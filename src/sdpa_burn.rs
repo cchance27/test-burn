@@ -2,7 +2,7 @@ use burn::prelude::*;
 use burn::tensor::activation::softmax;
 use burn::tensor::{Bool, Float, Shape, Tensor};
 
-pub fn scaled_dot_product_attention<B: Backend>(
+pub fn scaled_dot_product_attention_burn<B: Backend>(
     query: Tensor<B, 3, Float>,
     key: Tensor<B, 3, Float>,
     value: Tensor<B, 3, Float>,
