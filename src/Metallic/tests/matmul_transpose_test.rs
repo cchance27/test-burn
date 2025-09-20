@@ -1,6 +1,7 @@
 use super::*;
 
 // CPU-based matrix multiplication for golden testing
+#[allow(clippy::too_many_arguments)]
 fn cpu_matmul(
     a: &[f32],
     a_original_rows: usize,

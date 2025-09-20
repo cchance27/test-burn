@@ -12,6 +12,7 @@ mod tests {
     use super::*;
 
     // CPU-based matrix multiplication for golden testing
+    #[allow(clippy::too_many_arguments)]
     fn cpu_matmul(
         a: &[f32],
         a_original_rows: usize,
@@ -455,7 +456,7 @@ mod tests {
         // alpha * A * B = [[15.5, 9.5], [42.5, 27.5]]
         // beta * C = [[0.125, 0.375], [0.625, 0.875]]
         // Final result = [[15.625, 9.875], [43.125, 28.375]]
-        let expected_result = vec![15.625, 9.875, 43.125, 28.375];
+        let expected_result = [15.625, 9.875, 43.125, 28.375];
 
         let qk_gemm_key = MpsGemmKey {
             transpose_left: false,
@@ -513,7 +514,7 @@ mod tests {
 
         for i in 0..(m * n) {
             let metal_val = metal_output[i] as f64;
-            let expected_val = expected_result[i] as f64;
+            let expected_val = expected_result[i];
             let diff = (metal_val - expected_val).abs();
             let rel_err = if expected_val.abs() > 1e-8 {
                 diff / expected_val.abs()

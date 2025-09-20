@@ -289,7 +289,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
 
     // For identical values, each element should be 1/seq_k
     let expected_val = 1.0 / seq_k as f32;
-    for i in 0..(seq_q * seq_k) {
+    (0..(seq_q * seq_k)).for_each(|i| {
         assert!(
             (metal_output[i] - expected_val).abs() < 1e-5,
             "Element {} should be {:.6}, got {:.6}",
@@ -297,7 +297,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
             expected_val,
             metal_output[i]
         );
-    }
+    });
 
     Ok(())
 }
@@ -395,14 +395,14 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
     );
 
     // Other elements in the first row should be close to 0
-    for i in 0..4 {
+    (0..4).for_each(|i| {
         assert!(
             metal_output[i].abs() < 1e-3,
             "Non-outlier element {} should be close to 0, got {:.6}",
             i,
             metal_output[i]
         );
-    }
+    });
 
     Ok(())
 }

@@ -8,6 +8,7 @@ type MyBackend = burn::backend::Metal;
 use super::*;
 
 /// Helper function to compare Metallic SDPA against Burn with tolerance
+#[allow(clippy::too_many_arguments)]
 fn compare_sdpa_implementations(
     batch: usize,
     seq_q: usize,

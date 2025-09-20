@@ -24,7 +24,7 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
     // alpha * A * B = [[15.5, 9.5], [42.5, 27.5]]
     // beta * C = [[0.125, 0.375], [0.625, 0.875]]
     // Final result = [[15.625, 9.875], [43.125, 28.375]]
-    let expected_result = vec![15.625, 9.875, 43.125, 28.375];
+    let expected_result = [15.625, 9.875, 43.125, 28.375];
 
     let gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -82,7 +82,7 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
 
     for i in 0..(m * n) {
         let metal_val = metal_output[i] as f64;
-        let expected_val = expected_result[i] as f64;
+        let expected_val = expected_result[i];
         let diff = (metal_val - expected_val).abs();
         let rel_err = if expected_val.abs() > 1e-8 {
             diff / expected_val.abs()
@@ -129,7 +129,7 @@ fn test_matmul_alpha_beta_with_different_values() -> Result<(), MetalError> {
     // alpha * A * B = [[1.2, 1.5, 1.8, 2.1], [3.6, 5.1, 6.6, 8.1], [6.0, 8.7, 11.4, 14.1]]
     // beta * C = [[0, -0.05, -0.1, -0.15], [-0.2, -0.25, -0.3, -0.35], [-0.4, -0.45, -0.5, -0.55]]
     // Final result = [[1.2, 1.45, 1.7, 1.95], [3.4, 4.85, 6.3, 7.75], [5.6, 8.25, 10.9, 13.55]]
-    let expected_result = vec![
+    let expected_result = [
         1.2, 1.45, 1.7, 1.95, 3.4, 4.85, 6.3, 7.75, 5.6, 8.25, 10.9, 13.55,
     ];
 
@@ -189,7 +189,7 @@ fn test_matmul_alpha_beta_with_different_values() -> Result<(), MetalError> {
 
     for i in 0..(m * n) {
         let metal_val = metal_output[i] as f64;
-        let expected_val = expected_result[i] as f64;
+        let expected_val = expected_result[i];
         let diff = (metal_val - expected_val).abs();
         let rel_err = if expected_val.abs() > 1e-8 {
             diff / expected_val.abs()
@@ -330,7 +330,7 @@ fn test_matmul_alpha_one_beta_zero() -> Result<(), MetalError> {
 
     // Expected result: 1 * A * B + 0 * C = A * B
     // A * B = [[1*5+2*7, 1*6+2*8], [3*5+4*7, 3*6+4*8]] = [[19, 22], [43, 50]]
-    let expected_result = vec![19.0, 22.0, 43.0, 50.0];
+    let expected_result = [19.0, 22.0, 43.0, 50.0];
 
     let gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -388,7 +388,7 @@ fn test_matmul_alpha_one_beta_zero() -> Result<(), MetalError> {
 
     for i in 0..(m * n) {
         let metal_val = metal_output[i] as f64;
-        let expected_val = expected_result[i] as f64;
+        let expected_val = expected_result[i];
         let diff = (metal_val - expected_val).abs();
         let rel_err = if expected_val.abs() > 1e-8 {
             diff / expected_val.abs()

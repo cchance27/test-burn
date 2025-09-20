@@ -24,8 +24,8 @@ impl Operation for TestOperation {
 
 #[test]
 fn test_model_basic() -> Result<(), MetalError> {
-    let context = Context::new()?;
-    let mut cache = ResourceCache::new();
+    let _context = Context::new()?;
+    let _cache = ResourceCache::new();
 
     // Create a simple test operation
     let test_op = TestOperation;

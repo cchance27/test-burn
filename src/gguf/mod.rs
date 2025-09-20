@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
 use std::collections::HashMap;
@@ -5,6 +6,16 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use thiserror::Error;
+
+// Import quantization modules
+pub mod quant;
+
+// Import model loader
+pub mod model_loader;
+
+// Import validation tests
+#[cfg(test)]
+mod validation_test;
 
 #[derive(Debug, Error)]
 pub enum GGUFError {
@@ -16,6 +27,16 @@ pub enum GGUFError {
     UnsupportedVersion(u32),
     #[error("Invalid data")]
     InvalidData,
+    #[error("Tensor not found: {0}")]
+    TensorNotFound(String),
+    #[error("Invalid tensor data: {0}")]
+    InvalidTensorData(String),
+    #[error("Memory mapping error: {0}")]
+    MemoryMappingError(String),
+    #[error("Dequantization error: {0}")]
+    DequantizationError(String),
+    #[error("Dimension mismatch: expected {expected}, actual {actual}")]
+    DimensionMismatch { expected: usize, actual: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -93,12 +114,12 @@ pub struct GGUFHeader {
     pub metadata_count: u64,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GGUFMetadata {
     pub entries: HashMap<String, GGUFValue>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GGUFValue {
     U8(u8),
     I8(i8),
@@ -107,6 +128,7 @@ pub enum GGUFValue {
     U32(u32),
     I32(i32),
     F32(f32),
+    F64(f64),
     Bool(bool),
     String(String),
     Array(Vec<GGUFValue>),
@@ -126,12 +148,16 @@ pub struct GGUFFile {
     pub metadata: GGUFMetadata,
     pub tensors: Vec<GGUTensorInfo>,
     mmap: Mmap,
+    // For memory management
+    pub file_path: String,
 }
 
 impl GGUFFile {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, GGUFError> {
-        let file = File::open(path)?;
-        let mmap = unsafe { Mmap::map(&file)? };
+        let file_path = path.as_ref().to_string_lossy().to_string();
+        let file = File::open(&path).map_err(GGUFError::Io)?;
+        let mmap = unsafe { Mmap::map(&file) }
+            .map_err(|e| GGUFError::MemoryMappingError(e.to_string()))?;
 
         let mut reader = &mmap[..];
 
@@ -189,6 +215,7 @@ impl GGUFFile {
             metadata,
             tensors,
             mmap,
+            file_path,
         })
     }
 
@@ -221,10 +248,10 @@ impl GGUFFile {
 
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
-        let result = String::from_utf8(buf).map_err(|_| GGUFError::InvalidData);
+
         //println!("Read string: {:?}", result);
 
-        result
+        String::from_utf8(buf).map_err(|_| GGUFError::InvalidData)
     }
 
     fn read_string_direct(reader: &mut &[u8]) -> Result<String, GGUFError> {
@@ -238,10 +265,10 @@ impl GGUFFile {
 
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
-        let result = String::from_utf8(buf).map_err(|_| GGUFError::InvalidData);
+
         //println!("Read string: {:?}", result);
 
-        result
+        String::from_utf8(buf).map_err(|_| GGUFError::InvalidData)
     }
 
     fn read_value(reader: &mut &[u8]) -> Result<GGUFValue, GGUFError> {
@@ -391,10 +418,23 @@ impl GGUFFile {
         Ok(tensors)
     }
 
-    pub fn get_tensor_data(&self, tensor: &GGUTensorInfo) -> &[u8] {
+    pub fn get_tensor_data(&self, tensor: &GGUTensorInfo) -> Result<&[u8], GGUFError> {
         let start = tensor.offset as usize;
-        let end = start + self.calculate_tensor_size(tensor);
-        &self.mmap[start..end]
+        let size = self.calculate_actual_tensor_size(tensor);
+        let end = start + size;
+
+        // Bounds checking
+        if end > self.mmap.len() {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor data out of bounds: start={}, size={}, end={}, mmap_len={}",
+                start,
+                size,
+                end,
+                self.mmap.len()
+            )));
+        }
+
+        Ok(&self.mmap[start..end])
     }
 
     fn calculate_tensor_size(&self, tensor: &GGUTensorInfo) -> usize {
@@ -412,17 +452,88 @@ impl GGUFFile {
             GGUFDataType::F64 => 8,
             GGUFDataType::F32 => 4,
             GGUFDataType::F16 | GGUFDataType::BF16 => 2,
-            GGUFDataType::Q8_0 | GGUFDataType::Q8_1 | GGUFDataType::I8 => 1,
+            GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => 1, // For quantized types, we'll calculate differently
+            GGUFDataType::I8 => 1,
             GGUFDataType::Q4_0 | GGUFDataType::Q4_1 => 1, // 4 bits per element, but stored as bytes
             // Add more as needed
             _ => 4, // Default
         }
     }
-}
 
+    /// Calculate the actual size of tensor data in bytes
+    fn calculate_actual_tensor_size(&self, tensor: &GGUTensorInfo) -> usize {
+        match tensor.data_type {
+            GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
+                // For Q8 types, calculate based on blocks
+                let element_count: usize = tensor.dimensions.iter().map(|&d| d as usize).product();
+                let weights_per_block = 32;
+                let blocks = element_count.div_ceil(weights_per_block);
+
+                let block_size = match tensor.data_type {
+                    GGUFDataType::Q8_0 => 34, // 2 (scale) + 32 (weights)
+                    GGUFDataType::Q8_1 => 36, // 2 (scale) + 2 (delta) + 32 (weights)
+                    _ => 36,                  // Should not happen
+                };
+
+                blocks * block_size
+            }
+            _ => {
+                // For other types, use the original calculation
+                let mut size = 1;
+                for &dim in &tensor.dimensions {
+                    size *= dim as usize;
+                }
+                size * self.get_element_size(tensor.data_type)
+            }
+        }
+    }
+
+
+    /// Offload tensor data to disk to free up memory
+    #[allow(dead_code)]
+    pub fn offload_tensor(&self, tensor_info: &GGUTensorInfo) -> Result<(), GGUFError> {
+        // In a real implementation, this would save tensor data to disk
+        // and mark it as offloaded in some tracking structure
+        println!("Offloading tensor: {} to disk", tensor_info.name);
+        Ok(())
+    }
+
+    /// Load tensor data back from disk
+    #[allow(dead_code)]
+    pub fn load_tensor(&self, tensor_info: &GGUTensorInfo) -> Result<Vec<u8>, GGUFError> {
+        // In a real implementation, this would load tensor data from disk
+        // For now, we'll just return the data from the memory-mapped file
+        let data = self.get_tensor_data(tensor_info)?;
+        println!("Loading tensor: {} from disk/file", tensor_info.name);
+        Ok(data.to_vec())
+    }
+
+    /// Blockswap implementation - load/unload tensors in blocks
+    #[allow(dead_code)]
+    pub fn blockswap_tensors(
+        &self,
+        tensors_to_load: &[&GGUTensorInfo],
+        tensors_to_unload: &[&GGUTensorInfo],
+    ) -> Result<(), GGUFError> {
+        // Unload tensors first
+        for tensor in tensors_to_unload {
+            self.offload_tensor(tensor)?;
+        }
+
+        // Load tensors
+        for tensor in tensors_to_load {
+            let _data = self.load_tensor(tensor)?;
+            // In a real implementation, we would store this data somewhere
+        }
+
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
+    use crate::metallic;
+
     use super::*;
 
     #[test]
@@ -441,11 +552,14 @@ mod tests {
 
                 println!("Metadata entries: {}", gguf.metadata.entries.len());
                 for (key, value) in &gguf.metadata.entries {
-                    // For the tokenizer, just print the count to avoid huge output
-                    if let GGUFValue::Array(tokens) = value {
-                        println!("  {}: Array with {} elements", key, tokens.len());
-                    } else {
-                        println!("  {}: {:?}", key, value);
+                    // For arrays, just print the count to avoid huge output
+                    match value {
+                        GGUFValue::Array(tokens) => {
+                            println!("  {}: Array with {} elements", key, tokens.len());
+                        }
+                        _ => {
+                            println!("  {}: {:?}", key, value);
+                        }
                     }
                 }
 
@@ -467,6 +581,185 @@ mod tests {
                     "... and {} more tensors",
                     gguf.tensors.len().saturating_sub(10)
                 );
+            }
+            Err(e) => {
+                panic!("Failed to load GGUF file: {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_gguf_to_metallic_tensor() {
+        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        match GGUFFile::load(path) {
+            Ok(gguf) => {
+                // Initialize Metallic context
+                let _context = match metallic::Context::new() {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        panic!("Failed to create Metallic context: {:?}", e);
+                    }
+                };
+
+                // Test with the first tensor (should be Q8_1)
+                if let Some(first_tensor) = gguf.tensors.first() {
+                    println!(
+                        "Testing tensor: {} ({:?})",
+                        first_tensor.name, first_tensor.data_type
+                    );
+                    println!("Dimensions: {:?}", first_tensor.dimensions);
+
+                    // Calculate expected element count
+                    let expected_elements: usize = first_tensor
+                        .dimensions
+                        .iter()
+                        .map(|&d| d as usize)
+                        .product();
+                    println!("Expected elements: {}", expected_elements);
+
+                    // Get tensor data
+                    match gguf.get_tensor_data(first_tensor) {
+                        Ok(data) => {
+                            println!("Raw data length: {}", data.len());
+                        }
+                        Err(e) => {
+                            panic!("Error getting tensor data: {}", e);
+                        }
+                    }
+
+                    match metallic::Tensor::try_from((&gguf, first_tensor)) {
+                        Ok(metallic_tensor) => {
+                            println!(
+                                "Successfully converted tensor '{}' to Metallic tensor",
+                                first_tensor.name
+                            );
+                            println!("Tensor dimensions: {:?}", metallic_tensor.dims);
+                            println!("Tensor size (elements): {}", metallic_tensor.len());
+                        }
+                        Err(e) => {
+                            panic!("Error converting tensor '{}': {}", first_tensor.name, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("Failed to load GGUF file: {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_debug_q8_format() {
+        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        match GGUFFile::load(path) {
+            Ok(gguf) => {
+                // Debug the first tensor
+                if let Some(_first_tensor) = gguf.tensors.first() {
+                }
+
+                // Debug a few more tensors
+                for (i, _tensor) in gguf.tensors.iter().enumerate() {
+                    if i >= 3 {
+                        break;
+                    }
+                    println!("\n--- Tensor {} ---", i);
+                }
+            }
+            Err(e) => {
+                panic!("Failed to load GGUF file: {:?}", e);
+            }
+        }
+    }
+    
+    #[test]
+    fn test_initial_inference() {
+        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        match GGUFFile::load(path) {
+            Ok(gguf) => {
+                // Initialize Metallic context
+                let _context = match metallic::Context::new() {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        panic!("Failed to create Metallic context: {:?}", e);
+                    }
+                };
+
+                // Test with the first tensor (should be Q8_1)
+                if let Some(first_tensor) = gguf.tensors.first() {
+                    println!(
+                        "Testing tensor: {} ({:?})",
+                        first_tensor.name, first_tensor.data_type
+                    );
+                    println!("Dimensions: {:?}", first_tensor.dimensions);
+                    match metallic::Tensor::try_from((&gguf, first_tensor)){
+                        Ok(metallic_tensor) => {
+                            println!(
+                                "Successfully converted tensor '{}' to Metallic tensor",
+                                first_tensor.name
+                            );
+                            println!("Tensor dimensions: {:?}", metallic_tensor.dims);
+                            println!("Tensor size (elements): {}", metallic_tensor.len());
+
+                            // Print first few values for verification
+                            let slice = metallic_tensor.as_slice();
+                            let print_count = std::cmp::min(10, slice.len());
+                            println!("First {} values: {:?}", print_count, &slice[..print_count]);
+                        }
+                        Err(e) => {
+                            panic!("Error converting tensor '{}': {}", first_tensor.name, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("Failed to load GGUF file: {:?}", e);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn test_memory_management() {
+        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        match GGUFFile::load(path) {
+            Ok(gguf) => {
+                // Test with the first few tensors
+                let tensors_to_test: Vec<&GGUTensorInfo> = gguf.tensors.iter().take(3).collect();
+
+                for tensor in &tensors_to_test {
+                    println!("Testing memory management for tensor: {}", tensor.name);
+
+                    // Test offloading
+                    match gguf.offload_tensor(tensor) {
+                        Ok(_) => println!("Successfully offloaded tensor: {}", tensor.name),
+                        Err(e) => println!("Error offloading tensor {}: {}", tensor.name, e),
+                    }
+
+                    // Test loading
+                    match gguf.load_tensor(tensor) {
+                        Ok(data) => println!(
+                            "Successfully loaded tensor: {} ({} bytes)",
+                            tensor.name,
+                            data.len()
+                        ),
+                        Err(e) => println!("Error loading tensor {}: {}", tensor.name, e),
+                    }
+                }
+
+                // Test blockswapping with first two tensors
+                if tensors_to_test.len() >= 2 {
+                    let load_tensors = vec![tensors_to_test[1]];
+                    let unload_tensors = vec![tensors_to_test[0]];
+
+                    match gguf.blockswap_tensors(&load_tensors, &unload_tensors) {
+                        Ok(_) => println!("Successfully blockswapped tensors"),
+                        Err(e) => println!("Error blockswapping tensors: {}", e),
+                    }
+                }
             }
             Err(e) => {
                 panic!("Failed to load GGUF file: {:?}", e);

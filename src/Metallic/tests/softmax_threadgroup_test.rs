@@ -163,14 +163,14 @@ fn test_softmax_threadgroup_very_large_seq_k() -> Result<(), MetalError> {
     );
 
     // Check masked elements (all except the first element should be zeroed for causal)
-    for j in 1..seq_k {
+    (1..seq_k).for_each(|j| {
         assert!(
             row_slice[j].abs() < 1e-5,
             "Masked element at index {} not zeroed: got {:.6}",
             j,
             row_slice[j]
         );
-    }
+    });
 
     Ok(())
 }

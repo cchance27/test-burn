@@ -57,7 +57,7 @@ fn test_matmul_non_zero_buffer_offsets() -> Result<(), MetalError> {
     // A * B = [[1*3+1.1*3.4+1.2*3.8, 1*3.2+1.1*3.6+1.2*4.0], [1.3*3+1.4*3.4+1.5*3.8, 1.3*3.2+1.4*3.6+1.5*4.0]]
     //       = [[3+3.74+4.56, 3.2+3.96+4.8], [3.9+4.76+5.7, 4.16+5.04+6.0]]
     //       = [[11.3, 11.96], [14.36, 15.2]]
-    let expected_result = vec![11.3, 11.96, 14.36, 15.2];
+    let expected_result = [11.3, 11.96, 14.36, 15.2];
 
     let gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -118,7 +118,7 @@ fn test_matmul_non_zero_buffer_offsets() -> Result<(), MetalError> {
 
     for i in 0..(m * n) {
         let metal_val = metal_output[i] as f64;
-        let expected_val = expected_result[i] as f64;
+        let expected_val = expected_result[i];
         let diff = (metal_val - expected_val).abs();
         let rel_err = if expected_val.abs() > 1e-8 {
             diff / expected_val.abs()
@@ -205,7 +205,7 @@ fn test_matmul_non_zero_buffer_offsets_with_alpha_beta() -> Result<(), MetalErro
     // alpha * A * B = [[40, 44.4], [54.4, 60.4]]
     // beta * C = [[0.6, 0.65], [0.7, 0.75]]
     // Final result = [[40.6, 45.05], [55.1, 61.15]]
-    let expected_result = vec![40.6, 45.05, 55.1, 61.15];
+    let expected_result = [40.6, 45.05, 55.1, 61.15];
 
     let gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -266,7 +266,7 @@ fn test_matmul_non_zero_buffer_offsets_with_alpha_beta() -> Result<(), MetalErro
 
     for i in 0..(m * n) {
         let metal_val = metal_output[i] as f64;
-        let expected_val = expected_result[i] as f64;
+        let expected_val = expected_result[i];
         let diff = (metal_val - expected_val).abs();
         let rel_err = if expected_val.abs() > 1e-8 {
             diff / expected_val.abs()
@@ -338,7 +338,7 @@ fn test_matmul_large_offsets() -> Result<(), MetalError> {
     // Expected result: A * B (validated with NumPy)
     // A = [[5.0, 5.01], [5.02, 5.03], [5.04, 5.05]]
     // B = [[12.0, 12.02, 12.04, 12.06], [12.08, 12.10, 12.12, 12.14]]
-    let expected_result = vec![
+    let expected_result = [
         120.5208, 120.721, 120.9212, 121.1214, 121.0024, 121.2034, 121.4044, 121.6054, 121.484,
         121.6858, 121.8876, 122.0894,
     ];
@@ -402,7 +402,7 @@ fn test_matmul_large_offsets() -> Result<(), MetalError> {
 
     for i in 0..(m * n) {
         let metal_val = metal_output[i] as f64;
-        let expected_val = expected_result[i] as f64;
+        let expected_val = expected_result[i];
         let diff = (metal_val - expected_val).abs();
         let rel_err = if expected_val.abs() > 1e-8 {
             diff / expected_val.abs()

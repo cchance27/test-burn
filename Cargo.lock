@@ -4767,6 +4767,7 @@ version = "0.1.0"
 dependencies = [
  "burn",
  "byteorder",
+ "half",
  "memmap2",
  "objc2",
  "objc2-foundation",
