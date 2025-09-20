@@ -8,77 +8,52 @@ use super::{
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use zerovec::{ZeroMap, ZeroVec};
+use rustc_hash::FxHashMap;
 
-/// A generic resource cache that uses zeromap for high-performance key-value storage.
+/// A generic resource cache that uses FxHashMap for high-performance in-memory key-value storage.
 ///
-/// This cache is designed to store and retrieve cacheable resources efficiently,
-/// allowing for fine-grained caching of individual components rather than
-/// monolithic cache structures.
-///
-/// For Metal resources, we store the keys in zeromap and recreate the resources
-/// on demand since Metal resources cannot be serialized.
+/// This cache is designed to store and retrieve cacheable resources efficiently.
 pub struct ResourceCache {
-    // Store keys in zeromap for efficient lookup
-    gemm_keys: HashMap<u64, MpsGemmKey>,
-    descriptor_keys: HashMap<u64, MpsMatrixDescriptorKey>,
-    sdpa_keys: HashMap<u64, SdpaKey>,
-    // Store the actual resources in HashMap for now
-    // In the future, we might want to implement a more sophisticated caching
-    // strategy that can evict unused resources
-    gemm_cache: HashMap<MpsGemmKey, CacheableMpsGemm>,
-    descriptor_cache: HashMap<MpsMatrixDescriptorKey, CacheableMpsMatrixDescriptor>,
-    sdpa_cache: HashMap<SdpaKey, CacheableSdpa>,
+    gemm_cache: FxHashMap<MpsGemmKey, CacheableMpsGemm>,
+    descriptor_cache: FxHashMap<MpsMatrixDescriptorKey, CacheableMpsMatrixDescriptor>,
+    sdpa_cache: FxHashMap<SdpaKey, CacheableSdpa>,
 }
 
 impl ResourceCache {
     /// Create a new, empty resource cache.
     pub fn new() -> Self {
         Self {
-            gemm_keys: HashMap::new(),
-            descriptor_keys: HashMap::new(),
-            sdpa_keys: HashMap::new(),
-            gemm_cache: HashMap::new(),
-            descriptor_cache: HashMap::new(),
-            sdpa_cache: HashMap::new(),
+            gemm_cache: FxHashMap::default(),
+            descriptor_cache: FxHashMap::default(),
+            sdpa_cache: FxHashMap::default(),
         }
     }
 
     /// Get a cached resource by key, or create it if it doesn't exist.
-    fn get_or_create_resource<C: Cacheable>(
-        cache: &mut HashMap<C::Key, C>,
-        keys: &mut HashMap<u64, C::Key>,
+    fn get_or_create_resource<'a, C: Cacheable>(
+        cache: &'a mut FxHashMap<C::Key, C>,
         key: C::Key,
         device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>,
-        hash_fn: fn(&C::Key) -> u64,
-    ) -> Result<C, MetalError> {
-        // Check if we have this key in our zeromap-like structure
-        let key_hash = hash_fn(&key);
-        keys.entry(key_hash).or_insert_with(|| key.clone());
-
+    ) -> Result<&'a C, MetalError>
+    where
+        C::Key: std::hash::Hash + Eq + Clone,
+    {
         if !cache.contains_key(&key) {
-            let cacheable_resource = match device {
-                Some(device) => C::from_key(&key, device)?,
+            let resource = match device {
+                Some(d) => C::from_key(&key, d)?,
                 None => {
-                    // For types that don't need a device, we can pass a dummy reference
-                    // This is safe because the from_key implementation for these types
-                    // doesn't actually use the device parameter
+                    // This is for device-independent resources like SDPA
                     #[allow(clippy::transmute_ptr_to_ref)]
                     let dummy_device: &Retained<ProtocolObject<dyn MTLDevice>> =
                         unsafe { std::mem::transmute(&() as *const ()) };
                     C::from_key(&key, dummy_device)?
                 }
             };
-            let cache_key = cacheable_resource.cache_key();
-            cache.insert(cache_key, cacheable_resource);
+            cache.insert(key.clone(), resource);
         }
-
-        cache
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| MetalError::ResourceNotCached("Resource not found in cache".to_string()))
+        cache.get(&key).ok_or_else(|| {
+            MetalError::ResourceNotCached("Failed to retrieve resource from cache".to_string())
+        })
     }
 
     /// Get a cached GEMM operation by key, or create it if it doesn't exist.
@@ -88,13 +63,7 @@ impl ResourceCache {
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixMultiplication>, MetalError>
     {
-        let cacheable_gemm = Self::get_or_create_resource(
-            &mut self.gemm_cache,
-            &mut self.gemm_keys,
-            key,
-            Some(device),
-            Self::hash_gemm_key_static,
-        )?;
+        let cacheable_gemm = Self::get_or_create_resource(&mut self.gemm_cache, key, Some(device))?;
         Ok(cacheable_gemm.gemm.clone())
     }
 
@@ -104,41 +73,9 @@ impl ResourceCache {
         key: MpsMatrixDescriptorKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixDescriptor>, MetalError> {
-        let cacheable_descriptor = Self::get_or_create_resource(
-            &mut self.descriptor_cache,
-            &mut self.descriptor_keys,
-            key,
-            Some(device),
-            Self::hash_descriptor_key_static,
-        )?;
+        let cacheable_descriptor =
+            Self::get_or_create_resource(&mut self.descriptor_cache, key, Some(device))?;
         Ok(cacheable_descriptor.descriptor.clone())
-    }
-
-    fn hash_gemm_key_static(key: &MpsGemmKey) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn hash_descriptor_key_static(key: &MpsMatrixDescriptorKey) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn hash_sdpa_key_static(key: &SdpaKey) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        key.hash(&mut hasher);
-        hasher.finish()
     }
 
     /// Get or create an SDPA operation.
@@ -155,16 +92,10 @@ impl ResourceCache {
             seq_k,
             dim,
         };
-
-        // For SDPA, we don't need to use the device since it doesn't create Metal resources
-        Self::get_or_create_resource(
-            &mut self.sdpa_cache,
-            &mut self.sdpa_keys,
-            key,
-            None,
-            Self::hash_sdpa_key_static,
-        )
-        .unwrap() // SDPA creation should never fail
+        // SDPA creation should never fail, so we unwrap.
+        Self::get_or_create_resource(&mut self.sdpa_cache, key, None)
+            .unwrap()
+            .clone()
     }
 }
 
@@ -175,9 +106,6 @@ pub struct CacheStats {
     pub gemm_cache_size: usize,
     pub descriptor_cache_size: usize,
     pub sdpa_cache_size: usize,
-    pub gemm_key_count: usize,
-    pub descriptor_key_count: usize,
-    pub sdpa_key_count: usize,
 }
 
 impl Default for ResourceCache {

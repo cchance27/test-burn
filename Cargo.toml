@@ -10,6 +10,6 @@ objc2-foundation = "0.3.1"
 objc2-metal = "0.3.1"
 objc2-metal-performance-shaders = "0.3.1"
 rand = "0.9.2"
-serde = { version = "1.0", features = ["derive"] }
+rustc-hash = "2.1.1"
+serde = { version = "1.0.225", features = ["derive"] }
 thiserror = "2.0.16"
-zerovec = { version = "0.11.4", features = ["serde"] }
