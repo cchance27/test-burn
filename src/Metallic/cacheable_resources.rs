@@ -10,7 +10,7 @@ use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 /// A cacheable wrapper for MPSMatrixMultiplication.
-/// 
+///
 /// This struct implements the Cacheable trait, allowing MPS matrix multiplication
 /// operations to be cached and reused based on their parameters.
 #[derive(Clone)]
@@ -25,7 +25,7 @@ impl Cacheable for CacheableMpsGemm {
     fn cache_key(&self) -> Self::Key {
         self.key.clone()
     }
-    
+
     fn from_key(
         key: &Self::Key,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
@@ -51,7 +51,7 @@ impl Cacheable for CacheableMpsGemm {
 }
 
 /// A cacheable wrapper for MPSMatrixDescriptor.
-/// 
+///
 /// This struct implements the Cacheable trait, allowing MPS matrix descriptors
 /// to be cached and reused based on their dimensions.
 #[derive(Clone)]
@@ -66,7 +66,7 @@ impl Cacheable for CacheableMpsMatrixDescriptor {
     fn cache_key(&self) -> Self::Key {
         self.key.clone()
     }
-    
+
     fn from_key(
         key: &Self::Key,
         _device: &Retained<ProtocolObject<dyn MTLDevice>>,

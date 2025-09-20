@@ -1,16 +1,14 @@
 use super::{
-    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     Context, MetalError, Tensor,
+    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
 };
-use crate::metallic::softmax::{ensure_fused_softmax_pipeline, SoftmaxOperation};
+use crate::metallic::CommandBuffer;
 use crate::metallic::matmul::MatMulOperation;
 use crate::metallic::resource_cache::ResourceCache;
-use crate::metallic::CommandBuffer;
-use objc2::rc::{autoreleasepool, Retained};
+use crate::metallic::softmax::{SoftmaxOperation, ensure_fused_softmax_pipeline};
+use objc2::rc::{Retained, autoreleasepool};
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLCommandQueue, MTLDevice, MTLComputePipelineState,
-};
+use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLDevice};
 
 impl Context {
     pub fn scaled_dot_product_attention(
@@ -28,8 +26,6 @@ impl Context {
             let s_k = k.dims[1];
             let d = q.dims[2];
 
-            
-
             let out = self.pool.alloc_tensor(vec![b, s_q, d])?;
             let attn = self.pool.alloc_tensor(vec![b, s_q, s_k])?;
 
@@ -44,7 +40,10 @@ impl Context {
             let softmax_pipeline = self.fused_softmax_pipeline.as_ref().unwrap().clone();
 
             scaled_dot_product_attention_impl(
-                q, k, v, causal,
+                q,
+                k,
+                v,
+                causal,
                 &mut cache,
                 &self.device,
                 &self.command_queue,
@@ -58,7 +57,7 @@ impl Context {
 }
 
 /// Standalone implementation of scaled dot product attention that doesn't depend on Context.
-/// 
+///
 /// This function can be used independently of the Context struct, allowing for better
 /// decoupling and more flexible usage patterns.
 #[allow(clippy::too_many_arguments)]
@@ -348,12 +347,10 @@ mod tests {
         let k_burn_input = BurnTensor::<MyBackend, 1, Int>::arange(0..(kv_num as i64), &device)
             .float()
             .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
-        let v_burn_input = BurnTensor::<MyBackend, 1, Int>::arange(
-            (kv_num as i64)..(2 * kv_num as i64),
-            &device,
-        )
-        .float()
-        .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
+        let v_burn_input =
+            BurnTensor::<MyBackend, 1, Int>::arange((kv_num as i64)..(2 * kv_num as i64), &device)
+                .float()
+                .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
 
         let q_data_tensor = q_burn_input.to_data();
         let q_data = q_data_tensor.as_slice::<f32>().unwrap().to_vec();
@@ -375,9 +372,12 @@ mod tests {
         // Metallic
         use crate::metallic::{Context, Tensor};
         let mut ctx = Context::new().unwrap();
-        let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-        let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-        let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let q_tensor =
+            Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+        let k_tensor =
+            Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let v_tensor =
+            Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
         let metal_out = ctx
             .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true)
             .unwrap();
@@ -396,7 +396,11 @@ mod tests {
             assert!(
                 diff <= atol || rel_err <= rtol,
                 "Mismatch at index {}: metal={:.6}, burn={:.6}, diff={:.2e}, rel={:.2e}",
-                i, metal_val, burn_val, diff, rel_err
+                i,
+                metal_val,
+                burn_val,
+                diff,
+                rel_err
             );
         }
     }
@@ -421,12 +425,10 @@ mod tests {
         let k_burn_input = BurnTensor::<MyBackend, 1, Int>::arange(0..(kv_num as i64), &device)
             .float()
             .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
-        let v_burn_input = BurnTensor::<MyBackend, 1, Int>::arange(
-            (kv_num as i64)..(2 * kv_num as i64),
-            &device,
-        )
-        .float()
-        .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
+        let v_burn_input =
+            BurnTensor::<MyBackend, 1, Int>::arange((kv_num as i64)..(2 * kv_num as i64), &device)
+                .float()
+                .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
 
         let q_data_tensor = q_burn_input.to_data();
         let q_data = q_data_tensor.as_slice::<f32>().unwrap().to_vec();
@@ -448,9 +450,12 @@ mod tests {
         // Metallic
         use crate::metallic::{Context, Tensor};
         let mut ctx = Context::new().unwrap();
-        let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-        let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-        let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let q_tensor =
+            Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+        let k_tensor =
+            Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let v_tensor =
+            Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
         let metal_out = ctx
             .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)
             .unwrap();
@@ -469,7 +474,11 @@ mod tests {
             assert!(
                 diff <= atol || rel_err <= rtol,
                 "Mismatch at index {}: metal={:.6}, burn={:.6}, diff={:.2e}, rel={:.2e}",
-                i, metal_val, burn_val, diff, rel_err
+                i,
+                metal_val,
+                burn_val,
+                diff,
+                rel_err
             );
         }
     }

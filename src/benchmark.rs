@@ -1,73 +1,85 @@
 use crate::metallic::{Context, Tensor};
-use std::time::Instant;
 use crate::sdpa_burn::scaled_dot_product_attention_burn;
 use crate::sdpa_metal::scaled_dot_product_attention_metal;
 use burn::prelude::*;
 use burn::tensor::{Distribution, Float, Tensor as BurnTensor};
 use std::ffi::c_void;
+use std::time::Instant;
 
 const ITERATIONS: usize = 100;
 
-fn benchmark_sdpa(batch: usize, seq_q: usize, seq_k: usize, dim: usize, iterations: usize, causal: bool) -> Result<(), Box<dyn std::error::Error>> {
-    println!("Benchmarking SDPA with batch={}, seq_q={}, seq_k={}, dim={}, iterations={}, causal={}", 
-             batch, seq_q, seq_k, dim, iterations, causal);
-    
+fn benchmark_sdpa(
+    batch: usize,
+    seq_q: usize,
+    seq_k: usize,
+    dim: usize,
+    iterations: usize,
+    causal: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!(
+        "Benchmarking SDPA with batch={}, seq_q={}, seq_k={}, dim={}, iterations={}, causal={}",
+        batch, seq_q, seq_k, dim, iterations, causal
+    );
+
     // Create a context
     let mut context = Context::new()?;
-    
+
     // Create test tensors
-    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|x| x as f32).collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|x| x as f32).collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|x| x as f32).collect();
-    
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
-    
+    let q_tensor = Tensor::arange(batch * seq_q * dim, vec![batch, seq_q, dim], &context)?;
+    let k_tensor = Tensor::arange(batch * seq_k * dim, vec![batch, seq_k, dim], &context)?;
+    let v_tensor = Tensor::arange(batch * seq_k * dim, vec![batch, seq_k, dim], &context)?;
+
     // Warm up
     println!("Warming up...");
     for _ in 0..5 {
         let _ = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)?;
     }
-    
+
     // Actual benchmark
     println!("Running benchmark...");
     let start = Instant::now();
     for i in 0..iterations {
-        let _output = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)?;
+        let _output =
+            context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)?;
         if i % 10 == 0 {
             println!("Completed iteration {}", i);
         }
     }
     let duration = start.elapsed();
-    
+
     println!("Time for {} iterations: {:.2?}", iterations, duration);
-    println!("Average time per iteration: {:.2?}", duration / iterations as u32);
-    println!("Iterations per second: {:.2}", iterations as f64 / duration.as_secs_f64());
-    
+    println!(
+        "Average time per iteration: {:.2?}",
+        duration / iterations as u32
+    );
+    println!(
+        "Iterations per second: {:.2}",
+        iterations as f64 / duration.as_secs_f64()
+    );
+
     Ok(())
 }
 
 pub fn run_benchmarks() -> Result<(), Box<dyn std::error::Error>> {
     // Run benchmarks with different configurations
     println!("=== SDPA Metal Performance Benchmark ===\n");
-    
+
     // Small benchmark
     benchmark_sdpa(4, 128, 128, 64, 50, false)?;
     println!("\n----------------------------------------\n");
-    
+
     // Medium benchmark
     benchmark_sdpa(4, 512, 512, 64, 20, false)?;
     println!("\n----------------------------------------\n");
-    
+
     // Large benchmark
     benchmark_sdpa(4, 1024, 1024, 64, 10, false)?;
     println!("\n----------------------------------------\n");
-    
+
     // Causal benchmark
     benchmark_sdpa(4, 512, 512, 64, 20, true)?;
     println!("\n----------------------------------------\n");
-    
+
     println!("Benchmarking completed!");
     Ok(())
 }
@@ -136,19 +148,21 @@ pub fn benchmark_metallic(causal: bool) {
     let dim = 64;
 
     let mut context = Context::new().unwrap();
+
+    // Use Tensor::from_vec to populate tensors from random CPU data
     let query: Vec<f32> = (0..(batch * seq * dim)).map(|_| rand::random()).collect();
     let key: Vec<f32> = (0..(batch * seq * dim)).map(|_| rand::random()).collect();
     let value: Vec<f32> = (0..(batch * seq * dim)).map(|_| rand::random()).collect();
 
-    // Clone the device so the created tensors don't hold an immutable borrow on `context`
-    let q_tensor = Tensor::create_tensor_from_slice(&query, vec![batch, seq, dim], &context).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&key, vec![batch, seq, dim], &context).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&value, vec![batch, seq, dim], &context).unwrap();
+    let q_tensor = Tensor::from_vec(query, vec![batch, seq, dim], &context).unwrap();
+    let k_tensor = Tensor::from_vec(key, vec![batch, seq, dim], &context).unwrap();
+    let v_tensor = Tensor::from_vec(value, vec![batch, seq, dim], &context).unwrap();
 
     let start: Instant = Instant::now();
     for _ in 0..ITERATIONS {
-        let _output =
-            context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
+        let _output = context
+            .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)
+            .unwrap();
     }
     let duration = start.elapsed();
     println!("Metal Opt (MPS) time for {ITERATIONS} iterations: {duration:?}");

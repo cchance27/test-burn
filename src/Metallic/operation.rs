@@ -29,7 +29,11 @@ impl CommandBuffer {
     }
 
     /// Record an operation on this command buffer.
-    pub fn record(&mut self, operation: &dyn Operation, cache: &mut ResourceCache) -> Result<(), MetalError> {
+    pub fn record(
+        &mut self,
+        operation: &dyn Operation,
+        cache: &mut ResourceCache,
+    ) -> Result<(), MetalError> {
         operation.encode(&self.inner, cache)
     }
 

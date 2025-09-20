@@ -6,7 +6,7 @@ use objc2_metal_performance_shaders::{
     MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication,
 };
 
-use super::{cache_keys::MpsGemmKey, resource_cache::ResourceCache, Operation, error::MetalError};
+use super::{Operation, cache_keys::MpsGemmKey, error::MetalError, resource_cache::ResourceCache};
 
 /// Create an `MPSMatrix` view into an existing `MTLBuffer`.
 ///
@@ -80,7 +80,8 @@ impl Operation for MatMulOperation {
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
-        let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
+        let result =
+            mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
         // Encode
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
         Ok(())

@@ -1,15 +1,11 @@
-use super::{
-    cache_keys::SdpaKey,
-    cacheable::Cacheable,
-    error::MetalError,
-};
+use super::{cache_keys::SdpaKey, cacheable::Cacheable, error::MetalError};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 /// A cacheable SDPA (Scaled Dot Product Attention) operation.
-/// 
+///
 /// This struct represents a complete SDPA operation that can be cached
 /// and reused based on its dimensions.
 #[derive(Clone)]
@@ -26,7 +22,7 @@ impl Cacheable for CacheableSdpa {
     fn cache_key(&self) -> Self::Key {
         self.key.clone()
     }
-    
+
     fn from_key(
         key: &Self::Key,
         _device: &Retained<ProtocolObject<dyn MTLDevice>>,

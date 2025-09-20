@@ -45,14 +45,17 @@ pub fn dispatch_threadgroups(
     debug_assert!(groups.height > 0, "groups.height must be non-zero");
     debug_assert!(groups.depth > 0, "groups.depth must be non-zero");
     debug_assert!(
-        threads_per_tg.width > 0, "threads_per_tg.width must be non-zero"
+        threads_per_tg.width > 0,
+        "threads_per_tg.width must be non-zero"
     );
     debug_assert!(
-        threads_per_tg.height > 0, "threads_per_tg.height must be non-zero"
+        threads_per_tg.height > 0,
+        "threads_per_tg.height must be non-zero"
     );
     debug_assert!(
-        threads_per_tg.depth > 0, "threads_per_tg.depth must be non-zero"
+        threads_per_tg.depth > 0,
+        "threads_per_tg.depth must be non-zero"
     );
-    
+
     encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, threads_per_tg);
 }

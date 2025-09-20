@@ -85,9 +85,10 @@ This phase focuses on making the module easier and safer to use.
     -   Create a `metallic::CommandBuffer` struct that wraps `MTLCommandBuffer`.
     -   Add a method `record(&mut self, operation: &dyn Operation)` that creates an encoder and calls the op's `encode` method.
     -   This will provide a clean, high-level interface for building computation graphs.
--   [ ] **4.3. Enhance the `Tensor` API.**
-    -   Add more common tensor methods (e.g., `zeros_like`, `ones_like`, element-wise ops).
-    -   Overload operators (`+`, `*`) for element-wise tensor arithmetic using a trait-based approach.
+-   [x] **4.3. Enhance the `Tensor` API.**
+    -   Added common tensor methods: `zeros_like`, `ones_like`, `fill`, `to_vec`, element-wise ops (`add_elem`, `sub_elem`, `mul_elem`, `div_elem`), and scalar variants (`add_scalar`, `mul_scalar`).
+    -   Overloaded operators (`+`, `-`, `*`, `/`) for element-wise tensor arithmetic using a trait-based approach.
+    -   Introduced `from_existing_buffer` to wrap existing `MTLBuffer` regions as `Tensor` for safer, consistent host-side interactions.
 -   [ ] **4.4. Add Comprehensive Documentation.**
     -   Add `#[doc = "..."]` comments to all public structs, traits, and functions.
     -   Explain the purpose, arguments, and safety considerations for each item.
@@ -103,10 +104,9 @@ This phase expands the module's capabilities beyond SDPA.
 -   [ ] **5.2. Implement GELU Activation.**
     -   Write an MSL kernel for the GELU activation function.
     -   Create a `Gelu` struct that implements the `Operation` trait.
--   [ ] **5.3. Remove `softmax_legacy.rs`.**
-    -   The fused softmax is superior. Once the new architecture is in place, the legacy MPS-based softmax can be removed to reduce clutter.
--   [ ] **5.4. Build a simple `Model` or `Graph` runner.**
+-   [ ] **5.3. Build a simple `Model` or `Graph` runner.**
     -   Create a struct that holds a `Vec<Box<dyn Operation>>`.
     -   Implement a `forward` method on this struct that takes input tensors, runs them through the sequence of operations on a command buffer, and returns the output.
 
 ## Phase 6: Extensive Tests for our various kernels and base level components and other primatives
+-   [ ] Completed all TODO's from the TESTS-TODO.md

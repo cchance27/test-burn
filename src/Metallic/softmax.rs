@@ -1,13 +1,15 @@
-use super::{Context, MetalError, Operation, resource_cache::ResourceCache};
+use super::{Context, MetalError, Operation, Tensor, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLComputeCommandEncoder, MTLComputePipelineState,
-    MTLDevice as _, MTLLibrary as _, MTLSize,
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLComputeCommandEncoder,
+    MTLComputePipelineState, MTLDevice as _, MTLLibrary as _, MTLSize,
 };
 
-use crate::metallic::encoder::{set_buffer, set_bytes, set_compute_pipeline_state, dispatch_threadgroups};
+use crate::metallic::encoder::{
+    dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state,
+};
 
 /// Ensure the fused mask+softmax compute pipeline is compiled and cached on the Context.
 pub fn ensure_fused_softmax_pipeline(ctx: &mut Context) -> Result<(), MetalError> {
@@ -187,8 +189,16 @@ impl Operation for SoftmaxOperation {
         // Ensure at least 32 threads per threadgroup to satisfy kernel's reduction assumptions
         let native = self.pipeline.threadExecutionWidth();
         let width = if native < 32 { 32 } else { native };
-        let threads_per_tg = MTLSize { width, height: 1, depth: 1 };
-        let groups = MTLSize { width: 1, height: self.seq_q as usize, depth: 1 };
+        let threads_per_tg = MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        };
+        let groups = MTLSize {
+            width: 1,
+            height: self.seq_q as usize,
+            depth: 1,
+        };
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.attn_buf, self.attn_offset);
         set_bytes(&encoder, 1, &self.seq_q);

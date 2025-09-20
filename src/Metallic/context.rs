@@ -14,7 +14,8 @@ pub struct Context {
     pub command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub pool: MemoryPool,
     // Private field for the fused softmax pipeline - not part of the public API
-    pub(crate) fused_softmax_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pub(crate) fused_softmax_pipeline:
+        Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl Context {

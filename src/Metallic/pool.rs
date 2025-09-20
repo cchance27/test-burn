@@ -16,10 +16,7 @@ impl MemoryPool {
     /// Creates a new memory pool with a fixed capacity.
     pub fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
         let buffer = device
-            .newBufferWithLength_options(
-                POOL_SIZE_BYTES,
-                MTLResourceOptions::StorageModeShared,
-            )
+            .newBufferWithLength_options(POOL_SIZE_BYTES, MTLResourceOptions::StorageModeShared)
             .ok_or(MetalError::BufferCreationFailed(POOL_SIZE_BYTES))?;
         Ok(Self {
             buffer,

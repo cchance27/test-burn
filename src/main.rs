@@ -35,7 +35,7 @@ fn main() {
     benchmark_burn::<MyBackend>(&device);
     benchmark_burn::<MyBackend>(&device);
     benchmark_burn::<MyBackend>(&device);
-    
+
     // Run our custom benchmarks
     println!("\nRunning SDPA Custom Benchmarks...");
     if let Err(e) = benchmark::run_benchmarks() {

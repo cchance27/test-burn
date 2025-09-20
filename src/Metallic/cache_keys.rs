@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
 /// Key for MPS matrix multiplication operations.
-/// 
+///
 /// This key uniquely identifies an MPS matrix multiplication operation
 /// based on its dimensions and parameters.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,7 +45,7 @@ impl Hash for MpsGemmKey {
 }
 
 /// Key for MPS matrix descriptors.
-/// 
+///
 /// This key uniquely identifies an MPS matrix descriptor based on its dimensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MpsMatrixDescriptorKey {
@@ -56,7 +56,9 @@ pub struct MpsMatrixDescriptorKey {
 
 impl PartialEq for MpsMatrixDescriptorKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows && self.columns == other.columns && self.row_bytes == other.row_bytes
+        self.rows == other.rows
+            && self.columns == other.columns
+            && self.row_bytes == other.row_bytes
     }
 }
 
@@ -71,7 +73,7 @@ impl Hash for MpsMatrixDescriptorKey {
 }
 
 /// Key for SDPA operations.
-/// 
+///
 /// This key uniquely identifies an SDPA operation based on its dimensions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SdpaKey {

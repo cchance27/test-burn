@@ -4,6 +4,12 @@ This document tracks planned test coverage for the metallic module across SDPA e
 
 ## A. SDPA End-to-End Tests
 
+- [x] Tensor helper unit tests (host-side)
+  - [x] zeros/ones and zeros_like/ones_like
+  - [x] element-wise ops (+, -, *, /) and fill
+  - [x] get_batch and from_existing_buffer
+  - Acceptance: Unit tests compile and pass on macOS targets
+
 - [ ] Shape diversity
   - [ ] Non-square, non-power-of-two shapes (e.g., `batch=1, seq_q=7, seq_k=13, dim=5`). Compare against Burn output within tolerance.
   - [ ] Very small dimensions (e.g., `dim=1`, `seq_q=1`, `seq_k=1`) — verify results and no panics.

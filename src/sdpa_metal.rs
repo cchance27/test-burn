@@ -2,7 +2,7 @@ use objc2::AnyThread;
 use objc2::rc::autoreleasepool;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandQueue;
-use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use objc2_metal_performance_shaders::{
     MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax,
 };
@@ -219,12 +219,14 @@ pub fn scaled_dot_product_attention_metal(
             command_buffer.waitUntilCompleted();
         }
 
-        let mut out_data = vec![0.0f32; batch * seq_q * dim];
-        let ptr = out_buf.contents().as_ptr() as *mut f32;
-        unsafe {
-            std::ptr::copy_nonoverlapping(ptr, out_data.as_mut_ptr(), out_data.len());
-        }
-
-        out_data
+        // Wrap the output buffer in our Tensor API and copy out via to_vec for consistency
+        let out_tensor = crate::metallic::Tensor::from_existing_buffer(
+            out_buf.clone(),
+            vec![batch, seq_q, dim],
+            &device,
+            0,
+        )
+        .expect("failed to wrap out_buf as Tensor");
+        out_tensor.to_vec()
     })
 }
