@@ -2,17 +2,15 @@ use super::{
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     Context, MetalError, Tensor,
 };
-use crate::metallic::encoder::*;
-use crate::metallic::matmul::*;
-use crate::metallic::softmax::ensure_fused_softmax_pipeline;
+use crate::metallic::softmax::{ensure_fused_softmax_pipeline, SoftmaxOperation};
+use crate::metallic::matmul::MatMulOperation;
 use crate::metallic::resource_cache::ResourceCache;
+use crate::metallic::CommandBuffer;
 use objc2::rc::{autoreleasepool, Retained};
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLCommandBuffer as _, MTLCommandEncoder as _, MTLComputeCommandEncoder,
-    MTLComputePipelineState as _, MTLCommandQueue, MTLDevice, MTLSize, MTLComputePipelineState,
+    MTLCommandQueue, MTLDevice, MTLComputePipelineState,
 };
-use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixMultiplication};
 
 impl Context {
     pub fn scaled_dot_product_attention(
@@ -92,7 +90,7 @@ pub fn scaled_dot_product_attention_impl(
         alpha: scale,
         beta: 0.0,
     };
-    let qk_gemm_op = cache.get_or_create_gemm(qk_gemm_key, device)?;
+    let _qk_gemm_op = cache.get_or_create_gemm(qk_gemm_key.clone(), device)?;
 
     let out_gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -103,7 +101,7 @@ pub fn scaled_dot_product_attention_impl(
         alpha: 1.0,
         beta: 0.0,
     };
-    let out_gemm_op = cache.get_or_create_gemm(out_gemm_key, device)?;
+    let _out_gemm_op = cache.get_or_create_gemm(out_gemm_key.clone(), device)?;
 
     // Get cached matrix descriptors
     let bytes_per_elem: usize = core::mem::size_of::<f32>();
@@ -145,12 +143,10 @@ pub fn scaled_dot_product_attention_impl(
     };
     let desc_attn = cache.get_or_create_descriptor(desc_attn_key, device)?;
 
-    let mut command_buffers = Vec::with_capacity(b);
+    let mut command_buffers: Vec<CommandBuffer> = Vec::with_capacity(b);
 
     for i in 0..b {
-        let command_buffer = command_queue
-            .commandBuffer()
-            .ok_or(MetalError::CommandBufferCreationFailed)?;
+        let mut cmd = CommandBuffer::new(command_queue)?;
 
         let q_i = q.get_batch(i)?;
         let k_i = k.get_batch(i)?;
@@ -158,60 +154,55 @@ pub fn scaled_dot_product_attention_impl(
         let attn_i = attn.get_batch(i)?;
         let out_i = out.get_batch(i)?;
 
-        // Encode QxK GEMM
-        let q_matrix = mps_matrix_from_buffer(&q_i.buf, q_i.offset, &desc_q);
-        let k_matrix = mps_matrix_from_buffer(&k_i.buf, k_i.offset, &desc_k);
-        let attn_matrix = mps_matrix_from_buffer(&attn_i.buf, attn_i.offset, &desc_attn);
-        encode_mps_matrix_multiplication(
-            &qk_gemm_op,
-            &command_buffer,
-            &q_matrix,
-            &k_matrix,
-            &attn_matrix,
-        );
-
-        // Encode Softmax
-        let command_encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-        let tg_width = softmax_pipeline.threadExecutionWidth();
-        let threads_per_tg = MTLSize {
-            width: tg_width,
-            height: 1,
-            depth: 1,
+        // Q x K^T -> attn
+        let qk_gemm = cache.get_or_create_gemm(qk_gemm_key.clone(), device)?;
+        let qk_op = MatMulOperation {
+            left_buf: q_i.buf.clone(),
+            left_offset: q_i.offset,
+            right_buf: k_i.buf.clone(),
+            right_offset: k_i.offset,
+            result_buf: attn_i.buf.clone(),
+            result_offset: attn_i.offset,
+            left_desc: desc_q.clone(),
+            right_desc: desc_k.clone(),
+            result_desc: desc_attn.clone(),
+            gemm: qk_gemm,
         };
-        let groups = MTLSize {
-            width: 1,
-            height: s_q,
-            depth: 1,
+        cmd.record(&qk_op, cache)?;
+
+        // Softmax(attn)
+        let sm_op = SoftmaxOperation {
+            attn_buf: attn_i.buf.clone(),
+            attn_offset: attn_i.offset,
+            seq_q: s_q as u32,
+            seq_k: s_k as u32,
+            causal: causal as u32,
+            pipeline: softmax_pipeline.clone(),
         };
-        set_compute_pipeline_state(&command_encoder, softmax_pipeline);
-        set_buffer(&command_encoder, 0, &attn_i.buf, attn_i.offset);
-        set_bytes(&command_encoder, 1, &(s_q as u32));
-        set_bytes(&command_encoder, 2, &(s_k as u32));
-        set_bytes(&command_encoder, 3, &(causal as u32));
-        dispatch_threadgroups(&command_encoder, groups, threads_per_tg);
-        command_encoder.endEncoding();
+        cmd.record(&sm_op, cache)?;
 
-        // Encode AxV GEMM
-        let v_matrix = mps_matrix_from_buffer(&v_i.buf, v_i.offset, &desc_v);
-        let out_matrix = mps_matrix_from_buffer(&out_i.buf, out_i.offset, &desc_out);
-        encode_mps_matrix_multiplication(
-            &out_gemm_op,
-            &command_buffer,
-            &attn_matrix,
-            &v_matrix,
-            &out_matrix,
-        );
+        // attn x V -> out
+        let out_gemm = cache.get_or_create_gemm(out_gemm_key.clone(), device)?;
+        let out_op = MatMulOperation {
+            left_buf: attn_i.buf.clone(),
+            left_offset: attn_i.offset,
+            right_buf: v_i.buf.clone(),
+            right_offset: v_i.offset,
+            result_buf: out_i.buf.clone(),
+            result_offset: out_i.offset,
+            left_desc: desc_attn.clone(),
+            right_desc: desc_v.clone(),
+            result_desc: desc_out.clone(),
+            gemm: out_gemm,
+        };
+        cmd.record(&out_op, cache)?;
 
-        command_buffer.commit();
-        command_buffers.push(command_buffer);
+        cmd.commit();
+        command_buffers.push(cmd);
     }
 
     for cb in &command_buffers {
-        unsafe {
-            cb.waitUntilCompleted();
-        }
+        cb.wait();
     }
 
     Ok(out.clone())

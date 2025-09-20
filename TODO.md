@@ -78,10 +78,10 @@ This phase addresses known performance bottlenecks.
 
 This phase focuses on making the module easier and safer to use.
 
--   [ ] **4.1. Introduce an `Operation` trait.**
+-   [x] **4.1. Introduce an `Operation` trait.**
     -   Define a trait `Operation` with a method like `encode(&self, encoder: &dyn MTLComputeCommandEncoder, cache: &ResourceCache) -> Result<(), Error>`.
     -   Refactor `MatMul` and `Softmax` into structs that implement this trait.
--   [ ] **4.2. Create a `CommandBuffer` wrapper.**
+-   [x] **4.2. Create a `CommandBuffer` wrapper.**
     -   Create a `metallic::CommandBuffer` struct that wraps `MTLCommandBuffer`.
     -   Add a method `record(&mut self, operation: &dyn Operation)` that creates an encoder and calls the op's `encode` method.
     -   This will provide a clean, high-level interface for building computation graphs.

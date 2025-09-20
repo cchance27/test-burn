@@ -22,3 +22,6 @@ pub mod resource_cache;
 pub mod scaled_dot_product_attention;
 pub mod softmax;
 pub mod tensor;
+pub mod operation;
+
+pub use operation::{Operation, CommandBuffer};

@@ -1,10 +1,12 @@
 use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLDevice, MTLResource};
 use objc2_metal_performance_shaders::{
     MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication,
 };
+
+use super::{cache_keys::MpsGemmKey, resource_cache::ResourceCache, Operation, error::MetalError};
 
 /// Create an `MPSMatrix` view into an existing `MTLBuffer`.
 ///
@@ -51,5 +53,36 @@ pub fn encode_mps_matrix_multiplication(
             right,
             result,
         )
+    }
+}
+
+/// A high-level matmul operation that pulls kernels and descriptors from the cache
+/// and encodes itself into the command buffer.
+pub struct MatMulOperation {
+    pub left_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub left_offset: usize,
+    pub right_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub right_offset: usize,
+    pub result_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub result_offset: usize,
+    pub left_desc: Retained<MPSMatrixDescriptor>,
+    pub right_desc: Retained<MPSMatrixDescriptor>,
+    pub result_desc: Retained<MPSMatrixDescriptor>,
+    pub gemm: Retained<MPSMatrixMultiplication>,
+}
+
+impl Operation for MatMulOperation {
+    fn encode(
+        &self,
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        _cache: &mut ResourceCache,
+    ) -> Result<(), MetalError> {
+        // Wrap buffers into MPSMatrix views
+        let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
+        let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
+        let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
+        // Encode
+        encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+        Ok(())
     }
 }
