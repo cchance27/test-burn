@@ -2,8 +2,6 @@
 pub use context::Context;
 pub use error::MetalError;
 pub use matmul::{encode_mps_matrix_multiplication, mps_matrix_from_buffer};
-
-// TODO: We added an ecode_fused_softmax, but we didn't use it ... not sure what this was for.
 pub use softmax::ensure_fused_softmax_pipeline;
 pub use tensor::Tensor;
 
@@ -23,3 +21,6 @@ pub mod softmax;
 pub mod tensor;
 
 pub use operation::{CommandBuffer, Operation};
+
+#[cfg(test)]
+mod tests;

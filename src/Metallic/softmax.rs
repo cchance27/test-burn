@@ -38,56 +38,40 @@ pub fn ensure_fused_softmax_pipeline(ctx: &mut Context) -> Result<(), MetalError
         // Use a more efficient shared memory size based on common hardware
         // Apple GPUs typically have good performance with 256 or 512 threads per group
         threadgroup float shared_data[256];
+        threadgroup uint shared_indices[256];
         
-        // Phase 1: row-wise max reduction with causal masking.
+        // Phase 1: row-wise max reduction with causal masking and index tracking.
         float local_max = -INFINITY;
+        uint max_index = 0;
         for (uint c = lane; c < seq_k; c += stride) {
             float xv = attn[base + c];
             // Apply causal mask
             if (causal_flag == 1u && c > i_q) { 
                 xv = -INFINITY; 
             }
-            local_max = fmax(local_max, xv);
+            if (xv > local_max) {
+                local_max = xv;
+                max_index = c; // Store relative index within the row
+            }
         }
         
         shared_data[lane] = local_max;
+        shared_indices[lane] = max_index;
         threadgroup_barrier(mem_flags::mem_threadgroup);
         
-        // Optimized reduction with fewer iterations
-        for (uint offset = stride / 2u; offset > 31u; offset /= 2u) {
+        // Optimized reduction with fewer iterations, tracking the index of the maximum
+        for (uint offset = stride / 2u; offset > 0u; offset /= 2u) {
             if (lane < offset) {
-                shared_data[lane] = fmax(shared_data[lane], shared_data[lane + offset]);
+                if (shared_data[lane + offset] > shared_data[lane]) {
+                    shared_data[lane] = shared_data[lane + offset];
+                    shared_indices[lane] = shared_indices[lane + offset];
+                }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         
-        // Final reduction for small offsets (assumes width >= 32)
-        if (lane < 32) {
-            shared_data[lane] = fmax(shared_data[lane], shared_data[lane + 32]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane < 16) {
-            shared_data[lane] = fmax(shared_data[lane], shared_data[lane + 16]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane < 8) {
-            shared_data[lane] = fmax(shared_data[lane], shared_data[lane + 8]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane < 4) {
-            shared_data[lane] = fmax(shared_data[lane], shared_data[lane + 4]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane < 2) {
-            shared_data[lane] = fmax(shared_data[lane], shared_data[lane + 2]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        if (lane == 0) {
-            shared_data[0] = fmax(shared_data[0], shared_data[1]);
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
         float maxv = shared_data[0];
+        uint row_max_index = shared_indices[0]; // This is the relative index within the row
 
         // Phase 2: compute exp(x - max) and partial sums
         float local_sum = 0.0f;
@@ -97,7 +81,14 @@ pub fn ensure_fused_softmax_pipeline(ctx: &mut Context) -> Result<(), MetalError
             if (causal_flag == 1u && c > i_q) { 
                 xv = -INFINITY; 
             }
-            float e = exp(xv - maxv);
+            // Compute exp(x - max) with proper handling for extreme values
+            float e = 0.0f;
+            if (xv != -INFINITY) {
+                // For very large negative differences, exp might underflow to 0
+                // This is actually the correct behavior
+                float diff = xv - maxv;
+                e = exp(diff);
+            }
             attn[base + c] = e;
             local_sum += e;
         }
@@ -106,43 +97,34 @@ pub fn ensure_fused_softmax_pipeline(ctx: &mut Context) -> Result<(), MetalError
         threadgroup_barrier(mem_flags::mem_threadgroup);
         
         // Same optimized reduction for sum
-        for (uint offset = stride / 2u; offset > 31u; offset /= 2u) {
+        for (uint offset = stride / 2u; offset > 0u; offset /= 2u) {
             if (lane < offset) {
                 shared_data[lane] += shared_data[lane + offset];
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         
-        if (lane < 16) {
-            shared_data[lane] += shared_data[lane + 16];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        if (lane < 8) {
-            shared_data[lane] += shared_data[lane + 8];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        if (lane < 4) {
-            shared_data[lane] += shared_data[lane + 4];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        if (lane < 2) {
-            shared_data[lane] += shared_data[lane + 2];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
-        if (lane == 0) {
-            shared_data[0] += shared_data[1];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-        
         float sumv = shared_data[0];
 
         // Phase 3: normalize in place
         for (uint c = lane; c < seq_k; c += stride) {
-            attn[base + c] = attn[base + c] / sumv;
+            // Handle case where sum is zero or invalid
+            if (sumv > 0.0f && sumv != INFINITY) {
+                attn[base + c] = attn[base + c] / sumv;
+            } else {
+                // If sum is zero or invalid, handle appropriately
+                if (causal_flag == 1u && c > i_q) {
+                    attn[base + c] = 0.0f;
+                } else {
+                    // When all exponentials underflow to zero, give probability 1.0 to the maximum element
+                    // and 0.0 to all others
+                    if (c == row_max_index) {
+                        attn[base + c] = 1.0f;
+                    } else {
+                        attn[base + c] = 0.0f;
+                    }
+                }
+            }
         }
     }
     "#;

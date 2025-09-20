@@ -6,7 +6,7 @@ def benchmark(batch, seq, dim):
     query = torch.randn(batch, seq, dim, device=device)
     key = torch.randn(batch, seq, dim, device=device)
     value = torch.randn(batch, seq, dim, device=device)
-    iterations = 500
+    iterations = 100
     
     torch.mps.synchronize()  # Warm-up (for MPS; use torch.cuda.synchronize() for CUDA)
     start = torch.mps.current_allocated_memory()  # Optional: monitor memory if needed
@@ -15,7 +15,7 @@ def benchmark(batch, seq, dim):
         output = torch.nn.functional.scaled_dot_product_attention(query, key, value, is_causal=True)
         torch.mps.synchronize() 
     t1 = time.time()
-    print(f"PyTorch time for {iterations} iterations: {t1 - t0} seconds")
+    print(f"PyTorch time for {iterations} iterations: {(t1 - t0) * 1000} milliseconds")
 
 if __name__ == "__main__":
     benchmark(32, 1024, 64)

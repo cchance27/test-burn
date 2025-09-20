@@ -109,4 +109,4 @@ This phase expands the module's capabilities beyond SDPA.
     -   Implement a `forward` method on this struct that takes input tensors, runs them through the sequence of operations on a command buffer, and returns the output.
 
 ## Phase 6: Extensive Tests for our various kernels and base level components and other primatives
--   [ ] Completed all TODO's from the TESTS-TODO.md
+-   [x] Completed all TODO's from the TESTS-TODO.md
