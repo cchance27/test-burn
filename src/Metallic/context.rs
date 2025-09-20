@@ -16,6 +16,8 @@ pub struct Context {
     // Private field for the fused softmax pipeline - not part of the public API
     pub(crate) fused_softmax_pipeline:
         Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pub(crate) layernorm_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pub(crate) gelu_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl Context {
@@ -31,6 +33,8 @@ impl Context {
             command_queue,
             pool,
             fused_softmax_pipeline: None,
+            layernorm_pipeline: None,
+            gelu_pipeline: None,
         })
     }
 

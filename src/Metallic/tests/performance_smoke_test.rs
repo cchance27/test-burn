@@ -1,4 +1,3 @@
-
 use super::*;
 
 #[test]
@@ -278,10 +277,10 @@ fn test_performance_softmax_small() -> Result<(), MetalError> {
     let trials = 5;
     let iterations_per_trial = 10;
     let mut trial_times = Vec::with_capacity(trials);
-    
+
     for _ in 0..trials {
         let start = Instant::now();
-        
+
         for _ in 0..iterations_per_trial {
             let command_buffer = context.command_queue.commandBuffer().unwrap();
             sm_op.encode(&command_buffer, &mut cache)?;
@@ -290,12 +289,12 @@ fn test_performance_softmax_small() -> Result<(), MetalError> {
                 command_buffer.waitUntilCompleted();
             }
         }
-        
+
         let duration = start.elapsed();
         let avg_time = duration.as_micros() as f64 / iterations_per_trial as f64;
         trial_times.push(avg_time);
     }
-    
+
     // Take the minimum time as our performance metric to reduce noise from system interference
     let min_time = trial_times.into_iter().fold(f64::INFINITY, f64::min);
 

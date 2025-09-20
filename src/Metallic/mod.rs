@@ -22,5 +22,8 @@ pub mod tensor;
 
 pub use operation::{CommandBuffer, Operation};
 
+pub mod gelu;
+pub mod layernorm;
+pub mod model;
 #[cfg(test)]
 mod tests;

@@ -4766,6 +4766,8 @@ name = "test-burn"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "byteorder",
+ "memmap2",
  "objc2",
  "objc2-foundation",
  "objc2-metal",

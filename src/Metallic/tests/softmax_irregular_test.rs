@@ -1,4 +1,3 @@
-
 use super::*;
 
 // CPU-based softmax for golden testing

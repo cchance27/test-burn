@@ -98,13 +98,13 @@ This phase focuses on making the module easier and safer to use.
 
 This phase expands the module's capabilities beyond SDPA.
 
--   [ ] **5.1. Implement Layer Normalization.**
+-   [x] **5.1. Implement Layer Normalization.**
     -   Write a new MSL kernel for a fused LayerNorm operation.
     -   Create a `LayerNorm` struct that implements the `Operation` trait.
--   [ ] **5.2. Implement GELU Activation.**
+-   [x] **5.2. Implement GELU Activation.**
     -   Write an MSL kernel for the GELU activation function.
     -   Create a `Gelu` struct that implements the `Operation` trait.
--   [ ] **5.3. Build a simple `Model` or `Graph` runner.**
+-   [x] **5.3. Build a simple `Model` or `Graph` runner.**
     -   Create a struct that holds a `Vec<Box<dyn Operation>>`.
     -   Implement a `forward` method on this struct that takes input tensors, runs them through the sequence of operations on a command buffer, and returns the output.
 

@@ -76,14 +76,16 @@ pub fn scaled_dot_product_attention_impl(
 ) -> Result<Tensor, MetalError> {
     // Validate dimensions
     if q.dims.len() != 3 || k.dims.len() != 3 || v.dims.len() != 3 {
-        return Err(MetalError::InvalidShape("SDPA requires 3D tensors".to_string()));
+        return Err(MetalError::InvalidShape(
+            "SDPA requires 3D tensors".to_string(),
+        ));
     }
-    
+
     let b = q.dims[0];
     let s_q = q.dims[1];
     let s_k = k.dims[1];
     let d = q.dims[2];
-    
+
     // Check batch dimension compatibility
     if b != k.dims[0] || b != v.dims[0] {
         return Err(MetalError::DimensionMismatch {
@@ -91,7 +93,7 @@ pub fn scaled_dot_product_attention_impl(
             actual: k.dims[0].max(v.dims[0]),
         });
     }
-    
+
     // Check feature dimension compatibility
     if d != k.dims[2] {
         return Err(MetalError::DimensionMismatch {
@@ -99,7 +101,7 @@ pub fn scaled_dot_product_attention_impl(
             actual: k.dims[2],
         });
     }
-    
+
     // Check value tensor compatibility
     if s_k != v.dims[1] || d != v.dims[2] {
         return Err(MetalError::DimensionMismatch {

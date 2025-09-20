@@ -13,3 +13,5 @@ rand = "0.9.2"
 rustc-hash = "2.1.1"
 serde = { version = "1.0.225", features = ["derive"] }
 thiserror = "2.0.16"
+memmap2 = "0.9"
+byteorder = "1.5"

@@ -1,4 +1,3 @@
-
 use crate::metallic::softmax::SoftmaxOperation;
 
 use super::*;

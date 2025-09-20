@@ -1,4 +1,3 @@
-
 use super::*;
 
 // CPU-based matrix multiplication for golden testing
