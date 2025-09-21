@@ -69,33 +69,7 @@ fn sdpa_metal(batch: usize, seq: usize, dim: usize, _causal: bool) {
     }
 }
 
-fn benchmark_tensor_creation(c: &mut Criterion) {
-    let batch = 8;
-    let seq = 512;
-    let dim = 64;
-    let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
-    let mut group = c.benchmark_group("tensor_creation");
-
-    group.bench_function("burn", |b| {
-        b.iter(|| {
-            let _query = BurnTensor::<MyBackend, 3, Float>::random(
-                [batch, seq, dim],
-                Distribution::Normal(0.0, 1.0),
-                &device,
-            );
-        })
-    });
-
-    group.bench_function("metallic", |b| {
-        b.iter(|| {
-            let _v_tensor =
-                Tensor::random_uniform(vec![batch, seq, dim], &mut context).unwrap();
-        })
-    });
-}
-
-fn benchmark_small(c: &mut Criterion) {
+fn benchmark_sdpa_small(c: &mut Criterion) {
     let mut group = c.benchmark_group("sdpa_showdown_small");
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
 
@@ -107,7 +81,10 @@ fn benchmark_small(c: &mut Criterion) {
 
     let causal = false;
     group.bench_function("metallic", |b| {
-        b.iter(|| sdpa_metallic(batch, seq, dim, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(batch, seq, dim, causal, &mut context)
+        })
     });
     group.bench_function("burn", |b| {
         b.iter(|| sdpa_burn(batch, seq, dim, &device, causal))
@@ -115,7 +92,7 @@ fn benchmark_small(c: &mut Criterion) {
     group.bench_function("metal", |b| b.iter(|| sdpa_metal(batch, seq, dim, causal)));
 }
 
-fn benchmark_medium(c: &mut Criterion) {
+fn benchmark_sdpa_medium(c: &mut Criterion) {
     let mut group = c.benchmark_group("sdpa_showdown_medium");
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
 
@@ -127,7 +104,10 @@ fn benchmark_medium(c: &mut Criterion) {
 
     let causal = false;
     group.bench_function("metallic", |b| {
-        b.iter(|| sdpa_metallic(batch, seq, dim, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(batch, seq, dim, causal, &mut context)
+        })
     });
     group.bench_function("burn", |b| {
         b.iter(|| sdpa_burn(batch, seq, dim, &device, causal))
@@ -135,7 +115,7 @@ fn benchmark_medium(c: &mut Criterion) {
     group.bench_function("metal", |b| b.iter(|| sdpa_metal(batch, seq, dim, causal)));
 }
 
-fn benchmark_large(c: &mut Criterion) {
+fn benchmark_sdpa_large(c: &mut Criterion) {
     let mut group = c.benchmark_group("sdpa_showdown_large");
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
 
@@ -147,7 +127,10 @@ fn benchmark_large(c: &mut Criterion) {
 
     let causal = false;
     group.bench_function("metallic", |b| {
-        b.iter(|| sdpa_metallic(batch, seq, dim, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(batch, seq, dim, causal, &mut context)
+        })
     });
     group.bench_function("burn", |b| {
         b.iter(|| sdpa_burn(batch, seq, dim, &device, causal))
@@ -161,24 +144,42 @@ fn benchmark_sdpa_metallic(c: &mut Criterion) {
     let mut context = Context::new().unwrap();
     let causal = true;
     group.bench_function("small_non_causal", |b| {
-        b.iter(|| sdpa_metallic(4, 128, 64, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(4, 128, 64, causal, &mut context)
+        })
     });
     group.bench_function("medium_non_causal", |b| {
-        b.iter(|| sdpa_metallic(8, 512, 64, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(8, 512, 64, causal, &mut context)
+        })
     });
     group.bench_function("large_non_causal", |b| {
-        b.iter(|| sdpa_metallic(16, 1024, 96, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(16, 1024, 96, causal, &mut context)
+        })
     });
 
     let causal = false;
     group.bench_function("small_causal", |b| {
-        b.iter(|| sdpa_metallic(4, 128, 64, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(4, 128, 64, causal, &mut context)
+        })
     });
     group.bench_function("medium_causal", |b| {
-        b.iter(|| sdpa_metallic(8, 512, 64, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(8, 512, 64, causal, &mut context)
+        })
     });
     group.bench_function("large_causal", |b| {
-        b.iter(|| sdpa_metallic(16, 1024, 96, causal, &mut context))
+        b.iter(|| {
+            context.pool.reset();
+            sdpa_metallic(16, 1024, 96, causal, &mut context)
+        })
     });
     group.finish();
 }
@@ -229,12 +230,11 @@ fn benchmark_sdpa_metal(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    benchmark_tensor_creation,
     benchmark_sdpa_metallic,
     benchmark_sdpa_burn,
     benchmark_sdpa_metal,
-    benchmark_small,
-    benchmark_medium,
-    benchmark_large
+    benchmark_sdpa_small,
+    benchmark_sdpa_medium,
+    benchmark_sdpa_large
 );
 criterion_main!(benches);

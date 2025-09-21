@@ -47,7 +47,6 @@ fn test_layernorm_basic() -> Result<(), MetalError> {
     let feature_dim = 4;
     let batch_size = 2;
     let seq_len = 3;
-    let total_elements = batch_size * seq_len * feature_dim;
 
     let input_data = vec![
         1.0, 2.0, 3.0, 4.0, // row 0
@@ -63,7 +62,7 @@ fn test_layernorm_basic() -> Result<(), MetalError> {
 
     let dims = vec![batch_size, seq_len, feature_dim];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let output_tensor = Tensor::create_tensor(total_elements, dims.clone(), &context)?;
+    let output_tensor = Tensor::create_tensor(dims.clone(), &context)?;
     let gamma_tensor = Tensor::create_tensor_from_slice(&gamma_data, vec![feature_dim], &context)?;
     let beta_tensor = Tensor::create_tensor_from_slice(&beta_data, vec![feature_dim], &context)?;
 
@@ -121,7 +120,6 @@ fn test_layernorm_identity_transform() -> Result<(), MetalError> {
     let feature_dim = 3;
     let batch_size = 1;
     let seq_len = 2;
-    let total_elements = batch_size * seq_len * feature_dim;
 
     let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let gamma_data = vec![1.0, 1.0, 1.0]; // Identity scaling
@@ -129,7 +127,7 @@ fn test_layernorm_identity_transform() -> Result<(), MetalError> {
 
     let dims = vec![batch_size, seq_len, feature_dim];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let output_tensor = Tensor::create_tensor(total_elements, dims.clone(), &context)?;
+    let output_tensor = Tensor::create_tensor(dims.clone(), &context)?;
     let gamma_tensor = Tensor::create_tensor_from_slice(&gamma_data, vec![feature_dim], &context)?;
     let beta_tensor = Tensor::create_tensor_from_slice(&beta_data, vec![feature_dim], &context)?;
 
@@ -186,10 +184,10 @@ fn test_layernorm_validation_errors() {
     ensure_layernorm_pipeline(&mut context).unwrap();
 
     let dims = vec![2, 3, 4];
-    let input = Tensor::create_tensor(24, dims.clone(), &context).unwrap();
-    let output = Tensor::create_tensor(24, dims.clone(), &context).unwrap();
-    let gamma = Tensor::create_tensor(4, vec![4], &context).unwrap();
-    let beta = Tensor::create_tensor(4, vec![4], &context).unwrap();
+    let input = Tensor::create_tensor(dims.clone(), &context).unwrap();
+    let output = Tensor::create_tensor(dims.clone(), &context).unwrap();
+    let gamma = Tensor::create_tensor(vec![4], &context).unwrap();
+    let beta = Tensor::create_tensor(vec![4], &context).unwrap();
 
     // Use the layernorm pipeline for validation testing
     let pipeline = context.layernorm_pipeline.as_ref().unwrap().clone();
@@ -206,7 +204,7 @@ fn test_layernorm_validation_errors() {
     assert!(result.is_err());
 
     // Test mismatched gamma shape
-    let wrong_gamma = Tensor::create_tensor(3, vec![3], &context).unwrap();
+    let wrong_gamma = Tensor::create_tensor(vec![3], &context).unwrap();
     let result = LayerNorm::new(
         input.clone(),
         output.clone(),
@@ -218,7 +216,7 @@ fn test_layernorm_validation_errors() {
     assert!(result.is_err());
 
     // Test mismatched output shape
-    let wrong_output = Tensor::create_tensor(20, vec![2, 2, 5], &context).unwrap();
+    let wrong_output = Tensor::create_tensor(vec![2, 2, 5], &context).unwrap();
     let result = LayerNorm::new(
         input.clone(),
         wrong_output,

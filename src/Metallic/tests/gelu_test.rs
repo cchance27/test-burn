@@ -23,7 +23,7 @@ fn test_gelu_basic() -> Result<(), MetalError> {
     let input_data = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -0.5, 0.5, 1.5, -1.5, 0.1];
     let dims = vec![2, 5];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let output_tensor = Tensor::create_tensor(input_data.len(), dims.clone(), &context)?;
+    let output_tensor = Tensor::create_tensor(dims.clone(), &context)?;
 
     let gelu_op = Gelu::new(
         input_tensor,
@@ -79,7 +79,7 @@ fn test_gelu_extremes() -> Result<(), MetalError> {
     ];
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let output_tensor = Tensor::create_tensor(input_data.len(), dims.clone(), &context)?;
+    let output_tensor = Tensor::create_tensor(dims.clone(), &context)?;
 
     let gelu_op = Gelu::new(
         input_tensor,
@@ -155,7 +155,7 @@ fn test_gelu_zero_and_symmetry() -> Result<(), MetalError> {
     let input_data = vec![-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0];
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let output_tensor = Tensor::create_tensor(input_data.len(), dims.clone(), &context)?;
+    let output_tensor = Tensor::create_tensor(dims.clone(), &context)?;
 
     let gelu_op = Gelu::new(
         input_tensor,
@@ -217,10 +217,10 @@ fn test_gelu_validation_errors() {
     ensure_gelu_pipeline(&mut context).unwrap();
 
     let dims = vec![2, 3];
-    let input = Tensor::create_tensor(6, dims.clone(), &context).unwrap();
+    let input = Tensor::create_tensor(dims.clone(), &context).unwrap();
 
     // Test mismatched output shape
-    let wrong_output = Tensor::create_tensor(5, vec![5], &context).unwrap();
+    let wrong_output = Tensor::create_tensor(vec![5], &context).unwrap();
     let pipeline = context.gelu_pipeline.as_ref().unwrap().clone();
 
     let result = Gelu::new(input.clone(), wrong_output, pipeline);

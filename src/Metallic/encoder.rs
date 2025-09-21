@@ -1,6 +1,7 @@
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLBuffer, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize,
+    MTLBuffer, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _, MTLComputePipelineState,
+    MTLSize,
 };
 use std::ffi::c_void;
 

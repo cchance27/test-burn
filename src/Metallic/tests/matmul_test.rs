@@ -79,7 +79,7 @@ mod tests {
 
     #[test]
     fn test_matmul_correctness_small_int() -> Result<(), MetalError> {
-        let context = Context::new()?;
+        let mut context = Context::new()?;
         let mut cache = ResourceCache::new();
         let m = 2; // A rows
         let k = 3; // A cols / B rows
@@ -90,7 +90,7 @@ mod tests {
 
         let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
         let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-        let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+        let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
         let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 3, 2, false, false);
 
@@ -152,7 +152,7 @@ mod tests {
 
     #[test]
     fn test_matmul_correctness_asymmetric_float() -> Result<(), MetalError> {
-        let context = Context::new()?;
+        let mut context = Context::new()?;
         let mut cache = ResourceCache::new();
         let m = 5;
         let k = 4;
@@ -163,7 +163,7 @@ mod tests {
 
         let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
         let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-        let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+        let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
         let cpu_output = cpu_matmul(&a_data, 5, 4, &b_data, 4, 7, false, false);
 
@@ -246,7 +246,7 @@ mod tests {
 
     #[test]
     fn test_matmul_transpose_right() -> Result<(), MetalError> {
-        let context = Context::new()?;
+        let mut context = Context::new()?;
         let mut cache = ResourceCache::new();
         let m = 2; // A rows
         let k = 3; // A cols
@@ -257,7 +257,7 @@ mod tests {
 
         let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
         let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![n, k], &context)?; // B is 2x3, but conceptually 3x2 for matmul
-        let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+        let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
         let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, false, true);
 
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn test_matmul_transpose_left() -> Result<(), MetalError> {
-        let context = Context::new()?;
+        let mut context = Context::new()?;
         let mut cache = ResourceCache::new();
         let m = 3; // A rows (after transpose)
         let k = 2; // A cols
@@ -351,7 +351,7 @@ mod tests {
 
         let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![k, m], &context)?; // A is 2x3, but conceptually 3x2 for matmul
         let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-        let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+        let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
         let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, true, false);
 

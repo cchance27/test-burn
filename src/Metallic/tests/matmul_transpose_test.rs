@@ -68,7 +68,7 @@ fn cpu_matmul(
 
 #[test]
 fn test_matmul_transpose_left() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let mut context = Context::new()?;
     let mut cache = ResourceCache::new();
     let m = 3; // A rows (after transpose)
     let k = 2; // A cols
@@ -81,7 +81,7 @@ fn test_matmul_transpose_left() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![k, m], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+    let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, true, false);
 
@@ -164,7 +164,7 @@ fn test_matmul_transpose_left() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_transpose_right() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let mut context = Context::new()?;
     let mut cache = ResourceCache::new();
     let m = 2; // A rows
     let k = 3; // A cols
@@ -177,7 +177,7 @@ fn test_matmul_transpose_right() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![n, k], &context)?; // B is 2x3, but conceptually 3x2 for matmul
-    let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+    let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, false, true);
 
@@ -260,7 +260,7 @@ fn test_matmul_transpose_right() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_transpose_both() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let mut context = Context::new()?;
     let mut cache = ResourceCache::new();
     let m = 3; // A rows (after transpose)
     let k = 2; // A cols
@@ -273,7 +273,7 @@ fn test_matmul_transpose_both() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![k, m], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![n, k], &context)?;
-    let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+    let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 2, true, true);
 
@@ -356,7 +356,7 @@ fn test_matmul_transpose_both() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_transpose_with_different_sizes() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let mut context = Context::new()?;
     let mut cache = ResourceCache::new();
     let m = 4; // A rows (after transpose)
     let k = 3; // A cols
@@ -369,7 +369,7 @@ fn test_matmul_transpose_with_different_sizes() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![k, m], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![n, k], &context)?;
-    let result_tensor = Tensor::zeros(vec![m, n], &context)?;
+    let result_tensor = Tensor::zeros(vec![m, n], &mut context)?;
 
     let cpu_output = cpu_matmul(&a_data, 3, 4, &b_data, 5, 3, true, true);
 

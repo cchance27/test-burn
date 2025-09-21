@@ -3,52 +3,144 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
 
-const POOL_SIZE_BYTES: usize = 256 * 1024 * 1024; // 256MB
+const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
+const GROWTH_FACTOR: f32 = 1.5;
+const MAX_CHUNKS: usize = 16;
 
-/// A simple bump-allocator for Metal buffers.
+/// A chunk of memory in the pool.
+pub struct PoolChunk {
+    pub buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub cursor: usize,
+    pub capacity: usize,
+}
+
+/// A multi-chunk, growable bump-allocator for Metal buffers.
 pub struct MemoryPool {
-    buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    chunks: Vec<PoolChunk>,
+    current_chunk: usize,
     device: Retained<ProtocolObject<dyn MTLDevice>>,
-    cursor: usize,
+    // Metrics counters
+    pub pooled_bytes_allocated: usize,
+    pub pooled_allocations: usize,
+    pub pool_resets: usize,
 }
 
 impl MemoryPool {
-    /// Creates a new memory pool with a fixed capacity.
+    /// Creates a new memory pool with an initial chunk.
     pub fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
-        let buffer = device
-            .newBufferWithLength_options(POOL_SIZE_BYTES, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(POOL_SIZE_BYTES))?;
-        Ok(Self {
-            buffer,
+        let mut pool = Self {
+            chunks: Vec::new(),
+            current_chunk: 0,
             device: device.clone(),
-            cursor: 0,
-        })
+            pooled_bytes_allocated: 0,
+            pooled_allocations: 0,
+            pool_resets: 0,
+        };
+        pool.allocate_new_chunk(INITIAL_CHUNK_SIZE)?;
+        Ok(pool)
     }
 
-    /// Allocates a new tensor from the pool.
+    /// Allocates a new tensor from the pool, growing if necessary.
     pub fn alloc_tensor(&mut self, dims: Vec<usize>) -> Result<Tensor, MetalError> {
         let num_elements = dims.iter().product::<usize>();
         let size_bytes = num_elements * std::mem::size_of::<f32>();
         let aligned_size = align(size_bytes, 256); // Buffers must be 256-byte aligned
 
-        if self.cursor + aligned_size > POOL_SIZE_BYTES {
+        // Try to allocate in existing chunks
+        for chunk_idx in self.current_chunk..self.chunks.len() {
+            if let Some(offset) = self.try_alloc_in_chunk(chunk_idx, aligned_size) {
+                self.current_chunk = chunk_idx;
+                // Update metrics
+                self.pooled_bytes_allocated += aligned_size;
+                self.pooled_allocations += 1;
+
+                return Ok(Tensor {
+                    buf: self.chunks[chunk_idx].buffer.clone(),
+                    dims: dims.clone(),
+                    strides: Tensor::compute_strides(&dims),
+                    dtype: crate::metallic::tensor::Dtype::F32,
+                    device: self.device.clone(),
+                    offset,
+                });
+            }
+        }
+
+        // Need to allocate a new chunk
+        if self.chunks.len() >= MAX_CHUNKS {
             return Err(MetalError::OutOfMemory);
         }
 
-        let offset = self.cursor;
-        self.cursor += aligned_size;
+        let last_chunk_size = self.chunks.last().unwrap().capacity;
+        let new_chunk_size = ((last_chunk_size as f32 * GROWTH_FACTOR) as usize).max(aligned_size);
+        self.allocate_new_chunk(new_chunk_size)?;
+
+        // Now allocate in the new chunk
+        let chunk_idx = self.chunks.len() - 1;
+        let offset = self.try_alloc_in_chunk(chunk_idx, aligned_size).unwrap();
+        self.current_chunk = chunk_idx;
+
+        // Update metrics
+        self.pooled_bytes_allocated += aligned_size;
+        self.pooled_allocations += 1;
 
         Ok(Tensor {
-            buf: self.buffer.clone(),
-            dims,
+            buf: self.chunks[chunk_idx].buffer.clone(),
+            dims: dims.clone(),
+            strides: Tensor::compute_strides(&dims),
+            dtype: crate::metallic::tensor::Dtype::F32,
             device: self.device.clone(),
             offset,
         })
     }
 
+    /// Attempts to allocate in a specific chunk, returns offset if successful.
+    fn try_alloc_in_chunk(&mut self, chunk_idx: usize, aligned_size: usize) -> Option<usize> {
+        let chunk = &mut self.chunks[chunk_idx];
+        if chunk.cursor + aligned_size <= chunk.capacity {
+            let offset = chunk.cursor;
+            chunk.cursor += aligned_size;
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    /// Allocates a new chunk of the given size.
+    /// Returns the number of chunks (for testing).
+    pub fn num_chunks(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Returns the current chunk index (for testing).
+    pub fn current_chunk_index(&self) -> usize {
+        self.current_chunk
+    }
+
+    /// Returns the cursor positions of all chunks (for testing).
+    pub fn chunk_cursors(&self) -> Vec<usize> {
+        self.chunks.iter().map(|c| c.cursor).collect()
+    }
+    fn allocate_new_chunk(&mut self, size: usize) -> Result<(), MetalError> {
+        let buffer = self
+            .device
+            .newBufferWithLength_options(size, MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferCreationFailed(size))?;
+
+        self.chunks.push(PoolChunk {
+            buffer,
+            cursor: 0,
+            capacity: size,
+        });
+        Ok(())
+    }
+
     /// Resets the pool cursor, invalidating all previously allocated tensors.
     pub fn reset(&mut self) {
-        self.cursor = 0;
+        for chunk in &mut self.chunks {
+            chunk.cursor = 0;
+        }
+        self.current_chunk = 0;
+        self.pool_resets += 1;
     }
 }
 

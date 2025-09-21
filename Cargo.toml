@@ -38,5 +38,9 @@ name = "sdpa_benchmark"
 harness = false
 
 [[bench]]
+name = "tensor_benchmark"
+harness = false
+
+[[bench]]
 name = "gguf_quant_benchmark"
 harness = false

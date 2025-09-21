@@ -30,4 +30,6 @@ pub enum MetalError {
     PipelineCreationFailed,
     #[error("Resource not cached: {0}")]
     ResourceNotCached(String),
+    #[error("Operation not supported: {0}")]
+    OperationNotSupported(String),
 }
