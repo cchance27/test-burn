@@ -33,6 +33,10 @@ pub fn dequantize_q8_to_f32(
     let total_weights = num_blocks * weights_per_block;
     let mut f32_data = Vec::with_capacity(total_weights);
 
+    // Pre-allocate space to avoid repeated allocations
+    f32_data.resize(total_weights, 0.0);
+
+    // Process blocks in a more efficient way
     for block_idx in 0..num_blocks {
         let block_start = block_idx * block_size;
         let block_data = &data[block_start..block_start + block_size];
@@ -50,15 +54,35 @@ pub fn dequantize_q8_to_f32(
         } else {
             0.0
         };
-
         // Extract quantized weights
         let weight_data = &block_data[weight_offset..weight_offset + weights_per_block];
 
-        // Dequantize weights
-        for &weight_byte in weight_data {
-            let weight_i8 = weight_byte as i8;
+        // Calculate output offset for this block
+        let output_offset = block_idx * weights_per_block;
+
+        // Dequantize weights using loop unrolling for better performance
+        // Process 4 weights at a time to reduce loop overhead
+        let mut i = 0;
+        while i + 3 < weights_per_block {
+            let w0 = weight_data[i] as i8;
+            let w1 = weight_data[i + 1] as i8;
+            let w2 = weight_data[i + 2] as i8;
+            let w3 = weight_data[i + 3] as i8;
+
+            f32_data[output_offset + i] = (w0 as f32) * scale + delta;
+            f32_data[output_offset + i + 1] = (w1 as f32) * scale + delta;
+            f32_data[output_offset + i + 2] = (w2 as f32) * scale + delta;
+            f32_data[output_offset + i + 3] = (w3 as f32) * scale + delta;
+
+            i += 4;
+        }
+
+        // Handle remaining weights
+        while i < weights_per_block {
+            let weight_i8 = weight_data[i] as i8;
             let f32_value = (weight_i8 as f32) * scale + delta;
-            f32_data.push(f32_value);
+            f32_data[output_offset + i] = f32_value;
+            i += 1;
         }
     }
 
@@ -67,7 +91,10 @@ pub fn dequantize_q8_to_f32(
 
 /// Temporary function to debug Q8 format
 #[allow(dead_code)]
-pub fn debug_q8_format(tensor_info: &crate::gguf::GGUTensorInfo, data: &[u8]) -> Result<(), GGUFError> {
+pub fn debug_q8_format(
+    tensor_info: &crate::gguf::GGUTensorInfo,
+    data: &[u8],
+) -> Result<(), GGUFError> {
     println!("Tensor: {}", tensor_info.name);
     println!("Data type: {:?}", tensor_info.data_type);
     println!("Data length: {}", data.len());

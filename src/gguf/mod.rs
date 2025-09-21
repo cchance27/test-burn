@@ -488,7 +488,6 @@ impl GGUFFile {
         }
     }
 
-
     /// Offload tensor data to disk to free up memory
     #[allow(dead_code)]
     pub fn offload_tensor(&self, tensor_info: &GGUTensorInfo) -> Result<(), GGUFError> {
@@ -654,8 +653,7 @@ mod tests {
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 // Debug the first tensor
-                if let Some(_first_tensor) = gguf.tensors.first() {
-                }
+                if let Some(_first_tensor) = gguf.tensors.first() {}
 
                 // Debug a few more tensors
                 for (i, _tensor) in gguf.tensors.iter().enumerate() {
@@ -670,7 +668,7 @@ mod tests {
             }
         }
     }
-    
+
     #[test]
     fn test_initial_inference() {
         let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
@@ -691,7 +689,7 @@ mod tests {
                         first_tensor.name, first_tensor.data_type
                     );
                     println!("Dimensions: {:?}", first_tensor.dimensions);
-                    match metallic::Tensor::try_from((&gguf, first_tensor)){
+                    match metallic::Tensor::try_from((&gguf, first_tensor)) {
                         Ok(metallic_tensor) => {
                             println!(
                                 "Successfully converted tensor '{}' to Metallic tensor",

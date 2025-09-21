@@ -175,7 +175,7 @@ mod tests {
         // Test loading non-existent file
         let result = GGUFFile::load("/non/existent/file.gguf");
         assert!(result.is_err());
-        
+
         println!("Error handling tests passed!");
     }
 }
