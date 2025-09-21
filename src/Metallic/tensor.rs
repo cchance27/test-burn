@@ -1,7 +1,14 @@
 #![allow(dead_code)]
-use super::{CommandBuffer, Context, MetalError};
+use super::{operation::CommandBuffer, Context, MetalError};
+use crate::metallic::context::ensure_random_pipeline;
+use crate::metallic::encoder::{
+    dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state,
+};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
+};
 use std::ffi::c_void;
 use std::ops::{Add, Div, Mul, Sub};
 
@@ -209,24 +216,6 @@ impl Tensor {
         Ok(t)
     }
 
-    /// Allocate and fill a tensor from a Vec (host).
-    pub fn from_vec(
-        values: Vec<f32>,
-        dims: Vec<usize>,
-        context: &Context,
-    ) -> Result<Tensor, MetalError> {
-        let expected = dims.iter().product::<usize>();
-        if values.len() != expected {
-            return Err(MetalError::DimensionMismatch {
-                expected,
-                actual: values.len(),
-            });
-        }
-        let mut t = Self::create_tensor(values.len(), dims, context)?;
-        t.as_mut_slice().copy_from_slice(&values);
-        Ok(t)
-    }
-
     /// Create an arange tensor (0..n as f32) with the given shape.
     pub fn arange(
         num_elements: usize,
@@ -234,7 +223,7 @@ impl Tensor {
         context: &Context,
     ) -> Result<Tensor, MetalError> {
         let v: Vec<f32> = (0..num_elements).map(|x| x as f32).collect();
-        Self::from_vec(v, dims, context)
+        Self::create_tensor_from_slice(&v, dims, context)
     }
 
     /// Create a zeros tensor with the same shape.
@@ -245,6 +234,51 @@ impl Tensor {
     /// Create a ones tensor with the same shape.
     pub fn ones_like(&self, context: &Context) -> Result<Tensor, MetalError> {
         Self::ones(self.dims.clone(), context)
+    }
+
+    /// Allocate and fill a tensor with uniform random values between 0 and 1.
+    pub fn random_uniform(
+        dims: Vec<usize>,
+        context: &mut Context,
+    ) -> Result<Tensor, MetalError> {
+        ensure_random_pipeline(context)?;
+
+        let num_elements = dims.iter().product::<usize>();
+        let tensor = Self::create_tensor(num_elements, dims.clone(), context)?;
+
+        let command_buffer = context.command_queue.commandBuffer().unwrap();
+        let encoder = command_buffer.computeCommandEncoder().unwrap();
+
+        let pipeline = context.random_pipeline.as_ref().unwrap();
+        set_compute_pipeline_state(&encoder, pipeline);
+
+        set_buffer(&encoder, 0, &tensor.buf, 0);
+
+        // Seed with current time for now
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as u32;
+        set_bytes(&encoder, 1, &seed);
+
+        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+        let threadgroup_size = MTLSize {
+            width: threads_per_threadgroup,
+            height: 1,
+            depth: 1,
+        };
+
+        let grid_size = MTLSize {
+            width: num_elements,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threads(&encoder, grid_size, threadgroup_size);
+        encoder.endEncoding();
+        command_buffer.commit();
+
+        Ok(tensor)
     }
 
     /// Fill the tensor in-place with a scalar value.

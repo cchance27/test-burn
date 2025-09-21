@@ -1,5 +1,7 @@
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{
+    MTLBuffer, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize,
+};
 use std::ffi::c_void;
 
 /// Sets the compute pipeline state for a command encoder.
@@ -58,4 +60,13 @@ pub fn dispatch_threadgroups(
     );
 
     encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, threads_per_tg);
+}
+
+/// Dispatches a compute kernel using thread-level parallelism.
+pub fn dispatch_threads(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    grid_size: MTLSize,
+    threadgroup_size: MTLSize,
+) {
+    encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup_size);
 }

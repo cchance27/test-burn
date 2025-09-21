@@ -32,3 +32,11 @@ criterion = { version = "0.7", features = ["html_reports"] }
 [[bench]]
 name = "tokenizer_benchmark"
 harness = false
+
+[[bench]]
+name = "sdpa_benchmark"
+harness = false
+
+[[bench]]
+name = "gguf_quant_benchmark"
+harness = false

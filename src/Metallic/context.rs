@@ -6,6 +6,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::{
     MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLLibrary,
 };
 
 /// The main context for Metal operations.
@@ -18,6 +19,8 @@ pub struct Context {
         Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) layernorm_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) gelu_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pub(crate) random_pipeline:
+        Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl Context {
@@ -35,6 +38,7 @@ impl Context {
             fused_softmax_pipeline: None,
             layernorm_pipeline: None,
             gelu_pipeline: None,
+            random_pipeline: None,
         })
     }
 
@@ -51,4 +55,65 @@ impl Context {
     //    // Create a fresh command buffer for next operations.
     //    self.command_buffer = self.command_queue.commandBuffer().unwrap();
     //}
+}
+
+/// Ensure the random compute pipeline is compiled and cached on the Context.
+pub fn ensure_random_pipeline(ctx: &mut Context) -> Result<(), MetalError> {
+    if ctx.random_pipeline.is_some() {
+        return Ok(());
+    }
+
+    let source = r#"
+    #include <metal_stdlib>
+
+    using namespace metal;
+
+    // A simple hashing-based pseudo-random number generator for Metal shaders.
+    // It takes a 2D seed and produces a float in [0, 1).
+    float hash(uint2 seed) {
+        // Constants for hashing
+        const uint k1 = 0x456789abu;
+        const uint k2 = 0x89abcdefu;
+        const uint k3 = 0xabcdef01u;
+
+        // Scramble the seed
+        uint n = seed.x * k1 + seed.y * k2;
+        n = (n << 13) ^ n;
+        n = n * (n * n * 15731u + 789221u) + 1376312589u;
+        n = (n >> 13) ^ n;
+
+        // Convert to a float in [0, 1)
+        return float(n & 0x0fffffffu) / float(0x10000000u);
+    }
+
+    // Kernel to fill a buffer with uniform random numbers.
+    // It uses the thread position as a seed to ensure different values for each element.
+    kernel void random_uniform(
+        device float *output_buffer [[buffer(0)]],
+        constant uint &seed [[buffer(1)]],
+        uint thread_id [[thread_position_in_grid]]
+    ) {
+        // Use thread_id and the provided seed to generate a unique seed for each thread
+        uint2 random_seed = uint2(thread_id, seed);
+        output_buffer[thread_id] = hash(random_seed);
+    }
+    "#;
+
+    let source_ns = objc2_foundation::NSString::from_str(source);
+    let library = ctx
+        .device
+        .newLibraryWithSource_options_error(&source_ns, None)
+        .map_err(|err| MetalError::LibraryCompilationFailed(err.to_string()))?;
+
+    let fn_name = objc2_foundation::NSString::from_str("random_uniform");
+    let function = library
+        .newFunctionWithName(&fn_name)
+        .ok_or_else(|| MetalError::FunctionCreationFailed(fn_name.to_string()))?;
+    let pipeline = ctx
+        .device
+        .newComputePipelineStateWithFunction_error(&function)
+        .map_err(|_err| MetalError::PipelineCreationFailed)?;
+
+    ctx.random_pipeline = Some(pipeline);
+    Ok(())
 }

@@ -72,7 +72,7 @@ fn arange_helper() {
 fn from_vec_helper() {
     let ctx = Context::new().unwrap();
     let v = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
-    let t = Tensor::from_vec(v.clone(), vec![2, 3], &ctx).unwrap();
+    let t = Tensor::create_tensor_from_slice(&v, vec![2, 3], &ctx).unwrap();
     assert_eq!(t.dims(), &[2, 3]);
     assert_eq!(t.to_vec(), v);
 }

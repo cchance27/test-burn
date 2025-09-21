@@ -265,7 +265,7 @@ impl Tokenizer {
 
         // Split text into words (handling whitespace)
         let words: Vec<&str> = preprocessed_text.split_whitespace().collect();
-        
+
         // Process words in parallel
         // Estimate capacity for bpe_tokens based on number of words
         let mut bpe_tokens: Vec<Vec<u32>> = words
@@ -291,7 +291,7 @@ impl Tokenizer {
     pub fn encode_simd(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
         // Use SIMD-optimized preprocessing
         let preprocessed_text = self.byte_level_preprocess_simd(text);
-        
+
         // Estimate capacity based on text length (roughly 1 token per 3-4 characters)
         let estimated_capacity = text.len() / 4 + 10; // Add buffer for BOS token and special cases
         let mut tokens = Vec::with_capacity(estimated_capacity);
@@ -327,7 +327,7 @@ impl Tokenizer {
     pub fn encode_simd_parallel(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
         // Use SIMD-optimized preprocessing
         let preprocessed_text = self.byte_level_preprocess_simd(text);
-        
+
         // Add BOS token if required
         // Estimate capacity based on text length (roughly 1 token per 3-4 characters)
         let estimated_capacity = text.len() / 4 + 10; // Add buffer for BOS token and special cases
@@ -340,7 +340,7 @@ impl Tokenizer {
 
         // Split text into words (handling whitespace)
         let words: Vec<&str> = preprocessed_text.split_whitespace().collect();
-        
+
         // Process words in parallel
         // Estimate capacity for bpe_tokens based on number of words
         let mut bpe_tokens: Vec<Vec<u32>> = words
@@ -390,7 +390,7 @@ impl Tokenizer {
     #[cfg(target_arch = "aarch64")]
     pub fn byte_level_preprocess_simd(&self, text: &str) -> String {
         use std::arch::aarch64::*;
-        
+
         // Estimate capacity based on text length (worst case: each char becomes <0xXX>)
         let estimated_capacity = text.len() * 6; // <0xXX> is 6 characters
         let mut result = String::with_capacity(estimated_capacity);
@@ -465,7 +465,7 @@ impl Tokenizer {
                 return Ok(cached_result.clone());
             }
         }
-        
+
         // Start with character-level tokens
         // Estimate capacity based on word length (worst case: each char becomes a token)
         let estimated_capacity = word.len() + 1; // Add 1 for </w> suffix
@@ -596,7 +596,7 @@ impl Tokenizer {
                 return Ok(cached_result.clone());
             }
         }
-        
+
         // Start with character-level tokens
         // Estimate capacity based on word length (worst case: each char becomes a token)
         let estimated_capacity = word.len() + 1; // Add 1 for </w> suffix
@@ -743,7 +743,7 @@ impl Tokenizer {
     #[cfg(target_arch = "aarch64")]
     pub fn decode_simd(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
         use std::arch::aarch64::*;
-        
+
         // Estimate capacity based on number of tokens (roughly 3-10 characters per token)
         let estimated_capacity = tokens.len() * 5;
         let mut decoded_parts = Vec::with_capacity(estimated_capacity);
@@ -803,7 +803,7 @@ impl Tokenizer {
     fn post_process(&self, text: String) -> String {
         // Remove end-of-word markers
         let text = text.replace("</w>", " ");
-        
+
         // Handle byte-level decoding
         // Estimate capacity based on text length (worst case: no change)
         let estimated_capacity = text.len();
@@ -841,13 +841,13 @@ impl Tokenizer {
     fn post_process_simd(&self, text: String) -> String {
         // Remove end-of-word markers
         let text = text.replace("</w>", " ");
-        
+
         // For post-processing, the SIMD optimization is less straightforward
         // since we're dealing with variable-length patterns like <0xXX>
         // We'll use a more efficient approach for scanning and replacing
         // these patterns without SIMD for now, but with better algorithmic
         // efficiency than the original implementation.
-        
+
         // Estimate capacity based on text length (worst case: no change)
         let estimated_capacity = text.len();
         let mut result = String::with_capacity(estimated_capacity);
