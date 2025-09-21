@@ -45,3 +45,4 @@ mod softmax_pipeline_test;
 mod softmax_test;
 mod softmax_threadgroup_test;
 mod tensor_test;
+mod tokenizer_test;

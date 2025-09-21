@@ -1,5 +1,5 @@
+use crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn;
 use crate::metallic::{Context, Tensor};
-use crate::sdpa_burn::scaled_dot_product_attention_burn;
 use burn::prelude::*;
 use burn::tensor::{Distribution, Tensor as BurnTensor};
 

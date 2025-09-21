@@ -13,10 +13,6 @@ pub mod quant;
 // Import model loader
 pub mod model_loader;
 
-// Import validation tests
-#[cfg(test)]
-mod validation_test;
-
 #[derive(Debug, Error)]
 pub enum GGUFError {
     #[error("IO error: {0}")]

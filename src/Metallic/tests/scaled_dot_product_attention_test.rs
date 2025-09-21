@@ -1,3 +1,5 @@
+use crate::alternatives::sdpa_burn;
+
 const PYTORCH_ARANGE_NONCAUSAL: [f32; 256] = [
     112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0,
     125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0,
@@ -40,7 +42,9 @@ fn arange_sdpa_burn_vs_pytorch_causal() {
     let value = Tensor::<MyBackend, 1, Int>::arange(0..NUM_ELEMENTS, &device)
         .float()
         .reshape(DIMENSIONS);
-    let output = crate::sdpa_burn::scaled_dot_product_attention_burn(query, key, value, None, true);
+    let output = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
+        query, key, value, None, true,
+    );
     assert_eq!(output.dims(), DIMENSIONS);
     assert_eq!(
         output.to_data().as_slice::<f32>().unwrap(),
@@ -85,8 +89,9 @@ fn arange_sdpa_burn_vs_pytorch_noncausal() {
     let value = Tensor::<MyBackend, 1, Int>::arange(0..NUM_ELEMENTS, &device)
         .float()
         .reshape(DIMENSIONS);
-    let output =
-        crate::sdpa_burn::scaled_dot_product_attention_burn(query, key, value, None, false);
+    let output = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
+        query, key, value, None, false,
+    );
     assert_eq!(output.dims(), DIMENSIONS);
     assert_eq!(
         output.to_data().as_slice::<f32>().unwrap(),
@@ -147,7 +152,7 @@ fn large_sdpa_ours_vs_burn_causal() {
     let v_data_tensor = v_burn_input.to_data();
     let v_data = v_data_tensor.as_slice::<f32>().unwrap().to_vec();
 
-    let burn_out = crate::sdpa_burn::scaled_dot_product_attention_burn(
+    let burn_out = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
         q_burn_input,
         k_burn_input,
         v_burn_input,
@@ -225,7 +230,7 @@ fn large_sdpa_ours_vs_burn_noncausal() {
     let v_data_tensor = v_burn_input.to_data();
     let v_data = v_data_tensor.as_slice::<f32>().unwrap().to_vec();
 
-    let burn_out = crate::sdpa_burn::scaled_dot_product_attention_burn(
+    let burn_out = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
         q_burn_input,
         k_burn_input,
         v_burn_input,
@@ -315,7 +320,7 @@ fn run_sdpa_test(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: b
         .unwrap()
         .to_vec();
 
-    let burn_out = crate::sdpa_burn::scaled_dot_product_attention_burn(
+    let burn_out = sdpa_burn::scaled_dot_product_attention_burn(
         q_burn_input,
         k_burn_input,
         v_burn_input,

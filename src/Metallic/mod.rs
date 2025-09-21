@@ -4,6 +4,7 @@ pub use error::MetalError;
 pub use matmul::{encode_mps_matrix_multiplication, mps_matrix_from_buffer};
 pub use softmax::ensure_fused_softmax_pipeline;
 pub use tensor::Tensor;
+pub use tokenizer::{SpecialTokens, Tokenizer, TokenizerError};
 
 pub mod cache_keys;
 pub mod cacheable;
@@ -19,6 +20,7 @@ pub mod resource_cache;
 pub mod scaled_dot_product_attention;
 pub mod softmax;
 pub mod tensor;
+pub mod tokenizer;
 
 pub use operation::{CommandBuffer, Operation};
 

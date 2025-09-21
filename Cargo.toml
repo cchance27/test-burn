@@ -3,6 +3,14 @@ name = "test-burn"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+bench = false
+
+[[bin]]
+name = "test-burn"
+path = "src/main.rs"
+bench = false
+
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
 objc2 = "0.6.2"
@@ -10,9 +18,17 @@ objc2-foundation = "0.3.1"
 objc2-metal = "0.3.1"
 objc2-metal-performance-shaders = "0.3.1"
 rand = "0.9.2"
+rayon = "1.11"
 rustc-hash = "2.1.1"
-serde = { version = "1.0.225", features = ["derive"] }
+serde = { version = "1.0.226", features = ["derive"] }
 thiserror = "2.0.16"
 memmap2 = "0.9"
 byteorder = "1.5"
 half = "2.4"
+
+[dev-dependencies]
+criterion = { version = "0.7", features = ["html_reports"] }
+
+[[bench]]
+name = "tokenizer_benchmark"
+harness = false

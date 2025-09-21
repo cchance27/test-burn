@@ -82,3 +82,51 @@ Iterations per second: 2802.71
 
 ----------------------------------------
 ```
+
+```bash
+cargo bench -- --quick --format terse
+    Finished `bench` profile [optimized] target(s) in 0.14s
+     Running benches/tokenizer_benchmark.rs (target/release/deps/tokenizer_benchmark-7cf6ea83399907f3)
+short_encoding/serial   time:   [157.92 ns 158.76 ns 158.98 ns]
+                        change: [−3.4419% −2.8372% −2.2289%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+short_encoding/simd     time:   [155.43 ns 155.91 ns 156.04 ns]
+                        change: [+3.3428% +3.5868% +3.8311%] (p = 0.10 > 0.05)
+                        No change in performance detected.
+short_encoding/parallel time:   [17.937 µs 18.006 µs 18.279 µs]
+                        change: [−6.6974% −4.2061% −1.6285%] (p = 0.10 > 0.05)
+                        No change in performance detected.
+short_encoding/simd_parallel
+                        time:   [18.818 µs 19.060 µs 19.121 µs]
+                        change: [−2.1947% +0.8144% +3.9622%] (p = 0.81 > 0.05)
+                        No change in performance detected.
+
+medium_encoding/serial  time:   [930.75 ns 933.46 ns 934.14 ns]
+                        change: [−1.2689% −0.9067% −0.5432%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+medium_encoding/simd    time:   [927.28 ns 927.95 ns 930.64 ns]
+                        change: [−1.6597% −1.2261% −0.7903%] (p = 0.07 > 0.05)
+                        No change in performance detected.
+medium_encoding/parallel
+                        time:   [36.419 µs 36.719 µs 37.919 µs]
+                        change: [−3.7501% −0.0976% +3.6813%] (p = 0.87 > 0.05)
+                        No change in performance detected.
+medium_encoding/simd_parallel
+                        time:   [36.170 µs 36.578 µs 38.209 µs]
+                        change: [−5.7552% −2.5055% +0.7843%] (p = 0.54 > 0.05)
+                        No change in performance detected.
+
+long_encoding/serial    time:   [36.899 µs 36.995 µs 37.377 µs]
+                        change: [−1.0104% −0.0102% +0.9973%] (p = 0.86 > 0.05)
+                        No change in performance detected.
+long_encoding/simd      time:   [37.479 µs 37.541 µs 37.790 µs]
+                        change: [−0.6031% +0.2233% +1.0565%] (p = 0.73 > 0.05)
+                        No change in performance detected.
+long_encoding/parallel  time:   [506.62 µs 508.07 µs 513.90 µs]
+                        change: [−1.0084% +0.9716% +3.0026%] (p = 0.61 > 0.05)
+                        No change in performance detected.
+long_encoding/simd_parallel
+                        time:   [487.51 µs 497.89 µs 500.49 µs]
+                        change: [+0.1708% +1.8568% +3.5545%] (p = 0.15 > 0.05)
+                        No change in performance detected.
+```

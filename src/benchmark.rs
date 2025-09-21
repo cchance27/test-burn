@@ -1,10 +1,10 @@
 use crate::metallic::{Context, Tensor};
-use crate::sdpa_burn::scaled_dot_product_attention_burn;
-use crate::sdpa_metal::scaled_dot_product_attention_metal;
 use burn::prelude::*;
 use burn::tensor::{Distribution, Float, Tensor as BurnTensor};
 use std::ffi::c_void;
 use std::time::Instant;
+use test_burn::alternatives::sdpa_burn::scaled_dot_product_attention_burn;
+use test_burn::alternatives::sdpa_metal::scaled_dot_product_attention_metal;
 
 const ITERATIONS: usize = 100;
 

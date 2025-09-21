@@ -1,10 +1,7 @@
 use crate::benchmark::{benchmark_burn, benchmark_metal, benchmark_metallic};
 
 mod benchmark;
-mod gguf;
-mod metallic;
-mod sdpa_burn;
-mod sdpa_metal;
+use test_burn::metallic;
 
 fn benchmark() {
     println!("\nRunning Metal Opt (MPS) implementation (causal)...");

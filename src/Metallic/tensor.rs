@@ -33,6 +33,11 @@ impl Tensor {
         self.dims.iter().product::<usize>()
     }
 
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.dims.is_empty()
+    }
+
     /// Create a tensor by copying from a host slice.
     pub fn create_tensor_from_slice(
         items: &[f32],

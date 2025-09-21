@@ -26,11 +26,11 @@ pub fn get_memory_usage() -> usize {
             if line.contains("Pages active") {
                 // Extract the number of pages and convert to bytes
                 // This is a very rough approximation
-                if let Some(pages) = line.split(':').nth(1) {
-                    if let Ok(page_count) = pages.trim().parse::<usize>() {
-                        // Assuming 4KB pages
-                        return page_count * 4096;
-                    }
+                if let Some(pages) = line.split(':').nth(1)
+                    && let Ok(page_count) = pages.trim().parse::<usize>()
+                {
+                    // Assuming 4KB pages
+                    return page_count * 4096;
                 }
             }
         }

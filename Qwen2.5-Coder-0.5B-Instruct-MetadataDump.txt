@@ -1,3 +1,55 @@
+❯ cargo test gguf::tests::test_load_gguf_file -- --nocapture
+From our GGUF Rust Module Test
+
+Magic: "GGUF"
+Version: 3
+Tensor count: 290
+Metadata count: 27
+Metadata entries: 27
+  tokenizer.chat_template: String("{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are Qwen, created by Alibaba Cloud. You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n")
+  general.architecture: String("qwen2")
+  qwen2.embedding_length: U32(896)
+  general.file_type: U32(7)
+  qwen2.feed_forward_length: U32(4864)
+  tokenizer.ggml.model: String("gpt2")
+  tokenizer.ggml.pre: String("qwen2")
+  tokenizer.ggml.padding_token_id: U32(151665)
+  general.organization: String("Qwen")
+  general.finetune: String("Instruct")
+  tokenizer.ggml.token_type: Array with 151936 elements
+  tokenizer.ggml.merges: Array with 151387 elements
+  tokenizer.ggml.eos_token_id: U32(151645)
+  tokenizer.ggml.bos_token_id: U32(151643)
+  qwen2.attention.head_count: U32(14)
+  general.type: String("model")
+  qwen2.context_length: U32(32768)
+  general.basename: String("Qwen2.5-Coder")
+  general.quantization_version: U32(2)
+  qwen2.rope.freq_base: F32(1000000.0)
+  qwen2.attention.layer_norm_rms_epsilon: F32(1e-6)
+  qwen2.block_count: U32(24)
+  tokenizer.ggml.tokens: Array with 151936 elements
+  general.name: String("Qwen2.5 Coder 0.5B Instruct")
+  tokenizer.ggml.add_bos_token: Bool(false)
+  general.size_label: String("0.5B")
+  qwen2.attention.head_count_kv: U32(2)
+First 10 tensors:
+  token_embd.weight: [896, 151936] (Q8_1)
+  blk.0.attn_norm.weight: [896] (F64)
+  blk.0.ffn_down.weight: [4864, 896] (Q8_1)
+  blk.0.ffn_gate.weight: [896, 4864] (Q8_1)
+  blk.0.ffn_up.weight: [896, 4864] (Q8_1)
+  blk.0.ffn_norm.weight: [896] (F64)
+  blk.0.attn_k.bias: [128] (F64)
+  blk.0.attn_k.weight: [896, 128] (Q8_1)
+  blk.0.attn_output.weight: [896, 896] (Q8_1)
+  blk.0.attn_q.bias: [896] (F64)
+... and 280 more tensors
+
+-------
+
+And here is a third party overview of the gguf....
+
 ❯ gguf-utils show Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf
 +---------------------------------------+
 | Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf |
