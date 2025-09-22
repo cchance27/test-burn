@@ -240,7 +240,7 @@ fn batched_operations_correctness() {
     cb.wait();
 
     ctx.synchronize();
-    
+
     // Verify results
     assert!(t1.as_slice().iter().all(|&x| x == 0.0));
     assert!(t2.as_slice().iter().all(|&x| x == 1.0));
@@ -305,7 +305,7 @@ fn from_slice_no_copy() {
 
     // Create tensor without copying - caller must ensure data lives long enough
     let t = Tensor::from_slice_no_copy(&data, dims, &ctx).unwrap();
-    
+
     ctx.synchronize();
 
     assert_eq!(t.dims(), &[2, 3]);

@@ -27,5 +27,9 @@ pub use operation::{CommandBuffer, Operation};
 pub mod gelu;
 pub mod layernorm;
 pub mod model;
+pub mod rmsnorm;
+pub mod rope;
+pub mod silu;
+
 #[cfg(test)]
 mod tests;

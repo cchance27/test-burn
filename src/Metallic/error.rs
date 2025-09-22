@@ -32,4 +32,6 @@ pub enum MetalError {
     ResourceNotCached(String),
     #[error("Operation not supported: {0}")]
     OperationNotSupported(String),
+    #[error("Invalid operation: {0}")]
+    InvalidOperation(String),
 }
