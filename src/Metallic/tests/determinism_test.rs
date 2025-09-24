@@ -307,7 +307,7 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
 
 #[test]
 fn test_tensor_operations_determinism() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let mut context = Context::new()?;
 
     let dims = vec![2, 3];
     let data1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
@@ -322,11 +322,11 @@ fn test_tensor_operations_determinism() -> Result<(), MetalError> {
         let tensor2 = Tensor::create_tensor_from_slice(&data2, dims.clone(), &context)?;
 
         // Addition
-        let add_result = (&tensor1 + &tensor2).to_vec();
+        let add_result = tensor1.add_elem(&tensor2, &mut context)?.to_vec();
         add_results.push(add_result);
 
         // Multiplication
-        let mul_result = (&tensor1 * &tensor2).to_vec();
+        let mul_result = tensor1.mul_elem(&tensor2, &mut context)?.to_vec();
         mul_results.push(mul_result);
     }
 

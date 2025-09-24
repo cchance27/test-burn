@@ -156,6 +156,7 @@ impl Operation for RandomUniform {
 /// simple API to record high-level operations.
 pub struct CommandBuffer {
     inner: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    committed: std::cell::Cell<bool>,
 }
 
 impl CommandBuffer {
@@ -164,7 +165,10 @@ impl CommandBuffer {
         let inner = queue
             .commandBuffer()
             .ok_or(MetalError::CommandBufferCreationFailed)?;
-        Ok(Self { inner })
+        Ok(Self {
+            inner,
+            committed: std::cell::Cell::new(false),
+        })
     }
 
     /// Record an operation on this command buffer.
@@ -173,17 +177,32 @@ impl CommandBuffer {
         operation: &dyn Operation,
         cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        // Prevent recording after commit.
+        if self.committed.get() {
+            return Err(MetalError::InvalidOperation(
+                "Attempted to record on a committed command buffer".to_string(),
+            ));
+        }
         operation.encode(&self.inner, cache)
     }
 
     /// Commit the command buffer for execution.
+    ///
+    /// This method is idempotent: repeated calls are ignored after the first commit.
+    /// This avoids "commit an already committed command buffer" errors when multiple
+    /// call sites may attempt to commit the same wrapper.
     pub fn commit(&self) {
-        self.inner.commit();
+        if !self.committed.replace(true) {
+            self.inner.commit();
+        }
     }
 
     /// Wait for the command buffer to complete.
     pub fn wait(&self) {
-        unsafe { self.inner.waitUntilCompleted() };
+        // Only wait if we actually committed the buffer.
+        if self.committed.get() {
+            unsafe { self.inner.waitUntilCompleted() };
+        }
     }
 
     #[allow(dead_code)]

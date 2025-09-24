@@ -20,3 +20,7 @@ The following are design goals and rules for our Agents and Developers for the p
 17. Remember performance is #1 priority, so cloning should be minimized we should try to use zero copy abstractions where possible. 
 18. Use enums where possible so that we can rely on exhaustive and nonexhaustive match cases to avoid footguns.
 19. Note in comments tech debt with obvious DEBT: designations, but try to avoid tech debt that we will have to deal with later.
+20. Use the fastest possible primatives you can don't use HashMap if we can use FxHashMap which is known to be faster
+21. Tests should be written to check for semantic issues, as well as under-and-over runs for extrme values, and other items.
+22. Unit tests should test functionality to confirm base functionality is as expected.
+23. Unit tests should have strict tollerances and we should avoid adjusting tests to work around issues, and instead fix issues if the tests are valid.

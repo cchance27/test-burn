@@ -24,12 +24,21 @@ pub mod tokenizer;
 
 pub use operation::{CommandBuffer, Operation};
 
+pub mod elemwise_add;
+pub mod elemwise_div;
+pub mod elemwise_mul;
+pub mod elemwise_sub;
 pub mod gelu;
+pub mod generation;
+pub mod kv_rearrange;
 pub mod layernorm;
 pub mod model;
+pub mod permute;
+pub mod qwen25;
 pub mod rmsnorm;
 pub mod rope;
 pub mod silu;
+pub mod swiglu;
 
 #[cfg(test)]
 mod tests;

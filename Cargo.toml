@@ -6,11 +6,6 @@ edition = "2024"
 [lib]
 bench = false
 
-[[bin]]
-name = "test-burn"
-path = "src/main.rs"
-bench = false
-
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
 objc2 = "0.6.2"
@@ -25,8 +20,11 @@ thiserror = "2.0.16"
 memmap2 = "0.9"
 byteorder = "1.5"
 half = "2.4"
+approx = "0.5.1"
+serde_json = "1.0.145"
 
 [dev-dependencies]
+approx = "0.5.1"
 criterion = { version = "0.7", features = ["html_reports"] }
 
 [[bench]]

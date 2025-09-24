@@ -37,32 +37,45 @@ pub enum GGUFError {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GGUFDataType {
-    F64,
     F32,
     F16,
-    BF16,
-    Q8_0,
-    Q8_1,
     Q4_0,
     Q4_1,
+    Q4_2,
+    Q4_3,
     Q5_0,
     Q5_1,
+    Q8_0,
+    Q8_1,
     Q2K,
     Q3K,
     Q4K,
     Q5K,
     Q6K,
     Q8K,
+    IQ2XXS,
+    IQ2XS,
+    IQ3XXS,
+    IQ1S,
+    IQ4NL,
+    IQ3S,
+    IQ2S,
+    IQ4XS,
     I8,
     I16,
     I32,
     I64,
-    U8,
-    U16,
-    U32,
-    U64,
-    Bool,
-    String,
+    F64,
+    IQ1M,
+    BF16,
+    Q4044,
+    Q4048,
+    Q4088,
+    TQ10,
+    TQ20,
+    IQ4NL44,
+    IQ4NL48,
+    IQ4NL88,
     Array,
     Unknown(u32),
 }
@@ -70,34 +83,94 @@ pub enum GGUFDataType {
 impl GGUFDataType {
     fn from_u32(value: u32) -> Self {
         match value {
-            0 => Self::F64,
-            1 => Self::F32,
-            2 => Self::F16,
-            3 => Self::BF16,
-            7 => Self::Q8_0,
-            8 => Self::Q8_1,
-            9 => Self::Q4_0,
-            10 => Self::Q4_1,
-            11 => Self::Q5_0,
-            12 => Self::Q5_1,
-            13 => Self::Q2K,
-            14 => Self::Q3K,
-            15 => Self::Q4K,
-            16 => Self::Q5K,
-            17 => Self::Q6K,
-            18 => Self::Q8K,
-            19 => Self::I8,
-            20 => Self::I16,
-            21 => Self::I32,
-            22 => Self::I64,
-            23 => Self::U8,
-            24 => Self::U16,
-            25 => Self::U32,
-            26 => Self::U64,
-            27 => Self::Bool,
-            28 => Self::String,
-            29 => Self::Array,
+            0 => Self::F32,
+            1 => Self::F16,
+            2 => Self::Q4_0,
+            3 => Self::Q4_1,
+            4 => Self::Q4_2,
+            5 => Self::Q4_3,
+            6 => Self::Q5_0,
+            7 => Self::Q5_1,
+            8 => Self::Q8_0,
+            9 => Self::Q8_1,
+            10 => Self::Q2K,
+            11 => Self::Q3K,
+            12 => Self::Q4K,
+            13 => Self::Q5K,
+            14 => Self::Q6K,
+            15 => Self::Q8K,
+            16 => Self::IQ2XXS,
+            17 => Self::IQ2XS,
+            18 => Self::IQ3XXS,
+            19 => Self::IQ1S,
+            20 => Self::IQ4NL,
+            21 => Self::IQ3S,
+            22 => Self::IQ2S,
+            23 => Self::IQ4XS,
+            24 => Self::I8,
+            25 => Self::I16,
+            26 => Self::I32,
+            27 => Self::I64,
+            28 => Self::F64,
+            29 => Self::IQ1M,
+            30 => Self::BF16,
+            31 => Self::Q4044,
+            32 => Self::Q4048,
+            33 => Self::Q4088,
+            34 => Self::TQ10,
+            35 => Self::TQ20,
+            36 => Self::IQ4NL44,
+            37 => Self::IQ4NL48,
+            38 => Self::IQ4NL88,
+            39 => Self::Array,
             _ => Self::Unknown(value),
+        }
+    }
+
+    /// Return the raw numeric code used in the GGUF file for this data type.
+    fn as_u32(&self) -> u32 {
+        match self {
+            Self::F32 => 0,
+            Self::F16 => 1,
+            Self::Q4_0 => 2,
+            Self::Q4_1 => 3,
+            Self::Q4_2 => 4,
+            Self::Q4_3 => 5,
+            Self::Q5_0 => 6,
+            Self::Q5_1 => 7,
+            Self::Q8_0 => 8,
+            Self::Q8_1 => 9,
+            Self::Q2K => 10,
+            Self::Q3K => 11,
+            Self::Q4K => 12,
+            Self::Q5K => 13,
+            Self::Q6K => 14,
+            Self::Q8K => 15,
+            Self::IQ2XXS => 16,
+            Self::IQ2XS => 17,
+            Self::IQ3XXS => 18,
+            Self::IQ1S => 19,
+            Self::IQ4NL => 20,
+            Self::IQ3S => 21,
+            Self::IQ2S => 22,
+            Self::IQ4XS => 23,
+            Self::I8 => 24,
+            Self::I16 => 25,
+            Self::I32 => 26,
+            Self::I64 => 27,
+            Self::F64 => 28,
+            Self::IQ1M => 29,
+            Self::BF16 => 30,
+            Self::Q4044 => 31,
+            Self::Q4048 => 32,
+            Self::Q4088 => 33,
+            Self::TQ10 => 34,
+            Self::TQ20 => 35,
+            Self::IQ4NL44 => 36,
+            Self::IQ4NL48 => 37,
+            Self::IQ4NL88 => 38,
+            Self::Array => 39,
+            Self::Unknown(value) => *value,
         }
     }
 }
@@ -124,10 +197,12 @@ pub enum GGUFValue {
     U32(u32),
     I32(i32),
     F32(f32),
-    F64(f64),
     Bool(bool),
     String(String),
     Array(Vec<GGUFValue>),
+    U64(u64),
+    I64(i64),
+    F64(f64),
 }
 
 #[derive(Debug)]
@@ -216,36 +291,23 @@ impl GGUFFile {
     }
 
     fn read_metadata(reader: &mut &[u8], count: usize) -> Result<GGUFMetadata, GGUFError> {
-        //println!("Reading {} metadata entries", count);
         let mut entries = HashMap::new();
         for _i in 0..count {
-            //println!("Reading metadata entry {}", i);
-
             let key = Self::read_string_direct(reader)?;
-            //println!("Key: {}", key);
-
             let value = Self::read_value(reader)?;
-            //println!("Value: {:?}", value);
             entries.insert(key, value);
         }
         Ok(GGUFMetadata { entries })
     }
 
     fn read_string(reader: &mut &[u8]) -> Result<String, GGUFError> {
-        //println!("Reading string, reader length: {}", reader.len());
-
         let len = reader.read_u64::<LittleEndian>()? as usize;
-
-        // Add a sanity check for string length to prevent memory issues
         if len > 1024 * 1024 {
-            // 1MB limit for strings
             return Err(GGUFError::InvalidData);
         }
 
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
-
-        //println!("Read string: {:?}", result);
 
         String::from_utf8(buf).map_err(|_| GGUFError::InvalidData)
     }
@@ -262,68 +324,52 @@ impl GGUFFile {
         let mut buf = vec![0u8; len];
         reader.read_exact(&mut buf)?;
 
-        //println!("Read string: {:?}", result);
-
         String::from_utf8(buf).map_err(|_| GGUFError::InvalidData)
     }
 
     fn read_value(reader: &mut &[u8]) -> Result<GGUFValue, GGUFError> {
         let value_type = reader.read_u32::<LittleEndian>()?;
-        //println!("Value type: {}", value_type);
         match value_type {
             0 => {
                 let val = reader.read_u8()?;
-                //println!("Read U8: {}", val);
                 Ok(GGUFValue::U8(val))
             }
             1 => {
                 let val = reader.read_i8()?;
-                //println!("Read I8: {}", val);
                 Ok(GGUFValue::I8(val))
             }
             2 => {
                 let val = reader.read_u16::<LittleEndian>()?;
-                //println!("Read U16: {}", val);
                 Ok(GGUFValue::U16(val))
             }
             3 => {
                 let val = reader.read_i16::<LittleEndian>()?;
-                //println!("Read I16: {}", val);
                 Ok(GGUFValue::I16(val))
             }
             4 => {
                 let val = reader.read_u32::<LittleEndian>()?;
-                //println!("Read U32: {}", val);
                 Ok(GGUFValue::U32(val))
             }
             5 => {
                 let val = reader.read_i32::<LittleEndian>()?;
-                //println!("Read I32: {}", val);
                 Ok(GGUFValue::I32(val))
             }
             6 => {
                 let val = reader.read_f32::<LittleEndian>()?;
-                //println!("Read F32: {}", val);
                 Ok(GGUFValue::F32(val))
             }
             7 => {
                 let val = reader.read_u8()?;
                 let bool_val = val != 0;
-                //println!("Read Bool: {} ({})", bool_val, val);
                 Ok(GGUFValue::Bool(bool_val))
             }
             8 => {
                 let val = Self::read_string(reader)?;
-                //println!("Read String: {}", val);
                 Ok(GGUFValue::String(val))
             }
             9 => {
-                //println!("Reading array, reader length: {}", reader.len());
-
                 let element_type = reader.read_u32::<LittleEndian>()?;
-                //println!("Array element type: {}", element_type);
                 let len = reader.read_u64::<LittleEndian>()? as usize;
-                //println!("Array length: {}", len);
 
                 // Add a sanity check for array length to prevent memory issues
                 if len > 1024 * 1024 {
@@ -332,56 +378,56 @@ impl GGUFFile {
                 }
 
                 let mut values = Vec::with_capacity(len);
-                //println!("Array of {} elements", len);
                 for _i in 0..len {
-                    //println!("Reading array element {}", i);
-                    // For array elements, we don't read the type field since all elements have the same type
                     let value = match element_type {
                         0 => {
                             let val = reader.read_u8()?;
-                            //println!("Read U8: {}", val);
                             GGUFValue::U8(val)
                         }
                         1 => {
                             let val = reader.read_i8()?;
-                            //println!("Read I8: {}", val);
                             GGUFValue::I8(val)
                         }
                         2 => {
                             let val = reader.read_u16::<LittleEndian>()?;
-                            //println!("Read U16: {}", val);
                             GGUFValue::U16(val)
                         }
                         3 => {
                             let val = reader.read_i16::<LittleEndian>()?;
-                            //println!("Read I16: {}", val);
                             GGUFValue::I16(val)
                         }
                         4 => {
                             let val = reader.read_u32::<LittleEndian>()?;
-                            //println!("Read U32: {}", val);
                             GGUFValue::U32(val)
                         }
                         5 => {
                             let val = reader.read_i32::<LittleEndian>()?;
-                            //println!("Read I32: {}", val);
                             GGUFValue::I32(val)
                         }
                         6 => {
                             let val = reader.read_f32::<LittleEndian>()?;
-                            //println!("Read F32: {}", val);
                             GGUFValue::F32(val)
                         }
                         7 => {
                             let val = reader.read_u8()?;
                             let bool_val = val != 0;
-                            //println!("Read Bool: {} ({})", bool_val, val);
                             GGUFValue::Bool(bool_val)
                         }
                         8 => {
                             let val = Self::read_string(reader)?;
-                            //println!("Read String: {}", val);
                             GGUFValue::String(val)
+                        }
+                        9 => {
+                            let val = reader.read_u64::<LittleEndian>()?;
+                            GGUFValue::U64(val)
+                        }
+                        10 => {
+                            let val = reader.read_i64::<LittleEndian>()?;
+                            GGUFValue::I64(val)
+                        }
+                        11 => {
+                            let val = reader.read_f64::<LittleEndian>()?;
+                            GGUFValue::F64(val)
                         }
                         _ => return Err(GGUFError::InvalidData),
                     };
@@ -395,7 +441,7 @@ impl GGUFFile {
 
     fn read_tensors(reader: &mut &[u8], count: usize) -> Result<Vec<GGUTensorInfo>, GGUFError> {
         let mut tensors = Vec::with_capacity(count);
-        for _ in 0..count {
+        for _i in 0..count {
             let name = Self::read_string(reader)?;
             let n_dimensions = reader.read_u32::<LittleEndian>()? as usize;
             let mut dimensions = Vec::with_capacity(n_dimensions);
@@ -404,6 +450,12 @@ impl GGUFFile {
             }
             let data_type = GGUFDataType::from_u32(reader.read_u32::<LittleEndian>()?);
             let offset = reader.read_u64::<LittleEndian>()?;
+
+            //if name == "token_embd.weight" {
+            //    println!("token_embd.weight tensor #{}: offset={}, dimensions={:?}, data_type={:?}",
+            //             i, offset, dimensions, data_type);
+            //}
+
             tensors.push(GGUTensorInfo {
                 name,
                 dimensions,
@@ -415,22 +467,96 @@ impl GGUFFile {
     }
 
     pub fn get_tensor_data(&self, tensor: &GGUTensorInfo) -> Result<&[u8], GGUFError> {
-        let start = tensor.offset as usize;
+        // Calculate the actual start of tensor_data section
+        // This includes the header + tensor_infos + padding
+        let tensor_data_start = self.calculate_tensor_data_start();
+        let start = tensor_data_start + tensor.offset as usize;
         let size = self.calculate_actual_tensor_size(tensor);
         let end = start + size;
 
         // Bounds checking
         if end > self.mmap.len() {
             return Err(GGUFError::InvalidTensorData(format!(
-                "Tensor data out of bounds: start={}, size={}, end={}, mmap_len={}",
+                "Tensor data out of bounds: start={}, size={}, end={}, mmap_len={}, tensor_data_start={}",
                 start,
                 size,
                 end,
-                self.mmap.len()
+                self.mmap.len(),
+                tensor_data_start
             )));
         }
 
+        // println!("Tensor '{}' data: file_start={}, tensor_offset={}, calculated_start={}, size={}",
+        //          tensor.name, tensor_data_start, tensor.offset, start, size);
+
         Ok(&self.mmap[start..end])
+    }
+
+    /// Calculate where the tensor_data section starts in the file
+    fn calculate_tensor_data_start(&self) -> usize {
+        // Get the alignment value (default to 32 if not specified)
+        let alignment =
+            if let Some(GGUFValue::U32(val)) = self.metadata.entries.get("general.alignment") {
+                *val as usize
+            } else {
+                32 // Default alignment
+            };
+
+        // Calculate the size of header + metadata + tensor infos accurately
+        let mut offset = 4 + 4 + 8 + 8; // magic + version + tensor_count + metadata_count
+
+        // Add metadata size
+        for (key, value) in &self.metadata.entries {
+            offset += 8 + key.len(); // key length + key string
+            offset += 4; // value type
+            match value {
+                GGUFValue::String(s) => offset += 8 + s.len(),
+                GGUFValue::U32(_) => offset += 4,
+                GGUFValue::U64(_) => offset += 8,
+                GGUFValue::I32(_) => offset += 4,
+                GGUFValue::I64(_) => offset += 8,
+                GGUFValue::F32(_) => offset += 4,
+                GGUFValue::F64(_) => offset += 8,
+                GGUFValue::U8(_) => offset += 1,
+                GGUFValue::I8(_) => offset += 1,
+                GGUFValue::U16(_) => offset += 2,
+                GGUFValue::I16(_) => offset += 2,
+                GGUFValue::Bool(_) => offset += 1,
+                GGUFValue::Array(arr) => {
+                    offset += 8 + 4; // array length + element type
+                    // Add size for each element in the array
+                    for elem in arr {
+                        match elem {
+                            GGUFValue::String(s) => offset += 8 + s.len(),
+                            GGUFValue::U32(_) => offset += 4,
+                            GGUFValue::U64(_) => offset += 8,
+                            GGUFValue::I32(_) => offset += 4,
+                            GGUFValue::I64(_) => offset += 8,
+                            GGUFValue::F32(_) => offset += 4,
+                            GGUFValue::F64(_) => offset += 8,
+                            GGUFValue::U8(_) => offset += 1,
+                            GGUFValue::I8(_) => offset += 1,
+                            GGUFValue::U16(_) => offset += 2,
+                            GGUFValue::I16(_) => offset += 2,
+                            GGUFValue::Bool(_) => offset += 1,
+                            GGUFValue::Array(_) => unimplemented!("Unsupported Nested Array"),
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add tensor info size for each tensor
+        for tensor in &self.tensors {
+            offset += 8 + tensor.name.len(); // name length + name
+            offset += 4; // n_dimensions
+            offset += tensor.dimensions.len() * 8; // dimensions
+            offset += 4; // type
+            offset += 8; // offset
+        }
+
+        // Align to the required boundary
+        offset.div_ceil(alignment) * alignment
     }
 
     fn calculate_tensor_size(&self, tensor: &GGUTensorInfo) -> usize {
@@ -445,14 +571,46 @@ impl GGUFFile {
 
     fn get_element_size(&self, data_type: GGUFDataType) -> usize {
         match data_type {
-            GGUFDataType::F64 => 8,
             GGUFDataType::F32 => 4,
-            GGUFDataType::F16 | GGUFDataType::BF16 => 2,
-            GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => 1, // For quantized types, we'll calculate differently
+            GGUFDataType::F16 => 2,
+            //GGUFDataType::Q4_0 => 2 + block_size / 2,
+            //GGUFDataType::Q4_1 => 2 + 2 + block_size / 2,
+            GGUFDataType::Q4_2 => 0,
+            GGUFDataType::Q4_3 => 0,
+            //GGUFDataType::Q5_0 => 2 + 4 + block_size / 2,
+            //GGUFDataType::Q5_1 => 2 + 2 + 4 + block_size / 2,
+            //GGUFDataType::Q8_0 => 2 + block_size,
+            //GGUFDataType::Q8_1 => 4 + 4 + block_size,
+            //GGUFDataType::Q2K => block_size / 16 + block_size / 4 + 2 + 2,
+            //GGUFDataType::Q3K => block_size / 8 + block_size / 4 + 12 + 2,
+            //GGUFDataType::Q4K => 2 + 2 + 12 + block_size / 2,
+            //GGUFDataType::Q5K => 2 + 2 + 12 + block_size / 8 + block_size / 2,
+            //GGUFDataType::Q6K => block_size / 2 + block_size / 4 + block_size / 16 + 2,
+            //GGUFDataType::Q8K => 4 + block_size + block_size / 16 * 2,
+            //GGUFDataType::IQ2XXS => 2 + block_size / 8 * 2,
+            //GGUFDataType::IQ2XS => 2 + block_size / 8 * 2 + block_size / 32,
+            //GGUFDataType::IQ3XXS => 2 + 3 * (block_size / 8),
+            //GGUFDataType::IQ1S => 2 + block_size / 8 + block_size / 16,
+            //GGUFDataType::IQ4NL => 2 + 16,
+            //GGUFDataType::IQ3S => 2 + 13 * (block_size / 32) + block_size / 64,
+            //GGUFDataType::IQ2S => 2 + block_size / 4 + block_size / 16,
+            //GGUFDataType::IQ4XS => 2 + 2 + block_size / 64 + block_size / 2,
             GGUFDataType::I8 => 1,
-            GGUFDataType::Q4_0 | GGUFDataType::Q4_1 => 1, // 4 bits per element, but stored as bytes
-            // Add more as needed
-            _ => 4, // Default
+            GGUFDataType::I16 => 2,
+            GGUFDataType::I32 => 4,
+            GGUFDataType::I64 => 8,
+            GGUFDataType::F64 => 8,
+            //GGUFDataType::IQ1M => block_size / 8 + block_size / 16 + block_size / 32,
+            GGUFDataType::BF16 => 2,
+            GGUFDataType::IQ4NL44 => 0,
+            GGUFDataType::IQ4NL48 => 0,
+            GGUFDataType::IQ4NL88 => 0,
+            //GGUFDataType::TQ10 => 2 + block_size / 64 + (block_size - 4 * block_size / 64) / 5,
+            //GGUFDataType::TQ20 => 2 + block_size / 4,
+            GGUFDataType::Q4044 => 0,
+            GGUFDataType::Q4048 => 0,
+            GGUFDataType::Q4088 => 0,
+            _ => unreachable!("Unsupported data type size"),
         }
     }
 
@@ -482,6 +640,41 @@ impl GGUFFile {
                 size * self.get_element_size(tensor.data_type)
             }
         }
+    }
+
+    /// Validate tensor data for common issues
+    pub fn validate_tensor_data(&self, tensor: &GGUTensorInfo) -> Result<(), GGUFError> {
+        let data = self.get_tensor_data(tensor)?;
+        let expected_size = self.calculate_actual_tensor_size(tensor);
+
+        if data.len() != expected_size {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor {} has incorrect size: expected {}, got {}",
+                tensor.name,
+                expected_size,
+                data.len()
+            )));
+        }
+
+        // For Q8 types, validate block structure
+        if tensor.data_type == GGUFDataType::Q8_0 || tensor.data_type == GGUFDataType::Q8_1 {
+            let block_size = match tensor.data_type {
+                GGUFDataType::Q8_0 => 34,
+                GGUFDataType::Q8_1 => 36,
+                _ => 36,
+            };
+
+            if data.len() % block_size != 0 {
+                return Err(GGUFError::InvalidTensorData(format!(
+                    "Tensor {} has invalid block alignment: data size {} is not divisible by block size {}",
+                    tensor.name,
+                    data.len(),
+                    block_size
+                )));
+            }
+        }
+
+        Ok(())
     }
 
     /// Offload tensor data to disk to free up memory

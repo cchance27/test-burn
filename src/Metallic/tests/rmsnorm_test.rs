@@ -61,7 +61,7 @@ fn test_rmsnorm_basic() -> Result<(), MetalError> {
     let mut cache = ResourceCache::new();
     rmsnorm_op.encode(&command_buffer, &mut cache)?;
     command_buffer.commit();
-    
+
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();

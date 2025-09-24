@@ -25,14 +25,14 @@ fn zeros_like_and_ones_like() {
 
 #[test]
 fn elementwise_ops_and_fill() {
-    let ctx = Context::new().unwrap();
+    let mut ctx = Context::new().unwrap();
     let a = Tensor::create_tensor_from_slice(&[1.0, 2.0, 3.0, 4.0], vec![2, 2], &ctx).unwrap();
     let b = Tensor::create_tensor_from_slice(&[5.0, 6.0, 7.0, 8.0], vec![2, 2], &ctx).unwrap();
-    let c = &a + &b;
+    let c = a.add_elem(&b, &mut ctx).unwrap();
     assert_eq!(c.as_slice(), &[6.0, 8.0, 10.0, 12.0]);
-    let d = &a * &b;
+    let d = a.mul_elem(&b, &mut ctx).unwrap();
     assert_eq!(d.as_slice(), &[5.0, 12.0, 21.0, 32.0]);
-    let mut e = a.add_scalar(10.0).unwrap();
+    let mut e = a.add_scalar(10.0, &mut ctx).unwrap();
     assert_eq!(e.as_slice(), &[11.0, 12.0, 13.0, 14.0]);
     e.fill(2.5);
     assert!(e.as_slice().iter().all(|&x| (x - 2.5).abs() < 1e-12));
@@ -162,7 +162,7 @@ fn offset_correctness_across_chunks() {
     assert!(t2.offset > 0, "Second tensor should have non-zero offset");
 
     // Perform elementwise operation on t2 (uses GPU kernel with offset)
-    let t3 = &t2 + &t2; // Should result in tensor of 2.0s
+    let t3 = t2.add_elem(&t2, &mut ctx).unwrap(); // Should result in tensor of 2.0s
 
     ctx.synchronize();
 

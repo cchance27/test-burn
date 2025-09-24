@@ -1,0 +1,443 @@
+Our Dump from the f16...
+
+Magic: "GGUF"
+Version: 3
+Tensor count: 290
+Metadata count: 27
+Metadata entries: 27
+  tokenizer.ggml.tokens: Array with 151936 elements
+  tokenizer.ggml.bos_token_id: U32(151643)
+  qwen2.attention.head_count: U32(14)
+  qwen2.context_length: U32(32768)
+  qwen2.attention.layer_norm_rms_epsilon: F32(1e-6)
+  tokenizer.chat_template: String("{%- if tools %}\n    {{- '<|im_start|>system\\n' }}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- messages[0]['content'] }}\n    {%- else %}\n        {{- 'You are Qwen, created by Alibaba Cloud. You are a helpful assistant.' }}\n    {%- endif %}\n    {{- \"\\n\\n# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>\" }}\n    {%- for tool in tools %}\n        {{- \"\\n\" }}\n        {{- tool | tojson }}\n    {%- endfor %}\n    {{- \"\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\\\"name\\\": <function-name>, \\\"arguments\\\": <args-json-object>}\\n</tool_call><|im_end|>\\n\" }}\n{%- else %}\n    {%- if messages[0]['role'] == 'system' %}\n        {{- '<|im_start|>system\\n' + messages[0]['content'] + '<|im_end|>\\n' }}\n    {%- else %}\n        {{- '<|im_start|>system\\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in messages %}\n    {%- if (message.role == \"user\") or (message.role == \"system\" and not loop.first) or (message.role == \"assistant\" and not message.tool_calls) %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content %}\n            {{- '\\n' + message.content }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n{\"name\": \"' }}\n            {{- tool_call.name }}\n            {{- '\", \"arguments\": ' }}\n            {{- tool_call.arguments | tojson }}\n            {{- '}\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != \"tool\") %}\n            {{- '<|im_start|>user' }}\n        {%- endif %}\n        {{- '\\n<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>' }}\n        {%- if loop.last or (messages[loop.index0 + 1].role != \"tool\") %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n")
+  general.organization: String("Qwen")
+  qwen2.rope.freq_base: F32(1000000.0)
+  qwen2.feed_forward_length: U32(4864)
+  general.file_type: U32(1)
+  tokenizer.ggml.merges: Array with 151387 elements
+  general.finetune: String("Instruct")
+  general.quantization_version: U32(2)
+  tokenizer.ggml.eos_token_id: U32(151645)
+  general.basename: String("Qwen2.5-Coder")
+  general.type: String("model")
+  qwen2.block_count: U32(24)
+  general.architecture: String("qwen2")
+  tokenizer.ggml.add_bos_token: Bool(false)
+  general.name: String("Qwen2.5 Coder 0.5B Instruct")
+  qwen2.embedding_length: U32(896)
+  tokenizer.ggml.model: String("gpt2")
+  tokenizer.ggml.pre: String("qwen2")
+  qwen2.attention.head_count_kv: U32(2)
+  tokenizer.ggml.token_type: Array with 151936 elements
+  tokenizer.ggml.padding_token_id: U32(151665)
+  general.size_label: String("0.5B")
+First 10 tensors:
+  token_embd.weight: [896, 151936] (F16)
+  blk.0.attn_norm.weight: [896] (F32)
+  blk.0.ffn_down.weight: [4864, 896] (F16)
+  blk.0.ffn_gate.weight: [896, 4864] (F16)
+  blk.0.ffn_up.weight: [896, 4864] (F16)
+  blk.0.ffn_norm.weight: [896] (F32)
+  blk.0.attn_k.bias: [128] (F32)
+  blk.0.attn_k.weight: [896, 128] (F16)
+  blk.0.attn_output.weight: [896, 896] (F16)
+  blk.0.attn_q.bias: [896] (F32)
+... and 280 more tensors
+
+
+GGUF_UTIL Dump
+gguf-utils show Qwen2.5-Coder-0.5B-Instruct-F16.gguf
++--------------------------------------+
+| Qwen2.5-Coder-0.5B-Instruct-F16.gguf |
++--------------------------------------+
+
+Header
+======
+
+✔️  Magic   = "GGUF"
+✔️  Endian  = Little
+✔️  Version = 3
+✔️  MetaKVs = 27
+✔️  Tensors = 290
+
+Meta KV
+=======
+
+✔️  general.architecture····················str: `qwen2`
+✔️  general.type····························str: `model`
+✔️  general.name····························str: `Qwen2.5 Coder 0.5B Instruct`
+✔️  general.organization····················str: `Qwen`
+✔️  general.finetune························str: `Instruct`
+✔️  general.basename························str: `Qwen2.5-Coder`
+✔️  general.size_label······················str: `0.5B`
+✔️  qwen2.block_count·······················u32: 24
+✔️  qwen2.context_length····················u32: 32768
+✔️  qwen2.embedding_length··················u32: 896
+✔️  qwen2.feed_forward_length···············u32: 4864
+✔️  qwen2.attention.head_count··············u32: 14
+✔️  qwen2.attention.head_count_kv···········u32: 2
+✔️  qwen2.rope.freq_base····················f32: 1e6
+✔️  qwen2.attention.layer_norm_rms_epsilon··f32: 1e-6
+✔️  general.file_type·······················u32: 1
+✔️  tokenizer.ggml.model····················str: `gpt2`
+✔️  tokenizer.ggml.pre······················str: `qwen2`
+✔️  tokenizer.ggml.tokens···················arr: [`!`, `"`, `#`, `$`, `%`, `&`, `'`, `(`, ...(151928 more of 151936)]
+✔️  tokenizer.ggml.token_type···············arr: [1, 1, 1, 1, 1, 1, 1, 1, ...(151928 more of 151936)]
+✔️  tokenizer.ggml.merges···················arr: [`Ġ Ġ`, `ĠĠ ĠĠ`, `i n`, `Ġ t`, `ĠĠĠĠ ĠĠĠĠ`, `e r`, `ĠĠ Ġ`, `o n`, ...(151379 more of 151387)]
+✔️  tokenizer.ggml.eos_token_id·············u32: 151645
+✔️  tokenizer.ggml.padding_token_id·········u32: 151665
+✔️  tokenizer.ggml.bos_token_id·············u32: 151643
+✔️  tokenizer.ggml.add_bos_token···········bool: ×
+✔️  tokenizer.chat_template·················str: 
+   +--
+   | {%- if tools %}
+   |     {{- '<|im_start|>system\n' }}
+   |     {%- if messages[0]['role'] == 'system' %}
+   |         {{- messages[0]['content'] }}
+   |     {%- else %}
+   |         {{- 'You are Qwen, created by Alibaba Cloud. You are a helpful assistant.' }}
+   |     {%- endif %}
+   |     {{- "\n\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>" }}
+   |     {%- for tool in tools %}
+   |         {{- "\n" }}
+   |         {{- tool | tojson }}
+   |     {%- endfor %}
+   |     {{- "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n" }}
+   | {%- else %}
+   |     {%- if messages[0]['role'] == 'system' %}
+   |         {{- '<|im_start|>system\n' + messages[0]['content'] + '<|im_end|>\n' }}
+   |     {%- else %}
+   |         {{- '<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n' }}
+   |     {%- endif %}
+   | {%- endif %}
+   | {%- for message in messages %}
+   |     {%- if (message.role == "user") or (message.role == "system" and not loop.first) or (message.role == "assistant" and not message.tool_calls) %}
+   |         {{- '<|im_start|>' + message.role + '\n' + message.content + '<|im_end|>' + '\n' }}
+   |     {%- elif message.role == "assistant" %}
+   |         {{- '<|im_start|>' + message.role }}
+   |         {%- if message.content %}
+   |             {{- '\n' + message.content }}
+   |         {%- endif %}
+   |         {%- for tool_call in message.tool_calls %}
+   |             {%- if tool_call.function is defined %}
+   |                 {%- set tool_call = tool_call.function %}
+   |             {%- endif %}
+   |             {{- '\n<tool_call>\n{"name": "' }}
+   |             {{- tool_call.name }}
+   |             {{- '", "arguments": ' }}
+   |             {{- tool_call.arguments | tojson }}
+   |             {{- '}\n</tool_call>' }}
+   |         {%- endfor %}
+   |         {{- '<|im_end|>\n' }}
+   |     {%- elif message.role == "tool" %}
+   |         {%- if (loop.index0 == 0) or (messages[loop.index0 - 1].role != "tool") %}
+   |             {{- '<|im_start|>user' }}
+   |         {%- endif %}
+   |         {{- '\n<tool_response>\n' }}
+   |         {{- message.content }}
+   |         {{- '\n</tool_response>' }}
+   |         {%- if loop.last or (messages[loop.index0 + 1].role != "tool") %}
+   |             {{- '<|im_end|>\n' }}
+   |         {%- endif %}
+   |     {%- endif %}
+   | {%- endfor %}
+   | {%- if add_generation_prompt %}
+   |     {{- '<|im_start|>assistant\n' }}
+   | {%- endif %}
+   +--
+✔️  general.quantization_version············u32: 2
+
+Tensors
+=======
+
+✔️  token_embd.weight············F16 +0x0000000 [896, 151936]
+✔️  blk.0.attn_norm.weight·······F32 +0x103a8000 [896]
+✔️  blk.0.ffn_down.weight········F16 +0x103a8e00 [4864, 896]
+✔️  blk.0.ffn_gate.weight········F16 +0x10bf8e00 [896, 4864]
+✔️  blk.0.ffn_up.weight··········F16 +0x11448e00 [896, 4864]
+✔️  blk.0.ffn_norm.weight········F32 +0x11c98e00 [896]
+✔️  blk.0.attn_k.bias············F32 +0x11c99c00 [128]
+✔️  blk.0.attn_k.weight··········F16 +0x11c99e00 [896, 128]
+✔️  blk.0.attn_output.weight·····F16 +0x11cd1e00 [896, 896]
+✔️  blk.0.attn_q.bias············F32 +0x11e59e00 [896]
+✔️  blk.0.attn_q.weight··········F16 +0x11e5ac00 [896, 896]
+✔️  blk.0.attn_v.bias············F32 +0x11fe2c00 [128]
+✔️  blk.0.attn_v.weight··········F16 +0x11fe2e00 [896, 128]
+✔️  blk.1.attn_norm.weight·······F32 +0x1201ae00 [896]
+✔️  blk.1.ffn_down.weight········F16 +0x1201bc00 [4864, 896]
+✔️  blk.1.ffn_gate.weight········F16 +0x1286bc00 [896, 4864]
+✔️  blk.1.ffn_up.weight··········F16 +0x130bbc00 [896, 4864]
+✔️  blk.1.ffn_norm.weight········F32 +0x1390bc00 [896]
+✔️  blk.1.attn_k.bias············F32 +0x1390ca00 [128]
+✔️  blk.1.attn_k.weight··········F16 +0x1390cc00 [896, 128]
+✔️  blk.1.attn_output.weight·····F16 +0x13944c00 [896, 896]
+✔️  blk.1.attn_q.bias············F32 +0x13accc00 [896]
+✔️  blk.1.attn_q.weight··········F16 +0x13acda00 [896, 896]
+✔️  blk.1.attn_v.bias············F32 +0x13c55a00 [128]
+✔️  blk.1.attn_v.weight··········F16 +0x13c55c00 [896, 128]
+✔️  blk.10.attn_norm.weight······F32 +0x13c8dc00 [896]
+✔️  blk.10.ffn_down.weight·······F16 +0x13c8ea00 [4864, 896]
+✔️  blk.10.ffn_gate.weight·······F16 +0x144dea00 [896, 4864]
+✔️  blk.10.ffn_up.weight·········F16 +0x14d2ea00 [896, 4864]
+✔️  blk.10.ffn_norm.weight·······F32 +0x1557ea00 [896]
+✔️  blk.10.attn_k.bias···········F32 +0x1557f800 [128]
+✔️  blk.10.attn_k.weight·········F16 +0x1557fa00 [896, 128]
+✔️  blk.10.attn_output.weight····F16 +0x155b7a00 [896, 896]
+✔️  blk.10.attn_q.bias···········F32 +0x1573fa00 [896]
+✔️  blk.10.attn_q.weight·········F16 +0x15740800 [896, 896]
+✔️  blk.10.attn_v.bias···········F32 +0x158c8800 [128]
+✔️  blk.10.attn_v.weight·········F16 +0x158c8a00 [896, 128]
+✔️  blk.11.attn_norm.weight······F32 +0x15900a00 [896]
+✔️  blk.11.ffn_down.weight·······F16 +0x15901800 [4864, 896]
+✔️  blk.11.ffn_gate.weight·······F16 +0x16151800 [896, 4864]
+✔️  blk.11.ffn_up.weight·········F16 +0x169a1800 [896, 4864]
+✔️  blk.11.ffn_norm.weight·······F32 +0x171f1800 [896]
+✔️  blk.11.attn_k.bias···········F32 +0x171f2600 [128]
+✔️  blk.11.attn_k.weight·········F16 +0x171f2800 [896, 128]
+✔️  blk.11.attn_output.weight····F16 +0x1722a800 [896, 896]
+✔️  blk.11.attn_q.bias···········F32 +0x173b2800 [896]
+✔️  blk.11.attn_q.weight·········F16 +0x173b3600 [896, 896]
+✔️  blk.11.attn_v.bias···········F32 +0x1753b600 [128]
+✔️  blk.11.attn_v.weight·········F16 +0x1753b800 [896, 128]
+✔️  blk.12.attn_norm.weight······F32 +0x17573800 [896]
+✔️  blk.12.ffn_down.weight·······F16 +0x17574600 [4864, 896]
+✔️  blk.12.ffn_gate.weight·······F16 +0x17dc4600 [896, 4864]
+✔️  blk.12.ffn_up.weight·········F16 +0x18614600 [896, 4864]
+✔️  blk.12.ffn_norm.weight·······F32 +0x18e64600 [896]
+✔️  blk.12.attn_k.bias···········F32 +0x18e65400 [128]
+✔️  blk.12.attn_k.weight·········F16 +0x18e65600 [896, 128]
+✔️  blk.12.attn_output.weight····F16 +0x18e9d600 [896, 896]
+✔️  blk.12.attn_q.bias···········F32 +0x19025600 [896]
+✔️  blk.12.attn_q.weight·········F16 +0x19026400 [896, 896]
+✔️  blk.12.attn_v.bias···········F32 +0x191ae400 [128]
+✔️  blk.12.attn_v.weight·········F16 +0x191ae600 [896, 128]
+✔️  blk.13.attn_norm.weight······F32 +0x191e6600 [896]
+✔️  blk.13.ffn_down.weight·······F16 +0x191e7400 [4864, 896]
+✔️  blk.13.ffn_gate.weight·······F16 +0x19a37400 [896, 4864]
+✔️  blk.13.ffn_up.weight·········F16 +0x1a287400 [896, 4864]
+✔️  blk.13.ffn_norm.weight·······F32 +0x1aad7400 [896]
+✔️  blk.13.attn_k.bias···········F32 +0x1aad8200 [128]
+✔️  blk.13.attn_k.weight·········F16 +0x1aad8400 [896, 128]
+✔️  blk.13.attn_output.weight····F16 +0x1ab10400 [896, 896]
+✔️  blk.13.attn_q.bias···········F32 +0x1ac98400 [896]
+✔️  blk.13.attn_q.weight·········F16 +0x1ac99200 [896, 896]
+✔️  blk.13.attn_v.bias···········F32 +0x1ae21200 [128]
+✔️  blk.13.attn_v.weight·········F16 +0x1ae21400 [896, 128]
+✔️  blk.14.attn_norm.weight······F32 +0x1ae59400 [896]
+✔️  blk.14.ffn_down.weight·······F16 +0x1ae5a200 [4864, 896]
+✔️  blk.14.ffn_gate.weight·······F16 +0x1b6aa200 [896, 4864]
+✔️  blk.14.ffn_up.weight·········F16 +0x1befa200 [896, 4864]
+✔️  blk.14.ffn_norm.weight·······F32 +0x1c74a200 [896]
+✔️  blk.14.attn_k.bias···········F32 +0x1c74b000 [128]
+✔️  blk.14.attn_k.weight·········F16 +0x1c74b200 [896, 128]
+✔️  blk.14.attn_output.weight····F16 +0x1c783200 [896, 896]
+✔️  blk.14.attn_q.bias···········F32 +0x1c90b200 [896]
+✔️  blk.14.attn_q.weight·········F16 +0x1c90c000 [896, 896]
+✔️  blk.14.attn_v.bias···········F32 +0x1ca94000 [128]
+✔️  blk.14.attn_v.weight·········F16 +0x1ca94200 [896, 128]
+✔️  blk.15.attn_norm.weight······F32 +0x1cacc200 [896]
+✔️  blk.15.ffn_down.weight·······F16 +0x1cacd000 [4864, 896]
+✔️  blk.15.ffn_gate.weight·······F16 +0x1d31d000 [896, 4864]
+✔️  blk.15.ffn_up.weight·········F16 +0x1db6d000 [896, 4864]
+✔️  blk.15.ffn_norm.weight·······F32 +0x1e3bd000 [896]
+✔️  blk.15.attn_k.bias···········F32 +0x1e3bde00 [128]
+✔️  blk.15.attn_k.weight·········F16 +0x1e3be000 [896, 128]
+✔️  blk.15.attn_output.weight····F16 +0x1e3f6000 [896, 896]
+✔️  blk.15.attn_q.bias···········F32 +0x1e57e000 [896]
+✔️  blk.15.attn_q.weight·········F16 +0x1e57ee00 [896, 896]
+✔️  blk.15.attn_v.bias···········F32 +0x1e706e00 [128]
+✔️  blk.15.attn_v.weight·········F16 +0x1e707000 [896, 128]
+✔️  blk.16.attn_norm.weight······F32 +0x1e73f000 [896]
+✔️  blk.16.ffn_down.weight·······F16 +0x1e73fe00 [4864, 896]
+✔️  blk.16.ffn_gate.weight·······F16 +0x1ef8fe00 [896, 4864]
+✔️  blk.16.ffn_up.weight·········F16 +0x1f7dfe00 [896, 4864]
+✔️  blk.16.ffn_norm.weight·······F32 +0x2002fe00 [896]
+✔️  blk.16.attn_k.bias···········F32 +0x20030c00 [128]
+✔️  blk.16.attn_k.weight·········F16 +0x20030e00 [896, 128]
+✔️  blk.16.attn_output.weight····F16 +0x20068e00 [896, 896]
+✔️  blk.16.attn_q.bias···········F32 +0x201f0e00 [896]
+✔️  blk.16.attn_q.weight·········F16 +0x201f1c00 [896, 896]
+✔️  blk.16.attn_v.bias···········F32 +0x20379c00 [128]
+✔️  blk.16.attn_v.weight·········F16 +0x20379e00 [896, 128]
+✔️  blk.17.attn_norm.weight······F32 +0x203b1e00 [896]
+✔️  blk.17.ffn_down.weight·······F16 +0x203b2c00 [4864, 896]
+✔️  blk.17.ffn_gate.weight·······F16 +0x20c02c00 [896, 4864]
+✔️  blk.17.ffn_up.weight·········F16 +0x21452c00 [896, 4864]
+✔️  blk.17.ffn_norm.weight·······F32 +0x21ca2c00 [896]
+✔️  blk.17.attn_k.bias···········F32 +0x21ca3a00 [128]
+✔️  blk.17.attn_k.weight·········F16 +0x21ca3c00 [896, 128]
+✔️  blk.17.attn_output.weight····F16 +0x21cdbc00 [896, 896]
+✔️  blk.17.attn_q.bias···········F32 +0x21e63c00 [896]
+✔️  blk.17.attn_q.weight·········F16 +0x21e64a00 [896, 896]
+✔️  blk.17.attn_v.bias···········F32 +0x21feca00 [128]
+✔️  blk.17.attn_v.weight·········F16 +0x21fecc00 [896, 128]
+✔️  blk.18.attn_norm.weight······F32 +0x22024c00 [896]
+✔️  blk.18.ffn_down.weight·······F16 +0x22025a00 [4864, 896]
+✔️  blk.18.ffn_gate.weight·······F16 +0x22875a00 [896, 4864]
+✔️  blk.18.ffn_up.weight·········F16 +0x230c5a00 [896, 4864]
+✔️  blk.18.ffn_norm.weight·······F32 +0x23915a00 [896]
+✔️  blk.18.attn_k.bias···········F32 +0x23916800 [128]
+✔️  blk.18.attn_k.weight·········F16 +0x23916a00 [896, 128]
+✔️  blk.18.attn_output.weight····F16 +0x2394ea00 [896, 896]
+✔️  blk.18.attn_q.bias···········F32 +0x23ad6a00 [896]
+✔️  blk.18.attn_q.weight·········F16 +0x23ad7800 [896, 896]
+✔️  blk.18.attn_v.bias···········F32 +0x23c5f800 [128]
+✔️  blk.18.attn_v.weight·········F16 +0x23c5fa00 [896, 128]
+✔️  blk.19.attn_norm.weight······F32 +0x23c97a00 [896]
+✔️  blk.19.ffn_down.weight·······F16 +0x23c98800 [4864, 896]
+✔️  blk.19.ffn_gate.weight·······F16 +0x244e8800 [896, 4864]
+✔️  blk.19.ffn_up.weight·········F16 +0x24d38800 [896, 4864]
+✔️  blk.19.ffn_norm.weight·······F32 +0x25588800 [896]
+✔️  blk.19.attn_k.bias···········F32 +0x25589600 [128]
+✔️  blk.19.attn_k.weight·········F16 +0x25589800 [896, 128]
+✔️  blk.19.attn_output.weight····F16 +0x255c1800 [896, 896]
+✔️  blk.19.attn_q.bias···········F32 +0x25749800 [896]
+✔️  blk.19.attn_q.weight·········F16 +0x2574a600 [896, 896]
+✔️  blk.19.attn_v.bias···········F32 +0x258d2600 [128]
+✔️  blk.19.attn_v.weight·········F16 +0x258d2800 [896, 128]
+✔️  blk.2.attn_norm.weight·······F32 +0x2590a800 [896]
+✔️  blk.2.ffn_down.weight········F16 +0x2590b600 [4864, 896]
+✔️  blk.2.ffn_gate.weight········F16 +0x2615b600 [896, 4864]
+✔️  blk.2.ffn_up.weight··········F16 +0x269ab600 [896, 4864]
+✔️  blk.2.ffn_norm.weight········F32 +0x271fb600 [896]
+✔️  blk.2.attn_k.bias············F32 +0x271fc400 [128]
+✔️  blk.2.attn_k.weight··········F16 +0x271fc600 [896, 128]
+✔️  blk.2.attn_output.weight·····F16 +0x27234600 [896, 896]
+✔️  blk.2.attn_q.bias············F32 +0x273bc600 [896]
+✔️  blk.2.attn_q.weight··········F16 +0x273bd400 [896, 896]
+✔️  blk.2.attn_v.bias············F32 +0x27545400 [128]
+✔️  blk.2.attn_v.weight··········F16 +0x27545600 [896, 128]
+✔️  blk.20.attn_norm.weight······F32 +0x2757d600 [896]
+✔️  blk.20.ffn_down.weight·······F16 +0x2757e400 [4864, 896]
+✔️  blk.20.ffn_gate.weight·······F16 +0x27dce400 [896, 4864]
+✔️  blk.20.ffn_up.weight·········F16 +0x2861e400 [896, 4864]
+✔️  blk.20.ffn_norm.weight·······F32 +0x28e6e400 [896]
+✔️  blk.20.attn_k.bias···········F32 +0x28e6f200 [128]
+✔️  blk.20.attn_k.weight·········F16 +0x28e6f400 [896, 128]
+✔️  blk.20.attn_output.weight····F16 +0x28ea7400 [896, 896]
+✔️  blk.20.attn_q.bias···········F32 +0x2902f400 [896]
+✔️  blk.20.attn_q.weight·········F16 +0x29030200 [896, 896]
+✔️  blk.20.attn_v.bias···········F32 +0x291b8200 [128]
+✔️  blk.20.attn_v.weight·········F16 +0x291b8400 [896, 128]
+✔️  blk.21.attn_norm.weight······F32 +0x291f0400 [896]
+✔️  blk.21.ffn_down.weight·······F16 +0x291f1200 [4864, 896]
+✔️  blk.21.ffn_gate.weight·······F16 +0x29a41200 [896, 4864]
+✔️  blk.21.ffn_up.weight·········F16 +0x2a291200 [896, 4864]
+✔️  blk.21.ffn_norm.weight·······F32 +0x2aae1200 [896]
+✔️  blk.21.attn_k.bias···········F32 +0x2aae2000 [128]
+✔️  blk.21.attn_k.weight·········F16 +0x2aae2200 [896, 128]
+✔️  blk.21.attn_output.weight····F16 +0x2ab1a200 [896, 896]
+✔️  blk.21.attn_q.bias···········F32 +0x2aca2200 [896]
+✔️  blk.21.attn_q.weight·········F16 +0x2aca3000 [896, 896]
+✔️  blk.21.attn_v.bias···········F32 +0x2ae2b000 [128]
+✔️  blk.21.attn_v.weight·········F16 +0x2ae2b200 [896, 128]
+✔️  blk.22.attn_norm.weight······F32 +0x2ae63200 [896]
+✔️  blk.22.ffn_down.weight·······F16 +0x2ae64000 [4864, 896]
+✔️  blk.22.ffn_gate.weight·······F16 +0x2b6b4000 [896, 4864]
+✔️  blk.22.ffn_up.weight·········F16 +0x2bf04000 [896, 4864]
+✔️  blk.22.ffn_norm.weight·······F32 +0x2c754000 [896]
+✔️  blk.22.attn_k.bias···········F32 +0x2c754e00 [128]
+✔️  blk.22.attn_k.weight·········F16 +0x2c755000 [896, 128]
+✔️  blk.22.attn_output.weight····F16 +0x2c78d000 [896, 896]
+✔️  blk.22.attn_q.bias···········F32 +0x2c915000 [896]
+✔️  blk.22.attn_q.weight·········F16 +0x2c915e00 [896, 896]
+✔️  blk.22.attn_v.bias···········F32 +0x2ca9de00 [128]
+✔️  blk.22.attn_v.weight·········F16 +0x2ca9e000 [896, 128]
+✔️  blk.23.attn_norm.weight······F32 +0x2cad6000 [896]
+✔️  blk.23.ffn_down.weight·······F16 +0x2cad6e00 [4864, 896]
+✔️  blk.23.ffn_gate.weight·······F16 +0x2d326e00 [896, 4864]
+✔️  blk.23.ffn_up.weight·········F16 +0x2db76e00 [896, 4864]
+✔️  blk.23.ffn_norm.weight·······F32 +0x2e3c6e00 [896]
+✔️  blk.23.attn_k.bias···········F32 +0x2e3c7c00 [128]
+✔️  blk.23.attn_k.weight·········F16 +0x2e3c7e00 [896, 128]
+✔️  blk.23.attn_output.weight····F16 +0x2e3ffe00 [896, 896]
+✔️  blk.23.attn_q.bias···········F32 +0x2e587e00 [896]
+✔️  blk.23.attn_q.weight·········F16 +0x2e588c00 [896, 896]
+✔️  blk.23.attn_v.bias···········F32 +0x2e710c00 [128]
+✔️  blk.23.attn_v.weight·········F16 +0x2e710e00 [896, 128]
+✔️  blk.3.attn_norm.weight·······F32 +0x2e748e00 [896]
+✔️  blk.3.ffn_down.weight········F16 +0x2e749c00 [4864, 896]
+✔️  blk.3.ffn_gate.weight········F16 +0x2ef99c00 [896, 4864]
+✔️  blk.3.ffn_up.weight··········F16 +0x2f7e9c00 [896, 4864]
+✔️  blk.3.ffn_norm.weight········F32 +0x30039c00 [896]
+✔️  blk.3.attn_k.bias············F32 +0x3003aa00 [128]
+✔️  blk.3.attn_k.weight··········F16 +0x3003ac00 [896, 128]
+✔️  blk.3.attn_output.weight·····F16 +0x30072c00 [896, 896]
+✔️  blk.3.attn_q.bias············F32 +0x301fac00 [896]
+✔️  blk.3.attn_q.weight··········F16 +0x301fba00 [896, 896]
+✔️  blk.3.attn_v.bias············F32 +0x30383a00 [128]
+✔️  blk.3.attn_v.weight··········F16 +0x30383c00 [896, 128]
+✔️  blk.4.attn_norm.weight·······F32 +0x303bbc00 [896]
+✔️  blk.4.ffn_down.weight········F16 +0x303bca00 [4864, 896]
+✔️  blk.4.ffn_gate.weight········F16 +0x30c0ca00 [896, 4864]
+✔️  blk.4.ffn_up.weight··········F16 +0x3145ca00 [896, 4864]
+✔️  blk.4.ffn_norm.weight········F32 +0x31caca00 [896]
+✔️  blk.4.attn_k.bias············F32 +0x31cad800 [128]
+✔️  blk.4.attn_k.weight··········F16 +0x31cada00 [896, 128]
+✔️  blk.4.attn_output.weight·····F16 +0x31ce5a00 [896, 896]
+✔️  blk.4.attn_q.bias············F32 +0x31e6da00 [896]
+✔️  blk.4.attn_q.weight··········F16 +0x31e6e800 [896, 896]
+✔️  blk.4.attn_v.bias············F32 +0x31ff6800 [128]
+✔️  blk.4.attn_v.weight··········F16 +0x31ff6a00 [896, 128]
+✔️  blk.5.attn_norm.weight·······F32 +0x3202ea00 [896]
+✔️  blk.5.ffn_down.weight········F16 +0x3202f800 [4864, 896]
+✔️  blk.5.ffn_gate.weight········F16 +0x3287f800 [896, 4864]
+✔️  blk.5.ffn_up.weight··········F16 +0x330cf800 [896, 4864]
+✔️  blk.5.ffn_norm.weight········F32 +0x3391f800 [896]
+✔️  blk.5.attn_k.bias············F32 +0x33920600 [128]
+✔️  blk.5.attn_k.weight··········F16 +0x33920800 [896, 128]
+✔️  blk.5.attn_output.weight·····F16 +0x33958800 [896, 896]
+✔️  blk.5.attn_q.bias············F32 +0x33ae0800 [896]
+✔️  blk.5.attn_q.weight··········F16 +0x33ae1600 [896, 896]
+✔️  blk.5.attn_v.bias············F32 +0x33c69600 [128]
+✔️  blk.5.attn_v.weight··········F16 +0x33c69800 [896, 128]
+✔️  blk.6.attn_norm.weight·······F32 +0x33ca1800 [896]
+✔️  blk.6.ffn_down.weight········F16 +0x33ca2600 [4864, 896]
+✔️  blk.6.ffn_gate.weight········F16 +0x344f2600 [896, 4864]
+✔️  blk.6.ffn_up.weight··········F16 +0x34d42600 [896, 4864]
+✔️  blk.6.ffn_norm.weight········F32 +0x35592600 [896]
+✔️  blk.6.attn_k.bias············F32 +0x35593400 [128]
+✔️  blk.6.attn_k.weight··········F16 +0x35593600 [896, 128]
+✔️  blk.6.attn_output.weight·····F16 +0x355cb600 [896, 896]
+✔️  blk.6.attn_q.bias············F32 +0x35753600 [896]
+✔️  blk.6.attn_q.weight··········F16 +0x35754400 [896, 896]
+✔️  blk.6.attn_v.bias············F32 +0x358dc400 [128]
+✔️  blk.6.attn_v.weight··········F16 +0x358dc600 [896, 128]
+✔️  blk.7.attn_norm.weight·······F32 +0x35914600 [896]
+✔️  blk.7.ffn_down.weight········F16 +0x35915400 [4864, 896]
+✔️  blk.7.ffn_gate.weight········F16 +0x36165400 [896, 4864]
+✔️  blk.7.ffn_up.weight··········F16 +0x369b5400 [896, 4864]
+✔️  blk.7.ffn_norm.weight········F32 +0x37205400 [896]
+✔️  blk.7.attn_k.bias············F32 +0x37206200 [128]
+✔️  blk.7.attn_k.weight··········F16 +0x37206400 [896, 128]
+✔️  blk.7.attn_output.weight·····F16 +0x3723e400 [896, 896]
+✔️  blk.7.attn_q.bias············F32 +0x373c6400 [896]
+✔️  blk.7.attn_q.weight··········F16 +0x373c7200 [896, 896]
+✔️  blk.7.attn_v.bias············F32 +0x3754f200 [128]
+✔️  blk.7.attn_v.weight··········F16 +0x3754f400 [896, 128]
+✔️  blk.8.attn_norm.weight·······F32 +0x37587400 [896]
+✔️  blk.8.ffn_down.weight········F16 +0x37588200 [4864, 896]
+✔️  blk.8.ffn_gate.weight········F16 +0x37dd8200 [896, 4864]
+✔️  blk.8.ffn_up.weight··········F16 +0x38628200 [896, 4864]
+✔️  blk.8.ffn_norm.weight········F32 +0x38e78200 [896]
+✔️  blk.8.attn_k.bias············F32 +0x38e79000 [128]
+✔️  blk.8.attn_k.weight··········F16 +0x38e79200 [896, 128]
+✔️  blk.8.attn_output.weight·····F16 +0x38eb1200 [896, 896]
+✔️  blk.8.attn_q.bias············F32 +0x39039200 [896]
+✔️  blk.8.attn_q.weight··········F16 +0x3903a000 [896, 896]
+✔️  blk.8.attn_v.bias············F32 +0x391c2000 [128]
+✔️  blk.8.attn_v.weight··········F16 +0x391c2200 [896, 128]
+✔️  blk.9.attn_norm.weight·······F32 +0x391fa200 [896]
+✔️  blk.9.ffn_down.weight········F16 +0x391fb000 [4864, 896]
+✔️  blk.9.ffn_gate.weight········F16 +0x39a4b000 [896, 4864]
+✔️  blk.9.ffn_up.weight··········F16 +0x3a29b000 [896, 4864]
+✔️  blk.9.ffn_norm.weight········F32 +0x3aaeb000 [896]
+✔️  blk.9.attn_k.bias············F32 +0x3aaebe00 [128]
+✔️  blk.9.attn_k.weight··········F16 +0x3aaec000 [896, 128]
+✔️  blk.9.attn_output.weight·····F16 +0x3ab24000 [896, 896]
+✔️  blk.9.attn_q.bias············F32 +0x3acac000 [896]
+✔️  blk.9.attn_q.weight··········F16 +0x3acace00 [896, 896]
+✔️  blk.9.attn_v.bias············F32 +0x3ae34e00 [128]
+✔️  blk.9.attn_v.weight··········F16 +0x3ae35000 [896, 128]
+✔️  output_norm.weight···········F32 +0x3ae6d000 [896]

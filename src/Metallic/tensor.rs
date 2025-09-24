@@ -336,6 +336,8 @@ impl Tensor {
             command_buffer.commit();
         }
 
+        context.synchronize();
+
         Ok(tensor)
     }
 
@@ -383,6 +385,8 @@ impl Tensor {
             command_buffer.commit();
         }
 
+        context.synchronize();
+
         Ok(tensor)
     }
 
@@ -421,6 +425,8 @@ impl Tensor {
         encoder.endEncoding();
         command_buffer.commit();
 
+        context.synchronize();
+
         Ok(tensor)
     }
 
@@ -436,6 +442,7 @@ impl Tensor {
 
     /// Allocate and fill a tensor with uniform random values between 0 and 1.
     pub fn random_uniform(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
+        // Backwards-compatible simple random uniform in [0,1)
         ensure_random_pipeline(context)?;
 
         let tensor = Self::create_tensor_pooled(dims, context)?;
@@ -452,6 +459,12 @@ impl Tensor {
         let seed = context.rng_seed_counter as u32;
         context.rng_seed_counter += 1;
         set_bytes(&encoder, 1, &seed);
+
+        // Default min=0.0, scale=1.0 for backwards compatibility
+        let minv: f32 = 0.0f32;
+        let scale: f32 = 1.0f32;
+        set_bytes(&encoder, 2, &minv);
+        set_bytes(&encoder, 3, &scale);
 
         let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
         let threadgroup_size = MTLSize {
@@ -470,6 +483,61 @@ impl Tensor {
         dispatch_threads(&encoder, grid_size, threadgroup_size);
         encoder.endEncoding();
         command_buffer.commit();
+
+        context.synchronize();
+
+        Ok(tensor)
+    }
+
+    /// Fill a new tensor with uniform random values in [min, max).
+    /// Uses the device random pipeline for best performance.
+    pub fn random_uniform_range(
+        dims: Vec<usize>,
+        min: f32,
+        max: f32,
+        context: &mut Context,
+    ) -> Result<Tensor, MetalError> {
+        ensure_random_pipeline(context)?;
+
+        let tensor = Self::create_tensor_pooled(dims, context)?;
+
+        let command_buffer = context.command_queue.commandBuffer().unwrap();
+        let encoder = command_buffer.computeCommandEncoder().unwrap();
+
+        let pipeline = context.random_pipeline.as_ref().unwrap();
+        set_compute_pipeline_state(&encoder, pipeline);
+
+        set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
+
+        // Deterministic per-call seed
+        let seed = context.rng_seed_counter as u32;
+        context.rng_seed_counter += 1;
+        set_bytes(&encoder, 1, &seed);
+
+        let minv: f32 = min;
+        let scale: f32 = max - min;
+        set_bytes(&encoder, 2, &minv);
+        set_bytes(&encoder, 3, &scale);
+
+        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+        let threadgroup_size = MTLSize {
+            width: threads_per_threadgroup,
+            height: 1,
+            depth: 1,
+        };
+
+        let num_elements = tensor.len();
+        let grid_size = MTLSize {
+            width: num_elements,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threads(&encoder, grid_size, threadgroup_size);
+        encoder.endEncoding();
+        command_buffer.commit();
+
+        context.synchronize();
 
         Ok(tensor)
     }
@@ -699,67 +767,190 @@ impl Tensor {
         Self::fast_fill_f32(slice, value);
     }
 
+    pub fn permute(&self, permute: &[usize], ctx: &mut Context) -> Result<Tensor, MetalError> {
+        if permute.len() != self.dims.len() {
+            return Err(MetalError::InvalidShape(
+                "Permutation length must match tensor rank".to_string(),
+            ));
+        }
+
+        let mut new_dims = self.dims.clone();
+        for i in 0..permute.len() {
+            new_dims[i] = self.dims[permute[i]];
+        }
+
+        crate::metallic::permute::ensure_permute_pipeline(ctx)?;
+
+        let out = Tensor::create_tensor_pooled(new_dims, ctx)?;
+        let pipeline = ctx
+            .permute_pipeline
+            .as_ref()
+            .ok_or(MetalError::PipelineCreationFailed)?
+            .clone();
+
+        let permute_op = crate::metallic::permute::Permute::new(
+            self.clone(),
+            out.clone(),
+            permute.iter().map(|&x| x as u32).collect(),
+            pipeline,
+        )?;
+
+        ctx.with_command_buffer(|cmd_buf, cache| {
+            cmd_buf.record(&permute_op, cache)?;
+            Ok(())
+        })?;
+
+        ctx.synchronize();
+
+        Ok(out)
+    }
+
     /// Element-wise add, returns a new tensor on the same device.
-    pub fn add_elem(&self, other: &Tensor) -> Result<Tensor, MetalError> {
-        Self::binary_elementwise(self, other, |a, b| a + b)
+    pub fn add_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        crate::metallic::elemwise_add::ensure_add_pipeline(ctx)?;
+
+        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
+        let pipeline = ctx
+            .add_pipeline
+            .as_ref()
+            .ok_or(MetalError::PipelineCreationFailed)?
+            .clone();
+
+        let add_op = crate::metallic::elemwise_add::ElemwiseAdd::new(
+            self.clone(),
+            other.clone(),
+            out.clone(),
+            pipeline,
+        )?;
+
+        ctx.with_command_buffer(|cmd_buf, cache| {
+            cmd_buf.record(&add_op, cache)?;
+            Ok(())
+        })?;
+
+        ctx.synchronize();
+
+        Ok(out)
     }
 
     /// Element-wise sub, returns a new tensor on the same device.
-    pub fn sub_elem(&self, other: &Tensor) -> Result<Tensor, MetalError> {
-        Self::binary_elementwise(self, other, |a, b| a - b)
+    pub fn sub_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        crate::metallic::elemwise_sub::ensure_sub_pipeline(ctx)?;
+
+        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
+        let pipeline = ctx
+            .sub_pipeline
+            .as_ref()
+            .ok_or(MetalError::PipelineCreationFailed)?
+            .clone();
+
+        let op = crate::metallic::elemwise_sub::ElemwiseSub::new(
+            self.clone(),
+            other.clone(),
+            out.clone(),
+            pipeline,
+        )?;
+
+        ctx.with_command_buffer(|cmd_buf, cache| {
+            cmd_buf.record(&op, cache)?;
+            Ok(())
+        })?;
+
+        ctx.synchronize();
+
+        Ok(out)
     }
 
     /// Element-wise mul, returns a new tensor on the same device.
-    pub fn mul_elem(&self, other: &Tensor) -> Result<Tensor, MetalError> {
-        Self::binary_elementwise(self, other, |a, b| a * b)
+    pub fn mul_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        crate::metallic::elemwise_mul::ensure_mul_pipeline(ctx)?;
+
+        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
+        let pipeline = ctx
+            .mul_pipeline
+            .as_ref()
+            .ok_or(MetalError::PipelineCreationFailed)?
+            .clone();
+
+        let op = crate::metallic::elemwise_mul::ElemwiseMul::new(
+            self.clone(),
+            other.clone(),
+            out.clone(),
+            pipeline,
+        )?;
+
+        ctx.with_command_buffer(|cmd_buf, cache| {
+            cmd_buf.record(&op, cache)?;
+            Ok(())
+        })?;
+
+        ctx.synchronize();
+
+        Ok(out)
     }
 
     /// Element-wise div, returns a new tensor on the same device.
-    pub fn div_elem(&self, other: &Tensor) -> Result<Tensor, MetalError> {
-        Self::binary_elementwise(self, other, |a, b| a / b)
+    pub fn div_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        crate::metallic::elemwise_div::ensure_div_pipeline(ctx)?;
+
+        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
+        let pipeline = ctx
+            .div_pipeline
+            .as_ref()
+            .ok_or(MetalError::PipelineCreationFailed)?
+            .clone();
+
+        let op = crate::metallic::elemwise_div::ElemwiseDiv::new(
+            self.clone(),
+            other.clone(),
+            out.clone(),
+            pipeline,
+        )?;
+
+        ctx.with_command_buffer(|cmd_buf, cache| {
+            cmd_buf.record(&op, cache)?;
+            Ok(())
+        })?;
+
+        ctx.synchronize();
+
+        Ok(out)
     }
 
     /// Element-wise scalar add.
-    pub fn add_scalar(&self, value: f32) -> Result<Tensor, MetalError> {
-        Self::unary_elementwise(self, |a| a + value)
-    }
-
-    /// Element-wise scalar mul.
-    pub fn mul_scalar(&self, value: f32) -> Result<Tensor, MetalError> {
-        Self::unary_elementwise(self, |a| a * value)
-    }
-
-    fn binary_elementwise<F: Fn(f32, f32) -> f32>(
-        a: &Tensor,
-        b: &Tensor,
-        f: F,
-    ) -> Result<Tensor, MetalError> {
-        if a.dims != b.dims {
-            return Err(MetalError::DimensionMismatch {
-                expected: a.len(),
-                actual: b.len(),
-            });
-        }
-        let byte_len = a.size_bytes();
-        let buf = a
-            .device
-            .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-        let mut out = Tensor {
-            buf,
-            dims: a.dims.clone(),
-            strides: Self::compute_strides(&a.dims),
-            dtype: a.dtype,
-            device: a.device.clone(),
-            offset: 0,
-        };
-        let aslice = a.as_slice();
-        let bslice = b.as_slice();
-        let oslice = out.as_mut_slice();
-        for i in 0..a.len() {
-            oslice[i] = f(aslice[i], bslice[i]);
-        }
-        Ok(out)
+    pub fn add_scalar(&self, value: f32, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        // DEBT: This is inefficient. A dedicated kernel for scalar operations would be better.
+        let mut scalar_tensor = Tensor::zeros_like(self, ctx)?;
+        scalar_tensor.fill(value);
+        self.add_elem(&scalar_tensor, ctx)
     }
 
     fn unary_elementwise<F: Fn(f32) -> f32>(a: &Tensor, f: F) -> Result<Tensor, MetalError> {
@@ -808,35 +999,5 @@ impl Tensor {
             device: self.device.clone(),
             offset: new_offset,
         })
-    }
-}
-
-// Operator overloading for convenience. These panic on dimension mismatch.
-impl<'b> Add<&'b Tensor> for &Tensor {
-    type Output = Tensor;
-    fn add(self, rhs: &'b Tensor) -> Tensor {
-        self.add_elem(rhs)
-            .expect("Tensor Add: dimension mismatch or allocation failure")
-    }
-}
-impl<'b> Sub<&'b Tensor> for &Tensor {
-    type Output = Tensor;
-    fn sub(self, rhs: &'b Tensor) -> Tensor {
-        self.sub_elem(rhs)
-            .expect("Tensor Sub: dimension mismatch or allocation failure")
-    }
-}
-impl<'b> Mul<&'b Tensor> for &Tensor {
-    type Output = Tensor;
-    fn mul(self, rhs: &'b Tensor) -> Tensor {
-        self.mul_elem(rhs)
-            .expect("Tensor Mul: dimension mismatch or allocation failure")
-    }
-}
-impl<'b> Div<&'b Tensor> for &Tensor {
-    type Output = Tensor;
-    fn div(self, rhs: &'b Tensor) -> Tensor {
-        self.div_elem(rhs)
-            .expect("Tensor Div: dimension mismatch or allocation failure")
     }
 }

@@ -34,4 +34,6 @@ pub enum MetalError {
     OperationNotSupported(String),
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+    #[error("Tokenizer error: {0}")]
+    TokenizerError(#[from] crate::metallic::tokenizer::TokenizerError),
 }

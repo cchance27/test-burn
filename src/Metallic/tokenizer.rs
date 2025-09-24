@@ -5,7 +5,6 @@
 
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::hash::Hash;
 use std::sync::RwLock;
 use thiserror::Error;
 
@@ -38,6 +37,8 @@ pub struct Tokenizer {
     vocab_r: FxHashMap<String, u32>,
     /// BPE merges
     merges: FxHashMap<(String, String), u32>,
+    /// Token types
+    token_types: FxHashMap<u32, i32>,
     /// Special tokens
     special_tokens: SpecialTokens,
     /// Whether to add BOS token
@@ -51,6 +52,7 @@ impl Tokenizer {
     pub fn new(
         vocab: FxHashMap<u32, String>,
         merges: Vec<(String, String)>,
+        token_types: FxHashMap<u32, i32>,
         special_tokens: SpecialTokens,
         add_bos_token: bool,
     ) -> Result<Self, TokenizerError> {
@@ -70,6 +72,7 @@ impl Tokenizer {
             vocab,
             vocab_r,
             merges: merges_map,
+            token_types,
             special_tokens,
             add_bos_token,
             bpe_cache: RwLock::new(FxHashMap::default()),
@@ -81,7 +84,7 @@ impl Tokenizer {
         vocab: FxHashMap<u32, String>,
         merges: Vec<(String, String)>,
     ) -> Result<Self, TokenizerError> {
-        Self::new(vocab, merges, SpecialTokens::default(), false)
+        Self::new(vocab, merges, FxHashMap::default(), SpecialTokens::default(), false)
     }
 
     /// Create a new tokenizer with custom configuration
@@ -91,7 +94,7 @@ impl Tokenizer {
         special_tokens: SpecialTokens,
         add_bos_token: bool,
     ) -> Result<Self, TokenizerError> {
-        Self::new(vocab, merges, special_tokens, add_bos_token)
+        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
     }
 
     /// Create a tokenizer from any source that provides vocabulary and merges
@@ -104,7 +107,7 @@ impl Tokenizer {
     ) -> Result<Self, TokenizerError> {
         let vocab: FxHashMap<u32, String> = vocab_source.into_iter().collect();
         let merges: Vec<(String, String)> = merges_source.into_iter().collect();
-        Self::new(vocab, merges, special_tokens, add_bos_token)
+        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
     }
 
     /// Create a tokenizer from GGUF metadata
@@ -121,6 +124,10 @@ impl Tokenizer {
             .entries
             .get("tokenizer.ggml.merges")
             .ok_or(TokenizerError::MissingData)?;
+
+        let token_types_value = metadata
+            .entries
+            .get("tokenizer.ggml.token_type");
 
         // Extract special tokens
         let bos_token_id = metadata
@@ -174,6 +181,19 @@ impl Tokenizer {
             }
         };
 
+        // Parse token types array
+        let token_types_map = if let Some(crate::gguf::GGUFValue::Array(arr)) = token_types_value {
+            arr.iter()
+                .enumerate()
+                .filter_map(|(i, v)| match v {
+                    crate::gguf::GGUFValue::I32(t) => Some((i as u32, *t)),
+                    _ => None,
+                })
+                .collect::<FxHashMap<u32, i32>>()
+        } else {
+            FxHashMap::default()
+        };
+
         // Parse merges array
         let merges_str = match merges_value {
             crate::gguf::GGUFValue::Array(arr) => arr
@@ -217,501 +237,106 @@ impl Tokenizer {
             pad_token_id,
         };
 
-        Self::new(vocab, merges, special_tokens, add_bos_token)
+        Self::new(vocab, merges, token_types_map, special_tokens, add_bos_token)
     }
 
     /// Encode text into tokens using the serial implementation
-    pub fn encode_serial(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Estimate capacity based on text length (roughly 1 token per 3-4 characters)
-        let estimated_capacity = text.len() / 4 + 10; // Add buffer for BOS token and special cases
-        let mut tokens = Vec::with_capacity(estimated_capacity);
-
-        // Add BOS token if required
-        if let Some(bos_id) = self.special_tokens.bos_token_id
-            && self.add_bos_token
-        {
-            tokens.push(bos_id);
-        }
-
-        // Byte-level preprocessing
-        let preprocessed_text = self.byte_level_preprocess(text);
-
-        // Split text into words (handling whitespace)
-        let words: Vec<&str> = preprocessed_text.split_whitespace().collect();
-
-        for word in words {
-            // Apply BPE tokenization to each word
-            let bpe_tokens = self.bpe_tokenize(word)?;
-            tokens.extend(bpe_tokens);
-        }
-
-        Ok(tokens)
-    }
-
-    /// Encode text into tokens using parallel processing with Rayon
-    pub fn encode_parallel(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Add BOS token if required
-        // Estimate capacity based on text length (roughly 1 token per 3-4 characters)
-        let estimated_capacity = text.len() / 4 + 10; // Add buffer for BOS token and special cases
-        let mut tokens = Vec::with_capacity(estimated_capacity);
-        if let Some(bos_id) = self.special_tokens.bos_token_id
-            && self.add_bos_token
-        {
-            tokens.push(bos_id);
-        }
-
-        // Byte-level preprocessing
-        let preprocessed_text = self.byte_level_preprocess(text);
-
-        // Split text into words (handling whitespace)
-        let words: Vec<&str> = preprocessed_text.split_whitespace().collect();
-
-        // Process words in parallel
-        // Estimate capacity for bpe_tokens based on number of words
-        let mut bpe_tokens: Vec<Vec<u32>> = words
-            .par_iter()
-            .map(|word| self.bpe_tokenize(word))
-            .collect::<Result<Vec<Vec<u32>>, TokenizerError>>()?;
-
-        // Flatten the results
-        for token_vec in bpe_tokens.drain(..) {
-            tokens.extend(token_vec);
-        }
-
-        Ok(tokens)
-    }
-
-    /// Encode text into tokens using the default implementation (currently serial)
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
         self.encode_serial(text)
     }
 
-    /// Encode text into tokens using SIMD optimization
-    #[cfg(target_arch = "aarch64")]
-    pub fn encode_simd(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Use SIMD-optimized preprocessing
-        let preprocessed_text = self.byte_level_preprocess_simd(text);
-
-        // Estimate capacity based on text length (roughly 1 token per 3-4 characters)
-        let estimated_capacity = text.len() / 4 + 10; // Add buffer for BOS token and special cases
-        let mut tokens = Vec::with_capacity(estimated_capacity);
-
-        // Add BOS token if required
-        if let Some(bos_id) = self.special_tokens.bos_token_id
-            && self.add_bos_token
-        {
-            tokens.push(bos_id);
-        }
-
-        // Split text into words (handling whitespace)
-        let words: Vec<&str> = preprocessed_text.split_whitespace().collect();
-
-        for word in words {
-            // Apply BPE tokenization to each word
-            let bpe_tokens = self.bpe_tokenize_simd(word)?;
-            tokens.extend(bpe_tokens);
-        }
-
-        Ok(tokens)
-    }
-
-    /// Encode text into tokens using SIMD optimization
-    #[cfg(not(target_arch = "aarch64"))]
-    pub fn encode_simd(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
-        // For non-AArch64 architectures, just call the regular implementation
-        self.encode_serial(text)
-    }
-
-    /// Encode text into tokens using SIMD and parallel processing
-    #[cfg(target_arch = "aarch64")]
-    pub fn encode_simd_parallel(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Use SIMD-optimized preprocessing
-        let preprocessed_text = self.byte_level_preprocess_simd(text);
-
-        // Add BOS token if required
-        // Estimate capacity based on text length (roughly 1 token per 3-4 characters)
-        let estimated_capacity = text.len() / 4 + 10; // Add buffer for BOS token and special cases
-        let mut tokens = Vec::with_capacity(estimated_capacity);
-        if let Some(bos_id) = self.special_tokens.bos_token_id
-            && self.add_bos_token
-        {
-            tokens.push(bos_id);
-        }
-
-        // Split text into words (handling whitespace)
-        let words: Vec<&str> = preprocessed_text.split_whitespace().collect();
-
-        // Process words in parallel
-        // Estimate capacity for bpe_tokens based on number of words
-        let mut bpe_tokens: Vec<Vec<u32>> = words
-            .par_iter()
-            .map(|word| self.bpe_tokenize_simd(word))
-            .collect::<Result<Vec<Vec<u32>>, TokenizerError>>()?;
-
-        // Flatten the results
-        for token_vec in bpe_tokens.drain(..) {
-            tokens.extend(token_vec);
-        }
-
-        Ok(tokens)
-    }
-
-    /// Encode text into tokens using SIMD and parallel processing
-    #[cfg(not(target_arch = "aarch64"))]
-    pub fn encode_simd_parallel(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
-        // For non-AArch64 architectures, just call the parallel implementation
-        self.encode_parallel(text)
-    }
-
-    /// Byte-level preprocessing for handling special characters
-    pub fn byte_level_preprocess(&self, text: &str) -> String {
-        // Estimate capacity based on text length (worst case: each char becomes <0xXX>)
-        let estimated_capacity = text.len() * 6; // <0xXX> is 6 characters
-        let mut result = String::with_capacity(estimated_capacity);
-        for ch in text.chars() {
-            match ch {
-                '!'..='~' => result.push(ch), // Printable ASCII
-                ' ' => result.push(ch),       // Space
-                _ => {
-                    // For other characters, use byte-level encoding
-                    let ch_string = ch.to_string();
-                    let bytes = ch_string.as_bytes();
-                    for &byte in bytes {
-                        // Map byte to printable character (using byte-fallback representation)
-                        result.push_str(&format!("<0x{:02X}>", byte));
-                    }
-                }
-            }
-        }
-        result
-    }
-
-    /// SIMD-optimized byte-level preprocessing for handling special characters
-    #[cfg(target_arch = "aarch64")]
-    pub fn byte_level_preprocess_simd(&self, text: &str) -> String {
-        use std::arch::aarch64::*;
-
-        // Estimate capacity based on text length (worst case: each char becomes <0xXX>)
-        let estimated_capacity = text.len() * 6; // <0xXX> is 6 characters
-        let mut result = String::with_capacity(estimated_capacity);
-        let bytes = text.as_bytes();
-
-        // Process 16 bytes at a time using SIMD
-        let chunk_size = 16;
-        let mut i = 0;
-
-        while i + chunk_size <= bytes.len() {
-            // Load 16 bytes into a SIMD register
-            unsafe {
-                let chunk = bytes[i..i + chunk_size].as_ptr();
-                let simd_data = vld1q_u8(chunk);
-
-                // Create masks for different character ranges
-                // Printable ASCII: 0x20 (space) to 0x7E (~)
-                let space_char = vdupq_n_u8(0x20);
-                let tilde_char = vdupq_n_u8(0x7E);
-
-                // Check if characters are in printable ASCII range
-                let ge_space = vcgeq_u8(simd_data, space_char);
-                let le_tilde = vcleq_u8(simd_data, tilde_char);
-                let is_printable = vandq_u8(ge_space, le_tilde);
-
-                // Extract results and process
-                let printable_mask: [u8; 16] = std::mem::transmute(is_printable);
-                let data: [u8; 16] = std::mem::transmute(simd_data);
-
-                for j in 0..16 {
-                    let byte = data[j];
-                    if printable_mask[j] != 0 {
-                        result.push(byte as char);
-                    } else {
-                        // For other characters, use byte-level encoding
-                        result.push_str(&format!("<0x{:02X}>", byte));
-                    }
-                }
-            }
-
-            i += chunk_size;
-        }
-
-        // Process remaining bytes
-        for &byte in &bytes[i..] {
-            if (0x20..=0x7E).contains(&byte) {
-                result.push(byte as char);
-            } else {
-                // For other characters, use byte-level encoding
-                result.push_str(&format!("<0x{:02X}>", byte));
-            }
-        }
-
-        result
-    }
-
-    /// SIMD-optimized byte-level preprocessing for handling special characters
-    #[cfg(not(target_arch = "aarch64"))]
-    pub fn byte_level_preprocess_simd(&self, text: &str) -> String {
-        // For non-AArch64 architectures, just call the regular implementation
-        self.byte_level_preprocess(text)
-    }
-
-    /// Apply BPE tokenization to a single word
-    fn bpe_tokenize(&self, word: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Check cache first
-        {
-            let cache = self.bpe_cache.read().map_err(|_| {
-                TokenizerError::InitializationFailed("Cache lock poisoned".to_string())
-            })?;
-            if let Some(cached_result) = cache.get(word) {
-                return Ok(cached_result.clone());
-            }
-        }
-
-        // Start with character-level tokens
-        // Estimate capacity based on word length (worst case: each char becomes a token)
-        let estimated_capacity = word.len() + 1; // Add 1 for </w> suffix
-        let mut tokens: Vec<String> = Vec::with_capacity(estimated_capacity);
-        for ch in word.chars() {
-            tokens.push(ch.to_string());
-        }
-
-        // Add end-of-word suffix
-        if let Some(last) = tokens.last_mut() {
-            last.push_str("</w>");
-        }
-
-        // Iteratively apply BPE merges
-        loop {
-            // Find the best merge pair (lowest priority number)
-            let mut best_pair: Option<((String, String), u32)> = None;
-            let mut best_index = 0;
-
-            for i in 0..tokens.len().saturating_sub(1) {
-                let pair = (&tokens[i], &tokens[i + 1]);
-                if let Some(priority) = self.merges.get(&(pair.0.clone(), pair.1.clone())) {
-                    match &best_pair {
-                        None => {
-                            best_pair = Some(((pair.0.clone(), pair.1.clone()), *priority));
-                            best_index = i;
-                        }
-                        Some((_, best_priority)) if priority < best_priority => {
-                            best_pair = Some(((pair.0.clone(), pair.1.clone()), *priority));
-                            best_index = i;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // If no merge pair found, we're done
-            let (pair, _) = match best_pair {
-                Some(pair) => pair,
-                None => break,
-            };
-
-            // Apply the merge
-            // Estimate capacity for new_tokens (same as tokens, or slightly less)
-            let mut new_tokens = Vec::with_capacity(tokens.len());
-            let mut i = 0;
-            while i < tokens.len() {
-                if i == best_index {
-                    // Merge the pair
-                    new_tokens.push(format!("{}{}", pair.0, pair.1));
-                    i += 2; // Skip the next token as it's been merged
-                } else {
-                    new_tokens.push(tokens[i].clone());
-                    i += 1;
-                }
-            }
-            tokens = new_tokens;
-        }
-
-        // Convert to token IDs
+    /// Encode text into tokens using the serial implementation
+    pub fn encode_serial(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
         let mut token_ids = Vec::new();
-        for token in tokens {
-            if let Some(token_id) = self.vocab_r.get(&token) {
-                token_ids.push(*token_id);
-            } else {
-                // Handle unknown tokens with recursive splitting
-                let sub_tokens = self.handle_unknown_token(&token)?;
-                token_ids.extend(sub_tokens);
+        if let Some(bos_id) = self.special_tokens.bos_token_id {
+            if self.add_bos_token {
+                token_ids.push(bos_id);
             }
         }
 
-        // Store result in cache
-        {
-            let mut cache = self.bpe_cache.write().map_err(|_| {
-                TokenizerError::InitializationFailed("Cache lock poisoned".to_string())
-            })?;
-            cache.insert(word.to_string(), token_ids.clone());
+        let mut special_tokens = Vec::new();
+        for token in self.vocab.values() {
+            if token.starts_with("<|") && token.ends_with("|>") {
+                special_tokens.push(token.clone());
+            }
+        }
+        // Sort by length descending to match longest tokens first
+        special_tokens.sort_by_key(|b| std::cmp::Reverse(b.len()));
+
+        let mut parts = Vec::new();
+        let mut last = 0;
+        while last < text.len() {
+            let remaining_text = &text[last..];
+            // Find the earliest occurrence of any special token in remaining_text
+            let mut found_pos: Option<(usize, &String)> = None;
+            for token in &special_tokens {
+                if let Some(pos) = remaining_text.find(token) {
+                    match found_pos {
+                        Some((prev_pos, _)) if pos >= prev_pos => {}
+                        _ => found_pos = Some((pos, token)),
+                    }
+                }
+            }
+            if let Some((pos, token)) = found_pos {
+                if pos > 0 {
+                    parts.push(&text[last..last + pos]);
+                }
+                parts.push(&text[last + pos..last + pos + token.len()]);
+                last += pos + token.len();
+            } else {
+                parts.push(remaining_text);
+                break;
+            }
+        }
+
+        for part in parts {
+            if self.vocab_r.contains_key(part) && part.starts_with("<|") {
+                token_ids.push(*self.vocab_r.get(part).unwrap());
+                continue;
+            }
+            
+            // BPE encode part
+            let preprocessed: String = part.chars().map(|c| if c.is_whitespace() { 'Ġ' } else { c }).collect();
+            let mut pieces: Vec<String> = preprocessed.chars().map(|c| c.to_string()).collect();
+            if pieces.is_empty() {
+                continue;
+            }
+            loop {
+                let mut min_rank = u32::MAX;
+                let mut merge_pos = None;
+
+                for i in 0..pieces.len().saturating_sub(1) {
+                    let pair_key = (pieces[i].clone(), pieces[i + 1].clone());
+                    if let Some(&rank) = self.merges.get(&pair_key) {
+                        if rank < min_rank {
+                            min_rank = rank;
+                            merge_pos = Some(i);
+                        }
+                    }
+                }
+
+                if let Some(pos) = merge_pos {
+                    let merged = format!("{}{}", pieces[pos], pieces[pos + 1]);
+                    pieces.splice(pos..pos + 2, std::iter::once(merged));
+                } else {
+                    break;
+                }
+            }
+            for piece in pieces {
+                if let Some(&id) = self.vocab_r.get(&piece) {
+                    token_ids.push(id);
+                } else {
+                    token_ids.push(0); // UNK
+                }
+            }
         }
 
         Ok(token_ids)
-    }
-
-    /// Handle unknown tokens by trying to split them into known subwords
-    fn handle_unknown_token(&self, token: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Try to split the token into smaller parts
-        // This is a simple fallback approach - in a production implementation,
-        // you might want to use a more sophisticated algorithm
-
-        // If the token is a single character, use UNK token
-        if token.chars().count() <= 1 {
-            return Ok(vec![0]); // UNK token ID
-        }
-
-        // Try to split the token in half and recursively process
-        let chars: Vec<char> = token.chars().collect();
-        let mid = chars.len() / 2;
-        let left: String = chars[..mid].iter().collect();
-        let right: String = chars[mid..].iter().collect();
-
-        let mut result = Vec::new();
-
-        // Process left part
-        if let Some(token_id) = self.vocab_r.get(&left) {
-            result.push(*token_id);
-        } else {
-            result.extend(self.handle_unknown_token(&left)?);
-        }
-
-        // Process right part
-        if let Some(token_id) = self.vocab_r.get(&right) {
-            result.push(*token_id);
-        } else {
-            result.extend(self.handle_unknown_token(&right)?);
-        }
-
-        Ok(result)
-    }
-
-    /// SIMD-optimized BPE tokenization for a single word
-    #[cfg(target_arch = "aarch64")]
-    fn bpe_tokenize_simd(&self, word: &str) -> Result<Vec<u32>, TokenizerError> {
-        // Check cache first
-        {
-            let cache = self.bpe_cache.read().map_err(|_| {
-                TokenizerError::InitializationFailed("Cache lock poisoned".to_string())
-            })?;
-            if let Some(cached_result) = cache.get(word) {
-                return Ok(cached_result.clone());
-            }
-        }
-
-        // Start with character-level tokens
-        // Estimate capacity based on word length (worst case: each char becomes a token)
-        let estimated_capacity = word.len() + 1; // Add 1 for </w> suffix
-        let mut tokens: Vec<String> = Vec::with_capacity(estimated_capacity);
-        for ch in word.chars() {
-            tokens.push(ch.to_string());
-        }
-
-        // Add end-of-word suffix
-        if let Some(last) = tokens.last_mut() {
-            last.push_str("</w>");
-        }
-
-        // Iteratively apply BPE merges with SIMD optimizations
-        loop {
-            // Find the best merge pair (lowest priority number)
-            let mut best_pair: Option<((String, String), u32)> = None;
-            let mut best_index = 0;
-
-            // For BPE, SIMD optimization is more about efficient data structures
-            // and batch processing rather than vectorized operations on the data itself
-            // We'll optimize by processing multiple candidate pairs at once
-
-            // Process pairs in chunks for better cache efficiency
-            let chunk_size = 8; // Process 8 pairs at a time
-            let mut i = 0;
-            while i < tokens.len().saturating_sub(1) {
-                // Process up to chunk_size pairs
-                let end = std::cmp::min(i + chunk_size, tokens.len() - 1);
-
-                // Prepare batch of pairs for processing
-                let mut pairs: Vec<((String, String), usize)> = Vec::with_capacity(end - i);
-                for j in i..end {
-                    pairs.push(((tokens[j].clone(), tokens[j + 1].clone()), j));
-                }
-
-                // Check multiple pairs in this chunk efficiently
-                for (pair, index) in pairs {
-                    if let Some(priority) = self.merges.get(&(pair.0.clone(), pair.1.clone())) {
-                        match &best_pair {
-                            None => {
-                                best_pair = Some(((pair.0, pair.1), *priority));
-                                best_index = index;
-                            }
-                            Some((_, best_priority)) if priority < best_priority => {
-                                best_pair = Some(((pair.0, pair.1), *priority));
-                                best_index = index;
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-
-                i = end;
-            }
-
-            // If no merge pair found, we're done
-            let (pair, _) = match best_pair {
-                Some(pair) => pair,
-                None => break,
-            };
-
-            // Apply the merge
-            // Estimate capacity for new_tokens (same as tokens, or slightly less)
-            let mut new_tokens = Vec::with_capacity(tokens.len());
-            let mut i = 0;
-            while i < tokens.len() {
-                if i == best_index {
-                    // Merge the pair
-                    new_tokens.push(format!("{}{}", pair.0, pair.1));
-                    i += 2; // Skip the next token as it's been merged
-                } else {
-                    new_tokens.push(tokens[i].clone());
-                    i += 1;
-                }
-            }
-            tokens = new_tokens;
-        }
-
-        // Convert to token IDs
-        let mut token_ids = Vec::new();
-        for token in tokens {
-            if let Some(token_id) = self.vocab_r.get(&token) {
-                token_ids.push(*token_id);
-            } else {
-                // Handle unknown tokens with recursive splitting
-                let sub_tokens = self.handle_unknown_token(&token)?;
-                token_ids.extend(sub_tokens);
-            }
-        }
-
-        // Store result in cache
-        {
-            let mut cache = self.bpe_cache.write().map_err(|_| {
-                TokenizerError::InitializationFailed("Cache lock poisoned".to_string())
-            })?;
-            cache.insert(word.to_string(), token_ids.clone());
-        }
-
-        Ok(token_ids)
-    }
-
-    /// SIMD-optimized BPE tokenization for a single word (non-AArch64 fallback)
-    #[cfg(not(target_arch = "aarch64"))]
-    fn bpe_tokenize_simd(&self, word: &str) -> Result<Vec<u32>, TokenizerError> {
-        // On non-AArch64 architectures, just call the regular implementation
-        self.bpe_tokenize(word)
     }
 
     /// Decode tokens into text
     pub fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
-        // Estimate capacity based on number of tokens (roughly 3-10 characters per token)
-        let estimated_capacity = tokens.len() * 5;
-        let mut decoded_parts = Vec::with_capacity(estimated_capacity);
-
+        let mut bytes = Vec::new();
         // Skip BOS token if present at the beginning
         let start_index = if self.add_bos_token
             && self.special_tokens.bos_token_id.is_some()
@@ -724,171 +349,43 @@ impl Tokenizer {
 
         for token_id in &tokens[start_index..] {
             if let Some(token) = self.vocab.get(token_id) {
-                decoded_parts.push(token.clone());
-            } else {
-                return Err(TokenizerError::InvalidTokenId(*token_id));
-            }
-        }
+                let token_type = self.token_types.get(token_id).cloned().unwrap_or(1); // Default to normal
+                if token_type == 6 { // Byte token
+                    if token.starts_with("<0x") && token.ends_with('>') && token.len() == 6 {
+                        if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
+                            bytes.push(byte);
+                            println!("Token ID: {token_id}: Type: {token_type} TokenFromByte: {byte:?} {}", String::from_utf8_lossy(&[byte]));
 
-        // Join tokens and post-process
-        let joined_text = decoded_parts.join("");
-
-        // Post-process to remove end-of-word markers and handle byte-level decoding
-        let processed_text = self.post_process(joined_text);
-
-        Ok(processed_text)
-    }
-
-    /// Decode tokens into text using SIMD optimization
-    #[cfg(target_arch = "aarch64")]
-    pub fn decode_simd(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
-        use std::arch::aarch64::*;
-
-        // Estimate capacity based on number of tokens (roughly 3-10 characters per token)
-        let estimated_capacity = tokens.len() * 5;
-        let mut decoded_parts = Vec::with_capacity(estimated_capacity);
-
-        // Skip BOS token if present at the beginning
-        let start_index = if self.add_bos_token
-            && self.special_tokens.bos_token_id.is_some()
-            && tokens.first() == self.special_tokens.bos_token_id.as_ref()
-        {
-            1
-        } else {
-            0
-        };
-
-        // Process tokens in chunks for SIMD optimization
-        let chunk_size = 8;
-        let mut i = start_index;
-
-        while i + chunk_size <= tokens.len() {
-            // Process chunk of tokens
-            for token_id in &tokens[i..i + chunk_size] {
-                if let Some(token) = self.vocab.get(token_id) {
-                    decoded_parts.push(token.clone());
+                        } else {
+                            unimplemented!("handle failed str_Radix")
+                        }
+                    } else {
+                        unimplemented!("handle token missing <0x>")
+                    }
                 } else {
-                    return Err(TokenizerError::InvalidTokenId(*token_id));
+                    bytes.extend_from_slice(token.as_bytes());
+                    println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");                    
                 }
-            }
-            i += chunk_size;
-        }
-
-        // Process remaining tokens
-        for token_id in &tokens[i..] {
-            if let Some(token) = self.vocab.get(token_id) {
-                decoded_parts.push(token.clone());
             } else {
                 return Err(TokenizerError::InvalidTokenId(*token_id));
             }
         }
 
-        // Join tokens and post-process
-        let joined_text = decoded_parts.join("");
-
-        // Post-process to remove end-of-word markers and handle byte-level decoding
-        let processed_text = self.post_process_simd(joined_text);
-
+        let decoded_text = String::from_utf8_lossy(&bytes).to_string();
+        let processed_text = self.post_process(decoded_text);
+        
         Ok(processed_text)
-    }
-
-    /// Decode tokens into text using SIMD optimization
-    #[cfg(not(target_arch = "aarch64"))]
-    pub fn decode_simd(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
-        // For non-AArch64 architectures, just call the regular implementation
-        self.decode(tokens)
     }
 
     /// Post-process decoded text to remove BPE artifacts
     fn post_process(&self, text: String) -> String {
-        // Remove end-of-word markers
-        let text = text.replace("</w>", " ");
-
-        // Handle byte-level decoding
-        // Estimate capacity based on text length (worst case: no change)
-        let estimated_capacity = text.len();
-        let mut result = String::with_capacity(estimated_capacity);
-        let mut i = 0;
-        let chars: Vec<char> = text.chars().collect();
-        while i < chars.len() {
-            if i + 5 < chars.len()
-                && chars[i] == '<'
-                && chars[i + 1] == '0'
-                && chars[i + 2] == 'x'
-                && chars[i + 5] == '>'
-            {
-                // Try to parse byte
-                let hex_str: String = chars[i + 3..i + 5].iter().collect();
-                if let Ok(byte_val) = u8::from_str_radix(&hex_str, 16)
-                    && let Some(ch) = char::from_u32(byte_val as u32)
-                {
-                    result.push(ch);
-                    i += 6; // Skip the entire <0xXX> sequence
-                    continue;
-                }
-            }
-            // Add character as is
-            result.push(chars[i]);
-            i += 1;
-        }
-
-        // Clean up extra spaces
-        result.replace("  ", " ").trim().to_string()
+        // For GPT2, replace Ġ with space
+        text.replace("Ġ",  " ")
+            .replace("  ", " ")
+            .trim()
+            .to_string()
     }
-
-    /// SIMD-optimized post-process decoded text to remove BPE artifacts
-    #[cfg(target_arch = "aarch64")]
-    fn post_process_simd(&self, text: String) -> String {
-        // Remove end-of-word markers
-        let text = text.replace("</w>", " ");
-
-        // For post-processing, the SIMD optimization is less straightforward
-        // since we're dealing with variable-length patterns like <0xXX>
-        // We'll use a more efficient approach for scanning and replacing
-        // these patterns without SIMD for now, but with better algorithmic
-        // efficiency than the original implementation.
-
-        // Estimate capacity based on text length (worst case: no change)
-        let estimated_capacity = text.len();
-        let mut result = String::with_capacity(estimated_capacity);
-        let bytes = text.as_bytes();
-        let mut i = 0;
-
-        while i < bytes.len() {
-            // Check for <0xXX> pattern
-            if i + 5 < bytes.len()
-                && bytes[i] == b'<'
-                && bytes[i + 1] == b'0'
-                && bytes[i + 2] == b'x'
-                && bytes[i + 5] == b'>'
-                && bytes[i + 3].is_ascii_hexdigit()
-                && bytes[i + 4].is_ascii_hexdigit()
-            {
-                // Parse the hex digits
-                let hex_str = std::str::from_utf8(&bytes[i + 3..i + 5]).unwrap_or("");
-                if let Ok(byte_val) = u8::from_str_radix(hex_str, 16) {
-                    result.push(byte_val as char);
-                    i += 6; // Skip the entire <0xXX> sequence
-                    continue;
-                }
-            }
-            // Add character as is
-            if let Some(ch) = char::from_u32(bytes[i] as u32) {
-                result.push(ch);
-            }
-            i += 1;
-        }
-
-        // Clean up extra spaces
-        result.replace("  ", " ").trim().to_string()
-    }
-
-    /// SIMD-optimized post-process decoded text to remove BPE artifacts
-    #[cfg(not(target_arch = "aarch64"))]
-    fn post_process_simd(&self, text: String) -> String {
-        // For non-AArch64 architectures, just call the regular implementation
-        self.post_process(text)
-    }
+    
 
     /// Get the vocabulary size
     pub fn vocab_size(&self) -> usize {
@@ -903,6 +400,11 @@ impl Tokenizer {
     /// Get a token by ID (for testing purposes)
     #[cfg(test)]
     pub fn get_token(&self, id: u32) -> Option<&String> {
+        self.vocab.get(&id)
+    }
+
+    /// Get a token by ID (for debugging purposes)
+    pub fn get_token_debug(&self, id: u32) -> Option<&String> {
         self.vocab.get(&id)
     }
 
