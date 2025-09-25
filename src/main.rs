@@ -49,7 +49,7 @@ fn main() {
 
     // Instantiate Qwen25 (or the appropriate LoadableModel) from GGUFModel
     println!("Instantiating Qwen25 from GGUF model (this may allocate device memory)...");
-    let mut wan: test_burn::metallic::qwen25::Qwen25 = match gguf_model.instantiate(&mut ctx) {
+    let mut qwen: test_burn::metallic::qwen25::Qwen25 = match gguf_model.instantiate(&mut ctx) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Failed to instantiate Qwen25 from GGUFModel: {:?}", e);
@@ -96,7 +96,8 @@ fn main() {
         top_k: 40,
     };
 
-    match test_burn::metallic::generation::generate(&mut wan, &tokenizer, &mut ctx, &prompt, &cfg) {
+    match test_burn::metallic::generation::generate(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg)
+    {
         Ok(out_text) => {
             println!("Generation result:\n{}", out_text);
             process::exit(0);

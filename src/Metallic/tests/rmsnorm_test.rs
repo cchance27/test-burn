@@ -92,3 +92,79 @@ fn test_rmsnorm_basic() -> Result<(), MetalError> {
 
     Ok(())
 }
+
+#[test]
+fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
+    let mut context = Context::new()?;
+    ensure_rmsnorm_pipeline(&mut context)?;
+
+    let feature_dim = 4;
+    let batch_size = 1;
+    let seq_len = 1;
+
+    // Test with large values that could cause overflow in sum-of-squares
+    let input_data = vec![
+        1e3, 2e3, 3e3, 4e3, // Large positive values
+    ];
+
+    let gamma_data = vec![1.0, 1.0, 1.0, 1.0];
+
+    let dims = vec![batch_size, seq_len, feature_dim];
+    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let output_tensor = Tensor::create_tensor(dims.clone(), &context)?;
+    let gamma_tensor = Tensor::create_tensor_from_slice(&gamma_data, vec![feature_dim], &context)?;
+
+    let rmsnorm_op = RMSNorm::new(
+        input_tensor,
+        output_tensor.clone(),
+        gamma_tensor,
+        feature_dim as u32,
+        context.rmsnorm_pipeline.as_ref().unwrap().clone(),
+    )?;
+
+    let command_buffer = context.command_queue.commandBuffer().unwrap();
+    let mut cache = ResourceCache::new();
+    rmsnorm_op.encode(&command_buffer, &mut cache)?;
+    command_buffer.commit();
+
+    context.synchronize();
+
+    let metal_output = output_tensor.as_slice();
+
+    // Check that the output values are finite (not NaN or infinity)
+    for &val in metal_output {
+        assert!(
+            val.is_finite(),
+            "RMSNorm output contains non-finite value: {}",
+            val
+        );
+    }
+
+    // Compare with CPU implementation
+    let cpu_output = cpu_rmsnorm(&input_data, feature_dim, &gamma_data, 1e-5);
+
+    let rtol = 1e-4f64;
+    let atol = 1e-6f64;
+
+    for i in 0..input_data.len() {
+        let metal_val = metal_output[i] as f64;
+        let cpu_val = cpu_output[i] as f64;
+        let diff = (metal_val - cpu_val).abs();
+        let rel_err = if cpu_val.abs() > 1e-8 {
+            diff / cpu_val.abs()
+        } else {
+            diff
+        };
+        assert!(
+            diff <= atol || rel_err <= rtol,
+            "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
+            i,
+            metal_val,
+            cpu_val,
+            diff,
+            rel_err
+        );
+    }
+
+    Ok(())
+}

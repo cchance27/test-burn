@@ -121,7 +121,9 @@ impl BroadcastElemwiseAdd {
     ) -> Result<Self, MetalError> {
         let b_len = b.len();
         if b_len == 0 {
-            return Err(MetalError::InvalidShape("Broadcast b cannot be empty".to_string()));
+            return Err(MetalError::InvalidShape(
+                "Broadcast b cannot be empty".to_string(),
+            ));
         }
         if a.dims() != out.dims() {
             return Err(MetalError::InvalidShape(format!(

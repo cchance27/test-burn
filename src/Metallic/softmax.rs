@@ -83,11 +83,24 @@ pub fn ensure_fused_softmax_pipeline(ctx: &mut Context) -> Result<(), MetalError
             }
             // Compute exp(x - max) with proper handling for extreme values
             float e = 0.0f;
-            if (xv != -INFINITY) {
+            if (isinf(maxv) && maxv > 0) { // maxv is +inf
+                if (isinf(xv) && xv > 0) {
+                    e = 1.0f;
+                } else {
+                    e = 0.0f;
+                }
+            } else if (xv != -INFINITY) {
                 // For very large negative differences, exp might underflow to 0
                 // This is actually the correct behavior
                 float diff = xv - maxv;
-                e = exp(diff);
+                // Clamp the difference to prevent extreme values that could cause overflow/underflow
+                if (diff < -80.0f) {  // Prevent underflow
+                    e = 0.0f;
+                } else if (diff > 80.0f) {  // Prevent overflow
+                    e = exp(80.0f);  // Though this case should not happen due to max subtraction
+                } else {
+                    e = exp(diff);
+                }
             }
             attn[base + c] = e;
             local_sum += e;
@@ -109,7 +122,9 @@ pub fn ensure_fused_softmax_pipeline(ctx: &mut Context) -> Result<(), MetalError
         // Phase 3: normalize in place
         for (uint c = lane; c < seq_k; c += stride) {
             // Handle case where sum is zero or invalid
-            if (sumv > 0.0f && sumv != INFINITY) {
+            if (isnan(sumv)) {
+                attn[base + c] = sumv; // Propagate NaN
+            } else if (sumv > 0.0f && sumv != INFINITY) {
                 attn[base + c] = attn[base + c] / sumv;
             } else {
                 // If sum is zero or invalid, handle appropriately

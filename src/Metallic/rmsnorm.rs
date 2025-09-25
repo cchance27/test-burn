@@ -20,7 +20,7 @@ pub fn ensure_rmsnorm_pipeline(ctx: &mut Context) -> Result<(), MetalError> {
     let source = r#"
     using namespace metal;
 
-    constant float EPS = 1e-5f;
+    constant float EPS = 1e-6f;
 
     // RMSNorm: normalize by root-mean-square and apply per-feature scale (gamma)
     kernel void rmsnorm_kernel(device float* input [[buffer(0)]],

@@ -21,6 +21,11 @@ impl Context {
         self.pool.reset();
 
         autoreleasepool(|_| {
+            // Validate input tensors for numerical stability
+            q.validate_numerical_stability()?;
+            k.validate_numerical_stability()?;
+            v.validate_numerical_stability()?;
+
             let b = q.dims[0];
             let s_q = q.dims[1];
             let s_k = k.dims[1];

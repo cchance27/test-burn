@@ -726,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_load_gguf_file() {
-        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 println!("Successfully loaded GGUF file:");
@@ -778,7 +778,7 @@ mod tests {
 
     #[test]
     fn test_gguf_to_metallic_tensor() {
-        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 // Initialize Metallic context
@@ -838,7 +838,7 @@ mod tests {
 
     #[test]
     fn test_debug_q8_format() {
-        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 // Debug the first tensor
@@ -860,7 +860,7 @@ mod tests {
 
     #[test]
     fn test_initial_inference() {
-        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 // Initialize Metallic context
@@ -911,7 +911,7 @@ mod memory_tests {
 
     #[test]
     fn test_memory_management() {
-        let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+        let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 // Test with the first few tensors

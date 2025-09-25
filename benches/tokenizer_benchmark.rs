@@ -9,7 +9,7 @@ use test_burn::gguf::GGUFFile;
 use test_burn::metallic::Tokenizer;
 
 fn load_tokenizer() -> Tokenizer {
-    let path = "/Volumes/2TB/test-burn/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
+    let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";
     let gguf = GGUFFile::load(path).expect("Failed to load GGUF file");
     Tokenizer::from_gguf_metadata(&gguf.metadata).expect("Failed to create tokenizer")
 }

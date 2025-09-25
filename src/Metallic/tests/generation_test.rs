@@ -11,7 +11,7 @@ fn test_generation_pipeline() {
         ff_dim: 16,
         n_heads: 2,
         n_kv_heads: 1,
-        seq_len: 32,
+        seq_len: 256,
         vocab_size: 32,
         rope_freq_base: 1e6,
         rms_eps: 1e-6,

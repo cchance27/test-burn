@@ -27,7 +27,16 @@ impl Cacheable for CacheableSdpa {
         key: &Self::Key,
         _device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Self, MetalError> {
-        let scale = 1.0 / (key.dim as f32).sqrt();
+        let dim_f32 = key.dim as f32;
+        let scale = 1.0 / dim_f32.sqrt();
+
+        // Add numerical stability for extreme dimensions
+        let scale = if scale.is_infinite() || scale.is_nan() {
+            1.0
+        } else {
+            scale.clamp(1e-6, 1e6)
+        };
+
         Ok(Self {
             key: key.clone(),
             scale,

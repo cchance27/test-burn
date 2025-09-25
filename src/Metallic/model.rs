@@ -83,7 +83,7 @@ pub trait LoadableModel: Sized {
 
 impl Model {
     /// Generic loader helper: load a concrete model type that implements LoadableModel.
-    /// Example usage: let wan: Qwen25 = Model::load(&gguf_model, &mut ctx)?;
+    /// Example usage: let qwen: Qwen25 = Model::load(&gguf_model, &mut ctx)?;
     pub fn load<T: LoadableModel>(
         gguf_model: &crate::gguf::model_loader::GGUFModel,
         ctx: &mut crate::metallic::Context,

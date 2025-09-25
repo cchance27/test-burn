@@ -24,3 +24,4 @@ The following are design goals and rules for our Agents and Developers for the p
 21. Tests should be written to check for semantic issues, as well as under-and-over runs for extrme values, and other items.
 22. Unit tests should test functionality to confirm base functionality is as expected.
 23. Unit tests should have strict tollerances and we should avoid adjusting tests to work around issues, and instead fix issues if the tests are valid.
+24. Please remember to context.synchronize() as needed to make sure that tensors are settled in the gpu memory when created or used.

@@ -30,17 +30,31 @@ pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature:
     let mut scaled: Vec<f32> = logits.iter().map(|&v| v / temperature).collect();
 
     // Stabilize by subtracting max before exponentiation to prevent overflow
-    let m = scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-    for x in &mut scaled {
-        *x -= m; // Center around zero to prevent overflow
+    // Filter out any infinity/nan values first
+    let finite_scaled: Vec<f32> = scaled.iter().cloned().filter(|x| x.is_finite()).collect();
+    if finite_scaled.is_empty() {
+        return 0; // fallback if all logits are non-finite
     }
 
-    // Apply exponential safely
+    let m = finite_scaled
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    // Apply the shift and compute exponentials
     for x in &mut scaled {
-        *x = x.exp();
-        // Clamp extremely large values to prevent overflow
-        if *x > 1e10 {
-            *x = 1e10;
+        if x.is_finite() {
+            *x = (*x - m).exp();
+            // Clamp extremely large values to prevent overflow
+            if *x > 1e10 {
+                *x = 1e10;
+            }
+            // Clamp extremely small values to prevent underflow
+            if *x < 1e-10 {
+                *x = 0.0;
+            }
+        } else {
+            *x = 0.0; // Replace non-finite values with 0
         }
     }
 
@@ -86,29 +100,13 @@ pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature:
         *p /= ssum;
     }
 
-    // Debug output for problematic cases
-    //if shortlist_probs.is_empty() {
-    // println!("Top tokens: {}({:.4}), {}({:.4}), {}({:.4})",
-    //          shortlist[0], shortlist_probs[0],
-    //          if shortlist.len() > 1 { shortlist[1] } else { 0 },
-    //          if shortlist_probs.len() > 1 { shortlist_probs[1] } else { 0.0 },
-    //          if shortlist.len() > 2 { shortlist[2] } else { 0 },
-    //          if shortlist_probs.len() > 2 { shortlist_probs[2] } else { 0.0 });
-    //    if shortlist_probs[0] > 0.99 {
-    // println!("Warning: Very peaked distribution - token {} has prob {:.4}", shortlist[0], shortlist_probs[0]);
-    //     }
-    //}
-
     // Sample using RNG (use simple rng.next_u32() -> float to avoid trait issues)
     let mut rng = rand::rng();
     let r = (rng.next_u32() as f32) / (u32::MAX as f32);
-    // println!("Random value: {:.4}", r);
     let mut acc = 0.0f32;
     for (i, &p) in shortlist_probs.iter().enumerate() {
         acc += p;
-        // println!("  checking token {} with prob {:.4}, cumulative: {:.4}", shortlist[i], p, acc);
         if r <= acc || acc.is_infinite() || acc.is_nan() {
-            // println!("Selected token {} with prob {:.4}", shortlist[i], p);
             return shortlist[i];
         }
     }
@@ -118,7 +116,7 @@ pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature:
 /// High-level end-to-end generation pipeline that combines tokenization, embedding,
 /// model inference, and sampling into a complete inference loop.
 pub fn generate(
-    wan: &mut Qwen25,
+    qwen: &mut Qwen25,
     tokenizer: &Tokenizer,
     ctx: &mut Context,
     prompt: &str,
@@ -138,10 +136,24 @@ pub fn generate(
 
     // Generate tokens using the non-KV cache approach for debugging
     let generated_ids =
-        generate_autoregressive_without_kv_cache(wan, tokenizer, ctx, &input_ids, cfg)?;
-
-    // Decode the generated tokens
+        generate_autoregressive_without_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
     let output_text = tokenizer.decode(&generated_ids)?;
+    println!("Debug: Generated text Full: {:?}", output_text);
+
+    // Only decode the new tokens generated after the prompt, and trim at EOS if present
+    let start = input_ids.len();
+    let eos_id_opt = tokenizer.special_tokens().eos_token_id;
+    let tail = &generated_ids[start..];
+    let decode_slice: &[u32] = if let Some(eos_id) = eos_id_opt {
+        if let Some(pos) = tail.iter().position(|&t| t == eos_id) {
+            &tail[..pos]
+        } else {
+            tail
+        }
+    } else {
+        tail
+    };
+    let output_text = tokenizer.decode(decode_slice)?;
 
     Ok(output_text)
 }
@@ -149,7 +161,7 @@ pub fn generate(
 /// High-level autoregressive generation loop using Qwen25 without KV caches for debugging.
 /// This implementation processes the full context each time for comparison.
 pub fn generate_autoregressive_without_kv_cache(
-    wan: &mut Qwen25,
+    qwen: &mut Qwen25,
     tokenizer: &Tokenizer,
     ctx: &mut Context,
     input_ids: &[u32],
@@ -177,20 +189,20 @@ pub fn generate_autoregressive_without_kv_cache(
         let current_ids = generated.clone();
 
         // Embed all tokens so far
-        let input_tensor = wan.embed(&current_ids, ctx)?;
+        let input_tensor = qwen.embed(&current_ids, ctx)?;
 
         // Run through the full model
-        let hidden_states = wan.forward(&input_tensor, ctx)?;
+        let hidden_states = qwen.forward(&input_tensor, ctx)?;
 
         // Apply output projection
-        let logits_tensor = wan.output(&hidden_states, ctx)?;
+        let logits_tensor = qwen.output(&hidden_states, ctx)?;
 
         // Extract logits for the last token
         let logits_dims = logits_tensor.dims();
         let logits = logits_tensor.to_vec();
 
         // Convert logits to vocab-size slice; assume logits shape [batch, seq, vocab]
-        let vocab_size = wan.config.vocab_size;
+        let vocab_size = qwen.config.vocab_size;
         let vocab_logits =
             if logits_dims.len() >= 3 && logits_dims[logits_dims.len() - 1] == vocab_size {
                 // Properly shaped logits [batch, seq, vocab]
@@ -230,7 +242,11 @@ pub fn generate_autoregressive_without_kv_cache(
 
         generated.push(next_token);
         // Debug: print sampled token
-        println!("Sampled token ID: {}, decoded: '{}'", next_token, tokenizer.decode(&[next_token]).unwrap_or_default());
+        println!(
+            "Sampled token ID: {}, decoded: '{}'",
+            next_token,
+            tokenizer.decode(&[next_token]).unwrap_or_default()
+        );
 
         // Check for EOS token
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645); // Qwen2.5 default EOS

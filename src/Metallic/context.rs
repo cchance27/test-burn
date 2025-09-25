@@ -34,7 +34,8 @@ pub struct Context {
     pub(crate) kv_rearrange_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) mul_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) add_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-    pub(crate) broadcast_add_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pub(crate) broadcast_add_pipeline:
+        Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) permute_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) sub_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     pub(crate) div_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
@@ -88,7 +89,7 @@ impl Context {
             kv_caches: FxHashMap::default(),
         })
     }
-    
+
     pub fn with_command_buffer<F, R>(&mut self, f: F) -> Result<R, MetalError>
     where
         F: FnOnce(&mut CommandBuffer, &mut ResourceCache) -> Result<R, MetalError>,

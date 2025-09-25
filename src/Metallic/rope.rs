@@ -51,22 +51,23 @@ pub fn ensure_rope_pipeline(ctx: &mut Context) -> Result<(), MetalError> {
         // Position in sequence (assume rows are arranged so that seq dimension varies fastest across rows)
         uint pos = row_idx % seq_len;
 
-        // We require dim to be even so pairs exist
-        uint pair = feature_idx / 2; // floor
-        float cosv = cos_buf[pos * (dim/2) + pair];
-        float sinv = sin_buf[pos * (dim/2) + pair];
+        // Half-split RoPE: pair indices across the two halves of the last dimension
+        uint half_dim = dim / 2u;
+        uint pair = (feature_idx < half_dim) ? feature_idx : (feature_idx - half_dim);
+        float cosv = cos_buf[pos * half_dim + pair];
+        float sinv = sin_buf[pos * half_dim + pair];
 
-        float x = input[gid];
-
-        if ((feature_idx & 1u) == 0u) {
-            // even index -> x_i
-            float x_j = input[row_idx * dim + feature_idx + 1u];
-            float out_i = x * cosv - x_j * sinv;
+        if (feature_idx < half_dim) {
+            // first half element x_i pairs with x_j at index +half_dim
+            float x_i = input[gid];
+            float x_j = input[row_idx * dim + feature_idx + half_dim];
+            float out_i = x_i * cosv - x_j * sinv;
             output[gid] = out_i;
         } else {
-            // odd index -> x_j
-            float x_i = input[row_idx * dim + feature_idx - 1u];
-            float out_j = x * cosv + x_i * sinv;
+            // second half element x_j pairs with x_i at index -half_dim
+            float x_j = input[gid];
+            float x_i = input[row_idx * dim + (feature_idx - half_dim)];
+            float out_j = x_j * cosv + x_i * sinv;
             output[gid] = out_j;
         }
     }

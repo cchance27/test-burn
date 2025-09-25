@@ -1000,4 +1000,25 @@ impl Tensor {
             offset: new_offset,
         })
     }
+
+    /// Check tensor values for numerical stability issues
+    pub fn validate_numerical_stability(&self) -> Result<(), MetalError> {
+        let data = self.as_slice();
+        for (i, &val) in data.iter().enumerate() {
+            if !val.is_finite() {
+                return Err(MetalError::InvalidOperation(format!(
+                    "Non-finite value detected at index {}: {} in tensor with shape {:?}",
+                    i, val, self.dims
+                )));
+            }
+            // Check for extremely large values that might cause overflow in subsequent operations
+            if val.abs() > 1e6 {
+                eprintln!(
+                    "Warning: Very large value detected at index {}: {} in tensor with shape {:?}. This could cause numerical instability.",
+                    i, val, self.dims
+                );
+            }
+        }
+        Ok(())
+    }
 }

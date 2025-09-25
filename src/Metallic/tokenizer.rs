@@ -1,12 +1,33 @@
-//! Tokenizer implementation for the Metallic framework.
+// Tokenizer implementation for the Metallic framework.
 //!
 //! This module provides BPE (Byte Pair Encoding) tokenization capabilities
 //! that can work with GGUF metadata or other sources of vocabulary and merges.
 
+use fancy_regex::Regex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use std::sync::RwLock;
 use thiserror::Error;
+use unicode_normalization::UnicodeNormalization;
+
+fn bytes_to_unicode() -> FxHashMap<u8, char> {
+    let mut bs = (b'!'..=b'~')
+        .chain(b'\xa1'..=b'\xac')
+        .chain(b'\xae'..=b'\xff')
+        .collect::<Vec<_>>();
+    let mut cs = bs.iter().map(|b| *b as u32).collect::<Vec<_>>();
+    let mut n = 0;
+    for b in 0..=255 {
+        if !bs.contains(&b) {
+            bs.push(b);
+            cs.push(256 + n);
+            n += 1;
+        }
+    }
+    bs.into_iter()
+        .zip(cs.into_iter().map(|c| std::char::from_u32(c).unwrap()))
+        .collect()
+}
 
 /// Error types for tokenizer operations
 #[derive(Debug, Error)]
@@ -19,6 +40,8 @@ pub enum TokenizerError {
     MissingData,
     #[error("Tokenizer initialization failed: {0}")]
     InitializationFailed(String),
+    #[error("Regex Tokenizer Errors: {0}")]
+    RegexError(#[from] fancy_regex::Error),
 }
 
 /// Special token IDs
@@ -45,6 +68,7 @@ pub struct Tokenizer {
     add_bos_token: bool,
     /// Cache for BPE tokenization results
     bpe_cache: RwLock<FxHashMap<String, Vec<u32>>>,
+    byte_encoder: FxHashMap<u8, char>,
 }
 
 impl Tokenizer {
@@ -68,6 +92,8 @@ impl Tokenizer {
             merges_map.insert(merge.clone(), i as u32);
         }
 
+        let byte_encoder = bytes_to_unicode();
+
         Ok(Self {
             vocab,
             vocab_r,
@@ -76,6 +102,7 @@ impl Tokenizer {
             special_tokens,
             add_bos_token,
             bpe_cache: RwLock::new(FxHashMap::default()),
+            byte_encoder,
         })
     }
 
@@ -84,7 +111,13 @@ impl Tokenizer {
         vocab: FxHashMap<u32, String>,
         merges: Vec<(String, String)>,
     ) -> Result<Self, TokenizerError> {
-        Self::new(vocab, merges, FxHashMap::default(), SpecialTokens::default(), false)
+        Self::new(
+            vocab,
+            merges,
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+        )
     }
 
     /// Create a new tokenizer with custom configuration
@@ -94,7 +127,13 @@ impl Tokenizer {
         special_tokens: SpecialTokens,
         add_bos_token: bool,
     ) -> Result<Self, TokenizerError> {
-        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
+        Self::new(
+            vocab,
+            merges,
+            FxHashMap::default(),
+            special_tokens,
+            add_bos_token,
+        )
     }
 
     /// Create a tokenizer from any source that provides vocabulary and merges
@@ -107,7 +146,13 @@ impl Tokenizer {
     ) -> Result<Self, TokenizerError> {
         let vocab: FxHashMap<u32, String> = vocab_source.into_iter().collect();
         let merges: Vec<(String, String)> = merges_source.into_iter().collect();
-        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
+        Self::new(
+            vocab,
+            merges,
+            FxHashMap::default(),
+            special_tokens,
+            add_bos_token,
+        )
     }
 
     /// Create a tokenizer from GGUF metadata
@@ -125,9 +170,7 @@ impl Tokenizer {
             .get("tokenizer.ggml.merges")
             .ok_or(TokenizerError::MissingData)?;
 
-        let token_types_value = metadata
-            .entries
-            .get("tokenizer.ggml.token_type");
+        let token_types_value = metadata.entries.get("tokenizer.ggml.token_type");
 
         // Extract special tokens
         let bos_token_id = metadata
@@ -231,13 +274,28 @@ impl Tokenizer {
             vocab.insert(i as u32, token);
         }
 
+        // Diagnostics: print small sample of the built vocabulary so we can cross-check indexing
+        let vocab_len = vocab.len();
+        println!("TOKENIZER DEBUG: Built vocab with {} entries", vocab_len);
+        for i in 0..std::cmp::min(10, vocab_len) {
+            if let Some(tok) = vocab.get(&(i as u32)) {
+                println!("TOKENIZER DEBUG: vocab[{}] = '{}'", i, tok);
+            }
+        }
+
         let special_tokens = SpecialTokens {
             bos_token_id,
             eos_token_id,
             pad_token_id,
         };
 
-        Self::new(vocab, merges, token_types_map, special_tokens, add_bos_token)
+        Self::new(
+            vocab,
+            merges,
+            token_types_map,
+            special_tokens,
+            add_bos_token,
+        )
     }
 
     /// Encode text into tokens using the serial implementation
@@ -247,91 +305,95 @@ impl Tokenizer {
 
     /// Encode text into tokens using the serial implementation
     pub fn encode_serial(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
+        let text = text.nfc().collect::<String>();
+
         let mut token_ids = Vec::new();
-        if let Some(bos_id) = self.special_tokens.bos_token_id {
-            if self.add_bos_token {
-                token_ids.push(bos_id);
-            }
+        if let Some(bos_id) = self.special_tokens.bos_token_id
+            && self.add_bos_token
+        {
+            token_ids.push(bos_id);
         }
 
-        let mut special_tokens = Vec::new();
-        for token in self.vocab.values() {
-            if token.starts_with("<|") && token.ends_with("|>") {
-                special_tokens.push(token.clone());
-            }
-        }
-        // Sort by length descending to match longest tokens first
-        special_tokens.sort_by_key(|b| std::cmp::Reverse(b.len()));
-
-        let mut parts = Vec::new();
+        let special_re = Regex::new(r"<\|[^>]*\|>")?;
+        // Use the canonical GPT-2 ByteLevel BPE regex pattern (matches HF's implementation)
+        // Reference pattern: `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
+        // Use a GPT-2 ByteLevel BPE-compatible pattern without lookaround (rust-regex doesn't support it)
+        let re = Regex::new(
+            r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
+        )?;
+        let mut pieces: Vec<String> = Vec::new();
         let mut last = 0;
-        while last < text.len() {
-            let remaining_text = &text[last..];
-            // Find the earliest occurrence of any special token in remaining_text
-            let mut found_pos: Option<(usize, &String)> = None;
-            for token in &special_tokens {
-                if let Some(pos) = remaining_text.find(token) {
-                    match found_pos {
-                        Some((prev_pos, _)) if pos >= prev_pos => {}
-                        _ => found_pos = Some((pos, token)),
-                    }
+        let matches = special_re.find_iter(&text);
+        for mat_result in matches {
+            let mat = mat_result.unwrap();
+            if mat.start() > last {
+                let subtext = &text[last..mat.start()];
+                for submat_result in re.find_iter(subtext) {
+                    let submat = submat_result.unwrap();
+                    pieces.push(submat.as_str().to_string());
                 }
             }
-            if let Some((pos, token)) = found_pos {
-                if pos > 0 {
-                    parts.push(&text[last..last + pos]);
-                }
-                parts.push(&text[last + pos..last + pos + token.len()]);
-                last += pos + token.len();
-            } else {
-                parts.push(remaining_text);
-                break;
+            pieces.push(mat.as_str().to_string());
+            last = mat.end();
+        }
+        if last < text.len() {
+            let subtext = &text[last..];
+            for submat_result in re.find_iter(subtext) {
+                let submat = submat_result.unwrap();
+                pieces.push(submat.as_str().to_string());
             }
         }
-
-        for part in parts {
-            if self.vocab_r.contains_key(part) && part.starts_with("<|") {
-                token_ids.push(*self.vocab_r.get(part).unwrap());
-                continue;
-            }
-            
-            // BPE encode part
-            let preprocessed: String = part.chars().map(|c| if c.is_whitespace() { 'Ġ' } else { c }).collect();
-            let mut pieces: Vec<String> = preprocessed.chars().map(|c| c.to_string()).collect();
-            if pieces.is_empty() {
-                continue;
-            }
-            loop {
-                let mut min_rank = u32::MAX;
-                let mut merge_pos = None;
-
-                for i in 0..pieces.len().saturating_sub(1) {
-                    let pair_key = (pieces[i].clone(), pieces[i + 1].clone());
-                    if let Some(&rank) = self.merges.get(&pair_key) {
-                        if rank < min_rank {
-                            min_rank = rank;
-                            merge_pos = Some(i);
-                        }
-                    }
-                }
-
-                if let Some(pos) = merge_pos {
-                    let merged = format!("{}{}", pieces[pos], pieces[pos + 1]);
-                    pieces.splice(pos..pos + 2, std::iter::once(merged));
-                } else {
-                    break;
-                }
-            }
-            for piece in pieces {
-                if let Some(&id) = self.vocab_r.get(&piece) {
-                    token_ids.push(id);
-                } else {
-                    token_ids.push(0); // UNK
-                }
-            }
+        for piece in pieces {
+            self.bpe_encode(&piece, &mut token_ids);
         }
 
         Ok(token_ids)
+    }
+
+    fn bpe_encode(&self, text: &str, token_ids: &mut Vec<u32>) {
+        if let Some(id) = self.vocab_r.get(text) {
+            token_ids.push(*id);
+            return;
+        }
+
+        let token_unicode = text
+            .as_bytes()
+            .iter()
+            .map(|b| self.byte_encoder[b])
+            .collect::<String>();
+
+        let mut pieces: Vec<String> = token_unicode.chars().map(|c| c.to_string()).collect();
+        if pieces.is_empty() {
+            return;
+        }
+        loop {
+            let mut min_rank = u32::MAX;
+            let mut merge_pos = None;
+
+            for i in 0..pieces.len().saturating_sub(1) {
+                let pair_key = (pieces[i].clone(), pieces[i + 1].clone());
+                if let Some(&rank) = self.merges.get(&pair_key)
+                    && rank < min_rank
+                {
+                    min_rank = rank;
+                    merge_pos = Some(i);
+                }
+            }
+
+            if let Some(pos) = merge_pos {
+                let merged = format!("{}{}", pieces[pos], pieces[pos + 1]);
+                pieces.splice(pos..pos + 2, std::iter::once(merged));
+            } else {
+                break;
+            }
+        }
+        for piece in pieces {
+            if let Some(&id) = self.vocab_r.get(&piece) {
+                token_ids.push(id);
+            } else {
+                token_ids.push(0); // UNK
+            }
+        }
     }
 
     /// Decode tokens into text
@@ -350,12 +412,15 @@ impl Tokenizer {
         for token_id in &tokens[start_index..] {
             if let Some(token) = self.vocab.get(token_id) {
                 let token_type = self.token_types.get(token_id).cloned().unwrap_or(1); // Default to normal
-                if token_type == 6 { // Byte token
+                if token_type == 6 {
+                    // Byte token
                     if token.starts_with("<0x") && token.ends_with('>') && token.len() == 6 {
                         if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
                             bytes.push(byte);
-                            println!("Token ID: {token_id}: Type: {token_type} TokenFromByte: {byte:?} {}", String::from_utf8_lossy(&[byte]));
-
+                            println!(
+                                "Token ID: {token_id}: Type: {token_type} TokenFromByte: {byte:?} {}",
+                                String::from_utf8_lossy(&[byte])
+                            );
                         } else {
                             unimplemented!("handle failed str_Radix")
                         }
@@ -364,7 +429,7 @@ impl Tokenizer {
                     }
                 } else {
                     bytes.extend_from_slice(token.as_bytes());
-                    println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");                    
+                    println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");
                 }
             } else {
                 return Err(TokenizerError::InvalidTokenId(*token_id));
@@ -373,19 +438,15 @@ impl Tokenizer {
 
         let decoded_text = String::from_utf8_lossy(&bytes).to_string();
         let processed_text = self.post_process(decoded_text);
-        
+
         Ok(processed_text)
     }
 
     /// Post-process decoded text to remove BPE artifacts
     fn post_process(&self, text: String) -> String {
         // For GPT2, replace Ġ with space
-        text.replace("Ġ",  " ")
-            .replace("  ", " ")
-            .trim()
-            .to_string()
+        text.replace("Ġ", " ").replace("  ", " ").trim().to_string()
     }
-    
 
     /// Get the vocabulary size
     pub fn vocab_size(&self) -> usize {
