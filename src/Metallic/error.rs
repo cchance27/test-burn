@@ -35,5 +35,19 @@ pub enum MetalError {
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
     #[error("Tokenizer error: {0}")]
-    TokenizerError(#[from] crate::metallic::tokenizer::TokenizerError),
+    TokenizerError(Box<crate::metallic::tokenizer::TokenizerError>),
+    #[error("Regex Error: {0}")]
+    RegexError(Box<fancy_regex::Error>),
+}
+
+impl From<crate::metallic::tokenizer::TokenizerError> for MetalError {
+    fn from(e: crate::metallic::tokenizer::TokenizerError) -> Self {
+        MetalError::TokenizerError(Box::new(e))
+    }
+}
+
+impl From<fancy_regex::Error> for MetalError {
+    fn from(e: fancy_regex::Error) -> Self {
+        MetalError::RegexError(Box::new(e))
+    }
 }

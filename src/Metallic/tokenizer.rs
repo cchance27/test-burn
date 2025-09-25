@@ -10,6 +10,8 @@ use std::sync::RwLock;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
+use crate::metallic::MetalError;
+
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
     let mut bs = (b'!'..=b'~')
         .chain(b'\xa1'..=b'\xac')
@@ -79,7 +81,7 @@ impl Tokenizer {
         token_types: FxHashMap<u32, i32>,
         special_tokens: SpecialTokens,
         add_bos_token: bool,
-    ) -> Result<Self, TokenizerError> {
+    ) -> Result<Self, MetalError> {
         // Create reverse vocabulary
         let mut vocab_r = FxHashMap::default();
         for (id, token) in &vocab {
@@ -110,7 +112,7 @@ impl Tokenizer {
     pub fn from_vocab_and_merges(
         vocab: FxHashMap<u32, String>,
         merges: Vec<(String, String)>,
-    ) -> Result<Self, TokenizerError> {
+    ) -> Result<Self, MetalError> {
         Self::new(
             vocab,
             merges,
@@ -126,7 +128,7 @@ impl Tokenizer {
         merges: Vec<(String, String)>,
         special_tokens: SpecialTokens,
         add_bos_token: bool,
-    ) -> Result<Self, TokenizerError> {
+    ) -> Result<Self, MetalError> {
         Self::new(
             vocab,
             merges,
@@ -143,7 +145,7 @@ impl Tokenizer {
         merges_source: impl IntoIterator<Item = (String, String)>,
         special_tokens: SpecialTokens,
         add_bos_token: bool,
-    ) -> Result<Self, TokenizerError> {
+    ) -> Result<Self, MetalError> {
         let vocab: FxHashMap<u32, String> = vocab_source.into_iter().collect();
         let merges: Vec<(String, String)> = merges_source.into_iter().collect();
         Self::new(
@@ -156,9 +158,7 @@ impl Tokenizer {
     }
 
     /// Create a tokenizer from GGUF metadata
-    pub fn from_gguf_metadata(
-        metadata: &crate::gguf::GGUFMetadata,
-    ) -> Result<Self, TokenizerError> {
+    pub fn from_gguf_metadata(metadata: &crate::gguf::GGUFMetadata) -> Result<Self, MetalError> {
         // Extract vocabulary
         let tokens_value = metadata
             .entries
@@ -220,7 +220,8 @@ impl Tokenizer {
             _ => {
                 return Err(TokenizerError::InitializationFailed(
                     "Invalid tokens format".to_string(),
-                ));
+                )
+                .into());
             }
         };
 
@@ -251,7 +252,8 @@ impl Tokenizer {
             _ => {
                 return Err(TokenizerError::InitializationFailed(
                     "Invalid merges format".to_string(),
-                ));
+                )
+                .into());
             }
         };
 
@@ -299,12 +301,12 @@ impl Tokenizer {
     }
 
     /// Encode text into tokens using the serial implementation
-    pub fn encode(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
+    pub fn encode(&self, text: &str) -> Result<Vec<u32>, MetalError> {
         self.encode_serial(text)
     }
 
     /// Encode text into tokens using the serial implementation
-    pub fn encode_serial(&self, text: &str) -> Result<Vec<u32>, TokenizerError> {
+    pub fn encode_serial(&self, text: &str) -> Result<Vec<u32>, MetalError> {
         let text = text.nfc().collect::<String>();
 
         let mut token_ids = Vec::new();
@@ -397,7 +399,7 @@ impl Tokenizer {
     }
 
     /// Decode tokens into text
-    pub fn decode(&self, tokens: &[u32]) -> Result<String, TokenizerError> {
+    pub fn decode(&self, tokens: &[u32]) -> Result<String, MetalError> {
         let mut bytes = Vec::new();
         // Skip BOS token if present at the beginning
         let start_index = if self.add_bos_token
@@ -432,7 +434,7 @@ impl Tokenizer {
                     //println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");
                 }
             } else {
-                return Err(TokenizerError::InvalidTokenId(*token_id));
+                return Err(TokenizerError::InvalidTokenId(*token_id).into());
             }
         }
 
@@ -475,7 +477,7 @@ impl Tokenizer {
     }
 
     /// Clear the BPE cache
-    pub fn clear_cache(&self) -> Result<(), TokenizerError> {
+    pub fn clear_cache(&self) -> Result<(), MetalError> {
         let mut cache = self
             .bpe_cache
             .write()
@@ -485,7 +487,7 @@ impl Tokenizer {
     }
 
     /// Get the current size of the BPE cache
-    pub fn cache_size(&self) -> Result<usize, TokenizerError> {
+    pub fn cache_size(&self) -> Result<usize, MetalError> {
         let cache = self
             .bpe_cache
             .read()

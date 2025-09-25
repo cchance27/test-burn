@@ -1169,7 +1169,7 @@ impl LoadableModel for Qwen25 {
         //let mut attn_out_loaded = 0;
         //let mut embed_nonzero = false;
         //let mut output_nonzero = false;
-//
+        //
         //// Check embeddings/output
         //let embed_slice = qwen.embed_weight.as_slice();
         //if embed_slice.iter().any(|&x| x != 0.0) {
@@ -1183,7 +1183,7 @@ impl LoadableModel for Qwen25 {
         //} else {
         //    //println!("MAPPING DEBUG: WARNING - Output weights all zero!");
         //}
-//
+        //
         //// Per-block checks (expect 24 blocks from metadata)
         //for (idx, block) in qwen.blocks.iter().enumerate() {
         //    let q_slice = block.attn_q_weight.as_slice();
@@ -1222,7 +1222,7 @@ impl LoadableModel for Qwen25 {
         //    if out_slice.iter().any(|&x| x != 0.0) {
         //        attn_out_loaded += 1;
         //    }
-//
+        //
         //    // Sample for block 0 if detailed
         //    //if idx == 0 {
         //    //    println!(
