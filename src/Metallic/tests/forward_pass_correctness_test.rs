@@ -564,7 +564,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // --- 3. Test First Block Q Projection ---
     println!("--- 3. Testing First Block Q Projection ---");
-    let m = 1 * input_ids.len();
+    let m = input_ids.len();
     let d_model = model.config.d_model;
     let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
     // Check the dimensions of the weight tensor to see if it needs to be handled differently
@@ -918,8 +918,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &mut ctx)?;
-    let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &mut ctx)?;
+    let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
+    let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
     let q_heads_after_rope = {
         let out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), &mut ctx)?;
         let rope_q = crate::metallic::rope::RoPE::new(
@@ -950,8 +950,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &mut ctx)?;
-    let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &mut ctx)?;
+    let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &ctx)?;
+    let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope = {
         let out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), &mut ctx)?;
         let rope_k = crate::metallic::rope::RoPE::new(
@@ -1659,8 +1659,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q_last = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &mut ctx)?;
-    let sin_q_last = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &mut ctx)?;
+    let cos_q_last = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
+    let sin_q_last = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
     let q_heads_after_rope_last = {
         let out = Tensor::create_tensor_pooled(q_heads_last.dims().to_vec(), &mut ctx)?;
         let rope_q = crate::metallic::rope::RoPE::new(
@@ -1690,8 +1690,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k_last = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &mut ctx)?;
-    let sin_k_last = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &mut ctx)?;
+    let cos_k_last = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &ctx)?;
+    let sin_k_last = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope_last = {
         let out = Tensor::create_tensor_pooled(k_heads_last.dims().to_vec(), &mut ctx)?;
         let rope_k = crate::metallic::rope::RoPE::new(

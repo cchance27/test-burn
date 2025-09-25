@@ -137,8 +137,6 @@ pub fn generate(
     // Generate tokens using the non-KV cache approach for debugging
     let generated_ids =
         generate_autoregressive_without_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
-    let output_text = tokenizer.decode(&generated_ids)?;
-    println!("Debug: Generated text Full: {:?}", output_text);
 
     // Only decode the new tokens generated after the prompt, and trim at EOS if present
     let start = input_ids.len();
@@ -242,11 +240,11 @@ pub fn generate_autoregressive_without_kv_cache(
 
         generated.push(next_token);
         // Debug: print sampled token
-        println!(
-            "Sampled token ID: {}, decoded: '{}'",
-            next_token,
-            tokenizer.decode(&[next_token]).unwrap_or_default()
-        );
+        //println!(
+        //    "Sampled token ID: {}, decoded: '{}'",
+        //    next_token,
+        //    tokenizer.decode(&[next_token]).unwrap_or_default()
+        //);
 
         // Check for EOS token
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645); // Qwen2.5 default EOS

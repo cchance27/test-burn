@@ -29,9 +29,9 @@ impl GGUFModelLoader {
                     Ok(raw) => {
                         // TODO: Why is this necessary??? shouldnt this be handled like we do for Q8... and others?
                         //println!("Converting F16 tensor '{}' with {} bytes", tensor_info.name, raw.len());
-                        if tensor_info.name == "token_embd.weight" {
-                            println!("First F16 bytes: {:02x?} {:02x?}", raw[0], raw[1]);
-                        }
+                        //if tensor_info.name == "token_embd.weight" {
+                        //    println!("First F16 bytes: {:02x?} {:02x?}", raw[0], raw[1]);
+                        //}
                         let elem_count = raw.len() / 2;
                         let mut f32_data = Vec::with_capacity(elem_count);
                         for i in 0..elem_count {
@@ -56,20 +56,20 @@ impl GGUFModelLoader {
                             &f32_data, dims, _context,
                         ) {
                             Ok(t) => {
-                                if tensor_info.name == "token_embd.weight" {
-                                    let slice = t.as_slice();
-                                    println!(
-                                        "First 10 values of token_embd.weight: {:?}",
-                                        &slice[0..std::cmp::min(10, slice.len())]
-                                    );
-                                }
-                                if tensor_info.name == "output.weight" {
-                                    let slice = t.as_slice();
-                                    println!(
-                                        "First 10 values of output.weight: {:?}",
-                                        &slice[0..std::cmp::min(10, slice.len())]
-                                    );
-                                }
+                                //if tensor_info.name == "token_embd.weight" {
+                                //    let slice = t.as_slice();
+                                //    println!(
+                                //        "First 10 values of token_embd.weight: {:?}",
+                                //        &slice[0..std::cmp::min(10, slice.len())]
+                                //    );
+                                //}
+                                //if tensor_info.name == "output.weight" {
+                                //    let slice = t.as_slice();
+                                //    println!(
+                                //        "First 10 values of output.weight: {:?}",
+                                //        &slice[0..std::cmp::min(10, slice.len())]
+                                //    );
+                                //}
                                 tensors.insert(tensor_info.name.clone(), t);
                                 continue;
                             }

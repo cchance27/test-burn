@@ -166,15 +166,15 @@ impl Qwen25 {
             output_data[dst_start..dst_end].copy_from_slice(&embed_data[src_start..src_end]);
 
             // Debug for first token
-            if i == 0 {
-                let debug_end = std::cmp::min(src_start + 10, embed_data.len());
-                println!(
-                    "Weight for first token {} ({}): {:?}",
-                    token_id,
-                    src_start,
-                    &embed_data[src_start..debug_end]
-                );
-            }
+            //if i == 0 {
+            //    let debug_end = std::cmp::min(src_start + 10, embed_data.len());
+            //    println!(
+            //        "Weight for first token {} ({}): {:?}",
+            //        token_id,
+            //        src_start,
+            //        &embed_data[src_start..debug_end]
+            //    );
+            //}
         }
 
         Ok(embedded)
@@ -320,7 +320,7 @@ impl Qwen25 {
 
         let mut x = input.clone();
 
-        for (_block_idx, block) in self.blocks.iter().enumerate() {
+        for block in self.blocks.iter() {
             let resid_attn = x.clone();
 
             // RMSNorm before Attention
@@ -1158,149 +1158,149 @@ impl LoadableModel for Qwen25 {
         }
 
         // Debug: Verify loading matches metadata dump (24 blocks, specific tensors non-zero)
-        let mut q_loaded = 0;
-        let mut k_loaded = 0;
-        let mut v_loaded = 0;
-        let mut attn_norm_loaded = 0;
-        let mut ffn_norm_loaded = 0;
-        let mut ffn_gate_loaded = 0;
-        let mut ffn_up_loaded = 0;
-        let mut ffn_down_loaded = 0;
-        let mut attn_out_loaded = 0;
-        let mut embed_nonzero = false;
-        let mut output_nonzero = false;
-
-        // Check embeddings/output
-        let embed_slice = qwen.embed_weight.as_slice();
-        if embed_slice.iter().any(|&x| x != 0.0) {
-            embed_nonzero = true;
-        } else {
-            //println!("MAPPING DEBUG: WARNING - Embeddings all zero!");
-        }
-        let output_slice = qwen.output_weight.as_slice();
-        if output_slice.iter().any(|&x| x != 0.0) {
-            output_nonzero = true;
-        } else {
-            //println!("MAPPING DEBUG: WARNING - Output weights all zero!");
-        }
-
-        // Per-block checks (expect 24 blocks from metadata)
-        for (idx, block) in qwen.blocks.iter().enumerate() {
-            let q_slice = block.attn_q_weight.as_slice();
-            if q_slice.iter().any(|&x| x != 0.0) {
-                q_loaded += 1;
-            }
-            let k_slice = block.attn_k_weight.as_slice();
-            if k_slice.iter().any(|&x| x != 0.0) {
-                k_loaded += 1;
-            }
-            let v_slice = block.attn_v_weight.as_slice();
-            if v_slice.iter().any(|&x| x != 0.0) {
-                v_loaded += 1;
-            }
-            let attn_norm_slice = block.attn_norm_gamma.as_slice();
-            if attn_norm_slice.iter().any(|&x| x != 0.0) {
-                attn_norm_loaded += 1;
-            }
-            let ffn_norm_slice = block.ffn_norm_gamma.as_slice();
-            if ffn_norm_slice.iter().any(|&x| x != 0.0) {
-                ffn_norm_loaded += 1;
-            }
-            let gate_slice = block.ffn_gate.as_slice();
-            if gate_slice.iter().any(|&x| x != 0.0) {
-                ffn_gate_loaded += 1;
-            }
-            let up_slice = block.ffn_up.as_slice();
-            if up_slice.iter().any(|&x| x != 0.0) {
-                ffn_up_loaded += 1;
-            }
-            let down_slice = block.ffn_down.as_slice();
-            if down_slice.iter().any(|&x| x != 0.0) {
-                ffn_down_loaded += 1;
-            }
-            let out_slice = block.attn_out_weight.as_slice();
-            if out_slice.iter().any(|&x| x != 0.0) {
-                attn_out_loaded += 1;
-            }
-
-            // Sample for block 0 if detailed
-            if idx == 0 {
-                println!(
-                    "MAPPING DEBUG: Block 0 Q sample: {:.6}, K: {:.6}, Norm: {:.6}",
-                    q_slice[0], k_slice[0], attn_norm_slice[0]
-                );
-                // Also print FFN weight samples for deeper inspection
-                let gate_sample = qwen.blocks[0].ffn_gate.as_slice();
-                let up_sample = qwen.blocks[0].ffn_up.as_slice();
-                let down_sample = qwen.blocks[0].ffn_down.as_slice();
-                let n = std::cmp::min(10, gate_sample.len());
-                println!(
-                    "MAPPING DEBUG: Block 0 ffn_gate first {}: {:?}",
-                    n,
-                    &gate_sample[0..n]
-                );
-                let n2 = std::cmp::min(10, up_sample.len());
-                println!(
-                    "MAPPING DEBUG: Block 0 ffn_up first {}: {:?}",
-                    n2,
-                    &up_sample[0..n2]
-                );
-                let n3 = std::cmp::min(10, down_sample.len());
-                println!(
-                    "MAPPING DEBUG: Block 0 ffn_down first {}: {:?}",
-                    n3,
-                    &down_sample[0..n3]
-                );
-                // Also print biases if present
-                let gate_bias = qwen.blocks[0].ffn_gate_bias.as_slice();
-                let up_bias = qwen.blocks[0].ffn_up_bias.as_slice();
-                let down_bias = qwen.blocks[0].ffn_down_bias.as_slice();
-                println!(
-                    "MAPPING DEBUG: Block 0 ffn_gate_bias first {}: {:?}",
-                    std::cmp::min(10, gate_bias.len()),
-                    &gate_bias[0..std::cmp::min(10, gate_bias.len())]
-                );
-                println!(
-                    "MAPPING DEBUG: Block 0 ffn_up_bias first {}: {:?}",
-                    std::cmp::min(10, up_bias.len()),
-                    &up_bias[0..std::cmp::min(10, up_bias.len())]
-                );
-                println!(
-                    "MAPPING DEBUG: Block 0 ffn_down_bias first {}: {:?}",
-                    std::cmp::min(10, down_bias.len()),
-                    &down_bias[0..std::cmp::min(10, down_bias.len())]
-                );
-            }
-        }
+        //let mut q_loaded = 0;
+        //let mut k_loaded = 0;
+        //let mut v_loaded = 0;
+        //let mut attn_norm_loaded = 0;
+        //let mut ffn_norm_loaded = 0;
+        //let mut ffn_gate_loaded = 0;
+        //let mut ffn_up_loaded = 0;
+        //let mut ffn_down_loaded = 0;
+        //let mut attn_out_loaded = 0;
+        //let mut embed_nonzero = false;
+        //let mut output_nonzero = false;
+//
+        //// Check embeddings/output
+        //let embed_slice = qwen.embed_weight.as_slice();
+        //if embed_slice.iter().any(|&x| x != 0.0) {
+        //    embed_nonzero = true;
+        //} else {
+        //    //println!("MAPPING DEBUG: WARNING - Embeddings all zero!");
+        //}
+        //let output_slice = qwen.output_weight.as_slice();
+        //if output_slice.iter().any(|&x| x != 0.0) {
+        //    output_nonzero = true;
+        //} else {
+        //    //println!("MAPPING DEBUG: WARNING - Output weights all zero!");
+        //}
+//
+        //// Per-block checks (expect 24 blocks from metadata)
+        //for (idx, block) in qwen.blocks.iter().enumerate() {
+        //    let q_slice = block.attn_q_weight.as_slice();
+        //    if q_slice.iter().any(|&x| x != 0.0) {
+        //        q_loaded += 1;
+        //    }
+        //    let k_slice = block.attn_k_weight.as_slice();
+        //    if k_slice.iter().any(|&x| x != 0.0) {
+        //        k_loaded += 1;
+        //    }
+        //    let v_slice = block.attn_v_weight.as_slice();
+        //    if v_slice.iter().any(|&x| x != 0.0) {
+        //        v_loaded += 1;
+        //    }
+        //    let attn_norm_slice = block.attn_norm_gamma.as_slice();
+        //    if attn_norm_slice.iter().any(|&x| x != 0.0) {
+        //        attn_norm_loaded += 1;
+        //    }
+        //    let ffn_norm_slice = block.ffn_norm_gamma.as_slice();
+        //    if ffn_norm_slice.iter().any(|&x| x != 0.0) {
+        //        ffn_norm_loaded += 1;
+        //    }
+        //    let gate_slice = block.ffn_gate.as_slice();
+        //    if gate_slice.iter().any(|&x| x != 0.0) {
+        //        ffn_gate_loaded += 1;
+        //    }
+        //    let up_slice = block.ffn_up.as_slice();
+        //    if up_slice.iter().any(|&x| x != 0.0) {
+        //        ffn_up_loaded += 1;
+        //    }
+        //    let down_slice = block.ffn_down.as_slice();
+        //    if down_slice.iter().any(|&x| x != 0.0) {
+        //        ffn_down_loaded += 1;
+        //    }
+        //    let out_slice = block.attn_out_weight.as_slice();
+        //    if out_slice.iter().any(|&x| x != 0.0) {
+        //        attn_out_loaded += 1;
+        //    }
+//
+        //    // Sample for block 0 if detailed
+        //    //if idx == 0 {
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 Q sample: {:.6}, K: {:.6}, Norm: {:.6}",
+        //    //        q_slice[0], k_slice[0], attn_norm_slice[0]
+        //    //    );
+        //    //    // Also print FFN weight samples for deeper inspection
+        //    //    let gate_sample = qwen.blocks[0].ffn_gate.as_slice();
+        //    //    let up_sample = qwen.blocks[0].ffn_up.as_slice();
+        //    //    let down_sample = qwen.blocks[0].ffn_down.as_slice();
+        //    //    let n = std::cmp::min(10, gate_sample.len());
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 ffn_gate first {}: {:?}",
+        //    //        n,
+        //    //        &gate_sample[0..n]
+        //    //    );
+        //    //    let n2 = std::cmp::min(10, up_sample.len());
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 ffn_up first {}: {:?}",
+        //    //        n2,
+        //    //        &up_sample[0..n2]
+        //    //    );
+        //    //    let n3 = std::cmp::min(10, down_sample.len());
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 ffn_down first {}: {:?}",
+        //    //        n3,
+        //    //        &down_sample[0..n3]
+        //    //    );
+        //    //    // Also print biases if present
+        //    //    let gate_bias = qwen.blocks[0].ffn_gate_bias.as_slice();
+        //    //    let up_bias = qwen.blocks[0].ffn_up_bias.as_slice();
+        //    //    let down_bias = qwen.blocks[0].ffn_down_bias.as_slice();
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 ffn_gate_bias first {}: {:?}",
+        //    //        std::cmp::min(10, gate_bias.len()),
+        //    //        &gate_bias[0..std::cmp::min(10, gate_bias.len())]
+        //    //    );
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 ffn_up_bias first {}: {:?}",
+        //    //        std::cmp::min(10, up_bias.len()),
+        //    //        &up_bias[0..std::cmp::min(10, up_bias.len())]
+        //    //    );
+        //    //    println!(
+        //    //        "MAPPING DEBUG: Block 0 ffn_down_bias first {}: {:?}",
+        //    //        std::cmp::min(10, down_bias.len()),
+        //    //        &down_bias[0..std::cmp::min(10, down_bias.len())]
+        //    //    );
+        //    //}
+        //}
 
         // Summary vs. expected (from dump: 24 blocks, 290 tensors total, but focus on key ones)
-        println!("MAPPING DEBUG SUMMARY:");
-        println!("  Embed/Output: {} / {}", embed_nonzero, output_nonzero);
-        println!("  Per-block loaded counts (expect 24 each):");
-        println!(
-            "    Q-proj: {}/24, K-proj: {}/24, V-proj: {}/24",
-            q_loaded, k_loaded, v_loaded
-        );
-        println!(
-            "    Attn-norm: {}/24, FFN-norm: {}/24",
-            attn_norm_loaded, ffn_norm_loaded
-        );
-        println!(
-            "    FFN-gate: {}/24, FFN-up: {}/24, FFN-down: {}/24",
-            ffn_gate_loaded, ffn_up_loaded, ffn_down_loaded
-        );
-        println!("    Attn-out: {}/24", attn_out_loaded);
-        if q_loaded < 24 || attn_norm_loaded < 24 {
-            //println!("MAPPING DEBUG: WARNING - Incomplete loading! Check tensor name mappings.");
-        } else {
-            println!(
-                "MAPPING DEBUG: All key tensors loaded successfully (matches 24-block metadata)."
-            );
-        }
-        println!(
-            "  Total GGUF tensors processed: {}",
-            gguf_model.tensors.len()
-        );
+        //println!("MAPPING DEBUG SUMMARY:");
+        //println!("  Embed/Output: {} / {}", embed_nonzero, output_nonzero);
+        //println!("  Per-block loaded counts (expect 24 each):");
+        //println!(
+        //    "    Q-proj: {}/24, K-proj: {}/24, V-proj: {}/24",
+        //    q_loaded, k_loaded, v_loaded
+        //);
+        //println!(
+        //    "    Attn-norm: {}/24, FFN-norm: {}/24",
+        //    attn_norm_loaded, ffn_norm_loaded
+        //);
+        //println!(
+        //    "    FFN-gate: {}/24, FFN-up: {}/24, FFN-down: {}/24",
+        //    ffn_gate_loaded, ffn_up_loaded, ffn_down_loaded
+        //);
+        //println!("    Attn-out: {}/24", attn_out_loaded);
+        //if q_loaded < 24 || attn_norm_loaded < 24 {
+        //    //println!("MAPPING DEBUG: WARNING - Incomplete loading! Check tensor name mappings.");
+        //} else {
+        //    println!(
+        //        "MAPPING DEBUG: All key tensors loaded successfully (matches 24-block metadata)."
+        //    );
+        //}
+        //println!(
+        //    "  Total GGUF tensors processed: {}",
+        //    gguf_model.tensors.len()
+        //);
 
         // Synchronize to ensure all copies are complete
         ctx.synchronize();

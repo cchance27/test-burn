@@ -45,6 +45,7 @@ struct Weights {
 ///
 /// # Returns
 /// Flat output [m, d_model] (reshape externally to [batch, seq, d_model])
+#[allow(clippy::too_many_arguments)]
 pub fn swiglu(
     x_normed_flat: &Tensor,
     ffn_gate: &Tensor,

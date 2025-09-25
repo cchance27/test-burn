@@ -752,7 +752,7 @@ mod tests {
                 }
 
                 // Print tensor count and first few tensor names
-                println!("First 10 tensors:");
+                //println!("First 10 tensors:");
                 let mut count = 0;
                 for tensor in &gguf.tensors {
                     if count < 10 {

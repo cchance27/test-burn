@@ -275,13 +275,13 @@ impl Tokenizer {
         }
 
         // Diagnostics: print small sample of the built vocabulary so we can cross-check indexing
-        let vocab_len = vocab.len();
-        println!("TOKENIZER DEBUG: Built vocab with {} entries", vocab_len);
-        for i in 0..std::cmp::min(10, vocab_len) {
-            if let Some(tok) = vocab.get(&(i as u32)) {
-                println!("TOKENIZER DEBUG: vocab[{}] = '{}'", i, tok);
-            }
-        }
+        //let vocab_len = vocab.len();
+        //println!("TOKENIZER DEBUG: Built vocab with {} entries", vocab_len);
+        //for i in 0..std::cmp::min(10, vocab_len) {
+        //    if let Some(tok) = vocab.get(&(i as u32)) {
+        //        println!("TOKENIZER DEBUG: vocab[{}] = '{}'", i, tok);
+        //    }
+        //}
 
         let special_tokens = SpecialTokens {
             bos_token_id,
@@ -417,10 +417,10 @@ impl Tokenizer {
                     if token.starts_with("<0x") && token.ends_with('>') && token.len() == 6 {
                         if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
                             bytes.push(byte);
-                            println!(
-                                "Token ID: {token_id}: Type: {token_type} TokenFromByte: {byte:?} {}",
-                                String::from_utf8_lossy(&[byte])
-                            );
+                            //println!(
+                            //    "Token ID: {token_id}: Type: {token_type} TokenFromByte: {byte:?} {}",
+                            //    String::from_utf8_lossy(&[byte])
+                            //);
                         } else {
                             unimplemented!("handle failed str_Radix")
                         }
@@ -429,7 +429,7 @@ impl Tokenizer {
                     }
                 } else {
                     bytes.extend_from_slice(token.as_bytes());
-                    println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");
+                    //println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");
                 }
             } else {
                 return Err(TokenizerError::InvalidTokenId(*token_id));
@@ -444,8 +444,13 @@ impl Tokenizer {
 
     /// Post-process decoded text to remove BPE artifacts
     fn post_process(&self, text: String) -> String {
-        // For GPT2, replace Ġ with space
-        text.replace("Ġ", " ").replace("  ", " ").trim().to_string()
+        // For GPT2, replace special characters with their corresponding whitespace
+        text.replace("Ġ", " ")
+            .replace("Ċ", "\n")
+            .replace("đ", "\t")
+            .replace("  ", " ")
+            .trim()
+            .to_string()
     }
 
     /// Get the vocabulary size
