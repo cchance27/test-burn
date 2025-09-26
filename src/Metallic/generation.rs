@@ -1,6 +1,6 @@
 use super::{Context, MetalError, Tensor};
 use crate::metallic::Tokenizer;
-use crate::metallic::qwen25::Qwen25;
+use crate::metallic::models::Qwen25;
 use rand::prelude::*;
 
 /// Generation configuration (defaults chosen by user)

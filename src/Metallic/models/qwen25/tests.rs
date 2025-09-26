@@ -1,5 +1,5 @@
 #![cfg(test)]
-use crate::metallic::qwen25::{Qwen25, Qwen25Config};
+use crate::metallic::models::{Qwen25, Qwen25Config};
 
 use super::*;
 

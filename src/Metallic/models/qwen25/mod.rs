@@ -1,4 +1,3 @@
-use super::{Context, MetalError, Tensor, swiglu};
 use crate::gguf::model_loader::GGUFModel;
 use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
@@ -7,7 +6,10 @@ use crate::metallic::kernels::matmul::MatMulOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
-use crate::metallic::model::LoadableModel;
+use crate::metallic::models::LoadableModel;
+use crate::metallic::{Context, MetalError, Tensor, swiglu};
+
+mod tests;
 
 /// Qwen25 configuration derived from Qwen2.5 metadata.
 /// Matches Qwen2.5-Coder-0.5B: d_model=896, ff_dim=4864, n_heads=14, n_kv_heads=2, n_layers=24.

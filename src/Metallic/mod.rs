@@ -17,18 +17,13 @@ pub mod resource_cache;
 pub mod scaled_dot_product_attention;
 pub mod tensor;
 pub mod tokenizer;
-
 pub use operation::{CommandBuffer, Operation};
 
 pub mod generation;
-pub mod model;
-
-pub mod qwen25;
-mod qwen25_test;
-
-pub mod swiglu;
+pub mod models;
 
 pub mod kernels;
+pub mod swiglu;
 
 #[cfg(test)]
 mod tests;

@@ -5,9 +5,10 @@ use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
+use crate::metallic::models::Qwen25;
 use crate::metallic::{
-    context::Context, error::MetalError, generation, generation::GenerationConfig, model::LoadableModel, qwen25::Qwen25, swiglu,
-    tensor::Tensor, tokenizer::Tokenizer,
+    context::Context, error::MetalError, generation, generation::GenerationConfig, models::LoadableModel, swiglu, tensor::Tensor,
+    tokenizer::Tokenizer,
 };
 use approx::assert_relative_eq;
 use ndarray::ArrayD;

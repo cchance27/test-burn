@@ -1,7 +1,9 @@
 use std::env;
 use std::process;
 
+use test_burn::metallic::Tokenizer;
 use test_burn::metallic::generation::GenerationConfig;
+use test_burn::metallic::models::Qwen25;
 
 fn main() {
     // Minimal CLI:
@@ -49,7 +51,7 @@ fn main() {
 
     // Instantiate Qwen25 (or the appropriate LoadableModel) from GGUFModel
     println!("Instantiating Qwen25 from GGUF model (this may allocate device memory)...");
-    let mut qwen: test_burn::metallic::qwen25::Qwen25 = match gguf_model.instantiate(&mut ctx) {
+    let mut qwen: Qwen25 = match gguf_model.instantiate(&mut ctx) {
         Ok(w) => w,
         Err(e) => {
             eprintln!("Failed to instantiate Qwen25 from GGUFModel: {:?}", e);
@@ -58,7 +60,7 @@ fn main() {
     };
 
     // Try to construct a tokenizer from GGUF metadata (best-effort)
-    let tokenizer = match test_burn::metallic::tokenizer::Tokenizer::from_gguf_metadata(&gguf_model.metadata) {
+    let tokenizer = match Tokenizer::from_gguf_metadata(&gguf_model.metadata) {
         Ok(t) => t,
         Err(e) => {
             eprintln!(

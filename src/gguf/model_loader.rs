@@ -262,9 +262,12 @@ impl GGUFModel {
     /// This allows callers to do:
     ///   let gguf_model = GGUFModelLoader::new(...).load_model(...)?
     ///   let qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
-    pub fn instantiate<T: crate::metallic::model::LoadableModel>(&self, ctx: &mut crate::metallic::Context) -> Result<T, super::GGUFError> {
+    pub fn instantiate<T: crate::metallic::models::LoadableModel>(
+        &self,
+        ctx: &mut crate::metallic::Context,
+    ) -> Result<T, super::GGUFError> {
         // Delegate to the metallic::model::Model::load helper. Map MetalError -> GGUFError::InvalidData with context.
-        match crate::metallic::model::Model::load::<T>(self, ctx) {
+        match crate::metallic::models::load::<T>(self, ctx) {
             Ok(v) => Ok(v),
             Err(_e) => Err(super::GGUFError::InvalidData),
         }

@@ -28,7 +28,6 @@ mod determinism_test;
 mod error_path_test;
 mod forward_pass_correctness_test;
 mod generation_test;
-mod model_test;
 
 mod scaled_dot_product_attention_test;
 mod sdpa_extreme_test;
