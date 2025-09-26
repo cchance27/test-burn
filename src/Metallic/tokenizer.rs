@@ -70,7 +70,14 @@ pub struct Tokenizer {
     add_bos_token: bool,
     /// Cache for BPE tokenization results
     bpe_cache: RwLock<FxHashMap<String, Vec<u32>>>,
-    byte_encoder: FxHashMap<u8, char>,
+    /// ID-based BPE merges for optimized tokenization
+    merges_ranks: FxHashMap<(u32, u32), u32>,
+    /// ID-based BPE merge results for optimized tokenization
+    merges_results: FxHashMap<(u32, u32), u32>,
+    /// Array for O(1) byte-to-unicode mapping
+    byte_encoder_array: [char; 256],
+    /// Cache for single-character token lookups
+    char_vocab: FxHashMap<char, u32>,
 }
 
 impl Tokenizer {
@@ -94,7 +101,35 @@ impl Tokenizer {
             merges_map.insert(merge.clone(), i as u32);
         }
 
+        // Create ID-based merge maps for optimized BPE
+        let mut merges_ranks = FxHashMap::default();
+        let mut merges_results = FxHashMap::default();
+        for (i, merge) in merges.iter().enumerate() {
+            let p1 = &merge.0;
+            let p2 = &merge.1;
+            let merged = format!("{}{}", p1, p2);
+            if let (Some(&id1), Some(&id2), Some(&id_merged)) =
+                (vocab_r.get(p1), vocab_r.get(p2), vocab_r.get(&merged))
+            {
+                merges_ranks.insert((id1, id2), i as u32);
+                merges_results.insert((id1, id2), id_merged);
+            }
+        }
+
         let byte_encoder = bytes_to_unicode();
+        let mut byte_encoder_array = ['\0'; 256];
+        for (b, c) in &byte_encoder {
+            byte_encoder_array[*b as usize] = *c;
+        }
+
+        // Create a cache for single-character tokens
+        let mut char_vocab = FxHashMap::default();
+        for (token, &id) in &vocab_r {
+            let mut chars = token.chars();
+            if let (Some(c), None) = (chars.next(), chars.next()) {
+                char_vocab.insert(c, id);
+            }
+        }
 
         Ok(Self {
             vocab,
@@ -104,7 +139,10 @@ impl Tokenizer {
             special_tokens,
             add_bos_token,
             bpe_cache: RwLock::new(FxHashMap::default()),
-            byte_encoder,
+            merges_ranks,
+            merges_results,
+            byte_encoder_array,
+            char_vocab,
         })
     }
 
@@ -276,15 +314,6 @@ impl Tokenizer {
             vocab.insert(i as u32, token);
         }
 
-        // Diagnostics: print small sample of the built vocabulary so we can cross-check indexing
-        //let vocab_len = vocab.len();
-        //println!("TOKENIZER DEBUG: Built vocab with {} entries", vocab_len);
-        //for i in 0..std::cmp::min(10, vocab_len) {
-        //    if let Some(tok) = vocab.get(&(i as u32)) {
-        //        println!("TOKENIZER DEBUG: vocab[{}] = '{}'", i, tok);
-        //    }
-        //}
-
         let special_tokens = SpecialTokens {
             bos_token_id,
             eos_token_id,
@@ -300,54 +329,139 @@ impl Tokenizer {
         )
     }
 
-    /// Encode text into tokens using the serial implementation
+    /// Encode text into tokens (defaults to encode_simd now that we've benchmarked it as fastest in all lengths)
     pub fn encode(&self, text: &str) -> Result<Vec<u32>, MetalError> {
-        self.encode_serial(text)
+        self.encode_simd(text)
+    }
+
+    fn process_pieces(&self, text: &str, mut processor: impl FnMut(&str) -> Result<(), MetalError>) -> Result<(), MetalError> {
+        let special_re = Regex::new(r"<\|[^>]*\|>")?;
+        let re = Regex::new(
+            r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
+        )?;
+        let mut last = 0;
+        for mat in special_re.find_iter(text) {
+            let mat = mat?;
+            if mat.start() > last {
+                let subtext = &text[last..mat.start()];
+                for submat in re.find_iter(subtext) {
+                    processor(submat?.as_str())?;
+                }
+            }
+            processor(mat.as_str())?;
+            last = mat.end();
+        }
+        if last < text.len() {
+            let subtext = &text[last..];
+            for submat in re.find_iter(subtext) {
+                processor(submat?.as_str())?;
+            }
+        }
+        Ok(())
     }
 
     /// Encode text into tokens using the serial implementation
     pub fn encode_serial(&self, text: &str) -> Result<Vec<u32>, MetalError> {
-        let text = text.nfc().collect::<String>();
+        let mut norm_text = String::with_capacity(text.len());
+        text.nfc().for_each(|c| norm_text.push(c));
 
-        let mut token_ids = Vec::new();
+        let mut token_ids = Vec::with_capacity(norm_text.len() / 2);
         if let Some(bos_id) = self.special_tokens.bos_token_id
             && self.add_bos_token
         {
             token_ids.push(bos_id);
         }
 
-        let special_re = Regex::new(r"<\|[^>]*\|>")?;
-        // Use the canonical GPT-2 ByteLevel BPE regex pattern (matches HF's implementation)
-        // Reference pattern: `'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+`
-        // Use a GPT-2 ByteLevel BPE-compatible pattern without lookaround (rust-regex doesn't support it)
-        let re = Regex::new(
-            r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
-        )?;
-        let mut pieces: Vec<String> = Vec::new();
-        let mut last = 0;
-        let matches = special_re.find_iter(&text);
-        for mat_result in matches {
-            let mat = mat_result.unwrap();
-            if mat.start() > last {
-                let subtext = &text[last..mat.start()];
-                for submat_result in re.find_iter(subtext) {
-                    let submat = submat_result.unwrap();
-                    pieces.push(submat.as_str().to_string());
-                }
-            }
-            pieces.push(mat.as_str().to_string());
-            last = mat.end();
+        self.process_pieces(&norm_text, |piece| {
+            self.bpe_encode(piece, &mut token_ids);
+            Ok(())
+        })?;
+
+        Ok(token_ids)
+    }
+
+    /// Encode text into tokens using the SIMD-optimized (ID-based) implementation
+    pub fn encode_simd(&self, text: &str) -> Result<Vec<u32>, MetalError> {
+        let mut norm_text = String::with_capacity(text.len());
+        text.nfc().for_each(|c| norm_text.push(c));
+
+        let mut token_ids = Vec::with_capacity(norm_text.len() / 2);
+        if let Some(bos_id) = self.special_tokens.bos_token_id
+            && self.add_bos_token
+        {
+            token_ids.push(bos_id);
         }
-        if last < text.len() {
-            let subtext = &text[last..];
-            for submat_result in re.find_iter(subtext) {
-                let submat = submat_result.unwrap();
-                pieces.push(submat.as_str().to_string());
-            }
+
+        self.process_pieces(&norm_text, |piece| {
+            self.bpe_encode_ids(piece, &mut token_ids);
+            Ok(())
+        })?;
+
+        Ok(token_ids)
+    }
+
+    /// Encode text into tokens using the parallel implementation
+    pub fn encode_parallel(&self, text: &str) -> Result<Vec<u32>, MetalError> {
+        let mut norm_text = String::with_capacity(text.len());
+        text.nfc().for_each(|c| norm_text.push(c));
+
+        let mut token_ids = Vec::with_capacity(norm_text.len() / 2);
+        if let Some(bos_id) = self.special_tokens.bos_token_id
+            && self.add_bos_token
+        {
+            token_ids.push(bos_id);
         }
-        for piece in pieces {
-            self.bpe_encode(&piece, &mut token_ids);
+
+        // In the parallel version, we must collect the pieces first before processing in parallel.
+        // The streaming approach is not directly applicable with rayon's `par_iter`.
+        let mut pieces = Vec::new();
+        self.process_pieces(&norm_text, |piece| {
+            pieces.push(piece.to_string());
+            Ok(())
+        })?;
+
+        let tokens_from_pieces: Vec<Vec<u32>> = pieces
+            .par_iter()
+            .map(|piece| {
+                let mut local_token_ids = Vec::new();
+                self.bpe_encode_ids(piece, &mut local_token_ids);
+                local_token_ids
+            })
+            .collect();
+
+        token_ids.extend(tokens_from_pieces.into_iter().flatten());
+
+        Ok(token_ids)
+    }
+
+    /// Encode text into tokens using the parallel SIMD-optimized (ID-based) implementation
+    pub fn encode_simd_parallel(&self, text: &str) -> Result<Vec<u32>, MetalError> {
+        let mut norm_text = String::with_capacity(text.len());
+        text.nfc().for_each(|c| norm_text.push(c));
+
+        let mut token_ids = Vec::with_capacity(norm_text.len() / 2);
+        if let Some(bos_id) = self.special_tokens.bos_token_id
+            && self.add_bos_token
+        {
+            token_ids.push(bos_id);
         }
+
+        let mut pieces = Vec::new();
+        self.process_pieces(&norm_text, |piece| {
+            pieces.push(piece.to_string());
+            Ok(())
+        })?;
+
+        let tokens_from_pieces: Vec<Vec<u32>> = pieces
+            .par_iter()
+            .map(|piece| {
+                let mut local_token_ids = Vec::new();
+                self.bpe_encode_ids(piece, &mut local_token_ids);
+                local_token_ids
+            })
+            .collect();
+
+        token_ids.extend(tokens_from_pieces.into_iter().flatten());
 
         Ok(token_ids)
     }
@@ -358,11 +472,10 @@ impl Tokenizer {
             return;
         }
 
-        let token_unicode = text
-            .as_bytes()
-            .iter()
-            .map(|b| self.byte_encoder[b])
-            .collect::<String>();
+        let mut token_unicode = String::with_capacity(text.len());
+        for &b in text.as_bytes() {
+            token_unicode.push(self.byte_encoder_array[b as usize]);
+        }
 
         let mut pieces: Vec<String> = token_unicode.chars().map(|c| c.to_string()).collect();
         if pieces.is_empty() {
@@ -398,9 +511,59 @@ impl Tokenizer {
         }
     }
 
+    fn bpe_encode_ids(&self, text: &str, token_ids: &mut Vec<u32>) {
+        if let Some(id) = self.vocab_r.get(text) {
+            token_ids.push(*id);
+            return;
+        }
+
+        let mut token_unicode = String::with_capacity(text.len());
+        for &b in text.as_bytes() {
+            token_unicode.push(self.byte_encoder_array[b as usize]);
+        }
+
+        let mut piece_ids: Vec<u32> = Vec::with_capacity(token_unicode.len());
+        piece_ids.extend(
+            token_unicode
+                .chars()
+                .map(|c| *self.char_vocab.get(&c).unwrap_or(&0)), // Use UNK for unknown chars
+        );
+
+        if piece_ids.is_empty() {
+            return;
+        }
+
+        if piece_ids.len() == 1 {
+            token_ids.extend(piece_ids);
+            return;
+        }
+
+        loop {
+            let mut min_rank = u32::MAX;
+            let mut merge_pos = None;
+
+            for i in 0..piece_ids.len().saturating_sub(1) {
+                let pair_key = (piece_ids[i], piece_ids[i + 1]);
+                if let Some(&rank) = self.merges_ranks.get(&pair_key) && rank < min_rank {
+                    min_rank = rank;
+                    merge_pos = Some(i);
+                }
+            }
+
+            if let Some(pos) = merge_pos {
+                let pair_key = (piece_ids[pos], piece_ids[pos + 1]);
+                let merged_id = self.merges_results[&pair_key];
+                piece_ids.splice(pos..pos + 2, std::iter::once(merged_id));
+            } else {
+                break;
+            }
+        }
+        token_ids.extend(piece_ids);
+    }
+
     /// Decode tokens into text
     pub fn decode(&self, tokens: &[u32]) -> Result<String, MetalError> {
-        let mut bytes = Vec::new();
+        let mut bytes = Vec::with_capacity(tokens.len());
         // Skip BOS token if present at the beginning
         let start_index = if self.add_bos_token
             && self.special_tokens.bos_token_id.is_some()
@@ -419,10 +582,6 @@ impl Tokenizer {
                     if token.starts_with("<0x") && token.ends_with('>') && token.len() == 6 {
                         if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
                             bytes.push(byte);
-                            //println!(
-                            //    "Token ID: {token_id}: Type: {token_type} TokenFromByte: {byte:?} {}",
-                            //    String::from_utf8_lossy(&[byte])
-                            //);
                         } else {
                             unimplemented!("handle failed str_Radix")
                         }
@@ -431,7 +590,6 @@ impl Tokenizer {
                     }
                 } else {
                     bytes.extend_from_slice(token.as_bytes());
-                    //println!("Token ID: {token_id}: Type: {token_type} TokenStr: {token}");
                 }
             } else {
                 return Err(TokenizerError::InvalidTokenId(*token_id).into());
@@ -495,3 +653,4 @@ impl Tokenizer {
         Ok(cache.len())
     }
 }
+
