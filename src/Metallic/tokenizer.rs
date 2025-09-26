@@ -13,10 +13,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::metallic::MetalError;
 
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
-    let mut bs = (b'!'..=b'~')
-        .chain(b'\xa1'..=b'\xac')
-        .chain(b'\xae'..=b'\xff')
-        .collect::<Vec<_>>();
+    let mut bs = (b'!'..=b'~').chain(b'\xa1'..=b'\xac').chain(b'\xae'..=b'\xff').collect::<Vec<_>>();
     let mut cs = bs.iter().map(|b| *b as u32).collect::<Vec<_>>();
     let mut n = 0;
     for b in 0..=255 {
@@ -108,9 +105,7 @@ impl Tokenizer {
             let p1 = &merge.0;
             let p2 = &merge.1;
             let merged = format!("{}{}", p1, p2);
-            if let (Some(&id1), Some(&id2), Some(&id_merged)) =
-                (vocab_r.get(p1), vocab_r.get(p2), vocab_r.get(&merged))
-            {
+            if let (Some(&id1), Some(&id2), Some(&id_merged)) = (vocab_r.get(p1), vocab_r.get(p2), vocab_r.get(&merged)) {
                 merges_ranks.insert((id1, id2), i as u32);
                 merges_results.insert((id1, id2), id_merged);
             }
@@ -147,17 +142,8 @@ impl Tokenizer {
     }
 
     /// Create a new tokenizer with the given vocabulary, merges, and default special tokens
-    pub fn from_vocab_and_merges(
-        vocab: FxHashMap<u32, String>,
-        merges: Vec<(String, String)>,
-    ) -> Result<Self, MetalError> {
-        Self::new(
-            vocab,
-            merges,
-            FxHashMap::default(),
-            SpecialTokens::default(),
-            false,
-        )
+    pub fn from_vocab_and_merges(vocab: FxHashMap<u32, String>, merges: Vec<(String, String)>) -> Result<Self, MetalError> {
+        Self::new(vocab, merges, FxHashMap::default(), SpecialTokens::default(), false)
     }
 
     /// Create a new tokenizer with custom configuration
@@ -167,13 +153,7 @@ impl Tokenizer {
         special_tokens: SpecialTokens,
         add_bos_token: bool,
     ) -> Result<Self, MetalError> {
-        Self::new(
-            vocab,
-            merges,
-            FxHashMap::default(),
-            special_tokens,
-            add_bos_token,
-        )
+        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
     }
 
     /// Create a tokenizer from any source that provides vocabulary and merges
@@ -186,54 +166,33 @@ impl Tokenizer {
     ) -> Result<Self, MetalError> {
         let vocab: FxHashMap<u32, String> = vocab_source.into_iter().collect();
         let merges: Vec<(String, String)> = merges_source.into_iter().collect();
-        Self::new(
-            vocab,
-            merges,
-            FxHashMap::default(),
-            special_tokens,
-            add_bos_token,
-        )
+        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
     }
 
     /// Create a tokenizer from GGUF metadata
     pub fn from_gguf_metadata(metadata: &crate::gguf::GGUFMetadata) -> Result<Self, MetalError> {
         // Extract vocabulary
-        let tokens_value = metadata
-            .entries
-            .get("tokenizer.ggml.tokens")
-            .ok_or(TokenizerError::MissingData)?;
+        let tokens_value = metadata.entries.get("tokenizer.ggml.tokens").ok_or(TokenizerError::MissingData)?;
 
-        let merges_value = metadata
-            .entries
-            .get("tokenizer.ggml.merges")
-            .ok_or(TokenizerError::MissingData)?;
+        let merges_value = metadata.entries.get("tokenizer.ggml.merges").ok_or(TokenizerError::MissingData)?;
 
         let token_types_value = metadata.entries.get("tokenizer.ggml.token_type");
 
         // Extract special tokens
-        let bos_token_id = metadata
-            .entries
-            .get("tokenizer.ggml.bos_token_id")
-            .and_then(|v| match v {
-                crate::gguf::GGUFValue::U32(id) => Some(*id),
-                _ => None,
-            });
+        let bos_token_id = metadata.entries.get("tokenizer.ggml.bos_token_id").and_then(|v| match v {
+            crate::gguf::GGUFValue::U32(id) => Some(*id),
+            _ => None,
+        });
 
-        let eos_token_id = metadata
-            .entries
-            .get("tokenizer.ggml.eos_token_id")
-            .and_then(|v| match v {
-                crate::gguf::GGUFValue::U32(id) => Some(*id),
-                _ => None,
-            });
+        let eos_token_id = metadata.entries.get("tokenizer.ggml.eos_token_id").and_then(|v| match v {
+            crate::gguf::GGUFValue::U32(id) => Some(*id),
+            _ => None,
+        });
 
-        let pad_token_id = metadata
-            .entries
-            .get("tokenizer.ggml.padding_token_id")
-            .and_then(|v| match v {
-                crate::gguf::GGUFValue::U32(id) => Some(*id),
-                _ => None,
-            });
+        let pad_token_id = metadata.entries.get("tokenizer.ggml.padding_token_id").and_then(|v| match v {
+            crate::gguf::GGUFValue::U32(id) => Some(*id),
+            _ => None,
+        });
 
         let add_bos_token = metadata
             .entries
@@ -250,16 +209,11 @@ impl Tokenizer {
                 .iter()
                 .map(|v| match v {
                     crate::gguf::GGUFValue::String(s) => Ok(s.clone()),
-                    _ => Err(TokenizerError::InitializationFailed(
-                        "Invalid token type in vocabulary".to_string(),
-                    )),
+                    _ => Err(TokenizerError::InitializationFailed("Invalid token type in vocabulary".to_string())),
                 })
                 .collect::<Result<Vec<String>, TokenizerError>>()?,
             _ => {
-                return Err(TokenizerError::InitializationFailed(
-                    "Invalid tokens format".to_string(),
-                )
-                .into());
+                return Err(TokenizerError::InitializationFailed("Invalid tokens format".to_string()).into());
             }
         };
 
@@ -282,16 +236,11 @@ impl Tokenizer {
                 .iter()
                 .map(|v| match v {
                     crate::gguf::GGUFValue::String(s) => Ok(s.clone()),
-                    _ => Err(TokenizerError::InitializationFailed(
-                        "Invalid merge type".to_string(),
-                    )),
+                    _ => Err(TokenizerError::InitializationFailed("Invalid merge type".to_string())),
                 })
                 .collect::<Result<Vec<String>, TokenizerError>>()?,
             _ => {
-                return Err(TokenizerError::InitializationFailed(
-                    "Invalid merges format".to_string(),
-                )
-                .into());
+                return Err(TokenizerError::InitializationFailed("Invalid merges format".to_string()).into());
             }
         };
 
@@ -320,13 +269,7 @@ impl Tokenizer {
             pad_token_id,
         };
 
-        Self::new(
-            vocab,
-            merges,
-            token_types_map,
-            special_tokens,
-            add_bos_token,
-        )
+        Self::new(vocab, merges, token_types_map, special_tokens, add_bos_token)
     }
 
     /// Encode text into tokens (defaults to encode_simd now that we've benchmarked it as fastest in all lengths)
@@ -336,9 +279,7 @@ impl Tokenizer {
 
     fn process_pieces(&self, text: &str, mut processor: impl FnMut(&str) -> Result<(), MetalError>) -> Result<(), MetalError> {
         let special_re = Regex::new(r"<\|[^>]*\|>")?;
-        let re = Regex::new(
-            r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+",
-        )?;
+        let re = Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")?;
         let mut last = 0;
         for mat in special_re.find_iter(text) {
             let mat = mat?;
@@ -524,9 +465,7 @@ impl Tokenizer {
 
         let mut piece_ids: Vec<u32> = Vec::with_capacity(token_unicode.len());
         piece_ids.extend(
-            token_unicode
-                .chars()
-                .map(|c| *self.char_vocab.get(&c).unwrap_or(&0)), // Use UNK for unknown chars
+            token_unicode.chars().map(|c| *self.char_vocab.get(&c).unwrap_or(&0)), // Use UNK for unknown chars
         );
 
         if piece_ids.is_empty() {
@@ -544,7 +483,9 @@ impl Tokenizer {
 
             for i in 0..piece_ids.len().saturating_sub(1) {
                 let pair_key = (piece_ids[i], piece_ids[i + 1]);
-                if let Some(&rank) = self.merges_ranks.get(&pair_key) && rank < min_rank {
+                if let Some(&rank) = self.merges_ranks.get(&pair_key)
+                    && rank < min_rank
+                {
                     min_rank = rank;
                     merge_pos = Some(i);
                 }
@@ -653,4 +594,3 @@ impl Tokenizer {
         Ok(cache.len())
     }
 }
-

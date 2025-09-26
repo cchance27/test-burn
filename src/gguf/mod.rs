@@ -227,8 +227,7 @@ impl GGUFFile {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, GGUFError> {
         let file_path = path.as_ref().to_string_lossy().to_string();
         let file = File::open(&path).map_err(GGUFError::Io)?;
-        let mmap = unsafe { Mmap::map(&file) }
-            .map_err(|e| GGUFError::MemoryMappingError(e.to_string()))?;
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| GGUFError::MemoryMappingError(e.to_string()))?;
 
         let mut reader = &mmap[..];
 
@@ -495,12 +494,11 @@ impl GGUFFile {
     /// Calculate where the tensor_data section starts in the file
     fn calculate_tensor_data_start(&self) -> usize {
         // Get the alignment value (default to 32 if not specified)
-        let alignment =
-            if let Some(GGUFValue::U32(val)) = self.metadata.entries.get("general.alignment") {
-                *val as usize
-            } else {
-                32 // Default alignment
-            };
+        let alignment = if let Some(GGUFValue::U32(val)) = self.metadata.entries.get("general.alignment") {
+            *val as usize
+        } else {
+            32 // Default alignment
+        };
 
         // Calculate the size of header + metadata + tensor infos accurately
         let mut offset = 4 + 4 + 8 + 8; // magic + version + tensor_count + metadata_count
@@ -698,11 +696,7 @@ impl GGUFFile {
 
     /// Blockswap implementation - load/unload tensors in blocks
     #[allow(dead_code)]
-    pub fn blockswap_tensors(
-        &self,
-        tensors_to_load: &[&GGUTensorInfo],
-        tensors_to_unload: &[&GGUTensorInfo],
-    ) -> Result<(), GGUFError> {
+    pub fn blockswap_tensors(&self, tensors_to_load: &[&GGUTensorInfo], tensors_to_unload: &[&GGUTensorInfo]) -> Result<(), GGUFError> {
         // Unload tensors first
         for tensor in tensors_to_unload {
             self.offload_tensor(tensor)?;
@@ -730,10 +724,7 @@ mod tests {
         match GGUFFile::load(path) {
             Ok(gguf) => {
                 println!("Successfully loaded GGUF file:");
-                println!(
-                    "Magic: {:?}",
-                    std::str::from_utf8(&gguf.header.magic).unwrap_or("Invalid UTF-8")
-                );
+                println!("Magic: {:?}", std::str::from_utf8(&gguf.header.magic).unwrap_or("Invalid UTF-8"));
                 println!("Version: {}", gguf.header.version);
                 println!("Tensor count: {}", gguf.header.tensor_count);
                 println!("Metadata count: {}", gguf.header.metadata_count);
@@ -756,19 +747,13 @@ mod tests {
                 let mut count = 0;
                 for tensor in &gguf.tensors {
                     if count < 10 {
-                        println!(
-                            "  {}: {:?} ({:?})",
-                            tensor.name, tensor.dimensions, tensor.data_type
-                        );
+                        println!("  {}: {:?} ({:?})", tensor.name, tensor.dimensions, tensor.data_type);
                         count += 1;
                     } else {
                         break;
                     }
                 }
-                println!(
-                    "... and {} more tensors",
-                    gguf.tensors.len().saturating_sub(10)
-                );
+                println!("... and {} more tensors", gguf.tensors.len().saturating_sub(10));
             }
             Err(e) => {
                 panic!("Failed to load GGUF file: {:?}", e);
@@ -791,18 +776,11 @@ mod tests {
 
                 // Test with the first tensor (should be Q8_1)
                 if let Some(first_tensor) = gguf.tensors.first() {
-                    println!(
-                        "Testing tensor: {} ({:?})",
-                        first_tensor.name, first_tensor.data_type
-                    );
+                    println!("Testing tensor: {} ({:?})", first_tensor.name, first_tensor.data_type);
                     println!("Dimensions: {:?}", first_tensor.dimensions);
 
                     // Calculate expected element count
-                    let expected_elements: usize = first_tensor
-                        .dimensions
-                        .iter()
-                        .map(|&d| d as usize)
-                        .product();
+                    let expected_elements: usize = first_tensor.dimensions.iter().map(|&d| d as usize).product();
                     println!("Expected elements: {}", expected_elements);
 
                     // Get tensor data
@@ -817,10 +795,7 @@ mod tests {
 
                     match metallic::Tensor::try_from((&gguf, first_tensor)) {
                         Ok(metallic_tensor) => {
-                            println!(
-                                "Successfully converted tensor '{}' to Metallic tensor",
-                                first_tensor.name
-                            );
+                            println!("Successfully converted tensor '{}' to Metallic tensor", first_tensor.name);
                             println!("Tensor dimensions: {:?}", metallic_tensor.dims);
                             println!("Tensor size (elements): {}", metallic_tensor.len());
                         }
@@ -873,17 +848,11 @@ mod tests {
 
                 // Test with the first tensor (should be Q8_1)
                 if let Some(first_tensor) = gguf.tensors.first() {
-                    println!(
-                        "Testing tensor: {} ({:?})",
-                        first_tensor.name, first_tensor.data_type
-                    );
+                    println!("Testing tensor: {} ({:?})", first_tensor.name, first_tensor.data_type);
                     println!("Dimensions: {:?}", first_tensor.dimensions);
                     match metallic::Tensor::try_from((&gguf, first_tensor)) {
                         Ok(metallic_tensor) => {
-                            println!(
-                                "Successfully converted tensor '{}' to Metallic tensor",
-                                first_tensor.name
-                            );
+                            println!("Successfully converted tensor '{}' to Metallic tensor", first_tensor.name);
                             println!("Tensor dimensions: {:?}", metallic_tensor.dims);
                             println!("Tensor size (elements): {}", metallic_tensor.len());
 
@@ -928,11 +897,7 @@ mod memory_tests {
 
                     // Test loading
                     match gguf.load_tensor(tensor) {
-                        Ok(data) => println!(
-                            "Successfully loaded tensor: {} ({} bytes)",
-                            tensor.name,
-                            data.len()
-                        ),
+                        Ok(data) => println!("Successfully loaded tensor: {} ({} bytes)", tensor.name, data.len()),
                         Err(e) => println!("Error loading tensor {}: {}", tensor.name, e),
                     }
                 }

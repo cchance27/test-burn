@@ -28,9 +28,7 @@ impl Model {
         cache: &mut ResourceCache,
     ) -> Result<Vec<Tensor>, MetalError> {
         if self.operations.is_empty() {
-            return Err(MetalError::InvalidShape(
-                "Model has no operations".to_string(),
-            ));
+            return Err(MetalError::InvalidShape("Model has no operations".to_string()));
         }
 
         // Create a command buffer for this forward pass
@@ -75,10 +73,7 @@ impl Default for Model {
 /// Trait for Metallic models that can be instantiated from a GGUF-loaded model.
 /// Implement this trait for any model that should support loading via GGUF.
 pub trait LoadableModel: Sized {
-    fn load_from_gguf(
-        gguf_model: &crate::gguf::model_loader::GGUFModel,
-        ctx: &mut crate::metallic::Context,
-    ) -> Result<Self, MetalError>;
+    fn load_from_gguf(gguf_model: &crate::gguf::model_loader::GGUFModel, ctx: &mut crate::metallic::Context) -> Result<Self, MetalError>;
 }
 
 impl Model {

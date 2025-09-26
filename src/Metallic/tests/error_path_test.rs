@@ -11,29 +11,17 @@ fn test_sdpa_invalid_shapes() {
     let dim1 = 4;
     let dim2 = 5; // Different dimensions
 
-    let q_data: Vec<f32> = (0..(batch * seq_q * dim1))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim2))
-        .map(|i| (i as f32) * 0.2)
-        .collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim2))
-        .map(|i| (i as f32) * 0.3)
-        .collect();
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim1)).map(|i| (i as f32) * 0.1).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim2)).map(|i| (i as f32) * 0.2).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim2)).map(|i| (i as f32) * 0.3).collect();
 
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim1], &context).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim2], &context).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim2], &context).unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim1], &context).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim2], &context).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim2], &context).unwrap();
 
     // This should fail with a dimension mismatch error
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false);
-    assert!(
-        result.is_err(),
-        "SDPA should fail with incompatible dimensions"
-    );
+    assert!(result.is_err(), "SDPA should fail with incompatible dimensions");
 
     // Check that we get the expected error type
     match result {
@@ -60,35 +48,23 @@ fn test_sdpa_invalid_batch_dimensions() {
     let seq_k = 4;
     let dim = 4;
 
-    let q_data: Vec<f32> = (0..(batch1 * seq_q * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let k_data: Vec<f32> = (0..(batch2 * seq_k * dim))
-        .map(|i| (i as f32) * 0.2)
-        .collect();
-    let v_data: Vec<f32> = (0..(batch2 * seq_k * dim))
-        .map(|i| (i as f32) * 0.3)
-        .collect();
+    let q_data: Vec<f32> = (0..(batch1 * seq_q * dim)).map(|i| (i as f32) * 0.1).collect();
+    let k_data: Vec<f32> = (0..(batch2 * seq_k * dim)).map(|i| (i as f32) * 0.2).collect();
+    let v_data: Vec<f32> = (0..(batch2 * seq_k * dim)).map(|i| (i as f32) * 0.3).collect();
 
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch1, seq_q, dim], &context).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch2, seq_k, dim], &context).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch2, seq_k, dim], &context).unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch1, seq_q, dim], &context).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch2, seq_k, dim], &context).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch2, seq_k, dim], &context).unwrap();
 
     // This should fail with a dimension mismatch error
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false);
-    assert!(
-        result.is_err(),
-        "SDPA should fail with incompatible batch dimensions"
-    );
+    assert!(result.is_err(), "SDPA should fail with incompatible batch dimensions");
 }
 
 #[test]
 fn test_matmul_invalid_shapes() {
     use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
-    use crate::metallic::matmul::MatMulOperation;
+    use crate::metallic::kernels::matmul::MatMulOp;
     use crate::metallic::resource_cache::ResourceCache;
 
     let context = Context::new().unwrap();
@@ -106,8 +82,7 @@ fn test_matmul_invalid_shapes() {
 
     let _a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k1], &context).unwrap();
     let _b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k2, n], &context).unwrap();
-    let _result_tensor =
-        Tensor::create_tensor_from_slice(&result_data, vec![m, n], &context).unwrap();
+    let _result_tensor = Tensor::create_tensor_from_slice(&result_data, vec![m, n], &context).unwrap();
 
     let gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -135,10 +110,7 @@ fn test_tensor_creation_with_mismatched_dimensions() {
     let dims = vec![2, 4]; // Expecting 8 elements but only have 6
 
     let result = Tensor::create_tensor_from_slice(&data, dims, &context);
-    assert!(
-        result.is_err(),
-        "Tensor creation should fail with mismatched dimensions"
-    );
+    assert!(result.is_err(), "Tensor creation should fail with mismatched dimensions");
 
     match result {
         Err(MetalError::DimensionMismatch { expected, actual }) => {
@@ -173,10 +145,7 @@ fn test_tensor_from_existing_buffer_invalid_offset() {
         invalid_offset,
     );
 
-    assert!(
-        result.is_err(),
-        "Tensor creation should fail with invalid offset"
-    );
+    assert!(result.is_err(), "Tensor creation should fail with invalid offset");
 
     match result {
         Err(MetalError::InvalidShape(_)) => {
@@ -203,10 +172,7 @@ fn test_tensor_get_batch_out_of_bounds() {
     // Try to get a batch that doesn't exist
     let result = tensor.get_batch(2); // Only batches 0 and 1 exist
 
-    assert!(
-        result.is_err(),
-        "get_batch should fail with out of bounds index"
-    );
+    assert!(result.is_err(), "get_batch should fail with out of bounds index");
 
     match result {
         Err(MetalError::InvalidShape(_)) => {
@@ -233,10 +199,7 @@ fn test_tensor_get_batch_insufficient_dimensions() {
     // Try to get a batch from a tensor with insufficient dimensions
     let result = tensor.get_batch(0);
 
-    assert!(
-        result.is_err(),
-        "get_batch should fail with insufficient dimensions"
-    );
+    assert!(result.is_err(), "get_batch should fail with insufficient dimensions");
 
     match result {
         Err(MetalError::InvalidShape(_)) => {
@@ -254,8 +217,6 @@ fn test_tensor_get_batch_insufficient_dimensions() {
 #[test]
 fn test_softmax_invalid_dimensions() {
     let mut context = Context::new().unwrap();
-    let result = crate::metallic::ensure_fused_softmax_pipeline(&mut context);
-    assert!(result.is_ok(), "Pipeline creation should succeed");
 
     // Try with dimensions that might cause issues
     let seq_q = 0; // Invalid dimension
@@ -266,21 +227,7 @@ fn test_softmax_invalid_dimensions() {
     let result = Tensor::create_tensor_from_slice(&input_data, dims, &context);
     // This might fail at tensor creation time
     if let Ok(attn_tensor) = result {
-        use crate::metallic::resource_cache::ResourceCache;
-        use crate::metallic::softmax::SoftmaxOperation;
-
-        let sm_op = SoftmaxOperation {
-            attn_buf: attn_tensor.buf.clone(),
-            attn_offset: attn_tensor.offset,
-            seq_q: seq_q as u32,
-            seq_k: seq_k as u32,
-            causal: 0,
-            pipeline: context.fused_softmax_pipeline.as_ref().unwrap().clone(),
-        };
-
-        let command_buffer = context.command_queue.commandBuffer().unwrap();
-        let mut cache = ResourceCache::new();
-        let result = sm_op.encode(&command_buffer, &mut cache);
+        let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0));
         // Should not panic, but might return an error
         assert!(result.is_ok() || result.is_err());
     }

@@ -20,10 +20,7 @@ pub use q8_simd::dequantize_q8_to_f32_simd;
 /// Uniform wrapper that selects the appropriate dequantization implementation
 /// depending on the target architecture. Call this from other code when you
 /// want a stable, architecture-independent API.
-pub fn dequantize_q8(
-    data: &[u8],
-    data_type: GGUFDataType,
-) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn dequantize_q8(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     #[cfg(target_arch = "aarch64")]
     {
         // Use SIMD-ready implementation on AArch64
@@ -57,21 +54,15 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
         let dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
 
         // Initialize Metallic context (this should ideally be passed in)
-        let context = crate::metallic::Context::new()
-            .map_err(|e| format!("Failed to create Metallic context: {:?}", e))?;
+        let context = crate::metallic::Context::new().map_err(|e| format!("Failed to create Metallic context: {:?}", e))?;
 
         match tensor_info.data_type {
             crate::gguf::GGUFDataType::F32 => {
                 // For F32 tensors, we can directly copy the data
-                let float_data: &[f32] = unsafe {
-                    std::slice::from_raw_parts(
-                        data.as_ptr() as *const f32,
-                        data.len() / std::mem::size_of::<f32>(),
-                    )
-                };
+                let float_data: &[f32] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, data.len() / std::mem::size_of::<f32>()) };
 
-                Tensor::create_tensor_from_slice(float_data, dims, &context)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::create_tensor_from_slice(float_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::F16 => {
                 // F16 (IEEE 754 half) stored as little-endian u16 per element
@@ -93,8 +84,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                     let h = f16::from_bits(bits);
                     f32_data.push(h.to_f32());
                 }
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::BF16 => {
                 // BF16 (bfloat16) stored as little-endian u16 per element.
@@ -108,23 +98,17 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                     let bits32 = bits16 << 16;
                     f32_data.push(f32::from_bits(bits32));
                 }
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::F64 => {
                 // For F64 tensors, convert to F32
-                let f64_data: &[f64] = unsafe {
-                    std::slice::from_raw_parts(
-                        data.as_ptr() as *const f64,
-                        data.len() / std::mem::size_of::<f64>(),
-                    )
-                };
+                let f64_data: &[f64] =
+                    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f64, data.len() / std::mem::size_of::<f64>()) };
 
                 // Convert F64 to F32
                 let f32_data: Vec<f32> = f64_data.iter().map(|&x| x as f32).collect();
 
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::Q8_0 | crate::gguf::GGUFDataType::Q8_1 => {
                 // For Q8_0/Q8_1 tensors, we need to dequantize to F32
@@ -138,8 +122,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                 #[cfg(not(target_arch = "aarch64"))]
                 let f32_data = dequantize_q8_to_f32(data, tensor_info.data_type)?;
 
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context)
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             _ => {
                 // For other data types, we would need to implement specific dequantization

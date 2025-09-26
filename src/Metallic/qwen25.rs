@@ -1,11 +1,13 @@
 use super::{Context, MetalError, Tensor, swiglu};
 use crate::gguf::model_loader::GGUFModel;
 use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
-use crate::metallic::matmul::MatMulOperation;
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
+use crate::metallic::kernels::matmul::MatMulOp;
+use crate::metallic::kernels::rmsnorm::RMSNormOp;
+use crate::metallic::kernels::rope::RoPEOp;
+use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::model::LoadableModel;
-use crate::metallic::rmsnorm::RMSNorm;
-use crate::metallic::rope::RoPE;
-use crate::metallic::silu::Silu;
 
 /// Qwen25 configuration derived from Qwen2.5 metadata.
 /// Matches Qwen2.5-Coder-0.5B: d_model=896, ff_dim=4864, n_heads=14, n_kv_heads=2, n_layers=24.
@@ -49,46 +51,24 @@ impl TransformerBlock {
     pub fn new(cfg: &Qwen25Config, ctx: &mut Context) -> Result<Self, MetalError> {
         // Q, K, V projections
         let attn_q_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx)?;
-        // Expected: [d_model, d_model] = [896, 896] for Q projection (matches blk.0.attn_q.weight)
-        // debug_assert_eq!(attn_q_weight.dims(), vec![896, 896], "attn_q_weight dims mismatch");
-
         let attn_q_bias = Tensor::zeros(vec![cfg.d_model], ctx)?;
-        // Expected: [d_model] = [896] for Q bias (matches blk.0.attn_q.bias)
-        // debug_assert_eq!(attn_q_bias.dims(), vec![896], "attn_q_bias dims mismatch");
 
         let kv_dim = cfg.d_model * cfg.n_kv_heads / cfg.n_heads;
         let attn_k_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx)?;
-        // Expected: [kv_dim, d_model] = [128, 896] for K projection (matches blk.0.attn_k.weight [out, in])
-        // debug_assert_eq!(attn_k_weight.dims(), vec![128, 896], "attn_k_weight dims mismatch");
-
         let attn_k_bias = Tensor::zeros(vec![kv_dim], ctx)?;
-        // Expected: [kv_dim] = [128] for K bias (matches blk.0.attn_k.bias)
-        // debug_assert_eq!(attn_k_bias.dims(), vec![128], "attn_k_bias dims mismatch");
 
         let attn_v_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx)?;
-        // Expected: [kv_dim, d_model] = [128, 896] for V projection (matches blk.0.attn_v.weight [out, in])
-        // debug_assert_eq!(attn_v_weight.dims(), vec![128, 896], "attn_v_weight dims mismatch");
-
         let attn_v_bias = Tensor::zeros(vec![kv_dim], ctx)?;
-        // Expected: [kv_dim] = [128] for V bias (matches blk.0.attn_v.bias)
-        // debug_assert_eq!(attn_v_bias.dims(), vec![128], "attn_v_bias dims mismatch");
 
         let attn_out_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx)?;
-        // Expected: [d_model, d_model] = [896, 896] for attention output projection (matches blk.0.attn_output.weight)
-        // debug_assert_eq!(attn_out_weight.dims(), vec![896, 896], "attn_out_weight dims mismatch");
 
         // FFN (SwiGLU)
         // Allocate FFN weights in the layout expected by `swiglu`:
         // - gate/up: [d_model, ff_dim]
         // - down:    [ff_dim, d_model]
         let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx)?;
-        // Expected: [d_model, ff_dim] = [896, 4864] for FFN down projection (matches blk.0.ffn_down.weight [out, in])
-
         let ffn_gate = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx)?;
-        // Expected: [ff_dim, d_model] = [4864, 896] for FFN gate (SiLU input, matches blk.0.ffn_gate.weight [out, in])
-
         let ffn_up = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx)?;
-        // Expected: [ff_dim, d_model] = [4864, 896] for FFN up (element-wise mul input, matches blk.0.ffn_up.weight [out, in])
 
         // FFN biases
         let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx)?;
@@ -97,12 +77,8 @@ impl TransformerBlock {
 
         // Norms
         let ffn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx)?;
-        // Expected: [d_model] = [896] for FFN norm gamma (RMSNorm weights, matches blk.0.ffn_norm.weight)
-        // debug_assert_eq!(ffn_norm_gamma.dims(), vec![896], "ffn_norm_gamma dims mismatch");
 
         let attn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx)?;
-        // Expected: [d_model] = [896] for attention norm gamma (RMSNorm weights, matches blk.0.attn_norm.weight)
-        // debug_assert_eq!(attn_norm_gamma.dims(), vec![896], "attn_norm_gamma dims mismatch");
 
         ctx.synchronize();
 
@@ -226,25 +202,15 @@ impl Qwen25 {
         ctx.synchronize();
 
         let embedded_slice = embedded.as_slice();
-        let embedded_max = embedded_slice
-            .iter()
-            .cloned()
-            .fold(f32::NEG_INFINITY, f32::max);
+        let embedded_max = embedded_slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let embedded_min = embedded_slice.iter().cloned().fold(f32::INFINITY, f32::min);
-        println!(
-            "Embedded stats - max: {:.4}, min: {:.4}",
-            embedded_max, embedded_min
-        );
+        println!("Embedded stats - max: {:.4}, min: {:.4}", embedded_max, embedded_min);
 
         // Additional debug: sample first few values
         if embedded_slice.len() >= 5 {
             println!(
                 "First 5 embedded values: {:.6}, {:.6}, {:.6}, {:.6}, {:.6}",
-                embedded_slice[0],
-                embedded_slice[1],
-                embedded_slice[2],
-                embedded_slice[3],
-                embedded_slice[4]
+                embedded_slice[0], embedded_slice[1], embedded_slice[2], embedded_slice[3], embedded_slice[4]
             );
         }
 
@@ -309,33 +275,13 @@ impl Qwen25 {
             )));
         }
 
-        // Ensure all pipelines are ready
-        crate::metallic::rmsnorm::ensure_rmsnorm_pipeline(ctx)?;
-        crate::metallic::rope::ensure_rope_pipeline(ctx)?;
-        crate::metallic::silu::ensure_silu_pipeline(ctx)?;
-        crate::metallic::kv_rearrange::ensure_kv_rearrange_pipeline(ctx)?;
-        crate::metallic::elemwise_mul::ensure_mul_pipeline(ctx)?;
-        crate::metallic::elemwise_add::ensure_add_pipeline(ctx)?;
-        crate::metallic::permute::ensure_permute_pipeline(ctx)?;
-
         let mut x = input.clone();
 
         for block in self.blocks.iter() {
             let resid_attn = x.clone();
 
             // RMSNorm before Attention
-            let x_normed_attn = {
-                let out = Tensor::create_tensor_pooled(x.dims().to_vec(), ctx)?;
-                let op = RMSNorm::new(
-                    x,
-                    out.clone(),
-                    block.attn_norm_gamma.clone(),
-                    d_model as u32,
-                    ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-                )?;
-                ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-                out
-            };
+            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
             ctx.synchronize();
 
             // QKV GEMMs
@@ -347,42 +293,19 @@ impl Qwen25 {
             // Ensure matmul is finished before we read values for CPU sanity checks
             ctx.synchronize();
 
-            let q_out = Tensor::create_tensor_pooled(q_temp.dims().to_vec(), ctx)?;
-            // Diagnostic: inspect the bias being added
-            let q_broadcast_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-                q_temp,
-                block.attn_q_bias.clone(),
-                q_out.clone(),
-                ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&q_broadcast_add, cache))?;
-            let q_mat = q_out;
+            let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
             ctx.synchronize(); // Ensure Q matmul and bias add complete
 
             let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
             ctx.synchronize();
-            let k_out = Tensor::create_tensor_pooled(k_temp.dims().to_vec(), ctx)?;
-            let k_broadcast_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-                k_temp,
-                block.attn_k_bias.clone(),
-                k_out.clone(),
-                ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&k_broadcast_add, cache))?;
-            let k_mat = k_out;
+
+            let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
             ctx.synchronize(); // Ensure K matmul and bias add complete
 
             let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
             ctx.synchronize();
-            let v_out = Tensor::create_tensor_pooled(v_temp.dims().to_vec(), ctx)?;
-            let v_broadcast_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-                v_temp,
-                block.attn_v_bias.clone(),
-                v_out.clone(),
-                ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&v_broadcast_add, cache))?;
-            let v_mat = v_out;
+
+            let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
             ctx.synchronize(); // Ensure V matmul and bias add complete
 
             // Defer RoPE until after head rearrangement
@@ -392,57 +315,36 @@ impl Qwen25 {
             let n_kv_heads = self.config.n_kv_heads;
             let head_dim = d_model / n_heads;
             let kv_head_dim = kv_dim / n_kv_heads;
-            let q_batch_heads = batch * n_heads;
-            let kv_batch_heads = batch * n_kv_heads;
 
-            let q_heads = Tensor::create_tensor_pooled(vec![q_batch_heads, seq, head_dim], ctx)?;
-            let k_heads =
-                Tensor::create_tensor_pooled(vec![kv_batch_heads, seq, kv_head_dim], ctx)?;
-            let v_heads =
-                Tensor::create_tensor_pooled(vec![kv_batch_heads, seq, kv_head_dim], ctx)?;
+            let q_heads = ctx.call::<KvRearrangeOp>((
+                q_after,
+                d_model as u32,
+                head_dim as u32,
+                n_heads as u32,
+                n_heads as u32,
+                head_dim as u32,
+                seq as u32,
+            ))?;
+            let k_heads = ctx.call::<KvRearrangeOp>((
+                k_after,
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ))?;
+            let v_heads = ctx.call::<KvRearrangeOp>((
+                v_mat,
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ))?;
             ctx.synchronize();
-            let rearrange_pipeline = ctx.kv_rearrange_pipeline.as_ref().unwrap().clone();
-            ctx.synchronize();
-            ctx.with_command_buffer(|cmd_buf, cache| {
-                let q_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-                    q_after,
-                    q_heads.clone(),
-                    d_model as u32,
-                    head_dim as u32,
-                    n_heads as u32,
-                    n_heads as u32,
-                    head_dim as u32,
-                    seq as u32,
-                    rearrange_pipeline.clone(),
-                )?;
-                cmd_buf.record(&q_rearr, cache)?;
-                let k_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-                    k_after,
-                    k_heads.clone(),
-                    kv_dim as u32,
-                    kv_head_dim as u32,
-                    n_kv_heads as u32,
-                    n_kv_heads as u32,
-                    kv_head_dim as u32,
-                    seq as u32,
-                    rearrange_pipeline.clone(),
-                )?;
-                cmd_buf.record(&k_rearr, cache)?;
-                let v_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-                    v_mat,
-                    v_heads.clone(),
-                    kv_dim as u32,
-                    kv_head_dim as u32,
-                    n_kv_heads as u32,
-                    n_kv_heads as u32,
-                    kv_head_dim as u32,
-                    seq as u32,
-                    rearrange_pipeline,
-                )?;
-                cmd_buf.record(&v_rearr, cache)?;
-                Ok(())
-            })?;
-            ctx.synchronize();
+
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
             let q_heads_after_rope = {
                 let dim_half = head_dim / 2;
@@ -460,20 +362,12 @@ impl Qwen25 {
                 }
                 let cos = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
                 let sin = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-                let out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), ctx)?;
-                let rope_q = RoPE::new(
-                    q_heads,
-                    out.clone(),
-                    cos,
-                    sin,
-                    head_dim as u32,
-                    seq as u32,
-                    ctx.rope_pipeline.as_ref().unwrap().clone(),
-                )?;
-                ctx.with_command_buffer(|cb, cache| cb.record(&rope_q, cache))?;
-                out
+
+                // Use the new kernel system
+                ctx.call::<RoPEOp>((q_heads, cos, sin, head_dim as u32, seq as u32))?
             };
             ctx.synchronize();
+
             let k_heads_after_rope = {
                 let dim_half = kv_head_dim / 2;
                 let mut cos_buf = vec![0f32; seq * dim_half];
@@ -488,52 +382,23 @@ impl Qwen25 {
                         sin_buf[idx] = angle.sin();
                     }
                 }
+
                 let cos = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
                 let sin = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-                let out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), ctx)?;
                 ctx.synchronize();
-                let rope_k = RoPE::new(
-                    k_heads,
-                    out.clone(),
-                    cos,
-                    sin,
-                    kv_head_dim as u32,
-                    seq as u32,
-                    ctx.rope_pipeline.as_ref().unwrap().clone(),
-                )?;
-                ctx.with_command_buffer(|cb, cache| cb.record(&rope_k, cache))?;
-                out
+
+                // Use the new kernel system
+                ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?
             };
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
-            let k_repeated = Qwen25::repeat_kv_heads(
-                &k_heads_after_rope,
-                group_size,
-                batch,
-                n_kv_heads,
-                n_heads,
-                seq,
-                kv_head_dim,
-                ctx,
-            )?;
-            let v_repeated = Qwen25::repeat_kv_heads(
-                &v_heads,
-                group_size,
-                batch,
-                n_kv_heads,
-                n_heads,
-                seq,
-                kv_head_dim,
-                ctx,
-            )?;
+
+            let k_repeated = Qwen25::repeat_kv_heads(&k_heads_after_rope, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
+
+            let v_repeated = Qwen25::repeat_kv_heads(&v_heads, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
 
             // SDPA (causal mask enabled)
-            let attn_out_heads = ctx.scaled_dot_product_attention(
-                &q_heads_after_rope,
-                &k_repeated,
-                &v_repeated,
-                true,
-            )?;
+            let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
 
             // Attention Output Reassembly
             let attn_out_reshaped = attn_out_heads
@@ -559,18 +424,7 @@ impl Qwen25 {
             let resid_mlp = x.clone();
 
             // RMSNorm before MLP
-            let x_normed_mlp = {
-                let out = Tensor::create_tensor_pooled(x.dims().to_vec(), ctx)?;
-                let op = RMSNorm::new(
-                    x,
-                    out.clone(),
-                    block.ffn_norm_gamma.clone(),
-                    d_model as u32,
-                    ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-                )?;
-                ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-                out
-            };
+            let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
             ctx.synchronize();
             let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
@@ -595,18 +449,10 @@ impl Qwen25 {
         }
 
         // Final RMSNorm after all blocks
-        let final_out = Tensor::create_tensor_pooled(x.dims().to_vec(), ctx)?;
-        let final_norm_op = RMSNorm::new(
-            x.clone(),
-            final_out.clone(),
-            self.final_norm_gamma.clone(),
-            self.config.d_model as u32,
-            ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&final_norm_op, cache))?;
+        let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
         ctx.synchronize();
 
-        Ok(final_out)
+        Ok(final_normed)
     }
 
     /// Step-forward for autoregressive generation. For now this is a thin wrapper
@@ -639,14 +485,8 @@ impl Qwen25 {
         ctx: &mut Context,
     ) -> Result<Tensor, MetalError> {
         let input_dims = input.dims();
-        if input_dims.len() != 3
-            || input_dims[0] != batch * n_kv_heads
-            || input_dims[1] != seq
-            || input_dims[2] != head_dim
-        {
-            return Err(MetalError::InvalidShape(
-                "Invalid input dimensions for repeat_kv_heads".to_string(),
-            ));
+        if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
+            return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
         let output_dims = vec![batch * n_heads, seq, head_dim];
@@ -682,23 +522,14 @@ impl LoadableModel for Qwen25 {
         use crate::gguf::GGUFValue;
 
         // Build config heuristically from metadata (fallbacks kept consistent with qwen25::new)
-        let d_model =
-            gguf_model.get_metadata_u32_or(&["qwen2.d_model", "model.d_model"], 896) as usize;
-        let ff_dim =
-            gguf_model.get_metadata_u32_or(&["qwen2.ff_dim", "model.ff_dim"], 4864) as usize;
-        let n_heads =
-            gguf_model.get_metadata_u32_or(&["qwen2.n_heads", "model.n_heads"], 14) as usize;
-        let n_kv_heads =
-            gguf_model.get_metadata_u32_or(&["qwen2.n_kv_heads", "model.n_kv_heads"], 2) as usize;
-        let n_layers =
-            gguf_model.get_metadata_u32_or(&["qwen2.n_layers", "model.n_layers"], 24) as usize;
-        let seq_len = gguf_model
-            .get_metadata_u32_or(&["qwen2.context_length", "model.context_length"], 32768)
-            as usize;
-        let rope_freq_base = gguf_model
-            .get_metadata_f32_or(&["qwen2.rope_theta", "qwen2.rope.freq_base"], 1_000_000.0);
-        let rms_eps =
-            gguf_model.get_metadata_f32_or(&["qwen2.rms_norm_eps", "qwen2.rope.rms_eps"], 1e-6);
+        let d_model = gguf_model.get_metadata_u32_or(&["qwen2.d_model", "model.d_model"], 896) as usize;
+        let ff_dim = gguf_model.get_metadata_u32_or(&["qwen2.ff_dim", "model.ff_dim"], 4864) as usize;
+        let n_heads = gguf_model.get_metadata_u32_or(&["qwen2.n_heads", "model.n_heads"], 14) as usize;
+        let n_kv_heads = gguf_model.get_metadata_u32_or(&["qwen2.n_kv_heads", "model.n_kv_heads"], 2) as usize;
+        let n_layers = gguf_model.get_metadata_u32_or(&["qwen2.n_layers", "model.n_layers"], 24) as usize;
+        let seq_len = gguf_model.get_metadata_u32_or(&["qwen2.context_length", "model.context_length"], 32768) as usize;
+        let rope_freq_base = gguf_model.get_metadata_f32_or(&["qwen2.rope_theta", "qwen2.rope.freq_base"], 1_000_000.0);
+        let rms_eps = gguf_model.get_metadata_f32_or(&["qwen2.rms_norm_eps", "qwen2.rope.rms_eps"], 1e-6);
 
         // Determine vocabulary size:
         // 1) Prefer explicit `vocab_size` or `model.vocab_size` metadata
@@ -711,9 +542,7 @@ impl LoadableModel for Qwen25 {
             .or_else(|| gguf_model.metadata.entries.get("model.vocab_size"))
         {
             *v as usize
-        } else if let Some(GGUFValue::Array(arr)) =
-            gguf_model.metadata.entries.get("tokenizer.ggml.tokens")
-        {
+        } else if let Some(GGUFValue::Array(arr)) = gguf_model.metadata.entries.get("tokenizer.ggml.tokens") {
             // Use tokenizer token count when available to avoid token-id out-of-range errors.
             arr.len()
         } else {
@@ -738,10 +567,7 @@ impl LoadableModel for Qwen25 {
         // Helper: attempt to copy from gguf tensor into dst.
         // Fast-path when shapes match, and a linear fallback when only total element counts match.
         // We avoid transposing rectangular matrices since GGUF already has the correct layout for our matmuls.
-        fn try_copy(
-            src: &crate::metallic::Tensor,
-            dst: &mut crate::metallic::Tensor,
-        ) -> Result<(), MetalError> {
+        fn try_copy(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor) -> Result<(), MetalError> {
             // Basic size check
             if src.len() != dst.len() {
                 return Err(MetalError::DimensionMismatch {
@@ -767,9 +593,7 @@ impl LoadableModel for Qwen25 {
 
         // layer index extractor (searches for common patterns)
         fn parse_layer_index(name: &str) -> Option<usize> {
-            let patterns = [
-                "layers.", "layer.", "blocks.", "block.", "layer_", "layers_",
-            ];
+            let patterns = ["layers.", "layer.", "blocks.", "block.", "layer_", "layers_"];
             let lname = name.to_lowercase();
             for pat in patterns.iter() {
                 if let Some(pos) = lname.find(pat) {
@@ -812,13 +636,9 @@ impl LoadableModel for Qwen25 {
             let lname = name.to_lowercase();
 
             // Embedding and weight tying for token embeddings
-            if ((lname.contains("token") && lname.contains("emb"))
-                || lname.contains("tok_emb")
-                || lname.contains("tokembedding"))
+            if ((lname.contains("token") && lname.contains("emb")) || lname.contains("tok_emb") || lname.contains("tokembedding"))
                 && tensor.len() == qwen.embed_weight.len()
             {
-                //println!("MAPPING DEBUG: Loading token_embd tensor '{}' with dims {:?}", name, tensor.dims);
-
                 // For this model, the data is already laid out for [vocab, d_model] despite GGUF dims; linear copy
                 let src_slice = tensor.as_slice();
                 let dst_slice = qwen.embed_weight.as_mut_slice();
@@ -829,12 +649,9 @@ impl LoadableModel for Qwen25 {
             }
 
             // Output / lm_head
-            if (lname.contains("lm_head")
-                || lname.contains("lmhead")
-                || (lname.contains("output") && lname.contains("weight")))
+            if (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
                 && tensor.len() == qwen.output_weight.len()
             {
-                //prinln!("MAPPING -> output_weight candidate: '{}' len={} dst_len={}", name, tensor.len(), qwen.output_weight.len());
                 try_copy(tensor, &mut qwen.output_weight).expect("succesfull copy");
                 continue;
             }
@@ -863,10 +680,7 @@ impl LoadableModel for Qwen25 {
                                 //println!("MAPPING -> Applied weight tying: token_embd.weight -> output_weight");
                             }
                             Err(e) => {
-                                println!(
-                                    "MAPPING -> token_embd.weight copy to output_weight failed: {:?}",
-                                    e
-                                );
+                                println!("MAPPING -> token_embd.weight copy to output_weight failed: {:?}", e);
                             }
                         }
                     } else {
@@ -944,34 +758,26 @@ impl LoadableModel for Qwen25 {
                 }
 
                 // Attention biases (optional)
-                if (lname.contains("attn.q.bias")
-                    || lname.contains("attn_q.bias")
-                    || lname.contains("attention.query.bias"))
+                if (lname.contains("attn.q.bias") || lname.contains("attn_q.bias") || lname.contains("attention.query.bias"))
                     && tensor.len() == block.attn_q_bias.len()
                 {
                     try_copy(tensor, &mut block.attn_q_bias).expect("succesfull copy");
                     continue;
                 }
 
-                if (lname.contains("attn.k.bias")
-                    || lname.contains("attn_k.bias")
-                    || lname.contains("attention.key.bias"))
+                if (lname.contains("attn.k.bias") || lname.contains("attn_k.bias") || lname.contains("attention.key.bias"))
                     && tensor.len() == block.attn_k_bias.len()
                 {
                     try_copy(tensor, &mut block.attn_k_bias).expect("succesfull copy");
                     continue;
                 }
-                if (lname.contains("attn.v.bias")
-                    || lname.contains("attn_v.bias")
-                    || lname.contains("attention.value.bias"))
+                if (lname.contains("attn.v.bias") || lname.contains("attn_v.bias") || lname.contains("attention.value.bias"))
                     && tensor.len() == block.attn_v_bias.len()
                 {
                     try_copy(tensor, &mut block.attn_v_bias).expect("succesfull copy");
                     continue;
                 }
-                if (lname.contains("attn.v.bias")
-                    || lname.contains("attn_v.bias")
-                    || lname.contains("attention.value.bias"))
+                if (lname.contains("attn.v.bias") || lname.contains("attn_v.bias") || lname.contains("attention.value.bias"))
                     && tensor.len() == block.attn_v_bias.len()
                 {
                     try_copy(tensor, &mut block.attn_v_bias).expect("succesfull copy");
@@ -988,11 +794,8 @@ impl LoadableModel for Qwen25 {
                     || lname.contains("w1.weight"))
                     && tensor.len() == block.ffn_gate.len()
                 {
-                    //println!("MAPPING DEBUG: FFN gate candidate '{}' loading into ffn_gate. src_dims={:?} dst_dims={:?}", name, tensor.dims, block.ffn_gate.dims());
                     if tensor.dims == block.ffn_gate.dims() {
-                        try_copy(tensor, &mut block.ffn_gate)
-                            .expect("successful copy for ffn_gate (exact match)");
-                        //println!("MAPPING DEBUG: FFN gate loaded via exact copy");
+                        try_copy(tensor, &mut block.ffn_gate).expect("successful copy for ffn_gate (exact match)");
                     } else if tensor.dims.len() == 2
                         && block.ffn_gate.dims().len() == 2
                         && tensor.dims[0] == block.ffn_gate.dims()[1]
@@ -1003,11 +806,8 @@ impl LoadableModel for Qwen25 {
                         let src = tensor.as_slice();
                         let dst = block.ffn_gate.as_mut_slice();
                         dst.copy_from_slice(src);
-                        //println!("MAPPING DEBUG: FFN gate loaded via direct copy with swapped dims metadata");
                     } else {
-                        try_copy(tensor, &mut block.ffn_gate)
-                            .expect("successful linear copy fallback for ffn_gate");
-                        //println!("MAPPING DEBUG: FFN gate loaded via linear fallback copy");
+                        try_copy(tensor, &mut block.ffn_gate).expect("successful linear copy fallback for ffn_gate");
                     }
                     continue;
                 }
@@ -1020,11 +820,8 @@ impl LoadableModel for Qwen25 {
                     || lname.contains("w3.weight"))
                     && tensor.len() == block.ffn_up.len()
                 {
-                    //println!("MAPPING DEBUG: FFN up candidate '{}' loading into ffn_up. src_dims={:?} dst_dims={:?}", name, tensor.dims, block.ffn_up.dims());
                     if tensor.dims == block.ffn_up.dims() {
-                        try_copy(tensor, &mut block.ffn_up)
-                            .expect("successful copy for ffn_up (exact match)");
-                        //println!("MAPPING DEBUG: FFN up loaded via exact copy");
+                        try_copy(tensor, &mut block.ffn_up).expect("successful copy for ffn_up (exact match)");
                     } else if tensor.dims.len() == 2
                         && block.ffn_up.dims().len() == 2
                         && tensor.dims[0] == block.ffn_up.dims()[1]
@@ -1033,11 +830,8 @@ impl LoadableModel for Qwen25 {
                         let src = tensor.as_slice();
                         let dst = block.ffn_up.as_mut_slice();
                         dst.copy_from_slice(src);
-                        //println!("MAPPING DEBUG: FFN up loaded via direct copy with swapped dims metadata");
                     } else {
-                        try_copy(tensor, &mut block.ffn_up)
-                            .expect("successful linear copy fallback for ffn_up");
-                        //println!("MAPPING DEBUG: FFN up loaded via linear fallback copy");
+                        try_copy(tensor, &mut block.ffn_up).expect("successful linear copy fallback for ffn_up");
                     }
                     continue;
                 }
@@ -1052,11 +846,8 @@ impl LoadableModel for Qwen25 {
                     || lname.contains("wo.weight"))
                     && tensor.len() == block.ffn_down.len()
                 {
-                    //println!("MAPPING DEBUG: FFN down candidate '{}' loading into ffn_down. src_dims={:?} dst_dims={:?}", name, tensor.dims, block.ffn_down.dims());
                     if tensor.dims == block.ffn_down.dims() {
-                        try_copy(tensor, &mut block.ffn_down)
-                            .expect("successful copy for ffn_down (exact match)");
-                        //println!("MAPPING DEBUG: FFN down loaded via exact copy");
+                        try_copy(tensor, &mut block.ffn_down).expect("successful copy for ffn_down (exact match)");
                     } else if tensor.dims.len() == 2
                         && block.ffn_down.dims().len() == 2
                         && tensor.dims[0] == block.ffn_down.dims()[1]
@@ -1067,9 +858,7 @@ impl LoadableModel for Qwen25 {
                         dst.copy_from_slice(src);
                         //println!("MAPPING DEBUG: FFN down loaded via direct copy with swapped dims metadata");
                     } else {
-                        try_copy(tensor, &mut block.ffn_down)
-                            .expect("successful linear copy fallback for ffn_down");
-                        //println!("MAPPING DEBUG: FFN down loaded via linear fallback copy");
+                        try_copy(tensor, &mut block.ffn_down).expect("successful linear copy fallback for ffn_down");
                     }
                     continue;
                 }
@@ -1083,9 +872,7 @@ impl LoadableModel for Qwen25 {
                     || lname.contains("wg.bias")
                 {
                     if tensor.len() == block.ffn_gate_bias.len() {
-                        //println!("MAPPING DEBUG: FFN gate bias '{}' src_dims={:?} -> dst_dims={:?}", name, tensor.dims, block.ffn_gate_bias.dims());
-                        try_copy(tensor, &mut block.ffn_gate_bias)
-                            .expect("successful copy of gate bias");
+                        try_copy(tensor, &mut block.ffn_gate_bias).expect("successful copy of gate bias");
                     }
                     continue;
                 }
@@ -1096,9 +883,7 @@ impl LoadableModel for Qwen25 {
                     || lname.contains("w3.bias")
                 {
                     if tensor.len() == block.ffn_up_bias.len() {
-                        //println!("MAPPING DEBUG: FFN up bias '{}' src_dims={:?} -> dst_dims={:?}", name, tensor.dims, block.ffn_up_bias.dims());
-                        try_copy(tensor, &mut block.ffn_up_bias)
-                            .expect("successful copy of up bias");
+                        try_copy(tensor, &mut block.ffn_up_bias).expect("successful copy of up bias");
                     }
                     continue;
                 }
@@ -1112,9 +897,7 @@ impl LoadableModel for Qwen25 {
                     || lname.contains("wo.bias")
                 {
                     if tensor.len() == block.ffn_down_bias.len() {
-                        //println!("MAPPING DEBUG: FFN down bias '{}' src_dims={:?} -> dst_dims={:?}", name, tensor.dims, block.ffn_down_bias.dims());
-                        try_copy(tensor, &mut block.ffn_down_bias)
-                            .expect("successful copy of down bias");
+                        try_copy(tensor, &mut block.ffn_down_bias).expect("successful copy of down bias");
                     }
                     continue;
                 }
@@ -1157,239 +940,9 @@ impl LoadableModel for Qwen25 {
             }
         }
 
-        // Debug: Verify loading matches metadata dump (24 blocks, specific tensors non-zero)
-        //let mut q_loaded = 0;
-        //let mut k_loaded = 0;
-        //let mut v_loaded = 0;
-        //let mut attn_norm_loaded = 0;
-        //let mut ffn_norm_loaded = 0;
-        //let mut ffn_gate_loaded = 0;
-        //let mut ffn_up_loaded = 0;
-        //let mut ffn_down_loaded = 0;
-        //let mut attn_out_loaded = 0;
-        //let mut embed_nonzero = false;
-        //let mut output_nonzero = false;
-        //
-        //// Check embeddings/output
-        //let embed_slice = qwen.embed_weight.as_slice();
-        //if embed_slice.iter().any(|&x| x != 0.0) {
-        //    embed_nonzero = true;
-        //} else {
-        //    //println!("MAPPING DEBUG: WARNING - Embeddings all zero!");
-        //}
-        //let output_slice = qwen.output_weight.as_slice();
-        //if output_slice.iter().any(|&x| x != 0.0) {
-        //    output_nonzero = true;
-        //} else {
-        //    //println!("MAPPING DEBUG: WARNING - Output weights all zero!");
-        //}
-        //
-        //// Per-block checks (expect 24 blocks from metadata)
-        //for (idx, block) in qwen.blocks.iter().enumerate() {
-        //    let q_slice = block.attn_q_weight.as_slice();
-        //    if q_slice.iter().any(|&x| x != 0.0) {
-        //        q_loaded += 1;
-        //    }
-        //    let k_slice = block.attn_k_weight.as_slice();
-        //    if k_slice.iter().any(|&x| x != 0.0) {
-        //        k_loaded += 1;
-        //    }
-        //    let v_slice = block.attn_v_weight.as_slice();
-        //    if v_slice.iter().any(|&x| x != 0.0) {
-        //        v_loaded += 1;
-        //    }
-        //    let attn_norm_slice = block.attn_norm_gamma.as_slice();
-        //    if attn_norm_slice.iter().any(|&x| x != 0.0) {
-        //        attn_norm_loaded += 1;
-        //    }
-        //    let ffn_norm_slice = block.ffn_norm_gamma.as_slice();
-        //    if ffn_norm_slice.iter().any(|&x| x != 0.0) {
-        //        ffn_norm_loaded += 1;
-        //    }
-        //    let gate_slice = block.ffn_gate.as_slice();
-        //    if gate_slice.iter().any(|&x| x != 0.0) {
-        //        ffn_gate_loaded += 1;
-        //    }
-        //    let up_slice = block.ffn_up.as_slice();
-        //    if up_slice.iter().any(|&x| x != 0.0) {
-        //        ffn_up_loaded += 1;
-        //    }
-        //    let down_slice = block.ffn_down.as_slice();
-        //    if down_slice.iter().any(|&x| x != 0.0) {
-        //        ffn_down_loaded += 1;
-        //    }
-        //    let out_slice = block.attn_out_weight.as_slice();
-        //    if out_slice.iter().any(|&x| x != 0.0) {
-        //        attn_out_loaded += 1;
-        //    }
-        //
-        //    // Sample for block 0 if detailed
-        //    //if idx == 0 {
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 Q sample: {:.6}, K: {:.6}, Norm: {:.6}",
-        //    //        q_slice[0], k_slice[0], attn_norm_slice[0]
-        //    //    );
-        //    //    // Also print FFN weight samples for deeper inspection
-        //    //    let gate_sample = qwen.blocks[0].ffn_gate.as_slice();
-        //    //    let up_sample = qwen.blocks[0].ffn_up.as_slice();
-        //    //    let down_sample = qwen.blocks[0].ffn_down.as_slice();
-        //    //    let n = std::cmp::min(10, gate_sample.len());
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 ffn_gate first {}: {:?}",
-        //    //        n,
-        //    //        &gate_sample[0..n]
-        //    //    );
-        //    //    let n2 = std::cmp::min(10, up_sample.len());
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 ffn_up first {}: {:?}",
-        //    //        n2,
-        //    //        &up_sample[0..n2]
-        //    //    );
-        //    //    let n3 = std::cmp::min(10, down_sample.len());
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 ffn_down first {}: {:?}",
-        //    //        n3,
-        //    //        &down_sample[0..n3]
-        //    //    );
-        //    //    // Also print biases if present
-        //    //    let gate_bias = qwen.blocks[0].ffn_gate_bias.as_slice();
-        //    //    let up_bias = qwen.blocks[0].ffn_up_bias.as_slice();
-        //    //    let down_bias = qwen.blocks[0].ffn_down_bias.as_slice();
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 ffn_gate_bias first {}: {:?}",
-        //    //        std::cmp::min(10, gate_bias.len()),
-        //    //        &gate_bias[0..std::cmp::min(10, gate_bias.len())]
-        //    //    );
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 ffn_up_bias first {}: {:?}",
-        //    //        std::cmp::min(10, up_bias.len()),
-        //    //        &up_bias[0..std::cmp::min(10, up_bias.len())]
-        //    //    );
-        //    //    println!(
-        //    //        "MAPPING DEBUG: Block 0 ffn_down_bias first {}: {:?}",
-        //    //        std::cmp::min(10, down_bias.len()),
-        //    //        &down_bias[0..std::cmp::min(10, down_bias.len())]
-        //    //    );
-        //    //}
-        //}
-
-        // Summary vs. expected (from dump: 24 blocks, 290 tensors total, but focus on key ones)
-        //println!("MAPPING DEBUG SUMMARY:");
-        //println!("  Embed/Output: {} / {}", embed_nonzero, output_nonzero);
-        //println!("  Per-block loaded counts (expect 24 each):");
-        //println!(
-        //    "    Q-proj: {}/24, K-proj: {}/24, V-proj: {}/24",
-        //    q_loaded, k_loaded, v_loaded
-        //);
-        //println!(
-        //    "    Attn-norm: {}/24, FFN-norm: {}/24",
-        //    attn_norm_loaded, ffn_norm_loaded
-        //);
-        //println!(
-        //    "    FFN-gate: {}/24, FFN-up: {}/24, FFN-down: {}/24",
-        //    ffn_gate_loaded, ffn_up_loaded, ffn_down_loaded
-        //);
-        //println!("    Attn-out: {}/24", attn_out_loaded);
-        //if q_loaded < 24 || attn_norm_loaded < 24 {
-        //    //println!("MAPPING DEBUG: WARNING - Incomplete loading! Check tensor name mappings.");
-        //} else {
-        //    println!(
-        //        "MAPPING DEBUG: All key tensors loaded successfully (matches 24-block metadata)."
-        //    );
-        //}
-        //println!(
-        //    "  Total GGUF tensors processed: {}",
-        //    gguf_model.tensors.len()
-        //);
-
         // Synchronize to ensure all copies are complete
         ctx.synchronize();
 
         Ok(qwen)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
-        let cfg = Qwen25Config {
-            n_layers: 2,
-            d_model: 8,
-            ff_dim: 32, // small FF for tests
-            n_heads: 2,
-            n_kv_heads: 1,
-            seq_len: 4,
-            vocab_size: 32,
-            rope_freq_base: 1e6,
-            rms_eps: 1e-6,
-        };
-        let model = Qwen25::new(cfg, &mut ctx)?;
-
-        let input_data: Vec<f32> = vec![0.5; model.config.seq_len * model.config.d_model];
-        let input = Tensor::create_tensor_from_slice(
-            &input_data,
-            vec![1, model.config.seq_len, model.config.d_model],
-            &ctx,
-        )?;
-
-        let out = model.forward(&input, &mut ctx)?;
-        assert_eq!(out.dims(), input.dims());
-        Ok(())
-    }
-
-    #[test]
-    fn test_qwen25_embed() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
-        let cfg = Qwen25Config {
-            n_layers: 1,
-            d_model: 8,
-            ff_dim: 16,
-            n_heads: 2,
-            n_kv_heads: 1,
-            seq_len: 4,
-            vocab_size: 16,
-            rope_freq_base: 1e6,
-            rms_eps: 1e-6,
-        };
-        let model = Qwen25::new(cfg, &mut ctx)?;
-
-        // Test embedding a few tokens
-        let tokens = vec![1, 2, 3];
-        let embedded = model.embed(&tokens, &mut ctx)?;
-
-        // Check the output shape
-        assert_eq!(embedded.dims(), &[1, 3, 8]);
-
-        Ok(())
-    }
-
-    #[test]
-    fn test_qwen25_forward_tokens() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
-        let cfg = Qwen25Config {
-            n_layers: 1,
-            d_model: 8,
-            ff_dim: 16,
-            n_heads: 2,
-            n_kv_heads: 1,
-            seq_len: 4,
-            vocab_size: 16,
-            rope_freq_base: 1e6,
-            rms_eps: 1e-6,
-        };
-        let model = Qwen25::new(cfg, &mut ctx)?;
-
-        // Test forward pass with tokens
-        let tokens = vec![1, 2, 3];
-        let logits = model.forward_tokens(&tokens, &mut ctx)?;
-
-        // Check the output shape - should be [batch, seq, vocab_size]
-        assert_eq!(logits.dims(), &[1, 3, 16]);
-
-        Ok(())
     }
 }

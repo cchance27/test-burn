@@ -1,25 +1,19 @@
 use crate::alternatives::sdpa_burn;
 
 const PYTORCH_ARANGE_NONCAUSAL: [f32; 256] = [
-    112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0,
-    125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0,
-    122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0,
-    119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0,
-    116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0,
-    113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0,
-    126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0,
-    123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0,
-    120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0,
-    117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 240.0, 241.0,
-    242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0,
-    255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0,
-    252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0,
-    249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0,
-    246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0,
-    243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0,
-    240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0,
-    253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0,
-    250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0,
+    112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0,
+    115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0,
+    118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0,
+    121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0,
+    124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0,
+    127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0,
+    114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 240.0, 241.0, 242.0, 243.0, 244.0,
+    245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0,
+    248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0,
+    251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0,
+    254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0,
+    241.0, 242.0, 243.0, 244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0,
+    244.0, 245.0, 246.0, 247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0, 240.0, 241.0, 242.0, 243.0, 244.0, 245.0, 246.0,
     247.0, 248.0, 249.0, 250.0, 251.0, 252.0, 253.0, 254.0, 255.0,
 ];
 
@@ -42,14 +36,9 @@ fn arange_sdpa_burn_vs_pytorch_causal() {
     let value = Tensor::<MyBackend, 1, Int>::arange(0..NUM_ELEMENTS, &device)
         .float()
         .reshape(DIMENSIONS);
-    let output = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
-        query, key, value, None, true,
-    );
+    let output = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(query, key, value, None, true);
     assert_eq!(output.dims(), DIMENSIONS);
-    assert_eq!(
-        output.to_data().as_slice::<f32>().unwrap(),
-        &pytorch_arange_causal
-    );
+    assert_eq!(output.to_data().as_slice::<f32>().unwrap(), &pytorch_arange_causal);
 }
 
 #[test]
@@ -67,9 +56,7 @@ fn arange_sdpa_ours_vs_pytorch_causal() {
     let k_tensor = Tensor::create_tensor_from_slice(&key, vec![2, 8, 16], &context).unwrap();
     let v_tensor = Tensor::create_tensor_from_slice(&value, vec![2, 8, 16], &context).unwrap();
 
-    let output = context
-        .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true)
-        .unwrap();
+    let output = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true).unwrap();
     assert_eq!(output.dims(), DIMENSIONS);
     assert_eq!(output.as_slice(), &pytorch_arange_causal);
 }
@@ -89,14 +76,9 @@ fn arange_sdpa_burn_vs_pytorch_noncausal() {
     let value = Tensor::<MyBackend, 1, Int>::arange(0..NUM_ELEMENTS, &device)
         .float()
         .reshape(DIMENSIONS);
-    let output = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
-        query, key, value, None, false,
-    );
+    let output = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(query, key, value, None, false);
     assert_eq!(output.dims(), DIMENSIONS);
-    assert_eq!(
-        output.to_data().as_slice::<f32>().unwrap(),
-        &PYTORCH_ARANGE_NONCAUSAL
-    );
+    assert_eq!(output.to_data().as_slice::<f32>().unwrap(), &PYTORCH_ARANGE_NONCAUSAL);
 }
 
 #[test]
@@ -140,10 +122,9 @@ fn large_sdpa_ours_vs_burn_causal() {
     let k_burn_input = BurnTensor::<MyBackend, 1, Int>::arange(0..(kv_num as i64), &device)
         .float()
         .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
-    let v_burn_input =
-        BurnTensor::<MyBackend, 1, Int>::arange((kv_num as i64)..(2 * kv_num as i64), &device)
-            .float()
-            .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
+    let v_burn_input = BurnTensor::<MyBackend, 1, Int>::arange((kv_num as i64)..(2 * kv_num as i64), &device)
+        .float()
+        .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
 
     let q_data_tensor = q_burn_input.to_data();
     let q_data = q_data_tensor.as_slice::<f32>().unwrap().to_vec();
@@ -152,28 +133,17 @@ fn large_sdpa_ours_vs_burn_causal() {
     let v_data_tensor = v_burn_input.to_data();
     let v_data = v_data_tensor.as_slice::<f32>().unwrap().to_vec();
 
-    let burn_out = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
-        q_burn_input,
-        k_burn_input,
-        v_burn_input,
-        None,
-        true,
-    );
+    let burn_out = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(q_burn_input, k_burn_input, v_burn_input, None, true);
     let burn_data = burn_out.to_data();
     let burn_slice = burn_data.as_slice::<f32>().unwrap();
 
     // Metallic
     use crate::metallic::{Context, Tensor};
     let mut ctx = Context::new().unwrap();
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let metal_out = ctx
-        .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true)
-        .unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true).unwrap();
     let metal_slice = metal_out.as_slice();
 
     // Validate with tolerance due to FP reductions
@@ -218,10 +188,9 @@ fn large_sdpa_ours_vs_burn_noncausal() {
     let k_burn_input = BurnTensor::<MyBackend, 1, Int>::arange(0..(kv_num as i64), &device)
         .float()
         .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
-    let v_burn_input =
-        BurnTensor::<MyBackend, 1, Int>::arange((kv_num as i64)..(2 * kv_num as i64), &device)
-            .float()
-            .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
+    let v_burn_input = BurnTensor::<MyBackend, 1, Int>::arange((kv_num as i64)..(2 * kv_num as i64), &device)
+        .float()
+        .reshape(burn::tensor::Shape::from([batch, seq_k, dim]));
 
     let q_data_tensor = q_burn_input.to_data();
     let q_data = q_data_tensor.as_slice::<f32>().unwrap().to_vec();
@@ -230,28 +199,17 @@ fn large_sdpa_ours_vs_burn_noncausal() {
     let v_data_tensor = v_burn_input.to_data();
     let v_data = v_data_tensor.as_slice::<f32>().unwrap().to_vec();
 
-    let burn_out = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(
-        q_burn_input,
-        k_burn_input,
-        v_burn_input,
-        None,
-        false,
-    );
+    let burn_out = crate::alternatives::sdpa_burn::scaled_dot_product_attention_burn(q_burn_input, k_burn_input, v_burn_input, None, false);
     let burn_data = burn_out.to_data();
     let burn_slice = burn_data.as_slice::<f32>().unwrap();
 
     // Metallic
     use crate::metallic::{Context, Tensor};
     let mut ctx = Context::new().unwrap();
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let metal_out = ctx
-        .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)
-        .unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false).unwrap();
     let metal_slice = metal_out.as_slice();
 
     // Validate with tolerance due to FP reductions
@@ -285,70 +243,28 @@ fn run_sdpa_test(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: b
     let device = <MyBackend as Backend>::Device::default();
 
     // Use random data for more robust tests
-    let q_burn_input = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_q, dim],
-        Distribution::Uniform(-1.0, 1.0),
-        &device,
-    );
-    let k_burn_input = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_k, dim],
-        Distribution::Uniform(-1.0, 1.0),
-        &device,
-    );
-    let v_burn_input = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_k, dim],
-        Distribution::Uniform(-1.0, 1.0),
-        &device,
-    );
+    let q_burn_input = BurnTensor::<MyBackend, 3>::random([batch, seq_q, dim], Distribution::Uniform(-1.0, 1.0), &device);
+    let k_burn_input = BurnTensor::<MyBackend, 3>::random([batch, seq_k, dim], Distribution::Uniform(-1.0, 1.0), &device);
+    let v_burn_input = BurnTensor::<MyBackend, 3>::random([batch, seq_k, dim], Distribution::Uniform(-1.0, 1.0), &device);
 
-    let q_data = q_burn_input
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
-    let k_data = k_burn_input
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
-    let v_data = v_burn_input
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
+    let q_data = q_burn_input.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let k_data = k_burn_input.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let v_data = v_burn_input.clone().into_data().as_slice::<f32>().unwrap().to_vec();
 
-    let burn_out = sdpa_burn::scaled_dot_product_attention_burn(
-        q_burn_input,
-        k_burn_input,
-        v_burn_input,
-        None,
-        causal,
-    );
+    let burn_out = sdpa_burn::scaled_dot_product_attention_burn(q_burn_input, k_burn_input, v_burn_input, None, causal);
     let burn_data = burn_out.into_data();
     let burn_slice = burn_data.as_slice::<f32>().unwrap();
 
     // Metallic
     use crate::metallic::{Context, Tensor};
     let mut ctx = Context::new().unwrap();
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let metal_out = ctx
-        .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)
-        .unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
 
-    assert_eq!(
-        metal_out.dims(),
-        &[batch, seq_q, dim],
-        "Output shape mismatch"
-    );
+    assert_eq!(metal_out.dims(), &[batch, seq_q, dim], "Output shape mismatch");
 
     // Validate with tolerance
     let rtol = 1e-4f64;
@@ -429,14 +345,10 @@ fn sdpa_causality_correctness() {
     let mut ctx = Context::new().unwrap();
 
     // Create tensors
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor_base =
-        Tensor::create_tensor_from_slice(&v_data_base, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor_modified =
-        Tensor::create_tensor_from_slice(&v_data_modified, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor_base = Tensor::create_tensor_from_slice(&v_data_base, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor_modified = Tensor::create_tensor_from_slice(&v_data_modified, vec![batch, seq_k, dim], &ctx).unwrap();
 
     // Run SDPA with causal=True and base V
     let metal_out_base = ctx
@@ -465,11 +377,7 @@ fn sdpa_causality_correctness() {
         let base_val = metal_slice_base[i] as f64;
         let modified_val = metal_slice_modified[i] as f64;
         let diff = (base_val - modified_val).abs();
-        let rel_err = if base_val.abs() > 1e-8 {
-            diff / base_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if base_val.abs() > 1e-8 { diff / base_val.abs() } else { diff };
 
         assert!(
             diff <= atol || rel_err <= rtol,
@@ -487,11 +395,7 @@ fn sdpa_causality_correctness() {
         let base_val = metal_slice_base[i] as f64;
         let modified_val = metal_slice_modified[i] as f64;
         let diff = (base_val - modified_val).abs();
-        let rel_err = if base_val.abs() > 1e-8 {
-            diff / base_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if base_val.abs() > 1e-8 { diff / base_val.abs() } else { diff };
 
         assert!(
             diff <= atol || rel_err <= rtol,

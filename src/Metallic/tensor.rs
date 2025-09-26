@@ -1,15 +1,15 @@
 #![allow(dead_code)]
 use super::{Context, MetalError, operation::CommandBuffer};
-use crate::metallic::context::{
-    ensure_arange_pipeline, ensure_ones_pipeline, ensure_random_pipeline,
-};
-use crate::metallic::encoder::{
-    dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state,
-};
+use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
+use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
+use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
+use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
+use crate::metallic::kernels::elemwise_sub::ElemwiseSubOp;
+use crate::metallic::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue,
-    MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
 };
 use std::ffi::c_void;
 use std::ops::{Add, Div, Mul, Sub};
@@ -100,11 +100,7 @@ impl Tensor {
     }
 
     /// Helper function to bind a tensor to a compute encoder with correct offset
-    fn bind_tensor(
-        encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-        index: usize,
-        tensor: &Tensor,
-    ) {
+    fn bind_tensor(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, tensor: &Tensor) {
         set_buffer(encoder, index, &tensor.buf, tensor.offset);
     }
 
@@ -119,24 +115,15 @@ impl Tensor {
     }
 
     /// Create a tensor by copying from a host slice.
-    pub fn create_tensor_from_slice(
-        items: &[f32],
-        dims: Vec<usize>,
-        context: &Context,
-    ) -> Result<Tensor, MetalError> {
+    pub fn create_tensor_from_slice(items: &[f32], dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
         let num_elements = items.len();
         let byte_len = std::mem::size_of_val(items);
-        let item_ptr =
-            std::ptr::NonNull::new(items.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
+        let item_ptr = std::ptr::NonNull::new(items.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
 
         let buf = unsafe {
             context
                 .device
-                .newBufferWithBytes_length_options(
-                    item_ptr,
-                    byte_len,
-                    MTLResourceOptions::StorageModeShared,
-                )
+                .newBufferWithBytes_length_options(item_ptr, byte_len, MTLResourceOptions::StorageModeShared)
                 .ok_or(MetalError::BufferFromBytesCreationFailed)?
         };
 
@@ -198,9 +185,7 @@ impl Tensor {
     ) -> Result<Tensor, MetalError> {
         let expected_bytes = dims.iter().product::<usize>() * std::mem::size_of::<f32>();
         if offset + expected_bytes > buffer.length() {
-            return Err(MetalError::InvalidShape(
-                "buffer too small for dims/offset".into(),
-            ));
+            return Err(MetalError::InvalidShape("buffer too small for dims/offset".into()));
         }
         Ok(Tensor {
             buf: buffer,
@@ -215,11 +200,7 @@ impl Tensor {
     /// Create a tensor from a host slice without copying data.
     /// The caller is responsible for ensuring the slice remains valid for the lifetime of the tensor.
     /// This is more efficient than create_tensor_from_slice for read-only data.
-    pub fn from_slice_no_copy(
-        data: &[f32],
-        dims: Vec<usize>,
-        context: &Context,
-    ) -> Result<Tensor, MetalError> {
+    pub fn from_slice_no_copy(data: &[f32], dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
         let num_elements = data.len();
         let expected_elements = dims.iter().product::<usize>();
         if expected_elements != num_elements {
@@ -230,8 +211,7 @@ impl Tensor {
         }
 
         let byte_len = std::mem::size_of_val(data);
-        let item_ptr =
-            std::ptr::NonNull::new(data.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
+        let item_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
 
         // SAFETY: We use no-copy buffer creation, caller must ensure data lifetime
         let buf = unsafe {
@@ -327,11 +307,7 @@ impl Tensor {
             let command_buffer = context.command_queue.commandBuffer().unwrap();
             let encoder = command_buffer.blitCommandEncoder().unwrap();
 
-            encoder.fillBuffer_range_value(
-                &tensor.buf,
-                (tensor.offset..tensor.offset + size).into(),
-                0,
-            );
+            encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
             encoder.endEncoding();
             command_buffer.commit();
         }
@@ -341,92 +317,23 @@ impl Tensor {
         Ok(tensor)
     }
 
-    /// Allocate and fill a tensor with ones.
+    /// Create a tensor of all ones with the given shape.
     pub fn ones(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
-        let mut tensor = Self::create_tensor_pooled(dims, context)?;
-        let size = tensor.size_bytes();
-
-        if size <= Self::cpu_fill_threshold_bytes() {
-            // CPU fill path for small tensors (use optimized fast fill)
-            Self::fast_fill_f32(tensor.as_mut_slice(), 1.0f32);
-        } else {
-            // GPU fill path for large tensors (vectorized kernel - 4 elements per thread)
-            ensure_ones_pipeline(context)?;
-
-            let command_buffer = context.command_queue.commandBuffer().unwrap();
-            let encoder = command_buffer.computeCommandEncoder().unwrap();
-
-            let pipeline = context.ones_pipeline.as_ref().unwrap();
-            set_compute_pipeline_state(&encoder, pipeline);
-
-            set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
-
-            // Pass total elements as buffer(1) so kernel can guard tails
-            let num_elements = tensor.len();
-            let num_elements_u32: u32 = num_elements as u32;
-            set_bytes(&encoder, 1, &num_elements_u32);
-
-            let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-            let threadgroup_size = MTLSize {
-                width: threads_per_threadgroup,
-                height: 1,
-                depth: 1,
-            };
-
-            let num_vecs = num_elements.div_ceil(4);
-            let grid_size = MTLSize {
-                width: num_vecs,
-                height: 1,
-                depth: 1,
-            };
-
-            dispatch_threads(&encoder, grid_size, threadgroup_size);
-            encoder.endEncoding();
-            command_buffer.commit();
-        }
-
+        let tensor = context.call::<OnesOp>(dims)?;
         context.synchronize();
-
         Ok(tensor)
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape.
-    pub fn arange(
-        num_elements: usize,
-        dims: Vec<usize>,
-        context: &mut Context,
-    ) -> Result<Tensor, MetalError> {
-        ensure_arange_pipeline(context)?;
-
-        let tensor = Self::create_tensor_pooled(dims, context)?;
-
-        let command_buffer = context.command_queue.commandBuffer().unwrap();
-        let encoder = command_buffer.computeCommandEncoder().unwrap();
-
-        let pipeline = context.arange_pipeline.as_ref().unwrap();
-        set_compute_pipeline_state(&encoder, pipeline);
-
-        set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
-
-        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-        let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
-            height: 1,
-            depth: 1,
-        };
-
-        let grid_size = MTLSize {
-            width: num_elements,
-            height: 1,
-            depth: 1,
-        };
-
-        dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
-        command_buffer.commit();
-
+    pub fn arange(num_elements: usize, dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
+        if dims.iter().product::<usize>() != num_elements {
+            return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
+        }
+        let tensor = context.call::<ArangeOp>(num_elements)?;
         context.synchronize();
-
+        // Reshape if needed
+        let mut tensor = tensor;
+        tensor.dims = dims;
         Ok(tensor)
     }
 
@@ -443,111 +350,20 @@ impl Tensor {
     /// Allocate and fill a tensor with uniform random values between 0 and 1.
     pub fn random_uniform(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
         // Backwards-compatible simple random uniform in [0,1)
-        ensure_random_pipeline(context)?;
-
-        let tensor = Self::create_tensor_pooled(dims, context)?;
-
-        let command_buffer = context.command_queue.commandBuffer().unwrap();
-        let encoder = command_buffer.computeCommandEncoder().unwrap();
-
-        let pipeline = context.random_pipeline.as_ref().unwrap();
-        set_compute_pipeline_state(&encoder, pipeline);
-
-        set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
-
-        // Use rng_seed_counter for deterministic seeding
-        let seed = context.rng_seed_counter as u32;
-        context.rng_seed_counter += 1;
-        set_bytes(&encoder, 1, &seed);
-
-        // Default min=0.0, scale=1.0 for backwards compatibility
-        let minv: f32 = 0.0f32;
-        let scale: f32 = 1.0f32;
-        set_bytes(&encoder, 2, &minv);
-        set_bytes(&encoder, 3, &scale);
-
-        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-        let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
-            height: 1,
-            depth: 1,
-        };
-
-        let num_elements = tensor.len();
-        let grid_size = MTLSize {
-            width: num_elements,
-            height: 1,
-            depth: 1,
-        };
-
-        dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
-        command_buffer.commit();
-
+        let tensor = context.call::<RandomUniformOp>((dims, 0.0, 1.0, None))?;
         context.synchronize();
-
         Ok(tensor)
     }
 
     /// Fill a new tensor with uniform random values in [min, max).
     /// Uses the device random pipeline for best performance.
-    pub fn random_uniform_range(
-        dims: Vec<usize>,
-        min: f32,
-        max: f32,
-        context: &mut Context,
-    ) -> Result<Tensor, MetalError> {
-        ensure_random_pipeline(context)?;
-
-        let tensor = Self::create_tensor_pooled(dims, context)?;
-
-        let command_buffer = context.command_queue.commandBuffer().unwrap();
-        let encoder = command_buffer.computeCommandEncoder().unwrap();
-
-        let pipeline = context.random_pipeline.as_ref().unwrap();
-        set_compute_pipeline_state(&encoder, pipeline);
-
-        set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
-
-        // Deterministic per-call seed
-        let seed = context.rng_seed_counter as u32;
-        context.rng_seed_counter += 1;
-        set_bytes(&encoder, 1, &seed);
-
-        let minv: f32 = min;
-        let scale: f32 = max - min;
-        set_bytes(&encoder, 2, &minv);
-        set_bytes(&encoder, 3, &scale);
-
-        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-        let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
-            height: 1,
-            depth: 1,
-        };
-
-        let num_elements = tensor.len();
-        let grid_size = MTLSize {
-            width: num_elements,
-            height: 1,
-            depth: 1,
-        };
-
-        dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
-        command_buffer.commit();
-
-        context.synchronize();
-
+    pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut Context) -> Result<Tensor, MetalError> {
+        let tensor = context.call::<RandomUniformOp>((dims, min, max, None))?;
         Ok(tensor)
     }
 
     /// Allocate and zero-initialize a tensor using a provided command buffer (for batching).
-    pub fn zeros_batched(
-        dims: Vec<usize>,
-        command_buffer: &CommandBuffer,
-        context: &mut Context,
-    ) -> Result<Tensor, MetalError> {
+    pub fn zeros_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
         let tensor = Self::create_tensor_pooled(dims, context)?;
         let size = tensor.size_bytes();
 
@@ -555,20 +371,12 @@ impl Tensor {
             // CPU fill for small tensors - but since we're batching, this might not be ideal
             // For now, use GPU path for consistency
             let encoder = command_buffer.raw().blitCommandEncoder().unwrap();
-            encoder.fillBuffer_range_value(
-                &tensor.buf,
-                (tensor.offset..tensor.offset + size).into(),
-                0,
-            );
+            encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
             encoder.endEncoding();
         } else {
             // GPU fill for large tensors
             let encoder = command_buffer.raw().blitCommandEncoder().unwrap();
-            encoder.fillBuffer_range_value(
-                &tensor.buf,
-                (tensor.offset..tensor.offset + size).into(),
-                0,
-            );
+            encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
             encoder.endEncoding();
         }
 
@@ -576,38 +384,37 @@ impl Tensor {
     }
 
     /// Allocate and fill a tensor with ones using a provided command buffer (for batching).
-    pub fn ones_batched(
-        dims: Vec<usize>,
-        command_buffer: &CommandBuffer,
-        context: &mut Context,
-    ) -> Result<Tensor, MetalError> {
-        ensure_ones_pipeline(context)?;
-
+    pub fn ones_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
+        // Calculate total elements before moving dims
+        let total_elements: usize = dims.iter().product();
         let tensor = Self::create_tensor_pooled(dims, context)?;
 
-        let encoder = command_buffer.raw().computeCommandEncoder().unwrap();
+        // Since this is batched, we still need to execute the kernel within the provided command buffer
+        // So we need to get the pipeline and encode it manually
+        let pipeline = context
+            .kernel_manager
+            .get_pipeline(crate::metallic::kernels::KernelFunction::Ones, &context.device)?;
 
-        let pipeline = context.ones_pipeline.as_ref().unwrap();
-        set_compute_pipeline_state(&encoder, pipeline);
+        let encoder = command_buffer
+            .raw()
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
+        let total_elements_u32 = total_elements as u32;
+
+        set_compute_pipeline_state(&encoder, &pipeline);
         set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
+        set_bytes(&encoder, 1, &total_elements_u32);
 
-        // Pass total elements as buffer(1) so kernel can guard tails (kernel writes 4 elements/vector)
-        let num_elements = tensor.len();
-        let num_elements_u32: u32 = num_elements as u32;
-        set_bytes(&encoder, 1, &num_elements_u32);
-
-        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+        // Dispatch threads - each thread handles 4 elements
         let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
+            width: 256,
             height: 1,
             depth: 1,
         };
 
-        // Kernel expects vectorized work (4 elements per thread), match non-batched ones() behavior
-        let num_vecs = num_elements.div_ceil(4);
         let grid_size = MTLSize {
-            width: num_vecs,
+            width: total_elements.div_ceil(4),
             height: 1,
             depth: 1,
         };
@@ -625,20 +432,27 @@ impl Tensor {
         command_buffer: &CommandBuffer,
         context: &mut Context,
     ) -> Result<Tensor, MetalError> {
-        ensure_arange_pipeline(context)?;
+        if dims.iter().product::<usize>() != num_elements {
+            return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
+        }
 
         let tensor = Self::create_tensor_pooled(dims, context)?;
 
-        let encoder = command_buffer.raw().computeCommandEncoder().unwrap();
+        // Get pipeline and encode manually for batching
+        let pipeline = context
+            .kernel_manager
+            .get_pipeline(crate::metallic::kernels::KernelFunction::Arange, &context.device)?;
 
-        let pipeline = context.arange_pipeline.as_ref().unwrap();
-        set_compute_pipeline_state(&encoder, pipeline);
+        let encoder = command_buffer
+            .raw()
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
+        set_compute_pipeline_state(&encoder, &pipeline);
         set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
 
-        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
         let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
+            width: 256,
             height: 1,
             depth: 1,
         };
@@ -656,30 +470,34 @@ impl Tensor {
     }
 
     /// Allocate and fill a tensor with uniform random values using a provided command buffer (for batching).
-    pub fn random_uniform_batched(
-        dims: Vec<usize>,
-        command_buffer: &CommandBuffer,
-        context: &mut Context,
-    ) -> Result<Tensor, MetalError> {
-        ensure_random_pipeline(context)?;
-
+    pub fn random_uniform_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
         let tensor = Self::create_tensor_pooled(dims, context)?;
 
-        let encoder = command_buffer.raw().computeCommandEncoder().unwrap();
+        // Get pipeline and encode manually for batching with default [0, 1) range
+        let pipeline = context
+            .kernel_manager
+            .get_pipeline(crate::metallic::kernels::KernelFunction::RandomUniform, &context.device)?;
 
-        let pipeline = context.random_pipeline.as_ref().unwrap();
-        set_compute_pipeline_state(&encoder, pipeline);
+        let encoder = command_buffer
+            .raw()
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
-        set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
-
-        // Use rng_seed_counter and increment
+        // Use rng_seed_counter for deterministic seeding and increment
         let seed = context.rng_seed_counter as u32;
         context.rng_seed_counter += 1;
-        set_bytes(&encoder, 1, &seed);
 
-        let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+        let minv = 0.0f32; // Default min for [0, 1) range
+        let scale = 1.0f32; // Default scale for [0, 1) range
+
+        set_compute_pipeline_state(&encoder, &pipeline);
+        set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
+        set_bytes(&encoder, 1, &seed);
+        set_bytes(&encoder, 2, &minv);
+        set_bytes(&encoder, 3, &scale);
+
         let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
+            width: 256,
             height: 1,
             depth: 1,
         };
@@ -715,11 +533,7 @@ impl Tensor {
 
     /// Create an arange tensor (0..n as f32) with the given shape (CPU version).
     #[deprecated(note = "Use arange() with pooled allocation instead")]
-    pub fn arange_cpu(
-        num_elements: usize,
-        dims: Vec<usize>,
-        context: &Context,
-    ) -> Result<Tensor, MetalError> {
+    pub fn arange_cpu(num_elements: usize, dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
         let v: Vec<f32> = (0..num_elements).map(|x| x as f32).collect();
         Self::create_tensor_from_slice(&v, dims, context)
     }
@@ -736,11 +550,7 @@ impl Tensor {
         if value == 0.0f32 {
             unsafe {
                 // Write bytes: number of bytes = len * size_of::<f32>()
-                std::ptr::write_bytes(
-                    slice.as_mut_ptr() as *mut u8,
-                    0u8,
-                    std::mem::size_of_val(slice),
-                );
+                std::ptr::write_bytes(slice.as_mut_ptr() as *mut u8, 0u8, std::mem::size_of_val(slice));
             }
             return;
         }
@@ -769,40 +579,16 @@ impl Tensor {
 
     pub fn permute(&self, permute: &[usize], ctx: &mut Context) -> Result<Tensor, MetalError> {
         if permute.len() != self.dims.len() {
-            return Err(MetalError::InvalidShape(
-                "Permutation length must match tensor rank".to_string(),
-            ));
+            return Err(MetalError::InvalidShape("Permutation length must match tensor rank".to_string()));
         }
 
-        let mut new_dims = self.dims.clone();
-        for i in 0..permute.len() {
-            new_dims[i] = self.dims[permute[i]];
-        }
+        let permute_u32: Vec<u32> = permute.iter().map(|&x| x as u32).collect();
 
-        crate::metallic::permute::ensure_permute_pipeline(ctx)?;
-
-        let out = Tensor::create_tensor_pooled(new_dims, ctx)?;
-        let pipeline = ctx
-            .permute_pipeline
-            .as_ref()
-            .ok_or(MetalError::PipelineCreationFailed)?
-            .clone();
-
-        let permute_op = crate::metallic::permute::Permute::new(
-            self.clone(),
-            out.clone(),
-            permute.iter().map(|&x| x as u32).collect(),
-            pipeline,
-        )?;
-
-        ctx.with_command_buffer(|cmd_buf, cache| {
-            cmd_buf.record(&permute_op, cache)?;
-            Ok(())
-        })?;
-
+        use crate::metallic::kernels::permute::PermuteOp;
+        let result = ctx.call::<PermuteOp>((self.clone(), permute_u32))?;
         ctx.synchronize();
 
-        Ok(out)
+        Ok(result)
     }
 
     /// Element-wise add, returns a new tensor on the same device.
@@ -814,29 +600,8 @@ impl Tensor {
             });
         }
 
-        crate::metallic::elemwise_add::ensure_add_pipeline(ctx)?;
-
-        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
-        let pipeline = ctx
-            .add_pipeline
-            .as_ref()
-            .ok_or(MetalError::PipelineCreationFailed)?
-            .clone();
-
-        let add_op = crate::metallic::elemwise_add::ElemwiseAdd::new(
-            self.clone(),
-            other.clone(),
-            out.clone(),
-            pipeline,
-        )?;
-
-        ctx.with_command_buffer(|cmd_buf, cache| {
-            cmd_buf.record(&add_op, cache)?;
-            Ok(())
-        })?;
-
+        let out = ctx.call::<ElemwiseAddOp>((self.clone(), other.clone()))?;
         ctx.synchronize();
-
         Ok(out)
     }
 
@@ -849,29 +614,8 @@ impl Tensor {
             });
         }
 
-        crate::metallic::elemwise_sub::ensure_sub_pipeline(ctx)?;
-
-        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
-        let pipeline = ctx
-            .sub_pipeline
-            .as_ref()
-            .ok_or(MetalError::PipelineCreationFailed)?
-            .clone();
-
-        let op = crate::metallic::elemwise_sub::ElemwiseSub::new(
-            self.clone(),
-            other.clone(),
-            out.clone(),
-            pipeline,
-        )?;
-
-        ctx.with_command_buffer(|cmd_buf, cache| {
-            cmd_buf.record(&op, cache)?;
-            Ok(())
-        })?;
-
+        let out = ctx.call::<ElemwiseSubOp>((self.clone(), other.clone()))?;
         ctx.synchronize();
-
         Ok(out)
     }
 
@@ -884,33 +628,11 @@ impl Tensor {
             });
         }
 
-        crate::metallic::elemwise_mul::ensure_mul_pipeline(ctx)?;
-
-        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
-        let pipeline = ctx
-            .mul_pipeline
-            .as_ref()
-            .ok_or(MetalError::PipelineCreationFailed)?
-            .clone();
-
-        let op = crate::metallic::elemwise_mul::ElemwiseMul::new(
-            self.clone(),
-            other.clone(),
-            out.clone(),
-            pipeline,
-        )?;
-
-        ctx.with_command_buffer(|cmd_buf, cache| {
-            cmd_buf.record(&op, cache)?;
-            Ok(())
-        })?;
-
+        let out = ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))?;
         ctx.synchronize();
-
         Ok(out)
     }
 
-    /// Element-wise div, returns a new tensor on the same device.
     pub fn div_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
@@ -919,29 +641,8 @@ impl Tensor {
             });
         }
 
-        crate::metallic::elemwise_div::ensure_div_pipeline(ctx)?;
-
-        let out = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
-        let pipeline = ctx
-            .div_pipeline
-            .as_ref()
-            .ok_or(MetalError::PipelineCreationFailed)?
-            .clone();
-
-        let op = crate::metallic::elemwise_div::ElemwiseDiv::new(
-            self.clone(),
-            other.clone(),
-            out.clone(),
-            pipeline,
-        )?;
-
-        ctx.with_command_buffer(|cmd_buf, cache| {
-            cmd_buf.record(&op, cache)?;
-            Ok(())
-        })?;
-
+        let out = ctx.call::<ElemwiseDivOp>((self.clone(), other.clone()))?;
         ctx.synchronize();
-
         Ok(out)
     }
 
@@ -977,18 +678,13 @@ impl Tensor {
 
     pub fn get_batch(&self, batch_index: usize) -> Result<Tensor, MetalError> {
         if self.dims.len() < 3 {
-            return Err(MetalError::InvalidShape(
-                "get_batch requires at least 3 dimensions".to_string(),
-            ));
+            return Err(MetalError::InvalidShape("get_batch requires at least 3 dimensions".to_string()));
         }
         if batch_index >= self.dims[0] {
-            return Err(MetalError::InvalidShape(
-                "batch_index out of bounds".to_string(),
-            ));
+            return Err(MetalError::InvalidShape("batch_index out of bounds".to_string()));
         }
 
-        let batch_size_bytes =
-            self.dims[1..].iter().product::<usize>() * std::mem::size_of::<f32>();
+        let batch_size_bytes = self.dims[1..].iter().product::<usize>() * std::mem::size_of::<f32>();
         let new_offset = self.offset + batch_index * batch_size_bytes;
 
         Ok(Tensor {

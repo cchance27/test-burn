@@ -1,18 +1,13 @@
 use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
-use crate::metallic::MetalError;
+use crate::metallic::kernels::elemwise_add::{BroadcastElemwiseAddOp, ElemwiseAddOp};
+use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
+use crate::metallic::kernels::rmsnorm::RMSNormOp;
+use crate::metallic::kernels::rope::RoPEOp;
+use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::{
-    Tensor,
-    context::Context,
-    elemwise_mul,
-    generation::{self, GenerationConfig},
-    kv_rearrange,
-    model::LoadableModel,
-    permute,
-    qwen25::Qwen25,
-    rmsnorm::RMSNorm,
-    rope, silu,
-    tokenizer::Tokenizer,
+    context::Context, error::MetalError, generation, generation::GenerationConfig, model::LoadableModel, qwen25::Qwen25, swiglu,
+    tensor::Tensor, tokenizer::Tokenizer,
 };
 use approx::assert_relative_eq;
 use ndarray::ArrayD;
@@ -32,14 +27,8 @@ fn repeat_kv_heads(
     ctx: &mut Context,
 ) -> Result<Tensor, MetalError> {
     let input_dims = input.dims();
-    if input_dims.len() != 3
-        || input_dims[0] != batch * n_kv_heads
-        || input_dims[1] != seq
-        || input_dims[2] != head_dim
-    {
-        return Err(MetalError::InvalidShape(
-            "Invalid input dimensions for repeat_kv_heads".to_string(),
-        ));
+    if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
+        return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
     }
 
     let output_dims = vec![batch * n_heads, seq, head_dim];
@@ -83,17 +72,9 @@ fn squeeze_leading_batch(shape: &[usize]) -> Vec<usize> {
     }
 }
 
-fn compare_tensor_summary(
-    name: &str,
-    rust_tensor: &Tensor,
-    py_data: &ArrayD<f32>,
-    epsilon: f32,
-    significant_threshold: f32,
-) {
+fn compare_tensor_summary(name: &str, rust_tensor: &Tensor, py_data: &ArrayD<f32>, epsilon: f32, significant_threshold: f32) {
     let rust_slice = rust_tensor.as_slice();
-    let py_slice = py_data
-        .as_slice()
-        .expect("Failed to get slice from ndarray for comparison");
+    let py_slice = py_data.as_slice().expect("Failed to get slice from ndarray for comparison");
     assert_eq!(rust_slice.len(), py_slice.len(), "{} length mismatch", name);
 
     let mut diff_count = 0usize;
@@ -102,10 +83,7 @@ fn compare_tensor_summary(
         let diff = (r - p).abs();
         if diff > significant_threshold {
             if diff_count < 10 {
-                println!(
-                    "{} diff at index {}: rust={}, py={}, diff={}",
-                    name, i, r, p, diff
-                );
+                println!("{} diff at index {}: rust={}, py={}, diff={}", name, i, r, p, diff);
             }
             diff_count += 1;
         }
@@ -125,12 +103,7 @@ fn compare_tensor_summary(
     assert_relative_eq!(max_diff, 0.0, epsilon = epsilon);
 }
 
-fn run_blocks_up_to(
-    model: &Qwen25,
-    mut x: Tensor,
-    up_to: usize,
-    ctx: &mut Context,
-) -> Result<Tensor, MetalError> {
+fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
     if up_to == 0 {
         return Ok(x);
     }
@@ -147,113 +120,60 @@ fn run_blocks_up_to(
         let resid_attn = x.clone();
 
         // Attention RMSNorm
-        let x_normed_attn = {
-            let out = Tensor::create_tensor_pooled(x.dims().to_vec(), ctx)?;
-            let op = RMSNorm::new(
-                x,
-                out.clone(),
-                block.attn_norm_gamma.clone(),
-                d_model as u32,
-                ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-            out
-        };
+        let x_normed = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
         ctx.synchronize();
 
         let m = batch * seq;
         let kv_dim = block.attn_k_weight.dims()[0];
         let kv_head_dim = kv_dim / n_kv_heads;
-        let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
+        let x_flat = x_normed.reshape(vec![m, d_model])?;
 
         // Q projection + bias
         let q_temp = ctx.matmul(&x_flat, &block.attn_q_weight, false, true)?;
         ctx.synchronize();
-        let q_out = Tensor::create_tensor_pooled(q_temp.dims().to_vec(), ctx)?;
-        let q_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-            q_temp,
-            block.attn_q_bias.clone(),
-            q_out.clone(),
-            ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&q_add, cache))?;
-        let q_mat = q_out;
+        let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
         ctx.synchronize();
 
         // K projection + bias
         let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
         ctx.synchronize();
-        let k_out = Tensor::create_tensor_pooled(k_temp.dims().to_vec(), ctx)?;
-        let k_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-            k_temp,
-            block.attn_k_bias.clone(),
-            k_out.clone(),
-            ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&k_add, cache))?;
-        let k_mat = k_out;
+        let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
         ctx.synchronize();
 
         // V projection + bias
         let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
         ctx.synchronize();
-        let v_out = Tensor::create_tensor_pooled(v_temp.dims().to_vec(), ctx)?;
-        let v_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-            v_temp,
-            block.attn_v_bias.clone(),
-            v_out.clone(),
-            ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&v_add, cache))?;
-        let v_mat = v_out;
+        let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
         ctx.synchronize();
 
         // Rearrange into heads
-        let q_heads = Tensor::create_tensor_pooled(vec![n_heads, seq, head_dim], ctx)?;
-        let k_heads = Tensor::create_tensor_pooled(vec![n_kv_heads, seq, kv_head_dim], ctx)?;
-        let v_heads = Tensor::create_tensor_pooled(vec![n_kv_heads, seq, kv_head_dim], ctx)?;
-        let rearrange_pipeline = ctx.kv_rearrange_pipeline.as_ref().unwrap().clone();
-        ctx.with_command_buffer(|cb, cache| {
-            let q_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-                q_mat.clone(),
-                q_heads.clone(),
-                d_model as u32,
-                head_dim as u32,
-                n_heads as u32,
-                n_heads as u32,
-                head_dim as u32,
-                seq as u32,
-                rearrange_pipeline.clone(),
-            )?;
-            cb.record(&q_rearr, cache)?;
-
-            let k_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-                k_mat.clone(),
-                k_heads.clone(),
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-                rearrange_pipeline.clone(),
-            )?;
-            cb.record(&k_rearr, cache)?;
-
-            let v_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-                v_mat.clone(),
-                v_heads.clone(),
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-                rearrange_pipeline,
-            )?;
-            cb.record(&v_rearr, cache)?;
-            Ok(())
-        })?;
+        let q_heads = ctx.call::<KvRearrangeOp>((
+            q_mat.clone(),
+            d_model as u32,
+            head_dim as u32,
+            n_heads as u32,
+            n_heads as u32,
+            head_dim as u32,
+            seq as u32,
+        ))?;
+        let k_heads = ctx.call::<KvRearrangeOp>((
+            k_mat.clone(),
+            kv_dim as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ))?;
+        let v_heads = ctx.call::<KvRearrangeOp>((
+            v_mat.clone(),
+            kv_dim as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ))?;
         ctx.synchronize();
 
         // RoPE for Q
@@ -272,20 +192,7 @@ fn run_blocks_up_to(
         }
         let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
         let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-        let q_heads_after_rope = {
-            let out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), ctx)?;
-            let rope_q = crate::metallic::rope::RoPE::new(
-                q_heads,
-                out.clone(),
-                cos_q,
-                sin_q,
-                head_dim as u32,
-                seq as u32,
-                ctx.rope_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&rope_q, cache))?;
-            out
-        };
+        let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32))?;
         ctx.synchronize();
 
         // RoPE for K
@@ -304,47 +211,15 @@ fn run_blocks_up_to(
         }
         let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], ctx)?;
         let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], ctx)?;
-        let k_heads_after_rope = {
-            let out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), ctx)?;
-            let rope_k = crate::metallic::rope::RoPE::new(
-                k_heads,
-                out.clone(),
-                cos_k,
-                sin_k,
-                kv_head_dim as u32,
-                seq as u32,
-                ctx.rope_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&rope_k, cache))?;
-            out
-        };
+        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32))?;
         ctx.synchronize();
 
         // Repeat KV heads for SDPA (GQA)
         let group_size = n_heads / n_kv_heads;
-        let k_repeated = repeat_kv_heads(
-            &k_heads_after_rope,
-            group_size,
-            batch,
-            n_kv_heads,
-            n_heads,
-            seq,
-            kv_head_dim,
-            ctx,
-        )?;
-        let v_repeated = repeat_kv_heads(
-            &v_heads,
-            group_size,
-            batch,
-            n_kv_heads,
-            n_heads,
-            seq,
-            kv_head_dim,
-            ctx,
-        )?;
+        let k_repeated = repeat_kv_heads(&k_heads_after_rope, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
+        let v_repeated = repeat_kv_heads(&v_heads, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
 
-        let attn_out_heads =
-            ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
+        let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
 
         let attn_out_reshaped = attn_out_heads
             .reshape(vec![batch, n_heads, seq, head_dim])?
@@ -352,12 +227,7 @@ fn run_blocks_up_to(
             .reshape(vec![batch, seq, d_model])?;
 
         let attn_out = ctx
-            .matmul(
-                &attn_out_reshaped.reshape(vec![m, d_model])?,
-                &block.attn_out_weight,
-                false,
-                true,
-            )?
+            .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
             .reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
 
@@ -366,18 +236,7 @@ fn run_blocks_up_to(
 
         // MLP block
         let resid_mlp = x.clone();
-        let x_normed_mlp = {
-            let out = Tensor::create_tensor_pooled(x.dims().to_vec(), ctx)?;
-            let op = RMSNorm::new(
-                x,
-                out.clone(),
-                block.ffn_norm_gamma.clone(),
-                d_model as u32,
-                ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-            )?;
-            ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-            out
-        };
+        let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
         ctx.synchronize();
         let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
@@ -406,18 +265,7 @@ fn run_blocks_up_to(
 fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // --- Setup ---
     let mut ctx = Context::new()?;
-    crate::metallic::rmsnorm::ensure_rmsnorm_pipeline(&mut ctx)?;
-    crate::metallic::elemwise_add::ensure_add_pipeline(&mut ctx)?;
-    crate::metallic::rope::ensure_rope_pipeline(&mut ctx)?;
-    crate::metallic::kv_rearrange::ensure_kv_rearrange_pipeline(&mut ctx)?;
-    crate::metallic::permute::ensure_permute_pipeline(&mut ctx)?;
-    crate::metallic::silu::ensure_silu_pipeline(&mut ctx)?;
-    crate::metallic::elemwise_mul::ensure_mul_pipeline(&mut ctx)?;
-    crate::metallic::rope::ensure_rope_pipeline(&mut ctx)?;
-    crate::metallic::kv_rearrange::ensure_kv_rearrange_pipeline(&mut ctx)?;
-    crate::metallic::permute::ensure_permute_pipeline(&mut ctx)?;
-    crate::metallic::silu::ensure_silu_pipeline(&mut ctx)?;
-    crate::metallic::elemwise_mul::ensure_mul_pipeline(&mut ctx)?;
+
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
@@ -429,8 +277,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
 
     // --- Input ---
-    let input_text =
-        std::fs::read_to_string(Path::new(npy_dump_path).join("input_text.txt")).unwrap();
+    let input_text = std::fs::read_to_string(Path::new(npy_dump_path).join("input_text.txt")).unwrap();
     let input_ids = tokenizer.encode(&input_text)?;
     println!("Rust tokens: {:?}", input_ids);
     if let Some(first_token) = tokenizer.get_token_debug(input_ids[0]) {
@@ -444,35 +291,23 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_embeddings_slice = rust_embeddings.as_slice();
     //println!("Rust first 10 embeddings: {:?}", &rust_embeddings_slice[0..10]);
 
-    let (py_embeddings_data, py_embeddings_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/embeddings.npy"));
+    let (py_embeddings_data, py_embeddings_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/embeddings.npy"));
 
     // Compare shapes
-    assert_eq!(
-        rust_embeddings.dims(),
-        &py_embeddings_shape,
-        "Embedding shape mismatch"
-    );
+    assert_eq!(rust_embeddings.dims(), &py_embeddings_shape, "Embedding shape mismatch");
 
     // Compare values
     let mut diff_count = 0;
     let mut max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_embeddings_slice
         .iter()
-        .zip(
-            py_embeddings_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_embeddings_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if diff_count < 10 {
-                println!(
-                    "Diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("Diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             diff_count += 1;
         }
@@ -483,11 +318,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     println!("Embedding comparison summary:");
     println!("- Max difference: {}", max_diff);
-    println!(
-        "- Number of differences > 1e-4: {} / {}",
-        diff_count,
-        rust_embeddings_slice.len()
-    );
+    println!("- Number of differences > 1e-4: {} / {}", diff_count, rust_embeddings_slice.len());
     assert_relative_eq!(max_diff, 0.0, epsilon = 1e-4);
 
     println!("✅ Embedding layer output matches PyTorch!");
@@ -495,54 +326,28 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // --- 2. Test First Block Attn Norm ---
     println!("--- 2. Testing First Block Attn Norm ---");
     let block0 = &model.blocks[0];
-    let x_normed_attn = {
-        let out = Tensor::create_tensor_pooled(rust_embeddings.dims().to_vec(), &mut ctx)?;
-        let op = RMSNorm::new(
-            rust_embeddings.clone(),
-            out.clone(),
-            block0.attn_norm_gamma.clone(),
-            model.config.d_model as u32,
-            ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-        out
-    };
+    let x_normed_attn = ctx.call::<RMSNormOp>((rust_embeddings.clone(), block0.attn_norm_gamma.clone(), model.config.d_model as u32))?;
     ctx.synchronize();
     let rust_attn_norm_slice = x_normed_attn.as_slice();
-    println!(
-        "Rust first attn norm first 10: {:?}",
-        &rust_attn_norm_slice[0..10]
-    );
+    println!("Rust first attn norm first 10: {:?}", &rust_attn_norm_slice[0..10]);
 
-    let (py_attn_norm_data, py_attn_norm_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_norm.npy"));
+    let (py_attn_norm_data, py_attn_norm_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_norm.npy"));
 
     // Compare shapes
-    assert_eq!(
-        x_normed_attn.dims(),
-        &py_attn_norm_shape,
-        "Attn norm shape mismatch"
-    );
+    assert_eq!(x_normed_attn.dims(), &py_attn_norm_shape, "Attn norm shape mismatch");
 
     // Compare values
     let mut attn_norm_diff_count = 0;
     let mut attn_norm_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_attn_norm_slice
         .iter()
-        .zip(
-            py_attn_norm_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_attn_norm_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if attn_norm_diff_count < 10 {
-                println!(
-                    "Attn norm diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("Attn norm diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             attn_norm_diff_count += 1;
         }
@@ -575,24 +380,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Try with weight transposed: x_flat [m, d_model] * weight.T [d_model, d_model] = [m, d_model]
     let q_temp = ctx.matmul(&x_flat, &block0.attn_q_weight, false, true)?; // Transpose the weight
     ctx.synchronize();
-    let q_out = Tensor::create_tensor_pooled(q_temp.dims().to_vec(), &mut ctx)?;
-    let q_broadcast_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        q_temp,
-        block0.attn_q_bias.clone(),
-        q_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&q_broadcast_add, cache))?;
-    let q_mat = q_out;
+    let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block0.attn_q_bias.clone()))?;
     ctx.synchronize();
     let rust_q_proj_slice = q_mat.as_slice();
-    println!(
-        "Rust first Q proj first 10: {:?}",
-        &rust_q_proj_slice[0..10]
-    );
+    println!("Rust first Q proj first 10: {:?}", &rust_q_proj_slice[0..10]);
 
-    let (py_q_proj_data, py_q_proj_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__q_proj_out.npy"));
+    let (py_q_proj_data, py_q_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__q_proj_out.npy"));
 
     // Compare shapes - PyTorch includes batch dimension [1, seq_len, d_model] vs our [seq_len, d_model]
     let expected_shape = if py_q_proj_shape.len() == 3 && py_q_proj_shape[0] == 1 {
@@ -624,20 +417,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let mut q_proj_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_q_proj_slice
         .iter()
-        .zip(
-            py_q_proj_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_q_proj_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if q_proj_diff_count < 10 {
-                println!(
-                    "Q proj diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("Q proj diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             q_proj_diff_count += 1;
         }
@@ -665,25 +451,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let k_temp = ctx.matmul(&x_flat, &block0.attn_k_weight, false, true)?;
     ctx.synchronize();
     println!("K_temp dims: {:?}", k_temp.dims());
-    let k_out = Tensor::create_tensor_pooled(k_temp.dims().to_vec(), &mut ctx)?;
-    ctx.synchronize();
-    let k_broadcast_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        k_temp,
-        block0.attn_k_bias.clone(),
-        k_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&k_broadcast_add, cache))?;
-    let k_mat = k_out;
+    let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block0.attn_k_bias.clone()))?;
     ctx.synchronize();
     let rust_k_proj_slice = k_mat.as_slice();
-    println!(
-        "Rust first K proj first 10: {:?}",
-        &rust_k_proj_slice[0..10]
-    );
+    println!("Rust first K proj first 10: {:?}", &rust_k_proj_slice[0..10]);
 
-    let (py_k_proj_data, py_k_proj_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__k_proj_out.npy"));
+    let (py_k_proj_data, py_k_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__k_proj_out.npy"));
 
     // Compare shapes - PyTorch includes batch dimension [1, seq_len, kv_dim] vs our [seq_len, kv_dim]
     let expected_k_shape = if py_k_proj_shape.len() == 3 && py_k_proj_shape[0] == 1 {
@@ -715,20 +488,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let mut k_proj_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_k_proj_slice
         .iter()
-        .zip(
-            py_k_proj_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_k_proj_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if k_proj_diff_count < 10 {
-                println!(
-                    "K proj diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("K proj diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             k_proj_diff_count += 1;
         }
@@ -755,24 +521,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("V weight dims: {:?}", block0.attn_v_weight.dims());
     let v_temp = ctx.matmul(&x_flat, &block0.attn_v_weight, false, true)?;
     ctx.synchronize();
-    let v_out = Tensor::create_tensor_pooled(v_temp.dims().to_vec(), &mut ctx)?;
-    let v_broadcast_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        v_temp,
-        block0.attn_v_bias.clone(),
-        v_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&v_broadcast_add, cache))?;
-    let v_mat = v_out;
+    let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block0.attn_v_bias.clone()))?;
     ctx.synchronize();
     let rust_v_proj_slice = v_mat.as_slice();
-    println!(
-        "Rust first V proj first 10: {:?}",
-        &rust_v_proj_slice[0..10]
-    );
+    println!("Rust first V proj first 10: {:?}", &rust_v_proj_slice[0..10]);
 
-    let (py_v_proj_data, py_v_proj_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__v_proj_out.npy"));
+    let (py_v_proj_data, py_v_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__v_proj_out.npy"));
 
     // Compare shapes - PyTorch includes batch dimension [1, seq_len, kv_dim] vs our [seq_len, kv_dim]
     let expected_v_shape = if py_v_proj_shape.len() == 3 && py_v_proj_shape[0] == 1 {
@@ -804,20 +558,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let mut v_proj_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_v_proj_slice
         .iter()
-        .zip(
-            py_v_proj_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_v_proj_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if v_proj_diff_count < 10 {
-                println!(
-                    "V proj diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("V proj diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             v_proj_diff_count += 1;
         }
@@ -855,53 +602,33 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let v_after = v_mat.clone();
 
     // Create heads tensors [num_heads, seq, head_dim]
-    let q_heads = Tensor::create_tensor_pooled(vec![n_heads, seq, head_dim], &mut ctx)?;
-    let k_heads = Tensor::create_tensor_pooled(vec![n_kv_heads, seq, kv_head_dim], &mut ctx)?;
-    let v_heads = Tensor::create_tensor_pooled(vec![n_kv_heads, seq, kv_head_dim], &mut ctx)?;
-
-    let rearrange_pipeline = ctx.kv_rearrange_pipeline.as_ref().unwrap().clone();
-    ctx.with_command_buffer(|cmd_buf, cache| {
-        let q_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-            q_after,
-            q_heads.clone(),
-            d_model as u32,
-            head_dim as u32,
-            n_heads as u32,
-            n_heads as u32,
-            head_dim as u32,
-            seq as u32,
-            rearrange_pipeline.clone(),
-        )?;
-        cmd_buf.record(&q_rearr, cache)?;
-
-        let k_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-            k_after,
-            k_heads.clone(),
-            kv_dim as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-            rearrange_pipeline.clone(),
-        )?;
-        cmd_buf.record(&k_rearr, cache)?;
-
-        let v_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-            v_after,
-            v_heads.clone(),
-            kv_dim as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-            rearrange_pipeline,
-        )?;
-        cmd_buf.record(&v_rearr, cache)?;
-
-        Ok(())
-    })?;
+    let q_heads = ctx.call::<KvRearrangeOp>((
+        q_after,
+        d_model as u32,
+        head_dim as u32,
+        n_heads as u32,
+        n_heads as u32,
+        head_dim as u32,
+        seq as u32,
+    ))?;
+    let k_heads = ctx.call::<KvRearrangeOp>((
+        k_after,
+        kv_dim as u32,
+        kv_head_dim as u32,
+        n_kv_heads as u32,
+        n_kv_heads as u32,
+        kv_head_dim as u32,
+        seq as u32,
+    ))?;
+    let v_heads = ctx.call::<KvRearrangeOp>((
+        v_after,
+        kv_dim as u32,
+        kv_head_dim as u32,
+        n_kv_heads as u32,
+        n_kv_heads as u32,
+        kv_head_dim as u32,
+        seq as u32,
+    ))?;
     ctx.synchronize();
 
     // RoPE for Q
@@ -921,18 +648,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
     let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
     let q_heads_after_rope = {
-        let out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), &mut ctx)?;
-        let rope_q = crate::metallic::rope::RoPE::new(
-            q_heads,
-            out.clone(),
-            cos_q,
-            sin_q,
-            head_dim as u32,
-            seq as u32,
-            ctx.rope_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&rope_q, cache))?;
-        out
+        let _out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), &mut ctx)?;
+        ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32))?
     };
     ctx.synchronize();
 
@@ -953,18 +670,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &ctx)?;
     let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope = {
-        let out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), &mut ctx)?;
-        let rope_k = crate::metallic::rope::RoPE::new(
-            k_heads,
-            out.clone(),
-            cos_k,
-            sin_k,
-            kv_head_dim as u32,
-            seq as u32,
-            ctx.rope_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&rope_k, cache))?;
-        out
+        let _out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), &mut ctx)?;
+        ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32))?
     };
     ctx.synchronize();
 
@@ -980,16 +687,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         kv_head_dim,
         &mut ctx,
     )?;
-    let v_repeated = repeat_kv_heads(
-        &v_heads,
-        group_size,
-        1,
-        n_kv_heads,
-        n_heads,
-        seq,
-        kv_head_dim,
-        &mut ctx,
-    )?;
+    let v_repeated = repeat_kv_heads(&v_heads, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
 
     // SDPA
     let attn_out_heads = ctx.scaled_dot_product_attention(
@@ -1012,34 +710,22 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let attn_out = attn_out_proj.reshape(vec![1, seq, d_model])?;
 
     // Compare o_proj output (without residual add) to PyTorch dump
-    let (py_attn_out_data, py_attn_out_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_out.npy"));
+    let (py_attn_out_data, py_attn_out_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_out.npy"));
 
-    assert_eq!(
-        attn_out.dims(),
-        &py_attn_out_shape,
-        "Attn out shape mismatch"
-    );
+    assert_eq!(attn_out.dims(), &py_attn_out_shape, "Attn out shape mismatch");
 
     let rust_attn_out_slice = attn_out.as_slice();
     let mut attn_out_diff_count = 0;
     let mut attn_out_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_attn_out_slice
         .iter()
-        .zip(
-            py_attn_out_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_attn_out_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if attn_out_diff_count < 10 {
-                println!(
-                    "Attn out diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("Attn out diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             attn_out_diff_count += 1;
         }
@@ -1069,24 +755,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let resid_mlp = attn_residual.clone();
 
     // FFN norm
-    let x_normed_mlp = {
-        let out = Tensor::create_tensor_pooled(attn_residual.dims().to_vec(), &mut ctx)?;
-        let op = RMSNorm::new(
-            attn_residual,
-            out.clone(),
-            block0.ffn_norm_gamma.clone(),
-            d_model as u32,
-            ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-        out
-    };
+    let x_normed_mlp = ctx.call::<RMSNormOp>((attn_residual, block0.ffn_norm_gamma.clone(), d_model as u32))?;
     ctx.synchronize();
 
     // Compare x_normed_mlp against PyTorch mlp_norm dump if available
     if true {
-        let (py_mlp_norm_data, _py_mlp_norm_shape) =
-            load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mlp_norm.npy"));
+        let (py_mlp_norm_data, _py_mlp_norm_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mlp_norm.npy"));
         let rust_slice = x_normed_mlp.as_slice();
         let py_slice = py_mlp_norm_data.as_slice().unwrap();
         let mut diff_count = 0;
@@ -1095,10 +769,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             let diff = (r - p).abs();
             if diff > 1e-4 {
                 if diff_count < 10 {
-                    println!(
-                        "mlp_norm diff at {}: rust={}, py={}, diff={}",
-                        i, r, p, diff
-                    );
+                    println!("mlp_norm diff at {}: rust={}, py={}, diff={}", i, r, p, diff);
                 }
                 diff_count += 1;
             }
@@ -1126,27 +797,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     } else if gate_dims[1] == d_model {
         true
     } else {
-        panic!(
-            "Unexpected FFN gate dims {:?} for d_model={}",
-            gate_dims, d_model
-        );
+        panic!("Unexpected FFN gate dims {:?} for d_model={}", gate_dims, d_model);
     };
     println!("Using transpose_b={} for gate matmul", gate_transpose_b);
     // Gate projection
-    let gate_proj = ctx.matmul(
-        &x_normed_mlp_flat,
-        &block0.ffn_gate,
-        false,
-        gate_transpose_b,
-    )?;
-    let gate_proj_out = Tensor::create_tensor_pooled(gate_proj.dims().to_vec(), &mut ctx)?;
-    let gate_bias_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        gate_proj,
-        block0.ffn_gate_bias.clone(),
-        gate_proj_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&gate_bias_add, cache))?;
+    let gate_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_gate, false, gate_transpose_b)?;
+    let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()))?;
 
     // Up projection
     let up_dims = block0.ffn_up.dims();
@@ -1155,47 +811,17 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     } else if up_dims[1] == d_model {
         true
     } else {
-        panic!(
-            "Unexpected FFN up dims {:?} for d_model={}",
-            up_dims, d_model
-        );
+        panic!("Unexpected FFN up dims {:?} for d_model={}", up_dims, d_model);
     };
     println!("Using transpose_b={} for up matmul", up_transpose_b);
     let up_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_up, false, up_transpose_b)?;
-    let up_proj_out = Tensor::create_tensor_pooled(up_proj.dims().to_vec(), &mut ctx)?;
-    let up_bias_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        up_proj,
-        block0.ffn_up_bias.clone(),
-        up_proj_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&up_bias_add, cache))?;
+    let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()))?;
 
     // Silu
-    let silu_out = {
-        let out = Tensor::create_tensor_pooled(gate_proj_out.dims().to_vec(), &mut ctx)?;
-        let silu_op = crate::metallic::silu::Silu::new(
-            gate_proj_out.clone(),
-            out.clone(),
-            ctx.silu_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&silu_op, cache))?;
-        out
-    };
+    let silu_out = ctx.call::<crate::metallic::kernels::silu::SiluOp>(gate_proj_out.clone())?;
+    ctx.synchronize();
 
-    // Ensure mul pipeline
-    crate::metallic::elemwise_mul::ensure_mul_pipeline(&mut ctx)?;
-
-    // Mul
-    let mul_pipeline = ctx.mul_pipeline.as_ref().unwrap().clone();
-    let mul_out = Tensor::create_tensor_pooled(silu_out.dims().to_vec(), &mut ctx)?;
-    let mul_op = crate::metallic::elemwise_mul::ElemwiseMul::new(
-        silu_out.clone(),
-        up_proj_out.clone(),
-        mul_out.clone(),
-        mul_pipeline,
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&mul_op, cache))?;
+    let mul_out = ctx.call::<crate::metallic::kernels::elemwise_mul::ElemwiseMulOp>((silu_out.clone(), up_proj_out.clone()))?;
 
     // Down projection
     let ff_dim = model.config.ff_dim;
@@ -1205,21 +831,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     } else if down_dims[1] == ff_dim {
         true
     } else {
-        panic!(
-            "Unexpected FFN down dims {:?} for ff_dim={}",
-            down_dims, ff_dim
-        );
+        panic!("Unexpected FFN down dims {:?} for ff_dim={}", down_dims, ff_dim);
     };
     println!("Using transpose_b={} for down matmul", down_transpose_b);
     let down_proj = ctx.matmul(&mul_out, &block0.ffn_down, false, down_transpose_b)?;
-    let down_proj_out = Tensor::create_tensor_pooled(down_proj.dims().to_vec(), &mut ctx)?;
-    let down_bias_add = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        down_proj,
-        block0.ffn_down_bias.clone(),
-        down_proj_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&down_bias_add, cache))?;
+    let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()))?;
 
     let ffn_output_flat = down_proj_out.clone();
 
@@ -1228,16 +844,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let ffn_output = ffn_output_flat.reshape(vec![1, seq, d_model])?;
 
     // Load PyTorch intermediates
-    let (py_gate_proj_data, py_gate_proj_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__gate_proj_out.npy"));
-    let (py_up_proj_data, py_up_proj_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__up_proj_out.npy"));
-    let (py_silu_data, py_silu_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__silu_out.npy"));
-    let (py_mul_data, py_mul_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mul_out.npy"));
-    let (py_down_proj_data, py_down_proj_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__down_proj_out.npy"));
+    let (py_gate_proj_data, py_gate_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__gate_proj_out.npy"));
+    let (py_up_proj_data, py_up_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__up_proj_out.npy"));
+    let (py_silu_data, py_silu_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__silu_out.npy"));
+    let (py_mul_data, py_mul_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mul_out.npy"));
+    let (py_down_proj_data, py_down_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__down_proj_out.npy"));
 
     // Function to compare rust and py tensors without assertion (diagnostic)
     fn compare_tensors_no_assert(rust_t: &Tensor, py_data: &ArrayD<f32>, name: &str) -> f32 {
@@ -1259,13 +870,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let _ = compare_tensors_no_assert(&up_proj_out, &py_gate_proj_data, "Up vs Py Gate (diag)");
 
     // Function to compare rust and py tensors
-    fn compare_tensors(
-        rust_t: &Tensor,
-        py_data: &ArrayD<f32>,
-        _py_shape: &[usize],
-        name: &str,
-        epsilon: f32,
-    ) {
+    fn compare_tensors(rust_t: &Tensor, py_data: &ArrayD<f32>, _py_shape: &[usize], name: &str, epsilon: f32) {
         let rust_slice = rust_t.as_slice();
         let py_slice = py_data.as_slice().unwrap();
         let mut diff_count = 0;
@@ -1274,10 +879,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             let diff = (r - p).abs();
             if diff > 1e-4 {
                 if diff_count < 10 {
-                    println!(
-                        "{} diff at {}: rust={}, py={}, diff={}",
-                        name, i, r, p, diff
-                    );
+                    println!("{} diff at {}: rust={}, py={}, diff={}", name, i, r, p, diff);
                 }
                 diff_count += 1;
             }
@@ -1296,34 +898,15 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
 
     // Compare each
-    compare_tensors(
-        &gate_proj_out,
-        &py_gate_proj_data,
-        &py_gate_proj_shape,
-        "Gate proj",
-        1e-3,
-    );
-    compare_tensors(
-        &up_proj_out,
-        &py_up_proj_data,
-        &py_up_proj_shape,
-        "Up proj",
-        1e-3,
-    );
+    compare_tensors(&gate_proj_out, &py_gate_proj_data, &py_gate_proj_shape, "Gate proj", 1e-3);
+    compare_tensors(&up_proj_out, &py_up_proj_data, &py_up_proj_shape, "Up proj", 1e-3);
     compare_tensors(&silu_out, &py_silu_data, &py_silu_shape, "Silu", 1e-3);
     compare_tensors(&mul_out, &py_mul_data, &py_mul_shape, "Mul", 1e-3);
-    compare_tensors(
-        &down_proj_out,
-        &py_down_proj_data,
-        &py_down_proj_shape,
-        "Down proj",
-        1e-3,
-    );
+    compare_tensors(&down_proj_out, &py_down_proj_data, &py_down_proj_shape, "Down proj", 1e-3);
 
     // Existing mlp_out load and comparison follows
     // Load PyTorch mlp_out (captured directly from the MLP module, pre-residual)
-    let (py_mlp_out_data, _py_mlp_out_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mlp_out.npy"));
+    let (py_mlp_out_data, _py_mlp_out_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mlp_out.npy"));
 
     // Residual add
     let ffn_residual = resid_mlp.add_elem(&ffn_output, &mut ctx)?;
@@ -1331,9 +914,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Compare residual result to PyTorch expected residual: mlp_out + (embeddings + attn_out)
     {
-        let py_mlp_out = py_mlp_out_data
-            .as_slice()
-            .expect("Failed to get slice from ndarray for py_mlp_out");
+        let py_mlp_out = py_mlp_out_data.as_slice().expect("Failed to get slice from ndarray for py_mlp_out");
         let py_attn_out = py_attn_out_data
             .as_slice()
             .expect("Failed to get slice from ndarray for py_attn_out");
@@ -1341,16 +922,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             .as_slice()
             .expect("Failed to get slice from ndarray for py_embeddings");
         let total_elems = py_mlp_out.len();
-        assert_eq!(
-            py_attn_out.len(),
-            total_elems,
-            "Py attn_out length mismatch"
-        );
-        assert_eq!(
-            py_embeddings.len(),
-            total_elems,
-            "Py embeddings length mismatch"
-        );
+        assert_eq!(py_attn_out.len(), total_elems, "Py attn_out length mismatch");
+        assert_eq!(py_embeddings.len(), total_elems, "Py embeddings length mismatch");
 
         // expected residual = mlp_out + (embeddings + attn_out)
         let mut py_expected_residual: Vec<f32> = Vec::with_capacity(total_elems);
@@ -1358,27 +931,16 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             py_expected_residual.push(py_mlp_out[i] + py_embeddings[i] + py_attn_out[i]);
         }
 
-        assert_eq!(
-            ffn_residual.len(),
-            py_expected_residual.len(),
-            "Residual length mismatch"
-        );
+        assert_eq!(ffn_residual.len(), py_expected_residual.len(), "Residual length mismatch");
 
         let rust_mlp_out_slice = ffn_residual.as_slice();
         let mut mlp_out_diff_count = 0;
         let mut mlp_out_max_diff = 0.0;
-        for (i, (rust_val, py_val)) in rust_mlp_out_slice
-            .iter()
-            .zip(py_expected_residual.iter())
-            .enumerate()
-        {
+        for (i, (rust_val, py_val)) in rust_mlp_out_slice.iter().zip(py_expected_residual.iter()).enumerate() {
             let diff = (rust_val - py_val).abs();
             if diff > 1e-4 {
                 if mlp_out_diff_count < 10 {
-                    println!(
-                        "MLP residual diff at index {}: rust={}, py={}, diff={}",
-                        i, rust_val, py_val, diff
-                    );
+                    println!("MLP residual diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
                 }
                 mlp_out_diff_count += 1;
             }
@@ -1407,34 +969,22 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     ctx.synchronize();
 
     // Compare hidden states after final norm
-    let (py_hidden_data, py_hidden_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/hidden_states_last.npy"));
+    let (py_hidden_data, py_hidden_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/hidden_states_last.npy"));
 
-    assert_eq!(
-        full_hidden.dims(),
-        &py_hidden_shape,
-        "Full hidden shape mismatch"
-    );
+    assert_eq!(full_hidden.dims(), &py_hidden_shape, "Full hidden shape mismatch");
 
     let rust_hidden_slice = full_hidden.as_slice();
     let mut hidden_diff_count = 0;
     let mut hidden_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_hidden_slice
         .iter()
-        .zip(
-            py_hidden_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_hidden_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-3 {
             if hidden_diff_count < 10 {
-                println!(
-                    "Hidden diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("Hidden diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             hidden_diff_count += 1;
         }
@@ -1458,8 +1008,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let logits = model.output(&full_hidden, &mut ctx)?;
     ctx.synchronize();
 
-    let (py_logits_data, py_logits_shape) =
-        load_npy_tensor(Path::new(npy_dump_path).join("arrays/logits_pre_softmax.npy"));
+    let (py_logits_data, py_logits_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/logits_pre_softmax.npy"));
 
     assert_eq!(logits.dims(), &py_logits_shape, "Logits shape mismatch");
 
@@ -1468,20 +1017,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let mut logits_max_diff = 0.0;
     for (i, (rust_val, py_val)) in rust_logits_slice
         .iter()
-        .zip(
-            py_logits_data
-                .as_slice()
-                .expect("Failed to get slice from ndarray"),
-        )
+        .zip(py_logits_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
         let diff = (rust_val - py_val).abs();
         if diff > 1e-3 {
             if logits_diff_count < 10 {
-                println!(
-                    "Logits diff at index {}: rust={}, py={}, diff={}",
-                    i, rust_val, py_val, diff
-                );
+                println!("Logits diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
             logits_diff_count += 1;
         }
@@ -1511,31 +1053,18 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let kv_dim_last = model.blocks[last_block_idx].attn_k_weight.dims()[0];
     let kv_head_dim = kv_dim_last / n_kv_heads;
 
-    let final_block_input =
-        run_blocks_up_to(&model, rust_embeddings.clone(), last_block_idx, &mut ctx)?;
+    let final_block_input = run_blocks_up_to(&model, rust_embeddings.clone(), last_block_idx, &mut ctx)?;
     ctx.synchronize();
 
     let block_last = &model.blocks[last_block_idx];
     let resid_attn_last = final_block_input.clone();
 
     // Final block attention norm
-    let x_normed_attn_last = {
-        let out = Tensor::create_tensor_pooled(final_block_input.dims().to_vec(), &mut ctx)?;
-        let op = RMSNorm::new(
-            final_block_input,
-            out.clone(),
-            block_last.attn_norm_gamma.clone(),
-            d_model as u32,
-            ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-        out
-    };
+    let x_normed_attn_last = ctx.call::<RMSNormOp>((final_block_input, block_last.attn_norm_gamma.clone(), d_model as u32))?;
     ctx.synchronize();
 
-    let (py_attn_norm_last, py_attn_norm_shape) = load_npy_tensor(
-        Path::new(npy_dump_path).join(format!("arrays/{}__attn_norm.npy", last_layer_prefix)),
-    );
+    let (py_attn_norm_last, py_attn_norm_shape) =
+        load_npy_tensor(Path::new(npy_dump_path).join(format!("arrays/{}__attn_norm.npy", last_layer_prefix)));
     let attn_norm_expected_shape = squeeze_leading_batch(&py_attn_norm_shape);
     let attn_norm_last_view = x_normed_attn_last.reshape(attn_norm_expected_shape.clone())?;
     assert_eq!(
@@ -1560,89 +1089,47 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     let q_temp_last = ctx.matmul(&x_flat_last, &block_last.attn_q_weight, false, true)?;
     ctx.synchronize();
-    let q_out_last = Tensor::create_tensor_pooled(q_temp_last.dims().to_vec(), &mut ctx)?;
-    let q_add_last = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        q_temp_last,
-        block_last.attn_q_bias.clone(),
-        q_out_last.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&q_add_last, cache))?;
-    let q_mat_last = q_out_last;
+    let q_mat_last = ctx.call::<BroadcastElemwiseAddOp>((q_temp_last, block_last.attn_q_bias.clone()))?;
     ctx.synchronize();
 
     let k_temp_last = ctx.matmul(&x_flat_last, &block_last.attn_k_weight, false, true)?;
     ctx.synchronize();
-    let k_out_last = Tensor::create_tensor_pooled(k_temp_last.dims().to_vec(), &mut ctx)?;
-    let k_add_last = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        k_temp_last,
-        block_last.attn_k_bias.clone(),
-        k_out_last.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&k_add_last, cache))?;
-    let k_mat_last = k_out_last;
+    let k_mat_last = ctx.call::<BroadcastElemwiseAddOp>((k_temp_last, block_last.attn_k_bias.clone()))?;
     ctx.synchronize();
 
     let v_temp_last = ctx.matmul(&x_flat_last, &block_last.attn_v_weight, false, true)?;
     ctx.synchronize();
-    let v_out_last = Tensor::create_tensor_pooled(v_temp_last.dims().to_vec(), &mut ctx)?;
-    let v_add_last = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        v_temp_last,
-        block_last.attn_v_bias.clone(),
-        v_out_last.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&v_add_last, cache))?;
-    let v_mat_last = v_out_last;
+    let v_mat_last = ctx.call::<BroadcastElemwiseAddOp>((v_temp_last, block_last.attn_v_bias.clone()))?;
     ctx.synchronize();
 
     // Rearrangement into heads
-    let q_heads_last = Tensor::create_tensor_pooled(vec![n_heads, seq, head_dim], &mut ctx)?;
-    let k_heads_last = Tensor::create_tensor_pooled(vec![n_kv_heads, seq, kv_head_dim], &mut ctx)?;
-    let v_heads_last = Tensor::create_tensor_pooled(vec![n_kv_heads, seq, kv_head_dim], &mut ctx)?;
-    let rearrange_pipeline = ctx.kv_rearrange_pipeline.as_ref().unwrap().clone();
-    ctx.with_command_buffer(|cb, cache| {
-        let q_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-            q_mat_last.clone(),
-            q_heads_last.clone(),
-            d_model as u32,
-            head_dim as u32,
-            n_heads as u32,
-            n_heads as u32,
-            head_dim as u32,
-            seq as u32,
-            rearrange_pipeline.clone(),
-        )?;
-        cb.record(&q_rearr, cache)?;
-
-        let k_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-            k_mat_last.clone(),
-            k_heads_last.clone(),
-            kv_dim_last as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-            rearrange_pipeline.clone(),
-        )?;
-        cb.record(&k_rearr, cache)?;
-
-        let v_rearr = crate::metallic::kv_rearrange::KvRearrange::new(
-            v_mat_last.clone(),
-            v_heads_last.clone(),
-            kv_dim_last as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-            rearrange_pipeline,
-        )?;
-        cb.record(&v_rearr, cache)?;
-        Ok(())
-    })?;
+    let q_heads_last = ctx.call::<KvRearrangeOp>((
+        q_mat_last.clone(),
+        d_model as u32,
+        head_dim as u32,
+        n_heads as u32,
+        n_heads as u32,
+        head_dim as u32,
+        seq as u32,
+    ))?;
+    let k_heads_last = ctx.call::<KvRearrangeOp>((
+        k_mat_last.clone(),
+        kv_dim_last as u32,
+        kv_head_dim as u32,
+        n_kv_heads as u32,
+        n_kv_heads as u32,
+        kv_head_dim as u32,
+        seq as u32,
+    ))?;
+    let v_heads_last = ctx.call::<KvRearrangeOp>((
+        v_mat_last.clone(),
+        kv_dim_last as u32,
+        kv_head_dim as u32,
+        n_kv_heads as u32,
+        n_kv_heads as u32,
+        kv_head_dim as u32,
+        seq as u32,
+    ))?;
     ctx.synchronize();
 
     // Apply RoPE
@@ -1661,20 +1148,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
     let cos_q_last = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
     let sin_q_last = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
-    let q_heads_after_rope_last = {
-        let out = Tensor::create_tensor_pooled(q_heads_last.dims().to_vec(), &mut ctx)?;
-        let rope_q = crate::metallic::rope::RoPE::new(
-            q_heads_last,
-            out.clone(),
-            cos_q_last,
-            sin_q_last,
-            head_dim as u32,
-            seq as u32,
-            ctx.rope_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&rope_q, cache))?;
-        out
-    };
+    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32))? };
     ctx.synchronize();
 
     let dim_half_k = kv_head_dim / 2;
@@ -1693,18 +1167,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let cos_k_last = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &ctx)?;
     let sin_k_last = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope_last = {
-        let out = Tensor::create_tensor_pooled(k_heads_last.dims().to_vec(), &mut ctx)?;
-        let rope_k = crate::metallic::rope::RoPE::new(
-            k_heads_last,
-            out.clone(),
-            cos_k_last,
-            sin_k_last,
-            kv_head_dim as u32,
-            seq as u32,
-            ctx.rope_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&rope_k, cache))?;
-        out
+        let _out = Tensor::create_tensor_pooled(k_heads_last.dims().to_vec(), &mut ctx)?;
+        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32))?
     };
     ctx.synchronize();
 
@@ -1720,46 +1184,22 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         kv_head_dim,
         &mut ctx,
     )?;
-    let v_repeated_last = repeat_kv_heads(
-        &v_heads_last,
-        group_size,
-        1,
-        n_kv_heads,
-        n_heads,
-        seq,
-        kv_head_dim,
-        &mut ctx,
-    )?;
+    let v_repeated_last = repeat_kv_heads(&v_heads_last, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
 
-    let attn_out_heads_last = ctx.scaled_dot_product_attention(
-        &q_heads_after_rope_last,
-        &k_repeated_last,
-        &v_repeated_last,
-        true,
-    )?;
+    let attn_out_heads_last = ctx.scaled_dot_product_attention(&q_heads_after_rope_last, &k_repeated_last, &v_repeated_last, true)?;
 
     let attn_out_last = attn_out_heads_last
         .reshape(vec![1, n_heads, seq, head_dim])?
         .permute(&[0, 2, 1, 3], &mut ctx)?
         .reshape(vec![1, seq, d_model])?;
     let attn_out_last = ctx
-        .matmul(
-            &attn_out_last.reshape(vec![m, d_model])?,
-            &block_last.attn_out_weight,
-            false,
-            true,
-        )?
+        .matmul(&attn_out_last.reshape(vec![m, d_model])?, &block_last.attn_out_weight, false, true)?
         .reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
 
-    let (py_attn_out_last, py_attn_out_shape) = load_npy_tensor(
-        Path::new(npy_dump_path).join(format!("arrays/{}__attn_out.npy", last_layer_prefix)),
-    );
-    assert_eq!(
-        attn_out_last.dims(),
-        &py_attn_out_shape,
-        "Final block attn out shape mismatch"
-    );
+    let (py_attn_out_last, py_attn_out_shape) =
+        load_npy_tensor(Path::new(npy_dump_path).join(format!("arrays/{}__attn_out.npy", last_layer_prefix)));
+    assert_eq!(attn_out_last.dims(), &py_attn_out_shape, "Final block attn out shape mismatch");
     let attn_out_last_view = attn_out_last.reshape(squeeze_leading_batch(&py_attn_out_shape))?;
     compare_tensor_summary(
         &format!("Block {} attn out", last_block_idx),
@@ -1774,23 +1214,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Final block MLP
     let resid_mlp_last = attn_residual_last.clone();
-    let x_normed_mlp_last = {
-        let out = Tensor::create_tensor_pooled(attn_residual_last.dims().to_vec(), &mut ctx)?;
-        let op = RMSNorm::new(
-            attn_residual_last,
-            out.clone(),
-            block_last.ffn_norm_gamma.clone(),
-            d_model as u32,
-            ctx.rmsnorm_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-        out
-    };
+    let x_normed_mlp_last = ctx.call::<RMSNormOp>((attn_residual_last, block_last.ffn_norm_gamma.clone(), d_model as u32))?;
     ctx.synchronize();
 
-    let (py_mlp_norm_last, py_mlp_norm_shape) = load_npy_tensor(
-        Path::new(npy_dump_path).join(format!("arrays/{}__mlp_norm.npy", last_layer_prefix)),
-    );
+    let (py_mlp_norm_last, py_mlp_norm_shape) =
+        load_npy_tensor(Path::new(npy_dump_path).join(format!("arrays/{}__mlp_norm.npy", last_layer_prefix)));
     let mlp_norm_expected_shape = squeeze_leading_batch(&py_mlp_norm_shape);
     let mlp_norm_last_view = x_normed_mlp_last.reshape(mlp_norm_expected_shape.clone())?;
     assert_eq!(
@@ -1821,14 +1249,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let ffn_output_last = ffn_output_flat_last.reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
 
-    let (py_mlp_out_last, py_mlp_out_shape) = load_npy_tensor(
-        Path::new(npy_dump_path).join(format!("arrays/{}__mlp_out.npy", last_layer_prefix)),
-    );
-    assert_eq!(
-        ffn_output_last.dims(),
-        &py_mlp_out_shape,
-        "Final block mlp out shape mismatch"
-    );
+    let (py_mlp_out_last, py_mlp_out_shape) =
+        load_npy_tensor(Path::new(npy_dump_path).join(format!("arrays/{}__mlp_out.npy", last_layer_prefix)));
+    assert_eq!(ffn_output_last.dims(), &py_mlp_out_shape, "Final block mlp out shape mismatch");
     let ffn_output_last_view = ffn_output_last.reshape(squeeze_leading_batch(&py_mlp_out_shape))?;
     compare_tensor_summary(
         &format!("Block {} mlp out", last_block_idx),
@@ -1883,10 +1306,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         if let Ok(max_tokens_env) = env::var("METALLIC_FORWARD_GENERATE_MAX_TOKENS") {
             if let Ok(parsed) = max_tokens_env.parse::<usize>() {
                 gen_cfg.max_tokens = parsed;
-                println!(
-                    "Using overridden max_tokens={} for generation",
-                    gen_cfg.max_tokens
-                );
+                println!("Using overridden max_tokens={} for generation", gen_cfg.max_tokens);
             } else {
                 println!(
                     "Warning: could not parse METALLIC_FORWARD_GENERATE_MAX_TOKENS='{}'; using default {}",
@@ -1895,9 +1315,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             }
         }
 
-        let generated_ids = generation::generate_autoregressive_without_kv_cache(
-            &mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg,
-        )?;
+        let generated_ids = generation::generate_autoregressive_without_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
         ctx.synchronize();
 
         let prompt_len = input_ids.len();
@@ -1922,8 +1340,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
         let torch_text_path = Path::new(npy_dump_path).join("generated_text.txt");
         if torch_text_path.exists() {
-            let torch_text = std::fs::read_to_string(&torch_text_path)
-                .expect("Failed to read PyTorch generated_text.txt");
+            let torch_text = std::fs::read_to_string(&torch_text_path).expect("Failed to read PyTorch generated_text.txt");
             println!("PyTorch generated text:\n{}", torch_text);
 
             let rust_trim = rust_continuation_text.trim_end_matches(&['\r', '\n'][..]);
@@ -1931,16 +1348,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             if rust_trim == torch_trim {
                 println!("✅ Rust generation matches PyTorch text exactly");
             } else {
-                let mismatch = rust_trim
-                    .chars()
-                    .zip(torch_trim.chars())
-                    .enumerate()
-                    .find(|(_, (r, t))| r != t);
+                let mismatch = rust_trim.chars().zip(torch_trim.chars()).enumerate().find(|(_, (r, t))| r != t);
                 if let Some((idx, (r_char, t_char))) = mismatch {
-                    println!(
-                        "❌ Generation differs at char {} (rust='{}', pytorch='{}')",
-                        idx, r_char, t_char
-                    );
+                    println!("❌ Generation differs at char {} (rust='{}', pytorch='{}')", idx, r_char, t_char);
                     let rust_tail: String = rust_trim.chars().skip(idx).take(40).collect();
                     let torch_tail: String = torch_trim.chars().skip(idx).take(40).collect();
                     println!("Rust tail: {}", rust_tail);

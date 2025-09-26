@@ -55,9 +55,7 @@ fn get_batch_and_from_existing_buffer() {
 
     // wrap the second batch region using from_existing_buffer
     let offset_bytes = 12 * std::mem::size_of::<f32>();
-    let view =
-        Tensor::from_existing_buffer(base.buf.clone(), vec![3, 4], &base.device, offset_bytes)
-            .unwrap();
+    let view = Tensor::from_existing_buffer(base.buf.clone(), vec![3, 4], &base.device, offset_bytes).unwrap();
     assert_eq!(view.as_slice(), expected.as_slice());
 }
 
@@ -110,10 +108,7 @@ fn pool_growth_behavior() {
     }
 
     // Check that pool has grown
-    assert!(
-        ctx.pool.num_chunks() > 1,
-        "Pool should have grown to multiple chunks"
-    );
+    assert!(ctx.pool.num_chunks() > 1, "Pool should have grown to multiple chunks");
 }
 
 #[test]
@@ -244,10 +239,7 @@ fn batched_operations_correctness() {
     // Verify results
     assert!(t1.as_slice().iter().all(|&x| x == 0.0));
     assert!(t2.as_slice().iter().all(|&x| x == 1.0));
-    assert_eq!(
-        t3.as_slice(),
-        &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
-    );
+    assert_eq!(t3.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
 }
 
 #[test]

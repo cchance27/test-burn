@@ -3,10 +3,7 @@ use crate::gguf::{GGUFDataType, GGUFError};
 use half::f16;
 
 /// Dequantize Q8_0/Q8_1 tensor data to F32
-pub fn dequantize_q8_to_f32(
-    data: &[u8],
-    data_type: GGUFDataType,
-) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // Q8_0 format:
     // - Each block contains 32 weights
     // - Each block has:
@@ -21,7 +18,7 @@ pub fn dequantize_q8_to_f32(
     //   * 32 bytes: 8-bit quantized weights
 
     let (block_size, scale_offset, delta_offset, weight_offset) = match data_type {
-        GGUFDataType::Q8_0 => (34, 0, None, 2), // 2 (scale) + 32 (weights) = 34 bytes per block
+        GGUFDataType::Q8_0 => (34, 0, None, 2),    // 2 (scale) + 32 (weights) = 34 bytes per block
         GGUFDataType::Q8_1 => (36, 0, Some(2), 4), // 2 (scale) + 2 (delta) + 32 (weights) = 36 bytes per block
         _ => return Err("Invalid data type for Q8 dequantization".into()),
     };
@@ -91,10 +88,7 @@ pub fn dequantize_q8_to_f32(
 
 /// Temporary function to debug Q8 format
 #[allow(dead_code)]
-pub fn debug_q8_format(
-    tensor_info: &crate::gguf::GGUTensorInfo,
-    data: &[u8],
-) -> Result<(), GGUFError> {
+pub fn debug_q8_format(tensor_info: &crate::gguf::GGUTensorInfo, data: &[u8]) -> Result<(), GGUFError> {
     println!("Tensor: {}", tensor_info.name);
     println!("Data type: {:?}", tensor_info.data_type);
     println!("Data length: {}", data.len());
@@ -110,10 +104,7 @@ pub fn debug_q8_format(
             let block_size = 34;
             let blocks = data.len() / block_size;
             let remainder = data.len() % block_size;
-            println!(
-                "Q8_0 - Block size: {}, Blocks: {}, Remainder: {}",
-                block_size, blocks, remainder
-            );
+            println!("Q8_0 - Block size: {}, Blocks: {}, Remainder: {}", block_size, blocks, remainder);
             println!("Expected total weights: {}", blocks * 32);
         }
         GGUFDataType::Q8_1 => {
@@ -121,10 +112,7 @@ pub fn debug_q8_format(
             let block_size = 36;
             let blocks = data.len() / block_size;
             let remainder = data.len() % block_size;
-            println!(
-                "Q8_1 - Block size: {}, Blocks: {}, Remainder: {}",
-                block_size, blocks, remainder
-            );
+            println!("Q8_1 - Block size: {}, Blocks: {}, Remainder: {}", block_size, blocks, remainder);
             println!("Expected total weights: {}", blocks * 32);
         }
         _ => {}

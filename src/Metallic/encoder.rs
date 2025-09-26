@@ -1,8 +1,5 @@
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLBuffer, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _, MTLComputePipelineState,
-    MTLSize,
-};
+use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize};
 use std::ffi::c_void;
 
 /// Sets the compute pipeline state for a command encoder.
@@ -24,11 +21,7 @@ pub fn set_buffer(
 }
 
 /// Sets a small amount of data for a compute kernel.
-pub fn set_bytes<T: Sized>(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    index: usize,
-    data: &T,
-) {
+pub fn set_bytes<T: Sized>(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, data: &T) {
     let size = std::mem::size_of::<T>();
     // SAFETY: `data` is a valid reference, so its pointer is non-null.
     // Convert the reference into a NonNull<c_void> as required by the objc2 binding.
@@ -39,35 +32,18 @@ pub fn set_bytes<T: Sized>(
 }
 
 /// Dispatches a compute kernel.
-pub fn dispatch_threadgroups(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    groups: MTLSize,
-    threads_per_tg: MTLSize,
-) {
+pub fn dispatch_threadgroups(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, groups: MTLSize, threads_per_tg: MTLSize) {
     debug_assert!(groups.width > 0, "groups.width must be non-zero");
     debug_assert!(groups.height > 0, "groups.height must be non-zero");
     debug_assert!(groups.depth > 0, "groups.depth must be non-zero");
-    debug_assert!(
-        threads_per_tg.width > 0,
-        "threads_per_tg.width must be non-zero"
-    );
-    debug_assert!(
-        threads_per_tg.height > 0,
-        "threads_per_tg.height must be non-zero"
-    );
-    debug_assert!(
-        threads_per_tg.depth > 0,
-        "threads_per_tg.depth must be non-zero"
-    );
+    debug_assert!(threads_per_tg.width > 0, "threads_per_tg.width must be non-zero");
+    debug_assert!(threads_per_tg.height > 0, "threads_per_tg.height must be non-zero");
+    debug_assert!(threads_per_tg.depth > 0, "threads_per_tg.depth must be non-zero");
 
     encoder.dispatchThreadgroups_threadsPerThreadgroup(groups, threads_per_tg);
 }
 
 /// Dispatches a compute kernel using thread-level parallelism.
-pub fn dispatch_threads(
-    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
-    grid_size: MTLSize,
-    threadgroup_size: MTLSize,
-) {
+pub fn dispatch_threads(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, grid_size: MTLSize, threadgroup_size: MTLSize) {
     encoder.dispatchThreads_threadsPerThreadgroup(grid_size, threadgroup_size);
 }

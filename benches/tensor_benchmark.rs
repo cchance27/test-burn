@@ -19,11 +19,7 @@ fn benchmark_random_uniform_creation(c: &mut Criterion) {
 
     group.bench_function("burn", |b| {
         b.iter(|| {
-            let _query = BurnTensor::<MyBackend, 3, Float>::random(
-                [batch, seq, dim],
-                Distribution::Normal(0.0, 1.0),
-                &device,
-            );
+            let _query = BurnTensor::<MyBackend, 3, Float>::random([batch, seq, dim], Distribution::Normal(0.0, 1.0), &device);
             MyBackend::sync(&device);
         })
     });
@@ -134,14 +130,11 @@ fn benchmark_batched_operations(c: &mut Criterion) {
     group.bench_function("batched", |b| {
         b.iter(|| {
             context.pool.reset();
-            let cb =
-                test_burn::metallic::operation::CommandBuffer::new(&context.command_queue).unwrap();
+            let cb = test_burn::metallic::operation::CommandBuffer::new(&context.command_queue).unwrap();
             let _t1 = Tensor::zeros_batched(shape.to_vec(), &cb, &mut context).unwrap();
             let _t2 = Tensor::ones_batched(shape.to_vec(), &cb, &mut context).unwrap();
             let _t3 = Tensor::random_uniform_batched(shape.to_vec(), &cb, &mut context).unwrap();
-            let _t4 =
-                Tensor::arange_batched(shape.iter().product(), shape.to_vec(), &cb, &mut context)
-                    .unwrap();
+            let _t4 = Tensor::arange_batched(shape.iter().product(), shape.to_vec(), &cb, &mut context).unwrap();
             cb.commit();
             cb.wait();
         })

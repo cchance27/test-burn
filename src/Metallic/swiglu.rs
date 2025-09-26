@@ -1,6 +1,6 @@
-use super::elemwise_mul::ElemwiseMul;
-use super::silu::Silu;
 use super::{Context, MetalError, Tensor};
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::silu::SiluOp;
 use serde::{Deserialize, Serialize};
 use std::fs;
 
@@ -56,11 +56,6 @@ pub fn swiglu(
     ffn_down_bias: &Tensor,
     ctx: &mut Context,
 ) -> Result<Tensor, MetalError> {
-    // Ensure required pipelines
-    super::silu::ensure_silu_pipeline(ctx)?;
-    super::elemwise_mul::ensure_mul_pipeline(ctx)?;
-    super::elemwise_add::ensure_add_pipeline(ctx)?; // for broadcast bias adds
-
     // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
     // Choose transpose_b based on weight layout to ensure b_rows == d_model
     let d_model = x_normed_flat.dims()[1];
@@ -78,14 +73,7 @@ pub fn swiglu(
     let gate_temp = ctx.matmul(x_normed_flat, ffn_gate, false, gate_transpose_b)?;
     ctx.synchronize();
     // Add gate bias (broadcast over last dim)
-    let gate_out = Tensor::create_tensor_pooled(gate_temp.dims().to_vec(), ctx)?;
-    let gate_bcast = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        gate_temp,
-        ffn_gate_bias.clone(),
-        gate_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&gate_bcast, cache))?;
+    let gate_out = ctx.call::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias.clone()))?;
     ctx.synchronize();
     //println!("SWIGLU DEBUG: gate_proj dims={:?}", gate_out.dims());
     //{
@@ -117,14 +105,7 @@ pub fn swiglu(
     let up_temp = ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?;
     ctx.synchronize();
     // Add up bias
-    let up_out = Tensor::create_tensor_pooled(up_temp.dims().to_vec(), ctx)?;
-    let up_bcast = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        up_temp,
-        ffn_up_bias.clone(),
-        up_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&up_bcast, cache))?;
+    let up_out = ctx.call::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias.clone()))?;
     ctx.synchronize();
     //println!("SWIGLU DEBUG: up_proj dims={:?}", up_out.dims());
     //{
@@ -141,16 +122,7 @@ pub fn swiglu(
     //}
 
     // SiLU activation on gate_proj
-    let gate_act = {
-        let out = Tensor::create_tensor_pooled(gate_out.dims().to_vec(), ctx)?;
-        let op = Silu::new(
-            gate_out,
-            out.clone(),
-            ctx.silu_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-        out
-    };
+    let gate_act = ctx.call::<SiluOp>(gate_out)?;
     ctx.synchronize();
     //println!("SWIGLU DEBUG: gate_act dims={:?}", gate_act.dims());
     {
@@ -160,17 +132,7 @@ pub fn swiglu(
     }
 
     // Element-wise multiplication: SiLU(gate_proj) * up_proj -> [m, ff_dim]
-    let hidden = {
-        let out = Tensor::create_tensor_pooled(gate_act.dims().to_vec(), ctx)?;
-        let op = ElemwiseMul::new(
-            gate_act,
-            up_out,
-            out.clone(),
-            ctx.mul_pipeline.as_ref().unwrap().clone(),
-        )?;
-        ctx.with_command_buffer(|cb, cache| cb.record(&op, cache))?;
-        out
-    };
+    let hidden = ctx.call::<crate::metallic::kernels::elemwise_mul::ElemwiseMulOp>((gate_act, up_out))?;
     ctx.synchronize();
     //println!("SWIGLU DEBUG: hidden dims={:?}", hidden.dims());
     //{
@@ -209,14 +171,7 @@ pub fn swiglu(
     };
     ctx.synchronize();
     // Add down bias to final projection output
-    let ffn_out = Tensor::create_tensor_pooled(ffn_temp.dims().to_vec(), ctx)?;
-    let down_bcast = crate::metallic::elemwise_add::BroadcastElemwiseAdd::new(
-        ffn_temp,
-        ffn_down_bias.clone(),
-        ffn_out.clone(),
-        ctx.broadcast_add_pipeline.as_ref().unwrap().clone(),
-    )?;
-    ctx.with_command_buffer(|cb, cache| cb.record(&down_bcast, cache))?;
+    let ffn_out = ctx.call::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias.clone()))?;
     ctx.synchronize();
     //println!("SWIGLU DEBUG: ffn_output dims={:?}", ffn_out.dims());
     //{
@@ -267,12 +222,9 @@ mod tests {
         let x_normed_flat = Tensor::create_tensor_from_slice(&input_data, vec![m, d_model], &ctx)?;
 
         // Bias tensors (zeros) for this small test
-        let ffn_gate_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-        let ffn_up_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-        let ffn_down_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
+        let ffn_gate_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
+        let ffn_up_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
+        let ffn_down_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
         let output = swiglu(
             &x_normed_flat,
             &ffn_gate,
@@ -322,12 +274,9 @@ mod tests {
         let ffn_down = Tensor::create_tensor_from_slice(&down_data, vec![d_model, ff_dim], &ctx)?;
 
         // Biases (zeros)
-        let ffn_gate_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-        let ffn_up_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-        let ffn_down_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
+        let ffn_gate_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
+        let ffn_up_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
+        let ffn_down_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
 
         // Zero input
         let input_data: Vec<f32> = vec![0.0; m * d_model];
@@ -355,10 +304,8 @@ mod tests {
     #[test]
     fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
         // Load weights from JSON
-        let weights_json = fs::read_to_string("pytorch/swiglu_qwen25_weights_full.json")
-            .expect("Failed to read weights JSON");
-        let weights: Weights =
-            serde_json::from_str(&weights_json).expect("Failed to parse weights JSON");
+        let weights_json = fs::read_to_string("pytorch/swiglu_qwen25_weights_full.json").expect("Failed to read weights JSON");
+        let weights: Weights = serde_json::from_str(&weights_json).expect("Failed to parse weights JSON");
 
         let d_model = weights.shapes.gate_weight[1]; // 896
         let ff_dim = weights.shapes.gate_weight[0]; // 4864
@@ -374,40 +321,26 @@ mod tests {
 
         // Create weight Tensors
         let mut ctx = Context::new()?;
-        let ffn_gate =
-            Tensor::create_tensor_from_slice(&gate_weight_rust, vec![ff_dim, d_model], &ctx)?;
-        let ffn_up =
-            Tensor::create_tensor_from_slice(&up_weight_rust, vec![ff_dim, d_model], &ctx)?;
-        let ffn_down =
-            Tensor::create_tensor_from_slice(&down_weight_rust, vec![d_model, ff_dim], &ctx)?;
+        let ffn_gate = Tensor::create_tensor_from_slice(&gate_weight_rust, vec![ff_dim, d_model], &ctx)?;
+        let ffn_up = Tensor::create_tensor_from_slice(&up_weight_rust, vec![ff_dim, d_model], &ctx)?;
+        let ffn_down = Tensor::create_tensor_from_slice(&down_weight_rust, vec![d_model, ff_dim], &ctx)?;
 
         // Bias tensors (assume zero since JSON doesn't include biases)
-        let ffn_gate_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-        let ffn_up_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-        let ffn_down_bias =
-            Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
+        let ffn_gate_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
+        let ffn_up_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
+        let ffn_down_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
 
         // Load test cases
-        let cases_json = fs::read_to_string("pytorch/swiglu_full_qwen25_comparison_data.json")
-            .expect("Failed to read cases JSON");
-        let cases: Vec<TestCase> =
-            serde_json::from_str(&cases_json).expect("Failed to parse cases JSON");
+        let cases_json = fs::read_to_string("pytorch/swiglu_full_qwen25_comparison_data.json").expect("Failed to read cases JSON");
+        let cases: Vec<TestCase> = serde_json::from_str(&cases_json).expect("Failed to parse cases JSON");
 
         for case in cases {
             let input_len = case.input.len();
             let m = input_len / d_model;
-            assert_eq!(
-                input_len,
-                m * d_model,
-                "Input length mismatch for {}",
-                case.name
-            );
+            assert_eq!(input_len, m * d_model, "Input length mismatch for {}", case.name);
 
             // Create input Tensor [m, d_model]
-            let x_normed_flat =
-                Tensor::create_tensor_from_slice(&case.input, vec![m, d_model], &ctx)?;
+            let x_normed_flat = Tensor::create_tensor_from_slice(&case.input, vec![m, d_model], &ctx)?;
 
             // Run swiglu
             let rust_output = swiglu(
@@ -430,9 +363,7 @@ mod tests {
                 "Output length mismatch for {}",
                 case.name
             );
-            for (i, (&rust_val, &py_val)) in
-                rust_output_flat.iter().zip(case.output.iter()).enumerate()
-            {
+            for (i, (&rust_val, &py_val)) in rust_output_flat.iter().zip(case.output.iter()).enumerate() {
                 let diff = (rust_val - py_val).abs();
                 if diff > 1e-5 {
                     panic!(

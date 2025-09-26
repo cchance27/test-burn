@@ -1,37 +1,20 @@
 use super::*;
 
 /// Test that attention rows sum to approximately 1.0
-fn check_row_stochastic_property(
-    batch: usize,
-    seq_q: usize,
-    seq_k: usize,
-    dim: usize,
-    causal: bool,
-) {
+fn check_row_stochastic_property(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool) {
     // Generate random data
     let mut rng = rand::rng();
-    let q_data: Vec<f32> = (0..(batch * seq_q * dim))
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Metallic implementation
     let mut ctx = Context::new().unwrap();
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
 
-    let metal_out = ctx
-        .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)
-        .unwrap();
+    let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
 
     // Check that each row sums to approximately 1.0
@@ -75,24 +58,15 @@ fn property_based_sdpa_test(max_batch: usize, max_seq_q: usize, max_seq_k: usize
     let causal = rng.random_bool(0.5);
 
     // Generate random data
-    let q_data: Vec<f32> = (0..(batch * seq_q * dim))
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|_| rng.random_range(-1.0..1.0))
-        .collect();
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Metallic implementation
     let mut ctx = Context::new().unwrap();
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
 
     let result = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal);
 
@@ -180,30 +154,19 @@ fn sdpa_determinism_check() {
     let causal = true;
 
     // Fixed seed data
-    let q_data: Vec<f32> = (0..(batch * seq_q * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|i| (i as f32) * 0.2)
-        .collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|i| (i as f32) * 0.3)
-        .collect();
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|i| (i as f32) * 0.1).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.2).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.3).collect();
 
     // Run SDPA multiple times
     let mut results: Vec<Vec<f32>> = Vec::new();
     for _ in 0..5 {
         let mut ctx = Context::new().unwrap();
-        let q_tensor =
-            Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-        let k_tensor =
-            Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-        let v_tensor =
-            Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+        let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
 
-        let metal_out = ctx
-            .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)
-            .unwrap();
+        let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
         results.push(metal_out.as_slice().to_vec());
     }
 

@@ -22,11 +22,7 @@ pub fn benchmark_q8_large_dequantization() {
         }
     }
 
-    println!(
-        "Created {} blocks with {} total weights",
-        num_blocks,
-        num_blocks * 32
-    );
+    println!("Created {} blocks with {} total weights", num_blocks, num_blocks * 32);
 
     // Benchmark the regular dequantization
     let start = Instant::now();

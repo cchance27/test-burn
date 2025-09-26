@@ -58,9 +58,7 @@ fn main() {
     };
 
     // Try to construct a tokenizer from GGUF metadata (best-effort)
-    let tokenizer = match test_burn::metallic::tokenizer::Tokenizer::from_gguf_metadata(
-        &gguf_model.metadata,
-    ) {
+    let tokenizer = match test_burn::metallic::tokenizer::Tokenizer::from_gguf_metadata(&gguf_model.metadata) {
         Ok(t) => t,
         Err(e) => {
             eprintln!(
@@ -72,8 +70,7 @@ fn main() {
             for i in 0..256u32 {
                 map.insert(i, format!("<{}>", i));
             }
-            test_burn::metallic::tokenizer::Tokenizer::from_vocab_and_merges(map, vec![])
-                .expect("fallback tokenizer")
+            test_burn::metallic::tokenizer::Tokenizer::from_vocab_and_merges(map, vec![]).expect("fallback tokenizer")
         }
     };
 
@@ -96,8 +93,7 @@ fn main() {
         top_k: 40,
     };
 
-    match test_burn::metallic::generation::generate(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg)
-    {
+    match test_burn::metallic::generation::generate(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg) {
         Ok(out_text) => {
             println!("Generation result:\n{}", out_text);
             process::exit(0);

@@ -3,9 +3,7 @@ use objc2::rc::autoreleasepool;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandQueue;
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
-use objc2_metal_performance_shaders::{
-    MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax,
-};
+use objc2_metal_performance_shaders::{MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
 use std::ffi::c_void;
 use std::ptr::NonNull;
 
@@ -68,34 +66,33 @@ pub fn scaled_dot_product_attention_metal(
 
         let qk_gemm = unsafe {
             MPSMatrixMultiplication::initWithDevice_transposeLeft_transposeRight_resultRows_resultColumns_interiorColumns_alpha_beta(
-            MPSMatrixMultiplication::alloc(),
-            &device,
-            false,
-            true,
-            seq_q,
-            seq_k,
-            dim,
-            scale.into(),
-            0.0,
-        )
+                MPSMatrixMultiplication::alloc(),
+                &device,
+                false,
+                true,
+                seq_q,
+                seq_k,
+                dim,
+                scale.into(),
+                0.0,
+            )
         };
 
         let out_gemm = unsafe {
             MPSMatrixMultiplication::initWithDevice_transposeLeft_transposeRight_resultRows_resultColumns_interiorColumns_alpha_beta(
-            MPSMatrixMultiplication::alloc(),
-            &device,
-            false,
-            false,
-            seq_q,
-            dim,
-            seq_k,
-            1.0,
-            0.0,
-        )
+                MPSMatrixMultiplication::alloc(),
+                &device,
+                false,
+                false,
+                seq_q,
+                dim,
+                seq_k,
+                1.0,
+                0.0,
+            )
         };
 
-        let softmax =
-            unsafe { MPSMatrixSoftMax::initWithDevice(MPSMatrixSoftMax::alloc(), &device) };
+        let softmax = unsafe { MPSMatrixSoftMax::initWithDevice(MPSMatrixSoftMax::alloc(), &device) };
 
         for i in 0..batch {
             let q_offset = i * seq_q * dim * std::mem::size_of::<f32>();
@@ -112,14 +109,7 @@ pub fn scaled_dot_product_attention_metal(
                     MPSDataType::Float32,
                 )
             };
-            let q_matrix = unsafe {
-                MPSMatrix::initWithBuffer_offset_descriptor(
-                    MPSMatrix::alloc(),
-                    &q_buf,
-                    q_offset,
-                    &q_desc,
-                )
-            };
+            let q_matrix = unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), &q_buf, q_offset, &q_desc) };
 
             let k_desc = unsafe {
                 MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
@@ -129,14 +119,7 @@ pub fn scaled_dot_product_attention_metal(
                     MPSDataType::Float32,
                 )
             };
-            let k_matrix = unsafe {
-                MPSMatrix::initWithBuffer_offset_descriptor(
-                    MPSMatrix::alloc(),
-                    &k_buf,
-                    k_offset,
-                    &k_desc,
-                )
-            };
+            let k_matrix = unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), &k_buf, k_offset, &k_desc) };
 
             let attn_desc = unsafe {
                 MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
@@ -146,14 +129,8 @@ pub fn scaled_dot_product_attention_metal(
                     MPSDataType::Float32,
                 )
             };
-            let attn_matrix = unsafe {
-                MPSMatrix::initWithBuffer_offset_descriptor(
-                    MPSMatrix::alloc(),
-                    &attn_buf,
-                    attn_offset,
-                    &attn_desc,
-                )
-            };
+            let attn_matrix =
+                unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), &attn_buf, attn_offset, &attn_desc) };
 
             let v_desc = unsafe {
                 MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
@@ -163,14 +140,7 @@ pub fn scaled_dot_product_attention_metal(
                     MPSDataType::Float32,
                 )
             };
-            let v_matrix = unsafe {
-                MPSMatrix::initWithBuffer_offset_descriptor(
-                    MPSMatrix::alloc(),
-                    &v_buf,
-                    v_offset,
-                    &v_desc,
-                )
-            };
+            let v_matrix = unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), &v_buf, v_offset, &v_desc) };
 
             let out_desc = unsafe {
                 MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
@@ -180,37 +150,14 @@ pub fn scaled_dot_product_attention_metal(
                     MPSDataType::Float32,
                 )
             };
-            let out_matrix = unsafe {
-                MPSMatrix::initWithBuffer_offset_descriptor(
-                    MPSMatrix::alloc(),
-                    &out_buf,
-                    out_offset,
-                    &out_desc,
-                )
-            };
+            let out_matrix = unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), &out_buf, out_offset, &out_desc) };
 
             unsafe {
-                qk_gemm.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(
-                    &command_buffer,
-                    &q_matrix,
-                    &k_matrix,
-                    &attn_matrix,
-                )
+                qk_gemm.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(&command_buffer, &q_matrix, &k_matrix, &attn_matrix)
             };
+            unsafe { softmax.encodeToCommandBuffer_inputMatrix_resultMatrix(&command_buffer, &attn_matrix, &attn_matrix) };
             unsafe {
-                softmax.encodeToCommandBuffer_inputMatrix_resultMatrix(
-                    &command_buffer,
-                    &attn_matrix,
-                    &attn_matrix,
-                )
-            };
-            unsafe {
-                out_gemm.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(
-                    &command_buffer,
-                    &attn_matrix,
-                    &v_matrix,
-                    &out_matrix,
-                )
+                out_gemm.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(&command_buffer, &attn_matrix, &v_matrix, &out_matrix)
             };
         }
 
@@ -220,13 +167,8 @@ pub fn scaled_dot_product_attention_metal(
         }
 
         // Wrap the output buffer in our Tensor API and copy out via to_vec for consistency
-        let out_tensor = crate::metallic::Tensor::from_existing_buffer(
-            out_buf.clone(),
-            vec![batch, seq_q, dim],
-            &device,
-            0,
-        )
-        .expect("failed to wrap out_buf as Tensor");
+        let out_tensor = crate::metallic::Tensor::from_existing_buffer(out_buf.clone(), vec![batch, seq_q, dim], &device, 0)
+            .expect("failed to wrap out_buf as Tensor");
         out_tensor.to_vec()
     })
 }

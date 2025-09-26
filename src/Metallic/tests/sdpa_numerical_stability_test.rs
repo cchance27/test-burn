@@ -21,18 +21,9 @@ fn compare_sdpa_implementations(
 ) {
     // Burn implementation
     let device = <MyBackend as Backend>::Device::default();
-    let q_burn = BurnTensor::<MyBackend, 3>::from_data(
-        burn::tensor::TensorData::new(q_data.clone(), vec![batch, seq_q, dim]),
-        &device,
-    );
-    let k_burn = BurnTensor::<MyBackend, 3>::from_data(
-        burn::tensor::TensorData::new(k_data.clone(), vec![batch, seq_k, dim]),
-        &device,
-    );
-    let v_burn = BurnTensor::<MyBackend, 3>::from_data(
-        burn::tensor::TensorData::new(v_data.clone(), vec![batch, seq_k, dim]),
-        &device,
-    );
+    let q_burn = BurnTensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(q_data.clone(), vec![batch, seq_q, dim]), &device);
+    let k_burn = BurnTensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(k_data.clone(), vec![batch, seq_k, dim]), &device);
+    let v_burn = BurnTensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(v_data.clone(), vec![batch, seq_k, dim]), &device);
 
     let burn_out = scaled_dot_product_attention_burn(q_burn, k_burn, v_burn, None, causal);
     let burn_data = burn_out.to_data();
@@ -40,16 +31,11 @@ fn compare_sdpa_implementations(
 
     // Metallic implementation
     let mut ctx = Context::new().unwrap();
-    let q_tensor =
-        Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor =
-        Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor =
-        Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
+    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
 
-    let metal_out = ctx
-        .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal)
-        .unwrap();
+    let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
 
     // Validate with tolerance
@@ -98,15 +84,9 @@ fn sdpa_numerical_stability_large_magnitudes() {
     let dim = 4;
 
     // Create base data
-    let mut q_data: Vec<f32> = (0..(batch * seq_q * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
+    let mut q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|i| (i as f32) * 0.1).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.1).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.1).collect();
 
     // Add large offset to Q to create large logits
     for val in q_data.iter_mut() {
@@ -124,15 +104,9 @@ fn sdpa_numerical_stability_large_magnitudes_causal() {
     let dim = 4;
 
     // Create base data
-    let mut q_data: Vec<f32> = (0..(batch * seq_q * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let k_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
-    let v_data: Vec<f32> = (0..(batch * seq_k * dim))
-        .map(|i| (i as f32) * 0.1)
-        .collect();
+    let mut q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|i| (i as f32) * 0.1).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.1).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.1).collect();
 
     // Add large offset to Q to create large logits
     for val in q_data.iter_mut() {
@@ -172,40 +146,13 @@ fn sdpa_numerical_stability_random_large() {
 
     // Use Burn to generate random data with large values
     let device = <MyBackend as Backend>::Device::default();
-    let q_burn = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_q, dim],
-        Distribution::Uniform(-1000.0, 1000.0),
-        &device,
-    );
-    let k_burn = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_k, dim],
-        Distribution::Uniform(-1000.0, 1000.0),
-        &device,
-    );
-    let v_burn = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_k, dim],
-        Distribution::Uniform(-1000.0, 1000.0),
-        &device,
-    );
+    let q_burn = BurnTensor::<MyBackend, 3>::random([batch, seq_q, dim], Distribution::Uniform(-1000.0, 1000.0), &device);
+    let k_burn = BurnTensor::<MyBackend, 3>::random([batch, seq_k, dim], Distribution::Uniform(-1000.0, 1000.0), &device);
+    let v_burn = BurnTensor::<MyBackend, 3>::random([batch, seq_k, dim], Distribution::Uniform(-1000.0, 1000.0), &device);
 
-    let q_data = q_burn
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
-    let k_data = k_burn
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
-    let v_data = v_burn
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
+    let q_data = q_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let k_data = k_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let v_data = v_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
 
     compare_sdpa_implementations(batch, seq_q, seq_k, dim, false, q_data, k_data, v_data);
 }
@@ -219,40 +166,13 @@ fn sdpa_numerical_stability_random_large_causal() {
 
     // Use Burn to generate random data with large values
     let device = <MyBackend as Backend>::Device::default();
-    let q_burn = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_q, dim],
-        Distribution::Uniform(-1000.0, 1000.0),
-        &device,
-    );
-    let k_burn = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_k, dim],
-        Distribution::Uniform(-1000.0, 1000.0),
-        &device,
-    );
-    let v_burn = BurnTensor::<MyBackend, 3>::random(
-        [batch, seq_k, dim],
-        Distribution::Uniform(-1000.0, 1000.0),
-        &device,
-    );
+    let q_burn = BurnTensor::<MyBackend, 3>::random([batch, seq_q, dim], Distribution::Uniform(-1000.0, 1000.0), &device);
+    let k_burn = BurnTensor::<MyBackend, 3>::random([batch, seq_k, dim], Distribution::Uniform(-1000.0, 1000.0), &device);
+    let v_burn = BurnTensor::<MyBackend, 3>::random([batch, seq_k, dim], Distribution::Uniform(-1000.0, 1000.0), &device);
 
-    let q_data = q_burn
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
-    let k_data = k_burn
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
-    let v_data = v_burn
-        .clone()
-        .into_data()
-        .as_slice::<f32>()
-        .unwrap()
-        .to_vec();
+    let q_data = q_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let k_data = k_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
+    let v_data = v_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
 
     compare_sdpa_implementations(batch, seq_q, seq_k, dim, true, q_data, k_data, v_data);
 }

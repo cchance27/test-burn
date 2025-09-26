@@ -50,20 +50,11 @@ pub fn benchmark_q8_dequantization() {
                 "  - Throughput: {:.2} weights/second",
                 f32_data.len() as f64 / duration.as_secs_f64()
             );
-            println!(
-                "  - Memory usage during dequantization: {} bytes",
-                peak_memory
-            );
-            println!(
-                "  - Memory per weight: {:.2} bytes",
-                peak_memory as f64 / f32_data.len() as f64
-            );
+            println!("  - Memory usage during dequantization: {} bytes", peak_memory);
+            println!("  - Memory per weight: {:.2} bytes", peak_memory as f64 / f32_data.len() as f64);
 
             // Print first few values for verification
-            println!(
-                "  - First 10 values: {:?}",
-                &f32_data[..10.min(f32_data.len())]
-            );
+            println!("  - First 10 values: {:?}", &f32_data[..10.min(f32_data.len())]);
         }
         Err(e) => {
             println!("Error during benchmark: {}", e);
@@ -90,20 +81,11 @@ pub fn benchmark_q8_dequantization() {
                     "  - Throughput: {:.2} weights/second",
                     f32_data.len() as f64 / duration.as_secs_f64()
                 );
-                println!(
-                    "  - Memory usage during dequantization: {} bytes",
-                    peak_memory
-                );
-                println!(
-                    "  - Memory per weight: {:.2} bytes",
-                    peak_memory as f64 / f32_data.len() as f64
-                );
+                println!("  - Memory usage during dequantization: {} bytes", peak_memory);
+                println!("  - Memory per weight: {:.2} bytes", peak_memory as f64 / f32_data.len() as f64);
 
                 // Print first few values for verification
-                println!(
-                    "  - First 10 values: {:?}",
-                    &f32_data[..10.min(f32_data.len())]
-                );
+                println!("  - First 10 values: {:?}", &f32_data[..10.min(f32_data.len())]);
             }
             Err(e) => {
                 println!("Error during SIMD benchmark: {}", e);
@@ -159,20 +141,11 @@ pub fn benchmark_q8_dequantization() {
                 "  - Throughput: {:.2} weights/second",
                 f32_data.len() as f64 / duration.as_secs_f64()
             );
-            println!(
-                "  - Memory usage during dequantization: {} bytes",
-                peak_memory
-            );
-            println!(
-                "  - Memory per weight: {:.2} bytes",
-                peak_memory as f64 / f32_data.len() as f64
-            );
+            println!("  - Memory usage during dequantization: {} bytes", peak_memory);
+            println!("  - Memory per weight: {:.2} bytes", peak_memory as f64 / f32_data.len() as f64);
 
             // Print first few values for verification
-            println!(
-                "  - First 10 values: {:?}",
-                &f32_data[..10.min(f32_data.len())]
-            );
+            println!("  - First 10 values: {:?}", &f32_data[..10.min(f32_data.len())]);
         }
         Err(e) => {
             println!("Error during benchmark: {}", e);
@@ -199,20 +172,11 @@ pub fn benchmark_q8_dequantization() {
                     "  - Throughput: {:.2} weights/second",
                     f32_data.len() as f64 / duration.as_secs_f64()
                 );
-                println!(
-                    "  - Memory usage during dequantization: {} bytes",
-                    peak_memory
-                );
-                println!(
-                    "  - Memory per weight: {:.2} bytes",
-                    peak_memory as f64 / f32_data.len() as f64
-                );
+                println!("  - Memory usage during dequantization: {} bytes", peak_memory);
+                println!("  - Memory per weight: {:.2} bytes", peak_memory as f64 / f32_data.len() as f64);
 
                 // Print first few values for verification
-                println!(
-                    "  - First 10 values: {:?}",
-                    &f32_data[..10.min(f32_data.len())]
-                );
+                println!("  - First 10 values: {:?}", &f32_data[..10.min(f32_data.len())]);
             }
             Err(e) => {
                 println!("Error during SIMD benchmark: {}", e);

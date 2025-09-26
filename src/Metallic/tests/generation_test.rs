@@ -56,10 +56,7 @@ fn test_generation_pipeline() {
     // For this test, we're just checking that the pipeline runs without panicking
     // The actual output will be random since we're using an untrained model
     // We'll consider the test passed if it doesn't panic
-    assert!(
-        result.is_ok(),
-        "Generation should succeed or at least not panic"
-    );
+    assert!(result.is_ok(), "Generation should succeed or at least not panic");
 
     println!("Generation test completed successfully");
 }

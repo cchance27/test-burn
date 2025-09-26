@@ -44,16 +44,15 @@ impl ResourceCache {
                 None => {
                     // This is for device-independent resources like SDPA
                     #[allow(clippy::transmute_ptr_to_ref)]
-                    let dummy_device: &Retained<ProtocolObject<dyn MTLDevice>> =
-                        unsafe { std::mem::transmute(&() as *const ()) };
+                    let dummy_device: &Retained<ProtocolObject<dyn MTLDevice>> = unsafe { std::mem::transmute(&() as *const ()) };
                     C::from_key(&key, dummy_device)?
                 }
             };
             cache.insert(key.clone(), resource);
         }
-        cache.get(&key).ok_or_else(|| {
-            MetalError::ResourceNotCached("Failed to retrieve resource from cache".to_string())
-        })
+        cache
+            .get(&key)
+            .ok_or_else(|| MetalError::ResourceNotCached("Failed to retrieve resource from cache".to_string()))
     }
 
     /// Get a cached GEMM operation by key, or create it if it doesn't exist.
@@ -61,8 +60,7 @@ impl ResourceCache {
         &mut self,
         key: MpsGemmKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixMultiplication>, MetalError>
-    {
+    ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixMultiplication>, MetalError> {
         let cacheable_gemm = Self::get_or_create_resource(&mut self.gemm_cache, key, Some(device))?;
         Ok(cacheable_gemm.gemm.clone())
     }
@@ -73,29 +71,15 @@ impl ResourceCache {
         key: MpsMatrixDescriptorKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixDescriptor>, MetalError> {
-        let cacheable_descriptor =
-            Self::get_or_create_resource(&mut self.descriptor_cache, key, Some(device))?;
+        let cacheable_descriptor = Self::get_or_create_resource(&mut self.descriptor_cache, key, Some(device))?;
         Ok(cacheable_descriptor.descriptor.clone())
     }
 
     /// Get or create an SDPA operation.
-    pub fn get_or_create_sdpa(
-        &mut self,
-        batch: usize,
-        seq_q: usize,
-        seq_k: usize,
-        dim: usize,
-    ) -> CacheableSdpa {
-        let key = SdpaKey {
-            batch,
-            seq_q,
-            seq_k,
-            dim,
-        };
+    pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
+        let key = SdpaKey { batch, seq_q, seq_k, dim };
         // SDPA creation should never fail, so we unwrap.
-        Self::get_or_create_resource(&mut self.sdpa_cache, key, None)
-            .unwrap()
-            .clone()
+        Self::get_or_create_resource(&mut self.sdpa_cache, key, None).unwrap().clone()
     }
 }
 

@@ -21,30 +21,22 @@ fn benchmark_short_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("tokenizer_encoding_short");
     group.bench_function("serial", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_serial(short_text)
-                .expect("Serial encoding failed");
+            tokenizer.encode_serial(short_text).expect("Serial encoding failed");
         })
     });
     group.bench_function("simd", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_simd(short_text)
-                .expect("SIMD encoding failed");
+            tokenizer.encode_simd(short_text).expect("SIMD encoding failed");
         })
     });
     group.bench_function("parallel", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_parallel(short_text)
-                .expect("Parallel encoding failed");
+            tokenizer.encode_parallel(short_text).expect("Parallel encoding failed");
         })
     });
     group.bench_function("simd_parallel", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_simd_parallel(short_text)
-                .expect("SIMD parallel encoding failed");
+            tokenizer.encode_simd_parallel(short_text).expect("SIMD parallel encoding failed");
         })
     });
     group.finish();
@@ -57,30 +49,22 @@ fn benchmark_medium_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("tokenizer_encoding_medium");
     group.bench_function("serial", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_serial(medium_text)
-                .expect("Serial encoding failed");
+            tokenizer.encode_serial(medium_text).expect("Serial encoding failed");
         })
     });
     group.bench_function("simd", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_simd(medium_text)
-                .expect("SIMD encoding failed");
+            tokenizer.encode_simd(medium_text).expect("SIMD encoding failed");
         })
     });
     group.bench_function("parallel", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_parallel(medium_text)
-                .expect("Parallel encoding failed");
+            tokenizer.encode_parallel(medium_text).expect("Parallel encoding failed");
         })
     });
     group.bench_function("simd_parallel", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_simd_parallel(medium_text)
-                .expect("SIMD parallel encoding failed");
+            tokenizer.encode_simd_parallel(medium_text).expect("SIMD parallel encoding failed");
         })
     });
     group.finish();
@@ -93,30 +77,22 @@ fn benchmark_long_encoding(c: &mut Criterion) {
     let mut group = c.benchmark_group("tokenizer_encoding_long");
     group.bench_function("serial", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_serial(&long_text)
-                .expect("Serial encoding failed");
+            tokenizer.encode_serial(&long_text).expect("Serial encoding failed");
         })
     });
     group.bench_function("simd", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_simd(&long_text)
-                .expect("SIMD encoding failed");
+            tokenizer.encode_simd(&long_text).expect("SIMD encoding failed");
         })
     });
     group.bench_function("parallel", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_parallel(&long_text)
-                .expect("Parallel encoding failed");
+            tokenizer.encode_parallel(&long_text).expect("Parallel encoding failed");
         })
     });
     group.bench_function("simd_parallel", |b| {
         b.iter(|| {
-            tokenizer
-                .encode_simd_parallel(&long_text)
-                .expect("SIMD parallel encoding failed");
+            tokenizer.encode_simd_parallel(&long_text).expect("SIMD parallel encoding failed");
         })
     });
     group.finish();

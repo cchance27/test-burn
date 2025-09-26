@@ -8,12 +8,9 @@ use std::arch::aarch64::*;
 
 /// Dequantize Q8_0/Q8_1 tensor data to F32 using SIMD optimization
 #[cfg(target_arch = "aarch64")]
-pub fn dequantize_q8_to_f32_simd(
-    data: &[u8],
-    data_type: GGUFDataType,
-) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn dequantize_q8_to_f32_simd(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     let (block_size, scale_offset, delta_offset, weight_offset) = match data_type {
-        GGUFDataType::Q8_0 => (34, 0, None, 2), // 2 (scale) + 32 (weights) = 34 bytes per block
+        GGUFDataType::Q8_0 => (34, 0, None, 2),    // 2 (scale) + 32 (weights) = 34 bytes per block
         GGUFDataType::Q8_1 => (36, 0, Some(2), 4), // 2 (scale) + 2 (delta) + 32 (weights) = 36 bytes per block
         _ => return Err("Invalid data type for Q8 dequantization".into()),
     };
@@ -70,12 +67,9 @@ pub fn dequantize_q8_to_f32_simd(
 
                 // Convert i16 to f32 (4 operations)
                 let weights_f32x4_low_0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(weights_i16x8_low)));
-                let weights_f32x4_low_1 =
-                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(weights_i16x8_low)));
-                let weights_f32x4_high_0 =
-                    vcvtq_f32_s32(vmovl_s16(vget_low_s16(weights_i16x8_high)));
-                let weights_f32x4_high_1 =
-                    vcvtq_f32_s32(vmovl_s16(vget_high_s16(weights_i16x8_high)));
+                let weights_f32x4_low_1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(weights_i16x8_low)));
+                let weights_f32x4_high_0 = vcvtq_f32_s32(vmovl_s16(vget_low_s16(weights_i16x8_high)));
+                let weights_f32x4_high_1 = vcvtq_f32_s32(vmovl_s16(vget_high_s16(weights_i16x8_high)));
 
                 // Create scale and delta vectors
                 let scale_vec = vdupq_n_f32(scale);
@@ -88,22 +82,10 @@ pub fn dequantize_q8_to_f32_simd(
                 let result_f32x4_high_1 = vmlaq_f32(delta_vec, weights_f32x4_high_1, scale_vec);
 
                 // Store results
-                vst1q_f32(
-                    f32_data.as_mut_ptr().add(output_offset + i),
-                    result_f32x4_low_0,
-                );
-                vst1q_f32(
-                    f32_data.as_mut_ptr().add(output_offset + i + 4),
-                    result_f32x4_low_1,
-                );
-                vst1q_f32(
-                    f32_data.as_mut_ptr().add(output_offset + i + 8),
-                    result_f32x4_high_0,
-                );
-                vst1q_f32(
-                    f32_data.as_mut_ptr().add(output_offset + i + 12),
-                    result_f32x4_high_1,
-                );
+                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i), result_f32x4_low_0);
+                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i + 4), result_f32x4_low_1);
+                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i + 8), result_f32x4_high_0);
+                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i + 12), result_f32x4_high_1);
             }
             i += 16;
         }
@@ -122,10 +104,7 @@ pub fn dequantize_q8_to_f32_simd(
 
 /// Fallback implementation for non-AArch64 architectures
 #[cfg(not(target_arch = "aarch64"))]
-pub fn dequantize_q8_to_f32_simd(
-    data: &[u8],
-    data_type: GGUFDataType,
-) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+pub fn dequantize_q8_to_f32_simd(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // Fall back to the regular implementation
     super::q8::dequantize_q8_to_f32(data, data_type)
 }

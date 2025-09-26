@@ -41,20 +41,13 @@ impl GGUFModelLoader {
                             let h = half::f16::from_bits(bits);
                             f32_data.push(h.to_f32());
                         }
-                        let mut dims: Vec<usize> =
-                            tensor_info.dimensions.iter().map(|&d| d as usize).collect();
+                        let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
                         // Special case for embedding: swap dims if it's [d_model, vocab] but data laid out as [vocab, d_model]
-                        if tensor_info.name == "token_embd.weight"
-                            && dims.len() == 2
-                            && dims[0] == 896
-                            && dims[1] == 151936
-                        {
+                        if tensor_info.name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
                             dims = vec![151936, 896];
                             println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                         }
-                        match crate::metallic::Tensor::create_tensor_from_slice(
-                            &f32_data, dims, _context,
-                        ) {
+                        match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
                             Ok(t) => {
                                 //if tensor_info.name == "token_embd.weight" {
                                 //    let slice = t.as_slice();
@@ -82,10 +75,7 @@ impl GGUFModelLoader {
                         }
                     }
                     Err(e) => {
-                        println!(
-                            "Warning: failed to read raw F16 tensor bytes '{}': {:?}",
-                            tensor_info.name, e
-                        );
+                        println!("Warning: failed to read raw F16 tensor bytes '{}': {:?}", tensor_info.name, e);
                     }
                 }
             }
@@ -108,25 +98,13 @@ impl GGUFModelLoader {
                                 Ok(raw) => {
                                     // Use the q8 dequant path (SIMD on aarch64)
                                     #[cfg(target_arch = "aarch64")]
-                                    let deq_res = crate::gguf::quant::dequantize_q8_to_f32_simd(
-                                        raw,
-                                        tensor_info.data_type,
-                                    );
+                                    let deq_res = crate::gguf::quant::dequantize_q8_to_f32_simd(raw, tensor_info.data_type);
                                     #[cfg(not(target_arch = "aarch64"))]
-                                    let deq_res = crate::gguf::quant::dequantize_q8_to_f32(
-                                        raw,
-                                        tensor_info.data_type,
-                                    );
+                                    let deq_res = crate::gguf::quant::dequantize_q8_to_f32(raw, tensor_info.data_type);
                                     match deq_res {
                                         Ok(f32_data) => {
-                                            let dims: Vec<usize> = tensor_info
-                                                .dimensions
-                                                .iter()
-                                                .map(|&d| d as usize)
-                                                .collect();
-                                            match crate::metallic::Tensor::create_tensor_from_slice(
-                                                &f32_data, dims, _context,
-                                            ) {
+                                            let dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
+                                            match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
                                                 Ok(t) => {
                                                     tensors.insert(tensor_info.name.clone(), t);
                                                 }
@@ -139,18 +117,12 @@ impl GGUFModelLoader {
                                             }
                                         }
                                         Err(e) => {
-                                            println!(
-                                                "Warning: failed to dequantize tensor '{}': {:?}",
-                                                tensor_info.name, e
-                                            );
+                                            println!("Warning: failed to dequantize tensor '{}': {:?}", tensor_info.name, e);
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    println!(
-                                        "Warning: failed to read raw tensor bytes '{}': {:?}",
-                                        tensor_info.name, e
-                                    );
+                                    println!("Warning: failed to read raw tensor bytes '{}': {:?}", tensor_info.name, e);
                                 }
                             }
                         }
@@ -158,11 +130,7 @@ impl GGUFModelLoader {
                             // Try to get raw bytes and convert F16 to F32
                             match self.gguf_file.get_tensor_data(tensor_info) {
                                 Ok(raw) => {
-                                    println!(
-                                        "Converting F16 tensor '{}' with {} bytes",
-                                        tensor_info.name,
-                                        raw.len()
-                                    );
+                                    println!("Converting F16 tensor '{}' with {} bytes", tensor_info.name, raw.len());
                                     // Manual F16 conversion
                                     let elem_count = raw.len() / 2;
                                     let mut f32_data = Vec::with_capacity(elem_count);
@@ -172,10 +140,7 @@ impl GGUFModelLoader {
                                         let bits = lo | (hi << 8);
                                         let h = half::f16::from_bits(bits);
                                         let f32_val = h.to_f32();
-                                        println!(
-                                            "  F16[{}] bits=0x{:04x} -> f32={}",
-                                            i, bits, f32_val
-                                        );
+                                        println!("  F16[{}] bits=0x{:04x} -> f32={}", i, bits, f32_val);
                                         f32_data.push(f32_val);
                                     }
                                     // Add the rest of the data
@@ -186,30 +151,15 @@ impl GGUFModelLoader {
                                         let h = half::f16::from_bits(bits);
                                         f32_data.push(h.to_f32());
                                     }
-                                    let mut dims: Vec<usize> = tensor_info
-                                        .dimensions
-                                        .iter()
-                                        .map(|&d| d as usize)
-                                        .collect();
+                                    let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
                                     // Special case for embedding: swap dims if it's [d_model, vocab] but data laid out as [vocab, d_model]
-                                    if tensor_info.name == "token_embd.weight"
-                                        && dims.len() == 2
-                                        && dims[0] == 896
-                                        && dims[1] == 151936
-                                    {
+                                    if tensor_info.name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
                                         dims = vec![151936, 896];
-                                        println!(
-                                            "Swapped dims for token_embd.weight to [vocab, d_model]"
-                                        );
+                                        println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                                     }
-                                    match crate::metallic::Tensor::create_tensor_from_slice(
-                                        &f32_data, dims, _context,
-                                    ) {
+                                    match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
                                         Ok(t) => {
-                                            println!(
-                                                "Successfully converted F16 tensor '{}'",
-                                                tensor_info.name
-                                            );
+                                            println!("Successfully converted F16 tensor '{}'", tensor_info.name);
                                             // Check some values
                                             let slice = t.as_slice();
                                             println!(
@@ -234,10 +184,7 @@ impl GGUFModelLoader {
                                     }
                                 }
                                 Err(e) => {
-                                    println!(
-                                        "Warning: failed to read raw F16 tensor bytes '{}': {:?}",
-                                        tensor_info.name, e
-                                    );
+                                    println!("Warning: failed to read raw F16 tensor bytes '{}': {:?}", tensor_info.name, e);
                                 }
                             }
                         }
@@ -295,9 +242,7 @@ impl GGUFModel {
 
     /// Get model architecture from metadata
     pub fn get_architecture(&self) -> Option<&str> {
-        if let Some(super::GGUFValue::String(arch)) =
-            self.metadata.entries.get("general.architecture")
-        {
+        if let Some(super::GGUFValue::String(arch)) = self.metadata.entries.get("general.architecture") {
             Some(arch)
         } else {
             None
@@ -306,8 +251,7 @@ impl GGUFModel {
 
     /// Get context length from metadata
     pub fn get_context_length(&self) -> Option<u64> {
-        if let Some(super::GGUFValue::U32(len)) = self.metadata.entries.get("qwen2.context_length")
-        {
+        if let Some(super::GGUFValue::U32(len)) = self.metadata.entries.get("qwen2.context_length") {
             Some(*len as u64)
         } else {
             None
@@ -318,10 +262,7 @@ impl GGUFModel {
     /// This allows callers to do:
     ///   let gguf_model = GGUFModelLoader::new(...).load_model(...)?
     ///   let qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
-    pub fn instantiate<T: crate::metallic::model::LoadableModel>(
-        &self,
-        ctx: &mut crate::metallic::Context,
-    ) -> Result<T, super::GGUFError> {
+    pub fn instantiate<T: crate::metallic::model::LoadableModel>(&self, ctx: &mut crate::metallic::Context) -> Result<T, super::GGUFError> {
         // Delegate to the metallic::model::Model::load helper. Map MetalError -> GGUFError::InvalidData with context.
         match crate::metallic::model::Model::load::<T>(self, ctx) {
             Ok(v) => Ok(v),

@@ -56,9 +56,7 @@ pub struct MpsMatrixDescriptorKey {
 
 impl PartialEq for MpsMatrixDescriptorKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows
-            && self.columns == other.columns
-            && self.row_bytes == other.row_bytes
+        self.rows == other.rows && self.columns == other.columns && self.row_bytes == other.row_bytes
     }
 }
 
@@ -85,10 +83,7 @@ pub struct SdpaKey {
 
 impl PartialEq for SdpaKey {
     fn eq(&self, other: &Self) -> bool {
-        self.batch == other.batch
-            && self.seq_q == other.seq_q
-            && self.seq_k == other.seq_k
-            && self.dim == other.dim
+        self.batch == other.batch && self.seq_q == other.seq_q && self.seq_k == other.seq_k && self.dim == other.dim
     }
 }
 

@@ -31,21 +31,9 @@ fn sdpa_metallic(batch: usize, seq: usize, dim: usize, causal: bool, context: &m
 
 type MyBackend = burn::backend::Metal;
 fn sdpa_burn(batch: usize, seq: usize, dim: usize, device: &WgpuDevice, causal: bool) {
-    let query = BurnTensor::<MyBackend, 3, Float>::random(
-        [batch, seq, dim],
-        Distribution::Normal(0.0, 1.0),
-        device,
-    );
-    let key = BurnTensor::<MyBackend, 3, Float>::random(
-        [batch, seq, dim],
-        Distribution::Normal(0.0, 1.0),
-        device,
-    );
-    let value = BurnTensor::<MyBackend, 3, Float>::random(
-        [batch, seq, dim],
-        Distribution::Normal(0.0, 1.0),
-        device,
-    );
+    let query = BurnTensor::<MyBackend, 3, Float>::random([batch, seq, dim], Distribution::Normal(0.0, 1.0), device);
+    let key = BurnTensor::<MyBackend, 3, Float>::random([batch, seq, dim], Distribution::Normal(0.0, 1.0), device);
+    let value = BurnTensor::<MyBackend, 3, Float>::random([batch, seq, dim], Distribution::Normal(0.0, 1.0), device);
 
     for _ in 0..ITERATIONS {
         scaled_dot_product_attention_burn(query.clone(), key.clone(), value.clone(), None, causal);
@@ -58,11 +46,9 @@ fn sdpa_metal(batch: usize, seq: usize, dim: usize, _causal: bool) {
     let query: Vec<f32> = (0..(batch * seq * dim)).map(|_| rand::random()).collect();
     let key: Vec<f32> = (0..(batch * seq * dim)).map(|_| rand::random()).collect();
     let value: Vec<f32> = (0..(batch * seq * dim)).map(|_| rand::random()).collect();
-    let q_ptr =
-        std::ptr::NonNull::new(query.as_ptr() as *mut c_void).expect("query pointer is null");
+    let q_ptr = std::ptr::NonNull::new(query.as_ptr() as *mut c_void).expect("query pointer is null");
     let k_ptr = std::ptr::NonNull::new(key.as_ptr() as *mut c_void).expect("key pointer is null");
-    let v_ptr =
-        std::ptr::NonNull::new(value.as_ptr() as *mut c_void).expect("value pointer is null");
+    let v_ptr = std::ptr::NonNull::new(value.as_ptr() as *mut c_void).expect("value pointer is null");
 
     for _ in 0..ITERATIONS {
         scaled_dot_product_attention_metal(q_ptr, k_ptr, v_ptr, batch, seq, seq, dim);
@@ -86,9 +72,7 @@ fn benchmark_sdpa_small(c: &mut Criterion) {
             sdpa_metallic(batch, seq, dim, causal, &mut context)
         })
     });
-    group.bench_function("burn", |b| {
-        b.iter(|| sdpa_burn(batch, seq, dim, &device, causal))
-    });
+    group.bench_function("burn", |b| b.iter(|| sdpa_burn(batch, seq, dim, &device, causal)));
     group.bench_function("metal", |b| b.iter(|| sdpa_metal(batch, seq, dim, causal)));
 }
 
@@ -109,9 +93,7 @@ fn benchmark_sdpa_medium(c: &mut Criterion) {
             sdpa_metallic(batch, seq, dim, causal, &mut context)
         })
     });
-    group.bench_function("burn", |b| {
-        b.iter(|| sdpa_burn(batch, seq, dim, &device, causal))
-    });
+    group.bench_function("burn", |b| b.iter(|| sdpa_burn(batch, seq, dim, &device, causal)));
     group.bench_function("metal", |b| b.iter(|| sdpa_metal(batch, seq, dim, causal)));
 }
 
@@ -132,9 +114,7 @@ fn benchmark_sdpa_large(c: &mut Criterion) {
             sdpa_metallic(batch, seq, dim, causal, &mut context)
         })
     });
-    group.bench_function("burn", |b| {
-        b.iter(|| sdpa_burn(batch, seq, dim, &device, causal))
-    });
+    group.bench_function("burn", |b| b.iter(|| sdpa_burn(batch, seq, dim, &device, causal)));
     group.bench_function("metal", |b| b.iter(|| sdpa_metal(batch, seq, dim, causal)));
 }
 
@@ -189,41 +169,23 @@ fn benchmark_sdpa_burn(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("sdpa_burn");
     let causal = false;
-    group.bench_function("small_non_causal", |b| {
-        b.iter(|| sdpa_burn(4, 128, 64, &device, causal))
-    });
-    group.bench_function("medium_non_causal", |b| {
-        b.iter(|| sdpa_burn(8, 512, 64, &device, causal))
-    });
-    group.bench_function("large_non_causal", |b| {
-        b.iter(|| sdpa_burn(16, 1024, 96, &device, causal))
-    });
+    group.bench_function("small_non_causal", |b| b.iter(|| sdpa_burn(4, 128, 64, &device, causal)));
+    group.bench_function("medium_non_causal", |b| b.iter(|| sdpa_burn(8, 512, 64, &device, causal)));
+    group.bench_function("large_non_causal", |b| b.iter(|| sdpa_burn(16, 1024, 96, &device, causal)));
 
     let causal = false;
-    group.bench_function("small_causal", |b| {
-        b.iter(|| sdpa_burn(4, 128, 64, &device, causal))
-    });
-    group.bench_function("medium_causal", |b| {
-        b.iter(|| sdpa_burn(8, 512, 64, &device, causal))
-    });
-    group.bench_function("large_causal", |b| {
-        b.iter(|| sdpa_burn(16, 1024, 96, &device, causal))
-    });
+    group.bench_function("small_causal", |b| b.iter(|| sdpa_burn(4, 128, 64, &device, causal)));
+    group.bench_function("medium_causal", |b| b.iter(|| sdpa_burn(8, 512, 64, &device, causal)));
+    group.bench_function("large_causal", |b| b.iter(|| sdpa_burn(16, 1024, 96, &device, causal)));
     group.finish();
 }
 
 fn benchmark_sdpa_metal(c: &mut Criterion) {
     let mut group = c.benchmark_group("sdpa_metal");
     let causal = false;
-    group.bench_function("small_non_causal", |b| {
-        b.iter(|| sdpa_metal(4, 128, 64, causal))
-    });
-    group.bench_function("medium_non_causal", |b| {
-        b.iter(|| sdpa_metal(8, 512, 64, causal))
-    });
-    group.bench_function("large_non_causal", |b| {
-        b.iter(|| sdpa_metal(16, 1024, 96, causal))
-    });
+    group.bench_function("small_non_causal", |b| b.iter(|| sdpa_metal(4, 128, 64, causal)));
+    group.bench_function("medium_non_causal", |b| b.iter(|| sdpa_metal(8, 512, 64, causal)));
+    group.bench_function("large_non_causal", |b| b.iter(|| sdpa_metal(16, 1024, 96, causal)));
 
     group.finish();
 }

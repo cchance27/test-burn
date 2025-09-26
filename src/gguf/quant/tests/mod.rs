@@ -14,9 +14,7 @@ pub fn get_memory_usage() -> usize {
     use std::process::Command;
 
     // Use vm_stat to get memory information on macOS
-    let output = Command::new("vm_stat")
-        .output()
-        .expect("Failed to execute vm_stat");
+    let output = Command::new("vm_stat").output().expect("Failed to execute vm_stat");
 
     if output.status.success() {
         let stdout = String::from_utf8_lossy(&output.stdout);

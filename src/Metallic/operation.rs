@@ -1,26 +1,17 @@
 use super::{Context, Tensor, error::MetalError, resource_cache::ResourceCache};
-use crate::metallic::context::{
-    ensure_arange_pipeline, ensure_ones_pipeline, ensure_random_pipeline,
-};
-use crate::metallic::encoder::{
-    dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state,
-};
+
+use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBlitCommandEncoder as _, MTLCommandBuffer, MTLCommandEncoder,
-    MTLCommandQueue, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _,
-    MTLComputePipelineState, MTLSize,
+    MTLBlitCommandEncoder, MTLBlitCommandEncoder as _, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+    MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize,
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
 pub trait Operation {
     /// Encode this operation into the provided command buffer.
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        cache: &mut ResourceCache,
-    ) -> Result<(), MetalError>;
+    fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError>;
 }
 
 /// An operation that fills a tensor with a constant value.
@@ -39,11 +30,7 @@ impl Operation for FillConstant {
         if self.value == 0.0 {
             // Encode blit fill for zeros
             let encoder = command_buffer.blitCommandEncoder().unwrap();
-            encoder.fillBuffer_range_value(
-                &self.dst.buf,
-                (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(),
-                0,
-            );
+            encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
             encoder.endEncoding();
             Ok(())
         } else if self.value == 1.0 {
@@ -72,9 +59,7 @@ impl Operation for FillConstant {
                 encoder.endEncoding();
                 Ok(())
             } else {
-                Err(MetalError::OperationNotSupported(
-                    "Ones pipeline not available".to_string(),
-                ))
+                Err(MetalError::OperationNotSupported("Ones pipeline not available".to_string()))
             }
         } else {
             Err(MetalError::OperationNotSupported(
@@ -162,9 +147,7 @@ pub struct CommandBuffer {
 impl CommandBuffer {
     /// Create a new command buffer from a command queue.
     pub fn new(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Result<Self, MetalError> {
-        let inner = queue
-            .commandBuffer()
-            .ok_or(MetalError::CommandBufferCreationFailed)?;
+        let inner = queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
         Ok(Self {
             inner,
             committed: std::cell::Cell::new(false),
@@ -172,11 +155,7 @@ impl CommandBuffer {
     }
 
     /// Record an operation on this command buffer.
-    pub fn record(
-        &mut self,
-        operation: &dyn Operation,
-        cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    pub fn record(&mut self, operation: &dyn Operation, cache: &mut ResourceCache) -> Result<(), MetalError> {
         // Prevent recording after commit.
         if self.committed.get() {
             return Err(MetalError::InvalidOperation(

@@ -36,10 +36,7 @@ pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature:
         return 0; // fallback if all logits are non-finite
     }
 
-    let m = finite_scaled
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
+    let m = finite_scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
 
     // Apply the shift and compute exponentials
     for x in &mut scaled {
@@ -69,11 +66,7 @@ pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature:
 
     // Sort indices by probability descending
     let mut idxs: Vec<usize> = (0..scaled.len()).collect();
-    idxs.sort_by(|&a, &b| {
-        scaled[b]
-            .partial_cmp(&scaled[a])
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    idxs.sort_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal));
 
     // Apply top-k filtering first
     let k_cutoff = std::cmp::min(top_k, idxs.len());
@@ -135,8 +128,7 @@ pub fn generate(
     let input_ids = tokenizer.encode(&full_prompt)?;
 
     // Generate tokens using the non-KV cache approach for debugging
-    let generated_ids =
-        generate_autoregressive_without_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
+    let generated_ids = generate_autoregressive_without_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
 
     // Only decode the new tokens generated after the prompt, and trim at EOS if present
     let start = input_ids.len();
@@ -176,11 +168,7 @@ pub fn generate_autoregressive_without_kv_cache(
     // Autoregressive generation loop
     let max_gen_len = cfg.max_tokens + input_ids.len();
 
-    println!(
-        "Starting generation loop: cur_pos={}, max_gen_len={}",
-        input_ids.len(),
-        max_gen_len
-    );
+    println!("Starting generation loop: cur_pos={}, max_gen_len={}", input_ids.len(), max_gen_len);
 
     while generated.len() < max_gen_len {
         // Process the entire sequence so far
@@ -201,42 +189,40 @@ pub fn generate_autoregressive_without_kv_cache(
 
         // Convert logits to vocab-size slice; assume logits shape [batch, seq, vocab]
         let vocab_size = qwen.config.vocab_size;
-        let vocab_logits =
-            if logits_dims.len() >= 3 && logits_dims[logits_dims.len() - 1] == vocab_size {
-                // Properly shaped logits [batch, seq, vocab]
-                let seq_len = logits_dims[logits_dims.len() - 2];
-                let start_idx = (seq_len - 1) * vocab_size; // Get the last sequence position
-                let end_idx = start_idx + vocab_size;
-                if end_idx <= logits.len() {
-                    logits[start_idx..end_idx].to_vec()
-                } else {
-                    // Fallback: pad with zeros
-                    let mut padded = vec![0.0; vocab_size];
-                    let copy_len = std::cmp::min(end_idx - start_idx, logits.len());
-                    padded[..copy_len].copy_from_slice(&logits[..copy_len]);
-                    padded
-                }
-            } else if logits.len() >= vocab_size {
-                // Fallback to original method - but get the last vocab_size elements, not the first
-                let seq_len = logits.len() / vocab_size;
-                let start_idx = (seq_len - 1) * vocab_size; // Get the last sequence position
-                let end_idx = start_idx + vocab_size;
-                if end_idx <= logits.len() {
-                    logits[start_idx..end_idx].to_vec()
-                } else {
-                    // If we can't determine the correct slice, fall back to first vocab_size elements
-                    logits[..vocab_size].to_vec()
-                }
+        let vocab_logits = if logits_dims.len() >= 3 && logits_dims[logits_dims.len() - 1] == vocab_size {
+            // Properly shaped logits [batch, seq, vocab]
+            let seq_len = logits_dims[logits_dims.len() - 2];
+            let start_idx = (seq_len - 1) * vocab_size; // Get the last sequence position
+            let end_idx = start_idx + vocab_size;
+            if end_idx <= logits.len() {
+                logits[start_idx..end_idx].to_vec()
             } else {
-                // If we don't have enough logits, pad with zeros
-                let mut padded = logits;
-                padded.resize(vocab_size, 0.0);
+                // Fallback: pad with zeros
+                let mut padded = vec![0.0; vocab_size];
+                let copy_len = std::cmp::min(end_idx - start_idx, logits.len());
+                padded[..copy_len].copy_from_slice(&logits[..copy_len]);
                 padded
-            };
+            }
+        } else if logits.len() >= vocab_size {
+            // Fallback to original method - but get the last vocab_size elements, not the first
+            let seq_len = logits.len() / vocab_size;
+            let start_idx = (seq_len - 1) * vocab_size; // Get the last sequence position
+            let end_idx = start_idx + vocab_size;
+            if end_idx <= logits.len() {
+                logits[start_idx..end_idx].to_vec()
+            } else {
+                // If we can't determine the correct slice, fall back to first vocab_size elements
+                logits[..vocab_size].to_vec()
+            }
+        } else {
+            // If we don't have enough logits, pad with zeros
+            let mut padded = logits;
+            padded.resize(vocab_size, 0.0);
+            padded
+        };
 
         // Sample next token
-        let next_token =
-            sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        let next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
 
         generated.push(next_token);
         // Debug: print sampled token

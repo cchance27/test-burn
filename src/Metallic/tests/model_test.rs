@@ -63,11 +63,7 @@ fn test_model_empty() -> Result<(), MetalError> {
 #[test]
 fn test_model_multiple_operations() -> Result<(), MetalError> {
     // Create multiple test operations
-    let operations: Vec<Box<dyn Operation>> = vec![
-        Box::new(TestOperation),
-        Box::new(TestOperation),
-        Box::new(TestOperation),
-    ];
+    let operations: Vec<Box<dyn Operation>> = vec![Box::new(TestOperation), Box::new(TestOperation), Box::new(TestOperation)];
 
     let model = Model::new(operations);
 

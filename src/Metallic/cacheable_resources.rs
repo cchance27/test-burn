@@ -26,10 +26,7 @@ impl Cacheable for CacheableMpsGemm {
         self.key.clone()
     }
 
-    fn from_key(
-        key: &Self::Key,
-        device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Self, MetalError> {
+    fn from_key(key: &Self::Key, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
         let gemm = unsafe {
             MPSMatrixMultiplication::initWithDevice_transposeLeft_transposeRight_resultRows_resultColumns_interiorColumns_alpha_beta(
                 MPSMatrixMultiplication::alloc(),
@@ -43,10 +40,7 @@ impl Cacheable for CacheableMpsGemm {
                 key.beta as f64,
             )
         };
-        Ok(Self {
-            gemm,
-            key: key.clone(),
-        })
+        Ok(Self { gemm, key: key.clone() })
     }
 }
 
@@ -67,10 +61,7 @@ impl Cacheable for CacheableMpsMatrixDescriptor {
         self.key.clone()
     }
 
-    fn from_key(
-        key: &Self::Key,
-        _device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Self, MetalError> {
+    fn from_key(key: &Self::Key, _device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
         let descriptor = unsafe {
             MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
                 key.rows,

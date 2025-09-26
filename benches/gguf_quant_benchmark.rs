@@ -133,9 +133,5 @@ fn benchmark_q8_large_dequantization(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(
-    benches,
-    benchmark_q8_dequantization,
-    benchmark_q8_large_dequantization
-);
+criterion_group!(benches, benchmark_q8_dequantization, benchmark_q8_large_dequantization);
 criterion_main!(benches);
