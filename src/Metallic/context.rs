@@ -2,7 +2,8 @@ use super::error::MetalError;
 use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::ResourceCache;
-use crate::metallic::kernels;
+use crate::metallic::kernels::swiglu::SwiGLUOp;
+use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -227,4 +228,34 @@ impl Context {
         // Use the kernel system for SDPA
         self.call::<ScaledDotProductAttentionOp>((q.clone(), k.clone(), v.clone(), causal))
     }
+
+
+/// SwiGLU implementation extracted from Qwen25 FFN block.
+/// Computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
+///
+/// # Arguments
+/// * `x_normed_flat` - Flattened input [m, d_model] where m = batch * seq
+/// * `ffn_gate` - Gate projection weight [ff_dim, d_model] (row-major; transpose if source stored as [d_model, ff_dim])
+/// * `ffn_up` - Up projection weight [ff_dim, d_model] (row-major; transpose if source stored as [d_model, ff_dim])
+/// * `ffn_down` - Down projection weight [d_model, ff_dim] (row-major; transpose if source stored as [ff_dim, d_model])
+/// * `ctx` - Metal context for operations
+///
+/// # Returns
+/// Flat output [m, d_model] (reshape externally to [batch, seq, d_model])
+#[allow(clippy::too_many_arguments)]
+#[allow(non_snake_case)]
+pub fn SwiGLU(
+        &mut self,
+    x_normed_flat: &Tensor,
+    ffn_gate: &Tensor,
+    ffn_gate_bias: &Tensor,
+    ffn_up: &Tensor,
+    ffn_up_bias: &Tensor,
+    ffn_down: &Tensor,
+    ffn_down_bias: &Tensor,
+) -> Result<Tensor, MetalError> {
+    // Use the kernel system to call the SwiGLU operation
+    self.call::<SwiGLUOp>((x_normed_flat.clone(), ffn_gate.clone(), ffn_gate_bias.clone(), ffn_up.clone(), ffn_up_bias.clone(), ffn_down.clone(), ffn_down_bias.clone()))
+}
+
 }

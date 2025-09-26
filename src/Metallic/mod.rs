@@ -22,7 +22,6 @@ pub mod generation;
 pub mod models;
 
 pub mod kernels;
-pub mod swiglu;
 
 #[cfg(test)]
 mod tests;

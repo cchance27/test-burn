@@ -129,18 +129,21 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
         ctx.synchronize();
 
         // Create a dummy operation since all work is done in this function
-        Ok((Box::new(ScaledDotProductAttention {
-            q: q.clone(), // This is just to satisfy struct fields, actual work is done
-            k: k.clone(),
-            v: v.clone(), 
-            output: out.clone(),
-            causal,
-            batch: b,
-            seq_q: s_q,
-            seq_k: s_k,
-            dim: d,
-            scale,
-        }), out))
+        Ok((
+            Box::new(ScaledDotProductAttention {
+                q: q.clone(), // This is just to satisfy struct fields, actual work is done
+                k: k.clone(),
+                v: v.clone(),
+                output: out.clone(),
+                causal,
+                batch: b,
+                seq_q: s_q,
+                seq_k: s_k,
+                dim: d,
+                scale,
+            }),
+            out,
+        ))
     }
 }
 

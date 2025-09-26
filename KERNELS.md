@@ -4,12 +4,12 @@ This document outlines the standard procedure for adding new custom Metal comput
 
 ## 1. File Structure
 
-All custom kernels reside in the `src/kernels/` directory. Each kernel or family of related kernels should be placed in its own module (a subdirectory).
+All custom kernels reside in the `src/metallic/kernels/` directory. Each kernel or family of related kernels should be placed in its own module (a subdirectory).
 
 The required structure for a new kernel named `my_kernel` is as follows:
 
 ```
-src/kernels/
+src/metallic/kernels/
 ├── my_kernel/
 │   ├── mod.rs                    # Rust logic for MyKernelOp and trait implementations, mod and pub use to export MyKernelOtherOp
 │   ├── my_kernel_test.rs         # Tests for the main MyKernelOp
@@ -27,15 +27,15 @@ Let's add a simple element-wise multiplication kernel as an example.
 
 First, create the directory and the two files:
 
-1.  `src/kernels/elemwise_mul/`
-2.  `src/kernels/elemwise_mul/kernel.metal`
-3.  `src/kernels/elemwise_mul/mod.rs`
+1.  `src/metallic/kernels/elemwise_mul/`
+2.  `src/metallic/kernels/elemwise_mul/kernel.metal`
+3.  `src/metallic/kernels/elemwise_mul/mod.rs`
 
 ### Step 2: Write the Metal Code
 
 Place your MSL function(s) in `kernel.metal`.
 
-**`src/kernels/elemwise_mul/kernel.metal`**:
+**`src/metallic/kernels/elemwise_mul/kernel.metal`**:
 ```metal
 #include <metal_stdlib>
 using namespace metal;
@@ -50,7 +50,7 @@ kernel void mul_kernel(device const float* a [[buffer(0)]],
 
 ### Step 3: Update Kernel Enums (Required for Raw Metal Kernel style kernels, MPS call kernels don't require these enums)
 
-Edit `src/kernels/mod.rs` to make the kernel management system aware of your new kernel.
+Edit `src/metallic/kernels/mod.rs` to make the kernel management system aware of your new kernel.
 
 1.  **`KernelLibrary` enum**: Add a variant for your new kernel module. This corresponds to the `.metal` file.
 
@@ -105,7 +105,7 @@ Edit `src/kernels/mod.rs` to make the kernel management system aware of your new
 
 In your kernel's `mod.rs`, you will implement the `KernelInvocable` trait. This trait connects the high-level API (`ctx.call<T>()`) to your kernel's specific implementation.
 
-**`src/kernels/elemwise_mul/mod.rs`**:
+**`src/metallic/kernels/elemwise_mul/mod.rs`**:
 
 ```rust
 // You can pull in super::* to pull in most imports required for kernel creation to keep kernel rust files small.
@@ -177,8 +177,8 @@ impl Operation for ElemwiseMul {
 
 To maintain quality, add a test file for your new kernel.
 
-1.  Create `src/kernels/my_kernel/my_kernel.test.rs`.
-2.  In `src/kernels/my_kernel/mod.rs`, add the following to include the test file:
+1.  Create `src/metallic/kernels/my_kernel/my_kernel.test.rs`.
+2.  In `src/metallic/kernels/my_kernel/mod.rs`, add the following to include the test file:
     ```rust
     mod my_kernel_test;
     ```

@@ -7,7 +7,7 @@ use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::Qwen25;
 use crate::metallic::{
-    context::Context, error::MetalError, generation, generation::GenerationConfig, models::LoadableModel, swiglu, tensor::Tensor,
+    context::Context, error::MetalError, generation, generation::GenerationConfig, models::LoadableModel, tensor::Tensor,
     tokenizer::Tokenizer,
 };
 use approx::assert_relative_eq;
@@ -241,7 +241,7 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         ctx.synchronize();
         let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
-        let ffn_output_flat = crate::metallic::swiglu::swiglu(
+        let ffn_output_flat = ctx.SwiGLU(
             &x_normed_mlp_flat,
             &block.ffn_gate,
             &block.ffn_gate_bias,
@@ -249,7 +249,6 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
             &block.ffn_up_bias,
             &block.ffn_down,
             &block.ffn_down_bias,
-            ctx,
         )?;
         ctx.synchronize();
         let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
@@ -1236,7 +1235,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     );
 
     let mlp_norm_flat_last = mlp_norm_last_view.reshape(vec![m, d_model])?;
-    let ffn_output_flat_last = crate::metallic::swiglu::swiglu(
+    let ffn_output_flat_last = ctx.SwiGLU(
         &mlp_norm_flat_last,
         &block_last.ffn_gate,
         &block_last.ffn_gate_bias,
@@ -1244,7 +1243,6 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         &block_last.ffn_up_bias,
         &block_last.ffn_down,
         &block_last.ffn_down_bias,
-        &mut ctx,
     )?;
     ctx.synchronize();
     let ffn_output_last = ffn_output_flat_last.reshape(vec![1, seq, d_model])?;

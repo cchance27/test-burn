@@ -1,10 +1,9 @@
 #![cfg(test)]
 use rand::Rng as _;
 
-use crate::metallic::kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
-use crate::metallic::{Context, Tensor, MetalError};
 use crate::alternatives::sdpa_burn;
-
+use crate::metallic::kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
+use crate::metallic::{Context, MetalError, Tensor};
 
 #[test]
 fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
@@ -640,7 +639,6 @@ fn test_sdpa_zero_tensors() -> Result<(), MetalError> {
 
 // SDPA Numerical Stability tests
 
-
 type MyBackend = burn::backend::Metal;
 
 use super::*;
@@ -659,9 +657,12 @@ fn compare_sdpa_implementations(
 ) {
     // Burn implementation
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let q_burn = burn::prelude::Tensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(q_data.clone(), vec![batch, seq_q, dim]), &device);
-    let k_burn = burn::prelude::Tensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(k_data.clone(), vec![batch, seq_k, dim]), &device);
-    let v_burn = burn::prelude::Tensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(v_data.clone(), vec![batch, seq_k, dim]), &device);
+    let q_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(q_data.clone(), vec![batch, seq_q, dim]), &device);
+    let k_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(k_data.clone(), vec![batch, seq_k, dim]), &device);
+    let v_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::from_data(burn::tensor::TensorData::new(v_data.clone(), vec![batch, seq_k, dim]), &device);
 
     let burn_out = sdpa_burn::scaled_dot_product_attention_burn(q_burn, k_burn, v_burn, None, causal);
     let burn_data = burn_out.to_data();
@@ -784,9 +785,12 @@ fn sdpa_numerical_stability_random_large() {
 
     // Use Burn to generate random data with large values
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let q_burn = burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_q, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
-    let k_burn = burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
-    let v_burn = burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
+    let q_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_q, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
+    let k_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
+    let v_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
 
     let q_data = q_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
     let k_data = k_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
@@ -804,9 +808,12 @@ fn sdpa_numerical_stability_random_large_causal() {
 
     // Use Burn to generate random data with large values
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let q_burn = burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_q, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
-    let k_burn = burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
-    let v_burn = burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
+    let q_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_q, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
+    let k_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
+    let v_burn =
+        burn::prelude::Tensor::<MyBackend, 3>::random([batch, seq_k, dim], burn::tensor::Distribution::Uniform(-1000.0, 1000.0), &device);
 
     let q_data = q_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();
     let k_data = k_burn.clone().into_data().as_slice::<f32>().unwrap().to_vec();

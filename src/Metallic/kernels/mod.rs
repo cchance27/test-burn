@@ -26,9 +26,10 @@ pub mod matmul;
 pub mod permute;
 pub mod rmsnorm;
 pub mod rope;
+pub mod scaled_dot_product_attention;
 pub mod silu;
 pub mod softmax;
-pub mod scaled_dot_product_attention;
+pub mod swiglu;
 pub mod tensors;
 
 /// Uniquely identifies a compiled Metal library.
