@@ -14,7 +14,6 @@ pub mod error;
 pub mod operation;
 pub mod pool;
 pub mod resource_cache;
-pub mod scaled_dot_product_attention;
 pub mod tensor;
 pub mod tokenizer;
 pub use operation::{CommandBuffer, Operation};

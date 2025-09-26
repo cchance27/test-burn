@@ -28,6 +28,7 @@ pub mod rmsnorm;
 pub mod rope;
 pub mod silu;
 pub mod softmax;
+pub mod scaled_dot_product_attention;
 pub mod tensors;
 
 /// Uniquely identifies a compiled Metal library.

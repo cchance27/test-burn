@@ -4,6 +4,7 @@ use super::pool::MemoryPool;
 use super::resource_cache::ResourceCache;
 use crate::metallic::kernels;
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
+use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -214,5 +215,16 @@ impl Context {
         }
 
         Ok(())
+    }
+
+    pub fn scaled_dot_product_attention(
+        &mut self,
+        q: &super::Tensor,
+        k: &super::Tensor,
+        v: &super::Tensor,
+        causal: bool,
+    ) -> Result<super::Tensor, MetalError> {
+        // Use the kernel system for SDPA
+        self.call::<ScaledDotProductAttentionOp>((q.clone(), k.clone(), v.clone(), causal))
     }
 }

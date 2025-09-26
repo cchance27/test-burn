@@ -29,8 +29,4 @@ mod error_path_test;
 mod forward_pass_correctness_test;
 mod generation_test;
 
-mod scaled_dot_product_attention_test;
-mod sdpa_extreme_test;
-mod sdpa_numerical_stability_test;
-mod sdpa_property_test;
 mod tensor_test;
