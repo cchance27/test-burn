@@ -31,7 +31,6 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
     type Args = (Tensor, Tensor, Tensor, bool); // (q, k, v, causal)
     // The output type
-    type Output = Tensor;
 
     // For composed operations that use other kernels, return None
     fn function_id() -> Option<KernelFunction> {
@@ -45,8 +44,10 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
         args: Self::Args,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (q, k, v, causal) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut q, mut k, mut v, causal) = args;
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut q, &mut k, &mut v]);
 
         // Validate dimensions
         if q.dims().len() != 3 || k.dims().len() != 3 || v.dims().len() != 3 {
@@ -117,16 +118,11 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
             // [s_q, s_k] @ [s_k, d] = [s_q, d]
             let final_result = ctx.matmul(&softmax_result, &v_i, false, false)?; // [s_q, d]
 
-            // Ensure GPU work is complete before touching host-visible buffers.
-            ctx.synchronize();
-
             // Copy final result to output tensor
             let final_slice = final_result.as_slice();
             let out_slice = out_i.as_mut_slice();
             out_slice.copy_from_slice(final_slice);
         }
-
-        ctx.synchronize();
 
         // Create a dummy operation since all work is done in this function
         Ok((

@@ -18,7 +18,6 @@ fn test_rmsnorm_logic() -> Result<(), MetalError> {
 
     // Use the kernel via the generic `call` method.
     let result_tensor = ctx.call::<RMSNormOp>((input, gamma, feature_dim))?;
-    ctx.synchronize();
 
     // Verify the output shape matches input shape
     assert_eq!(result_tensor.dims(), &[2, 4]);

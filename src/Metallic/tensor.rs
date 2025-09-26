@@ -11,8 +11,10 @@ use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLComputeCommandEncoder,
     MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
 };
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ops::{Add, Div, Mul, Sub};
+use std::rc::Rc;
 
 /// Supported data types for tensors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -74,6 +76,10 @@ pub struct Tensor {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// Byte offset into the buffer.
     pub offset: usize,
+
+    /// The command buffer that must complete before this tensor's data is safe for host access.
+    /// None indicates the tensor is already synchronized with the CPU.
+    pub(crate) defining_cmd_buffer: Rc<RefCell<Option<CommandBuffer>>>,
 }
 
 impl Tensor {
@@ -100,6 +106,7 @@ impl Tensor {
     }
 
     /// Helper function to bind a tensor to a compute encoder with correct offset
+    #[inline]
     fn bind_tensor(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, tensor: &Tensor) {
         set_buffer(encoder, index, &tensor.buf, tensor.offset);
     }
@@ -142,6 +149,7 @@ impl Tensor {
             dtype: Dtype::F32,
             device: context.device.clone(),
             offset: 0,
+            defining_cmd_buffer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -168,10 +176,12 @@ impl Tensor {
             dtype: Dtype::F32,
             device: context.device.clone(),
             offset: 0,
+            defining_cmd_buffer: Rc::new(RefCell::new(None)),
         })
     }
 
     /// Create an uninitialized tensor of given shape using pooled memory.
+    #[inline]
     pub fn create_tensor_pooled(dims: Vec<usize>, ctx: &mut Context) -> Result<Tensor, MetalError> {
         ctx.pool.alloc_tensor(dims)
     }
@@ -194,6 +204,7 @@ impl Tensor {
             dtype: Dtype::F32,
             device: device.clone(),
             offset,
+            defining_cmd_buffer: Rc::new(RefCell::new(None)),
         })
     }
 
@@ -233,16 +244,29 @@ impl Tensor {
             dtype: Dtype::F32,
             device: context.device.clone(),
             offset: 0,
+            defining_cmd_buffer: Rc::new(RefCell::new(None)),
         })
     }
 
+    fn ensure_ready(&self) {
+        let pending = { self.defining_cmd_buffer.borrow().clone() };
+        if let Some(cmd_buf) = pending {
+            cmd_buf.commit();
+            cmd_buf.wait();
+            self.defining_cmd_buffer.borrow_mut().take();
+        }
+    }
+
     /// Immutable host view of the buffer. Ensure GPU work has completed before reading.
+    #[inline]
     pub fn as_slice(&self) -> &[f32] {
+        self.ensure_ready();
         let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const f32;
         unsafe { std::slice::from_raw_parts(ptr, self.len()) }
     }
 
     /// Copy the tensor contents to a host Vec.
+    #[inline]
     pub fn to_vec(&self) -> Vec<f32> {
         self.as_slice().to_vec()
     }
@@ -256,14 +280,17 @@ impl Tensor {
 
     /// Mutable host view of the buffer. Ensure no concurrent GPU access.
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
+        self.ensure_ready();
         let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut f32;
         unsafe { std::slice::from_raw_parts_mut(ptr, self.len()) }
     }
 
+    #[inline]
     pub fn dims(&self) -> &[usize] {
         &self.dims
     }
 
+    #[inline]
     pub fn flatten(&self) -> Tensor {
         Tensor {
             buf: self.buf.clone(),
@@ -272,6 +299,7 @@ impl Tensor {
             dtype: self.dtype,
             device: self.device.clone(),
             offset: self.offset,
+            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
         }
     }
 
@@ -291,6 +319,7 @@ impl Tensor {
             dtype: self.dtype,
             device: self.device.clone(),
             offset: self.offset,
+            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
         })
     }
 
@@ -303,25 +332,27 @@ impl Tensor {
             // CPU fill path for small tensors (use optimized fast fill)
             Self::fast_fill_f32(tensor.as_mut_slice(), 0.0f32);
         } else {
-            // GPU fill path for large tensors
-            let command_buffer = context.command_queue.commandBuffer().unwrap();
-            let encoder = command_buffer.blitCommandEncoder().unwrap();
+            // GPU fill path for large tensors encoded onto the active command buffer
+            {
+                let cmd_buf = context.active_command_buffer_mut()?;
+                let encoder = cmd_buf
+                    .raw()
+                    .blitCommandEncoder()
+                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
 
-            encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
-            encoder.endEncoding();
-            command_buffer.commit();
+                encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
+                encoder.endEncoding();
+            }
+            context.mark_tensor_pending(&tensor);
         }
-
-        context.synchronize();
 
         Ok(tensor)
     }
 
     /// Create a tensor of all ones with the given shape.
+    #[inline]
     pub fn ones(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
-        let tensor = context.call::<OnesOp>(dims)?;
-        context.synchronize();
-        Ok(tensor)
+        context.call::<OnesOp>(dims)
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape.
@@ -329,34 +360,33 @@ impl Tensor {
         if dims.iter().product::<usize>() != num_elements {
             return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
         }
-        let tensor = context.call::<ArangeOp>(num_elements)?;
-        context.synchronize();
-        // Reshape if needed
-        let mut tensor = tensor;
+        let mut tensor = context.call::<ArangeOp>(num_elements)?;
         tensor.dims = dims;
         Ok(tensor)
     }
 
     /// Create a zeros tensor with the same shape.
+    #[inline]
     pub fn zeros_like(&self, context: &mut Context) -> Result<Tensor, MetalError> {
         Self::zeros(self.dims.clone(), context)
     }
 
     /// Create a ones tensor with the same shape.
+    #[inline]
     pub fn ones_like(&self, context: &mut Context) -> Result<Tensor, MetalError> {
         Self::ones(self.dims.clone(), context)
     }
 
     /// Allocate and fill a tensor with uniform random values between 0 and 1.
+    #[inline]
     pub fn random_uniform(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
         // Backwards-compatible simple random uniform in [0,1)
-        let tensor = context.call::<RandomUniformOp>((dims, 0.0, 1.0, None))?;
-        context.synchronize();
-        Ok(tensor)
+        context.call::<RandomUniformOp>((dims, 0.0, 1.0, None))
     }
 
     /// Fill a new tensor with uniform random values in [min, max).
     /// Uses the device random pipeline for best performance.
+    #[inline]
     pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut Context) -> Result<Tensor, MetalError> {
         let tensor = context.call::<RandomUniformOp>((dims, min, max, None))?;
         Ok(tensor)
@@ -379,6 +409,8 @@ impl Tensor {
             encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
             encoder.endEncoding();
         }
+
+        tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
 
         Ok(tensor)
     }
@@ -421,6 +453,8 @@ impl Tensor {
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
         encoder.endEncoding();
+
+        tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
 
         Ok(tensor)
     }
@@ -465,6 +499,8 @@ impl Tensor {
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
         encoder.endEncoding();
+
+        tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
 
         Ok(tensor)
     }
@@ -511,6 +547,8 @@ impl Tensor {
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
         encoder.endEncoding();
+
+        tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
 
         Ok(tensor)
     }
@@ -585,10 +623,7 @@ impl Tensor {
         let permute_u32: Vec<u32> = permute.iter().map(|&x| x as u32).collect();
 
         use crate::metallic::kernels::permute::PermuteOp;
-        let result = ctx.call::<PermuteOp>((self.clone(), permute_u32))?;
-        ctx.synchronize();
-
-        Ok(result)
+        ctx.call::<PermuteOp>((self.clone(), permute_u32))
     }
 
     /// Element-wise add, returns a new tensor on the same device.
@@ -600,9 +635,7 @@ impl Tensor {
             });
         }
 
-        let out = ctx.call::<ElemwiseAddOp>((self.clone(), other.clone()))?;
-        ctx.synchronize();
-        Ok(out)
+        ctx.call::<ElemwiseAddOp>((self.clone(), other.clone()))
     }
 
     /// Element-wise sub, returns a new tensor on the same device.
@@ -614,9 +647,7 @@ impl Tensor {
             });
         }
 
-        let out = ctx.call::<ElemwiseSubOp>((self.clone(), other.clone()))?;
-        ctx.synchronize();
-        Ok(out)
+        ctx.call::<ElemwiseSubOp>((self.clone(), other.clone()))
     }
 
     /// Element-wise mul, returns a new tensor on the same device.
@@ -628,9 +659,7 @@ impl Tensor {
             });
         }
 
-        let out = ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))?;
-        ctx.synchronize();
-        Ok(out)
+        ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))
     }
 
     pub fn div_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
@@ -641,9 +670,7 @@ impl Tensor {
             });
         }
 
-        let out = ctx.call::<ElemwiseDivOp>((self.clone(), other.clone()))?;
-        ctx.synchronize();
-        Ok(out)
+        ctx.call::<ElemwiseDivOp>((self.clone(), other.clone()))
     }
 
     /// Element-wise scalar add.
@@ -667,6 +694,7 @@ impl Tensor {
             dtype: a.dtype,
             device: a.device.clone(),
             offset: 0,
+            defining_cmd_buffer: Rc::new(RefCell::new(None)),
         };
         let aslice = a.as_slice();
         let oslice = out.as_mut_slice();
@@ -694,6 +722,7 @@ impl Tensor {
             dtype: self.dtype,
             device: self.device.clone(),
             offset: new_offset,
+            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
         })
     }
 

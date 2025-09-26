@@ -1,11 +1,11 @@
 use super::*;
 
-use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
-use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
-use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::Context;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
+use crate::metallic::kernels::silu::SiluOp;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -15,7 +15,6 @@ pub struct SwiGLU;
 
 impl KernelInvocable for SwiGLUOp {
     type Args = (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor);
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         // This is a composite operation using existing kernels, so we don't need a specific kernel function
@@ -27,11 +26,20 @@ impl KernelInvocable for SwiGLUOp {
         args: Self::Args,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias) = args;
 
         // Execute the SwiGLU operation logic directly in the new method
-        let output = execute_swiglu_logic(ctx, x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias)?;
+        let output = execute_swiglu_logic(
+            ctx,
+            x_normed_flat,
+            ffn_gate,
+            ffn_gate_bias,
+            ffn_up,
+            ffn_up_bias,
+            ffn_down,
+            ffn_down_bias,
+        )?;
 
         // Create a dummy operation since all work is done in this function
         Ok((Box::new(SwiGLU), output))
@@ -50,6 +58,23 @@ fn execute_swiglu_logic(
     ffn_down: Tensor,
     ffn_down_bias: Tensor,
 ) -> Result<Tensor, MetalError> {
+    let mut x_normed_flat = x_normed_flat;
+    let mut ffn_gate = ffn_gate;
+    let mut ffn_gate_bias = ffn_gate_bias;
+    let mut ffn_up = ffn_up;
+    let mut ffn_up_bias = ffn_up_bias;
+    let mut ffn_down = ffn_down;
+    let mut ffn_down_bias = ffn_down_bias;
+
+    ctx.prepare_tensors_for_active_cmd(&mut [
+        &mut x_normed_flat,
+        &mut ffn_gate,
+        &mut ffn_gate_bias,
+        &mut ffn_up,
+        &mut ffn_up_bias,
+        &mut ffn_down,
+        &mut ffn_down_bias,
+    ]);
     let d_model = x_normed_flat.dims()[1];
 
     // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
@@ -65,11 +90,9 @@ fn execute_swiglu_logic(
         });
     };
     let gate_temp = ctx.matmul(&x_normed_flat, &ffn_gate, false, gate_transpose_b)?;
-    ctx.synchronize();
-    
+
     // Add gate bias (broadcast over last dim)
     let gate_out = ctx.call::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias))?;
-    ctx.synchronize();
 
     // up_proj: [m, d_model] @ weight -> [m, ff_dim]
     let up_dims = ffn_up.dims();
@@ -84,19 +107,15 @@ fn execute_swiglu_logic(
         });
     };
     let up_temp = ctx.matmul(&x_normed_flat, &ffn_up, false, up_transpose_b)?;
-    ctx.synchronize();
-    
+
     // Add up bias
     let up_out = ctx.call::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias))?;
-    ctx.synchronize();
-    
+
     // SiLU activation on gate_proj
     let gate_act = ctx.call::<SiluOp>(gate_out)?;
-    ctx.synchronize();
 
     // Element-wise multiplication: SiLU(gate_proj) * up_proj -> [m, ff_dim]
     let hidden = ctx.call::<ElemwiseMulOp>((gate_act, up_out))?;
-    ctx.synchronize();
 
     // down_proj: [m, ff_dim] @ [ff_dim, d_model] -> [m, d_model]
     let hidden_cols = hidden.dims()[1];
@@ -114,11 +133,9 @@ fn execute_swiglu_logic(
             actual: ffn_down_rows,
         });
     };
-    ctx.synchronize();
-    
+
     // Add down bias to final projection output
     let ffn_out = ctx.call::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias))?;
-    ctx.synchronize();
 
     Ok(ffn_out)
 }

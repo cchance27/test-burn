@@ -289,7 +289,7 @@ fn strides_and_dtype() {
 
 #[test]
 fn from_slice_no_copy() {
-    let ctx = Context::new().unwrap();
+    let mut ctx = Context::new().unwrap();
 
     // Create data that will be managed by the caller
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];

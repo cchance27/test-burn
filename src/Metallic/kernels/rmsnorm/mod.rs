@@ -12,7 +12,6 @@ struct RMSNorm {
 
 impl KernelInvocable for RMSNormOp {
     type Args = (Tensor, Tensor, u32); // (input, gamma, feature_dim)
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::RMSNorm)
@@ -23,8 +22,8 @@ impl KernelInvocable for RMSNormOp {
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (input, gamma, feature_dim) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut input, mut gamma, feature_dim) = args;
 
         // Validate dimensions
         if input.dims().last() != Some(&(feature_dim as usize)) {
@@ -41,6 +40,8 @@ impl KernelInvocable for RMSNormOp {
                 feature_dim
             )));
         }
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut input, &mut gamma]);
 
         let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
 

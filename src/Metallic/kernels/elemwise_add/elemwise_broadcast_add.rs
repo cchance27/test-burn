@@ -14,7 +14,6 @@ struct BroadcastElemwiseAdd {
 
 impl KernelInvocable for BroadcastElemwiseAddOp {
     type Args = (Tensor, Tensor);
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::ElemwiseBroadcastAdd)
@@ -25,8 +24,8 @@ impl KernelInvocable for BroadcastElemwiseAddOp {
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (a, b) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut a, mut b) = args;
         let b_len = b.len();
         if b_len == 0 {
             return Err(MetalError::InvalidShape("Broadcast b cannot be empty".to_string()));
@@ -34,6 +33,8 @@ impl KernelInvocable for BroadcastElemwiseAddOp {
         if b.dims().len() != 1 {
             return Err(MetalError::InvalidShape(format!("Broadcast b must be 1D, got {:?}", b.dims())));
         }
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut a, &mut b]);
 
         let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
         let op = BroadcastElemwiseAdd {

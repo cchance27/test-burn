@@ -12,7 +12,6 @@ fn test_permute_2d_transpose() -> Result<(), crate::metallic::MetalError> {
     // Permute dimensions [1, 0] to transpose: [[1, 4], [2, 5], [3, 6]]
     let permute_indices = vec![1, 0];
     let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
-    ctx.synchronize();
 
     // Expected result: [1, 4, 2, 5, 3, 6] (row-major order after transpose)
     let result = result_tensor.as_slice();
@@ -30,7 +29,6 @@ fn test_permute_3d() -> Result<(), crate::metallic::MetalError> {
     // Permute dimensions [2, 0, 1]
     let permute_indices = vec![2, 0, 1];
     let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
-    ctx.synchronize();
 
     // The result should have shape [2, 2, 2] but with dimensions permuted
     assert_eq!(result_tensor.dims(), &[2, 2, 2]);
@@ -47,7 +45,6 @@ fn test_permute_identity() -> Result<(), crate::metallic::MetalError> {
     // Permute with identity: [0, 1] - should be unchanged
     let permute_indices = vec![0, 1];
     let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
-    ctx.synchronize();
 
     let result = result_tensor.as_slice();
     assert_eq!(result, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -87,7 +84,6 @@ fn run_case(batch: usize, n_heads: usize, seq: usize, head_dim: usize) {
     let reshaped = t.reshape(vec![batch, n_heads, seq, head_dim]).unwrap();
     let permuted = reshaped.permute(&[0, 2, 1, 3], &mut ctx).unwrap();
     let merged = permuted.reshape(vec![batch, seq, d_model]).unwrap();
-    ctx.synchronize();
     let gpu = merged.to_vec();
 
     // Manual reference on CPU

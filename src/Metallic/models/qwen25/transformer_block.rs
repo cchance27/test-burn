@@ -57,8 +57,6 @@ impl TransformerBlock {
 
         let attn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx)?;
 
-        ctx.synchronize();
-
         Ok(Self {
             attn_q_weight,
             attn_q_bias,

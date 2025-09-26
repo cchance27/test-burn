@@ -45,24 +45,10 @@ impl GGUFModelLoader {
                         // Special case for embedding: swap dims if it's [d_model, vocab] but data laid out as [vocab, d_model]
                         if tensor_info.name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
                             dims = vec![151936, 896];
-                            println!("Swapped dims for token_embd.weight to [vocab, d_model]");
+                            //println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                         }
                         match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
                             Ok(t) => {
-                                //if tensor_info.name == "token_embd.weight" {
-                                //    let slice = t.as_slice();
-                                //    println!(
-                                //        "First 10 values of token_embd.weight: {:?}",
-                                //        &slice[0..std::cmp::min(10, slice.len())]
-                                //    );
-                                //}
-                                //if tensor_info.name == "output.weight" {
-                                //    let slice = t.as_slice();
-                                //    println!(
-                                //        "First 10 values of output.weight: {:?}",
-                                //        &slice[0..std::cmp::min(10, slice.len())]
-                                //    );
-                                //}
                                 tensors.insert(tensor_info.name.clone(), t);
                                 continue;
                             }
@@ -155,7 +141,7 @@ impl GGUFModelLoader {
                                     // Special case for embedding: swap dims if it's [d_model, vocab] but data laid out as [vocab, d_model]
                                     if tensor_info.name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
                                         dims = vec![151936, 896];
-                                        println!("Swapped dims for token_embd.weight to [vocab, d_model]");
+                                        //println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                                     }
                                     match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
                                         Ok(t) => {

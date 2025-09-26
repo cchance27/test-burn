@@ -19,7 +19,6 @@ impl KernelInvocable for RandomUniformOp {
     // Input arguments for the call.
     type Args = (Vec<usize>, f32, f32, Option<u32>);
     // The output type.
-    type Output = Tensor;
 
     // Link to the enum variant in `KernelFunction`.
     fn function_id() -> Option<KernelFunction> {
@@ -33,7 +32,7 @@ impl KernelInvocable for RandomUniformOp {
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         let (dims, min_val, max_val, seed_opt) = args;
 
         // Create the output tensor.
@@ -116,7 +115,6 @@ mod random_uniform_test {
     fn test_random_uniform() -> Result<(), MetalError> {
         let mut ctx = Context::new()?;
         let result = ctx.call::<RandomUniformOp>((vec![5], 0.0, 1.0, Some(42)))?;
-        ctx.synchronize();
 
         let values = result.as_slice();
         assert_eq!(values.len(), 5);

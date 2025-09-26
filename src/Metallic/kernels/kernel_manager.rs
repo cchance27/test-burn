@@ -3,16 +3,16 @@ use super::*;
 /// A trait for kernel operations that can be invoked via `Context::call`.
 pub trait KernelInvocable {
     type Args;
-    type Output;
 
     fn function_id() -> Option<KernelFunction>;
 
+    #[allow(clippy::new_ret_no_self)]
     fn new(
         ctx: &mut Context,
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError>;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError>;
 }
 
 /// Manages the compilation and caching of Metal kernel libraries and functions.

@@ -15,7 +15,6 @@ struct LayerNorm {
 
 impl KernelInvocable for LayerNormOp {
     type Args = (Tensor, Tensor, Tensor, u32); // (input, gamma, beta, feature_dim)
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::LayerNorm)
@@ -26,8 +25,8 @@ impl KernelInvocable for LayerNormOp {
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (input, gamma, beta, feature_dim) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut input, mut gamma, mut beta, feature_dim) = args;
 
         // Validate dimensions
         if input.dims().last() != Some(&(feature_dim as usize)) {
@@ -51,6 +50,8 @@ impl KernelInvocable for LayerNormOp {
                 feature_dim
             )));
         }
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut input, &mut gamma, &mut beta]);
 
         let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
 
@@ -121,7 +122,6 @@ mod layernorm_test {
         let beta = Tensor::create_tensor_from_slice(&beta_data, vec![3], &ctx)?;
 
         let result = ctx.call::<LayerNormOp>((input, gamma, beta, 3))?;
-        ctx.synchronize();
 
         // The result should have mean 0 and variance 1 for each row after normalization
         let result_slice = result.as_slice();

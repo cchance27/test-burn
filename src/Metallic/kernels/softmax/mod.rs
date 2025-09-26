@@ -14,19 +14,18 @@ struct SoftmaxOperation {
 
 impl KernelInvocable for SoftmaxOp {
     type Args = (Tensor, u32, u32, u32); // (attn, seq_q, seq_k, causal)
-    type Output = Tensor; // Returns the same tensor that was modified in-place
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::FusedSoftmax)
     }
 
     fn new(
-        _ctx: &mut Context,
+        ctx: &mut Context,
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (attn, seq_q, seq_k, causal) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut attn, seq_q, seq_k, causal) = args;
 
         // Validate dimensions
         if attn.dims().len() != 2 {
@@ -45,6 +44,8 @@ impl KernelInvocable for SoftmaxOp {
                 seq_k
             )));
         }
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut attn]);
 
         let op = SoftmaxOperation {
             attn: attn.clone(),
@@ -105,7 +106,6 @@ mod softmax_test {
 
         // Apply softmax with no causal masking (causal=0)
         let result = ctx.call::<SoftmaxOp>((attn, 2, 3, 0))?;
-        ctx.synchronize();
 
         // Check that each row sums to approximately 1 (property of softmax)
         let result_slice = result.as_slice();

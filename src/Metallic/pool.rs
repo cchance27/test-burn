@@ -2,6 +2,8 @@ use super::{MetalError, Tensor};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
+use std::cell::RefCell;
+use std::rc::Rc;
 
 const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
 const GROWTH_FACTOR: f32 = 1.5;
@@ -61,6 +63,7 @@ impl MemoryPool {
                     dtype: crate::metallic::tensor::Dtype::F32,
                     device: self.device.clone(),
                     offset,
+                    defining_cmd_buffer: Rc::new(RefCell::new(None)),
                 });
             }
         }
@@ -90,6 +93,7 @@ impl MemoryPool {
             dtype: crate::metallic::tensor::Dtype::F32,
             device: self.device.clone(),
             offset,
+            defining_cmd_buffer: Rc::new(RefCell::new(None)),
         })
     }
 

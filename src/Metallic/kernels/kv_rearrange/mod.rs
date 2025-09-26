@@ -18,7 +18,6 @@ struct KvRearrange {
 
 impl KernelInvocable for KvRearrangeOp {
     type Args = (Tensor, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::KvRearrange)
@@ -29,14 +28,16 @@ impl KernelInvocable for KvRearrangeOp {
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq) = args;
 
         // Calculate output dimensions: [batch*n_heads, seq, head_dim]
         // We need to infer batch from the input dimensions: M = batch*seq
         let input_m = input.dims()[0];
         let batch = input_m / seq as usize;
         let output_dims = vec![batch * n_heads as usize, seq as usize, head_dim as usize];
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut input]);
 
         let output = Tensor::create_tensor_pooled(output_dims, ctx)?;
 
@@ -108,7 +109,6 @@ mod kv_rearrange_test {
 
         // Test parameters: kv_dim=4, kv_head_dim=2, n_heads=2, n_kv_heads=1, head_dim=2, seq=3
         let result = ctx.call::<KvRearrangeOp>((input, 4, 2, 2, 1, 2, 3))?;
-        ctx.synchronize();
 
         // Verify dimensions: [batch*n_heads, seq, head_dim] = [2*2, 3, 2] = [4, 3, 2]
         assert_eq!(result.dims(), &[4, 3, 2]);

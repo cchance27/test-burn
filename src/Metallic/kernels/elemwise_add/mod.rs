@@ -21,7 +21,6 @@ struct ElemwiseAdd {
 
 impl KernelInvocable for ElemwiseAddOp {
     type Args = (Tensor, Tensor);
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::ElemwiseAdd)
@@ -32,8 +31,8 @@ impl KernelInvocable for ElemwiseAddOp {
         args: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (a, b) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut a, mut b) = args;
         if a.dims() != b.dims() {
             return Err(MetalError::InvalidShape(format!(
                 "ElemwiseAdd: input shapes must match, got a={:?}, b={:?}",
@@ -41,6 +40,7 @@ impl KernelInvocable for ElemwiseAddOp {
                 b.dims(),
             )));
         }
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut a, &mut b]);
         let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
         let op = ElemwiseAdd {
             a,

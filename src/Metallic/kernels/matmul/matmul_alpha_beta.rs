@@ -29,7 +29,6 @@ impl KernelInvocable for MatMulAlphaBetaOp {
     // Input arguments for the call - two input tensors + transpose options + alpha/beta
     type Args = (Tensor, Tensor, Tensor, bool, bool, f32, f32); // (left, right, result, transpose_left, transpose_right, alpha, beta)
     // The output type
-    type Output = Tensor;
 
     // For MPS operations, return None since they don't use KernelFunction
     fn function_id() -> Option<KernelFunction> {
@@ -43,13 +42,15 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         args: Self::Args,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>, // MPS doesn't use this
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
-        let (left, right, result, transpose_left, transpose_right, alpha, beta) = args;
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let (mut left, mut right, mut result, transpose_left, transpose_right, alpha, beta) = args;
 
         // Validate dimensions for matrix multiplication
         if left.dims().len() != 2 || right.dims().len() != 2 {
             return Err(MetalError::InvalidOperation("matmul requires 2D tensors".to_string()));
         }
+
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut left, &mut right, &mut result]);
 
         let left_rows = left.dims()[0];
         let left_cols = left.dims()[1];

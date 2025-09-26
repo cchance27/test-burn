@@ -7,6 +7,13 @@ use objc2_metal::{
     MTLBlitCommandEncoder, MTLBlitCommandEncoder as _, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
     MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize,
 };
+use std::{
+    rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+};
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
 pub trait Operation {
@@ -139,30 +146,38 @@ impl Operation for RandomUniform {
 
 /// A light wrapper around a Metal command buffer that provides a
 /// simple API to record high-level operations.
+#[derive(Clone)]
 pub struct CommandBuffer {
-    inner: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    committed: std::cell::Cell<bool>,
+    inner: Rc<CommandBufferInner>,
+}
+
+struct CommandBufferInner {
+    buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    committed: AtomicBool,
+    completed: AtomicBool,
 }
 
 impl CommandBuffer {
     /// Create a new command buffer from a command queue.
     pub fn new(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Result<Self, MetalError> {
-        let inner = queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+        let buffer = queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
         Ok(Self {
-            inner,
-            committed: std::cell::Cell::new(false),
+            inner: Rc::new(CommandBufferInner {
+                buffer,
+                committed: AtomicBool::new(false),
+                completed: AtomicBool::new(false),
+            }),
         })
     }
 
     /// Record an operation on this command buffer.
     pub fn record(&mut self, operation: &dyn Operation, cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Prevent recording after commit.
-        if self.committed.get() {
+        if self.inner.committed.load(Ordering::Acquire) {
             return Err(MetalError::InvalidOperation(
                 "Attempted to record on a committed command buffer".to_string(),
             ));
         }
-        operation.encode(&self.inner, cache)
+        operation.encode(&self.inner.buffer, cache)
     }
 
     /// Commit the command buffer for execution.
@@ -171,22 +186,36 @@ impl CommandBuffer {
     /// This avoids "commit an already committed command buffer" errors when multiple
     /// call sites may attempt to commit the same wrapper.
     pub fn commit(&self) {
-        if !self.committed.replace(true) {
-            self.inner.commit();
+        if !self.inner.committed.swap(true, Ordering::AcqRel) {
+            self.inner.buffer.commit();
         }
     }
 
     /// Wait for the command buffer to complete.
     pub fn wait(&self) {
-        // Only wait if we actually committed the buffer.
-        if self.committed.get() {
-            unsafe { self.inner.waitUntilCompleted() };
+        self.commit();
+        if !self.inner.completed.swap(true, Ordering::AcqRel) {
+            unsafe { self.inner.buffer.waitUntilCompleted() };
         }
     }
 
-    #[allow(dead_code)]
     /// Borrow the underlying command buffer if direct access is needed.
     pub fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>> {
-        &self.inner
+        &self.inner.buffer
+    }
+
+    /// Returns true if two command buffers wrap the same underlying buffer.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.inner, &other.inner)
+    }
+
+    /// Returns whether the command buffer has completed execution.
+    pub fn is_completed(&self) -> bool {
+        self.inner.completed.load(Ordering::Acquire)
+    }
+
+    /// Returns whether the command buffer has been committed for execution.
+    pub fn is_committed(&self) -> bool {
+        self.inner.committed.load(Ordering::Acquire)
     }
 }

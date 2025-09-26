@@ -16,7 +16,6 @@ impl KernelInvocable for OnesOp {
     // Input arguments for the call.
     type Args = Vec<usize>;
     // The output type.
-    type Output = Tensor;
 
     // Link to the enum variant in `KernelFunction`.
     fn function_id() -> Option<KernelFunction> {
@@ -30,7 +29,7 @@ impl KernelInvocable for OnesOp {
         dims: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         // Create the output tensor.
         let out = Tensor::create_tensor_pooled(dims.clone(), ctx)?;
 
@@ -98,7 +97,6 @@ mod ones_test {
     fn test_ones() -> Result<(), MetalError> {
         let mut ctx = Context::new()?;
         let result = ctx.call::<OnesOp>(vec![5])?;
-        ctx.synchronize();
 
         assert_eq!(result.as_slice(), &[1.0, 1.0, 1.0, 1.0, 1.0]);
         Ok(())

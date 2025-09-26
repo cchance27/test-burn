@@ -49,7 +49,6 @@ impl Qwen25 {
 
         // Get the embedding weight data
         let embed_data = self.embed_weight.as_slice();
-        ctx.synchronize();
 
         // For each token, look up its embedding
         let output_data = embedded.as_mut_slice();
@@ -93,18 +92,14 @@ impl Qwen25 {
             )));
         }
 
-        ctx.synchronize();
-
         // Reshape for matrix multiplication: [batch*seq, d_model]
         let m = batch * seq;
         let flat_hidden = hidden.reshape(vec![m, d_model])?;
-        ctx.synchronize();
 
         // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
         let logits_flat = ctx.matmul(&flat_hidden, &self.output_weight, false, true)?;
 
         // Synchronize to ensure matmul is complete before reading values
-        ctx.synchronize();
 
         // Reshape back to [batch, seq, vocab_size]
         let logits = logits_flat.reshape(vec![batch, seq, self.config.vocab_size])?;
@@ -116,7 +111,6 @@ impl Qwen25 {
     pub fn forward_tokens(&self, tokens: &[u32], ctx: &mut Context) -> Result<Tensor, MetalError> {
         // Embed tokens
         let embedded = self.embed(tokens, ctx)?;
-        ctx.synchronize();
 
         let embedded_slice = embedded.as_slice();
         let embedded_max = embedded_slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -137,11 +131,9 @@ impl Qwen25 {
         let hidden = self.forward(&embedded, ctx)?;
 
         // Synchronize to ensure forward pass is complete before reading values
-        ctx.synchronize();
 
         // Apply output projection
         let logits = self.output(&hidden, ctx)?;
-        ctx.synchronize();
 
         Ok(logits)
     }
@@ -151,7 +143,6 @@ impl Qwen25 {
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx)?;
         let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx)?;
         let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx)?;
-        ctx.synchronize();
 
         let mut blocks = Vec::with_capacity(config.n_layers);
         for _ in 0..config.n_layers {
@@ -199,7 +190,6 @@ impl Qwen25 {
 
             // RMSNorm before Attention
             let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
-            ctx.synchronize();
 
             // QKV GEMMs
             let m = batch * seq;
@@ -207,23 +197,15 @@ impl Qwen25 {
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
             let q_temp = ctx.matmul(&x_flat, &block.attn_q_weight, false, true)?;
-            // Ensure matmul is finished before we read values for CPU sanity checks
-            ctx.synchronize();
-
             let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
-            ctx.synchronize(); // Ensure Q matmul and bias add complete
 
             let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
-            ctx.synchronize();
 
             let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
-            ctx.synchronize(); // Ensure K matmul and bias add complete
 
             let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
-            ctx.synchronize();
 
             let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
-            ctx.synchronize(); // Ensure V matmul and bias add complete
 
             // Defer RoPE until after head rearrangement
             let (q_after, k_after) = (q_mat.clone(), k_mat.clone());
@@ -260,7 +242,6 @@ impl Qwen25 {
                 kv_head_dim as u32,
                 seq as u32,
             ))?;
-            ctx.synchronize();
 
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
             let q_heads_after_rope = {
@@ -283,7 +264,6 @@ impl Qwen25 {
                 // Use the new kernel system
                 ctx.call::<RoPEOp>((q_heads, cos, sin, head_dim as u32, seq as u32))?
             };
-            ctx.synchronize();
 
             let k_heads_after_rope = {
                 let dim_half = kv_head_dim / 2;
@@ -302,7 +282,6 @@ impl Qwen25 {
 
                 let cos = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
                 let sin = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-                ctx.synchronize();
 
                 // Use the new kernel system
                 ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?
@@ -331,18 +310,15 @@ impl Qwen25 {
                     true, // Transpose the output weight for correct dimensions
                 )?
                 .reshape(vec![batch, seq, d_model])?;
-            ctx.synchronize(); // Ensure attention output matmul complete
 
             // Residual Add
             x = resid_attn.add_elem(&attn_out, ctx)?;
-            ctx.synchronize(); // Ensure residual add complete
 
             // --- MLP Block ---
             let resid_mlp = x.clone();
 
             // RMSNorm before MLP
             let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
-            ctx.synchronize();
             let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
             // FFN using extracted SwiGLU
@@ -355,18 +331,14 @@ impl Qwen25 {
                 &block.ffn_down,
                 &block.ffn_down_bias,
             )?;
-            ctx.synchronize();
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
-            ctx.synchronize(); // Ensure SwiGLU operation complete
 
             // Residual Add
             x = resid_mlp.add_elem(&ffn_output, ctx)?;
-            ctx.synchronize(); // Ensure final residual add complete
         }
 
         // Final RMSNorm after all blocks
         let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
-        ctx.synchronize();
 
         Ok(final_normed)
     }

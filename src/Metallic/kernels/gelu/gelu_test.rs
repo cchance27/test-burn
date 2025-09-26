@@ -10,8 +10,6 @@ fn test_gelu_logic() -> Result<(), MetalError> {
 
     // Use the kernel via the generic `call` method.
     let result_tensor = ctx.call::<GeluOp>(input)?;
-    ctx.synchronize();
-
     // Get the actual results
     let result_slice = result_tensor.as_slice();
 

@@ -115,14 +115,14 @@ pub fn generate(
     prompt: &str,
     cfg: &GenerationConfig,
 ) -> Result<String, MetalError> {
-    println!("Starting generation with prompt: {}", prompt);
+    //println!("Starting generation with prompt: {}", prompt);
     // Build full prompt string following Qwen2.5 chat template
     let im_start = "<|im_start|>";
     let im_end = "<|im_end|>";
     let full_prompt = format!(
         "{im_start}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{im_end}\n{im_start}user\n{prompt}{im_end}\n{im_start}assistant\n",
     );
-    println!("Full prompt: {:?}", full_prompt);
+    //println!("Full prompt: {:?}", full_prompt);
 
     // Encode the full prompt
     let input_ids = tokenizer.encode(&full_prompt)?;
@@ -157,10 +157,10 @@ pub fn generate_autoregressive_without_kv_cache(
     input_ids: &[u32],
     cfg: &GenerationConfig,
 ) -> Result<Vec<u32>, MetalError> {
-    println!(
-        "Starting autoregressive generation without KV cache with {} input tokens",
-        input_ids.len()
-    );
+    //println!(
+    //    "Starting autoregressive generation without KV cache with {} input tokens",
+    //    input_ids.len()
+    //);
 
     // Start with input tokens
     let mut generated = input_ids.to_vec();
@@ -168,7 +168,7 @@ pub fn generate_autoregressive_without_kv_cache(
     // Autoregressive generation loop
     let max_gen_len = cfg.max_tokens + input_ids.len();
 
-    println!("Starting generation loop: cur_pos={}, max_gen_len={}", input_ids.len(), max_gen_len);
+    //println!("Starting generation loop: cur_pos={}, max_gen_len={}", input_ids.len(), max_gen_len);
 
     while generated.len() < max_gen_len {
         // Process the entire sequence so far

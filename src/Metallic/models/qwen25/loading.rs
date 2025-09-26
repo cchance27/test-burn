@@ -426,9 +426,6 @@ impl LoadableModel for super::Qwen25 {
             }
         }
 
-        // Synchronize to ensure all copies are complete
-        ctx.synchronize();
-
         Ok(qwen)
     }
 }

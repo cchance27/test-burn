@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Context, Tensor, MetalError};
+use crate::metallic::{Context, MetalError, Tensor};
 use std::fs;
 
 use serde::{Deserialize, Serialize};

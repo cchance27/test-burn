@@ -12,7 +12,6 @@ struct Silu {
 
 impl KernelInvocable for SiluOp {
     type Args = Tensor;
-    type Output = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::Silu)
@@ -23,7 +22,10 @@ impl KernelInvocable for SiluOp {
         input: Self::Args,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+        let mut input = input;
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut input]);
+
         let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
 
         let op = Silu {
@@ -80,7 +82,6 @@ mod silu_test {
         let input = Tensor::create_tensor_from_slice(&input_data, vec![4], &ctx)?;
 
         let result = ctx.call::<SiluOp>(input)?;
-        ctx.synchronize();
 
         // SiLU(x) = x * sigmoid(x)
         let expected: Vec<f32> = input_data.iter().map(|&x| x * (1.0 / (1.0 + (-x).exp()))).collect();

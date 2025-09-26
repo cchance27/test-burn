@@ -97,11 +97,11 @@ fn main() {
 
     match test_burn::metallic::generation::generate(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg) {
         Ok(out_text) => {
-            println!("Generation result:\n{}", out_text);
+            println!("\n\nGeneration result: {}", out_text);
             process::exit(0);
         }
         Err(e) => {
-            eprintln!("Generation failed: {:?}", e);
+            eprintln!("\n\nGeneration failed: {:?}", e);
             process::exit(8);
         }
     }
