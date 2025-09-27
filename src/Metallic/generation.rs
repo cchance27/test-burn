@@ -3,9 +3,17 @@ use crate::app_event::{AppEvent, LatencyRow, MemoryRow};
 use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, BlockMemorySnapshot, MemoryEvent, MemoryUsage};
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
+use chrono::{SecondsFormat, Utc};
 use rand::prelude::*;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use serde::Serialize;
+use serde_json::json;
+use std::{
+    env,
+    fs::OpenOptions,
+    io::{self, BufWriter, Write},
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 use sysinfo::{get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const IM_START: &str = "<|im_start|>";
@@ -289,6 +297,90 @@ impl ProcessMemoryTracker {
     }
 }
 
+struct MetricsLoggers {
+    memory: Option<JsonlLogger>,
+    latency: Option<JsonlLogger>,
+}
+
+impl MetricsLoggers {
+    fn new(interval: Duration) -> Self {
+        let timestamp = Utc::now().format("%Y%m%d%H%M%S").to_string();
+        let memory = JsonlLogger::create(&format!("{}-memory.jsonl", timestamp), interval).ok();
+        let latency = JsonlLogger::create(&format!("{}-latency.jsonl", timestamp), interval).ok();
+        let mut loggers = Self { memory, latency };
+        let now = Instant::now();
+        loggers.log_memory(&[], now, true);
+        if let Some(logger) = loggers.memory.as_mut() {
+            logger.last_logged = None;
+        }
+        loggers.log_latency(&[], now, true);
+        if let Some(logger) = loggers.latency.as_mut() {
+            logger.last_logged = None;
+        }
+        loggers
+    }
+
+    fn log_memory(&mut self, rows: &[MemoryRow], now: Instant, force: bool) {
+        if let Some(logger) = self.memory.as_mut() {
+            if let Err(err) = logger.log(rows, now, force) {
+                eprintln!("Failed to log memory metrics: {err}");
+                self.memory = None;
+            }
+        }
+    }
+
+    fn log_latency(&mut self, rows: &[LatencyRow], now: Instant, force: bool) {
+        if let Some(logger) = self.latency.as_mut() {
+            if let Err(err) = logger.log(rows, now, force) {
+                eprintln!("Failed to log latency metrics: {err}");
+                self.latency = None;
+            }
+        }
+    }
+}
+
+struct JsonlLogger {
+    writer: BufWriter<std::fs::File>,
+    interval: Duration,
+    last_logged: Option<Instant>,
+}
+
+impl JsonlLogger {
+    fn create(path: &str, interval: Duration) -> io::Result<Self> {
+        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        Ok(Self {
+            writer: BufWriter::new(file),
+            interval,
+            last_logged: None,
+        })
+    }
+
+    fn log<T>(&mut self, rows: &[T], now: Instant, force: bool) -> io::Result<()>
+    where
+        T: Serialize,
+    {
+        let should_log = force
+            || self
+                .last_logged
+                .map(|last| now.duration_since(last) >= self.interval)
+                .unwrap_or(true);
+
+        if !should_log {
+            return Ok(());
+        }
+
+        let entry = json!({
+            "timestamp": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            "rows": rows,
+        });
+        serde_json::to_writer(&mut self.writer, &entry)?;
+        self.writer.write_all(b"\n")?;
+        self.writer.flush()?;
+        self.last_logged = Some(now);
+        Ok(())
+    }
+}
+
 fn bytes_to_mb(bytes: usize) -> f64 {
     bytes as f64 / 1024.0 / 1024.0
 }
@@ -472,8 +564,24 @@ fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
             level: 1,
             current_total_mb: capacity_mb,
             peak_total_mb: capacity_mb,
-            current_pool_mb: used_mb,
-            peak_pool_mb: used_mb,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        });
+        rows.push(MemoryRow {
+            label: "pool".to_string(),
+            level: 2,
+            current_total_mb: used_mb,
+            peak_total_mb: used_mb,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
             current_kv_mb: 0.0,
             peak_kv_mb: 0.0,
             current_kv_cache_mb: 0.0,
@@ -496,10 +604,42 @@ fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
             peak_total_mb: capacity_mb,
             current_pool_mb: 0.0,
             peak_pool_mb: 0.0,
-            current_kv_mb: used_mb,
-            peak_kv_mb: used_mb,
-            current_kv_cache_mb: cache_mb,
-            peak_kv_cache_mb: cache_mb,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        });
+        rows.push(MemoryRow {
+            label: "kv".to_string(),
+            level: 2,
+            current_total_mb: used_mb,
+            peak_total_mb: used_mb,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        });
+        rows.push(MemoryRow {
+            label: "kv-cache".to_string(),
+            level: 2,
+            current_total_mb: cache_mb,
+            peak_total_mb: cache_mb,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
             absolute_pool_mb: 0.0,
             absolute_kv_mb: 0.0,
             absolute_kv_cache_mb: 0.0,
@@ -748,6 +888,14 @@ where
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1; // Assuming batch size of 1 for now
 
+    let log_interval = env::var("METRICS_LOG_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|&secs| secs > 0)
+        .map(Duration::from_secs)
+        .unwrap_or_else(|| Duration::from_secs(5));
+    let mut metrics_loggers = MetricsLoggers::new(log_interval);
+
     let mut embed_stats = RollingStat::default();
     let mut forward_stats = RollingStat::default();
     let mut output_stats = RollingStat::default();
@@ -934,14 +1082,18 @@ where
             sample_stats.record(sample_duration);
         }
 
-        if latencies_ready && ui_connected {
+        if latencies_ready {
             let rows = build_latency_rows(&embed_stats, &forward_stats, &block_stats, &output_stats, &sample_stats);
-            if tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
-                ui_connected = false;
+            let log_now = Instant::now();
+            metrics_loggers.log_latency(&rows, log_now, false);
+            if ui_connected {
+                if tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
+                    ui_connected = false;
+                }
             }
         }
 
-        if memory_ready && ui_connected {
+        if memory_ready {
             let rows = build_memory_rows(
                 &model_memory_tree,
                 &host_memory,
@@ -952,8 +1104,12 @@ where
                 &memory_output,
                 host_overheads,
             );
-            if tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
-                ui_connected = false;
+            let log_now = Instant::now();
+            metrics_loggers.log_memory(&rows, log_now, false);
+            if ui_connected {
+                if tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
+                    ui_connected = false;
+                }
             }
         }
 

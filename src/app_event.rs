@@ -1,6 +1,7 @@
+use serde::Serialize;
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct LatencyRow {
     pub label: String,
     pub last_ms: f64,
@@ -8,7 +9,7 @@ pub struct LatencyRow {
     pub level: u8,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct MemoryRow {
     pub label: String,
     pub level: u8,
