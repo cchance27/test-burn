@@ -96,38 +96,27 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
             let q_i = q.get_batch(i)?; // [s_q, d]
             let k_i = k.get_batch(i)?; // [s_k, d]
             let v_i = v.get_batch(i)?; // [s_k, d]
-            let mut out_i = out.get_batch(i)?; // [s_q, d]
+            let out_i = out.get_batch(i)?; // [s_q, d]
 
             // Q x K^T -> attn (for this batch)
             // Note: k.get_batch(i) gives [s_k, d], need to transpose to [d, s_k]
             let k_i_t = k_i.permute(&[1, 0], ctx)?; // [d, s_k]
 
-            // Perform matmul: [s_q, d] @ [d, s_k] = [s_q, s_k]
-            let qk_result = ctx.matmul(&q_i, &k_i_t, false, false)?; // [s_q, s_k]
+            // Create a temporary tensor for QK^T result
+            let qk_dims = vec![s_q, s_k];
+            let temp_qk = Tensor::zeros(qk_dims, ctx, true)?; // [s_q, s_k] - temporary tensor
 
-            // Apply scale using element-wise multiplication to the attention matrix
-            // Create a scale tensor with the same shape as attention [s_q, s_k]
-            let scale_values = vec![scale; s_q * s_k]; // Fill with scale value for each element
-            let scale_tensor = Tensor::create_tensor_from_slice(&scale_values, vec![s_q, s_k], ctx)?;
-            let scaled_attn = ctx.call::<crate::metallic::kernels::elemwise_mul::ElemwiseMulOp>((qk_result, scale_tensor))?;
+            // Perform matmul with scaling in one operation: [s_q, d] @ [d, s_k] = [s_q, s_k] with alpha=scale
+            let qk_scaled_result = ctx.matmul_alpha_beta(&q_i, &k_i_t, &temp_qk, false, false, scale, 0.0)?; // [s_q, s_k]
 
             // Apply softmax to the scaled attention
-            let softmax_result = ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
-                scaled_attn,
-                s_q as u32,
-                s_k as u32,
-                causal as u32,
-                query_offset,
-            ))?;
+            let softmax_result = ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
+                (qk_scaled_result, s_q as u32, s_k as u32, causal as u32, query_offset)
+            )?;
 
-            // attn x V -> out (for this batch)
+            // softmax_result x V -> out (for this batch)
             // [s_q, s_k] @ [s_k, d] = [s_q, d]
-            let final_result = ctx.matmul(&softmax_result, &v_i, false, false)?; // [s_q, d]
-
-            // Copy final result to output tensor
-            let final_slice = final_result.as_slice();
-            let out_slice = out_i.as_mut_slice();
-            out_slice.copy_from_slice(final_slice);
+            ctx.matmul_alpha_beta(&softmax_result, &v_i, &out_i, false, false, 1.0, 0.0)?; // [s_q, d]
         }
 
         // Create a dummy operation since all work is done in this function
