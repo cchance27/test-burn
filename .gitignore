@@ -4,3 +4,4 @@
 pytorch/dumps
 debug_compare_out
 debug_dumps
+pytorch/*.json

@@ -1,7 +1,7 @@
 use super::error::MetalError;
 use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
-use super::resource_cache::ResourceCache;
+use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
@@ -20,6 +20,7 @@ pub struct Context {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub pool: MemoryPool,
+    pub kv_cache_pool: MemoryPool,
     pub kernel_manager: KernelManager,
     // Metrics counters
     pub pooled_bytes_allocated: usize,
@@ -61,10 +62,12 @@ impl Context {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device)?;
+        let kv_cache_pool = MemoryPool::new(&device)?;
         Ok(Context {
             device,
             command_queue,
             pool,
+            kv_cache_pool,
             kernel_manager: KernelManager::new(),
             pooled_bytes_allocated: 0,
             pooled_allocations: 0,
@@ -123,7 +126,6 @@ impl Context {
         self.call::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn matmul_alpha_beta(
         &mut self,
         a: &super::Tensor,
@@ -137,17 +139,52 @@ impl Context {
         // Use the kernel system for matmul with alpha/beta scaling
         self.call::<MatMulAlphaBetaOp>((a.clone(), b.clone(), result.clone(), transpose_a, transpose_b, alpha, beta))
     }
+
+    pub fn get_cache_stats(&self) -> Option<CacheStats> {
+        self.active_resource_cache.as_ref().map(|cache| cache.get_stats())
+    }
+
+    pub fn clear_cache(&mut self) {
+        if let Some(cache) = self.active_resource_cache.as_mut() {
+            cache.clear();
+        }
+    }
+
+    pub fn reset_pool(&mut self) {
+        self.pool.reset();
+    }
 }
 
 impl Context {
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
     /// Layout: [seq_len, batch_heads, head_dim] (contiguous).
     pub fn alloc_kv_cache(&mut self, layer_idx: usize, seq_len: usize, batch_heads: usize, head_dim: usize) -> Result<(), MetalError> {
-        // allocate tensors using the Tensor::zeros helper which uses pooled allocation internally
-        let k = crate::metallic::Tensor::zeros(vec![seq_len, batch_heads, head_dim], self)?;
-        let v = crate::metallic::Tensor::zeros(vec![seq_len, batch_heads, head_dim], self)?;
-        // register in central cache map (store tuple: k, v, capacity)
-        self.kv_caches.insert(layer_idx, (k.clone(), v.clone(), seq_len));
+        let dims = vec![seq_len, batch_heads, head_dim];
+
+        // Allocate K and V tensors directly from the dedicated KV cache pool
+        let k = self.kv_cache_pool.alloc_tensor(dims.clone())?;
+        let v = self.kv_cache_pool.alloc_tensor(dims)?;
+
+        // Manually zero the tensors using a blit command
+        let k_size = k.size_bytes();
+        let v_size = v.size_bytes();
+
+        self.ensure_active_cmd_buffer()?;
+        let cmd_buf = self.active_command_buffer_mut()?;
+        if let Some(encoder) = cmd_buf.raw().blitCommandEncoder() {
+            encoder.fillBuffer_range_value(&k.buf, (k.offset..k.offset + k_size).into(), 0);
+            encoder.fillBuffer_range_value(&v.buf, (v.offset..v.offset + v_size).into(), 0);
+            encoder.endEncoding();
+        } else {
+            return Err(MetalError::OperationNotSupported(
+                "Blit encoder not available".into(),
+            ));
+        }
+
+        self.mark_tensor_pending(&k);
+        self.mark_tensor_pending(&v);
+
+        self.kv_caches.insert(layer_idx, (k, v, seq_len));
         Ok(())
     }
 

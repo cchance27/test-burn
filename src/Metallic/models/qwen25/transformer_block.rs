@@ -27,35 +27,35 @@ pub struct TransformerBlock {
 impl TransformerBlock {
     pub fn new(cfg: &super::Qwen25Config, ctx: &mut Context) -> Result<Self, MetalError> {
         // Q, K, V projections
-        let attn_q_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx)?;
-        let attn_q_bias = Tensor::zeros(vec![cfg.d_model], ctx)?;
+        let attn_q_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?;
+        let attn_q_bias = Tensor::zeros(vec![cfg.d_model], ctx, false)?;
 
         let kv_dim = cfg.d_model * cfg.n_kv_heads / cfg.n_heads;
-        let attn_k_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx)?;
-        let attn_k_bias = Tensor::zeros(vec![kv_dim], ctx)?;
+        let attn_k_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx, false)?;
+        let attn_k_bias = Tensor::zeros(vec![kv_dim], ctx, false)?;
 
-        let attn_v_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx)?;
-        let attn_v_bias = Tensor::zeros(vec![kv_dim], ctx)?;
+        let attn_v_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx, false)?;
+        let attn_v_bias = Tensor::zeros(vec![kv_dim], ctx, false)?;
 
-        let attn_out_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx)?;
+        let attn_out_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?;
 
         // FFN (SwiGLU)
         // Allocate FFN weights in the layout expected by `swiglu`:
         // - gate/up: [d_model, ff_dim]
         // - down:    [ff_dim, d_model]
-        let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx)?;
-        let ffn_gate = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx)?;
-        let ffn_up = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx)?;
+        let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
+        let ffn_gate = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
+        let ffn_up = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
 
         // FFN biases
-        let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx)?;
-        let ffn_up_bias = Tensor::zeros(vec![cfg.ff_dim], ctx)?;
-        let ffn_down_bias = Tensor::zeros(vec![cfg.d_model], ctx)?;
+        let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx, false)?;
+        let ffn_up_bias = Tensor::zeros(vec![cfg.ff_dim], ctx, false)?;
+        let ffn_down_bias = Tensor::zeros(vec![cfg.d_model], ctx, false)?;
 
         // Norms
-        let ffn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx)?;
+        let ffn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx, false)?;
 
-        let attn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx)?;
+        let attn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx, false)?;
 
         Ok(Self {
             attn_q_weight,

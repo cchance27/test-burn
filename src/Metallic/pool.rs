@@ -8,6 +8,7 @@ use std::rc::Rc;
 const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
 const GROWTH_FACTOR: f32 = 1.5;
 const MAX_CHUNKS: usize = 16;
+const MAX_POOL_SIZE: usize = 5 * 1024 * 1024 * 1024; // 5GB
 
 /// A chunk of memory in the pool.
 pub struct PoolChunk {
@@ -73,8 +74,14 @@ impl MemoryPool {
             return Err(MetalError::OutOfMemory);
         }
 
+        let current_total_size: usize = self.chunks.iter().map(|c| c.capacity).sum();
         let last_chunk_size = self.chunks.last().unwrap().capacity;
         let new_chunk_size = ((last_chunk_size as f32 * GROWTH_FACTOR) as usize).max(aligned_size);
+
+        if current_total_size + new_chunk_size > MAX_POOL_SIZE {
+            return Err(MetalError::OutOfMemory);
+        }
+
         self.allocate_new_chunk(new_chunk_size)?;
 
         // Now allocate in the new chunk
@@ -140,11 +147,16 @@ impl MemoryPool {
 
     /// Resets the pool cursor, invalidating all previously allocated tensors.
     pub fn reset(&mut self) {
+        self.pooled_bytes_allocated = 0;
         for chunk in &mut self.chunks {
             chunk.cursor = 0;
         }
         self.current_chunk = 0;
         self.pool_resets += 1;
+    }
+
+    pub fn total_capacity(&self) -> usize {
+        self.chunks.iter().map(|c| c.capacity).sum()
     }
 }
 

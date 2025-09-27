@@ -13,6 +13,7 @@ use std::{
 };
 
 use test_burn::{
+    app_event::AppEvent,
     gguf,
     metallic::{
         generation::{generate_streaming, GenerationConfig},
@@ -66,7 +67,6 @@ fn main() -> Result<()> {
 
         tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
         let start_time = Instant::now();
-        let mut token_count = 0;
 
         let _ = generate_streaming(
             &mut qwen,
@@ -74,19 +74,8 @@ fn main() -> Result<()> {
             &mut ctx,
             &prompt,
             &cfg,
-            |_, decoded_token| {
-                token_count += 1;
-                let elapsed = start_time.elapsed();
-                let tokens_per_second = token_count as f64 / elapsed.as_secs_f64();
-
-                if tx
-                    .send(AppEvent::Token(decoded_token, tokens_per_second))
-                    .is_err()
-                {
-                    return Ok(false); // Stop generation if UI thread has disconnected
-                }
-                Ok(true)
-            },
+            &tx,
+            start_time,
         );
         tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
         Ok(())
@@ -116,6 +105,9 @@ fn main() -> Result<()> {
                 AppEvent::StatusUpdate(status) => {
                     app_state.status = status;
                 }
+                AppEvent::MemoryUpdate(memory_usage) => {
+                    app_state.memory_usage = memory_usage;
+                }
             }
         }
 
@@ -127,18 +119,13 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-enum AppEvent {
-    Token(String, f64),
-    TokenCount(usize),
-    StatusUpdate(String),
-}
-
 struct AppState {
     generated_text: String,
     tokens_per_second: f64,
     prompt_token_count: usize,
     should_quit: bool,
     status: String,
+    memory_usage: String,
 }
 
 impl AppState {
@@ -149,6 +136,7 @@ impl AppState {
             prompt_token_count: 0,
             should_quit: false,
             status: "Initializing...".to_string(),
+            memory_usage: String::new(),
         }
     }
 }
@@ -191,11 +179,19 @@ fn ui(frame: &mut Frame, state: &AppState) {
 
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(33),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+        ])
         .split(main_layout[1]);
 
     let status_text = Paragraph::new(state.status.clone())
         .style(Style::default().fg(Color::White).bg(Color::Blue));
+
+    let memory_text = Paragraph::new(state.memory_usage.clone())
+        .style(Style::default().fg(Color::White).bg(Color::Blue))
+        .alignment(Alignment::Center);
 
     let its_text = Paragraph::new(format!("it/s: {:.2}", state.tokens_per_second))
         .style(Style::default().fg(Color::White).bg(Color::Blue))
@@ -203,5 +199,6 @@ fn ui(frame: &mut Frame, state: &AppState) {
 
     frame.render_widget(text_area, main_layout[0]);
     frame.render_widget(status_text, status_layout[0]);
-    frame.render_widget(its_text, status_layout[1]);
+    frame.render_widget(memory_text, status_layout[1]);
+    frame.render_widget(its_text, status_layout[2]);
 }

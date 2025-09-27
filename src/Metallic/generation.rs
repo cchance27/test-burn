@@ -1,7 +1,11 @@
 use super::{Context, MetalError, Tensor};
+use crate::app_event::AppEvent;
+use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
-use crate::metallic::models::Qwen25;
+use app_memory_usage_fetcher::get_memory_usage_mbytes;
 use rand::prelude::*;
+use std::sync::mpsc;
+use std::time::Instant;
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
@@ -118,33 +122,25 @@ pub fn generate(
     prompt: &str,
     cfg: &GenerationConfig,
 ) -> Result<String, MetalError> {
-    let mut output_tokens = Vec::new();
-    let callback = |token_id, _decoded_token| -> Result<bool, MetalError> {
-        output_tokens.push(token_id);
-        // Continue generation
-        Ok(true)
-    };
-
-    // Use the streaming version with a callback that collects tokens
-    generate_streaming(qwen, tokenizer, ctx, prompt, cfg, callback)?;
-
-    // Decode all collected tokens
+    let full_prompt = format!(
+        "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
+    );
+    let input_ids = tokenizer.encode(&full_prompt)?;
+    let output_tokens = generate_autoregressive_with_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
     let output_text = tokenizer.decode(&output_tokens)?;
     Ok(output_text)
 }
 
 /// High-level end-to-end generation pipeline with token streaming support
-pub fn generate_streaming<F>(
+pub fn generate_streaming(
     qwen: &mut Qwen25,
     tokenizer: &Tokenizer,
     ctx: &mut Context,
     prompt: &str,
     cfg: &GenerationConfig,
-    mut token_callback: F,
-) -> Result<(), MetalError>
-where
-    F: FnMut(u32, String) -> Result<bool, MetalError>,
-{
+    tx: &mpsc::Sender<AppEvent>,
+    start_time: Instant,
+) -> Result<(), MetalError> {
     // Build full prompt string following Qwen2.5 chat template
     let full_prompt = format!(
         "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
@@ -153,15 +149,30 @@ where
     // Encode the full prompt
     let input_ids = tokenizer.encode(&full_prompt)?;
 
-    // Generate tokens using the non-KV cache approach for debugging
-    generate_autoregressive_without_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback)?;
+    let mut token_count = 0;
+    let mut token_callback = |_token_id, decoded_token| -> Result<bool, MetalError> {
+        token_count += 1;
+        let elapsed = start_time.elapsed();
+        let tokens_per_second = token_count as f64 / elapsed.as_secs_f64();
+
+        if tx
+            .send(AppEvent::Token(decoded_token, tokens_per_second))
+            .is_err()
+        {
+            return Ok(false); // Stop generation if UI thread has disconnected
+        }
+        Ok(true)
+    };
+
+    // Generate tokens using the new KV cache approach
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx)?;
 
     Ok(())
 }
 
-/// High-level autoregressive generation loop using Qwen25 without KV caches for debugging.
+/// High-level autoregressive generation loop using Qwen25 with KV caches for debugging.
 /// This implementation processes the full context each time for comparison.
-pub fn generate_autoregressive_without_kv_cache(
+pub fn generate_autoregressive_with_kv_cache(
     qwen: &mut Qwen25,
     tokenizer: &Tokenizer,
     ctx: &mut Context,
@@ -174,94 +185,124 @@ pub fn generate_autoregressive_without_kv_cache(
         Ok(true)
     };
 
-    generate_autoregressive_without_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback)?;
+    let (tx, _) = mpsc::channel();
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx)?;
 
     Ok(result)
 }
 
-/// High-level autoregressive generation loop with streaming support using Qwen25 without KV caches.
-pub fn generate_autoregressive_without_kv_cache_streaming<F>(
+/// High-level autoregressive generation loop with streaming support using Qwen25 with KV Caching.
+pub fn generate_autoregressive_with_kv_cache_streaming<F>(
     qwen: &mut Qwen25,
     tokenizer: &Tokenizer,
     ctx: &mut Context,
     input_ids: &[u32],
     cfg: &GenerationConfig,
     token_callback: &mut F,
+    tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError>
 where
     F: FnMut(u32, String) -> Result<bool, MetalError>,
 {
-    // Start with input tokens
-    let mut generated = input_ids.to_vec();
+    // Pre-allocate KV cache for all layers
+    let n_layers = qwen.config.n_layers;
+    let seq_len = qwen.config.seq_len;
+    let n_kv_heads = qwen.config.n_kv_heads;
+    let d_model = qwen.config.d_model;
+    let n_heads = qwen.config.n_heads;
+    let kv_dim = d_model * n_kv_heads / n_heads;
+    let kv_head_dim = kv_dim / n_kv_heads;
+    let batch_size = 1; // Assuming batch size of 1 for now
 
-    // Autoregressive generation loop
-    let max_gen_len = cfg.max_tokens + input_ids.len();
+    for layer_idx in 0..n_layers {
+        ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
+    }
 
-    while generated.len() < max_gen_len {
-        // Process the entire sequence so far
-        let current_ids = generated.clone();
+    // --- Prompt Processing Pass ---
+    // Process the prompt token by token to warm up the KV cache.
+    let mut logits_tensor: Option<Tensor> = None;
+    if !input_ids.is_empty() {
+        ctx.clear_cache(); // It's okay to clear the resource cache
+        for (i, &token_id) in input_ids.iter().enumerate() {
+            let input_tensor = qwen.embed(&[token_id], ctx)?;
+            let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
+            logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
+        }
+    }
 
-        // Embed all tokens so far
-        let input_tensor = qwen.embed(&current_ids, ctx)?;
+    let mut generated_ids = input_ids.to_vec();
+    let prompt_len = input_ids.len();
+    let vocab_size = qwen.config.vocab_size;
+    let mut next_token;
 
-        // Run through the full model
-        let hidden_states = qwen.forward(&input_tensor, ctx)?;
+    if let Some(logits_tensor) = logits_tensor {
+        // Extract logits for the very last token of the prompt
+        let logits = logits_tensor.to_vec();
+        let vocab_logits = logits[0..vocab_size].to_vec();
 
-        // Apply output projection
+        // Sample the first token
+        next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+
+        println!("[KV] Prompt processing produced next_token: {}", next_token);
+    } else {
+        // If there's no prompt, start with token 0.
+        next_token = 0;
+    }
+
+    generated_ids.push(next_token);
+    let decoded_token = tokenizer.decode_lossless(&[next_token])?;
+    if !token_callback(next_token, decoded_token)? {
+        return Ok(());
+    }
+
+    // --- Autoregressive Generation Loop ---
+    // Now, generate tokens one by one using the KV cache.
+    for i in 0..cfg.max_tokens - 1 {
+        ctx.reset_pool();
+        ctx.clear_cache();
+
+        // Embed just the single last token
+        let input_tensor = qwen.embed(&[next_token], ctx)?;
+        
+        // Run a single forward step
+        let current_pos = prompt_len + i;
+        let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
         let logits_tensor = qwen.output(&hidden_states, ctx)?;
 
-        // Extract logits for the last token
-        let logits_dims = logits_tensor.dims();
-        let logits = logits_tensor.to_vec();
-
-        // Convert logits to vocab-size slice; assume logits shape [batch, seq, vocab]
-        let vocab_size = qwen.config.vocab_size;
-        let vocab_logits = if logits_dims.len() >= 3 && logits_dims[logits_dims.len() - 1] == vocab_size {
-            // Properly shaped logits [batch, seq, vocab]
-            let seq_len = logits_dims[logits_dims.len() - 2];
-            let start_idx = (seq_len - 1) * vocab_size; // Get the last sequence position
-            let end_idx = start_idx + vocab_size;
-            if end_idx <= logits.len() {
-                logits[start_idx..end_idx].to_vec()
-            } else {
-                // Fallback: pad with zeros
-                let mut padded = vec![0.0; vocab_size];
-                let copy_len = std::cmp::min(end_idx - start_idx, logits.len());
-                padded[..copy_len].copy_from_slice(&logits[..copy_len]);
-                padded
+        if let Some(stats) = ctx.get_cache_stats() {
+            let app_mem = get_memory_usage_mbytes();
+            let memory_usage = format!(
+                "App: {:.2} GB | Pool: {:.2} / {:.2} MB | Cache: G{}/D{}/S{}",
+                app_mem.unwrap(),
+                ctx.pool.pooled_bytes_allocated as f32 / 1024.0 / 1024.0,
+                ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0,
+                stats.gemm_cache_size,
+                stats.descriptor_cache_size,
+                stats.sdpa_cache_size
+            );
+            if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
+                return Ok(()); // Stop if UI thread is gone
             }
-        } else if logits.len() >= vocab_size {
-            // Fallback to original method - but get the last vocab_size elements, not the first
-            let seq_len = logits.len() / vocab_size;
-            let start_idx = (seq_len - 1) * vocab_size; // Get the last sequence position
-            let end_idx = start_idx + vocab_size;
-            if end_idx <= logits.len() {
-                logits[start_idx..end_idx].to_vec()
-            } else {
-                // If we can't determine the correct slice, fall back to first vocab_size elements
-                logits[..vocab_size].to_vec()
-            }
-        } else {
-            // If we don't have enough logits, pad with zeros
-            let mut padded = logits;
-            padded.resize(vocab_size, 0.0);
-            padded
-        };
-
-        // Sample next token
-        let next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
-
-        generated.push(next_token);
-
-        // Call the callback with the new token and its decoded form
-        let decoded_token = tokenizer.decode_lossless(&[next_token])?;
-        if !token_callback(next_token, decoded_token)? {
-            // If callback returns false, stop generation
-            break;
         }
 
-        // Check for EOS token
-        let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645); // Qwen2.5 default EOS
+        let logits = logits_tensor.to_vec();
+        
+        // Since seq_len is 1, the logits are just the first (and only) vocab block
+        let vocab_logits = logits[0..vocab_size].to_vec();
+
+        // Sample the next token
+        next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+
+        println!("[KV]  Step {}: token={}, logits={:?}", i, next_token, &vocab_logits[..10]);
+
+        generated_ids.push(next_token);
+
+        // Callback and check for EOS
+        let decoded_token = tokenizer.decode_lossless(&[next_token])?;
+        if !token_callback(next_token, decoded_token)? {
+            break;
+        }
+        let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
         if next_token == eos_token_id {
             break;
         }

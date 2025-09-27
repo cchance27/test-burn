@@ -36,6 +36,8 @@ pub struct Qwen25 {
     pub embed_weight: Tensor,
     pub output_weight: Tensor,
     pub final_norm_gamma: Tensor,
+    pub rope_cos_cache: Tensor,
+    pub rope_sin_cache: Tensor,
 }
 
 impl Qwen25 {
@@ -45,7 +47,7 @@ impl Qwen25 {
         let seq = tokens.len();
 
         // Create output tensor [batch, seq, d_model]
-        let mut embedded = Tensor::zeros(vec![batch, seq, self.config.d_model], ctx)?;
+        let mut embedded = Tensor::zeros(vec![batch, seq, self.config.d_model], ctx, true)?;
 
         // Get the embedding weight data
         let embed_data = self.embed_weight.as_slice();
@@ -140,13 +142,33 @@ impl Qwen25 {
 
     pub fn new(config: Qwen25Config, ctx: &mut Context) -> Result<Self, MetalError> {
         // allocate embed and output weights
-        let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx)?;
-        let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx)?;
-        let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx)?;
+        let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
+        let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
+        let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx, false)?;
 
         let mut blocks = Vec::with_capacity(config.n_layers);
         for _ in 0..config.n_layers {
             blocks.push(TransformerBlock::new(&config, ctx)?);
+        }
+
+        // Pre-compute RoPE frequencies
+        // NOTE: This assumes head_dim for Q and K are the same, which is true for Qwen2.5-0.5B
+        let head_dim = config.d_model / config.n_heads;
+        let dim_half = head_dim / 2;
+        let mut cos_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, true)?;
+        let mut sin_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, true)?;
+        let cos_slice = cos_cache.as_mut_slice();
+        let sin_slice = sin_cache.as_mut_slice();
+
+        for pos in 0..config.seq_len {
+            for i in 0..dim_half {
+                let idx = pos * dim_half + i;
+                let exponent = (2 * i) as f32 / head_dim as f32;
+                let inv_freq = 1.0f32 / config.rope_freq_base.powf(exponent);
+                let angle = pos as f32 * inv_freq;
+                cos_slice[idx] = angle.cos();
+                sin_slice[idx] = angle.sin();
+            }
         }
 
         Ok(Self {
@@ -155,6 +177,8 @@ impl Qwen25 {
             embed_weight,
             output_weight,
             final_norm_gamma,
+            rope_cos_cache: cos_cache,
+            rope_sin_cache: sin_cache,
         })
     }
 
@@ -244,48 +268,13 @@ impl Qwen25 {
             ))?;
 
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
-            let q_heads_after_rope = {
-                let dim_half = head_dim / 2;
-                let mut cos_buf = vec![0f32; seq * dim_half];
-                let mut sin_buf = vec![0f32; seq * dim_half];
-                for pos in 0..seq {
-                    for i in 0..dim_half {
-                        let idx = pos * dim_half + i;
-                        let exponent = (2 * i) as f32 / head_dim as f32;
-                        let inv_freq = 1.0f32 / self.config.rope_freq_base.powf(exponent);
-                        let angle = pos as f32 * inv_freq;
-                        cos_buf[idx] = angle.cos();
-                        sin_buf[idx] = angle.sin();
-                    }
-                }
-                let cos = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
-                let sin = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
+            // TODO: Implement zero-copy `Tensor::slice`
+            let cos = self.rope_cos_cache.slice(&[0..seq])?;
+            let sin = self.rope_sin_cache.slice(&[0..seq])?;
 
-                // Use the new kernel system
-                ctx.call::<RoPEOp>((q_heads, cos, sin, head_dim as u32, seq as u32))?
-            };
+            let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads, cos.clone(), sin.clone(), head_dim as u32, seq as u32))?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?;
 
-            let k_heads_after_rope = {
-                let dim_half = kv_head_dim / 2;
-                let mut cos_buf = vec![0f32; seq * dim_half];
-                let mut sin_buf = vec![0f32; seq * dim_half];
-                for pos in 0..seq {
-                    for i in 0..dim_half {
-                        let idx = pos * dim_half + i;
-                        let exponent = (2 * i) as f32 / kv_head_dim as f32;
-                        let inv_freq = 1.0f32 / self.config.rope_freq_base.powf(exponent);
-                        let angle = pos as f32 * inv_freq;
-                        cos_buf[idx] = angle.cos();
-                        sin_buf[idx] = angle.sin();
-                    }
-                }
-
-                let cos = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
-                let sin = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-
-                // Use the new kernel system
-                ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?
-            };
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
 
@@ -343,21 +332,117 @@ impl Qwen25 {
         Ok(final_normed)
     }
 
-    /// Step-forward for autoregressive generation. For now this is a thin wrapper
-    /// around `forward` that validates the input has sequence length 1. We'll
-    /// replace this with an incremental on-device KV-aware implementation next.
-    pub fn step_forward(&self, input: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    /// Step-forward for autoregressive generation with KV caching.
+    pub fn forward_step(&self, input: &Tensor, pos: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        // Validate input shape: expect [batch, 1, d_model]
         let dims = input.dims();
         if dims.len() != 3 || dims[1] != 1 {
             return Err(MetalError::InvalidShape(format!(
-                "qwen25::step_forward expects input shape [batch, 1, d_model], got {:?}",
+                "qwen25::forward_step expects input shape [batch, 1, d_model], got {:?}",
                 dims
             )));
         }
+        let batch = dims[0];
+        let seq = dims[1]; // seq is always 1
+        let d_model = dims[2];
 
-        // For autoregressive generation, we need to implement proper KV caching
-        // For now, we'll use the full forward pass but in the future we'll optimize this
-        self.forward(input, ctx)
+        let mut x = input.clone();
+
+        for (layer_idx, block) in self.blocks.iter().enumerate() {
+            let resid_attn = x.clone();
+
+            // RMSNorm before Attention
+            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
+
+            // QKV GEMMs for the single token
+            let m = batch * seq; // m is always 1 for a single token
+            let kv_dim = block.attn_k_weight.dims()[0];
+            let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
+
+            let q_temp = ctx.matmul(&x_flat, &block.attn_q_weight, false, true)?;
+            let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
+
+            let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
+            let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
+
+            let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
+            let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
+
+            // KV Head Rearrangement
+            let n_heads = self.config.n_heads;
+            let n_kv_heads = self.config.n_kv_heads;
+            let head_dim = d_model / n_heads;
+            let kv_head_dim = kv_dim / n_kv_heads;
+
+            let q_heads = ctx.call::<KvRearrangeOp>((q_mat, d_model as u32, head_dim as u32, n_heads as u32, n_heads as u32, head_dim as u32, seq as u32))?;
+            let k_heads = ctx.call::<KvRearrangeOp>((k_mat, kv_dim as u32, kv_head_dim as u32, n_kv_heads as u32, n_kv_heads as u32, kv_head_dim as u32, seq as u32))?;
+            let v_heads = ctx.call::<KvRearrangeOp>((v_mat, kv_dim as u32, kv_head_dim as u32, n_kv_heads as u32, n_kv_heads as u32, kv_head_dim as u32, seq as u32))?;
+
+            // Apply RoPE using the pre-computed cache for the current position
+            let cos = self.rope_cos_cache.slice(&[pos..pos + 1])?;
+            let sin = self.rope_sin_cache.slice(&[pos..pos + 1])?;
+
+            let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads, cos.clone(), sin.clone(), head_dim as u32, seq as u32))?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?;
+
+            // Update the KV cache with the new K and V values
+            ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
+
+            // Retrieve the full K and V caches for attention
+            let (k_cache, v_cache, _) = ctx.kv_caches.get(&layer_idx).cloned().ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
+            let k_history = k_cache.slice(&[0..pos + 1])?.permute(&[1, 0, 2], ctx)?;
+            let v_history = v_cache.slice(&[0..pos + 1])?.permute(&[1, 0, 2], ctx)?;
+            
+            // Repeat K and V to match Q head count for GQA
+            let group_size = n_heads / n_kv_heads;
+            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
+            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
+
+            // SDPA (causal mask enabled)
+            let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
+
+            // Attention Output Reassembly
+            let attn_out_reshaped_1 = attn_out_heads.reshape(vec![batch, n_heads, seq, head_dim])?;
+            let attn_out_permuted = attn_out_reshaped_1.permute(&[0, 2, 1, 3], ctx)?;
+            let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
+
+
+            let attn_out = ctx
+                .matmul(
+                    &attn_out_reshaped.reshape(vec![m, d_model])?,
+                    &block.attn_out_weight,
+                    false,
+                    true,
+                )?
+                .reshape(vec![batch, seq, d_model])?;
+
+            // Residual Add
+            x = resid_attn.add_elem(&attn_out, ctx)?;
+
+            // --- MLP Block ---
+            let resid_mlp = x.clone();
+            let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
+            let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
+
+            let ffn_output_flat = ctx.SwiGLU(
+                &x_normed_mlp_flat,
+                &block.ffn_gate,
+                &block.ffn_gate_bias,
+                &block.ffn_up,
+                &block.ffn_up_bias,
+                &block.ffn_down,
+                &block.ffn_down_bias,
+            )?;
+            let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
+
+            // Residual Add
+            x = resid_mlp.add_elem(&ffn_output, ctx)?;
+        }
+
+        // Final RMSNorm after all blocks
+        let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
+
+        Ok(final_normed)
     }
 
     /// Repeat KV heads for GQA to match Q head count
@@ -378,7 +463,7 @@ impl Qwen25 {
         }
 
         let output_dims = vec![batch * n_heads, seq, head_dim];
-        let mut output = Tensor::zeros(output_dims, ctx)?;
+        let mut output = Tensor::zeros(output_dims, ctx, true)?;
 
         let input_slice = input.as_slice();
         let output_slice = output.as_mut_slice();

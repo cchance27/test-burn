@@ -81,11 +81,26 @@ impl ResourceCache {
         // SDPA creation should never fail, so we unwrap.
         Self::get_or_create_resource(&mut self.sdpa_cache, key, None).unwrap().clone()
     }
+
+    /// Get statistics about the cache.
+    pub fn get_stats(&self) -> CacheStats {
+        CacheStats {
+            gemm_cache_size: self.gemm_cache.len(),
+            descriptor_cache_size: self.descriptor_cache.len(),
+            sdpa_cache_size: self.sdpa_cache.len(),
+        }
+    }
+
+    /// Clears all internal caches.
+    pub fn clear(&mut self) {
+        self.gemm_cache.clear();
+        self.descriptor_cache.clear();
+        self.sdpa_cache.clear();
+    }
 }
 
 /// Statistics about the cache.
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct CacheStats {
     pub gemm_cache_size: usize,
     pub descriptor_cache_size: usize,

@@ -33,8 +33,7 @@ fn repeat_kv_heads(
     }
 
     let output_dims = vec![batch * n_heads, seq, head_dim];
-    let mut output = Tensor::zeros(output_dims, ctx)?;
-
+            let mut output = Tensor::zeros(output_dims, ctx, true)?;
     let input_slice = input.as_slice();
     let output_slice = output.as_mut_slice();
 
@@ -1314,7 +1313,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             }
         }
 
-        let generated_ids = generation::generate_autoregressive_without_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
+        let generated_ids = generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
         ctx.synchronize();
 
         let prompt_len = input_ids.len();

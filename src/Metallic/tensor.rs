@@ -323,9 +323,60 @@ impl Tensor {
         })
     }
 
+    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Tensor, MetalError> {
+        if ranges.len() > self.dims.len() {
+            return Err(MetalError::InvalidShape(
+                "Number of slice ranges cannot exceed tensor rank".to_string(),
+            ));
+        }
+
+        // TODO: Generalize to support multi-dimensional slicing.
+        if ranges.len() > 1 {
+            return Err(MetalError::OperationNotSupported(
+                "Slicing on more than one dimension is not yet supported.".to_string(),
+            ));
+        }
+
+        let mut new_dims = self.dims.clone();
+        let mut new_offset = self.offset;
+
+        if !ranges.is_empty() {
+            let range0 = &ranges[0];
+            let start = range0.start;
+            let end = range0.end;
+
+            if start > end || end > self.dims[0] {
+                return Err(MetalError::InvalidShape(format!(
+                    "Invalid slice range {:?} for dimension 0 with size {}",
+                    range0, self.dims[0]
+                )));
+            }
+
+            // Update dimension for the sliced axis
+            new_dims[0] = end - start;
+
+            // Update the byte offset into the buffer
+            new_offset += start * self.strides[0] * self.dtype.size_bytes();
+        }
+
+        Ok(Tensor {
+            buf: self.buf.clone(),
+            dims: new_dims.clone(),
+            strides: Self::compute_strides(&new_dims), // Re-compute for correctness.
+            dtype: self.dtype,
+            device: self.device.clone(),
+            offset: new_offset,
+            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
+        })
+    }
+
     /// Allocate and zero-initialize a tensor of the given shape.
-    pub fn zeros(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
-        let mut tensor = Self::create_tensor_pooled(dims, context)?;
+    pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Tensor, MetalError> {
+        let mut tensor = if use_pool {
+            Self::create_tensor_pooled(dims, context)?
+        } else {
+            Self::create_tensor(dims, context)?
+        };
         let size = tensor.size_bytes();
 
         if size <= Self::cpu_fill_threshold_bytes() {
@@ -368,7 +419,7 @@ impl Tensor {
     /// Create a zeros tensor with the same shape.
     #[inline]
     pub fn zeros_like(&self, context: &mut Context) -> Result<Tensor, MetalError> {
-        Self::zeros(self.dims.clone(), context)
+        Self::zeros(self.dims.clone(), context, true)
     }
 
     /// Create a ones tensor with the same shape.

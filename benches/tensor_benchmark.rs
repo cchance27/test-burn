@@ -79,7 +79,7 @@ fn benchmark_zeros_creation(c: &mut Criterion) {
     group.bench_function("metallic", |b| {
         b.iter(|| {
             context.pool.reset();
-            let t = Tensor::zeros(shape.to_vec(), &mut context).unwrap();
+            let t = Tensor::zeros(shape.to_vec(), &mut context, true).unwrap();
             context.synchronize();
             let _vec = t.to_vec();
         });
@@ -118,7 +118,7 @@ fn benchmark_batched_operations(c: &mut Criterion) {
     group.bench_function("individual", |b| {
         b.iter(|| {
             context.pool.reset();
-            let _t1 = Tensor::zeros(shape.to_vec(), &mut context).unwrap();
+            let _t1 = Tensor::zeros(shape.to_vec(), &mut context, true).unwrap();
             let _t2 = Tensor::ones(shape.to_vec(), &mut context).unwrap();
             let _t3 = Tensor::random_uniform(shape.to_vec(), &mut context).unwrap();
             let _t4 = Tensor::arange(shape.iter().product(), shape.to_vec(), &mut context).unwrap();
@@ -149,7 +149,7 @@ fn benchmark_large_tensor_gpu_fallback(c: &mut Criterion) {
     group.bench_function("zeros_large", |b| {
         b.iter(|| {
             context.pool.reset();
-            let _t = Tensor::zeros(large_shape.to_vec(), &mut context).unwrap();
+            let _t = Tensor::zeros(large_shape.to_vec(), &mut context, true).unwrap();
         });
         context.synchronize();
     });
@@ -221,7 +221,7 @@ fn benchmark_zeros_scaling(c: &mut Criterion) {
         group.bench_function(format!("{}_metallic_zeros", name), |b| {
             b.iter(|| {
                 context.pool.reset();
-                let t = Tensor::zeros(vec![num_elements], &mut context).unwrap();
+                let t = Tensor::zeros(vec![num_elements], &mut context, true).unwrap();
                 context.synchronize();
                 let _vec = t.to_vec();
             });

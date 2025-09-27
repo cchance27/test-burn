@@ -3,7 +3,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLCommandQueue;
 
-mod qwen25;
+pub mod qwen25;
 pub use qwen25::{Qwen25, Qwen25Config};
 
 mod tests;
