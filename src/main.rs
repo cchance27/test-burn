@@ -223,13 +223,13 @@ impl AppState {
                 if delta != 0 {
                     self.text_follow_bottom = false;
                 }
-                self.adjust_scroll(&mut self.text_scroll, delta);
+                Self::adjust_scroll(&mut self.text_scroll, delta);
                 if self.text_scroll == 0 && delta <= 0 {
                     self.text_follow_bottom = true;
                 }
             }
             FocusArea::Metrics => {
-                self.adjust_scroll(&mut self.metrics_scroll, delta);
+                Self::adjust_scroll(&mut self.metrics_scroll, delta);
             }
         }
     }
@@ -256,7 +256,7 @@ impl AppState {
         }
     }
 
-    fn adjust_scroll(&mut self, value: &mut u16, delta: i32) {
+    fn adjust_scroll(value: &mut u16, delta: i32) {
         let current = i32::from(*value);
         let next = (current + delta).clamp(0, u16::MAX as i32);
         *value = next as u16;
