@@ -196,9 +196,9 @@ impl Context {
         k_step: &crate::metallic::Tensor,
         v_step: &crate::metallic::Tensor,
     ) -> Result<(), MetalError> {
-        // Lookup entry
-        let (k_cache_raw, v_cache_raw, capacity_seq) = match self.kv_caches.get(&layer_idx) {
-            Some(entry) => entry.clone(),
+        // Lookup entry mutably so we always operate on the canonical cache tensors.
+        let (k_cache, v_cache, capacity_seq) = match self.kv_caches.get_mut(&layer_idx) {
+            Some(entry) => entry,
             None => {
                 return Err(MetalError::InvalidOperation(format!(
                     "KV cache for layer {} not allocated",
@@ -206,28 +206,26 @@ impl Context {
                 )));
             }
         };
-        if step >= capacity_seq {
+        let capacity_seq_val = *capacity_seq;
+        if step >= capacity_seq_val {
             return Err(MetalError::InvalidOperation(format!(
                 "Step {} exceeds KV cache capacity {} for layer {}",
-                step, capacity_seq, layer_idx
+                step, capacity_seq_val, layer_idx
             )));
         }
 
         // Ensure both the source tensors and the cache buffers are safe to access
-        let mut k_cache = k_cache_raw.clone();
-        let mut v_cache = v_cache_raw.clone();
         let mut k_src = k_step.clone();
         let mut v_src = v_step.clone();
-        self.prepare_tensors_for_active_cmd(&mut [&mut k_cache, &mut v_cache, &mut k_src, &mut v_src]);
+        self.prepare_tensors_for_active_cmd(&mut [&mut *k_cache, &mut *v_cache, &mut k_src, &mut v_src]);
 
         // Validate shapes
         let bh = k_src.dims().first().cloned().unwrap_or(0);
-        let hd = if k_src.dims().len() == 2 {
-            k_src.dims()[1]
-        } else if k_src.dims().len() == 3 {
-            k_src.dims()[2]
-        } else {
-            0
+        let dims = k_src.dims();
+        let (seq_in_src, hd) = match dims.len() {
+            2 => (1, dims[1]),
+            3 => (dims[1], dims[2]),
+            _ => (0, 0),
         };
         // Expected per-entry stride
         let expected_bh = k_cache.dims()[1];
@@ -239,13 +237,26 @@ impl Context {
             });
         }
 
+        if seq_in_src != 1 {
+            return Err(MetalError::OperationNotSupported(
+                "write_kv_step currently expects a single timestep in the source tensor".into(),
+            ));
+        }
+
+        if step + seq_in_src > capacity_seq_val {
+            return Err(MetalError::InvalidOperation(format!(
+                "Writing KV step {} ({} timesteps) exceeds cache capacity {} for layer {}",
+                step, seq_in_src, capacity_seq_val, layer_idx
+            )));
+        }
+
         // Compute byte offsets
         let elem_size = std::mem::size_of::<f32>();
         let row_elems = expected_bh * expected_hd;
         let copy_bytes = row_elems * elem_size;
-        // Destination offset in bytes = (step * row_elems) * elem_size + k_cache.offset
-        let dst_base = k_cache.offset + step * row_elems * elem_size;
-        let dst_base_v = v_cache.offset + step * row_elems * elem_size;
+        // Destination offset in bytes = (step * stride_0) * elem_size + base offset
+        let dst_base = k_cache.offset + step * k_cache.strides[0] * elem_size;
+        let dst_base_v = v_cache.offset + step * v_cache.strides[0] * elem_size;
 
         // Source offset and size: assume k_step is tightly packed starting at its offset
         let src_offset_k = k_src.offset;
@@ -279,8 +290,8 @@ impl Context {
             encoder.endEncoding();
         }
 
-        self.mark_tensor_pending(&k_cache);
-        self.mark_tensor_pending(&v_cache);
+        self.mark_tensor_pending(&*k_cache);
+        self.mark_tensor_pending(&*v_cache);
 
         Ok(())
     }
