@@ -81,12 +81,11 @@ fn main() -> Result<()> {
                     text,
                     tokens_per_second,
                     prompt_processing,
-                    generation,
+                    generation: _,
                 } => {
                     app_state.generated_text.push_str(&text);
                     app_state.tokens_per_second = tokens_per_second;
                     app_state.prompt_processing_time = prompt_processing;
-                    app_state.generation_time = generation;
                 }
                 AppEvent::TokenCount(count) => {
                     app_state.prompt_token_count = count;
@@ -119,7 +118,6 @@ struct AppState {
     status: String,
     memory_usage: String,
     prompt_processing_time: Duration,
-    generation_time: Duration,
     latency_rows: Vec<LatencyRow>,
 }
 
@@ -133,7 +131,6 @@ impl AppState {
             status: "Initializing...".to_string(),
             memory_usage: String::new(),
             prompt_processing_time: Duration::default(),
-            generation_time: Duration::default(),
             latency_rows: Vec::new(),
         }
     }
@@ -182,12 +179,7 @@ fn ui(frame: &mut Frame, state: &AppState) {
 
     let sidebar_sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(7),
-            Constraint::Length(9),
-            Constraint::Length(6),
-            Constraint::Min(5),
-        ])
+        .constraints([Constraint::Length(7), Constraint::Length(6), Constraint::Min(0)])
         .split(sidebar_inner);
 
     let memory_text = if state.memory_usage.is_empty() {
@@ -196,6 +188,13 @@ fn ui(frame: &mut Frame, state: &AppState) {
         state.memory_usage.clone()
     };
     let memory_section = Paragraph::new(memory_text).block(Block::default().title("Memory Usage").borders(Borders::ALL));
+
+    let prompt_section = Paragraph::new(format!(
+        "Prompt Tokens: {}\nProcessing Time: {}",
+        state.prompt_token_count,
+        format_duration(state.prompt_processing_time)
+    ))
+    .block(Block::default().title("Prompt").borders(Borders::ALL));
 
     let latency_text = if state.latency_rows.is_empty() {
         "Collecting data...".to_string()
@@ -212,20 +211,6 @@ fn ui(frame: &mut Frame, state: &AppState) {
     };
     let latency_section = Paragraph::new(latency_text).block(Block::default().title("Latency").borders(Borders::ALL));
 
-    let prompt_section = Paragraph::new(format!(
-        "Prompt Tokens: {}\nProcessing Time: {}",
-        state.prompt_token_count,
-        format_duration(state.prompt_processing_time)
-    ))
-    .block(Block::default().title("Prompt").borders(Borders::ALL));
-
-    let generation_section = Paragraph::new(format!(
-        "Total Time: {}\nThroughput: {:.2} it/s",
-        format_duration(state.generation_time),
-        state.tokens_per_second
-    ))
-    .block(Block::default().title("Generation").borders(Borders::ALL));
-
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
@@ -240,9 +225,8 @@ fn ui(frame: &mut Frame, state: &AppState) {
     frame.render_widget(text_area, body_layout[0]);
     frame.render_widget(sidebar_block, sidebar_area);
     frame.render_widget(memory_section, sidebar_sections[0]);
-    frame.render_widget(latency_section, sidebar_sections[1]);
-    frame.render_widget(prompt_section, sidebar_sections[2]);
-    frame.render_widget(generation_section, sidebar_sections[3]);
+    frame.render_widget(prompt_section, sidebar_sections[1]);
+    frame.render_widget(latency_section, sidebar_sections[2]);
     frame.render_widget(status_text, status_layout[0]);
     frame.render_widget(throughput_text, status_layout[1]);
 }
