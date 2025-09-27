@@ -358,7 +358,7 @@ fn unattributed_host_row(host: &ScalarStat, forward_usage: Option<MemoryUsage>, 
         return None;
     }
 
-    let tracked_bytes = model_memory.total_bytes() + usage.pool_used + usage.kv_used;
+    let tracked_bytes = model_memory.total_bytes() + usage.pool_used + usage.kv_used + usage.kv_cache_bytes;
     let tracked_mb = bytes_to_mb(tracked_bytes);
     if tracked_mb <= 0.0 {
         return None;
@@ -778,8 +778,7 @@ where
         );
 
         if let Some(app_mem) = get_memory_usage_mbytes() {
-            // Crate reports GB; convert to MB for consistency with other rows.
-            host_memory.record((app_mem * 1024.0) as f64);
+            host_memory.record(app_mem as f64);
         }
 
         let logits = logits_tensor.to_vec();
