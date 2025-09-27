@@ -1,13 +1,13 @@
 use super::{
-    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey, MpsSoftMaxKey},
     cacheable::Cacheable,
     error::MetalError,
 };
-use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2::AnyThread;
 use objc2_metal::MTLDevice;
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
+use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
 
 /// A cacheable wrapper for MPSMatrixMultiplication.
 ///
@@ -74,5 +74,25 @@ impl Cacheable for CacheableMpsMatrixDescriptor {
             descriptor,
             key: key.clone(),
         })
+    }
+}
+
+/// A cacheable wrapper for `MPSMatrixSoftMax` operations.
+#[derive(Clone)]
+pub struct CacheableMpsSoftMax {
+    pub softmax: Retained<MPSMatrixSoftMax>,
+    pub key: MpsSoftMaxKey,
+}
+
+impl Cacheable for CacheableMpsSoftMax {
+    type Key = MpsSoftMaxKey;
+
+    fn cache_key(&self) -> Self::Key {
+        self.key.clone()
+    }
+
+    fn from_key(key: &Self::Key, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
+        let softmax = unsafe { MPSMatrixSoftMax::initWithDevice(MPSMatrixSoftMax::alloc(), device) };
+        Ok(Self { softmax, key: key.clone() })
     }
 }

@@ -1,7 +1,7 @@
 use super::{
-    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey, SdpaKey},
+    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey, MpsSoftMaxKey, SdpaKey},
     cacheable::Cacheable,
-    cacheable_resources::{CacheableMpsGemm, CacheableMpsMatrixDescriptor},
+    cacheable_resources::{CacheableMpsGemm, CacheableMpsMatrixDescriptor, CacheableMpsSoftMax},
     cacheable_sdpa::CacheableSdpa,
     error::MetalError,
 };
@@ -16,6 +16,7 @@ use rustc_hash::FxHashMap;
 pub struct ResourceCache {
     gemm_cache: FxHashMap<MpsGemmKey, CacheableMpsGemm>,
     descriptor_cache: FxHashMap<MpsMatrixDescriptorKey, CacheableMpsMatrixDescriptor>,
+    softmax_cache: FxHashMap<MpsSoftMaxKey, CacheableMpsSoftMax>,
     sdpa_cache: FxHashMap<SdpaKey, CacheableSdpa>,
 }
 
@@ -25,6 +26,7 @@ impl ResourceCache {
         Self {
             gemm_cache: FxHashMap::default(),
             descriptor_cache: FxHashMap::default(),
+            softmax_cache: FxHashMap::default(),
             sdpa_cache: FxHashMap::default(),
         }
     }
@@ -75,6 +77,16 @@ impl ResourceCache {
         Ok(cacheable_descriptor.descriptor.clone())
     }
 
+    /// Get or create an MPS softmax operation.
+    pub fn get_or_create_softmax(
+        &mut self,
+        key: MpsSoftMaxKey,
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixSoftMax>, MetalError> {
+        let cacheable_softmax = Self::get_or_create_resource(&mut self.softmax_cache, key, Some(device))?;
+        Ok(cacheable_softmax.softmax.clone())
+    }
+
     /// Get or create an SDPA operation.
     pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
         let key = SdpaKey { batch, seq_q, seq_k, dim };
@@ -87,6 +99,7 @@ impl ResourceCache {
         CacheStats {
             gemm_cache_size: self.gemm_cache.len(),
             descriptor_cache_size: self.descriptor_cache.len(),
+            softmax_cache_size: self.softmax_cache.len(),
             sdpa_cache_size: self.sdpa_cache.len(),
         }
     }
@@ -95,6 +108,7 @@ impl ResourceCache {
     pub fn clear(&mut self) {
         self.gemm_cache.clear();
         self.descriptor_cache.clear();
+        self.softmax_cache.clear();
         self.sdpa_cache.clear();
     }
 }
@@ -104,6 +118,7 @@ impl ResourceCache {
 pub struct CacheStats {
     pub gemm_cache_size: usize,
     pub descriptor_cache_size: usize,
+    pub softmax_cache_size: usize,
     pub sdpa_cache_size: usize,
 }
 
