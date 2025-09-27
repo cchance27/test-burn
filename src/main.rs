@@ -350,31 +350,48 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
             if state.memory_rows.is_empty() {
                 "Collecting data...".to_string()
             } else {
+                let collapse_depth = 1;
                 state
                     .memory_rows
                     .iter()
-                    .filter(|row| !state.metrics_collapsed || row.level == 0)
+                    .filter(|row| !state.metrics_collapsed || row.level <= collapse_depth)
                     .map(|row| {
                         let indent = "  ".repeat(row.level as usize);
                         let mut line = format!(
-                            "{}{} - {:.2} MB ({:.2} peak)",
+                            "{}{}: {:.2} MB (peak {:.2})",
                             indent, row.label, row.current_total_mb, row.peak_total_mb
                         );
+
+                        let mut deltas = Vec::new();
                         if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
-                            line.push_str(&format!(" | pool {:.2}/{:.2}", row.current_pool_mb, row.peak_pool_mb));
+                            deltas.push(format!("pool {:.2}/{:.2}", row.current_pool_mb, row.peak_pool_mb));
                         }
                         if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
-                            line.push_str(&format!(" | kv {:.2}/{:.2}", row.current_kv_mb, row.peak_kv_mb));
+                            deltas.push(format!("kv {:.2}/{:.2}", row.current_kv_mb, row.peak_kv_mb));
                         }
                         if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
-                            line.push_str(&format!(" | kv-cache {:.2}/{:.2}", row.current_kv_cache_mb, row.peak_kv_cache_mb));
+                            deltas.push(format!("kv-cache {:.2}/{:.2}", row.current_kv_cache_mb, row.peak_kv_cache_mb));
                         }
+                        if !deltas.is_empty() {
+                            line.push_str(&format!(" | {}", deltas.join(", ")));
+                        }
+
                         if row.show_absolute {
-                            line.push_str(&format!(
-                                " | totals pool {:.2} MB, kv {:.2} MB, kv-cache {:.2} MB",
-                                row.absolute_pool_mb, row.absolute_kv_mb, row.absolute_kv_cache_mb
-                            ));
+                            let mut absolutes = Vec::new();
+                            if row.absolute_pool_mb > 0.0 {
+                                absolutes.push(format!("pool {:.2}", row.absolute_pool_mb));
+                            }
+                            if row.absolute_kv_mb > 0.0 {
+                                absolutes.push(format!("kv {:.2}", row.absolute_kv_mb));
+                            }
+                            if row.absolute_kv_cache_mb > 0.0 {
+                                absolutes.push(format!("kv-cache {:.2}", row.absolute_kv_cache_mb));
+                            }
+                            if !absolutes.is_empty() {
+                                line.push_str(&format!(" | abs {} MB", absolutes.join(", ")));
+                            }
                         }
+
                         line
                     })
                     .collect::<Vec<_>>()
@@ -385,10 +402,11 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
             if state.latency_rows.is_empty() {
                 "Collecting data...".to_string()
             } else {
+                let collapse_depth = 1;
                 state
                     .latency_rows
                     .iter()
-                    .filter(|row| !state.metrics_collapsed || row.level == 0)
+                    .filter(|row| !state.metrics_collapsed || row.level <= collapse_depth)
                     .map(|row| {
                         let indent = "  ".repeat(row.level as usize);
                         format!("{}{} - {:.2}ms ({:.2} avg)", indent, row.label, row.last_ms, row.average_ms)
