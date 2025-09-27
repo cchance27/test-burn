@@ -307,7 +307,7 @@ impl MemoryScopeEntry {
 #[derive(Clone, Debug, Default)]
 struct BlockMemoryEntry {
     scope: MemoryScopeEntry,
-    phases: Vec<BlockPhaseEntry>,
+    phases: Vec<MemoryPhaseEntry>,
 }
 
 impl BlockMemoryEntry {
@@ -342,7 +342,7 @@ impl BlockMemoryEntry {
             phase.peak_kv_delta = phase.peak_kv_delta.max(delta.kv_used);
             phase.peak_kv_cache_delta = phase.peak_kv_cache_delta.max(delta.kv_cache_bytes);
         } else {
-            self.phases.push(BlockPhaseEntry {
+            self.phases.push(MemoryPhaseEntry {
                 label,
                 usage,
                 current_pool_delta: delta.pool_used,
@@ -366,13 +366,13 @@ impl BlockMemoryEntry {
             peak_pool_delta: scope.peak_pool_delta,
             peak_kv_delta: scope.peak_kv_delta,
             peak_kv_cache_delta: scope.peak_kv_cache_delta,
-            phases: self.phases.iter().map(BlockPhaseEntry::snapshot).collect(),
+            phases: self.phases.iter().map(MemoryPhaseEntry::snapshot).collect(),
         }
     }
 }
 
 #[derive(Clone, Debug)]
-struct BlockPhaseEntry {
+struct MemoryPhaseEntry {
     label: String,
     usage: MemoryUsage,
     current_pool_delta: usize,
@@ -383,9 +383,9 @@ struct BlockPhaseEntry {
     peak_kv_cache_delta: usize,
 }
 
-impl BlockPhaseEntry {
-    fn snapshot(&self) -> BlockPhaseSnapshot {
-        BlockPhaseSnapshot {
+impl MemoryPhaseEntry {
+    fn snapshot(&self) -> MemoryPhaseSnapshot {
+        MemoryPhaseSnapshot {
             label: self.label.clone(),
             current_pool_delta: self.current_pool_delta,
             current_kv_delta: self.current_kv_delta,
@@ -419,11 +419,11 @@ pub struct BlockMemorySnapshot {
     pub peak_pool_delta: usize,
     pub peak_kv_delta: usize,
     pub peak_kv_cache_delta: usize,
-    pub phases: Vec<BlockPhaseSnapshot>,
+    pub phases: Vec<MemoryPhaseSnapshot>,
 }
 
 #[derive(Clone, Debug)]
-pub struct BlockPhaseSnapshot {
+pub struct MemoryPhaseSnapshot {
     pub label: String,
     pub current_pool_delta: usize,
     pub current_kv_delta: usize,
