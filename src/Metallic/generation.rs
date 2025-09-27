@@ -131,11 +131,11 @@ impl MemoryScopeStat {
     }
 
     fn current_total_mb(&self) -> f64 {
-        self.current_pool_mb + self.current_kv_mb
+        self.current_pool_mb + self.current_kv_mb + self.current_kv_cache_mb
     }
 
     fn peak_total_mb(&self) -> f64 {
-        self.peak_pool_mb + self.peak_kv_mb
+        self.peak_pool_mb + self.peak_kv_mb + self.peak_kv_cache_mb
     }
 
     fn to_row(&self, label: String, level: u8) -> MemoryRow {
@@ -291,6 +291,13 @@ impl ProcessMemoryTracker {
 
 fn bytes_to_mb(bytes: usize) -> f64 {
     bytes as f64 / 1024.0 / 1024.0
+}
+
+fn usage_tracked_mb(usage: &MemoryUsage) -> f64 {
+    let pool_mb = bytes_to_mb(usage.pool_used.max(usage.pool_capacity));
+    let kv_mb = bytes_to_mb(usage.kv_used.max(usage.kv_capacity));
+    let kv_cache_mb = bytes_to_mb(usage.kv_cache_bytes);
+    pool_mb + kv_mb + kv_cache_mb
 }
 
 fn build_model_memory_tree(model: &Qwen25) -> ModelMemoryNode {
@@ -1033,14 +1040,14 @@ fn build_memory_rows(
 
     append_model_memory_rows(model_memory, 0, &mut rows);
 
-    let mut tracked_mb = bytes_to_mb(model_memory.total_bytes());
+    let mut host_tracked_mb = bytes_to_mb(model_memory.total_bytes());
 
     for (label, bytes) in host_overheads {
         if *bytes == 0 {
             continue;
         }
         let mb = bytes_to_mb(*bytes);
-        tracked_mb += mb;
+        host_tracked_mb += mb;
         rows.push(MemoryRow {
             label: label.clone(),
             level: 0,
@@ -1060,18 +1067,19 @@ fn build_memory_rows(
     }
 
     if host.current > 0.0 || host.peak > 0.0 {
+        let mut explained_host_mb = host_tracked_mb;
         rows.push(host.to_row("Host Memory (MB)"));
         if let Some(usage) = forward_usage {
-            tracked_mb += bytes_to_mb(usage.pool_capacity) + bytes_to_mb(usage.kv_capacity);
+            explained_host_mb += usage_tracked_mb(&usage);
             append_reserved_pool_rows(&usage, &mut rows);
         }
 
-        if let Some((baseline_row, baseline_mb)) = baseline_host_row(host, tracked_mb) {
-            tracked_mb += baseline_mb;
+        if let Some((baseline_row, baseline_mb)) = baseline_host_row(host, explained_host_mb) {
+            explained_host_mb += baseline_mb;
             rows.push(baseline_row);
         }
 
-        if let Some(unattributed) = unattributed_host_row(host, tracked_mb) {
+        if let Some(unattributed) = unattributed_host_row(host, explained_host_mb) {
             rows.push(unattributed);
         }
     }
