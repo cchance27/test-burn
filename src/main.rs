@@ -358,19 +358,24 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
                     .map(|row| {
                         let indent = "  ".repeat(row.level as usize);
                         let mut line = format!(
-                            "{}{}: {:.2} MB (peak {:.2})",
-                            indent, row.label, row.current_total_mb, row.peak_total_mb
+                            "{}{}: {}",
+                            indent,
+                            row.label,
+                            format_current_and_peak(row.current_total_mb, row.peak_total_mb)
                         );
 
                         let mut deltas = Vec::new();
                         if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
-                            deltas.push(format!("pool {:.2}/{:.2}", row.current_pool_mb, row.peak_pool_mb));
+                            deltas.push(format!("pool {}", format_current_and_peak(row.current_pool_mb, row.peak_pool_mb)));
                         }
                         if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
-                            deltas.push(format!("kv {:.2}/{:.2}", row.current_kv_mb, row.peak_kv_mb));
+                            deltas.push(format!("kv {}", format_current_and_peak(row.current_kv_mb, row.peak_kv_mb)));
                         }
                         if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
-                            deltas.push(format!("kv-cache {:.2}/{:.2}", row.current_kv_cache_mb, row.peak_kv_cache_mb));
+                            deltas.push(format!(
+                                "kv-cache {}",
+                                format_current_and_peak(row.current_kv_cache_mb, row.peak_kv_cache_mb)
+                            ));
                         }
                         if !deltas.is_empty() {
                             line.push_str(&format!(" | {}", deltas.join(", ")));
@@ -379,16 +384,16 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
                         if row.show_absolute {
                             let mut absolutes = Vec::new();
                             if row.absolute_pool_mb > 0.0 {
-                                absolutes.push(format!("pool {:.2}", row.absolute_pool_mb));
+                                absolutes.push(format!("pool {}", format_memory_amount(row.absolute_pool_mb)));
                             }
                             if row.absolute_kv_mb > 0.0 {
-                                absolutes.push(format!("kv {:.2}", row.absolute_kv_mb));
+                                absolutes.push(format!("kv {}", format_memory_amount(row.absolute_kv_mb)));
                             }
                             if row.absolute_kv_cache_mb > 0.0 {
-                                absolutes.push(format!("kv-cache {:.2}", row.absolute_kv_cache_mb));
+                                absolutes.push(format!("kv-cache {}", format_memory_amount(row.absolute_kv_cache_mb)));
                             }
                             if !absolutes.is_empty() {
-                                line.push_str(&format!(" | abs {} MB", absolutes.join(", ")));
+                                line.push_str(&format!(" | abs {}", absolutes.join(", ")));
                             }
                         }
 
@@ -456,6 +461,36 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
         }
         state.request_follow_text = false;
     }
+}
+
+fn format_current_and_peak(current_mb: f64, peak_mb: f64) -> String {
+    let current = format_memory_amount(current_mb);
+    if nearly_equal(current_mb, peak_mb) {
+        current
+    } else {
+        format!("{} (peak {})", current, format_memory_amount(peak_mb))
+    }
+}
+
+fn format_memory_amount(mb: f64) -> String {
+    if mb >= 1024.0 {
+        format!("{:.2} GB", mb / 1024.0)
+    } else if mb >= 1.0 {
+        format!("{:.2} MB", mb)
+    } else if mb > 0.0 {
+        let kb = mb * 1024.0;
+        if kb >= 10.0 {
+            format!("{:.0} KB", kb)
+        } else {
+            format!("{:.2} KB", kb)
+        }
+    } else {
+        "0 MB".to_string()
+    }
+}
+
+fn nearly_equal(a: f64, b: f64) -> bool {
+    (a - b).abs() < 0.005
 }
 
 fn format_duration(duration: Duration) -> String {
