@@ -1,6 +1,6 @@
 use super::{Context, MetalError, Tensor};
-use crate::app_event::{AppEvent, LatencyRow};
-use crate::metallic::instrumentation::new_collector;
+use crate::app_event::{AppEvent, LatencyRow, MemoryRow};
+use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, BlockMemorySnapshot, MemoryEvent, MemoryUsage};
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
 use app_memory_usage_fetcher::get_memory_usage_mbytes;
@@ -67,6 +67,157 @@ impl BlockStat {
             });
         }
     }
+}
+
+#[derive(Clone, Default)]
+struct MemoryScopeStat {
+    current_pool_mb: f64,
+    peak_pool_mb: f64,
+    current_kv_mb: f64,
+    peak_kv_mb: f64,
+    current_kv_cache_mb: f64,
+    peak_kv_cache_mb: f64,
+}
+
+impl MemoryScopeStat {
+    fn update(
+        &mut self,
+        current_pool_bytes: usize,
+        current_kv_bytes: usize,
+        current_kv_cache_bytes: usize,
+        peak_pool_bytes: usize,
+        peak_kv_bytes: usize,
+        peak_kv_cache_bytes: usize,
+    ) {
+        self.current_pool_mb = bytes_to_mb(current_pool_bytes);
+        self.current_kv_mb = bytes_to_mb(current_kv_bytes);
+        self.current_kv_cache_mb = bytes_to_mb(current_kv_cache_bytes);
+        self.peak_pool_mb = self.peak_pool_mb.max(bytes_to_mb(peak_pool_bytes));
+        self.peak_kv_mb = self.peak_kv_mb.max(bytes_to_mb(peak_kv_bytes));
+        self.peak_kv_cache_mb = self.peak_kv_cache_mb.max(bytes_to_mb(peak_kv_cache_bytes));
+    }
+
+    fn has_data(&self) -> bool {
+        self.current_total_mb() > 0.0 || self.peak_total_mb() > 0.0
+    }
+
+    fn current_total_mb(&self) -> f64 {
+        self.current_pool_mb + self.current_kv_mb
+    }
+
+    fn peak_total_mb(&self) -> f64 {
+        self.peak_pool_mb + self.peak_kv_mb
+    }
+
+    fn to_row(&self, label: String, level: u8) -> MemoryRow {
+        MemoryRow {
+            label,
+            level,
+            current_total_mb: self.current_total_mb(),
+            peak_total_mb: self.peak_total_mb(),
+            current_pool_mb: self.current_pool_mb,
+            peak_pool_mb: self.peak_pool_mb,
+            current_kv_mb: self.current_kv_mb,
+            peak_kv_mb: self.peak_kv_mb,
+            current_kv_cache_mb: self.current_kv_cache_mb,
+            peak_kv_cache_mb: self.peak_kv_cache_mb,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        }
+    }
+}
+
+#[derive(Clone, Default)]
+struct MemoryPhaseStat {
+    label: String,
+    scope: MemoryScopeStat,
+}
+
+#[derive(Clone, Default)]
+struct MemoryBlockStat {
+    scope: MemoryScopeStat,
+    phases: Vec<MemoryPhaseStat>,
+}
+
+impl MemoryBlockStat {
+    fn update_from_snapshot(&mut self, snapshot: &BlockMemorySnapshot) {
+        self.scope.update(
+            snapshot.current_pool_delta,
+            snapshot.current_kv_delta,
+            snapshot.current_kv_cache_delta,
+            snapshot.peak_pool_delta,
+            snapshot.peak_kv_delta,
+            snapshot.peak_kv_cache_delta,
+        );
+
+        for phase_snapshot in &snapshot.phases {
+            if let Some(phase_stat) = self.phases.iter_mut().find(|phase| phase.label == phase_snapshot.label) {
+                phase_stat.scope.update(
+                    phase_snapshot.current_pool_delta,
+                    phase_snapshot.current_kv_delta,
+                    phase_snapshot.current_kv_cache_delta,
+                    phase_snapshot.peak_pool_delta,
+                    phase_snapshot.peak_kv_delta,
+                    phase_snapshot.peak_kv_cache_delta,
+                );
+            } else {
+                let mut scope = MemoryScopeStat::default();
+                scope.update(
+                    phase_snapshot.current_pool_delta,
+                    phase_snapshot.current_kv_delta,
+                    phase_snapshot.current_kv_cache_delta,
+                    phase_snapshot.peak_pool_delta,
+                    phase_snapshot.peak_kv_delta,
+                    phase_snapshot.peak_kv_cache_delta,
+                );
+                self.phases.push(MemoryPhaseStat {
+                    label: phase_snapshot.label.clone(),
+                    scope,
+                });
+            }
+        }
+
+        self.phases
+            .retain(|phase| snapshot.phases.iter().any(|snap| snap.label == phase.label));
+    }
+}
+
+#[derive(Clone, Copy, Default)]
+struct ScalarStat {
+    current: f64,
+    peak: f64,
+}
+
+impl ScalarStat {
+    fn record(&mut self, value: f64) {
+        self.current = value;
+        self.peak = self.peak.max(value);
+    }
+
+    fn to_row(&self, label: &str) -> MemoryRow {
+        MemoryRow {
+            label: label.to_string(),
+            level: 0,
+            current_total_mb: self.current,
+            peak_total_mb: self.peak,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        }
+    }
+}
+
+fn bytes_to_mb(bytes: usize) -> f64 {
+    bytes as f64 / 1024.0 / 1024.0
 }
 
 /// Generation configuration (defaults chosen by user)
@@ -312,6 +463,13 @@ where
     let mut sample_stats = RollingStat::default();
     let mut block_stats = vec![BlockStat::default(); n_layers];
     let mut latencies_ready = false;
+    let mut memory_embed = MemoryScopeStat::default();
+    let mut memory_forward = MemoryScopeStat::default();
+    let mut memory_output = MemoryScopeStat::default();
+    let mut memory_blocks = vec![MemoryBlockStat::default(); n_layers];
+    let mut latest_forward_usage: Option<MemoryUsage> = None;
+    let mut memory_ready = false;
+    let mut host_memory = ScalarStat::default();
 
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
@@ -368,20 +526,54 @@ where
         ctx.reset_pool();
         ctx.clear_cache();
 
+        let embed_usage_before = ctx.snapshot_memory_usage();
         let embed_start = Instant::now();
         let input_tensor = qwen.embed(&[next_token], ctx)?;
         let embed_duration = embed_start.elapsed();
         if !embed_duration.is_zero() {
             embed_stats.record(embed_duration);
         }
+        let embed_usage_after = ctx.snapshot_memory_usage();
+        let embed_delta = embed_usage_after.delta_from(embed_usage_before);
+        memory_embed.update(
+            embed_delta.pool_used,
+            embed_delta.kv_used,
+            embed_delta.kv_cache_bytes,
+            embed_delta.pool_used,
+            embed_delta.kv_used,
+            embed_delta.kv_cache_bytes,
+        );
 
         let current_pos = prompt_len + i;
-        let collector = new_collector(n_layers);
-        ctx.set_latency_collector(Some(collector.clone()));
+        let latency_collector = new_latency_collector(n_layers);
+        let memory_collector = new_memory_collector(n_layers);
+        ctx.set_latency_collector(Some(latency_collector.clone()));
+        ctx.set_memory_collector(Some(memory_collector.clone()));
+        ctx.record_memory_event(MemoryEvent::ForwardStart);
 
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
-        let forward_snapshot = collector.borrow().snapshot();
+        let forward_snapshot = latency_collector.borrow().snapshot();
+        let memory_snapshot = memory_collector.borrow().snapshot();
         ctx.set_latency_collector(None);
+        ctx.set_memory_collector(None);
+
+        if let Some(usage) = memory_snapshot.forward.last {
+            latest_forward_usage = Some(usage);
+        }
+        if memory_snapshot.forward.baseline.is_some() {
+            memory_forward.update(
+                memory_snapshot.forward.current_pool_delta,
+                memory_snapshot.forward.current_kv_delta,
+                memory_snapshot.forward.current_kv_cache_delta,
+                memory_snapshot.forward.peak_pool_delta,
+                memory_snapshot.forward.peak_kv_delta,
+                memory_snapshot.forward.peak_kv_cache_delta,
+            );
+            for (idx, block_snapshot) in memory_snapshot.blocks.iter().enumerate() {
+                memory_blocks[idx].update_from_snapshot(block_snapshot);
+            }
+            memory_ready = true;
+        }
 
         if !forward_snapshot.forward_step.is_zero() {
             forward_stats.record(forward_snapshot.forward_step);
@@ -398,47 +590,27 @@ where
             }
         }
 
+        let output_usage_before = ctx.snapshot_memory_usage();
         let output_start = Instant::now();
         let logits_tensor = qwen.output(&hidden_states, ctx)?;
         let output_duration = output_start.elapsed();
         if !output_duration.is_zero() {
             output_stats.record(output_duration);
         }
+        let output_usage_after = ctx.snapshot_memory_usage();
+        let output_delta = output_usage_after.delta_from(output_usage_before);
+        memory_output.update(
+            output_delta.pool_used,
+            output_delta.kv_used,
+            output_delta.kv_cache_bytes,
+            output_delta.pool_used,
+            output_delta.kv_used,
+            output_delta.kv_cache_bytes,
+        );
 
-        if ui_connected && let Some(stats) = ctx.get_cache_stats() {
-            let app_mem = get_memory_usage_mbytes(); // This actually seems to return GB not MB due to a bug in crate
-            let app_mem_str = app_mem.map(|mb| format!("{:.2} GB", mb)).unwrap_or_else(|| "n/a".to_string());
-
-            let pool_used_mb = ctx.pool.used_bytes() as f32 / 1024.0 / 1024.0;
-            let pool_capacity_mb = ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0;
-
-            let kv_used_mb = ctx.kv_cache_pool.used_bytes() as f32 / 1024.0 / 1024.0;
-            let kv_capacity_mb = ctx.kv_cache_pool.total_capacity() as f32 / 1024.0 / 1024.0;
-            let kv_layers = ctx.kv_caches.len();
-
-            let memory_usage = format!(
-                "App: {}\nPool: {:.2}/{:.2} MB (chunks: {}, allocs: {}, resets: {})\nKV: {:.2}/{:.2} MB (chunks: {}, allocs: {}, resets: {})\nContext: step {}/{} | Cache: G{}/D{}/S{}",
-                app_mem_str,
-                pool_used_mb,
-                pool_capacity_mb,
-                ctx.pool.num_chunks(),
-                ctx.pool.pooled_allocations,
-                ctx.pool.pool_resets,
-                kv_used_mb,
-                kv_capacity_mb,
-                ctx.kv_cache_pool.num_chunks(),
-                ctx.kv_cache_pool.pooled_allocations,
-                ctx.kv_cache_pool.pool_resets,
-                current_pos + 1,
-                seq_len,
-                stats.gemm_cache_size,
-                stats.descriptor_cache_size,
-                stats.sdpa_cache_size
-            );
-
-            if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
-                ui_connected = false;
-            }
+        if let Some(app_mem) = get_memory_usage_mbytes() {
+            // Crate reports GB; convert to MB for consistency with other rows.
+            host_memory.record((app_mem * 1024.0) as f64);
         }
 
         let logits = logits_tensor.to_vec();
@@ -466,6 +638,20 @@ where
         if latencies_ready && ui_connected {
             let rows = build_latency_rows(&embed_stats, &forward_stats, &block_stats, &output_stats, &sample_stats);
             if tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
+                ui_connected = false;
+            }
+        }
+
+        if memory_ready && ui_connected {
+            let rows = build_memory_rows(
+                &host_memory,
+                &memory_embed,
+                &memory_forward,
+                latest_forward_usage,
+                &memory_blocks,
+                &memory_output,
+            );
+            if tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
                 ui_connected = false;
             }
         }
@@ -535,6 +721,55 @@ fn build_latency_rows(
         average_ms: sample.average_ms(),
         level: 0,
     });
+
+    rows
+}
+
+fn build_memory_rows(
+    host: &ScalarStat,
+    embed: &MemoryScopeStat,
+    forward: &MemoryScopeStat,
+    forward_usage: Option<MemoryUsage>,
+    blocks: &[MemoryBlockStat],
+    output: &MemoryScopeStat,
+) -> Vec<MemoryRow> {
+    let mut rows = Vec::new();
+
+    if host.current > 0.0 || host.peak > 0.0 {
+        rows.push(host.to_row("Host Memory (MB)"));
+    }
+
+    if embed.has_data() {
+        rows.push(embed.to_row("Embedding".to_string(), 0));
+    }
+
+    if forward.has_data() || forward_usage.is_some() {
+        let mut forward_row = forward.to_row("Forward Step".to_string(), 0);
+        if let Some(usage) = forward_usage {
+            forward_row.show_absolute = true;
+            forward_row.absolute_pool_mb = bytes_to_mb(usage.pool_used);
+            forward_row.absolute_kv_mb = bytes_to_mb(usage.kv_used);
+            forward_row.absolute_kv_cache_mb = bytes_to_mb(usage.kv_cache_bytes);
+        }
+        rows.push(forward_row);
+
+        for (idx, block_stat) in blocks.iter().enumerate() {
+            if !block_stat.scope.has_data() {
+                continue;
+            }
+            rows.push(block_stat.scope.to_row(format!("Block {}", idx + 1), 1));
+            for phase in &block_stat.phases {
+                if !phase.scope.has_data() {
+                    continue;
+                }
+                rows.push(phase.scope.to_row(phase.label.clone(), 2));
+            }
+        }
+    }
+
+    if output.has_data() {
+        rows.push(output.to_row("Output".to_string(), 0));
+    }
 
     rows
 }

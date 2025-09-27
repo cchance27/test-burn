@@ -8,6 +8,24 @@ pub struct LatencyRow {
     pub level: u8,
 }
 
+#[derive(Clone, Debug)]
+pub struct MemoryRow {
+    pub label: String,
+    pub level: u8,
+    pub current_total_mb: f64,
+    pub peak_total_mb: f64,
+    pub current_pool_mb: f64,
+    pub peak_pool_mb: f64,
+    pub current_kv_mb: f64,
+    pub peak_kv_mb: f64,
+    pub current_kv_cache_mb: f64,
+    pub peak_kv_cache_mb: f64,
+    pub absolute_pool_mb: f64,
+    pub absolute_kv_mb: f64,
+    pub absolute_kv_cache_mb: f64,
+    pub show_absolute: bool,
+}
+
 pub enum AppEvent {
     Token {
         text: String,
@@ -17,6 +35,6 @@ pub enum AppEvent {
     },
     TokenCount(usize),
     StatusUpdate(String),
-    MemoryUpdate(String),
+    MemoryUpdate(Vec<MemoryRow>),
     LatencyUpdate(Vec<LatencyRow>),
 }

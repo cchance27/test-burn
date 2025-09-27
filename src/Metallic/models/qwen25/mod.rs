@@ -1,6 +1,6 @@
 use crate::gguf::model_loader::GGUFModel;
 use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
-use crate::metallic::instrumentation::LatencyEvent;
+use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::matmul::MatMulOp;
@@ -367,10 +367,13 @@ impl Qwen25 {
             let block_start = Instant::now();
             let resid_attn = x.clone();
 
+            ctx.record_memory_event(MemoryEvent::BlockStart { index: layer_idx });
+
             // RMSNorm before Attention
             let mut phase_start = Instant::now();
             let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_norm"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_norm"));
 
             // QKV GEMMs for the single token
             let m = batch * seq; // m is always 1 for a single token
@@ -387,6 +390,7 @@ impl Qwen25 {
             let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
             let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_qkv_proj"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_qkv_proj"));
 
             // KV Head Rearrangement
             let n_heads = self.config.n_heads;
@@ -423,6 +427,7 @@ impl Qwen25 {
                 seq as u32,
             ))?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_rearrange"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_rearrange"));
 
             // Apply RoPE using the pre-computed cache for the current position
             let position_offset = pos as u32;
@@ -444,6 +449,7 @@ impl Qwen25 {
                 position_offset,
             ))?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "rope"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "rope"));
 
             // Update the KV cache with the new K and V values
             phase_start = Instant::now();
@@ -458,6 +464,7 @@ impl Qwen25 {
             let k_history = Qwen25::gather_cache_history(&k_cache, pos + 1, ctx)?;
             let v_history = Qwen25::gather_cache_history(&v_cache, pos + 1, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
             // Repeat K and V to match Q head count for GQA
             let group_size = n_heads / n_kv_heads;
@@ -465,11 +472,13 @@ impl Qwen25 {
             let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
             let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
 
             // SDPA (causal mask enabled)
             phase_start = Instant::now();
             let attn_out_heads = ctx.scaled_dot_product_attention_with_offset(&q_heads_after_rope, &k_repeated, &v_repeated, true, pos)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "sdpa"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "sdpa"));
 
             // Attention Output Reassembly
             phase_start = Instant::now();
@@ -484,6 +493,7 @@ impl Qwen25 {
             // Residual Add
             x = resid_attn.add_elem(&attn_out, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_output"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_output"));
 
             // --- MLP Block ---
             let resid_mlp = x.clone();
@@ -504,19 +514,23 @@ impl Qwen25 {
             )?;
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "mlp_swiglu"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "mlp_swiglu"));
 
             // Residual Add
             phase_start = Instant::now();
             x = resid_mlp.add_elem(&ffn_output, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "mlp_output"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "mlp_output"));
 
             ctx.record_latency_event(LatencyEvent::Block { index: layer_idx }, block_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::BlockEnd { index: layer_idx });
         }
 
         // Final RMSNorm after all blocks
         let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
 
         ctx.record_latency_event(LatencyEvent::ForwardStep, overall_start.elapsed());
+        ctx.record_memory_event(MemoryEvent::ForwardSample);
 
         Ok(final_normed)
     }

@@ -6,12 +6,12 @@ use ratatui::{
 use std::{env, io::stdout, process, sync::mpsc, thread, time::Duration};
 
 use test_burn::{
-    app_event::{AppEvent, LatencyRow},
+    app_event::{AppEvent, LatencyRow, MemoryRow},
     gguf,
     metallic::{
-        Context, Tokenizer,
-        generation::{GenerationConfig, generate_streaming},
+        generation::{generate_streaming, GenerationConfig},
         models::Qwen25,
+        Context, Tokenizer,
     },
 };
 
@@ -93,8 +93,8 @@ fn main() -> Result<()> {
                 AppEvent::StatusUpdate(status) => {
                     app_state.status = status;
                 }
-                AppEvent::MemoryUpdate(memory_usage) => {
-                    app_state.memory_usage = memory_usage;
+                AppEvent::MemoryUpdate(memory_rows) => {
+                    app_state.memory_rows = memory_rows;
                 }
                 AppEvent::LatencyUpdate(rows) => {
                     app_state.latency_rows = rows;
@@ -116,7 +116,7 @@ struct AppState {
     prompt_token_count: usize,
     should_quit: bool,
     status: String,
-    memory_usage: String,
+    memory_rows: Vec<MemoryRow>,
     prompt_processing_time: Duration,
     latency_rows: Vec<LatencyRow>,
 }
@@ -129,7 +129,7 @@ impl AppState {
             prompt_token_count: 0,
             should_quit: false,
             status: "Initializing...".to_string(),
-            memory_usage: String::new(),
+            memory_rows: Vec::new(),
             prompt_processing_time: Duration::default(),
             latency_rows: Vec::new(),
         }
@@ -182,10 +182,37 @@ fn ui(frame: &mut Frame, state: &AppState) {
         .constraints([Constraint::Length(7), Constraint::Length(6), Constraint::Min(0)])
         .split(sidebar_inner);
 
-    let memory_text = if state.memory_usage.is_empty() {
+    let memory_text = if state.memory_rows.is_empty() {
         "Collecting data...".to_string()
     } else {
-        state.memory_usage.clone()
+        state
+            .memory_rows
+            .iter()
+            .map(|row| {
+                let indent = "  ".repeat(row.level as usize);
+                let mut line = format!(
+                    "{}{} - {:.2} MB ({:.2} peak)",
+                    indent, row.label, row.current_total_mb, row.peak_total_mb
+                );
+                if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
+                    line.push_str(&format!(" | pool {:.2}/{:.2}", row.current_pool_mb, row.peak_pool_mb));
+                }
+                if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
+                    line.push_str(&format!(" | kv {:.2}/{:.2}", row.current_kv_mb, row.peak_kv_mb));
+                }
+                if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
+                    line.push_str(&format!(" | kv-cache {:.2}/{:.2}", row.current_kv_cache_mb, row.peak_kv_cache_mb));
+                }
+                if row.show_absolute {
+                    line.push_str(&format!(
+                        " | totals pool {:.2} MB, kv {:.2} MB, kv-cache {:.2} MB",
+                        row.absolute_pool_mb, row.absolute_kv_mb, row.absolute_kv_cache_mb
+                    ));
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     };
     let memory_section = Paragraph::new(memory_text).block(Block::default().title("Memory Usage").borders(Borders::ALL));
 
