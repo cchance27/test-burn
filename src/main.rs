@@ -3,22 +3,15 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Paragraph, Wrap},
 };
-use std::{
-    env,
-    io::stdout,
-    process,
-    sync::mpsc,
-    thread,
-    time::{Duration, Instant},
-};
+use std::{env, io::stdout, process, sync::mpsc, thread, time::Duration};
 
 use test_burn::{
     app_event::AppEvent,
     gguf,
     metallic::{
-        Context, Tokenizer,
-        generation::{GenerationConfig, generate_streaming},
+        generation::{generate_streaming, GenerationConfig},
         models::Qwen25,
+        Context, Tokenizer,
     },
 };
 
@@ -66,9 +59,7 @@ fn main() -> Result<()> {
         };
 
         tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-        let start_time = Instant::now();
-
-        let _ = generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &tx, start_time);
+        let _ = generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &tx);
         tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
         Ok(())
     });
@@ -79,15 +70,23 @@ fn main() -> Result<()> {
     while !app_state.should_quit {
         if crossterm::event::poll(Duration::from_millis(50))?
             && let crossterm::event::Event::Key(key) = crossterm::event::read()?
-                && key.code == crossterm::event::KeyCode::Char('q') {
-                    app_state.should_quit = true;
-                }
+            && key.code == crossterm::event::KeyCode::Char('q')
+        {
+            app_state.should_quit = true;
+        }
 
         while let Ok(event) = rx.try_recv() {
             match event {
-                AppEvent::Token(token, tokens_per_second) => {
-                    app_state.generated_text.push_str(&token);
+                AppEvent::Token {
+                    text,
+                    tokens_per_second,
+                    prompt_processing,
+                    generation,
+                } => {
+                    app_state.generated_text.push_str(&text);
                     app_state.tokens_per_second = tokens_per_second;
+                    app_state.prompt_processing_time = prompt_processing;
+                    app_state.generation_time = generation;
                 }
                 AppEvent::TokenCount(count) => {
                     app_state.prompt_token_count = count;
@@ -116,6 +115,8 @@ struct AppState {
     should_quit: bool,
     status: String,
     memory_usage: String,
+    prompt_processing_time: Duration,
+    generation_time: Duration,
 }
 
 impl AppState {
@@ -127,6 +128,8 @@ impl AppState {
             should_quit: false,
             status: "Initializing...".to_string(),
             memory_usage: String::new(),
+            prompt_processing_time: Duration::default(),
+            generation_time: Duration::default(),
         }
     }
 }
@@ -159,27 +162,73 @@ fn ui(frame: &mut Frame, state: &AppState) {
         .constraints([Constraint::Min(0), Constraint::Length(1)])
         .split(frame.area());
 
+    let body_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
+        .split(main_layout[0]);
+
     let text_area = Paragraph::new(state.generated_text.clone())
         .block(Block::default().title("Generated Text (q to quit)").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
 
+    let sidebar_block = Block::default().title("Metrics").borders(Borders::ALL);
+    let sidebar_area = body_layout[1];
+    let sidebar_inner = sidebar_block.inner(sidebar_area);
+
+    let sidebar_sections = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Length(6), Constraint::Min(5)])
+        .split(sidebar_inner);
+
+    let memory_text = if state.memory_usage.is_empty() {
+        "Collecting data...".to_string()
+    } else {
+        state.memory_usage.replace(" | ", "\n")
+    };
+    let memory_section = Paragraph::new(memory_text).block(Block::default().title("Memory Usage").borders(Borders::ALL));
+
+    let prompt_section = Paragraph::new(format!(
+        "Prompt Tokens: {}\nProcessing Time: {}",
+        state.prompt_token_count,
+        format_duration(state.prompt_processing_time)
+    ))
+    .block(Block::default().title("Prompt").borders(Borders::ALL));
+
+    let generation_section = Paragraph::new(format!(
+        "Total Time: {}\nThroughput: {:.2} it/s",
+        format_duration(state.generation_time),
+        state.tokens_per_second
+    ))
+    .block(Block::default().title("Generation").borders(Borders::ALL));
+
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(33), Constraint::Percentage(34), Constraint::Percentage(33)])
+        .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
         .split(main_layout[1]);
 
     let status_text = Paragraph::new(state.status.clone()).style(Style::default().fg(Color::White).bg(Color::Blue));
 
-    let memory_text = Paragraph::new(state.memory_usage.clone())
-        .style(Style::default().fg(Color::White).bg(Color::Blue))
-        .alignment(Alignment::Center);
-
-    let its_text = Paragraph::new(format!("it/s: {:.2}", state.tokens_per_second))
+    let throughput_text = Paragraph::new(format!("{:.2} it/s", state.tokens_per_second))
         .style(Style::default().fg(Color::White).bg(Color::Blue))
         .alignment(Alignment::Right);
 
-    frame.render_widget(text_area, main_layout[0]);
+    frame.render_widget(text_area, body_layout[0]);
+    frame.render_widget(sidebar_block, sidebar_area);
+    frame.render_widget(memory_section, sidebar_sections[0]);
+    frame.render_widget(prompt_section, sidebar_sections[1]);
+    frame.render_widget(generation_section, sidebar_sections[2]);
     frame.render_widget(status_text, status_layout[0]);
-    frame.render_widget(memory_text, status_layout[1]);
-    frame.render_widget(its_text, status_layout[2]);
+    frame.render_widget(throughput_text, status_layout[1]);
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs_f64() >= 1.0 {
+        format!("{:.2}s", duration.as_secs_f64())
+    } else if duration.as_millis() >= 1 {
+        format!("{:.0}ms", duration.as_secs_f64() * 1000.0)
+    } else if duration.as_nanos() > 0 {
+        "<1ms".to_string()
+    } else {
+        "0ms".to_string()
+    }
 }

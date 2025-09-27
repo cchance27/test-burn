@@ -1,11 +1,11 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::Tokenizer;
 use crate::metallic::models::qwen25::Qwen25;
+use crate::metallic::Tokenizer;
 use app_memory_usage_fetcher::get_memory_usage_mbytes;
 use rand::prelude::*;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
@@ -149,23 +149,45 @@ pub fn generate_streaming(
     prompt: &str,
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
-    start_time: Instant,
 ) -> Result<(), MetalError> {
     // Build full prompt string following Qwen2.5 chat template
     let full_prompt = format!(
         "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
     );
 
+    let prompt_start = Instant::now();
+
     // Encode the full prompt
     let input_ids = tokenizer.encode(&full_prompt)?;
 
-    let mut token_count = 0;
-    let mut token_callback = |_token_id, decoded_token| -> Result<bool, MetalError> {
-        token_count += 1;
-        let elapsed = start_time.elapsed();
-        let tokens_per_second = token_count as f64 / elapsed.as_secs_f64();
+    let mut token_count = 0usize;
+    let mut prompt_processing_duration: Option<Duration> = None;
+    let mut generation_start: Option<Instant> = None;
 
-        if tx.send(AppEvent::Token(decoded_token, tokens_per_second)).is_err() {
+    let mut token_callback = |_token_id, decoded_token: String| -> Result<bool, MetalError> {
+        token_count += 1;
+        let now = Instant::now();
+
+        let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
+
+        let gen_start = generation_start.get_or_insert(now);
+        let generation_elapsed = now.duration_since(*gen_start);
+        let elapsed_secs = generation_elapsed.as_secs_f64();
+        let tokens_per_second = if elapsed_secs > 0.0 {
+            token_count as f64 / elapsed_secs
+        } else {
+            0.0
+        };
+
+        if tx
+            .send(AppEvent::Token {
+                text: decoded_token,
+                tokens_per_second,
+                prompt_processing: prompt_duration,
+                generation: generation_elapsed,
+            })
+            .is_err()
+        {
             return Ok(false); // Stop generation if UI thread has disconnected
         }
         Ok(true)
