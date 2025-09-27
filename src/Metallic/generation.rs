@@ -3,10 +3,10 @@ use crate::app_event::{AppEvent, LatencyRow, MemoryRow};
 use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, BlockMemorySnapshot, MemoryEvent, MemoryUsage};
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
-use app_memory_usage_fetcher::get_memory_usage_mbytes;
 use rand::prelude::*;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
+use sysinfo::{get_current_pid, Pid, ProcessExt, System, SystemExt};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
@@ -242,6 +242,31 @@ impl ScalarStat {
             absolute_kv_cache_mb: 0.0,
             show_absolute: false,
         }
+    }
+}
+
+struct ProcessMemoryTracker {
+    system: System,
+    pid: Pid,
+}
+
+impl ProcessMemoryTracker {
+    fn new() -> Option<Self> {
+        let pid = get_current_pid().ok()?;
+        let mut system = System::new();
+        if !system.refresh_process(pid) {
+            system.refresh_processes();
+        }
+        Some(Self { system, pid })
+    }
+
+    fn sample_mb(&mut self) -> Option<f64> {
+        if !self.system.refresh_process(self.pid) {
+            self.system.refresh_processes();
+        }
+        self.system
+            .process(self.pid)
+            .map(|process| process.memory() as f64 / 1024.0 / 1024.0)
     }
 }
 
@@ -638,6 +663,12 @@ where
     let mut latest_forward_usage: Option<MemoryUsage> = None;
     let mut memory_ready = false;
     let mut host_memory = ScalarStat::default();
+    let mut process_memory_tracker = ProcessMemoryTracker::new();
+    if let Some(tracker) = process_memory_tracker.as_mut() {
+        if let Some(memory_mb) = tracker.sample_mb() {
+            host_memory.record(memory_mb);
+        }
+    }
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
@@ -777,8 +808,10 @@ where
             output_delta.kv_cache_bytes,
         );
 
-        if let Some(app_mem) = get_memory_usage_mbytes() {
-            host_memory.record(app_mem as f64);
+        if let Some(tracker) = process_memory_tracker.as_mut() {
+            if let Some(memory_mb) = tracker.sample_mb() {
+                host_memory.record(memory_mb);
+            }
         }
 
         let logits = logits_tensor.to_vec();

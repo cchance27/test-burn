@@ -92,15 +92,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
 
 [[package]]
-name = "app-memory-usage-fetcher"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "933b291c20ae9e6fbc520672f72d26c94547facb65a30d8a8a89d0ffff35057d"
-dependencies = [
- "cc",
-]
-
-[[package]]
 name = "approx"
 version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5032,7 +5023,6 @@ name = "test-burn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "app-memory-usage-fetcher",
  "approx",
  "burn",
  "byteorder",
@@ -5054,6 +5044,7 @@ dependencies = [
  "rustc-hash 2.1.1",
  "serde",
  "serde_json",
+ "sysinfo",
  "thiserror 2.0.16",
  "unicode-normalization",
 ]
