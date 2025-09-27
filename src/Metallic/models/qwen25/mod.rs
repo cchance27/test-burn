@@ -155,8 +155,10 @@ impl Qwen25 {
         // NOTE: This assumes head_dim for Q and K are the same, which is true for Qwen2.5-0.5B
         let head_dim = config.d_model / config.n_heads;
         let dim_half = head_dim / 2;
-        let mut cos_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, true)?;
-        let mut sin_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, true)?;
+        // These RoPE caches are retained for the lifetime of the model, so allocate them
+        // outside of the transient memory pool to survive `Context::reset_pool()` calls.
+        let mut cos_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, false)?;
+        let mut sin_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, false)?;
         let cos_slice = cos_cache.as_mut_slice();
         let sin_slice = sin_cache.as_mut_slice();
 
@@ -374,9 +376,33 @@ impl Qwen25 {
             let head_dim = d_model / n_heads;
             let kv_head_dim = kv_dim / n_kv_heads;
 
-            let q_heads = ctx.call::<KvRearrangeOp>((q_mat, d_model as u32, head_dim as u32, n_heads as u32, n_heads as u32, head_dim as u32, seq as u32))?;
-            let k_heads = ctx.call::<KvRearrangeOp>((k_mat, kv_dim as u32, kv_head_dim as u32, n_kv_heads as u32, n_kv_heads as u32, kv_head_dim as u32, seq as u32))?;
-            let v_heads = ctx.call::<KvRearrangeOp>((v_mat, kv_dim as u32, kv_head_dim as u32, n_kv_heads as u32, n_kv_heads as u32, kv_head_dim as u32, seq as u32))?;
+            let q_heads = ctx.call::<KvRearrangeOp>((
+                q_mat,
+                d_model as u32,
+                head_dim as u32,
+                n_heads as u32,
+                n_heads as u32,
+                head_dim as u32,
+                seq as u32,
+            ))?;
+            let k_heads = ctx.call::<KvRearrangeOp>((
+                k_mat,
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ))?;
+            let v_heads = ctx.call::<KvRearrangeOp>((
+                v_mat,
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ))?;
 
             // Apply RoPE using the pre-computed cache for the current position
             let cos = self.rope_cos_cache.slice(&[pos..pos + 1])?;
@@ -389,10 +415,14 @@ impl Qwen25 {
             ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
 
             // Retrieve the full K and V caches for attention
-            let (k_cache, v_cache, _) = ctx.kv_caches.get(&layer_idx).cloned().ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
+            let (k_cache, v_cache, _) = ctx
+                .kv_caches
+                .get(&layer_idx)
+                .cloned()
+                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
             let k_history = k_cache.slice(&[0..pos + 1])?.permute(&[1, 0, 2], ctx)?;
             let v_history = v_cache.slice(&[0..pos + 1])?.permute(&[1, 0, 2], ctx)?;
-            
+
             // Repeat K and V to match Q head count for GQA
             let group_size = n_heads / n_kv_heads;
             let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
@@ -406,14 +436,8 @@ impl Qwen25 {
             let attn_out_permuted = attn_out_reshaped_1.permute(&[0, 2, 1, 3], ctx)?;
             let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
 
-
             let attn_out = ctx
-                .matmul(
-                    &attn_out_reshaped.reshape(vec![m, d_model])?,
-                    &block.attn_out_weight,
-                    false,
-                    true,
-                )?
+                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
                 .reshape(vec![batch, seq, d_model])?;
 
             // Residual Add

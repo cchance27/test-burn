@@ -130,7 +130,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         let hidden_state = model.forward(&sequence_embedding, &mut ctx)?;
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
         let full_forward_logits = logits_tensor.to_vec();
-        
+
         // Get the logits for the last token from the full forward pass
         let last_token_logits = full_forward_logits[i * vocab_size..].to_vec();
 
@@ -145,11 +145,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         }
         let avg_diff = diff_sum / last_token_logits.len() as f32;
 
-        assert!(
-            avg_diff < 1e-5,
-            "Logits mismatch at step {}. Avg diff: {}",
-            i, avg_diff
-        );
+        assert!(avg_diff < 1e-5, "Logits mismatch at step {}. Avg diff: {}", i, avg_diff);
         println!("✅ Logits match at step {}.", i);
     }
 
