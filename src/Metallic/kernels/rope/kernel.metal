@@ -7,7 +7,8 @@ kernel void rope_kernel(device float* input [[buffer(0)]],
                         device float* sin_buf [[buffer(3)]],
                         constant uint& dim [[buffer(4)]],
                         constant uint& seq_len [[buffer(5)]],
-                        constant uint& total_elements [[buffer(6)]],
+                        constant uint& position_offset [[buffer(6)]],
+                        constant uint& total_elements [[buffer(7)]],
                         uint gid [[thread_position_in_grid]]) {
     if (gid >= total_elements) return;
 
@@ -16,7 +17,7 @@ kernel void rope_kernel(device float* input [[buffer(0)]],
     uint row_idx = gid / dim;
 
     // Position in sequence (assume rows are arranged so that seq dimension varies fastest across rows)
-    uint pos = row_idx % seq_len;
+    uint pos = (row_idx % seq_len) + position_offset;
 
     // Half-split RoPE: pair indices across the two halves of the last dimension
     uint half_dim = dim / 2u;

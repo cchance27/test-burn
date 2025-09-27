@@ -55,7 +55,7 @@ fn test_rope_basic() -> Result<(), MetalError> {
     let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
     let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -114,7 +114,7 @@ fn test_rope_extreme_large_position_values() -> Result<(), MetalError> {
     let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
     let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -178,7 +178,7 @@ fn test_rope_extreme_angle_values() -> Result<(), MetalError> {
     let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
     let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -242,7 +242,7 @@ fn test_rope_extreme_input_values() -> Result<(), MetalError> {
     let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
     let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -288,7 +288,7 @@ fn test_rope_extreme_cos_sin_values() -> Result<(), MetalError> {
     let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
     let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();

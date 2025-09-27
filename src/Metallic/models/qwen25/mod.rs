@@ -270,12 +270,22 @@ impl Qwen25 {
             ))?;
 
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
-            // TODO: Implement zero-copy `Tensor::slice`
-            let cos = self.rope_cos_cache.slice(&[0..seq])?;
-            let sin = self.rope_sin_cache.slice(&[0..seq])?;
-
-            let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads, cos.clone(), sin.clone(), head_dim as u32, seq as u32))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?;
+            let q_heads_after_rope = ctx.call::<RoPEOp>((
+                q_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                head_dim as u32,
+                seq as u32,
+                0,
+            ))?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>((
+                k_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                kv_head_dim as u32,
+                seq as u32,
+                0,
+            ))?;
 
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
@@ -405,11 +415,23 @@ impl Qwen25 {
             ))?;
 
             // Apply RoPE using the pre-computed cache for the current position
-            let cos = self.rope_cos_cache.slice(&[pos..pos + 1])?;
-            let sin = self.rope_sin_cache.slice(&[pos..pos + 1])?;
-
-            let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads, cos.clone(), sin.clone(), head_dim as u32, seq as u32))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?;
+            let position_offset = pos as u32;
+            let q_heads_after_rope = ctx.call::<RoPEOp>((
+                q_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                head_dim as u32,
+                seq as u32,
+                position_offset,
+            ))?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>((
+                k_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                kv_head_dim as u32,
+                seq as u32,
+                position_offset,
+            ))?;
 
             // Update the KV cache with the new K and V values
             ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;

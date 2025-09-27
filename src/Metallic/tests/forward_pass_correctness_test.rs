@@ -192,7 +192,7 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         }
         let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
         let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-        let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32))?;
+        let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
         // RoPE for K
@@ -211,7 +211,7 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         }
         let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], ctx)?;
         let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], ctx)?;
-        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32))?;
+        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
         // Repeat KV heads for SDPA (GQA)
@@ -648,7 +648,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
     let q_heads_after_rope = {
         let _out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), &mut ctx)?;
-        ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32))?
+        ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
 
@@ -670,7 +670,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope = {
         let _out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), &mut ctx)?;
-        ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32))?
+        ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
 
@@ -1147,7 +1147,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
     let cos_q_last = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
     let sin_q_last = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
-    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32))? };
+    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0))? };
     ctx.synchronize();
 
     let dim_half_k = kv_head_dim / 2;
@@ -1167,7 +1167,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let sin_k_last = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope_last = {
         let _out = Tensor::create_tensor_pooled(k_heads_last.dims().to_vec(), &mut ctx)?;
-        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32))?
+        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
 
