@@ -165,10 +165,7 @@ pub fn generate_streaming(
         let elapsed = start_time.elapsed();
         let tokens_per_second = token_count as f64 / elapsed.as_secs_f64();
 
-        if tx
-            .send(AppEvent::Token(decoded_token, tokens_per_second))
-            .is_err()
-        {
+        if tx.send(AppEvent::Token(decoded_token, tokens_per_second)).is_err() {
             return Ok(false); // Stop generation if UI thread has disconnected
         }
         Ok(true)
@@ -214,6 +211,10 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F>(
 where
     F: FnMut(u32, String) -> Result<bool, MetalError>,
 {
+    // Ensure KV caches start from a clean slate between generations.
+    ctx.kv_caches.clear();
+    ctx.kv_cache_pool.reset();
+
     // Pre-allocate KV cache for all layers
     let n_layers = qwen.config.n_layers;
     let seq_len = qwen.config.seq_len;
@@ -244,6 +245,7 @@ where
     let prompt_len = input_ids.len();
     let vocab_size = qwen.config.vocab_size;
     let mut next_token;
+    let mut last_decoded_len = 0usize;
 
     if let Some(logits_tensor) = logits_tensor {
         // Extract logits for the very last token of the prompt
@@ -260,8 +262,16 @@ where
     }
 
     generated_ids.push(next_token);
-    let decoded_token = tokenizer.decode_lossless(&[next_token])?;
-    if !token_callback(next_token, decoded_token)? {
+    let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
+    let mut decoded_chunk = String::new();
+    if decoded_full.len() >= last_decoded_len {
+        decoded_chunk.push_str(&decoded_full[last_decoded_len..]);
+    } else {
+        decoded_chunk = decoded_full.clone();
+    }
+    last_decoded_len = decoded_full.len();
+
+    if !token_callback(next_token, decoded_chunk)? {
         return Ok(());
     }
 
@@ -274,7 +284,7 @@ where
 
         // Embed just the single last token
         let input_tensor = qwen.embed(&[next_token], ctx)?;
-        
+
         // Run a single forward step
         let current_pos = prompt_len + i;
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
@@ -299,7 +309,7 @@ where
         }
 
         let logits = logits_tensor.to_vec();
-        
+
         // Since seq_len is 1, the logits are just the first (and only) vocab block
         let vocab_logits = logits[0..vocab_size].to_vec();
 
@@ -311,8 +321,16 @@ where
         generated_ids.push(next_token);
 
         // Callback and check for EOS
-        let decoded_token = tokenizer.decode_lossless(&[next_token])?;
-        if !token_callback(next_token, decoded_token)? {
+        let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
+        let mut decoded_chunk = String::new();
+        if decoded_full.len() >= last_decoded_len {
+            decoded_chunk.push_str(&decoded_full[last_decoded_len..]);
+        } else {
+            decoded_chunk = decoded_full.clone();
+        }
+        last_decoded_len = decoded_full.len();
+
+        if !token_callback(next_token, decoded_chunk)? {
             break;
         }
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
