@@ -33,6 +33,16 @@ impl Default for GenerationConfig {
 /// - `logits` is a slice of f32 representing vocabulary logits.
 ///   Returns selected token index.
 pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature: f32) -> usize {
+    // Handle deterministic (greedy) sampling when temperature is zero or non-finite.
+    if temperature <= 0.0 || !temperature.is_finite() {
+        return logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+
     // Apply temperature scaling and convert to positive scores
     let mut scaled: Vec<f32> = logits.iter().map(|&v| v / temperature).collect();
 
@@ -155,10 +165,7 @@ pub fn generate_streaming(
         let elapsed = start_time.elapsed();
         let tokens_per_second = token_count as f64 / elapsed.as_secs_f64();
 
-        if tx
-            .send(AppEvent::Token(decoded_token, tokens_per_second))
-            .is_err()
-        {
+        if tx.send(AppEvent::Token(decoded_token, tokens_per_second)).is_err() {
             return Ok(false); // Stop generation if UI thread has disconnected
         }
         Ok(true)
@@ -204,6 +211,10 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F>(
 where
     F: FnMut(u32, String) -> Result<bool, MetalError>,
 {
+    // Ensure KV caches start from a clean slate between generations.
+    ctx.kv_caches.clear();
+    ctx.kv_cache_pool.reset();
+
     // Pre-allocate KV cache for all layers
     let n_layers = qwen.config.n_layers;
     let seq_len = qwen.config.seq_len;
@@ -234,6 +245,7 @@ where
     let prompt_len = input_ids.len();
     let vocab_size = qwen.config.vocab_size;
     let mut next_token;
+    let mut last_decoded_len = 0usize;
 
     if let Some(logits_tensor) = logits_tensor {
         // Extract logits for the very last token of the prompt
@@ -250,43 +262,54 @@ where
     }
 
     generated_ids.push(next_token);
-    let decoded_token = tokenizer.decode_lossless(&[next_token])?;
-    if !token_callback(next_token, decoded_token)? {
+    let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
+    let mut decoded_chunk = String::new();
+    if decoded_full.len() >= last_decoded_len {
+        decoded_chunk.push_str(&decoded_full[last_decoded_len..]);
+    } else {
+        decoded_chunk = decoded_full.clone();
+    }
+    last_decoded_len = decoded_full.len();
+
+    if !token_callback(next_token, decoded_chunk)? {
         return Ok(());
     }
 
     // --- Autoregressive Generation Loop ---
     // Now, generate tokens one by one using the KV cache.
+    let mut ui_connected = true;
     for i in 0..cfg.max_tokens - 1 {
         ctx.reset_pool();
         ctx.clear_cache();
 
         // Embed just the single last token
         let input_tensor = qwen.embed(&[next_token], ctx)?;
-        
+
         // Run a single forward step
         let current_pos = prompt_len + i;
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
         let logits_tensor = qwen.output(&hidden_states, ctx)?;
 
-        if let Some(stats) = ctx.get_cache_stats() {
-            let app_mem = get_memory_usage_mbytes();
-            let memory_usage = format!(
-                "App: {:.2} GB | Pool: {:.2} / {:.2} MB | Cache: G{}/D{}/S{}",
-                app_mem.unwrap(),
-                ctx.pool.pooled_bytes_allocated as f32 / 1024.0 / 1024.0,
-                ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0,
-                stats.gemm_cache_size,
-                stats.descriptor_cache_size,
-                stats.sdpa_cache_size
-            );
-            if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
-                return Ok(()); // Stop if UI thread is gone
+        if ui_connected {
+            if let Some(stats) = ctx.get_cache_stats() {
+                let app_mem = get_memory_usage_mbytes();
+                let memory_usage = format!(
+                    "App: {:.2} GB | Pool: {:.2} / {:.2} MB | Cache: G{}/D{}/S{}",
+                    app_mem.unwrap(),
+                    ctx.pool.pooled_bytes_allocated as f32 / 1024.0 / 1024.0,
+                    ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0,
+                    stats.gemm_cache_size,
+                    stats.descriptor_cache_size,
+                    stats.sdpa_cache_size
+                );
+                if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
+                    ui_connected = false; // Receiver dropped; continue without UI updates
+                }
             }
         }
 
         let logits = logits_tensor.to_vec();
-        
+
         // Since seq_len is 1, the logits are just the first (and only) vocab block
         let vocab_logits = logits[0..vocab_size].to_vec();
 
@@ -298,8 +321,16 @@ where
         generated_ids.push(next_token);
 
         // Callback and check for EOS
-        let decoded_token = tokenizer.decode_lossless(&[next_token])?;
-        if !token_callback(next_token, decoded_token)? {
+        let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
+        let mut decoded_chunk = String::new();
+        if decoded_full.len() >= last_decoded_len {
+            decoded_chunk.push_str(&decoded_full[last_decoded_len..]);
+        } else {
+            decoded_chunk = decoded_full.clone();
+        }
+        last_decoded_len = decoded_full.len();
+
+        if !token_callback(next_token, decoded_chunk)? {
             break;
         }
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);

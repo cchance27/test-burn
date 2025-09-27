@@ -155,8 +155,10 @@ impl Qwen25 {
         // NOTE: This assumes head_dim for Q and K are the same, which is true for Qwen2.5-0.5B
         let head_dim = config.d_model / config.n_heads;
         let dim_half = head_dim / 2;
-        let mut cos_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, true)?;
-        let mut sin_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, true)?;
+        // These RoPE caches are retained for the lifetime of the model, so allocate them
+        // outside of the transient memory pool to survive `Context::reset_pool()` calls.
+        let mut cos_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, false)?;
+        let mut sin_cache = Tensor::zeros(vec![config.seq_len, dim_half], ctx, false)?;
         let cos_slice = cos_cache.as_mut_slice();
         let sin_slice = sin_cache.as_mut_slice();
 
@@ -268,12 +270,22 @@ impl Qwen25 {
             ))?;
 
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
-            // TODO: Implement zero-copy `Tensor::slice`
-            let cos = self.rope_cos_cache.slice(&[0..seq])?;
-            let sin = self.rope_sin_cache.slice(&[0..seq])?;
-
-            let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads, cos.clone(), sin.clone(), head_dim as u32, seq as u32))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?;
+            let q_heads_after_rope = ctx.call::<RoPEOp>((
+                q_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                head_dim as u32,
+                seq as u32,
+                0,
+            ))?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>((
+                k_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                kv_head_dim as u32,
+                seq as u32,
+                0,
+            ))?;
 
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
@@ -374,25 +386,65 @@ impl Qwen25 {
             let head_dim = d_model / n_heads;
             let kv_head_dim = kv_dim / n_kv_heads;
 
-            let q_heads = ctx.call::<KvRearrangeOp>((q_mat, d_model as u32, head_dim as u32, n_heads as u32, n_heads as u32, head_dim as u32, seq as u32))?;
-            let k_heads = ctx.call::<KvRearrangeOp>((k_mat, kv_dim as u32, kv_head_dim as u32, n_kv_heads as u32, n_kv_heads as u32, kv_head_dim as u32, seq as u32))?;
-            let v_heads = ctx.call::<KvRearrangeOp>((v_mat, kv_dim as u32, kv_head_dim as u32, n_kv_heads as u32, n_kv_heads as u32, kv_head_dim as u32, seq as u32))?;
+            let q_heads = ctx.call::<KvRearrangeOp>((
+                q_mat,
+                d_model as u32,
+                head_dim as u32,
+                n_heads as u32,
+                n_heads as u32,
+                head_dim as u32,
+                seq as u32,
+            ))?;
+            let k_heads = ctx.call::<KvRearrangeOp>((
+                k_mat,
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ))?;
+            let v_heads = ctx.call::<KvRearrangeOp>((
+                v_mat,
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ))?;
 
             // Apply RoPE using the pre-computed cache for the current position
-            let cos = self.rope_cos_cache.slice(&[pos..pos + 1])?;
-            let sin = self.rope_sin_cache.slice(&[pos..pos + 1])?;
-
-            let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads, cos.clone(), sin.clone(), head_dim as u32, seq as u32))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos, sin, kv_head_dim as u32, seq as u32))?;
+            let position_offset = pos as u32;
+            let q_heads_after_rope = ctx.call::<RoPEOp>((
+                q_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                head_dim as u32,
+                seq as u32,
+                position_offset,
+            ))?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>((
+                k_heads,
+                self.rope_cos_cache.clone(),
+                self.rope_sin_cache.clone(),
+                kv_head_dim as u32,
+                seq as u32,
+                position_offset,
+            ))?;
 
             // Update the KV cache with the new K and V values
             ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
 
             // Retrieve the full K and V caches for attention
-            let (k_cache, v_cache, _) = ctx.kv_caches.get(&layer_idx).cloned().ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_history = k_cache.slice(&[0..pos + 1])?.permute(&[1, 0, 2], ctx)?;
-            let v_history = v_cache.slice(&[0..pos + 1])?.permute(&[1, 0, 2], ctx)?;
-            
+            let (k_cache, v_cache, _) = ctx
+                .kv_caches
+                .get(&layer_idx)
+                .cloned()
+                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
+            let k_history = Qwen25::gather_cache_history(&k_cache, pos + 1, ctx)?;
+            let v_history = Qwen25::gather_cache_history(&v_cache, pos + 1, ctx)?;
+
             // Repeat K and V to match Q head count for GQA
             let group_size = n_heads / n_kv_heads;
             let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
@@ -406,14 +458,8 @@ impl Qwen25 {
             let attn_out_permuted = attn_out_reshaped_1.permute(&[0, 2, 1, 3], ctx)?;
             let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
 
-
             let attn_out = ctx
-                .matmul(
-                    &attn_out_reshaped.reshape(vec![m, d_model])?,
-                    &block.attn_out_weight,
-                    false,
-                    true,
-                )?
+                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
                 .reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
@@ -482,6 +528,46 @@ impl Qwen25 {
                         dst.copy_from_slice(src);
                     }
                 }
+            }
+        }
+
+        Ok(output)
+    }
+
+    fn gather_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
+        let dims = cache.dims();
+        if dims.len() != 3 {
+            return Err(MetalError::InvalidShape(
+                "KV cache tensor must have shape [seq, batch_heads, head_dim]".to_string(),
+            ));
+        }
+        if steps == 0 || steps > dims[0] {
+            return Err(MetalError::InvalidShape(format!(
+                "Requested {} KV steps exceeds cache capacity {}",
+                steps, dims[0]
+            )));
+        }
+
+        let cache_view = cache.slice(&[0..steps])?;
+        let view_dims = cache_view.dims();
+        debug_assert_eq!(view_dims.len(), 3);
+        let seq = view_dims[0];
+        let batch_heads = view_dims[1];
+        let head_dim = view_dims[2];
+
+        let mut output = Tensor::zeros(vec![batch_heads, seq, head_dim], ctx, true)?;
+        let src = cache_view.as_slice();
+        let dst = output.as_mut_slice();
+
+        let seq_stride = batch_heads * head_dim;
+        let head_stride = head_dim;
+
+        for s in 0..seq {
+            let src_seq_base = s * seq_stride;
+            for bh in 0..batch_heads {
+                let src_idx = src_seq_base + bh * head_stride;
+                let dst_idx = (bh * seq + s) * head_dim;
+                dst[dst_idx..dst_idx + head_dim].copy_from_slice(&src[src_idx..src_idx + head_dim]);
             }
         }
 
