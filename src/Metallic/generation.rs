@@ -33,6 +33,16 @@ impl Default for GenerationConfig {
 /// - `logits` is a slice of f32 representing vocabulary logits.
 ///   Returns selected token index.
 pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature: f32) -> usize {
+    // Handle deterministic (greedy) sampling when temperature is zero or non-finite.
+    if temperature <= 0.0 || !temperature.is_finite() {
+        return logits
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+    }
+
     // Apply temperature scaling and convert to positive scores
     let mut scaled: Vec<f32> = logits.iter().map(|&v| v / temperature).collect();
 
@@ -257,6 +267,7 @@ where
 
     // --- Autoregressive Generation Loop ---
     // Now, generate tokens one by one using the KV cache.
+    let mut ui_connected = true;
     for i in 0..cfg.max_tokens - 1 {
         ctx.reset_pool();
         ctx.clear_cache();
@@ -269,19 +280,21 @@ where
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
         let logits_tensor = qwen.output(&hidden_states, ctx)?;
 
-        if let Some(stats) = ctx.get_cache_stats() {
-            let app_mem = get_memory_usage_mbytes();
-            let memory_usage = format!(
-                "App: {:.2} GB | Pool: {:.2} / {:.2} MB | Cache: G{}/D{}/S{}",
-                app_mem.unwrap(),
-                ctx.pool.pooled_bytes_allocated as f32 / 1024.0 / 1024.0,
-                ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0,
-                stats.gemm_cache_size,
-                stats.descriptor_cache_size,
-                stats.sdpa_cache_size
-            );
-            if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
-                return Ok(()); // Stop if UI thread is gone
+        if ui_connected {
+            if let Some(stats) = ctx.get_cache_stats() {
+                let app_mem = get_memory_usage_mbytes();
+                let memory_usage = format!(
+                    "App: {:.2} GB | Pool: {:.2} / {:.2} MB | Cache: G{}/D{}/S{}",
+                    app_mem.unwrap(),
+                    ctx.pool.pooled_bytes_allocated as f32 / 1024.0 / 1024.0,
+                    ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0,
+                    stats.gemm_cache_size,
+                    stats.descriptor_cache_size,
+                    stats.sdpa_cache_size
+                );
+                if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
+                    ui_connected = false; // Receiver dropped; continue without UI updates
+                }
             }
         }
 
