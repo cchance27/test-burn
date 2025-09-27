@@ -68,11 +68,16 @@ fn main() -> Result<()> {
     let mut app_state = AppState::new();
 
     while !app_state.should_quit {
-        if crossterm::event::poll(Duration::from_millis(50))?
-            && let crossterm::event::Event::Key(key) = crossterm::event::read()?
-            && key.code == crossterm::event::KeyCode::Char('q')
-        {
-            app_state.should_quit = true;
+        if crossterm::event::poll(Duration::from_millis(50))? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                match key.code {
+                    crossterm::event::KeyCode::Char('q') => app_state.should_quit = true,
+                    crossterm::event::KeyCode::Char('m') => app_state.metrics_view = MetricsView::Memory,
+                    crossterm::event::KeyCode::Char('l') => app_state.metrics_view = MetricsView::Latency,
+                    crossterm::event::KeyCode::Tab => app_state.metrics_view.toggle(),
+                    _ => {}
+                }
+            }
         }
 
         while let Ok(event) = rx.try_recv() {
@@ -119,6 +124,7 @@ struct AppState {
     memory_rows: Vec<MemoryRow>,
     prompt_processing_time: Duration,
     latency_rows: Vec<LatencyRow>,
+    metrics_view: MetricsView,
 }
 
 impl AppState {
@@ -132,7 +138,23 @@ impl AppState {
             memory_rows: Vec::new(),
             prompt_processing_time: Duration::default(),
             latency_rows: Vec::new(),
+            metrics_view: MetricsView::Memory,
         }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum MetricsView {
+    Memory,
+    Latency,
+}
+
+impl MetricsView {
+    fn toggle(&mut self) {
+        *self = match self {
+            MetricsView::Memory => MetricsView::Latency,
+            MetricsView::Latency => MetricsView::Memory,
+        };
     }
 }
 
@@ -179,42 +201,8 @@ fn ui(frame: &mut Frame, state: &AppState) {
 
     let sidebar_sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Length(6), Constraint::Min(0)])
+        .constraints([Constraint::Length(6), Constraint::Min(0)])
         .split(sidebar_inner);
-
-    let memory_text = if state.memory_rows.is_empty() {
-        "Collecting data...".to_string()
-    } else {
-        state
-            .memory_rows
-            .iter()
-            .map(|row| {
-                let indent = "  ".repeat(row.level as usize);
-                let mut line = format!(
-                    "{}{} - {:.2} MB ({:.2} peak)",
-                    indent, row.label, row.current_total_mb, row.peak_total_mb
-                );
-                if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
-                    line.push_str(&format!(" | pool {:.2}/{:.2}", row.current_pool_mb, row.peak_pool_mb));
-                }
-                if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
-                    line.push_str(&format!(" | kv {:.2}/{:.2}", row.current_kv_mb, row.peak_kv_mb));
-                }
-                if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
-                    line.push_str(&format!(" | kv-cache {:.2}/{:.2}", row.current_kv_cache_mb, row.peak_kv_cache_mb));
-                }
-                if row.show_absolute {
-                    line.push_str(&format!(
-                        " | totals pool {:.2} MB, kv {:.2} MB, kv-cache {:.2} MB",
-                        row.absolute_pool_mb, row.absolute_kv_mb, row.absolute_kv_cache_mb
-                    ));
-                }
-                line
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
-    let memory_section = Paragraph::new(memory_text).block(Block::default().title("Memory Usage").borders(Borders::ALL));
 
     let prompt_section = Paragraph::new(format!(
         "Prompt Tokens: {}\nProcessing Time: {}",
@@ -223,20 +211,67 @@ fn ui(frame: &mut Frame, state: &AppState) {
     ))
     .block(Block::default().title("Prompt").borders(Borders::ALL));
 
-    let latency_text = if state.latency_rows.is_empty() {
-        "Collecting data...".to_string()
-    } else {
-        state
-            .latency_rows
-            .iter()
-            .map(|row| {
-                let indent = "  ".repeat(row.level as usize);
-                format!("{}{} - {:.2}ms ({:.2} avg)", indent, row.label, row.last_ms, row.average_ms)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+    let metrics_block_title = match state.metrics_view {
+        MetricsView::Memory => "Memory Usage",
+        MetricsView::Latency => "Latency",
     };
-    let latency_section = Paragraph::new(latency_text).block(Block::default().title("Latency").borders(Borders::ALL));
+
+    let metrics_help = "[m] Memory  [l] Latency  [Tab] Toggle";
+
+    let metrics_text = match state.metrics_view {
+        MetricsView::Memory => {
+            if state.memory_rows.is_empty() {
+                "Collecting data...".to_string()
+            } else {
+                state
+                    .memory_rows
+                    .iter()
+                    .map(|row| {
+                        let indent = "  ".repeat(row.level as usize);
+                        let mut line = format!(
+                            "{}{} - {:.2} MB ({:.2} peak)",
+                            indent, row.label, row.current_total_mb, row.peak_total_mb
+                        );
+                        if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
+                            line.push_str(&format!(" | pool {:.2}/{:.2}", row.current_pool_mb, row.peak_pool_mb));
+                        }
+                        if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
+                            line.push_str(&format!(" | kv {:.2}/{:.2}", row.current_kv_mb, row.peak_kv_mb));
+                        }
+                        if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
+                            line.push_str(&format!(" | kv-cache {:.2}/{:.2}", row.current_kv_cache_mb, row.peak_kv_cache_mb));
+                        }
+                        if row.show_absolute {
+                            line.push_str(&format!(
+                                " | totals pool {:.2} MB, kv {:.2} MB, kv-cache {:.2} MB",
+                                row.absolute_pool_mb, row.absolute_kv_mb, row.absolute_kv_cache_mb
+                            ));
+                        }
+                        line
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+        MetricsView::Latency => {
+            if state.latency_rows.is_empty() {
+                "Collecting data...".to_string()
+            } else {
+                state
+                    .latency_rows
+                    .iter()
+                    .map(|row| {
+                        let indent = "  ".repeat(row.level as usize);
+                        format!("{}{} - {:.2}ms ({:.2} avg)", indent, row.label, row.last_ms, row.average_ms)
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            }
+        }
+    };
+
+    let metrics_section = Paragraph::new(format!("{}\n\n{}", metrics_help, metrics_text))
+        .block(Block::default().title(metrics_block_title).borders(Borders::ALL));
 
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
@@ -251,9 +286,8 @@ fn ui(frame: &mut Frame, state: &AppState) {
 
     frame.render_widget(text_area, body_layout[0]);
     frame.render_widget(sidebar_block, sidebar_area);
-    frame.render_widget(memory_section, sidebar_sections[0]);
-    frame.render_widget(prompt_section, sidebar_sections[1]);
-    frame.render_widget(latency_section, sidebar_sections[2]);
+    frame.render_widget(prompt_section, sidebar_sections[0]);
+    frame.render_widget(metrics_section, sidebar_sections[1]);
     frame.render_widget(status_text, status_layout[0]);
     frame.render_widget(throughput_text, status_layout[1]);
 }
