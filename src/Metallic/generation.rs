@@ -6,7 +6,7 @@ use crate::metallic::Tokenizer;
 use rand::prelude::*;
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
-use sysinfo::{get_current_pid, Pid, ProcessExt, System, SystemExt};
+use sysinfo::{get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
@@ -254,19 +254,30 @@ impl ProcessMemoryTracker {
     fn new() -> Option<Self> {
         let pid = get_current_pid().ok()?;
         let mut system = System::new();
-        if !system.refresh_process(pid) {
-            system.refresh_processes();
+        let targets = [pid];
+        if system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&targets),
+            false,
+            ProcessRefreshKind::nothing().with_memory(),
+        ) == 0
+        {
+            system.refresh_processes(ProcessesToUpdate::All, false);
         }
         Some(Self { system, pid })
     }
 
     fn sample_mb(&mut self) -> Option<f64> {
-        if !self.system.refresh_process(self.pid) {
-            self.system.refresh_processes();
+        let pid = self.pid;
+        let targets = [pid];
+        if self.system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&targets),
+            false,
+            ProcessRefreshKind::nothing().with_memory(),
+        ) == 0
+        {
+            self.system.refresh_processes(ProcessesToUpdate::All, false);
         }
-        self.system
-            .process(self.pid)
-            .map(|process| process.memory() as f64 / 1024.0 / 1024.0)
+        self.system.process(pid).map(|process| process.memory() as f64 / 1024.0 / 1024.0)
     }
 }
 
