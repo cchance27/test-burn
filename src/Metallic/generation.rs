@@ -215,14 +215,22 @@ impl MemoryBlockStat {
 
 #[derive(Clone, Copy, Default)]
 struct ScalarStat {
+    baseline: Option<f64>,
     current: f64,
     peak: f64,
 }
 
 impl ScalarStat {
     fn record(&mut self, value: f64) {
+        if self.baseline.is_none() {
+            self.baseline = Some(value);
+        }
         self.current = value;
         self.peak = self.peak.max(value);
+    }
+
+    fn baseline_mb(&self) -> Option<f64> {
+        self.baseline
     }
 
     fn to_row(&self, label: &str) -> MemoryRow {
@@ -388,22 +396,13 @@ fn append_model_memory_rows(node: &ModelMemoryNode, level: u8, rows: &mut Vec<Me
     }
 }
 
-fn unattributed_host_row(host: &ScalarStat, forward_usage: Option<MemoryUsage>, model_memory: &ModelMemoryNode) -> Option<MemoryRow> {
-    let usage = forward_usage?;
+fn unattributed_host_row(host: &ScalarStat, tracked_mb: f64) -> Option<MemoryRow> {
     if host.current <= 0.0 {
         return None;
     }
 
-    let mut tracked_bytes = model_memory.total_bytes();
-    tracked_bytes += usage.pool_capacity;
-    tracked_bytes += usage.kv_capacity;
-    let tracked_mb = bytes_to_mb(tracked_bytes);
-    if tracked_mb <= 0.0 {
-        return None;
-    }
-
     let current_gap = (host.current - tracked_mb).max(0.0);
-    let peak_gap = (host.peak - tracked_mb).max(0.0);
+    let peak_gap = (host.peak - tracked_mb).max(current_gap);
     if current_gap < 1.0 && peak_gap < 1.0 {
         return None;
     }
@@ -424,6 +423,37 @@ fn unattributed_host_row(host: &ScalarStat, forward_usage: Option<MemoryUsage>, 
         absolute_kv_cache_mb: 0.0,
         show_absolute: false,
     })
+}
+
+fn baseline_host_row(host: &ScalarStat, tracked_mb: f64) -> Option<(MemoryRow, f64)> {
+    let baseline = host.baseline_mb()?;
+    if baseline <= 0.0 {
+        return None;
+    }
+
+    let gap = (baseline - tracked_mb).max(0.0);
+    if gap < 1.0 {
+        return None;
+    }
+
+    let row = MemoryRow {
+        label: "Process Baseline (Other)".to_string(),
+        level: 1,
+        current_total_mb: gap,
+        peak_total_mb: gap,
+        current_pool_mb: 0.0,
+        peak_pool_mb: 0.0,
+        current_kv_mb: 0.0,
+        peak_kv_mb: 0.0,
+        current_kv_cache_mb: 0.0,
+        peak_kv_cache_mb: 0.0,
+        absolute_pool_mb: 0.0,
+        absolute_kv_mb: 0.0,
+        absolute_kv_cache_mb: 0.0,
+        show_absolute: false,
+    };
+
+    Some((row, gap))
 }
 
 fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
@@ -597,7 +627,7 @@ pub fn generate(
         "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
     );
     let input_ids = tokenizer.encode(&full_prompt)?;
-    let output_tokens = generate_autoregressive_with_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
+    let output_tokens = generate_autoregressive_with_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg, &[])?;
     let output_text = tokenizer.decode(&output_tokens)?;
     Ok(output_text)
 }
@@ -610,6 +640,7 @@ pub fn generate_streaming(
     prompt: &str,
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
+    host_overheads: &[(String, usize)],
 ) -> Result<(), MetalError> {
     // Build full prompt string following Qwen2.5 chat template
     let full_prompt = format!(
@@ -655,7 +686,7 @@ pub fn generate_streaming(
     };
 
     // Generate tokens using the new KV cache approach
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx)?;
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx, host_overheads)?;
 
     Ok(())
 }
@@ -668,6 +699,7 @@ pub fn generate_autoregressive_with_kv_cache(
     ctx: &mut Context,
     input_ids: &[u32],
     cfg: &GenerationConfig,
+    host_overheads: &[(String, usize)],
 ) -> Result<Vec<u32>, MetalError> {
     let mut result = Vec::new();
     let mut callback = |token_id, _decoded_token| -> Result<bool, MetalError> {
@@ -676,7 +708,7 @@ pub fn generate_autoregressive_with_kv_cache(
     };
 
     let (tx, _) = mpsc::channel();
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx)?;
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx, host_overheads)?;
 
     Ok(result)
 }
@@ -690,6 +722,7 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F>(
     cfg: &GenerationConfig,
     token_callback: &mut F,
     tx: &mpsc::Sender<AppEvent>,
+    host_overheads: &[(String, usize)],
 ) -> Result<(), MetalError>
 where
     F: FnMut(u32, String) -> Result<bool, MetalError>,
@@ -910,6 +943,7 @@ where
                 latest_forward_usage,
                 &memory_blocks,
                 &memory_output,
+                host_overheads,
             );
             if tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
                 ui_connected = false;
@@ -993,17 +1027,51 @@ fn build_memory_rows(
     forward_usage: Option<MemoryUsage>,
     blocks: &[MemoryBlockStat],
     output: &MemoryScopeStat,
+    host_overheads: &[(String, usize)],
 ) -> Vec<MemoryRow> {
     let mut rows = Vec::new();
 
     append_model_memory_rows(model_memory, 0, &mut rows);
 
+    let mut tracked_mb = bytes_to_mb(model_memory.total_bytes());
+
+    for (label, bytes) in host_overheads {
+        if *bytes == 0 {
+            continue;
+        }
+        let mb = bytes_to_mb(*bytes);
+        tracked_mb += mb;
+        rows.push(MemoryRow {
+            label: label.clone(),
+            level: 0,
+            current_total_mb: mb,
+            peak_total_mb: mb,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        });
+    }
+
     if host.current > 0.0 || host.peak > 0.0 {
         rows.push(host.to_row("Host Memory (MB)"));
         if let Some(usage) = forward_usage {
+            tracked_mb += bytes_to_mb(usage.pool_capacity) + bytes_to_mb(usage.kv_capacity);
             append_reserved_pool_rows(&usage, &mut rows);
         }
-        if let Some(unattributed) = unattributed_host_row(host, forward_usage, model_memory) {
+
+        if let Some((baseline_row, baseline_mb)) = baseline_host_row(host, tracked_mb) {
+            tracked_mb += baseline_mb;
+            rows.push(baseline_row);
+        }
+
+        if let Some(unattributed) = unattributed_host_row(host, tracked_mb) {
             rows.push(unattributed);
         }
     }

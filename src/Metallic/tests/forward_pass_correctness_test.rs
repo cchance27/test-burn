@@ -1,5 +1,5 @@
-use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
+use crate::gguf::GGUFFile;
 use crate::metallic::kernels::elemwise_add::{BroadcastElemwiseAddOp, ElemwiseAddOp};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
@@ -1313,7 +1313,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             }
         }
 
-        let generated_ids = generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
+        let generated_ids = generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg, &[])?;
         ctx.synchronize();
 
         let prompt_len = input_ids.len();

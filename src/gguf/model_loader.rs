@@ -1,7 +1,7 @@
 use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     gguf::GGUFValue,
-    metallic::{Context, Tensor, resource_cache::ResourceCache},
+    metallic::{resource_cache::ResourceCache, Context, Tensor},
 };
 use std::collections::HashMap;
 
@@ -14,6 +14,12 @@ impl GGUFModelLoader {
     /// Create a new model loader from a GGUF file
     pub fn new(gguf_file: GGUFFile) -> Self {
         Self { gguf_file }
+    }
+
+    /// Return the size of the memory-mapped GGUF file in bytes so callers can
+    /// reason about the resident host footprint of keeping the loader alive.
+    pub fn mapped_len(&self) -> usize {
+        self.gguf_file.mmap.len()
     }
 
     /// Load a model from the GGUF file

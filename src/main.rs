@@ -39,6 +39,12 @@ fn main() -> Result<()> {
 
         tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
         let loader = gguf::model_loader::GGUFModelLoader::new(gguf);
+        let mapped_bytes = loader.mapped_len();
+        let host_overheads = if mapped_bytes > 0 {
+            vec![("GGUF File Mapping".to_string(), mapped_bytes)]
+        } else {
+            Vec::new()
+        };
         let gguf_model = loader.load_model(&ctx)?;
 
         tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
@@ -59,7 +65,7 @@ fn main() -> Result<()> {
         };
 
         tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-        let _ = generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &tx);
+        let _ = generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &tx, &host_overheads);
         tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
         Ok(())
     });
