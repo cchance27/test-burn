@@ -394,7 +394,9 @@ fn unattributed_host_row(host: &ScalarStat, forward_usage: Option<MemoryUsage>, 
         return None;
     }
 
-    let tracked_bytes = model_memory.total_bytes() + usage.pool_used + usage.kv_used + usage.kv_cache_bytes;
+    let mut tracked_bytes = model_memory.total_bytes();
+    tracked_bytes += usage.pool_capacity;
+    tracked_bytes += usage.kv_capacity;
     let tracked_mb = bytes_to_mb(tracked_bytes);
     if tracked_mb <= 0.0 {
         return None;
@@ -422,6 +424,51 @@ fn unattributed_host_row(host: &ScalarStat, forward_usage: Option<MemoryUsage>, 
         absolute_kv_cache_mb: 0.0,
         show_absolute: false,
     })
+}
+
+fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
+    if usage.pool_capacity > 0 {
+        let capacity_mb = bytes_to_mb(usage.pool_capacity);
+        let used_mb = bytes_to_mb(usage.pool_used);
+        rows.push(MemoryRow {
+            label: "Tensor Pool (Reserved)".to_string(),
+            level: 1,
+            current_total_mb: capacity_mb,
+            peak_total_mb: capacity_mb,
+            current_pool_mb: used_mb,
+            peak_pool_mb: used_mb,
+            current_kv_mb: 0.0,
+            peak_kv_mb: 0.0,
+            current_kv_cache_mb: 0.0,
+            peak_kv_cache_mb: 0.0,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        });
+    }
+
+    if usage.kv_capacity > 0 {
+        let capacity_mb = bytes_to_mb(usage.kv_capacity);
+        let used_mb = bytes_to_mb(usage.kv_used);
+        let cache_mb = bytes_to_mb(usage.kv_cache_bytes);
+        rows.push(MemoryRow {
+            label: "KV Pool (Reserved)".to_string(),
+            level: 1,
+            current_total_mb: capacity_mb,
+            peak_total_mb: capacity_mb,
+            current_pool_mb: 0.0,
+            peak_pool_mb: 0.0,
+            current_kv_mb: used_mb,
+            peak_kv_mb: used_mb,
+            current_kv_cache_mb: cache_mb,
+            peak_kv_cache_mb: cache_mb,
+            absolute_pool_mb: 0.0,
+            absolute_kv_mb: 0.0,
+            absolute_kv_cache_mb: 0.0,
+            show_absolute: false,
+        });
+    }
 }
 
 /// Generation configuration (defaults chosen by user)
@@ -953,6 +1000,9 @@ fn build_memory_rows(
 
     if host.current > 0.0 || host.peak > 0.0 {
         rows.push(host.to_row("Host Memory (MB)"));
+        if let Some(usage) = forward_usage {
+            append_reserved_pool_rows(&usage, &mut rows);
+        }
         if let Some(unattributed) = unattributed_host_row(host, forward_usage, model_memory) {
             rows.push(unattributed);
         }
@@ -963,13 +1013,7 @@ fn build_memory_rows(
     }
 
     if forward.has_data() || forward_usage.is_some() {
-        let mut forward_row = forward.to_row("Forward Step".to_string(), 0);
-        if let Some(usage) = forward_usage {
-            forward_row.show_absolute = true;
-            forward_row.absolute_pool_mb = bytes_to_mb(usage.pool_used);
-            forward_row.absolute_kv_mb = bytes_to_mb(usage.kv_used);
-            forward_row.absolute_kv_cache_mb = bytes_to_mb(usage.kv_cache_bytes);
-        }
+        let forward_row = forward.to_row("Forward Step".to_string(), 0);
         rows.push(forward_row);
 
         for (idx, block_stat) in blocks.iter().enumerate() {
