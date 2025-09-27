@@ -504,6 +504,16 @@ impl Tokenizer {
 
     /// Decode tokens into text
     pub fn decode(&self, tokens: &[u32]) -> Result<String, MetalError> {
+        let text = self.decode_lossless(tokens)?;
+        Ok(text.trim().to_string())
+    }
+
+    /// Decode tokens while preserving leading and trailing whitespace.
+    pub fn decode_lossless(&self, tokens: &[u32]) -> Result<String, MetalError> {
+        self.decode_internal(tokens)
+    }
+
+    fn decode_internal(&self, tokens: &[u32]) -> Result<String, MetalError> {
         let mut bytes = Vec::with_capacity(tokens.len());
         // Skip BOS token if present at the beginning
         let start_index = if self.add_bos_token
@@ -516,8 +526,16 @@ impl Tokenizer {
         };
 
         for token_id in &tokens[start_index..] {
+            if self.special_tokens.eos_token_id == Some(*token_id) {
+                continue;
+            }
+
+            let token_type = self.token_types.get(token_id).cloned().unwrap_or(1); // Default to normal
+            if token_type == 3 { // Control token
+                continue;
+            }
+
             if let Some(token) = self.vocab.get(token_id) {
-                let token_type = self.token_types.get(token_id).cloned().unwrap_or(1); // Default to normal
                 if token_type == 6 {
                     // Byte token
                     if token.starts_with("<0x") && token.ends_with('>') && token.len() == 6 {
@@ -538,20 +556,13 @@ impl Tokenizer {
         }
 
         let decoded_text = String::from_utf8_lossy(&bytes).to_string();
-        let processed_text = self.post_process(decoded_text);
-
-        Ok(processed_text)
+        Ok(self.post_process(decoded_text))
     }
 
     /// Post-process decoded text to remove BPE artifacts
     fn post_process(&self, text: String) -> String {
         // For GPT2, replace special characters with their corresponding whitespace
-        text.replace("Ġ", " ")
-            .replace("Ċ", "\n")
-            .replace("đ", "\t")
-            .replace("  ", " ")
-            .trim()
-            .to_string()
+        text.replace("Ġ", " ").replace("Ċ", "\n").replace("đ", "\t").replace("  ", " ")
     }
 
     /// Get the vocabulary size

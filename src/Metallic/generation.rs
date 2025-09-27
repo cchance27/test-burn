@@ -3,6 +3,9 @@ use crate::metallic::Tokenizer;
 use crate::metallic::models::Qwen25;
 use rand::prelude::*;
 
+const IM_START: &str = "<|im_start|>";
+const IM_END: &str = "<|im_end|>";
+
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
     pub max_tokens: usize,
@@ -115,37 +118,45 @@ pub fn generate(
     prompt: &str,
     cfg: &GenerationConfig,
 ) -> Result<String, MetalError> {
-    //println!("Starting generation with prompt: {}", prompt);
+    let mut output_tokens = Vec::new();
+    let callback = |token_id, _decoded_token| -> Result<bool, MetalError> {
+        output_tokens.push(token_id);
+        // Continue generation
+        Ok(true)
+    };
+
+    // Use the streaming version with a callback that collects tokens
+    generate_streaming(qwen, tokenizer, ctx, prompt, cfg, callback)?;
+
+    // Decode all collected tokens
+    let output_text = tokenizer.decode(&output_tokens)?;
+    Ok(output_text)
+}
+
+/// High-level end-to-end generation pipeline with token streaming support
+pub fn generate_streaming<F>(
+    qwen: &mut Qwen25,
+    tokenizer: &Tokenizer,
+    ctx: &mut Context,
+    prompt: &str,
+    cfg: &GenerationConfig,
+    mut token_callback: F,
+) -> Result<(), MetalError>
+where
+    F: FnMut(u32, String) -> Result<bool, MetalError>,
+{
     // Build full prompt string following Qwen2.5 chat template
-    let im_start = "<|im_start|>";
-    let im_end = "<|im_end|>";
     let full_prompt = format!(
-        "{im_start}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{im_end}\n{im_start}user\n{prompt}{im_end}\n{im_start}assistant\n",
+        "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
     );
-    //println!("Full prompt: {:?}", full_prompt);
 
     // Encode the full prompt
     let input_ids = tokenizer.encode(&full_prompt)?;
 
     // Generate tokens using the non-KV cache approach for debugging
-    let generated_ids = generate_autoregressive_without_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
+    generate_autoregressive_without_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback)?;
 
-    // Only decode the new tokens generated after the prompt, and trim at EOS if present
-    let start = input_ids.len();
-    let eos_id_opt = tokenizer.special_tokens().eos_token_id;
-    let tail = &generated_ids[start..];
-    let decode_slice: &[u32] = if let Some(eos_id) = eos_id_opt {
-        if let Some(pos) = tail.iter().position(|&t| t == eos_id) {
-            &tail[..pos]
-        } else {
-            tail
-        }
-    } else {
-        tail
-    };
-    let output_text = tokenizer.decode(decode_slice)?;
-
-    Ok(output_text)
+    Ok(())
 }
 
 /// High-level autoregressive generation loop using Qwen25 without KV caches for debugging.
@@ -157,18 +168,34 @@ pub fn generate_autoregressive_without_kv_cache(
     input_ids: &[u32],
     cfg: &GenerationConfig,
 ) -> Result<Vec<u32>, MetalError> {
-    //println!(
-    //    "Starting autoregressive generation without KV cache with {} input tokens",
-    //    input_ids.len()
-    //);
+    let mut result = Vec::new();
+    let mut callback = |token_id, _decoded_token| -> Result<bool, MetalError> {
+        result.push(token_id);
+        Ok(true)
+    };
 
+    generate_autoregressive_without_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback)?;
+
+    Ok(result)
+}
+
+/// High-level autoregressive generation loop with streaming support using Qwen25 without KV caches.
+pub fn generate_autoregressive_without_kv_cache_streaming<F>(
+    qwen: &mut Qwen25,
+    tokenizer: &Tokenizer,
+    ctx: &mut Context,
+    input_ids: &[u32],
+    cfg: &GenerationConfig,
+    token_callback: &mut F,
+) -> Result<(), MetalError>
+where
+    F: FnMut(u32, String) -> Result<bool, MetalError>,
+{
     // Start with input tokens
     let mut generated = input_ids.to_vec();
 
     // Autoregressive generation loop
     let max_gen_len = cfg.max_tokens + input_ids.len();
-
-    //println!("Starting generation loop: cur_pos={}, max_gen_len={}", input_ids.len(), max_gen_len);
 
     while generated.len() < max_gen_len {
         // Process the entire sequence so far
@@ -225,24 +252,20 @@ pub fn generate_autoregressive_without_kv_cache(
         let next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
 
         generated.push(next_token);
-        // Debug: print sampled token
-        //println!(
-        //    "Sampled token ID: {}, decoded: '{}'",
-        //    next_token,
-        //    tokenizer.decode(&[next_token]).unwrap_or_default()
-        //);
+
+        // Call the callback with the new token and its decoded form
+        let decoded_token = tokenizer.decode_lossless(&[next_token])?;
+        if !token_callback(next_token, decoded_token)? {
+            // If callback returns false, stop generation
+            break;
+        }
 
         // Check for EOS token
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645); // Qwen2.5 default EOS
         if next_token == eos_token_id {
             break;
         }
-
-        // Debug output
-        if generated.len() <= 20 {
-            println!("Generated token {}: {}", generated.len(), next_token);
-        }
     }
 
-    Ok(generated)
+    Ok(())
 }

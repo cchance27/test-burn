@@ -1,14 +1,29 @@
-use std::env;
-use std::process;
+use anyhow::Result;
+use ratatui::{
+    prelude::*,
+    widgets::{Block, Borders, Paragraph, Wrap},
+};
+use std::{
+    env,
+    io::stdout,
+    process,
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
 
-use test_burn::metallic::Tokenizer;
-use test_burn::metallic::generation::GenerationConfig;
-use test_burn::metallic::models::Qwen25;
+use test_burn::{
+    gguf,
+    metallic::{
+        generation::{generate_streaming, GenerationConfig},
+        models::Qwen25,
+        Context, Tokenizer,
+    },
+};
 
-fn main() {
+fn main() -> Result<()> {
     // Minimal CLI:
-    //   cargo run -- /path/to/model.gguf [PROMPT] [--diag]
-    //   or: cargo run -- /path/to/model.gguf --diag
+    //   cargo run -- /path/to/model.gguf [PROMPT]
     let mut args = env::args().skip(1);
     let gguf_path = match args.next() {
         Some(p) => p,
@@ -17,92 +32,176 @@ fn main() {
             process::exit(1);
         }
     };
-
     let prompt = args.next().unwrap_or_else(|| "Hello World".to_string());
 
-    println!("Loading GGUF file: {}", gguf_path);
-    // Load GGUF (memory-mapped)
-    let gguf = match test_burn::gguf::GGUFFile::load(&gguf_path) {
-        Ok(g) => g,
-        Err(e) => {
-            eprintln!("Failed to load GGUF file '{}': {:?}", gguf_path, e);
-            process::exit(2);
-        }
-    };
+    let (tx, rx) = mpsc::channel();
 
-    // Initialize Metallic context (Metal / MPS)
-    let mut ctx = match test_burn::metallic::Context::new() {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Failed to create Metallic Context: {:?}", e);
-            process::exit(3);
-        }
-    };
+    let generation_handle = thread::spawn(move || -> Result<()> {
+        tx.send(AppEvent::StatusUpdate("Loading GGUF...".to_string()))?;
+        let gguf = gguf::GGUFFile::load(&gguf_path)?;
 
-    // Build GGUFModel using the loader
-    let loader = test_burn::gguf::model_loader::GGUFModelLoader::new(gguf);
-    let gguf_model = match loader.load_model(&ctx) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Failed to create GGUFModel: {:?}", e);
-            process::exit(4);
-        }
-    };
+        tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
+        let mut ctx = Context::new()?;
 
-    // Instantiate Qwen25 (or the appropriate LoadableModel) from GGUFModel
-    println!("Instantiating Qwen25 from GGUF model (this may allocate device memory)...");
-    let mut qwen: Qwen25 = match gguf_model.instantiate(&mut ctx) {
-        Ok(w) => w,
-        Err(e) => {
-            eprintln!("Failed to instantiate Qwen25 from GGUFModel: {:?}", e);
-            process::exit(5);
-        }
-    };
+        tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
+        let loader = gguf::model_loader::GGUFModelLoader::new(gguf);
+        let gguf_model = loader.load_model(&ctx)?;
 
-    // Try to construct a tokenizer from GGUF metadata (best-effort)
-    let tokenizer = match Tokenizer::from_gguf_metadata(&gguf_model.metadata) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!(
-                "Warning: failed to build tokenizer from GGUF metadata: {:?}. Falling back to basic whitespace tokenizer.",
-                e
-            );
-            // Very small fallback tokenizer: map bytes to token ids 0..255
-            let mut map = rustc_hash::FxHashMap::default();
-            for i in 0..256u32 {
-                map.insert(i, format!("<{}>", i));
+        tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
+        let mut qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
+
+        tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
+        let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+
+        tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
+        let tokens = tokenizer.encode(&prompt)?;
+        tx.send(AppEvent::TokenCount(tokens.len()))?;
+
+        let cfg = GenerationConfig {
+            max_tokens: 4096,
+            temperature: 0.7,
+            top_p: 0.95,
+            top_k: 40,
+        };
+
+        tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+        let start_time = Instant::now();
+        let mut token_count = 0;
+
+        let _ = generate_streaming(
+            &mut qwen,
+            &tokenizer,
+            &mut ctx,
+            &prompt,
+            &cfg,
+            |_, decoded_token| {
+                token_count += 1;
+                let elapsed = start_time.elapsed();
+                let tokens_per_second = token_count as f64 / elapsed.as_secs_f64();
+
+                if tx
+                    .send(AppEvent::Token(decoded_token, tokens_per_second))
+                    .is_err()
+                {
+                    return Ok(false); // Stop generation if UI thread has disconnected
+                }
+                Ok(true)
+            },
+        );
+        tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
+        Ok(())
+    });
+
+    let mut terminal = setup_terminal()?;
+    let mut app_state = AppState::new();
+
+    while !app_state.should_quit {
+        if crossterm::event::poll(Duration::from_millis(50))? {
+            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
+                if key.code == crossterm::event::KeyCode::Char('q') {
+                    app_state.should_quit = true;
+                }
             }
-            test_burn::metallic::tokenizer::Tokenizer::from_vocab_and_merges(map, vec![]).expect("fallback tokenizer")
         }
-    };
 
-    // Tokenize prompt
-    println!("Tokenizing prompt: {:?}", prompt);
-    let tokens = match tokenizer.encode(&prompt) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("Failed to tokenize prompt: {:?}", e);
-            process::exit(6);
+        while let Ok(event) = rx.try_recv() {
+            match event {
+                AppEvent::Token(token, tokens_per_second) => {
+                    app_state.generated_text.push_str(&token);
+                    app_state.tokens_per_second = tokens_per_second;
+                }
+                AppEvent::TokenCount(count) => {
+                    app_state.prompt_token_count = count;
+                }
+                AppEvent::StatusUpdate(status) => {
+                    app_state.status = status;
+                }
+            }
         }
-    };
 
-    println!("Token count: {}", tokens.len());
+        terminal.draw(|frame| ui(frame, &app_state))?;
+    }
 
-    let cfg = GenerationConfig {
-        max_tokens: 40,
-        temperature: 0.7,
-        top_p: 0.95,
-        top_k: 40,
-    };
+    restore_terminal()?;
+    generation_handle.join().unwrap()?;
+    Ok(())
+}
 
-    match test_burn::metallic::generation::generate(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg) {
-        Ok(out_text) => {
-            println!("\n\nGeneration result: {}", out_text);
-            process::exit(0);
-        }
-        Err(e) => {
-            eprintln!("\n\nGeneration failed: {:?}", e);
-            process::exit(8);
+enum AppEvent {
+    Token(String, f64),
+    TokenCount(usize),
+    StatusUpdate(String),
+}
+
+struct AppState {
+    generated_text: String,
+    tokens_per_second: f64,
+    prompt_token_count: usize,
+    should_quit: bool,
+    status: String,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            generated_text: String::new(),
+            tokens_per_second: 0.0,
+            prompt_token_count: 0,
+            should_quit: false,
+            status: "Initializing...".to_string(),
         }
     }
+}
+
+fn setup_terminal() -> Result<Terminal<impl Backend>> {
+    let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
+    crossterm::terminal::enable_raw_mode()?;
+    crossterm::execute!(
+        stdout(),
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    )?;
+    terminal.clear()?;
+    Ok(terminal)
+}
+
+fn restore_terminal() -> Result<()> {
+    crossterm::execute!(
+        stdout(),
+        crossterm::terminal::LeaveAlternateScreen,
+        crossterm::event::DisableMouseCapture
+    )?;
+    crossterm::terminal::disable_raw_mode()?;
+    Ok(())
+}
+
+fn ui(frame: &mut Frame, state: &AppState) {
+    let main_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(frame.area());
+
+    let text_area = Paragraph::new(state.generated_text.clone())
+        .block(
+            Block::default()
+                .title("Generated Text (q to quit)")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: false });
+
+    let status_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(main_layout[1]);
+
+    let status_text = Paragraph::new(state.status.clone())
+        .style(Style::default().fg(Color::White).bg(Color::Blue));
+
+    let its_text = Paragraph::new(format!("it/s: {:.2}", state.tokens_per_second))
+        .style(Style::default().fg(Color::White).bg(Color::Blue))
+        .alignment(Alignment::Right);
+
+    frame.render_widget(text_area, main_layout[0]);
+    frame.render_widget(status_text, status_layout[0]);
+    frame.render_widget(its_text, status_layout[1]);
 }
