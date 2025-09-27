@@ -1,5 +1,5 @@
-use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
+use crate::gguf::GGUFFile;
 use crate::metallic::kernels::elemwise_add::{BroadcastElemwiseAddOp, ElemwiseAddOp};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
@@ -33,7 +33,7 @@ fn repeat_kv_heads(
     }
 
     let output_dims = vec![batch * n_heads, seq, head_dim];
-            let mut output = Tensor::zeros(output_dims, ctx, true)?;
+    let mut output = Tensor::zeros(output_dims, ctx, true)?;
     let input_slice = input.as_slice();
     let output_slice = output.as_mut_slice();
 
@@ -1368,6 +1368,133 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             );
         }
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::metallic::MetalError> {
+    let mut ctx = Context::new()?;
+
+    let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
+    let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
+    let loader = GGUFModelLoader::new(gguf_file);
+    let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
+    let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+
+    let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
+    let input_text = std::fs::read_to_string(Path::new(npy_dump_path).join("input_text.txt")).unwrap();
+    let input_ids = tokenizer.encode(&input_text)?;
+
+    let (py_logits_data, py_logits_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/logits_pre_softmax.npy"));
+    let py_logits_flat = py_logits_data
+        .as_slice()
+        .expect("Failed to get slice from ndarray for PyTorch logits");
+
+    let vocab_size = model.config.vocab_size;
+    assert!(
+        !input_ids.is_empty(),
+        "Input prompt from PyTorch dump should contain at least one token"
+    );
+    assert_eq!(
+        py_logits_flat.len() % vocab_size,
+        0,
+        "PyTorch logits length must be a multiple of vocab size"
+    );
+
+    let total_positions = py_logits_flat.len() / vocab_size;
+    let expected_positions = if py_logits_shape.len() == 3 && py_logits_shape[0] == 1 {
+        py_logits_shape[1]
+    } else {
+        py_logits_shape[0]
+    };
+    assert_eq!(total_positions, expected_positions, "PyTorch logits metadata mismatch");
+    assert_eq!(
+        total_positions,
+        input_ids.len(),
+        "Prompt token count does not match PyTorch logits dump"
+    );
+
+    // Prepare KV cache pool for incremental forward steps.
+    let n_layers = model.config.n_layers;
+    let n_kv_heads = model.config.n_kv_heads;
+    let d_model = model.config.d_model;
+    let n_heads = model.config.n_heads;
+    let kv_dim = d_model * n_kv_heads / n_heads;
+    let kv_head_dim = kv_dim / n_kv_heads;
+
+    ctx.kv_caches.clear();
+    ctx.kv_cache_pool.reset();
+    for layer_idx in 0..n_layers {
+        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, 1 * n_kv_heads, kv_head_dim)?;
+    }
+
+    println!("--- Comparing incremental forward_step logits against PyTorch reference ---");
+
+    for (pos, &token_id) in input_ids.iter().enumerate() {
+        ctx.reset_pool();
+        ctx.clear_cache();
+
+        let token_embedding = model.embed(&[token_id], &mut ctx)?;
+        let hidden_state = model.forward_step(&token_embedding, pos, &mut ctx)?;
+        let logits_tensor = model.output(&hidden_state, &mut ctx)?;
+        let kv_logits = logits_tensor.to_vec();
+
+        assert_eq!(kv_logits.len(), vocab_size, "forward_step logits should be a single vocab slice");
+
+        let start = pos * vocab_size;
+        let end = start + vocab_size;
+        let py_slice = &py_logits_flat[start..end];
+
+        let mut max_diff = 0.0f32;
+        let mut max_idx = 0usize;
+        let mut diff_sum = 0.0f32;
+
+        for (idx, (&rust_val, &py_val)) in kv_logits.iter().zip(py_slice.iter()).enumerate() {
+            let diff = (rust_val - py_val).abs();
+            diff_sum += diff;
+            if diff > max_diff {
+                max_diff = diff;
+                max_idx = idx;
+            }
+        }
+
+        let avg_diff = diff_sum / vocab_size as f32;
+
+        println!(
+            "Step {:02} | token {:>6} | max diff {:>10.3e} @ vocab {} | avg diff {:>10.3e}",
+            pos, token_id, max_diff, max_idx, avg_diff
+        );
+
+        assert!(
+            max_diff < 1e-3,
+            "Logits mismatch at step {} exceeds tolerance: max diff {}",
+            pos,
+            max_diff
+        );
+
+        let kv_argmax = kv_logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap();
+        let py_argmax = py_slice
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap();
+
+        assert_eq!(
+            kv_argmax, py_argmax,
+            "Argmax mismatch between KV cache logits and PyTorch at step {}",
+            pos
+        );
+    }
+
+    println!("✅ Incremental forward_step logits match PyTorch reference for all prompt tokens.");
 
     Ok(())
 }
