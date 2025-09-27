@@ -9,11 +9,12 @@ struct SoftmaxOperation {
     seq_q: u32,
     seq_k: u32,
     causal: u32,
+    query_offset: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for SoftmaxOp {
-    type Args = (Tensor, u32, u32, u32); // (attn, seq_q, seq_k, causal)
+    type Args = (Tensor, u32, u32, u32, u32); // (attn, seq_q, seq_k, causal, query_offset)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::FusedSoftmax)
@@ -25,7 +26,7 @@ impl KernelInvocable for SoftmaxOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut attn, seq_q, seq_k, causal) = args;
+        let (mut attn, seq_q, seq_k, causal, query_offset) = args;
 
         // Validate dimensions
         if attn.dims().len() != 2 {
@@ -52,6 +53,7 @@ impl KernelInvocable for SoftmaxOp {
             seq_q,
             seq_k,
             causal,
+            query_offset,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
@@ -87,6 +89,7 @@ impl Operation for SoftmaxOperation {
         set_bytes(&encoder, 1, &self.seq_q);
         set_bytes(&encoder, 2, &self.seq_k);
         set_bytes(&encoder, 3, &self.causal);
+        set_bytes(&encoder, 4, &self.query_offset);
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();
         Ok(())
@@ -105,7 +108,7 @@ mod softmax_test {
         let attn = Tensor::create_tensor_from_slice(&input_data, vec![2, 3], &ctx)?;
 
         // Apply softmax with no causal masking (causal=0)
-        let result = ctx.call::<SoftmaxOp>((attn, 2, 3, 0))?;
+        let result = ctx.call::<SoftmaxOp>((attn, 2, 3, 0, 0))?;
 
         // Check that each row sums to approximately 1 (property of softmax)
         let result_slice = result.as_slice();

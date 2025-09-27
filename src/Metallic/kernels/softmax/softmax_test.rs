@@ -44,7 +44,7 @@ fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
     // Apply softmax using the new kernel system (in-place operation)
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -56,11 +56,7 @@ fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
         assert!(
             diff <= atol || rel_err <= rtol,
             "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
@@ -98,7 +94,7 @@ fn test_softmax_golden_causal() -> Result<(), MetalError> {
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
 
     // Apply softmax using the new kernel system (in-place operation) with causal masking
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -110,11 +106,7 @@ fn test_softmax_golden_causal() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
         assert!(
             diff <= atol || rel_err <= rtol,
             "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
@@ -160,22 +152,20 @@ fn test_softmax_golden_causal() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 3;
     let seq_k = 4;
 
     // Create input with large positive values
     let input_data = vec![
-        1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0, 8000.0, 9000.0, 10000.0, 11000.0,
-        12000.0,
+        1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0, 8000.0, 9000.0, 10000.0, 11000.0, 12000.0,
     ];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -187,11 +177,7 @@ fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -235,8 +221,7 @@ fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 2;
     let seq_k = 3;
 
@@ -247,7 +232,7 @@ fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -259,11 +244,7 @@ fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -307,8 +288,7 @@ fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 2;
     let seq_k = 4;
 
@@ -319,7 +299,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -331,11 +311,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -391,8 +367,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 2;
     let seq_k = 5;
 
@@ -406,7 +381,7 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -418,11 +393,7 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -483,21 +454,18 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_causal_with_extremes() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 3;
     let seq_k = 3;
 
     // Create input with extreme values and test causal masking
-    let input_data = vec![
-        1000.0, -1000.0, 5000.0, -2000.0, 3000.0, -4000.0, 100.0, 200.0, 300.0,
-    ];
+    let input_data = vec![1000.0, -1000.0, 5000.0, -2000.0, 3000.0, -4000.0, 100.0, 200.0, 300.0];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -509,11 +477,7 @@ fn test_softmax_extremes_causal_with_extremes() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -595,11 +559,7 @@ fn cpu_softmax_with_infinity(input: &[f32], seq_q: usize, seq_k: usize, causal: 
                 }
             }
             for j in 0..seq_k {
-                output[row_start + j] = if row[j] == f32::INFINITY {
-                    1.0 / total_inf
-                } else {
-                    0.0
-                };
+                output[row_start + j] = if row[j] == f32::INFINITY { 1.0 / total_inf } else { 0.0 };
             }
             continue;
         }
@@ -622,15 +582,13 @@ fn cpu_softmax_with_infinity(input: &[f32], seq_q: usize, seq_k: usize, causal: 
 #[test]
 fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 2;
     let seq_k = 4;
 
     // Test with extremely small values that may cause underflow issues
     let input_data = vec![
-        -10000.0, -9999.0, -10001.0,
-        -10002.0, // Very negative values that could cause exp to underflow
+        -10000.0, -9999.0, -10001.0, -10002.0, // Very negative values that could cause exp to underflow
         -10000.0, -10000.0, -10000.0, -10000.0, // Identical very negative values
     ];
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
@@ -638,7 +596,7 @@ fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -650,11 +608,7 @@ fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -698,8 +652,7 @@ fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 2;
     let seq_k = 4;
 
@@ -719,7 +672,7 @@ fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -731,11 +684,7 @@ fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity - the output should be finite after softmax
         assert!(
@@ -794,8 +743,7 @@ fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 1;
     let seq_k = 4;
 
@@ -811,7 +759,7 @@ fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -842,8 +790,7 @@ fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 1;
     let seq_k = 2048; // Large sequence length
 
@@ -862,7 +809,7 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -874,11 +821,7 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -907,11 +850,7 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
 
     // Verify row sums to ~1.0
     let row_sum: f32 = metal_output.iter().sum();
-    assert!(
-        (row_sum - 1.0).abs() < 1e-5,
-        "Row sum mismatch: expected ~1.0, got {:.6}",
-        row_sum
-    );
+    assert!((row_sum - 1.0).abs() < 1e-5, "Row sum mismatch: expected ~1.0, got {:.6}", row_sum);
 
     Ok(())
 }
@@ -919,8 +858,7 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
-    
+
     let seq_q = 1;
     let seq_k = 8;
 
@@ -940,7 +878,7 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -952,11 +890,7 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -985,11 +919,7 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
 
     // Verify row sums to ~1.0
     let row_sum: f32 = metal_output.iter().sum();
-    assert!(
-        (row_sum - 1.0).abs() < 1e-5,
-        "Row sum mismatch: expected ~1.0, got {:.6}",
-        row_sum
-    );
+    assert!((row_sum - 1.0).abs() < 1e-5, "Row sum mismatch: expected ~1.0, got {:.6}", row_sum);
 
     // The largest positive value (1e10) should dominate and be close to 1.0
     assert!(
@@ -1006,7 +936,6 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
 #[test]
 fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
 
     let seq_q = 7;
     let seq_k = 13;
@@ -1016,7 +945,7 @@ fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1028,11 +957,7 @@ fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
         assert!(
             diff <= atol || rel_err <= rtol,
             "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
@@ -1061,7 +986,6 @@ fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
 
     let seq_q = 31;
     let seq_k = 257;
@@ -1071,7 +995,7 @@ fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1083,11 +1007,7 @@ fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
         assert!(
             diff <= atol || rel_err <= rtol,
             "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
@@ -1116,7 +1036,6 @@ fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
 
     let seq_q = 5;
     let seq_k = 9;
@@ -1126,7 +1045,7 @@ fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1138,11 +1057,7 @@ fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
         assert!(
             diff <= atol || rel_err <= rtol,
             "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
@@ -1186,7 +1101,6 @@ fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
 #[test]
 fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
     let mut context = Context::new()?;
-    
 
     let seq_q = 17;
     let seq_k = 93;
@@ -1194,9 +1108,9 @@ fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);  // Using causal=true
+    let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true); // Using causal=true
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1208,11 +1122,7 @@ fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
         assert!(
             diff <= atol || rel_err <= rtol,
             "Mismatch at index {}: metal={:.6}, cpu={:.6}, diff={:.2e}, rel={:.2e}",
@@ -1260,7 +1170,9 @@ fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
     let mut context = Context::new()?;
 
     // Get the pipeline through the new kernel system
-    let pipeline = context.kernel_manager.get_pipeline(crate::metallic::kernels::KernelFunction::FusedSoftmax, &context.device)?;
+    let pipeline = context
+        .kernel_manager
+        .get_pipeline(crate::metallic::kernels::KernelFunction::FusedSoftmax, &context.device)?;
 
     // Check that the pipeline has a valid execution width
     let execution_width = pipeline.threadExecutionWidth();
@@ -1277,7 +1189,7 @@ fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1307,12 +1219,12 @@ fn test_softmax_threadgroup_large_seq_k() -> Result<(), MetalError> {
 
     // Test with a larger sequence length that requires many threads per threadgroup
     let seq_q = 2;
-    let seq_k = 128;  // Larger than typical threadgroup size
+    let seq_k = 128; // Larger than typical threadgroup size
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.05).collect();
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1342,12 +1254,12 @@ fn test_softmax_threadgroup_very_large_seq_k() -> Result<(), MetalError> {
 
     // Test with a very large sequence length
     let seq_q = 1;
-    let seq_k = 512;  // Very large sequence length
+    let seq_k = 512; // Very large sequence length
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.01).collect();
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1382,7 +1294,7 @@ fn test_softmax_threadgroup_multiple_rows() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+    let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
     context.synchronize();
 
     // Verify the operation completed successfully

@@ -305,8 +305,19 @@ impl Context {
         v: &super::Tensor,
         causal: bool,
     ) -> Result<super::Tensor, MetalError> {
+        self.scaled_dot_product_attention_with_offset(q, k, v, causal, 0)
+    }
+
+    pub fn scaled_dot_product_attention_with_offset(
+        &mut self,
+        q: &super::Tensor,
+        k: &super::Tensor,
+        v: &super::Tensor,
+        causal: bool,
+        query_offset: usize,
+    ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOp>((q.clone(), k.clone(), v.clone(), causal))
+        self.call::<ScaledDotProductAttentionOp>((q.clone(), k.clone(), v.clone(), causal, query_offset as u32))
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.

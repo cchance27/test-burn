@@ -15,7 +15,7 @@ fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
     let v = Tensor::create_tensor_from_slice(&[1.0, 0.0, 0.0, 1.0], vec![1, 2, 2], &ctx)?;
 
     // Use the kernel via the generic `call` method.
-    let result_tensor = ctx.call::<ScaledDotProductAttentionOp>((q, k, v, false))?;
+    let result_tensor = ctx.call::<ScaledDotProductAttentionOp>((q, k, v, false, 0))?;
     ctx.synchronize();
 
     // We expect some output, but the exact values depend on the implementation
@@ -35,7 +35,7 @@ fn test_scaled_dot_product_attention_kernel_causal() -> Result<(), MetalError> {
     let v = Tensor::create_tensor_from_slice(&[1.0, 0.0, 0.0, 1.0], vec![1, 2, 2], &ctx)?;
 
     // Use the kernel via the generic `call` method with causal attention.
-    let result_tensor = ctx.call::<ScaledDotProductAttentionOp>((q, k, v, true))?;
+    let result_tensor = ctx.call::<ScaledDotProductAttentionOp>((q, k, v, true, 0))?;
     ctx.synchronize();
 
     // We expect some output, but the exact values depend on the implementation

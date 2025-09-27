@@ -188,7 +188,7 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
         let attn_tensor = input_tensor.clone();
 
         // Apply softmax using the new kernel system (in-place operation)
-        let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0))?;
+        let result = context.call::<SoftmaxOp>((attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
         context.synchronize();
 
         results.push(result.as_slice().to_vec());

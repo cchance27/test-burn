@@ -451,7 +451,7 @@ impl Qwen25 {
             let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
 
             // SDPA (causal mask enabled)
-            let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
+            let attn_out_heads = ctx.scaled_dot_product_attention_with_offset(&q_heads_after_rope, &k_repeated, &v_repeated, true, pos)?;
 
             // Attention Output Reassembly
             let attn_out_reshaped_1 = attn_out_heads.reshape(vec![batch, n_heads, seq, head_dim])?;
