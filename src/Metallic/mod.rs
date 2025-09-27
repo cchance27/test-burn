@@ -11,6 +11,8 @@ pub mod cacheable_sdpa;
 pub mod context;
 pub mod encoder;
 pub mod error;
+pub mod instrumentation;
+pub mod metrics;
 pub mod operation;
 pub mod pool;
 pub mod resource_cache;

@@ -1,11 +1,17 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
+use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, MemoryEvent, MemoryUsage};
+use crate::metallic::metrics::{
+    build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, BlockStat, MemoryBlockStat, MemoryScopeStat,
+    MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat,
+};
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
-use app_memory_usage_fetcher::get_memory_usage_mbytes;
 use rand::prelude::*;
-use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::{
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
@@ -136,7 +142,7 @@ pub fn generate(
         "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
     );
     let input_ids = tokenizer.encode(&full_prompt)?;
-    let output_tokens = generate_autoregressive_with_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
+    let output_tokens = generate_autoregressive_with_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg, &[])?;
     let output_text = tokenizer.decode(&output_tokens)?;
     Ok(output_text)
 }
@@ -149,6 +155,7 @@ pub fn generate_streaming(
     prompt: &str,
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
+    host_overheads: &[(String, usize)],
 ) -> Result<(), MetalError> {
     // Build full prompt string following Qwen2.5 chat template
     let full_prompt = format!(
@@ -194,7 +201,7 @@ pub fn generate_streaming(
     };
 
     // Generate tokens using the new KV cache approach
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx)?;
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx, host_overheads)?;
 
     Ok(())
 }
@@ -207,6 +214,7 @@ pub fn generate_autoregressive_with_kv_cache(
     ctx: &mut Context,
     input_ids: &[u32],
     cfg: &GenerationConfig,
+    host_overheads: &[(String, usize)],
 ) -> Result<Vec<u32>, MetalError> {
     let mut result = Vec::new();
     let mut callback = |token_id, _decoded_token| -> Result<bool, MetalError> {
@@ -215,7 +223,7 @@ pub fn generate_autoregressive_with_kv_cache(
     };
 
     let (tx, _) = mpsc::channel();
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx)?;
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx, host_overheads)?;
 
     Ok(result)
 }
@@ -229,6 +237,7 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F>(
     cfg: &GenerationConfig,
     token_callback: &mut F,
     tx: &mpsc::Sender<AppEvent>,
+    host_overheads: &[(String, usize)],
 ) -> Result<(), MetalError>
 where
     F: FnMut(u32, String) -> Result<bool, MetalError>,
@@ -246,6 +255,30 @@ where
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1; // Assuming batch size of 1 for now
+
+    let log_interval = log_interval_from_env();
+    let mut metrics_loggers = MetricsLoggers::from_env(log_interval);
+
+    let mut embed_stats = RollingStat::default();
+    let mut forward_stats = RollingStat::default();
+    let mut output_stats = RollingStat::default();
+    let mut sample_stats = RollingStat::default();
+    let mut block_stats = vec![BlockStat::default(); n_layers];
+    let mut latencies_ready = false;
+    let mut memory_embed = MemoryScopeStat::default();
+    let mut memory_forward = MemoryScopeStat::default();
+    let mut memory_output = MemoryScopeStat::default();
+    let mut memory_blocks = vec![MemoryBlockStat::default(); n_layers];
+    let mut latest_forward_usage: Option<MemoryUsage> = None;
+    let mut memory_ready = false;
+    let mut host_memory = ScalarStat::default();
+    let mut process_memory_tracker = ProcessMemoryTracker::new();
+    if let Some(tracker) = process_memory_tracker.as_mut() {
+        if let Some(memory_mb) = tracker.sample_mb() {
+            host_memory.record(memory_mb);
+        }
+    }
+    let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
@@ -302,54 +335,102 @@ where
         ctx.reset_pool();
         ctx.clear_cache();
 
-        // Embed just the single last token
+        let embed_usage_before = ctx.snapshot_memory_usage();
+        let embed_start = Instant::now();
         let input_tensor = qwen.embed(&[next_token], ctx)?;
+        let embed_duration = embed_start.elapsed();
+        if !embed_duration.is_zero() {
+            embed_stats.record(embed_duration);
+        }
+        let embed_usage_after = ctx.snapshot_memory_usage();
+        let embed_delta = embed_usage_after.delta_from(embed_usage_before);
+        memory_embed.update(
+            embed_delta.pool_used,
+            embed_delta.kv_used,
+            embed_delta.kv_cache_bytes,
+            embed_delta.pool_used,
+            embed_delta.kv_used,
+            embed_delta.kv_cache_bytes,
+        );
 
-        // Run a single forward step
         let current_pos = prompt_len + i;
+        let latency_collector = new_latency_collector(n_layers);
+        let memory_collector = new_memory_collector(n_layers);
+        ctx.set_latency_collector(Some(latency_collector.clone()));
+        ctx.set_memory_collector(Some(memory_collector.clone()));
+        ctx.record_memory_event(MemoryEvent::ForwardStart);
+
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
-        let logits_tensor = qwen.output(&hidden_states, ctx)?;
+        let forward_snapshot = latency_collector.borrow().snapshot();
+        let memory_snapshot = memory_collector.borrow().snapshot();
+        ctx.set_latency_collector(None);
+        ctx.set_memory_collector(None);
 
-        if ui_connected && let Some(stats) = ctx.get_cache_stats() {
-            let app_mem = get_memory_usage_mbytes(); // This actually seems to return GB not MB due to a bug in crate
-            let app_mem_str = app_mem.map(|mb| format!("{:.2} GB", mb)).unwrap_or_else(|| "n/a".to_string());
-
-            let pool_used_mb = ctx.pool.used_bytes() as f32 / 1024.0 / 1024.0;
-            let pool_capacity_mb = ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0;
-
-            let kv_used_mb = ctx.kv_cache_pool.used_bytes() as f32 / 1024.0 / 1024.0;
-            let kv_capacity_mb = ctx.kv_cache_pool.total_capacity() as f32 / 1024.0 / 1024.0;
-            let kv_layers = ctx.kv_caches.len();
-
-            let memory_usage = format!(
-                "App: {} | Pool: {:.2}/{:.2} MB | KV: {:.2}/{:.2} MB (L={}) | Cache: G{}/D{}/S{}",
-                app_mem_str,
-                pool_used_mb,
-                pool_capacity_mb,
-                kv_used_mb,
-                kv_capacity_mb,
-                kv_layers,
-                stats.gemm_cache_size,
-                stats.descriptor_cache_size,
-                stats.sdpa_cache_size
+        if let Some(usage) = memory_snapshot.forward.last {
+            latest_forward_usage = Some(usage);
+        }
+        if memory_snapshot.forward.baseline.is_some() {
+            memory_forward.update(
+                memory_snapshot.forward.current_pool_delta,
+                memory_snapshot.forward.current_kv_delta,
+                memory_snapshot.forward.current_kv_cache_delta,
+                memory_snapshot.forward.peak_pool_delta,
+                memory_snapshot.forward.peak_kv_delta,
+                memory_snapshot.forward.peak_kv_cache_delta,
             );
+            for (idx, block_snapshot) in memory_snapshot.blocks.iter().enumerate() {
+                memory_blocks[idx].update_from_snapshot(block_snapshot);
+            }
+            memory_ready = true;
+        }
 
-            if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
-                ui_connected = false; // Receiver dropped; continue without UI updates
+        if !forward_snapshot.forward_step.is_zero() {
+            forward_stats.record(forward_snapshot.forward_step);
+            latencies_ready = true;
+        }
+        for (idx, block_snapshot) in forward_snapshot.blocks.iter().enumerate() {
+            if !block_snapshot.total.is_zero() {
+                block_stats[idx].record_total(block_snapshot.total);
+            }
+            for phase in &block_snapshot.phases {
+                if !phase.duration.is_zero() {
+                    block_stats[idx].record_phase(&phase.label, phase.duration);
+                }
+            }
+        }
+
+        let output_usage_before = ctx.snapshot_memory_usage();
+        let output_start = Instant::now();
+        let logits_tensor = qwen.output(&hidden_states, ctx)?;
+        let output_duration = output_start.elapsed();
+        if !output_duration.is_zero() {
+            output_stats.record(output_duration);
+        }
+        let output_usage_after = ctx.snapshot_memory_usage();
+        let output_delta = output_usage_after.delta_from(output_usage_before);
+        memory_output.update(
+            output_delta.pool_used,
+            output_delta.kv_used,
+            output_delta.kv_cache_bytes,
+            output_delta.pool_used,
+            output_delta.kv_used,
+            output_delta.kv_cache_bytes,
+        );
+
+        if let Some(tracker) = process_memory_tracker.as_mut() {
+            if let Some(memory_mb) = tracker.sample_mb() {
+                host_memory.record(memory_mb);
             }
         }
 
         let logits = logits_tensor.to_vec();
-
-        // Since seq_len is 1, the logits are just the first (and only) vocab block
         let vocab_logits = logits[0..vocab_size].to_vec();
 
-        // Sample the next token
+        let sample_start = Instant::now();
         next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
 
         generated_ids.push(next_token);
 
-        // Callback and check for EOS
         let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
         let mut decoded_chunk = String::new();
         if decoded_full.len() >= last_decoded_len {
@@ -358,6 +439,46 @@ where
             decoded_chunk = decoded_full.clone();
         }
         last_decoded_len = decoded_full.len();
+
+        let sample_duration = sample_start.elapsed();
+        if !sample_duration.is_zero() {
+            sample_stats.record(sample_duration);
+        }
+
+        if latencies_ready {
+            let rows = build_latency_rows(&embed_stats, &forward_stats, &block_stats, &output_stats, &sample_stats);
+            if let Some(loggers) = metrics_loggers.as_mut() {
+                let log_now = Instant::now();
+                loggers.log_latency(&rows, log_now, false);
+            }
+            if ui_connected {
+                if tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
+                    ui_connected = false;
+                }
+            }
+        }
+
+        if memory_ready {
+            let rows = build_memory_rows(
+                &model_memory_tree,
+                &host_memory,
+                &memory_embed,
+                &memory_forward,
+                latest_forward_usage,
+                &memory_blocks,
+                &memory_output,
+                host_overheads,
+            );
+            if let Some(loggers) = metrics_loggers.as_mut() {
+                let log_now = Instant::now();
+                loggers.log_memory(&rows, log_now, false);
+            }
+            if ui_connected {
+                if tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
+                    ui_connected = false;
+                }
+            }
+        }
 
         if !token_callback(next_token, decoded_chunk)? {
             break;

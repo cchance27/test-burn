@@ -1,9 +1,10 @@
 use super::error::MetalError;
+use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollectorHandle, MemoryEvent, MemoryUsage};
 use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Tensor, kernels};
+use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -14,6 +15,7 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary};
 use rustc_hash::FxHashMap;
+use std::time::Duration;
 
 /// The main context for Metal operations.
 pub struct Context {
@@ -37,6 +39,10 @@ pub struct Context {
     active_cmd_buffer: Option<CommandBuffer>,
     /// Resource cache associated with the active command buffer.
     active_resource_cache: Option<ResourceCache>,
+    /// Optional latency collector used to report per-iteration timings.
+    latency_collector: Option<LatencyCollectorHandle>,
+    /// Optional memory collector used to capture detailed allocation snapshots.
+    memory_collector: Option<MemoryCollectorHandle>,
 }
 
 impl Context {
@@ -76,6 +82,8 @@ impl Context {
             kv_caches: FxHashMap::default(),
             active_cmd_buffer: None,
             active_resource_cache: None,
+            latency_collector: None,
+            memory_collector: None,
         })
     }
 
@@ -113,6 +121,48 @@ impl Context {
         self.mark_tensor_pending(&output);
 
         Ok(output)
+    }
+
+    /// Registers a latency collector handle for the upcoming operations. Passing `None`
+    /// disables instrumentation and avoids the associated overhead.
+    pub fn set_latency_collector(&mut self, collector: Option<LatencyCollectorHandle>) {
+        self.latency_collector = collector;
+    }
+
+    /// Emit a latency event to the currently installed collector, if any.
+    pub fn record_latency_event(&mut self, event: LatencyEvent<'_>, duration: Duration) {
+        if let Some(collector) = self.latency_collector.as_ref() {
+            collector.borrow_mut().record(event, duration);
+        }
+    }
+
+    /// Registers a memory collector handle for the upcoming operations. Passing `None`
+    /// disables memory instrumentation.
+    pub fn set_memory_collector(&mut self, collector: Option<MemoryCollectorHandle>) {
+        self.memory_collector = collector;
+    }
+
+    /// Emit a memory event to the currently installed collector, capturing the latest
+    /// allocation snapshot inside the callback.
+    pub fn record_memory_event(&mut self, event: MemoryEvent<'_>) {
+        if let Some(collector) = self.memory_collector.as_ref() {
+            let usage = self.snapshot_memory_usage();
+            collector.borrow_mut().record(event, usage);
+        }
+    }
+
+    /// Capture a snapshot of the current memory usage for both the transient tensor pool
+    /// and the persistent KV cache pool.
+    pub fn snapshot_memory_usage(&self) -> MemoryUsage {
+        let kv_cache_bytes = self.kv_caches.values().map(|(k, v, _)| k.size_bytes() + v.size_bytes()).sum();
+
+        MemoryUsage {
+            pool_used: self.pool.used_bytes(),
+            pool_capacity: self.pool.total_capacity(),
+            kv_used: self.kv_cache_pool.used_bytes(),
+            kv_capacity: self.kv_cache_pool.total_capacity(),
+            kv_cache_bytes,
+        }
     }
 
     pub fn matmul(
