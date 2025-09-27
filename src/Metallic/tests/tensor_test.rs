@@ -5,7 +5,8 @@ use crate::metallic::{Context, Tensor};
 #[test]
 fn zeros_and_ones() {
     let mut ctx = Context::new().unwrap();
-            let t0 = Tensor::zeros(vec![2, 3, 4], &mut ctx, true).unwrap();    assert!(t0.as_slice().iter().all(|&x| x == 0.0));
+    let t0 = Tensor::zeros(vec![2, 3, 4], &mut ctx, true).unwrap();
+    assert!(t0.as_slice().iter().all(|&x| x == 0.0));
     let t1 = Tensor::ones(vec![2, 3, 4], &mut ctx).unwrap();
     assert!(t1.as_slice().iter().all(|&x| x == 1.0));
 }
@@ -86,7 +87,8 @@ fn pool_growth_behavior() {
 
     // First, allocate a tensor that takes most of the first chunk
     let large_dims = vec![8, 512, 512]; // 8*512*512*4 = 8MB
-            let t1 = Tensor::zeros(large_dims.clone(), &mut ctx, true).unwrap();    assert_eq!(t1.dims(), &large_dims);
+    let t1 = Tensor::zeros(large_dims.clone(), &mut ctx, true).unwrap();
+    assert_eq!(t1.dims(), &large_dims);
 
     // Allocate more to fill first chunk and trigger growth
     let mut tensors = vec![t1];
@@ -114,7 +116,8 @@ fn pool_reset_invalidates_tensors() {
     let mut ctx = Context::new().unwrap();
 
     // Allocate some tensors
-            let t1 = Tensor::zeros(vec![100, 100], &mut ctx, true).unwrap();    let t2 = Tensor::ones(vec![100, 100], &mut ctx).unwrap();
+    let t1 = Tensor::zeros(vec![100, 100], &mut ctx, true).unwrap();
+    let t2 = Tensor::ones(vec![100, 100], &mut ctx).unwrap();
 
     ctx.synchronize();
 
@@ -131,7 +134,8 @@ fn pool_reset_invalidates_tensors() {
     assert_eq!(ctx.pool.chunk_cursors(), vec![0; ctx.pool.num_chunks()]);
 
     // Allocate new tensors after reset - should work fine
-            let t3 = Tensor::zeros(vec![50, 50], &mut ctx, true).unwrap();    let t4 = Tensor::ones(vec![50, 50], &mut ctx).unwrap();
+    let t3 = Tensor::zeros(vec![50, 50], &mut ctx, true).unwrap();
+    let t4 = Tensor::ones(vec![50, 50], &mut ctx).unwrap();
 
     assert!(t3.as_slice().iter().all(|&x| x == 0.0));
     assert!(t4.as_slice().iter().all(|&x| x == 1.0));
@@ -142,7 +146,7 @@ fn offset_correctness_across_chunks() {
     let mut ctx = Context::new().unwrap();
 
     // Allocate first tensor to take some space
-            let t1 = Tensor::zeros(vec![1000, 1000], &mut ctx, true).unwrap(); // ~4MB
+    let t1 = Tensor::zeros(vec![1000, 1000], &mut ctx, true).unwrap(); // ~4MB
     // Allocate second tensor - should be at non-zero offset
     let t2 = Tensor::ones(vec![100, 100], &mut ctx).unwrap(); // ~40KB
 
@@ -168,7 +172,7 @@ fn cpu_fill_with_offsets() {
     let mut ctx = Context::new().unwrap();
 
     // Allocate first tensor to create offset
-            let _t1 = Tensor::zeros(vec![500, 500], &mut ctx, true).unwrap();
+    let _t1 = Tensor::zeros(vec![500, 500], &mut ctx, true).unwrap();
     // Allocate second tensor - should use CPU fill due to small size
     let t2 = Tensor::ones(vec![10, 10], &mut ctx).unwrap();
 
@@ -181,7 +185,7 @@ fn cpu_fill_with_offsets() {
     assert!(t2.as_slice().iter().all(|&x| x == 1.0));
 
     // Test zeros as well
-            let t3 = Tensor::zeros(vec![5, 5], &mut ctx, true).unwrap();
+    let t3 = Tensor::zeros(vec![5, 5], &mut ctx, true).unwrap();
     ctx.synchronize();
 
     assert!(t3.offset > 0);
@@ -243,7 +247,8 @@ fn synchronization_contract() {
     let t1 = Tensor::random_uniform(vec![100, 100], &mut ctx).unwrap();
 
     // Do some other work to ensure GPU operations complete
-            let _t2 = Tensor::zeros(vec![10, 10], &mut ctx, true).unwrap();    let _t3 = Tensor::ones(vec![10, 10], &mut ctx).unwrap();
+    let _t2 = Tensor::zeros(vec![10, 10], &mut ctx, true).unwrap();
+    let _t3 = Tensor::ones(vec![10, 10], &mut ctx).unwrap();
 
     // Now read t1 - should be fine since other operations forced synchronization
     let _val = t1.as_slice()[0]; // Just access to ensure it's readable
@@ -263,7 +268,7 @@ fn strides_and_dtype() {
     let mut ctx = Context::new().unwrap();
 
     // Test contiguous strides computation
-            let t = Tensor::zeros(vec![2, 3, 4], &mut ctx, true).unwrap();
+    let t = Tensor::zeros(vec![2, 3, 4], &mut ctx, true).unwrap();
     ctx.synchronize();
 
     assert_eq!(t.dims, &[2, 3, 4]);

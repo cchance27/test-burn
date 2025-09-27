@@ -1,4 +1,4 @@
-use crate::metallic::generation::{generate, GenerationConfig};
+use crate::metallic::generation::{GenerationConfig, generate};
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{Context, MetalError, Tensor, Tokenizer};
 use rustc_hash::FxHashMap;
@@ -110,7 +110,7 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
             let input_tensor = model.embed(&generated, ctx)?;
             let hidden_states = model.forward(&input_tensor, ctx)?;
             let logits_tensor = model.output(&hidden_states, ctx)?;
-            
+
             let logits = logits_tensor.to_vec();
             let seq_len = generated.len();
             let start_idx = (seq_len - 1) * vocab_size;
@@ -125,7 +125,12 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
                 .map(|(i, _)| i as u32)
                 .unwrap_or(0);
 
-            println!("[Ref] Step {}: token={}, logits={:?}", generated.len() - input_ids.len(), next_token, &vocab_logits[..10]);
+            println!(
+                "[Ref] Step {}: token={}, logits={:?}",
+                generated.len() - input_ids.len(),
+                next_token,
+                &vocab_logits[..10]
+            );
 
             generated.push(next_token);
         }
@@ -137,24 +142,38 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
     // --- Run 2: KV Cache Implementation ---
     // Reset context to ensure a clean run
     ctx.kv_caches.clear();
-    let kv_cache_new_ids = crate::metallic::generation::generate_autoregressive_with_kv_cache(
-        &mut model,
-        &tokenizer,
-        &mut ctx,
-        &input_ids,
-        &gen_cfg,
-    )?;
+    let kv_cache_new_ids =
+        crate::metallic::generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
     let mut kv_cache_ids = input_ids.clone();
     kv_cache_ids.extend(kv_cache_new_ids);
 
     // --- Compare ---
-    assert_eq!(
-        reference_ids,
-        kv_cache_ids,
-        "Mismatch between reference and KV cache generation!\nReference: {:?}\nKV Cache:  {:?}",
-        reference_ids,
-        kv_cache_ids
-    );
+    if reference_ids != kv_cache_ids {
+        let mismatch_index = reference_ids.iter().zip(kv_cache_ids.iter()).position(|(a, b)| a != b);
+
+        if let Some(idx) = mismatch_index {
+            println!(
+                "❌ Divergence detected at position {} (reference={}, kv={})",
+                idx, reference_ids[idx], kv_cache_ids[idx]
+            );
+        } else if reference_ids.len() != kv_cache_ids.len() {
+            println!(
+                "❌ Sequence length mismatch: reference {} tokens vs KV {} tokens",
+                reference_ids.len(),
+                kv_cache_ids.len()
+            );
+        }
+
+        let reference_text = tokenizer.decode(&reference_ids).unwrap_or_default();
+        let kv_text = tokenizer.decode(&kv_cache_ids).unwrap_or_default();
+        println!("Reference text: {}", reference_text);
+        println!("KV-cache text: {}", kv_text);
+
+        panic!(
+            "Mismatch between reference and KV cache generation!\nReference: {:?}\nKV Cache:  {:?}",
+            reference_ids, kv_cache_ids
+        );
+    }
 
     println!("✅ KV cache implementation passed full generation correctness test.");
 

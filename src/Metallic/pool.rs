@@ -158,6 +158,11 @@ impl MemoryPool {
     pub fn total_capacity(&self) -> usize {
         self.chunks.iter().map(|c| c.capacity).sum()
     }
+
+    /// Returns the total number of bytes currently in use across all chunks.
+    pub fn used_bytes(&self) -> usize {
+        self.chunks.iter().map(|c| c.cursor).sum()
+    }
 }
 
 fn align(size: usize, alignment: usize) -> usize {

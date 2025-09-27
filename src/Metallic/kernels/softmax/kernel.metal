@@ -6,6 +6,7 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
                                constant uint &seq_q [[buffer(1)]],
                                constant uint &seq_k [[buffer(2)]],
                                constant uint &causal_flag [[buffer(3)]],
+                               constant uint &query_offset [[buffer(4)]],
                                uint3 tg_pos [[threadgroup_position_in_grid]],
                                uint3 tid3 [[thread_position_in_threadgroup]],
                                uint3 tptg [[threads_per_threadgroup]]) {
@@ -14,7 +15,7 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
     uint lane = tid3.x;
     uint stride = tptg.x;
     uint base = row * seq_k;
-    uint i_q = row % seq_q;
+    uint i_q = (row % seq_q) + query_offset;
 
     // Use a more efficient shared memory size based on common hardware
     // Apple GPUs typically have good performance with 256 or 512 threads per group

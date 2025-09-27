@@ -16,9 +16,9 @@ use test_burn::{
     app_event::AppEvent,
     gguf,
     metallic::{
-        generation::{generate_streaming, GenerationConfig},
-        models::Qwen25,
         Context, Tokenizer,
+        generation::{GenerationConfig, generate_streaming},
+        models::Qwen25,
     },
 };
 
@@ -68,15 +68,7 @@ fn main() -> Result<()> {
         tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
         let start_time = Instant::now();
 
-        let _ = generate_streaming(
-            &mut qwen,
-            &tokenizer,
-            &mut ctx,
-            &prompt,
-            &cfg,
-            &tx,
-            start_time,
-        );
+        let _ = generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &tx, start_time);
         tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
         Ok(())
     });
@@ -85,13 +77,11 @@ fn main() -> Result<()> {
     let mut app_state = AppState::new();
 
     while !app_state.should_quit {
-        if crossterm::event::poll(Duration::from_millis(50))? {
-            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                if key.code == crossterm::event::KeyCode::Char('q') {
+        if crossterm::event::poll(Duration::from_millis(50))?
+            && let crossterm::event::Event::Key(key) = crossterm::event::read()?
+                && key.code == crossterm::event::KeyCode::Char('q') {
                     app_state.should_quit = true;
                 }
-            }
-        }
 
         while let Ok(event) = rx.try_recv() {
             match event {
@@ -170,24 +160,15 @@ fn ui(frame: &mut Frame, state: &AppState) {
         .split(frame.area());
 
     let text_area = Paragraph::new(state.generated_text.clone())
-        .block(
-            Block::default()
-                .title("Generated Text (q to quit)")
-                .borders(Borders::ALL),
-        )
+        .block(Block::default().title("Generated Text (q to quit)").borders(Borders::ALL))
         .wrap(Wrap { trim: false });
 
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(33),
-            Constraint::Percentage(34),
-            Constraint::Percentage(33),
-        ])
+        .constraints([Constraint::Percentage(33), Constraint::Percentage(34), Constraint::Percentage(33)])
         .split(main_layout[1]);
 
-    let status_text = Paragraph::new(state.status.clone())
-        .style(Style::default().fg(Color::White).bg(Color::Blue));
+    let status_text = Paragraph::new(state.status.clone()).style(Style::default().fg(Color::White).bg(Color::Blue));
 
     let memory_text = Paragraph::new(state.memory_usage.clone())
         .style(Style::default().fg(Color::White).bg(Color::Blue))

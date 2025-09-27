@@ -588,7 +588,7 @@ fn test_matmul_no_transpose() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-            let _result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
+    let _result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
     let cpu_output = cpu_matmul(&a_data, m, k, &b_data, k, n, false, false);
 
     // Use the new kernel system
@@ -692,7 +692,7 @@ fn test_matmul_extreme_alpha_scaling() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-            let result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
+    let result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
     // Test with very large alpha value
     let alpha = 1e6f32;
     let beta = 0.0f32;
@@ -803,7 +803,7 @@ fn test_matmul_scaled_with_extreme_values() -> Result<(), MetalError> {
 
     let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
     let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-            let mut result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
+    let mut result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
     // Use alpha that's very small and beta that's very large to test scaling
     let alpha = 1e-8f32;
     let beta = 0.0f32; // No accumulation in this test

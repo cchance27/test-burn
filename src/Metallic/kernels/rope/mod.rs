@@ -17,12 +17,13 @@ struct RoPE {
     sin: Tensor,
     dim: u32,
     seq_len: u32,
+    position_offset: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for RoPEOp {
-    /// Input arguments for the call: (input, cos, sin, dim, seq_len)
-    type Args = (Tensor, Tensor, Tensor, u32, u32);
+    /// Input arguments for the call: (input, cos, sin, dim, seq_len, position_offset)
+    type Args = (Tensor, Tensor, Tensor, u32, u32, u32);
 
     /// Link to the enum variant in `KernelFunction`.
     fn function_id() -> Option<KernelFunction> {
@@ -37,7 +38,7 @@ impl KernelInvocable for RoPEOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut input, mut cos, mut sin, dim, seq_len) = args;
+        let (mut input, mut cos, mut sin, dim, seq_len, position_offset) = args;
 
         // Basic validation
         if dim == 0 || !dim.is_multiple_of(2) {
@@ -47,21 +48,30 @@ impl KernelInvocable for RoPEOp {
             )));
         }
 
-        // cos/sin should be [seq_len, dim/2]
-        if cos.dims() != [seq_len as usize, (dim as usize) / 2] {
+        if cos.dims().len() != 2 || cos.dims()[1] != (dim as usize) / 2 {
             return Err(MetalError::InvalidShape(format!(
-                "cos shape {:?} does not match [seq_len, dim/2] = [{}, {}]",
+                "cos shape {:?} must be [N, dim/2] with N >= position_offset + seq_len (offset={}, seq_len={})",
                 cos.dims(),
-                seq_len,
-                dim / 2
+                position_offset,
+                seq_len
             )));
         }
-        if sin.dims() != [seq_len as usize, (dim as usize) / 2] {
+        if sin.dims().len() != 2 || sin.dims()[1] != (dim as usize) / 2 {
             return Err(MetalError::InvalidShape(format!(
-                "sin shape {:?} does not match [seq_len, dim/2] = [{}, {}]",
+                "sin shape {:?} must be [N, dim/2] with N >= position_offset + seq_len (offset={}, seq_len={})",
                 sin.dims(),
-                seq_len,
-                dim / 2
+                position_offset,
+                seq_len
+            )));
+        }
+
+        let cos_rows = cos.dims()[0];
+        let sin_rows = sin.dims()[0];
+        let required_rows = position_offset as usize + seq_len as usize;
+        if cos_rows < required_rows || sin_rows < required_rows {
+            return Err(MetalError::InvalidShape(format!(
+                "RoPE caches require at least {} rows, got cos={} sin={}",
+                required_rows, cos_rows, sin_rows
             )));
         }
 
@@ -78,6 +88,7 @@ impl KernelInvocable for RoPEOp {
             sin,
             dim,
             seq_len,
+            position_offset,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
@@ -115,7 +126,8 @@ impl Operation for RoPE {
         set_buffer(&encoder, 3, &self.sin.buf, self.sin.offset);
         set_bytes(&encoder, 4, &self.dim);
         set_bytes(&encoder, 5, &self.seq_len);
-        set_bytes(&encoder, 6, &total_elements);
+        set_bytes(&encoder, 6, &self.position_offset);
+        set_bytes(&encoder, 7, &total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();

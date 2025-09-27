@@ -531,7 +531,8 @@ impl Tokenizer {
             }
 
             let token_type = self.token_types.get(token_id).cloned().unwrap_or(1); // Default to normal
-            if token_type == 3 { // Control token
+            if token_type == 3 {
+                // Control token
                 continue;
             }
 

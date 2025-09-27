@@ -24,12 +24,13 @@ struct ScaledDotProductAttention {
     pub seq_k: usize,
     pub dim: usize,
     pub scale: f32,
+    pub query_offset: u32,
 }
 
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
-    type Args = (Tensor, Tensor, Tensor, bool); // (q, k, v, causal)
+    type Args = (Tensor, Tensor, Tensor, bool, u32); // (q, k, v, causal, query_offset)
     // The output type
 
     // For composed operations that use other kernels, return None
@@ -45,7 +46,7 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut q, mut k, mut v, causal) = args;
+        let (mut q, mut k, mut v, causal, query_offset) = args;
 
         ctx.prepare_tensors_for_active_cmd(&mut [&mut q, &mut k, &mut v]);
 
@@ -111,8 +112,13 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
             let scaled_attn = ctx.call::<crate::metallic::kernels::elemwise_mul::ElemwiseMulOp>((qk_result, scale_tensor))?;
 
             // Apply softmax to the scaled attention
-            let softmax_result =
-                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((scaled_attn, s_q as u32, s_k as u32, causal as u32))?;
+            let softmax_result = ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
+                scaled_attn,
+                s_q as u32,
+                s_k as u32,
+                causal as u32,
+                query_offset,
+            ))?;
 
             // attn x V -> out (for this batch)
             // [s_q, s_k] @ [s_k, d] = [s_q, d]
@@ -137,6 +143,7 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
                 seq_k: s_k,
                 dim: d,
                 scale,
+                query_offset,
             }),
             out,
         ))

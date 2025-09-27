@@ -33,7 +33,7 @@ fn repeat_kv_heads(
     }
 
     let output_dims = vec![batch * n_heads, seq, head_dim];
-            let mut output = Tensor::zeros(output_dims, ctx, true)?;
+    let mut output = Tensor::zeros(output_dims, ctx, true)?;
     let input_slice = input.as_slice();
     let output_slice = output.as_mut_slice();
 
@@ -192,7 +192,7 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         }
         let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
         let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
-        let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32))?;
+        let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
         // RoPE for K
@@ -211,7 +211,7 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         }
         let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], ctx)?;
         let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], ctx)?;
-        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32))?;
+        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
         // Repeat KV heads for SDPA (GQA)
@@ -648,7 +648,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
     let q_heads_after_rope = {
         let _out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), &mut ctx)?;
-        ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32))?
+        ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
 
@@ -670,7 +670,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope = {
         let _out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), &mut ctx)?;
-        ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32))?
+        ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
 
@@ -1147,7 +1147,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
     let cos_q_last = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
     let sin_q_last = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
-    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32))? };
+    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0))? };
     ctx.synchronize();
 
     let dim_half_k = kv_head_dim / 2;
@@ -1167,7 +1167,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let sin_k_last = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
     let k_heads_after_rope_last = {
         let _out = Tensor::create_tensor_pooled(k_heads_last.dims().to_vec(), &mut ctx)?;
-        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32))?
+        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
 
@@ -1370,4 +1370,307 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
 
     Ok(())
+}
+
+#[test]
+fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::metallic::MetalError> {
+    let mut ctx = Context::new()?;
+
+    let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
+    let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
+    let loader = GGUFModelLoader::new(gguf_file);
+    let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
+    let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
+    let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+
+    let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
+    let input_text = std::fs::read_to_string(Path::new(npy_dump_path).join("input_text.txt")).unwrap();
+    let input_ids = tokenizer.encode(&input_text)?;
+
+    let (py_logits_data, py_logits_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/logits_pre_softmax.npy"));
+    let py_logits_flat = py_logits_data
+        .as_slice()
+        .expect("Failed to get slice from ndarray for PyTorch logits");
+
+    let vocab_size = model.config.vocab_size;
+    assert!(
+        !input_ids.is_empty(),
+        "Input prompt from PyTorch dump should contain at least one token"
+    );
+    assert_eq!(
+        py_logits_flat.len() % vocab_size,
+        0,
+        "PyTorch logits length must be a multiple of vocab size"
+    );
+
+    let total_positions = py_logits_flat.len() / vocab_size;
+    let expected_positions = if py_logits_shape.len() == 3 && py_logits_shape[0] == 1 {
+        py_logits_shape[1]
+    } else {
+        py_logits_shape[0]
+    };
+    assert_eq!(total_positions, expected_positions, "PyTorch logits metadata mismatch");
+    assert_eq!(
+        total_positions,
+        input_ids.len(),
+        "Prompt token count does not match PyTorch logits dump"
+    );
+
+    // Precompute reference logits by running the standard forward pass on
+    // progressively longer prefixes. This mirrors the legacy non-KV execution
+    // path and helps us distinguish between issues in the Metal kernels and
+    // higher level sampling logic when a mismatch is detected against the
+    // PyTorch dump.
+    let mut forward_reference_logits: Vec<Vec<f32>> = Vec::with_capacity(input_ids.len());
+    for (pos, _) in input_ids.iter().enumerate() {
+        ctx.reset_pool();
+        ctx.clear_cache();
+        ctx.kv_caches.clear();
+        ctx.kv_cache_pool.reset();
+
+        let prefix = &input_ids[..=pos];
+        let prefix_embedding = model.embed(prefix, &mut ctx)?;
+        let prefix_hidden = model.forward(&prefix_embedding, &mut ctx)?;
+        let prefix_logits_tensor = model.output(&prefix_hidden, &mut ctx)?;
+        let prefix_logits = prefix_logits_tensor.to_vec();
+
+        let start = pos * vocab_size;
+        let end = start + vocab_size;
+        forward_reference_logits.push(prefix_logits[start..end].to_vec());
+    }
+
+    ctx.reset_pool();
+    ctx.clear_cache();
+    ctx.kv_caches.clear();
+    ctx.kv_cache_pool.reset();
+
+    // Prepare KV cache pool for incremental forward steps.
+    let n_layers = model.config.n_layers;
+    let n_kv_heads = model.config.n_kv_heads;
+    let d_model = model.config.d_model;
+    let n_heads = model.config.n_heads;
+    let kv_dim = d_model * n_kv_heads / n_heads;
+    let kv_head_dim = kv_dim / n_kv_heads;
+
+    ctx.kv_caches.clear();
+    ctx.kv_cache_pool.reset();
+    for layer_idx in 0..n_layers {
+        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, n_kv_heads, kv_head_dim)?;
+    }
+
+    println!("--- Comparing incremental forward_step logits against PyTorch reference ---");
+
+    for (pos, &token_id) in input_ids.iter().enumerate() {
+        ctx.reset_pool();
+
+        let token_embedding = model.embed(&[token_id], &mut ctx)?;
+        let hidden_state = model.forward_step(&token_embedding, pos, &mut ctx)?;
+        let logits_tensor = model.output(&hidden_state, &mut ctx)?;
+        let kv_logits = logits_tensor.to_vec();
+
+        assert_eq!(kv_logits.len(), vocab_size, "forward_step logits should be a single vocab slice");
+
+        let start = pos * vocab_size;
+        let end = start + vocab_size;
+        let py_slice = &py_logits_flat[start..end];
+        let forward_slice = &forward_reference_logits[pos];
+
+        let mut max_diff = 0.0f32;
+        let mut max_idx = 0usize;
+        let mut diff_sum = 0.0f32;
+
+        for (idx, (&rust_val, &py_val)) in kv_logits.iter().zip(py_slice.iter()).enumerate() {
+            let diff = (rust_val - py_val).abs();
+            diff_sum += diff;
+            if diff > max_diff {
+                max_diff = diff;
+                max_idx = idx;
+            }
+        }
+
+        let avg_diff = diff_sum / vocab_size as f32;
+
+        println!(
+            "Step {:02} | token {:>6} | max diff {:>10.3e} @ vocab {} | avg diff {:>10.3e}",
+            pos, token_id, max_diff, max_idx, avg_diff
+        );
+
+        if max_diff >= 1e-3 {
+            let mut top_diffs: Vec<(usize, f32, f32, f32)> = kv_logits
+                .iter()
+                .zip(py_slice.iter())
+                .enumerate()
+                .map(|(idx, (&kv_val, &py_val))| (idx, kv_val, py_val, (kv_val - py_val).abs()))
+                .collect();
+
+            use std::cmp::Ordering;
+
+            top_diffs.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(Ordering::Equal));
+
+            println!("  Top differing vocab entries (idx | kv | pytorch | abs diff):");
+            for (idx, kv_val, py_val, diff) in top_diffs.into_iter().take(8) {
+                println!("    {:>6} | {:>12.6} | {:>12.6} | {:>10.3e}", idx, kv_val, py_val, diff);
+            }
+        }
+
+        assert!(
+            max_diff < 1e-3,
+            "Logits mismatch at step {} exceeds tolerance: max diff {}",
+            pos,
+            max_diff
+        );
+
+        // Compare against the reference logits obtained by rerunning the full
+        // forward pass on the prompt prefix.  This highlights whether the
+        // regression originates in the incremental attention path or stems from
+        // a broader discrepancy against the PyTorch export.
+        let mut forward_max_diff = 0.0f32;
+        let mut forward_max_idx = 0usize;
+        let mut forward_diff_sum = 0.0f32;
+        for (idx, (&kv_val, &forward_val)) in kv_logits.iter().zip(forward_slice.iter()).enumerate() {
+            let diff = (kv_val - forward_val).abs();
+            forward_diff_sum += diff;
+            if diff > forward_max_diff {
+                forward_max_diff = diff;
+                forward_max_idx = idx;
+            }
+        }
+
+        let forward_avg_diff = forward_diff_sum / vocab_size as f32;
+        if forward_max_diff >= 1e-3 {
+            println!(
+                "  ↳ Against forward(): max diff {:>10.3e} @ vocab {} | avg diff {:>10.3e}",
+                forward_max_diff, forward_max_idx, forward_avg_diff
+            );
+
+            use std::cmp::Ordering;
+            let mut top_diffs: Vec<(usize, f32, f32, f32)> = kv_logits
+                .iter()
+                .zip(forward_slice.iter())
+                .enumerate()
+                .map(|(idx, (&kv_val, &fw_val))| (idx, kv_val, fw_val, (kv_val - fw_val).abs()))
+                .collect();
+            top_diffs.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(Ordering::Equal));
+            println!("    Top KV vs forward() diffs (idx | kv | forward | abs diff):");
+            for (idx, kv_val, fw_val, diff) in top_diffs.into_iter().take(8) {
+                println!("      {:>6} | {:>12.6} | {:>12.6} | {:>10.3e}", idx, kv_val, fw_val, diff);
+            }
+
+            dump_kv_snapshot(&mut ctx, pos);
+        }
+
+        assert!(
+            forward_max_diff < 1e-3,
+            "KV forward_step diverges from full forward() logits at step {}: max diff {}",
+            pos,
+            forward_max_diff
+        );
+
+        // Cross-check the PyTorch logits against the Rust non-KV reference so
+        // we can tell if the mismatch originates from the exported tensors.
+        let mut py_forward_max_diff = 0.0f32;
+        let mut py_forward_max_idx = 0usize;
+        let mut py_forward_diff_sum = 0.0f32;
+        for (idx, (&py_val, &forward_val)) in py_slice.iter().zip(forward_slice.iter()).enumerate() {
+            let diff = (py_val - forward_val).abs();
+            py_forward_diff_sum += diff;
+            if diff > py_forward_max_diff {
+                py_forward_max_diff = diff;
+                py_forward_max_idx = idx;
+            }
+        }
+
+        let py_forward_avg_diff = py_forward_diff_sum / vocab_size as f32;
+        if py_forward_max_diff >= 1e-3 {
+            println!(
+                "  ↳ PyTorch vs forward(): max diff {:>10.3e} @ vocab {} | avg diff {:>10.3e}",
+                py_forward_max_diff, py_forward_max_idx, py_forward_avg_diff
+            );
+        }
+
+        assert!(
+            py_forward_max_diff < 1e-3,
+            "PyTorch export diverges from Rust forward() logits at step {}: max diff {}",
+            pos,
+            py_forward_max_diff
+        );
+
+        let kv_argmax = kv_logits
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap();
+        let py_argmax = py_slice
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(idx, _)| idx)
+            .unwrap();
+
+        assert_eq!(
+            kv_argmax, py_argmax,
+            "Argmax mismatch between KV cache logits and PyTorch at step {}",
+            pos
+        );
+    }
+
+    println!("✅ Incremental forward_step logits match PyTorch reference for all prompt tokens.");
+
+    Ok(())
+}
+
+fn dump_kv_snapshot(ctx: &mut Context, step: usize) {
+    ctx.synchronize();
+
+    let mut snapshot: Vec<(usize, Tensor, Tensor, usize)> = ctx
+        .kv_caches
+        .iter()
+        .map(|(&layer_idx, (k, v, capacity))| (layer_idx, k.clone(), v.clone(), *capacity))
+        .collect();
+
+    snapshot.sort_by_key(|(layer_idx, _, _, _)| *layer_idx);
+
+    for (layer_idx, k_tensor, v_tensor, capacity) in snapshot {
+        let dims = k_tensor.dims();
+        if dims.len() != 3 {
+            println!("    Layer {} unexpected dims {:?} while dumping KV snapshot", layer_idx, dims);
+            continue;
+        }
+
+        let seq_len = dims[0];
+        let batch_heads = dims[1];
+        let head_dim = dims[2];
+
+        if step >= seq_len {
+            println!(
+                "    Layer {} step {} exceeds cache capacity {}; skipping dump",
+                layer_idx, step, seq_len
+            );
+            continue;
+        }
+
+        let elems_per_step = batch_heads * head_dim;
+        let offset = step * elems_per_step;
+
+        let k_vec = k_tensor.to_vec();
+        let v_vec = v_tensor.to_vec();
+
+        let heads_to_show = batch_heads.min(2);
+        let values_to_show = head_dim.min(8);
+
+        println!(
+            "    Layer {} KV slice @ step {} (capacity {}, dims {:?})",
+            layer_idx, step, capacity, dims
+        );
+
+        for head_idx in 0..heads_to_show {
+            let head_offset = offset + head_idx * head_dim;
+            let k_slice = &k_vec[head_offset..head_offset + values_to_show];
+            let v_slice = &v_vec[head_offset..head_offset + values_to_show];
+
+            println!("      head {:>2} K[..{}] = {:?}", head_idx, values_to_show, k_slice);
+            println!("      head {:>2} V[..{}] = {:?}", head_idx, values_to_show, v_slice);
+        }
+    }
 }
