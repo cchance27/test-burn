@@ -1,7 +1,7 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
+use crate::metallic::models::qwen25::Qwen25;
 use app_memory_usage_fetcher::get_memory_usage_mbytes;
 use rand::prelude::*;
 use std::sync::mpsc;
@@ -288,36 +288,32 @@ where
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
         let logits_tensor = qwen.output(&hidden_states, ctx)?;
 
-        if ui_connected {
-            if let Some(stats) = ctx.get_cache_stats() {
-                let app_mem = get_memory_usage_mbytes();
-                let app_mem_str = app_mem
-                    .map(|mb| format!("{:.2} GB", mb / 1024.0))
-                    .unwrap_or_else(|| "n/a".to_string());
+        if ui_connected && let Some(stats) = ctx.get_cache_stats() {
+            let app_mem = get_memory_usage_mbytes(); // This actually seems to return GB not MB due to a bug in crate
+            let app_mem_str = app_mem.map(|mb| format!("{:.2} GB", mb)).unwrap_or_else(|| "n/a".to_string());
 
-                let pool_used_mb = ctx.pool.used_bytes() as f32 / 1024.0 / 1024.0;
-                let pool_capacity_mb = ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0;
+            let pool_used_mb = ctx.pool.used_bytes() as f32 / 1024.0 / 1024.0;
+            let pool_capacity_mb = ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0;
 
-                let kv_used_mb = ctx.kv_cache_pool.used_bytes() as f32 / 1024.0 / 1024.0;
-                let kv_capacity_mb = ctx.kv_cache_pool.total_capacity() as f32 / 1024.0 / 1024.0;
-                let kv_layers = ctx.kv_caches.len();
+            let kv_used_mb = ctx.kv_cache_pool.used_bytes() as f32 / 1024.0 / 1024.0;
+            let kv_capacity_mb = ctx.kv_cache_pool.total_capacity() as f32 / 1024.0 / 1024.0;
+            let kv_layers = ctx.kv_caches.len();
 
-                let memory_usage = format!(
-                    "App: {} | Pool: {:.2}/{:.2} MB | KV: {:.2}/{:.2} MB (L={}) | Cache: G{}/D{}/S{}",
-                    app_mem_str,
-                    pool_used_mb,
-                    pool_capacity_mb,
-                    kv_used_mb,
-                    kv_capacity_mb,
-                    kv_layers,
-                    stats.gemm_cache_size,
-                    stats.descriptor_cache_size,
-                    stats.sdpa_cache_size
-                );
+            let memory_usage = format!(
+                "App: {} | Pool: {:.2}/{:.2} MB | KV: {:.2}/{:.2} MB (L={}) | Cache: G{}/D{}/S{}",
+                app_mem_str,
+                pool_used_mb,
+                pool_capacity_mb,
+                kv_used_mb,
+                kv_capacity_mb,
+                kv_layers,
+                stats.gemm_cache_size,
+                stats.descriptor_cache_size,
+                stats.sdpa_cache_size
+            );
 
-                if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
-                    ui_connected = false; // Receiver dropped; continue without UI updates
-                }
+            if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
+                ui_connected = false; // Receiver dropped; continue without UI updates
             }
         }
 

@@ -3,7 +3,7 @@ use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{kernels, Tensor};
+use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -126,6 +126,7 @@ impl Context {
         self.call::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn matmul_alpha_beta(
         &mut self,
         a: &super::Tensor,

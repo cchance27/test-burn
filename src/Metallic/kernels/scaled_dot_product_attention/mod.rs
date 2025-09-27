@@ -1,10 +1,10 @@
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::AnyThread;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 
 use super::{KernelFunction, KernelInvocable};
-use crate::metallic::{cache_keys::SdpaKey, resource_cache::ResourceCache, Context, MetalError, Operation, Tensor};
+use crate::metallic::{Context, MetalError, Operation, Tensor, cache_keys::SdpaKey, resource_cache::ResourceCache};
 
 mod scaled_dot_product_attention_test;
 
@@ -31,7 +31,7 @@ struct ScaledDotProductAttention {
 impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
     type Args = (Tensor, Tensor, Tensor, bool, u32); // (q, k, v, causal, query_offset)
-                                                     // The output type
+    // The output type
 
     // For composed operations that use other kernels, return None
     fn function_id() -> Option<KernelFunction> {

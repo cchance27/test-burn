@@ -548,6 +548,7 @@ impl Qwen25 {
             )));
         }
 
+        #[allow(clippy::single_range_in_vec_init)]
         let cache_view = cache.slice(&[0..steps])?;
         let view_dims = cache_view.dims();
         debug_assert_eq!(view_dims.len(), 3);

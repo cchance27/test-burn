@@ -95,7 +95,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     };
     let model = Qwen25::new(cfg, &mut ctx)?;
 
-    let prompt_tokens = vec![1, 2, 3, 4, 5];
+    let prompt_tokens = [1, 2, 3, 4, 5];
     let vocab_size = model.config.vocab_size;
 
     // Pre-allocate KV cache
@@ -105,7 +105,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
     for i in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(i, model.config.seq_len, 1 * n_kv_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(i, model.config.seq_len, n_kv_heads, kv_head_dim)?;
     }
 
     // --- Multi-step correctness check ---
@@ -114,7 +114,8 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     // 1. Run incremental `forward_step` for each token
     ctx.reset_pool();
     ctx.clear_cache();
-    for i in 0..prompt_tokens.len() {
+    let tmp = 0..prompt_tokens.len();
+    for i in tmp {
         let token_embedding = model.embed(&[prompt_tokens[i]], &mut ctx)?;
         let hidden_state = model.forward_step(&token_embedding, i, &mut ctx)?;
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
