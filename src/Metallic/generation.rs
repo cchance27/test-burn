@@ -254,8 +254,6 @@ where
 
         // Sample the first token
         next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
-
-        println!("[KV] Prompt processing produced next_token: {}", next_token);
     } else {
         // If there's no prompt, start with token 0.
         next_token = 0;
@@ -293,15 +291,30 @@ where
         if ui_connected {
             if let Some(stats) = ctx.get_cache_stats() {
                 let app_mem = get_memory_usage_mbytes();
+                let app_mem_str = app_mem
+                    .map(|mb| format!("{:.2} GB", mb / 1024.0))
+                    .unwrap_or_else(|| "n/a".to_string());
+
+                let pool_used_mb = ctx.pool.used_bytes() as f32 / 1024.0 / 1024.0;
+                let pool_capacity_mb = ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0;
+
+                let kv_used_mb = ctx.kv_cache_pool.used_bytes() as f32 / 1024.0 / 1024.0;
+                let kv_capacity_mb = ctx.kv_cache_pool.total_capacity() as f32 / 1024.0 / 1024.0;
+                let kv_layers = ctx.kv_caches.len();
+
                 let memory_usage = format!(
-                    "App: {:.2} GB | Pool: {:.2} / {:.2} MB | Cache: G{}/D{}/S{}",
-                    app_mem.unwrap(),
-                    ctx.pool.pooled_bytes_allocated as f32 / 1024.0 / 1024.0,
-                    ctx.pool.total_capacity() as f32 / 1024.0 / 1024.0,
+                    "App: {} | Pool: {:.2}/{:.2} MB | KV: {:.2}/{:.2} MB (L={}) | Cache: G{}/D{}/S{}",
+                    app_mem_str,
+                    pool_used_mb,
+                    pool_capacity_mb,
+                    kv_used_mb,
+                    kv_capacity_mb,
+                    kv_layers,
                     stats.gemm_cache_size,
                     stats.descriptor_cache_size,
                     stats.sdpa_cache_size
                 );
+
                 if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
                     ui_connected = false; // Receiver dropped; continue without UI updates
                 }
@@ -315,8 +328,6 @@ where
 
         // Sample the next token
         next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
-
-        println!("[KV]  Step {}: token={}, logits={:?}", i, next_token, &vocab_logits[..10]);
 
         generated_ids.push(next_token);
 
