@@ -196,9 +196,10 @@ impl Context {
         k_step: &crate::metallic::Tensor,
         v_step: &crate::metallic::Tensor,
     ) -> Result<(), MetalError> {
-        // Lookup entry mutably so we always operate on the canonical cache tensors.
-        let (k_cache, v_cache, capacity_seq) = match self.kv_caches.get_mut(&layer_idx) {
-            Some(entry) => entry,
+        // Lookup the canonical cache tensors and clone their handles so we can work with them
+        // while issuing additional commands on `self`.
+        let (k_cache_ref, v_cache_ref, capacity_seq_val) = match self.kv_caches.get(&layer_idx) {
+            Some((k_cache, v_cache, capacity_seq)) => (k_cache.clone(), v_cache.clone(), *capacity_seq),
             None => {
                 return Err(MetalError::InvalidOperation(format!(
                     "KV cache for layer {} not allocated",
@@ -206,7 +207,6 @@ impl Context {
                 )));
             }
         };
-        let capacity_seq_val = *capacity_seq;
         if step >= capacity_seq_val {
             return Err(MetalError::InvalidOperation(format!(
                 "Step {} exceeds KV cache capacity {} for layer {}",
@@ -215,9 +215,11 @@ impl Context {
         }
 
         // Ensure both the source tensors and the cache buffers are safe to access
+        let mut k_cache = k_cache_ref;
+        let mut v_cache = v_cache_ref;
         let mut k_src = k_step.clone();
         let mut v_src = v_step.clone();
-        self.prepare_tensors_for_active_cmd(&mut [&mut *k_cache, &mut *v_cache, &mut k_src, &mut v_src]);
+        self.prepare_tensors_for_active_cmd(&mut [&mut k_cache, &mut v_cache, &mut k_src, &mut v_src]);
 
         // Validate shapes
         let bh = k_src.dims().first().cloned().unwrap_or(0);
