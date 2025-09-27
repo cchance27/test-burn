@@ -292,8 +292,8 @@ impl Context {
             encoder.endEncoding();
         }
 
-        self.mark_tensor_pending(&*k_cache);
-        self.mark_tensor_pending(&*v_cache);
+        self.mark_tensor_pending(&k_cache);
+        self.mark_tensor_pending(&v_cache);
 
         Ok(())
     }
