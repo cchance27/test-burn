@@ -1,9 +1,10 @@
 use super::error::MetalError;
+use super::instrumentation::{LatencyCollectorHandle, LatencyEvent};
 use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Tensor, kernels};
+use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -14,6 +15,7 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary};
 use rustc_hash::FxHashMap;
+use std::time::Duration;
 
 /// The main context for Metal operations.
 pub struct Context {
@@ -37,6 +39,8 @@ pub struct Context {
     active_cmd_buffer: Option<CommandBuffer>,
     /// Resource cache associated with the active command buffer.
     active_resource_cache: Option<ResourceCache>,
+    /// Optional latency collector used to report per-iteration timings.
+    latency_collector: Option<LatencyCollectorHandle>,
 }
 
 impl Context {
@@ -76,6 +80,7 @@ impl Context {
             kv_caches: FxHashMap::default(),
             active_cmd_buffer: None,
             active_resource_cache: None,
+            latency_collector: None,
         })
     }
 
@@ -113,6 +118,19 @@ impl Context {
         self.mark_tensor_pending(&output);
 
         Ok(output)
+    }
+
+    /// Registers a latency collector handle for the upcoming operations. Passing `None`
+    /// disables instrumentation and avoids the associated overhead.
+    pub fn set_latency_collector(&mut self, collector: Option<LatencyCollectorHandle>) {
+        self.latency_collector = collector;
+    }
+
+    /// Emit a latency event to the currently installed collector, if any.
+    pub fn record_latency_event(&mut self, event: LatencyEvent, duration: Duration) {
+        if let Some(collector) = self.latency_collector.as_ref() {
+            collector.borrow_mut().record(event, duration);
+        }
     }
 
     pub fn matmul(

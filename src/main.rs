@@ -6,7 +6,7 @@ use ratatui::{
 use std::{env, io::stdout, process, sync::mpsc, thread, time::Duration};
 
 use test_burn::{
-    app_event::AppEvent,
+    app_event::{AppEvent, LatencyRow},
     gguf,
     metallic::{
         generation::{generate_streaming, GenerationConfig},
@@ -97,6 +97,9 @@ fn main() -> Result<()> {
                 AppEvent::MemoryUpdate(memory_usage) => {
                     app_state.memory_usage = memory_usage;
                 }
+                AppEvent::LatencyUpdate(rows) => {
+                    app_state.latency_rows = rows;
+                }
             }
         }
 
@@ -117,6 +120,7 @@ struct AppState {
     memory_usage: String,
     prompt_processing_time: Duration,
     generation_time: Duration,
+    latency_rows: Vec<LatencyRow>,
 }
 
 impl AppState {
@@ -130,6 +134,7 @@ impl AppState {
             memory_usage: String::new(),
             prompt_processing_time: Duration::default(),
             generation_time: Duration::default(),
+            latency_rows: Vec::new(),
         }
     }
 }
@@ -177,15 +182,35 @@ fn ui(frame: &mut Frame, state: &AppState) {
 
     let sidebar_sections = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(7), Constraint::Length(6), Constraint::Min(5)])
+        .constraints([
+            Constraint::Length(7),
+            Constraint::Length(9),
+            Constraint::Length(6),
+            Constraint::Min(5),
+        ])
         .split(sidebar_inner);
 
     let memory_text = if state.memory_usage.is_empty() {
         "Collecting data...".to_string()
     } else {
-        state.memory_usage.replace(" | ", "\n")
+        state.memory_usage.clone()
     };
     let memory_section = Paragraph::new(memory_text).block(Block::default().title("Memory Usage").borders(Borders::ALL));
+
+    let latency_text = if state.latency_rows.is_empty() {
+        "Collecting data...".to_string()
+    } else {
+        state
+            .latency_rows
+            .iter()
+            .map(|row| {
+                let indent = "  ".repeat(row.level as usize);
+                format!("{}{} - {:.2}ms ({:.2} avg)", indent, row.label, row.last_ms, row.average_ms)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let latency_section = Paragraph::new(latency_text).block(Block::default().title("Latency").borders(Borders::ALL));
 
     let prompt_section = Paragraph::new(format!(
         "Prompt Tokens: {}\nProcessing Time: {}",
@@ -215,8 +240,9 @@ fn ui(frame: &mut Frame, state: &AppState) {
     frame.render_widget(text_area, body_layout[0]);
     frame.render_widget(sidebar_block, sidebar_area);
     frame.render_widget(memory_section, sidebar_sections[0]);
-    frame.render_widget(prompt_section, sidebar_sections[1]);
-    frame.render_widget(generation_section, sidebar_sections[2]);
+    frame.render_widget(latency_section, sidebar_sections[1]);
+    frame.render_widget(prompt_section, sidebar_sections[2]);
+    frame.render_widget(generation_section, sidebar_sections[3]);
     frame.render_widget(status_text, status_layout[0]);
     frame.render_widget(throughput_text, status_layout[1]);
 }

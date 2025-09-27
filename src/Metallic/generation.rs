@@ -1,5 +1,6 @@
 use super::{Context, MetalError, Tensor};
-use crate::app_event::AppEvent;
+use crate::app_event::{AppEvent, LatencyRow};
+use crate::metallic::instrumentation::new_collector;
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::Tokenizer;
 use app_memory_usage_fetcher::get_memory_usage_mbytes;
@@ -9,6 +10,33 @@ use std::time::{Duration, Instant};
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
+
+#[derive(Clone, Copy, Default)]
+struct RollingStat {
+    last: Duration,
+    total: Duration,
+    count: u64,
+}
+
+impl RollingStat {
+    fn record(&mut self, duration: Duration) {
+        self.last = duration;
+        self.total += duration;
+        self.count += 1;
+    }
+
+    fn last_ms(&self) -> f64 {
+        self.last.as_secs_f64() * 1000.0
+    }
+
+    fn average_ms(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            (self.total.as_secs_f64() * 1000.0) / self.count as f64
+        }
+    }
+}
 
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
@@ -247,6 +275,13 @@ where
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1; // Assuming batch size of 1 for now
 
+    let mut embed_stats = RollingStat::default();
+    let mut forward_stats = RollingStat::default();
+    let mut output_stats = RollingStat::default();
+    let mut sample_stats = RollingStat::default();
+    let mut block_stats = vec![RollingStat::default(); n_layers];
+    let mut latencies_ready = false;
+
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
     }
@@ -302,13 +337,37 @@ where
         ctx.reset_pool();
         ctx.clear_cache();
 
-        // Embed just the single last token
+        let embed_start = Instant::now();
         let input_tensor = qwen.embed(&[next_token], ctx)?;
+        let embed_duration = embed_start.elapsed();
+        if !embed_duration.is_zero() {
+            embed_stats.record(embed_duration);
+        }
 
-        // Run a single forward step
         let current_pos = prompt_len + i;
+        let collector = new_collector(n_layers);
+        ctx.set_latency_collector(Some(collector.clone()));
+
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
+        let forward_snapshot = collector.borrow().snapshot();
+        ctx.set_latency_collector(None);
+
+        if !forward_snapshot.forward_step.is_zero() {
+            forward_stats.record(forward_snapshot.forward_step);
+            latencies_ready = true;
+        }
+        for (idx, duration) in forward_snapshot.blocks.iter().enumerate() {
+            if !duration.is_zero() {
+                block_stats[idx].record(*duration);
+            }
+        }
+
+        let output_start = Instant::now();
         let logits_tensor = qwen.output(&hidden_states, ctx)?;
+        let output_duration = output_start.elapsed();
+        if !output_duration.is_zero() {
+            output_stats.record(output_duration);
+        }
 
         if ui_connected && let Some(stats) = ctx.get_cache_stats() {
             let app_mem = get_memory_usage_mbytes(); // This actually seems to return GB not MB due to a bug in crate
@@ -322,34 +381,38 @@ where
             let kv_layers = ctx.kv_caches.len();
 
             let memory_usage = format!(
-                "App: {} | Pool: {:.2}/{:.2} MB | KV: {:.2}/{:.2} MB (L={}) | Cache: G{}/D{}/S{}",
+                "App: {}\nPool: {:.2}/{:.2} MB (chunks: {}, allocs: {}, resets: {})\nKV: {:.2}/{:.2} MB (chunks: {}, allocs: {}, resets: {})\nContext: step {}/{} | Cache: G{}/D{}/S{}",
                 app_mem_str,
                 pool_used_mb,
                 pool_capacity_mb,
+                ctx.pool.num_chunks(),
+                ctx.pool.pooled_allocations,
+                ctx.pool.pool_resets,
                 kv_used_mb,
                 kv_capacity_mb,
-                kv_layers,
+                ctx.kv_cache_pool.num_chunks(),
+                ctx.kv_cache_pool.pooled_allocations,
+                ctx.kv_cache_pool.pool_resets,
+                current_pos + 1,
+                seq_len,
                 stats.gemm_cache_size,
                 stats.descriptor_cache_size,
                 stats.sdpa_cache_size
             );
 
             if tx.send(AppEvent::MemoryUpdate(memory_usage)).is_err() {
-                ui_connected = false; // Receiver dropped; continue without UI updates
+                ui_connected = false;
             }
         }
 
         let logits = logits_tensor.to_vec();
-
-        // Since seq_len is 1, the logits are just the first (and only) vocab block
         let vocab_logits = logits[0..vocab_size].to_vec();
 
-        // Sample the next token
+        let sample_start = Instant::now();
         next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
 
         generated_ids.push(next_token);
 
-        // Callback and check for EOS
         let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
         let mut decoded_chunk = String::new();
         if decoded_full.len() >= last_decoded_len {
@@ -358,6 +421,18 @@ where
             decoded_chunk = decoded_full.clone();
         }
         last_decoded_len = decoded_full.len();
+
+        let sample_duration = sample_start.elapsed();
+        if !sample_duration.is_zero() {
+            sample_stats.record(sample_duration);
+        }
+
+        if latencies_ready && ui_connected {
+            let rows = build_latency_rows(&embed_stats, &forward_stats, &block_stats, &output_stats, &sample_stats);
+            if tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
+                ui_connected = false;
+            }
+        }
 
         if !token_callback(next_token, decoded_chunk)? {
             break;
@@ -369,4 +444,53 @@ where
     }
 
     Ok(())
+}
+
+fn build_latency_rows(
+    embed: &RollingStat,
+    forward: &RollingStat,
+    blocks: &[RollingStat],
+    output: &RollingStat,
+    sample: &RollingStat,
+) -> Vec<LatencyRow> {
+    let mut rows = Vec::with_capacity(2 + blocks.len() + 2);
+
+    rows.push(LatencyRow {
+        label: "Embedding".to_string(),
+        last_ms: embed.last_ms(),
+        average_ms: embed.average_ms(),
+        level: 0,
+    });
+
+    rows.push(LatencyRow {
+        label: "Forward Step".to_string(),
+        last_ms: forward.last_ms(),
+        average_ms: forward.average_ms(),
+        level: 0,
+    });
+
+    for (idx, stat) in blocks.iter().enumerate() {
+        rows.push(LatencyRow {
+            label: format!("Block {}", idx + 1),
+            last_ms: stat.last_ms(),
+            average_ms: stat.average_ms(),
+            level: 1,
+        });
+    }
+
+    rows.push(LatencyRow {
+        label: "Output".to_string(),
+        last_ms: output.last_ms(),
+        average_ms: output.average_ms(),
+        level: 0,
+    });
+
+    rows.push(LatencyRow {
+        label: "Sampling".to_string(),
+        last_ms: sample.last_ms(),
+        average_ms: sample.average_ms(),
+        level: 0,
+    });
+
+    rows
 }

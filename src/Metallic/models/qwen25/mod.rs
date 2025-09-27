@@ -1,5 +1,6 @@
 use crate::gguf::model_loader::GGUFModel;
 use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
+use crate::metallic::instrumentation::LatencyEvent;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::matmul::MatMulOp;
@@ -8,6 +9,7 @@ use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::LoadableModel;
 use crate::metallic::{Context, MetalError, Tensor};
+use std::time::Instant;
 
 mod qwen25_tests;
 
@@ -359,8 +361,10 @@ impl Qwen25 {
         let d_model = dims[2];
 
         let mut x = input.clone();
+        let overall_start = Instant::now();
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
+            let block_start = Instant::now();
             let resid_attn = x.clone();
 
             // RMSNorm before Attention
@@ -483,10 +487,14 @@ impl Qwen25 {
 
             // Residual Add
             x = resid_mlp.add_elem(&ffn_output, ctx)?;
+
+            ctx.record_latency_event(LatencyEvent::Block { index: layer_idx }, block_start.elapsed());
         }
 
         // Final RMSNorm after all blocks
         let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
+
+        ctx.record_latency_event(LatencyEvent::ForwardStep, overall_start.elapsed());
 
         Ok(final_normed)
     }
