@@ -269,7 +269,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
-    let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
+    let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let embed_slice = model.embed_weight.as_slice();
     println!("Loaded embed first 10: {:?}", &embed_slice[0..10]);
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
@@ -1434,7 +1434,6 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
 
     for (pos, &token_id) in input_ids.iter().enumerate() {
         ctx.reset_pool();
-        ctx.clear_cache();
 
         let token_embedding = model.embed(&[token_id], &mut ctx)?;
         let hidden_state = model.forward_step(&token_embedding, pos, &mut ctx)?;
