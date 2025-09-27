@@ -1466,6 +1466,24 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
             pos, token_id, max_diff, max_idx, avg_diff
         );
 
+        if max_diff >= 1e-3 {
+            let mut top_diffs: Vec<(usize, f32, f32, f32)> = kv_logits
+                .iter()
+                .zip(py_slice.iter())
+                .enumerate()
+                .map(|(idx, (&kv_val, &py_val))| (idx, kv_val, py_val, (kv_val - py_val).abs()))
+                .collect();
+
+            use std::cmp::Ordering;
+
+            top_diffs.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(Ordering::Equal));
+
+            println!("  Top differing vocab entries (idx | kv | pytorch | abs diff):");
+            for (idx, kv_val, py_val, diff) in top_diffs.into_iter().take(8) {
+                println!("    {:>6} | {:>12.6} | {:>12.6} | {:>10.3e}", idx, kv_val, py_val, diff);
+            }
+        }
+
         assert!(
             max_diff < 1e-3,
             "Logits mismatch at step {} exceeds tolerance: max diff {}",
