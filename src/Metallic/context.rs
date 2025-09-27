@@ -127,7 +127,7 @@ impl Context {
     }
 
     /// Emit a latency event to the currently installed collector, if any.
-    pub fn record_latency_event(&mut self, event: LatencyEvent, duration: Duration) {
+    pub fn record_latency_event(&mut self, event: LatencyEvent<'_>, duration: Duration) {
         if let Some(collector) = self.latency_collector.as_ref() {
             collector.borrow_mut().record(event, duration);
         }

@@ -9,9 +9,9 @@ use test_burn::{
     app_event::{AppEvent, LatencyRow},
     gguf,
     metallic::{
-        generation::{generate_streaming, GenerationConfig},
-        models::Qwen25,
         Context, Tokenizer,
+        generation::{GenerationConfig, generate_streaming},
+        models::Qwen25,
     },
 };
 

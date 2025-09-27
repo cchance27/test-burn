@@ -38,6 +38,37 @@ impl RollingStat {
     }
 }
 
+#[derive(Clone, Default)]
+struct BlockPhaseStat {
+    label: String,
+    stat: RollingStat,
+}
+
+#[derive(Clone, Default)]
+struct BlockStat {
+    total: RollingStat,
+    phases: Vec<BlockPhaseStat>,
+}
+
+impl BlockStat {
+    fn record_total(&mut self, duration: Duration) {
+        self.total.record(duration);
+    }
+
+    fn record_phase(&mut self, label: &str, duration: Duration) {
+        if let Some(entry) = self.phases.iter_mut().find(|entry| entry.label == label) {
+            entry.stat.record(duration);
+        } else {
+            let mut stat = RollingStat::default();
+            stat.record(duration);
+            self.phases.push(BlockPhaseStat {
+                label: label.to_string(),
+                stat,
+            });
+        }
+    }
+}
+
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
     pub max_tokens: usize,
@@ -279,7 +310,7 @@ where
     let mut forward_stats = RollingStat::default();
     let mut output_stats = RollingStat::default();
     let mut sample_stats = RollingStat::default();
-    let mut block_stats = vec![RollingStat::default(); n_layers];
+    let mut block_stats = vec![BlockStat::default(); n_layers];
     let mut latencies_ready = false;
 
     for layer_idx in 0..n_layers {
@@ -356,9 +387,14 @@ where
             forward_stats.record(forward_snapshot.forward_step);
             latencies_ready = true;
         }
-        for (idx, duration) in forward_snapshot.blocks.iter().enumerate() {
-            if !duration.is_zero() {
-                block_stats[idx].record(*duration);
+        for (idx, block_snapshot) in forward_snapshot.blocks.iter().enumerate() {
+            if !block_snapshot.total.is_zero() {
+                block_stats[idx].record_total(block_snapshot.total);
+            }
+            for phase in &block_snapshot.phases {
+                if !phase.duration.is_zero() {
+                    block_stats[idx].record_phase(&phase.label, phase.duration);
+                }
             }
         }
 
@@ -449,11 +485,11 @@ where
 fn build_latency_rows(
     embed: &RollingStat,
     forward: &RollingStat,
-    blocks: &[RollingStat],
+    blocks: &[BlockStat],
     output: &RollingStat,
     sample: &RollingStat,
 ) -> Vec<LatencyRow> {
-    let mut rows = Vec::with_capacity(2 + blocks.len() + 2);
+    let mut rows = Vec::new();
 
     rows.push(LatencyRow {
         label: "Embedding".to_string(),
@@ -472,10 +508,18 @@ fn build_latency_rows(
     for (idx, stat) in blocks.iter().enumerate() {
         rows.push(LatencyRow {
             label: format!("Block {}", idx + 1),
-            last_ms: stat.last_ms(),
-            average_ms: stat.average_ms(),
+            last_ms: stat.total.last_ms(),
+            average_ms: stat.total.average_ms(),
             level: 1,
         });
+        for phase in &stat.phases {
+            rows.push(LatencyRow {
+                label: phase.label.clone(),
+                last_ms: phase.stat.last_ms(),
+                average_ms: phase.stat.average_ms(),
+                level: 2,
+            });
+        }
     }
 
     rows.push(LatencyRow {
