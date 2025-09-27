@@ -269,7 +269,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
-    let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
+    let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let embed_slice = model.embed_weight.as_slice();
     println!("Loaded embed first 10: {:?}", &embed_slice[0..10]);
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
@@ -1380,7 +1380,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
-    let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
+    let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
 
     let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
