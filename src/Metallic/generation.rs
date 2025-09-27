@@ -11,6 +11,35 @@ use std::time::{Duration, Instant};
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
 
+#[derive(Clone)]
+struct ModelMemoryNode {
+    label: String,
+    bytes: usize,
+    children: Vec<ModelMemoryNode>,
+}
+
+impl ModelMemoryNode {
+    fn leaf(label: impl Into<String>, bytes: usize) -> Self {
+        Self {
+            label: label.into(),
+            bytes,
+            children: Vec::new(),
+        }
+    }
+
+    fn branch(label: impl Into<String>, children: Vec<ModelMemoryNode>) -> Self {
+        Self {
+            label: label.into(),
+            bytes: 0,
+            children,
+        }
+    }
+
+    fn total_bytes(&self) -> usize {
+        self.bytes + self.children.iter().map(|child| child.total_bytes()).sum::<usize>()
+    }
+}
+
 #[derive(Clone, Copy, Default)]
 struct RollingStat {
     last: Duration,
@@ -218,6 +247,145 @@ impl ScalarStat {
 
 fn bytes_to_mb(bytes: usize) -> f64 {
     bytes as f64 / 1024.0 / 1024.0
+}
+
+fn build_model_memory_tree(model: &Qwen25) -> ModelMemoryNode {
+    let mut children = Vec::new();
+
+    children.push(ModelMemoryNode::leaf("Token Embeddings", model.embed_weight.size_bytes()));
+    children.push(ModelMemoryNode::leaf("Output Projection", model.output_weight.size_bytes()));
+    children.push(ModelMemoryNode::leaf("Final Layer Norm", model.final_norm_gamma.size_bytes()));
+    children.push(ModelMemoryNode::leaf(
+        "RoPE Cache",
+        model.rope_cos_cache.size_bytes() + model.rope_sin_cache.size_bytes(),
+    ));
+
+    let block_nodes: Vec<ModelMemoryNode> = model
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(idx, block)| {
+            let attn_projections = ModelMemoryNode::branch(
+                "Attention Projections",
+                vec![
+                    ModelMemoryNode::leaf("Q weight", block.attn_q_weight.size_bytes()),
+                    ModelMemoryNode::leaf("K weight", block.attn_k_weight.size_bytes()),
+                    ModelMemoryNode::leaf("V weight", block.attn_v_weight.size_bytes()),
+                    ModelMemoryNode::leaf("Output weight", block.attn_out_weight.size_bytes()),
+                ],
+            );
+
+            let attn_biases = ModelMemoryNode::branch(
+                "Attention Biases",
+                vec![
+                    ModelMemoryNode::leaf("Q bias", block.attn_q_bias.size_bytes()),
+                    ModelMemoryNode::leaf("K bias", block.attn_k_bias.size_bytes()),
+                    ModelMemoryNode::leaf("V bias", block.attn_v_bias.size_bytes()),
+                ],
+            );
+
+            let feedforward = ModelMemoryNode::branch(
+                "Feedforward Projections",
+                vec![
+                    ModelMemoryNode::leaf("Gate weight", block.ffn_gate.size_bytes()),
+                    ModelMemoryNode::leaf("Up weight", block.ffn_up.size_bytes()),
+                    ModelMemoryNode::leaf("Down weight", block.ffn_down.size_bytes()),
+                ],
+            );
+
+            let feedforward_biases = ModelMemoryNode::branch(
+                "Feedforward Biases",
+                vec![
+                    ModelMemoryNode::leaf("Gate bias", block.ffn_gate_bias.size_bytes()),
+                    ModelMemoryNode::leaf("Up bias", block.ffn_up_bias.size_bytes()),
+                    ModelMemoryNode::leaf("Down bias", block.ffn_down_bias.size_bytes()),
+                ],
+            );
+
+            let norms = ModelMemoryNode::branch(
+                "Norm Parameters",
+                vec![
+                    ModelMemoryNode::leaf("Attention norm", block.attn_norm_gamma.size_bytes()),
+                    ModelMemoryNode::leaf("FFN norm", block.ffn_norm_gamma.size_bytes()),
+                ],
+            );
+
+            ModelMemoryNode::branch(
+                format!("Block {}", idx + 1),
+                vec![attn_projections, attn_biases, feedforward, feedforward_biases, norms],
+            )
+        })
+        .collect();
+
+    if !block_nodes.is_empty() {
+        children.push(ModelMemoryNode::branch("Transformer Blocks", block_nodes));
+    }
+
+    ModelMemoryNode::branch("Model Weights", children)
+}
+
+fn append_model_memory_rows(node: &ModelMemoryNode, level: u8, rows: &mut Vec<MemoryRow>) {
+    let total_mb = bytes_to_mb(node.total_bytes());
+    if total_mb <= 0.0 {
+        return;
+    }
+
+    rows.push(MemoryRow {
+        label: node.label.clone(),
+        level,
+        current_total_mb: total_mb,
+        peak_total_mb: total_mb,
+        current_pool_mb: 0.0,
+        peak_pool_mb: 0.0,
+        current_kv_mb: 0.0,
+        peak_kv_mb: 0.0,
+        current_kv_cache_mb: 0.0,
+        peak_kv_cache_mb: 0.0,
+        absolute_pool_mb: 0.0,
+        absolute_kv_mb: 0.0,
+        absolute_kv_cache_mb: 0.0,
+        show_absolute: false,
+    });
+
+    for child in &node.children {
+        append_model_memory_rows(child, level + 1, rows);
+    }
+}
+
+fn unattributed_host_row(host: &ScalarStat, forward_usage: Option<MemoryUsage>, model_memory: &ModelMemoryNode) -> Option<MemoryRow> {
+    let usage = forward_usage?;
+    if host.current <= 0.0 {
+        return None;
+    }
+
+    let tracked_bytes = model_memory.total_bytes() + usage.pool_used + usage.kv_used;
+    let tracked_mb = bytes_to_mb(tracked_bytes);
+    if tracked_mb <= 0.0 {
+        return None;
+    }
+
+    let current_gap = (host.current - tracked_mb).max(0.0);
+    let peak_gap = (host.peak - tracked_mb).max(0.0);
+    if current_gap < 1.0 && peak_gap < 1.0 {
+        return None;
+    }
+
+    Some(MemoryRow {
+        label: "Unattributed Host Memory".to_string(),
+        level: 1,
+        current_total_mb: current_gap,
+        peak_total_mb: peak_gap.max(current_gap),
+        current_pool_mb: 0.0,
+        peak_pool_mb: 0.0,
+        current_kv_mb: 0.0,
+        peak_kv_mb: 0.0,
+        current_kv_cache_mb: 0.0,
+        peak_kv_cache_mb: 0.0,
+        absolute_pool_mb: 0.0,
+        absolute_kv_mb: 0.0,
+        absolute_kv_cache_mb: 0.0,
+        show_absolute: false,
+    })
 }
 
 /// Generation configuration (defaults chosen by user)
@@ -470,6 +638,7 @@ where
     let mut latest_forward_usage: Option<MemoryUsage> = None;
     let mut memory_ready = false;
     let mut host_memory = ScalarStat::default();
+    let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
@@ -644,6 +813,7 @@ where
 
         if memory_ready && ui_connected {
             let rows = build_memory_rows(
+                &model_memory_tree,
                 &host_memory,
                 &memory_embed,
                 &memory_forward,
@@ -726,6 +896,7 @@ fn build_latency_rows(
 }
 
 fn build_memory_rows(
+    model_memory: &ModelMemoryNode,
     host: &ScalarStat,
     embed: &MemoryScopeStat,
     forward: &MemoryScopeStat,
@@ -735,8 +906,13 @@ fn build_memory_rows(
 ) -> Vec<MemoryRow> {
     let mut rows = Vec::new();
 
+    append_model_memory_rows(model_memory, 0, &mut rows);
+
     if host.current > 0.0 || host.peak > 0.0 {
         rows.push(host.to_row("Host Memory (MB)"));
+        if let Some(unattributed) = unattributed_host_row(host, forward_usage, model_memory) {
+            rows.push(unattributed);
+        }
     }
 
     if embed.has_data() {
