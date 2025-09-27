@@ -69,14 +69,44 @@ fn main() -> Result<()> {
 
     while !app_state.should_quit {
         if crossterm::event::poll(Duration::from_millis(50))? {
-            if let crossterm::event::Event::Key(key) = crossterm::event::read()? {
-                match key.code {
+            match crossterm::event::read()? {
+                crossterm::event::Event::Key(key) => match key.code {
                     crossterm::event::KeyCode::Char('q') => app_state.should_quit = true,
-                    crossterm::event::KeyCode::Char('m') => app_state.metrics_view = MetricsView::Memory,
-                    crossterm::event::KeyCode::Char('l') => app_state.metrics_view = MetricsView::Latency,
-                    crossterm::event::KeyCode::Tab => app_state.metrics_view.toggle(),
+                    crossterm::event::KeyCode::Char('m') => {
+                        app_state.metrics_view = MetricsView::Memory;
+                        app_state.reset_metrics_scroll();
+                    }
+                    crossterm::event::KeyCode::Char('l') => {
+                        app_state.metrics_view = MetricsView::Latency;
+                        app_state.reset_metrics_scroll();
+                    }
+                    crossterm::event::KeyCode::Char('c') => {
+                        app_state.toggle_collapse();
+                    }
+                    crossterm::event::KeyCode::Tab => {
+                        if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                            app_state.focus_prev();
+                        } else {
+                            app_state.focus_next();
+                        }
+                    }
+                    crossterm::event::KeyCode::BackTab => {
+                        app_state.focus_prev();
+                    }
+                    crossterm::event::KeyCode::Up => app_state.scroll_active(-1),
+                    crossterm::event::KeyCode::Down => app_state.scroll_active(1),
+                    crossterm::event::KeyCode::PageUp => app_state.scroll_active(-10),
+                    crossterm::event::KeyCode::PageDown => app_state.scroll_active(10),
+                    crossterm::event::KeyCode::Home => app_state.scroll_active_to_start(),
+                    crossterm::event::KeyCode::End => app_state.scroll_active_to_end(),
                     _ => {}
+                },
+                crossterm::event::Event::Mouse(mouse) => {
+                    if let crossterm::event::MouseEventKind::Down(_) = mouse.kind {
+                        app_state.handle_click(mouse.column, mouse.row);
+                    }
                 }
+                _ => {}
             }
         }
 
@@ -88,7 +118,11 @@ fn main() -> Result<()> {
                     prompt_processing,
                     generation: _,
                 } => {
+                    let was_following = app_state.text_follow_bottom;
                     app_state.generated_text.push_str(&text);
+                    if was_following {
+                        app_state.request_follow_text = true;
+                    }
                     app_state.tokens_per_second = tokens_per_second;
                     app_state.prompt_processing_time = prompt_processing;
                 }
@@ -107,7 +141,7 @@ fn main() -> Result<()> {
             }
         }
 
-        terminal.draw(|frame| ui(frame, &app_state))?;
+        terminal.draw(|frame| ui(frame, &mut app_state))?;
     }
 
     restore_terminal()?;
@@ -125,6 +159,14 @@ struct AppState {
     prompt_processing_time: Duration,
     latency_rows: Vec<LatencyRow>,
     metrics_view: MetricsView,
+    metrics_collapsed: bool,
+    focus: FocusArea,
+    text_scroll: u16,
+    metrics_scroll: u16,
+    text_follow_bottom: bool,
+    request_follow_text: bool,
+    text_area: Rect,
+    metrics_area: Rect,
 }
 
 impl AppState {
@@ -139,6 +181,14 @@ impl AppState {
             prompt_processing_time: Duration::default(),
             latency_rows: Vec::new(),
             metrics_view: MetricsView::Memory,
+            metrics_collapsed: false,
+            focus: FocusArea::GeneratedText,
+            text_scroll: 0,
+            metrics_scroll: 0,
+            text_follow_bottom: true,
+            request_follow_text: false,
+            text_area: Rect::new(0, 0, 0, 0),
+            metrics_area: Rect::new(0, 0, 0, 0),
         }
     }
 }
@@ -149,12 +199,84 @@ enum MetricsView {
     Latency,
 }
 
-impl MetricsView {
-    fn toggle(&mut self) {
-        *self = match self {
-            MetricsView::Memory => MetricsView::Latency,
-            MetricsView::Latency => MetricsView::Memory,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum FocusArea {
+    GeneratedText,
+    Metrics,
+}
+
+impl AppState {
+    fn focus_next(&mut self) {
+        self.focus = match self.focus {
+            FocusArea::GeneratedText => FocusArea::Metrics,
+            FocusArea::Metrics => FocusArea::GeneratedText,
         };
+    }
+
+    fn focus_prev(&mut self) {
+        self.focus_next();
+    }
+
+    fn scroll_active(&mut self, delta: i32) {
+        match self.focus {
+            FocusArea::GeneratedText => {
+                if delta != 0 {
+                    self.text_follow_bottom = false;
+                }
+                self.adjust_scroll(&mut self.text_scroll, delta);
+                if self.text_scroll == 0 && delta <= 0 {
+                    self.text_follow_bottom = true;
+                }
+            }
+            FocusArea::Metrics => {
+                self.adjust_scroll(&mut self.metrics_scroll, delta);
+            }
+        }
+    }
+
+    fn scroll_active_to_start(&mut self) {
+        match self.focus {
+            FocusArea::GeneratedText => {
+                self.text_scroll = 0;
+                self.text_follow_bottom = false;
+            }
+            FocusArea::Metrics => self.metrics_scroll = 0,
+        }
+    }
+
+    fn scroll_active_to_end(&mut self) {
+        match self.focus {
+            FocusArea::GeneratedText => {
+                self.text_follow_bottom = true;
+                self.request_follow_text = true;
+            }
+            FocusArea::Metrics => {
+                self.metrics_scroll = u16::MAX;
+            }
+        }
+    }
+
+    fn adjust_scroll(&mut self, value: &mut u16, delta: i32) {
+        let current = i32::from(*value);
+        let next = (current + delta).clamp(0, u16::MAX as i32);
+        *value = next as u16;
+    }
+
+    fn toggle_collapse(&mut self) {
+        self.metrics_collapsed = !self.metrics_collapsed;
+        self.reset_metrics_scroll();
+    }
+
+    fn reset_metrics_scroll(&mut self) {
+        self.metrics_scroll = 0;
+    }
+
+    fn handle_click(&mut self, column: u16, row: u16) {
+        if rect_contains(self.text_area, column, row) {
+            self.focus = FocusArea::GeneratedText;
+        } else if rect_contains(self.metrics_area, column, row) {
+            self.focus = FocusArea::Metrics;
+        }
     }
 }
 
@@ -180,7 +302,7 @@ fn restore_terminal() -> Result<()> {
     Ok(())
 }
 
-fn ui(frame: &mut Frame, state: &AppState) {
+fn ui(frame: &mut Frame, state: &mut AppState) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -191,9 +313,14 @@ fn ui(frame: &mut Frame, state: &AppState) {
         .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
         .split(main_layout[0]);
 
-    let text_area = Paragraph::new(state.generated_text.clone())
-        .block(Block::default().title("Generated Text (q to quit)").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
+    let text_block = Block::default()
+        .title("Generated Text (q to quit)")
+        .borders(Borders::ALL)
+        .border_style(border_style(state.focus == FocusArea::GeneratedText));
+    let text_area_widget = Paragraph::new(state.generated_text.clone())
+        .block(text_block)
+        .wrap(Wrap { trim: false })
+        .scroll((state.text_scroll, 0));
 
     let sidebar_block = Block::default().title("Metrics").borders(Borders::ALL);
     let sidebar_area = body_layout[1];
@@ -216,7 +343,7 @@ fn ui(frame: &mut Frame, state: &AppState) {
         MetricsView::Latency => "Latency",
     };
 
-    let metrics_help = "[m] Memory  [l] Latency  [Tab] Toggle";
+    let metrics_help = "[m] Memory  [l] Latency  [c] Collapse  [Tab] Focus";
 
     let metrics_text = match state.metrics_view {
         MetricsView::Memory => {
@@ -226,6 +353,7 @@ fn ui(frame: &mut Frame, state: &AppState) {
                 state
                     .memory_rows
                     .iter()
+                    .filter(|row| !state.metrics_collapsed || row.level == 0)
                     .map(|row| {
                         let indent = "  ".repeat(row.level as usize);
                         let mut line = format!(
@@ -260,6 +388,7 @@ fn ui(frame: &mut Frame, state: &AppState) {
                 state
                     .latency_rows
                     .iter()
+                    .filter(|row| !state.metrics_collapsed || row.level == 0)
                     .map(|row| {
                         let indent = "  ".repeat(row.level as usize);
                         format!("{}{} - {:.2}ms ({:.2} avg)", indent, row.label, row.last_ms, row.average_ms)
@@ -270,8 +399,14 @@ fn ui(frame: &mut Frame, state: &AppState) {
         }
     };
 
+    let metrics_block = Block::default()
+        .title(metrics_block_title)
+        .borders(Borders::ALL)
+        .border_style(border_style(state.focus == FocusArea::Metrics));
     let metrics_section = Paragraph::new(format!("{}\n\n{}", metrics_help, metrics_text))
-        .block(Block::default().title(metrics_block_title).borders(Borders::ALL));
+        .block(metrics_block)
+        .wrap(Wrap { trim: false })
+        .scroll((state.metrics_scroll, 0));
 
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
@@ -284,12 +419,25 @@ fn ui(frame: &mut Frame, state: &AppState) {
         .style(Style::default().fg(Color::White).bg(Color::Blue))
         .alignment(Alignment::Right);
 
-    frame.render_widget(text_area, body_layout[0]);
+    frame.render_widget(text_area_widget, body_layout[0]);
     frame.render_widget(sidebar_block, sidebar_area);
     frame.render_widget(prompt_section, sidebar_sections[0]);
     frame.render_widget(metrics_section, sidebar_sections[1]);
     frame.render_widget(status_text, status_layout[0]);
     frame.render_widget(throughput_text, status_layout[1]);
+
+    state.text_area = body_layout[0];
+    state.metrics_area = sidebar_sections[1];
+
+    if state.request_follow_text {
+        if state.text_area.height > 0 {
+            let content_lines = state.generated_text.matches('\n').count() + 1;
+            let visible = state.text_area.height as usize;
+            let baseline = content_lines.saturating_sub(visible) as u16;
+            state.text_scroll = baseline;
+        }
+        state.request_follow_text = false;
+    }
 }
 
 fn format_duration(duration: Duration) -> String {
@@ -302,4 +450,16 @@ fn format_duration(duration: Duration) -> String {
     } else {
         "0ms".to_string()
     }
+}
+
+fn border_style(active: bool) -> Style {
+    if active {
+        Style::default().fg(Color::Cyan)
+    } else {
+        Style::default()
+    }
+}
+
+fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
+    x >= rect.x && x < rect.x.saturating_add(rect.width) && y >= rect.y && y < rect.y.saturating_add(rect.height)
 }
