@@ -3,7 +3,7 @@ use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Tensor, kernels};
+use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -176,9 +176,7 @@ impl Context {
             encoder.fillBuffer_range_value(&v.buf, (v.offset..v.offset + v_size).into(), 0);
             encoder.endEncoding();
         } else {
-            return Err(MetalError::OperationNotSupported(
-                "Blit encoder not available".into(),
-            ));
+            return Err(MetalError::OperationNotSupported("Blit encoder not available".into()));
         }
 
         self.mark_tensor_pending(&k);
@@ -199,7 +197,7 @@ impl Context {
         v_step: &crate::metallic::Tensor,
     ) -> Result<(), MetalError> {
         // Lookup entry
-        let (k_cache, v_cache, capacity_seq) = match self.kv_caches.get(&layer_idx) {
+        let (k_cache_raw, v_cache_raw, capacity_seq) = match self.kv_caches.get(&layer_idx) {
             Some(entry) => entry.clone(),
             None => {
                 return Err(MetalError::InvalidOperation(format!(
@@ -215,12 +213,19 @@ impl Context {
             )));
         }
 
+        // Ensure both the source tensors and the cache buffers are safe to access
+        let mut k_cache = k_cache_raw.clone();
+        let mut v_cache = v_cache_raw.clone();
+        let mut k_src = k_step.clone();
+        let mut v_src = v_step.clone();
+        self.prepare_tensors_for_active_cmd(&mut [&mut k_cache, &mut v_cache, &mut k_src, &mut v_src]);
+
         // Validate shapes
-        let bh = k_step.dims().first().cloned().unwrap_or(0);
-        let hd = if k_step.dims().len() == 2 {
-            k_step.dims()[1]
-        } else if k_step.dims().len() == 3 {
-            k_step.dims()[2]
+        let bh = k_src.dims().first().cloned().unwrap_or(0);
+        let hd = if k_src.dims().len() == 2 {
+            k_src.dims()[1]
+        } else if k_src.dims().len() == 3 {
+            k_src.dims()[2]
         } else {
             0
         };
@@ -243,8 +248,8 @@ impl Context {
         let dst_base_v = v_cache.offset + step * row_elems * elem_size;
 
         // Source offset and size: assume k_step is tightly packed starting at its offset
-        let src_offset_k = k_step.offset;
-        let src_offset_v = v_step.offset;
+        let src_offset_k = k_src.offset;
+        let src_offset_v = v_src.offset;
 
         // Create a command buffer and blit encoder to copy slices
         {
@@ -257,14 +262,14 @@ impl Context {
             // copy K then V
             unsafe {
                 encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &k_step.buf,
+                    &k_src.buf,
                     src_offset_k,
                     &k_cache.buf,
                     dst_base,
                     copy_bytes,
                 );
                 encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &v_step.buf,
+                    &v_src.buf,
                     src_offset_v,
                     &v_cache.buf,
                     dst_base_v,
