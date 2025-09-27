@@ -349,7 +349,7 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
         MetricsView::Latency => "Latency",
     };
 
-    let metrics_help = "[m] Memory  [l] Latency  [c] Collapse  [Tab] Focus";
+    let metrics_help = "[m] Memory [l] Latency [c] Collapse";
 
     let metrics_text = match state.metrics_view {
         MetricsView::Memory => {
