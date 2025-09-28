@@ -1,14 +1,14 @@
-use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2::AnyThread;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor,
 };
 
 mod matmul_test;
@@ -38,8 +38,8 @@ struct MatMul {
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for MatMulOp {
     // Input arguments for the call - two input tensors + transpose options
-    type Args = (Tensor, Tensor, bool, bool); // (left, right, transpose_left, transpose_right)
-    // The output type
+    type Args<'a> = (&'a Tensor, &'a Tensor, bool, bool); // (left, right, transpose_left, transpose_right)
+                                                          // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
     fn function_id() -> Option<KernelFunction> {
@@ -48,20 +48,20 @@ impl KernelInvocable for MatMulOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>, // MPS doesn't use this
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut left, mut right, transpose_left, transpose_right) = args;
+        let (left, right, transpose_left, transpose_right) = args;
 
         // Validate dimensions for matrix multiplication
         if left.dims().len() != 2 || right.dims().len() != 2 {
             return Err(MetalError::InvalidOperation("matmul requires 2D tensors".to_string()));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut left, &mut right]);
+        ctx.prepare_tensors_for_active_cmd(&[left, right]);
 
         let left_rows = left.dims()[0];
         let left_cols = left.dims()[1];

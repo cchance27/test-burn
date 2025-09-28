@@ -17,19 +17,19 @@ struct RepeatKvHeads {
 }
 
 impl KernelInvocable for RepeatKvHeadsOp {
-    type Args = (Tensor, u32, u32, u32, u32, u32, u32, u32);
+    type Args<'a> = (Tensor, u32, u32, u32, u32, u32, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::RepeatKvHeads)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride) = args;
+        let (input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride) = args;
 
         if group_size == 0 {
             return Err(MetalError::InvalidShape(
@@ -94,7 +94,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut input]);
+        ctx.prepare_tensors_for_active_cmd(&[&input]);
 
         let output_dims = vec![(batch * n_heads) as usize, seq as usize, head_dim as usize];
         let output = Tensor::create_tensor_pooled(output_dims, ctx)?;

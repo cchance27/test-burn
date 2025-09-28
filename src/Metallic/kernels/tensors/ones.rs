@@ -14,7 +14,7 @@ struct Ones {
 // 3. Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for OnesOp {
     // Input arguments for the call.
-    type Args = Vec<usize>;
+    type Args<'a> = Vec<usize>;
     // The output type.
 
     // Link to the enum variant in `KernelFunction`.
@@ -24,9 +24,9 @@ impl KernelInvocable for OnesOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        dims: Self::Args,
+        dims: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {

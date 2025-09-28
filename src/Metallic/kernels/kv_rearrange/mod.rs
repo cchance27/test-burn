@@ -17,19 +17,19 @@ struct KvRearrange {
 }
 
 impl KernelInvocable for KvRearrangeOp {
-    type Args = (Tensor, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
+    type Args<'a> = (Tensor, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::KvRearrange)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq) = args;
+        let (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq) = args;
 
         // Calculate output dimensions: [batch*n_heads, seq, head_dim]
         // We need to infer batch from the input dimensions: M = batch*seq
@@ -37,7 +37,7 @@ impl KernelInvocable for KvRearrangeOp {
         let batch = input_m / seq as usize;
         let output_dims = vec![batch * n_heads as usize, seq as usize, head_dim as usize];
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut input]);
+        ctx.prepare_tensors_for_active_cmd(&[&input]);
 
         let output = Tensor::create_tensor_pooled(output_dims, ctx)?;
 

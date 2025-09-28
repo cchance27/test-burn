@@ -9,20 +9,20 @@ struct Gelu {
 }
 
 impl KernelInvocable for GeluOp {
-    type Args = Tensor;
+    type Args<'a> = Tensor;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::Gelu)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        input: Self::Args,
+        input: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let mut input = input;
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut input]);
+        let input = input;
+        ctx.prepare_tensors_for_active_cmd(&[&input]);
 
         let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
 

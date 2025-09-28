@@ -14,7 +14,7 @@ struct Arange {
 // 3. Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ArangeOp {
     // Input arguments for the call.
-    type Args = usize;
+    type Args<'a> = usize;
     // The output type.
 
     // Link to the enum variant in `KernelFunction`.
@@ -24,9 +24,9 @@ impl KernelInvocable for ArangeOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        length: Self::Args,
+        length: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {

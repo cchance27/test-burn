@@ -12,19 +12,19 @@ struct ElemwiseSub {
 }
 
 impl KernelInvocable for ElemwiseSubOp {
-    type Args = (Tensor, Tensor);
+    type Args<'a> = (Tensor, Tensor);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::ElemwiseSub)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut a, mut b) = args;
+        let (a, b) = args;
         if a.dims() != b.dims() {
             return Err(MetalError::InvalidShape(format!(
                 "ElemwiseSub: input shapes must match, got a={:?}, b={:?}",
@@ -33,7 +33,7 @@ impl KernelInvocable for ElemwiseSubOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut a, &mut b]);
+        ctx.prepare_tensors_for_active_cmd(&[&a, &b]);
 
         let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
 
