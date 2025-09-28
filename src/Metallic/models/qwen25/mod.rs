@@ -282,9 +282,12 @@ impl Qwen25 {
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
 
-            let k_repeated = Qwen25::repeat_kv_heads(&k_heads_after_rope, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
+            let k_history = CacheHistory::from_tensor(k_heads_after_rope)?;
+            let v_history = CacheHistory::from_tensor(v_heads)?;
 
-            let v_repeated = Qwen25::repeat_kv_heads(&v_heads, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
+            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+
+            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
 
             // SDPA (causal mask enabled)
             let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
@@ -566,4 +569,26 @@ struct CacheHistory {
     tensor: Tensor,
     active_seq: usize,
     cache_capacity: usize,
+}
+
+impl CacheHistory {
+    fn from_tensor(tensor: Tensor) -> Result<Self, MetalError> {
+        let dims = tensor.dims();
+        if dims.len() != 3 {
+            return Err(MetalError::InvalidShape(
+                "Cache history tensors must be rank-3".to_string(),
+            ));
+        }
+        if dims[1] == 0 {
+            return Err(MetalError::InvalidShape(
+                "Cache history tensors must have non-zero sequence length".to_string(),
+            ));
+        }
+
+        Ok(Self {
+            cache_capacity: dims[1],
+            active_seq: dims[1],
+            tensor,
+        })
+    }
 }
