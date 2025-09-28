@@ -338,6 +338,7 @@ impl Tensor {
         }
 
         let mut new_dims = self.dims.clone();
+        let new_strides = self.strides.clone();
         let mut new_offset = self.offset;
 
         if !ranges.is_empty() {
@@ -361,8 +362,8 @@ impl Tensor {
 
         Ok(Tensor {
             buf: self.buf.clone(),
-            dims: new_dims.clone(),
-            strides: Self::compute_strides(&new_dims), // Re-compute for correctness.
+            dims: new_dims,
+            strides: new_strides,
             dtype: self.dtype,
             device: self.device.clone(),
             offset: new_offset,
@@ -394,8 +395,7 @@ impl Tensor {
         let mut tensor = self.clone();
         let stride = self.strides.get(axis).copied().unwrap_or(0);
         tensor.offset += start * stride * self.dtype.size_bytes();
-        tensor.dims = new_dims.clone();
-        tensor.strides = Self::compute_strides(&new_dims);
+        tensor.dims = new_dims;
 
         Ok(tensor)
     }
@@ -793,7 +793,12 @@ impl Tensor {
             return Err(MetalError::InvalidShape("batch_index out of bounds".to_string()));
         }
 
-        let batch_size_bytes = self.dims[1..].iter().product::<usize>() * std::mem::size_of::<f32>();
+        let elem_stride = self
+            .strides
+            .get(0)
+            .copied()
+            .unwrap_or_else(|| self.dims[1..].iter().product());
+        let batch_size_bytes = elem_stride * self.dtype.size_bytes();
         let new_offset = self.offset + batch_index * batch_size_bytes;
 
         Ok(Tensor {
