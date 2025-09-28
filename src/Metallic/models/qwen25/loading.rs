@@ -136,52 +136,6 @@ fn parse_layer_index(name: &str) -> Option<usize> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::pack_weight_transposed_into_fused_slice;
-    use crate::metallic::MetalError;
-
-    #[test]
-    fn pack_weight_transposes_row_major_layouts() {
-        let src_dims = vec![3, 2];
-        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let fused_dims = vec![2, 3];
-        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
-
-        pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
-
-        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
-    }
-
-    #[test]
-    fn pack_weight_transposes_column_major_exports() {
-        let src_dims = vec![2, 3];
-        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let fused_dims = vec![2, 3];
-        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
-
-        pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
-
-        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
-    }
-
-    #[test]
-    fn pack_weight_errors_when_rows_mismatch_fused_input() {
-        let src_dims = vec![4, 3];
-        let src = vec![0.0; 12];
-        let fused_dims = vec![2, 6];
-        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
-
-        let err =
-            pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).expect_err("expected invalid shape error");
-
-        match err {
-            MetalError::InvalidShape(_) => {}
-            other => panic!("unexpected error: {:?}", other),
-        }
-    }
-}
-
 /// Implement the LoadableModel trait so Qwen25 can be created from a GGUFModel
 impl LoadableModel for super::Qwen25 {
     fn load_from_gguf(gguf_model: &GGUFModel, ctx: &mut Context) -> Result<Self, MetalError> {
@@ -540,5 +494,52 @@ impl LoadableModel for super::Qwen25 {
         }
 
         Ok(qwen)
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::pack_weight_transposed_into_fused_slice;
+    use crate::metallic::MetalError;
+
+    #[test]
+    fn pack_weight_transposes_row_major_layouts() {
+        let src_dims = vec![3, 2];
+        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let fused_dims = vec![2, 3];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
+
+        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn pack_weight_transposes_column_major_exports() {
+        let src_dims = vec![2, 3];
+        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let fused_dims = vec![2, 3];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
+
+        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn pack_weight_errors_when_rows_mismatch_fused_input() {
+        let src_dims = vec![4, 3];
+        let src = vec![0.0; 12];
+        let fused_dims = vec![2, 6];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        let err =
+            pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).expect_err("expected invalid shape error");
+
+        match err {
+            MetalError::InvalidShape(_) => {}
+            other => panic!("unexpected error: {:?}", other),
+        }
     }
 }

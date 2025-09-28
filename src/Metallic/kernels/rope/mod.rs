@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::{resource_cache::ResourceCache, Context, MetalError, Operation, Tensor};
+use crate::metallic::{Context, MetalError, Operation, Tensor, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};

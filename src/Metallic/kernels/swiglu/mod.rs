@@ -1,11 +1,11 @@
 use super::*;
 
-use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
-use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
-use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::Context;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
+use crate::metallic::kernels::silu::SiluOp;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;

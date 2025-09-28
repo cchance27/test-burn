@@ -1,14 +1,14 @@
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2::AnyThread;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
+    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
-    Context, MetalError, Operation, Tensor,
 };
 
 mod matmul_test;
@@ -39,7 +39,7 @@ struct MatMul {
 impl KernelInvocable for MatMulOp {
     // Input arguments for the call - two input tensors + transpose options
     type Args<'a> = (&'a Tensor, &'a Tensor, bool, bool); // (left, right, transpose_left, transpose_right)
-                                                          // The output type
+    // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
     fn function_id() -> Option<KernelFunction> {

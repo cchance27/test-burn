@@ -229,6 +229,7 @@ pub fn generate_autoregressive_with_kv_cache(
 }
 
 /// High-level autoregressive generation loop with streaming support using Qwen25 with KV Caching.
+#[allow(clippy::too_many_arguments)]
 pub fn generate_autoregressive_with_kv_cache_streaming<F>(
     qwen: &mut Qwen25,
     tokenizer: &Tokenizer,
