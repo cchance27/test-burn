@@ -6,7 +6,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
-use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
+use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -191,6 +191,54 @@ impl Context {
         self.call::<MatMulAlphaBetaOp>((a.clone(), b.clone(), result.clone(), transpose_a, transpose_b, alpha, beta))
     }
 
+    pub(crate) fn call_with_cache<K: KernelInvocable>(
+        &mut self,
+        args: K::Args,
+        cache: &mut ResourceCache,
+    ) -> Result<Tensor, MetalError> {
+        self.ensure_active_cmd_buffer_internal(false)?;
+
+        let pipeline = if let Some(kernel_func) = K::function_id() {
+            Some(self.kernel_manager.get_pipeline(kernel_func, &self.device)?)
+        } else {
+            None
+        };
+
+        let (operation, output) = K::new(self, args, pipeline, Some(cache))?;
+
+        let command_buffer = self.active_command_buffer_mut_without_cache()?;
+        command_buffer.record(&*operation, cache)?;
+        self.mark_tensor_pending(&output);
+
+        Ok(output)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn matmul_alpha_beta_with_cache(
+        &mut self,
+        a: &super::Tensor,
+        b: &super::Tensor,
+        result: &super::Tensor,
+        transpose_a: bool,
+        transpose_b: bool,
+        alpha: f32,
+        beta: f32,
+        cache: &mut ResourceCache,
+    ) -> Result<super::Tensor, MetalError> {
+        self.call_with_cache::<MatMulAlphaBetaOp>(
+            (
+                a.clone(),
+                b.clone(),
+                result.clone(),
+                transpose_a,
+                transpose_b,
+                alpha,
+                beta,
+            ),
+            cache,
+        )
+    }
+
     pub fn get_cache_stats(&self) -> Option<CacheStats> {
         self.active_resource_cache.as_ref().map(|cache| cache.get_stats())
     }
@@ -368,7 +416,13 @@ impl Context {
         query_offset: usize,
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOp>((q.clone(), k.clone(), v.clone(), causal, query_offset as u32))
+        self.call::<ScaledDotProductAttentionOptimizedOp>((
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            causal,
+            query_offset as u32,
+        ))
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.
@@ -410,6 +464,10 @@ impl Context {
 
 impl Context {
     fn ensure_active_cmd_buffer(&mut self) -> Result<(), MetalError> {
+        self.ensure_active_cmd_buffer_internal(true)
+    }
+
+    fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
         let should_refresh = if let Some(active) = self.active_cmd_buffer.as_ref() {
             if active.is_committed() {
                 if !active.is_completed() {
@@ -433,7 +491,7 @@ impl Context {
             self.active_cmd_buffer = Some(cmd_buf);
         }
 
-        if self.active_resource_cache.is_none() {
+        if ensure_cache && self.active_resource_cache.is_none() {
             self.active_resource_cache = Some(ResourceCache::new());
         }
 
@@ -442,6 +500,11 @@ impl Context {
 
     pub(crate) fn active_command_buffer_mut(&mut self) -> Result<&mut CommandBuffer, MetalError> {
         self.ensure_active_cmd_buffer()?;
+        Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
+    }
+
+    pub(crate) fn active_command_buffer_mut_without_cache(&mut self) -> Result<&mut CommandBuffer, MetalError> {
+        self.ensure_active_cmd_buffer_internal(false)?;
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
     }
 

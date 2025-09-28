@@ -70,6 +70,28 @@ impl Hash for MpsMatrixDescriptorKey {
     }
 }
 
+/// Key for cached MPS softmax operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsSoftMaxKey {
+    pub rows: usize,
+    pub columns: usize,
+}
+
+impl PartialEq for MpsSoftMaxKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows && self.columns == other.columns
+    }
+}
+
+impl Eq for MpsSoftMaxKey {}
+
+impl Hash for MpsSoftMaxKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.rows.hash(state);
+        self.columns.hash(state);
+    }
+}
+
 /// Key for SDPA operations.
 ///
 /// This key uniquely identifies an SDPA operation based on its dimensions.
