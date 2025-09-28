@@ -173,35 +173,18 @@ fn create_sdpa_operation(
             None => ctx.matmul_alpha_beta(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0)?,
         }; // [s_q, s_k]
 
-        let use_mps_softmax = config.use_mps_softmax && !causal && query_offset == 0;
-
-        let softmax_result = if use_mps_softmax {
-            if let Some(cache_ref) = cache.as_deref_mut() {
-                apply_mps_softmax(ctx, cache_ref, &qk_scaled_result, s_q, s_k)?;
-                qk_scaled_result.clone()
-            } else {
-                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
-                    qk_scaled_result,
-                    s_q as u32,
-                    s_k as u32,
-                    causal as u32,
-                    query_offset,
-                ))?
-            }
-        } else {
-            match cache.as_deref_mut() {
-                Some(cache_ref) => ctx.call_with_cache::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (qk_scaled_result, s_q as u32, s_k as u32, causal as u32, query_offset),
-                    cache_ref,
-                )?,
-                None => ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
-                    qk_scaled_result,
-                    s_q as u32,
-                    s_k as u32,
-                    causal as u32,
-                    query_offset,
-                ))?,
-            }
+        let softmax_result = {
+            let cache_opt = cache.as_deref_mut();
+            crate::metallic::kernels::softmax::apply_softmax(
+                ctx,
+                cache_opt,
+                &qk_scaled_result,
+                s_q,
+                s_k,
+                causal,
+                query_offset,
+                config.use_mps_softmax,
+            )?
         };
 
         // softmax_result x V -> out (for this batch)
