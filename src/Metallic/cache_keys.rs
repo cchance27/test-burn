@@ -12,6 +12,7 @@ pub struct MpsGemmKey {
     pub result_rows: usize,
     pub result_columns: usize,
     pub interior_columns: usize,
+    pub batch_size: usize,
     pub alpha: f32,
     pub beta: f32,
 }
@@ -23,6 +24,7 @@ impl PartialEq for MpsGemmKey {
             && self.result_rows == other.result_rows
             && self.result_columns == other.result_columns
             && self.interior_columns == other.interior_columns
+            && self.batch_size == other.batch_size
             && self.alpha == other.alpha
             && self.beta == other.beta
     }
@@ -37,6 +39,7 @@ impl Hash for MpsGemmKey {
         self.result_rows.hash(state);
         self.result_columns.hash(state);
         self.interior_columns.hash(state);
+        self.batch_size.hash(state);
         // For f32, we need to be careful about NaN values
         // We'll use the bit representation for hashing
         self.alpha.to_bits().hash(state);
@@ -52,11 +55,17 @@ pub struct MpsMatrixDescriptorKey {
     pub rows: usize,
     pub columns: usize,
     pub row_bytes: usize,
+    pub matrices: usize,
+    pub matrix_bytes: usize,
 }
 
 impl PartialEq for MpsMatrixDescriptorKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows && self.columns == other.columns && self.row_bytes == other.row_bytes
+        self.rows == other.rows
+            && self.columns == other.columns
+            && self.row_bytes == other.row_bytes
+            && self.matrices == other.matrices
+            && self.matrix_bytes == other.matrix_bytes
     }
 }
 
@@ -67,6 +76,8 @@ impl Hash for MpsMatrixDescriptorKey {
         self.rows.hash(state);
         self.columns.hash(state);
         self.row_bytes.hash(state);
+        self.matrices.hash(state);
+        self.matrix_bytes.hash(state);
     }
 }
 

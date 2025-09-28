@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use test_burn::metallic::kernels::softmax::{apply_softmax, METALLIC_SOFTMAX_BACKEND_ENV};
+use criterion::{Criterion, criterion_group, criterion_main};
+use test_burn::metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
 use test_burn::metallic::resource_cache::ResourceCache;
 use test_burn::metallic::{Context, Tensor};
 
@@ -13,12 +13,12 @@ fn run_softmax(ctx: &mut Context, cache: Option<&mut ResourceCache>, allow_mps: 
     match cache {
         Some(cache_ref) => {
             for _ in 0..ITERATIONS {
-                let _ = apply_softmax(ctx, Some(cache_ref), &attn, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
+                let _ = apply_softmax(ctx, Some(cache_ref), &attn, 1, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
             }
         }
         None => {
             for _ in 0..ITERATIONS {
-                let _ = apply_softmax(ctx, None, &attn, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
+                let _ = apply_softmax(ctx, None, &attn, 1, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
             }
         }
     }

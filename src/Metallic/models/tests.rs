@@ -1,7 +1,7 @@
 #![cfg(test)]
 use super::*;
-use crate::metallic::{resource_cache::ResourceCache, Operation};
 use crate::metallic::{Context, MetalError};
+use crate::metallic::{Operation, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder as _};

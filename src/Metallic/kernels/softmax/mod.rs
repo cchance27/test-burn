@@ -2,8 +2,10 @@ use super::*;
 use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::resource_cache::ResourceCache;
+use crate::metallic::tensor::MpsMatrixBatchView;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSUInteger;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::env;
@@ -62,26 +64,50 @@ pub fn apply_softmax(
     ctx: &mut Context,
     mut cache: Option<&mut ResourceCache>,
     attn: &Tensor,
+    batch: usize,
     rows: usize,
     columns: usize,
     causal: bool,
     query_offset: u32,
     allow_mps: bool,
 ) -> Result<Tensor, MetalError> {
+    let view = attn.as_mps_matrix_batch_view()?;
+
+    if view.rows != rows || view.columns != columns {
+        return Err(MetalError::InvalidShape(format!(
+            "Attention matrix dimensions {:?} don't match expected {} x {}",
+            attn.dims(),
+            rows,
+            columns
+        )));
+    }
+
+    if view.batch != batch {
+        return Err(MetalError::InvalidShape(format!(
+            "Attention batch dimension {} does not match expected {}",
+            view.batch, batch
+        )));
+    }
+
+    let rows_total = batch * rows;
+
     let preference = softmax_backend_preference();
     let start = Instant::now();
 
     let can_use_mps = allow_mps && !causal && query_offset == 0 && !preference.forces_kernel();
     if can_use_mps && let Some(cache_slot) = cache.as_mut() {
         let cache_ref: &mut ResourceCache = cache_slot;
-        try_apply_mps_softmax(ctx, cache_ref, attn, rows, columns)?;
+        try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns)?;
         ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
         return Ok(attn.clone());
     }
 
     let result = match cache {
-        Some(cache_ref) => ctx.call_with_cache::<SoftmaxOp>((attn, rows as u32, columns as u32, causal as u32, query_offset), cache_ref)?,
-        None => ctx.call::<SoftmaxOp>((attn, rows as u32, columns as u32, causal as u32, query_offset))?,
+        Some(cache_ref) => ctx.call_with_cache::<SoftmaxOp>(
+            (attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset),
+            cache_ref,
+        )?,
+        None => ctx.call::<SoftmaxOp>((attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset))?,
     };
     ctx.record_softmax_backend_sample(SoftmaxBackend::Kernel, start.elapsed());
     Ok(result)
@@ -91,6 +117,8 @@ fn try_apply_mps_softmax(
     ctx: &mut Context,
     cache: &mut ResourceCache,
     attn: &Tensor,
+    view: &MpsMatrixBatchView,
+    batch: usize,
     rows: usize,
     columns: usize,
 ) -> Result<(), MetalError> {
@@ -99,7 +127,9 @@ fn try_apply_mps_softmax(
     let descriptor_key = MpsMatrixDescriptorKey {
         rows,
         columns,
-        row_bytes: columns * size_of::<f32>(),
+        row_bytes: view.row_bytes,
+        matrices: view.batch,
+        matrix_bytes: view.matrix_bytes,
     };
     let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
     let softmax_key = MpsSoftMaxKey { rows, columns };
@@ -110,6 +140,7 @@ fn try_apply_mps_softmax(
         attn: attn.clone(),
         descriptor,
         softmax,
+        batch,
     };
     command_buffer.record(&op, cache)?;
     ctx.mark_tensor_pending(attn);
@@ -120,6 +151,7 @@ struct SoftmaxMpsOperation {
     attn: Tensor,
     descriptor: Retained<MPSMatrixDescriptor>,
     softmax: Retained<MPSMatrixSoftMax>,
+    batch: usize,
 }
 
 impl Operation for SoftmaxMpsOperation {
@@ -130,6 +162,8 @@ impl Operation for SoftmaxMpsOperation {
     ) -> Result<(), MetalError> {
         let attn_matrix = mps_matrix_from_buffer(&self.attn.buf, self.attn.offset, &self.descriptor);
         unsafe {
+            self.softmax.setBatchStart(0 as NSUInteger);
+            self.softmax.setBatchSize(self.batch as NSUInteger);
             self.softmax
                 .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer, &attn_matrix, &attn_matrix);
         }
@@ -145,6 +179,7 @@ pub struct SoftmaxOp;
 /// Internal struct that holds data for the Operation trait.
 struct SoftmaxOperation {
     attn: Tensor,
+    rows_total: u32,
     seq_q: u32,
     seq_k: u32,
     causal: u32,
@@ -153,7 +188,7 @@ struct SoftmaxOperation {
 }
 
 impl KernelInvocable for SoftmaxOp {
-    type Args<'a> = (&'a Tensor, u32, u32, u32, u32); // (attn, seq_q, seq_k, causal, query_offset)
+    type Args<'a> = (&'a Tensor, u32, u32, u32, u32, u32); // (attn, rows_total, seq_q, seq_k, causal, query_offset)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::FusedSoftmax)
@@ -165,18 +200,18 @@ impl KernelInvocable for SoftmaxOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (attn, seq_q, seq_k, causal, query_offset) = args;
+        let (attn, rows_total, seq_q, seq_k, causal, query_offset) = args;
 
         // Validate dimensions
-        if attn.dims().len() != 2 {
+        if attn.dims().len() < 2 {
             return Err(MetalError::InvalidShape(format!(
-                "Softmax input must be 2D [seq_q, seq_k], got {:?}",
+                "Softmax input must be at least 2D, got {:?}",
                 attn.dims()
             )));
         }
 
-        let expected_dims = [seq_q as usize, seq_k as usize];
-        if attn.dims() != expected_dims {
+        let view = attn.as_mps_matrix_batch_view()?;
+        if view.rows != seq_q as usize || view.columns != seq_k as usize {
             return Err(MetalError::InvalidShape(format!(
                 "Attention matrix dimensions {:?} don't match seq_q={} x seq_k={}",
                 attn.dims(),
@@ -185,10 +220,19 @@ impl KernelInvocable for SoftmaxOp {
             )));
         }
 
+        if rows_total as usize != view.batch * view.rows {
+            return Err(MetalError::InvalidShape(format!(
+                "Softmax rows_total {} does not match view layout {:?}",
+                rows_total,
+                attn.dims()
+            )));
+        }
+
         ctx.prepare_tensors_for_active_cmd(&[attn]);
 
         let op = SoftmaxOperation {
             attn: attn.clone(),
+            rows_total,
             seq_q,
             seq_k,
             causal,
@@ -220,7 +264,7 @@ impl Operation for SoftmaxOperation {
         };
         let groups = MTLSize {
             width: 1,
-            height: self.seq_q as usize,
+            height: self.rows_total as usize,
             depth: 1,
         };
         set_compute_pipeline_state(&encoder, &self.pipeline);

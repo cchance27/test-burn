@@ -71,12 +71,7 @@ impl ResourceCache {
         key: MpsGemmKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixMultiplication>, MetalError> {
-        let cacheable_gemm = Self::get_or_create_resource(
-            &mut self.gemm_cache,
-            key,
-            Some(device),
-            self.default_device.as_ref(),
-        )?;
+        let cacheable_gemm = Self::get_or_create_resource(&mut self.gemm_cache, key, Some(device), self.default_device.as_ref())?;
         Ok(cacheable_gemm.gemm.clone())
     }
 
@@ -86,12 +81,8 @@ impl ResourceCache {
         key: MpsMatrixDescriptorKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixDescriptor>, MetalError> {
-        let cacheable_descriptor = Self::get_or_create_resource(
-            &mut self.descriptor_cache,
-            key,
-            Some(device),
-            self.default_device.as_ref(),
-        )?;
+        let cacheable_descriptor =
+            Self::get_or_create_resource(&mut self.descriptor_cache, key, Some(device), self.default_device.as_ref())?;
         Ok(cacheable_descriptor.descriptor.clone())
     }
 
@@ -101,12 +92,7 @@ impl ResourceCache {
         key: MpsSoftMaxKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixSoftMax>, MetalError> {
-        let cacheable_softmax = Self::get_or_create_resource(
-            &mut self.softmax_cache,
-            key,
-            Some(device),
-            self.default_device.as_ref(),
-        )?;
+        let cacheable_softmax = Self::get_or_create_resource(&mut self.softmax_cache, key, Some(device), self.default_device.as_ref())?;
         Ok(cacheable_softmax.softmax.clone())
     }
 
@@ -114,14 +100,9 @@ impl ResourceCache {
     pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
         let key = SdpaKey { batch, seq_q, seq_k, dim };
         // SDPA creation should never fail, so we unwrap.
-        Self::get_or_create_resource(
-            &mut self.sdpa_cache,
-            key,
-            None,
-            self.default_device.as_ref(),
-        )
-        .unwrap()
-        .clone()
+        Self::get_or_create_resource(&mut self.sdpa_cache, key, None, self.default_device.as_ref())
+            .unwrap()
+            .clone()
     }
 
     /// Get statistics about the cache.
