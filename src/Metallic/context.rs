@@ -418,10 +418,10 @@ impl Context {
         debug_assert_eq!(dtype, repeated_k_allocation.dtype);
         debug_assert_eq!(dtype, repeated_v_allocation.dtype);
 
-        let mut k = k_allocation.into_tensor();
-        let mut v = v_allocation.into_tensor();
-        let mut repeated_k = repeated_k_allocation.into_tensor();
-        let mut repeated_v = repeated_v_allocation.into_tensor();
+        let k = k_allocation.into_tensor();
+        let v = v_allocation.into_tensor();
+        let repeated_k = repeated_k_allocation.into_tensor();
+        let repeated_v = repeated_v_allocation.into_tensor();
 
         // Manually zero the tensors using a blit command
         let k_size = k.size_bytes();
@@ -477,14 +477,14 @@ impl Context {
         let mut k_src = k_step.clone();
         let mut v_src = v_step.clone();
 
-        let dims = k_src.dims();
+        let dims = k_src.dims().to_vec();
         let (bh, seq_in_src, hd) = match dims.len() {
             2 => (dims[0], 1, dims[1]),
             3 => (dims[0], dims[1], dims[2]),
             _ => (0, 0, 0),
         };
 
-        let v_dims = v_src.dims();
+        let v_dims = v_src.dims().to_vec();
         let (v_bh, v_seq_in_src, v_hd) = match v_dims.len() {
             2 => (v_dims[0], 1, v_dims[1]),
             3 => (v_dims[0], v_dims[1], v_dims[2]),
