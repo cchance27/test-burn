@@ -494,7 +494,7 @@ impl Context {
         if zero_ready {
             self.prepare_tensors_for_active_cmd(&mut [&mut k_src, &mut v_src]);
             self.ensure_active_cmd_buffer()?;
-            let mut encoder = {
+            let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
                 cmd_buf
                     .raw()
@@ -664,7 +664,7 @@ impl Context {
 
         self.ensure_active_cmd_buffer()?;
         {
-            let mut encoder = {
+            let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
                 cmd_buf
                     .raw()
@@ -741,7 +741,7 @@ impl Context {
         let mut k_src = k_step.clone();
         let mut v_src = v_step.clone();
 
-        let k_dims = k_src.dims();
+        let k_dims = k_src.dims().to_vec();
         let (canonical_heads, seq_in_src, head_dim) = match k_dims.len() {
             2 => (k_dims[0], 1, k_dims[1]),
             3 => (k_dims[0], k_dims[1], k_dims[2]),
@@ -753,7 +753,7 @@ impl Context {
             ));
         }
 
-        let v_dims = v_src.dims();
+        let v_dims = v_src.dims().to_vec();
         let (v_heads, v_seq_in_src, v_head_dim) = match v_dims.len() {
             2 => (v_dims[0], 1, v_dims[1]),
             3 => (v_dims[0], v_dims[1], v_dims[2]),
@@ -763,7 +763,7 @@ impl Context {
         if zero_ready {
             self.prepare_tensors_for_active_cmd(&mut [&mut k_src, &mut v_src]);
             self.ensure_active_cmd_buffer()?;
-            let mut encoder = {
+            let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
                 cmd_buf
                     .raw()
