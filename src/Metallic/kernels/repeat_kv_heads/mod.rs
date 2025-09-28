@@ -11,12 +11,13 @@ struct RepeatKvHeads {
     n_heads: u32,
     seq: u32,
     head_dim: u32,
+    cache_stride: u32,
     total_elements: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for RepeatKvHeadsOp {
-    type Args = (Tensor, u32, u32, u32, u32, u32, u32);
+    type Args = (Tensor, u32, u32, u32, u32, u32, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::RepeatKvHeads)
@@ -28,7 +29,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut input, group_size, batch, n_kv_heads, n_heads, seq, head_dim) = args;
+        let (mut input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride) = args;
 
         if group_size == 0 {
             return Err(MetalError::InvalidShape(
@@ -53,16 +54,46 @@ impl KernelInvocable for RepeatKvHeadsOp {
                 n_heads / n_kv_heads
             )));
         }
+        if seq == 0 {
+            return Err(MetalError::InvalidShape(
+                "Active sequence length for repeat_kv_heads must be greater than zero".to_string(),
+            ));
+        }
+        if seq > cache_stride {
+            return Err(MetalError::InvalidShape(format!(
+                "Active sequence length ({}) exceeds cache stride ({})",
+                seq, cache_stride
+            )));
+        }
 
         let input_dims = input.dims();
         if input_dims.len() != 3
             || input_dims[0] != (batch * n_kv_heads) as usize
-            || input_dims[1] != seq as usize
             || input_dims[2] != head_dim as usize
         {
             return Err(MetalError::InvalidShape(format!(
                 "Input dims {:?} must be [batch*n_kv_heads, seq, head_dim]",
                 input_dims
+            )));
+        }
+        if input_dims[1] != seq as usize {
+            return Err(MetalError::InvalidShape(format!(
+                "Input sequence ({}) must match active sequence ({})",
+                input_dims[1], seq
+            )));
+        }
+
+        let input_strides = input.strides.clone();
+        if input_strides.len() < 2 {
+            return Err(MetalError::InvalidShape(
+                "Input tensor for repeat_kv_heads must expose at least two strides".to_string(),
+            ));
+        }
+        let expected_stride = cache_stride as usize * head_dim as usize;
+        if input_strides[0] != expected_stride {
+            return Err(MetalError::InvalidShape(format!(
+                "Input batch stride ({}) does not match cache stride ({})",
+                input_strides[0], expected_stride
             )));
         }
 
@@ -81,6 +112,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
             n_heads,
             seq,
             head_dim,
+            cache_stride,
             total_elements,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
@@ -119,7 +151,8 @@ impl Operation for RepeatKvHeads {
         set_bytes(&encoder, 5, &self.n_heads);
         set_bytes(&encoder, 6, &self.seq);
         set_bytes(&encoder, 7, &self.head_dim);
-        set_bytes(&encoder, 8, &self.total_elements);
+        set_bytes(&encoder, 8, &self.cache_stride);
+        set_bytes(&encoder, 9, &self.total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();

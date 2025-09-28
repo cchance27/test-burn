@@ -168,6 +168,11 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
     let element_count = batch * n_kv_heads * seq * head_dim;
     let input_data: Vec<f32> = (0..element_count).map(|v| v as f32).collect();
     let input = Tensor::create_tensor_from_slice(&input_data, vec![batch * n_kv_heads, seq, head_dim], &ctx)?;
+    let history = CacheHistory {
+        tensor: input.clone(),
+        active_seq: seq,
+        cache_capacity: seq,
+    };
 
     let expected = {
         let mut out = vec![0.0f32; batch * n_heads * seq * head_dim];
@@ -188,7 +193,7 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
         out
     };
 
-    let output = Qwen25::repeat_kv_heads(&input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, &mut ctx)?;
+    let output = Qwen25::repeat_kv_heads(&history, group_size, batch, n_kv_heads, n_heads, head_dim, &mut ctx)?;
     ctx.synchronize();
 
     assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);
@@ -249,25 +254,31 @@ fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
     let batch_heads = 3;
     let head_dim = 5;
     let mut data = Vec::with_capacity(seq * batch_heads * head_dim);
-    for s in 0..seq {
-        for bh in 0..batch_heads {
+    for bh in 0..batch_heads {
+        for s in 0..seq {
             for d in 0..head_dim {
-                data.push((s * 100 + bh * 10 + d) as f32);
+                data.push((bh * 100 + s * 10 + d) as f32);
             }
         }
     }
 
-    let cache = Tensor::create_tensor_from_slice(&data, vec![seq, batch_heads, head_dim], &ctx)?;
+    let cache = Tensor::create_tensor_from_slice(&data, vec![batch_heads, seq, head_dim], &ctx)?;
 
     for steps in 1..=seq {
         let history = Qwen25::gather_cache_history(&cache, steps, &mut ctx)?;
-        assert_eq!(history.dims(), &[batch_heads, steps, head_dim]);
+        assert_eq!(history.tensor.dims(), &[batch_heads, steps, head_dim]);
+        assert_eq!(history.active_seq, steps);
+        assert_eq!(history.cache_capacity, seq);
 
-        let gpu_values = history.to_vec();
+        let mut gpu_values = Vec::with_capacity(steps * batch_heads * head_dim);
+        for bh in 0..batch_heads {
+            let batch_view = history.tensor.get_batch(bh)?;
+            gpu_values.extend_from_slice(batch_view.as_slice());
+        }
         let mut expected = Vec::with_capacity(steps * batch_heads * head_dim);
         for bh in 0..batch_heads {
             for s in 0..steps {
-                let src_idx = (s * batch_heads + bh) * head_dim;
+                let src_idx = (bh * seq + s) * head_dim;
                 expected.extend_from_slice(&data[src_idx..src_idx + head_dim]);
             }
         }

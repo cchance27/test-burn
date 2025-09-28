@@ -763,13 +763,23 @@ impl Tensor {
             return Err(MetalError::InvalidShape("batch_index out of bounds".to_string()));
         }
 
-        let batch_size_bytes = self.dims[1..].iter().product::<usize>() * std::mem::size_of::<f32>();
-        let new_offset = self.offset + batch_index * batch_size_bytes;
+        let elem_size = std::mem::size_of::<f32>();
+        let batch_stride_elems = if self.strides.len() == self.dims.len() && !self.strides.is_empty() {
+            self.strides[0]
+        } else {
+            self.dims[1..].iter().product::<usize>()
+        };
+        let new_offset = self.offset + batch_index * batch_stride_elems * elem_size;
+        let new_strides = if self.strides.len() >= 2 {
+            self.strides[1..].to_vec()
+        } else {
+            Self::compute_strides(&self.dims[1..])
+        };
 
         Ok(Tensor {
             buf: self.buf.clone(),
             dims: self.dims[1..].to_vec(),
-            strides: Self::compute_strides(&self.dims[1..]),
+            strides: new_strides,
             dtype: self.dtype,
             device: self.device.clone(),
             offset: new_offset,

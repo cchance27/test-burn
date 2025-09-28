@@ -54,6 +54,7 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
         n_heads as u32,
         seq as u32,
         head_dim as u32,
+        seq as u32,
     ))?;
     ctx.synchronize();
 

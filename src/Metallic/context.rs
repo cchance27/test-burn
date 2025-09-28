@@ -375,9 +375,9 @@ impl Context {
 
 impl Context {
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
-    /// Layout: [seq_len, batch_heads, head_dim] (contiguous).
+    /// Layout: [batch_heads, seq_len, head_dim] (contiguous with full sequence stride preserved).
     pub fn alloc_kv_cache(&mut self, layer_idx: usize, seq_len: usize, batch_heads: usize, head_dim: usize) -> Result<(), MetalError> {
-        let dims = vec![seq_len, batch_heads, head_dim];
+        let dims = vec![batch_heads, seq_len, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
         let k = self.kv_cache_pool.alloc_tensor(dims.clone())?;
@@ -440,15 +440,13 @@ impl Context {
         self.prepare_tensors_for_active_cmd(&mut [&mut k_cache, &mut v_cache, &mut k_src, &mut v_src]);
 
         // Validate shapes
-        let bh = k_src.dims().first().cloned().unwrap_or(0);
         let dims = k_src.dims();
-        let (seq_in_src, hd) = match dims.len() {
-            2 => (1, dims[1]),
-            3 => (dims[1], dims[2]),
-            _ => (0, 0),
+        let (bh, seq_in_src, hd) = match dims.len() {
+            2 => (dims[0], 1, dims[1]),
+            3 => (dims[0], dims[1], dims[2]),
+            _ => (0, 0, 0),
         };
-        // Expected per-entry stride
-        let expected_bh = k_cache.dims()[1];
+        let expected_bh = k_cache.dims()[0];
         let expected_hd = k_cache.dims()[2];
         if bh != expected_bh || hd != expected_hd {
             return Err(MetalError::DimensionMismatch {
@@ -470,17 +468,29 @@ impl Context {
             )));
         }
 
+        let v_dims = v_src.dims();
+        let (v_bh, v_seq_in_src, v_hd) = match v_dims.len() {
+            2 => (v_dims[0], 1, v_dims[1]),
+            3 => (v_dims[0], v_dims[1], v_dims[2]),
+            _ => (0, 0, 0),
+        };
+        if v_bh != expected_bh || v_hd != expected_hd {
+            return Err(MetalError::DimensionMismatch {
+                expected: expected_bh * expected_hd,
+                actual: v_bh * v_hd,
+            });
+        }
+        if v_seq_in_src != seq_in_src {
+            return Err(MetalError::OperationNotSupported(
+                "write_kv_step expects matching sequence dims for K and V".into(),
+            ));
+        }
+
         // Compute byte offsets
         let elem_size = std::mem::size_of::<f32>();
-        let row_elems = expected_bh * expected_hd;
+        let row_elems = expected_hd;
         let copy_bytes = row_elems * elem_size;
-        // Destination offset in bytes = (step * stride_0) * elem_size + base offset
-        let dst_base = k_cache.offset + step * k_cache.strides[0] * elem_size;
-        let dst_base_v = v_cache.offset + step * v_cache.strides[0] * elem_size;
-
-        // Source offset and size: assume k_step is tightly packed starting at its offset
-        let src_offset_k = k_src.offset;
-        let src_offset_v = v_src.offset;
+        let cache_stride_elems = capacity_seq_val * expected_hd;
 
         // Create a command buffer and blit encoder to copy slices
         {
@@ -490,22 +500,40 @@ impl Context {
                 .blitCommandEncoder()
                 .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
 
-            // copy K then V
             unsafe {
-                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &k_src.buf,
-                    src_offset_k,
-                    &k_cache.buf,
-                    dst_base,
-                    copy_bytes,
-                );
-                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &v_src.buf,
-                    src_offset_v,
-                    &v_cache.buf,
-                    dst_base_v,
-                    copy_bytes,
-                );
+                for head_idx in 0..expected_bh {
+                    let src_elem_index = match dims.len() {
+                        2 => head_idx * expected_hd,
+                        3 => (head_idx * seq_in_src) * expected_hd,
+                        _ => unreachable!(),
+                    };
+                    let v_src_elem_index = match v_dims.len() {
+                        2 => head_idx * expected_hd,
+                        3 => (head_idx * v_seq_in_src) * expected_hd,
+                        _ => unreachable!(),
+                    };
+                    let dst_elem_index = head_idx * cache_stride_elems + step * expected_hd;
+
+                    let src_offset_k = k_src.offset + src_elem_index * elem_size;
+                    let src_offset_v = v_src.offset + v_src_elem_index * elem_size;
+                    let dst_offset_k = k_cache.offset + dst_elem_index * elem_size;
+                    let dst_offset_v = v_cache.offset + dst_elem_index * elem_size;
+
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &k_src.buf,
+                        src_offset_k,
+                        &k_cache.buf,
+                        dst_offset_k,
+                        copy_bytes,
+                    );
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &v_src.buf,
+                        src_offset_v,
+                        &v_cache.buf,
+                        dst_offset_v,
+                        copy_bytes,
+                    );
+                }
             }
             encoder.endEncoding();
         }
@@ -514,6 +542,36 @@ impl Context {
         self.mark_tensor_pending(&v_cache);
 
         Ok(())
+    }
+
+    /// Create a strided view of the KV cache exposing the first `active_steps` positions in
+    /// [batch_heads, steps, head_dim] order while preserving the underlying cache stride.
+    pub fn kv_cache_history_view(
+        &mut self,
+        cache: &Tensor,
+        active_steps: usize,
+    ) -> Result<(Tensor, usize), MetalError> {
+        let dims = cache.dims();
+        if dims.len() != 3 {
+            return Err(MetalError::InvalidShape(
+                "KV cache tensor must have shape [batch_heads, seq_len, head_dim]".to_string(),
+            ));
+        }
+
+        if active_steps == 0 || active_steps > dims[1] {
+            return Err(MetalError::InvalidShape(format!(
+                "Requested {} KV steps exceeds cache capacity {}",
+                active_steps, dims[1]
+            )));
+        }
+
+        let mut view = cache.clone();
+        view.dims = vec![dims[0], active_steps, dims[2]];
+        view.strides = vec![cache.strides[0], cache.strides[1], cache.strides[2]];
+
+        self.prepare_tensors_for_active_cmd(&mut [&mut view]);
+
+        Ok((view, dims[1]))
     }
 
     pub fn scaled_dot_product_attention(
