@@ -1,4 +1,5 @@
 use serde::Serialize;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize)]
@@ -29,7 +30,7 @@ pub struct MemoryRow {
 
 pub enum AppEvent {
     Token {
-        text: String,
+        text: Arc<str>,
         tokens_per_second: f64,
         prompt_processing: Duration,
         generation: Duration,

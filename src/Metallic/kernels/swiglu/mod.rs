@@ -1,11 +1,11 @@
 use super::*;
 
-use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
-use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
-use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::Context;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
+use crate::metallic::kernels::silu::SiluOp;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -92,13 +92,13 @@ fn execute_swiglu_logic(
         });
     };
     let gate_temp = match cache.as_mut() {
-        Some(cache) => ctx.matmul_with_cache(&x_normed_flat, &ffn_gate, false, gate_transpose_b, *cache)?,
+        Some(cache) => ctx.matmul_with_cache(&x_normed_flat, &ffn_gate, false, gate_transpose_b, cache)?,
         None => ctx.matmul(&x_normed_flat, &ffn_gate, false, gate_transpose_b)?,
     };
 
     // Add gate bias (broadcast over last dim)
     let gate_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias), *cache)?,
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias), cache)?,
         None => ctx.call::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias))?,
     };
 
@@ -115,25 +115,25 @@ fn execute_swiglu_logic(
         });
     };
     let up_temp = match cache.as_mut() {
-        Some(cache) => ctx.matmul_with_cache(&x_normed_flat, &ffn_up, false, up_transpose_b, *cache)?,
+        Some(cache) => ctx.matmul_with_cache(&x_normed_flat, &ffn_up, false, up_transpose_b, cache)?,
         None => ctx.matmul(&x_normed_flat, &ffn_up, false, up_transpose_b)?,
     };
 
     // Add up bias
     let up_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias), *cache)?,
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias), cache)?,
         None => ctx.call::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias))?,
     };
 
     // SiLU activation on gate_proj
     let gate_act = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<SiluOp>(gate_out, *cache)?,
+        Some(cache) => ctx.call_with_cache::<SiluOp>(gate_out, cache)?,
         None => ctx.call::<SiluOp>(gate_out)?,
     };
 
     // Element-wise multiplication: SiLU(gate_proj) * up_proj -> [m, ff_dim]
     let hidden = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<ElemwiseMulOp>((gate_act, up_out), *cache)?,
+        Some(cache) => ctx.call_with_cache::<ElemwiseMulOp>((gate_act, up_out), cache)?,
         None => ctx.call::<ElemwiseMulOp>((gate_act, up_out))?,
     };
 
@@ -144,13 +144,13 @@ fn execute_swiglu_logic(
     let ffn_temp = if hidden_cols == ffn_down_rows {
         // Hidden [m, ff_dim] @ ffn_down [ff_dim, d_model] -> [m, d_model]
         match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(&hidden, &ffn_down, false, false, *cache)?,
+            Some(cache) => ctx.matmul_with_cache(&hidden, &ffn_down, false, false, cache)?,
             None => ctx.matmul(&hidden, &ffn_down, false, false)?,
         }
     } else if hidden_cols == ffn_down_cols {
         // Hidden [m, ff_dim] @ ffn_down^T [ff_dim, d_model] where stored as [d_model, ff_dim]
         match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(&hidden, &ffn_down, false, true, *cache)?,
+            Some(cache) => ctx.matmul_with_cache(&hidden, &ffn_down, false, true, cache)?,
             None => ctx.matmul(&hidden, &ffn_down, false, true)?,
         }
     } else {
@@ -162,7 +162,7 @@ fn execute_swiglu_logic(
 
     // Add down bias to final projection output
     let ffn_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias), *cache)?,
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias), cache)?,
         None => ctx.call::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias))?,
     };
 

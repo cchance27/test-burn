@@ -6,11 +6,8 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
+    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
-    Context,
-    MetalError,
-    Operation,
-    Tensor,
     resource_cache::ResourceCache,
 };
 
@@ -105,8 +102,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             beta,
         };
 
-        let cache = cache
-            .ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
+        let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 
         // Create MPS matrix descriptors based on original dimensions (not transposed ones)

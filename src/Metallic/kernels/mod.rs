@@ -1,7 +1,7 @@
 use crate::metallic::{
+    Context, MetalError, Operation, Tensor,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
-    Context, MetalError, Operation, Tensor,
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;

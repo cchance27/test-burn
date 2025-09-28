@@ -6,7 +6,7 @@
 use fancy_regex::Regex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
@@ -54,7 +54,7 @@ pub struct SpecialTokens {
 /// A BPE tokenizer implementation
 pub struct Tokenizer {
     /// Vocabulary mapping token IDs to token strings
-    vocab: FxHashMap<u32, String>,
+    vocab: FxHashMap<u32, Arc<str>>,
     /// Reverse vocabulary mapping token strings to token IDs
     vocab_r: FxHashMap<String, u32>,
     /// BPE merges
@@ -86,10 +86,12 @@ impl Tokenizer {
         special_tokens: SpecialTokens,
         add_bos_token: bool,
     ) -> Result<Self, MetalError> {
-        // Create reverse vocabulary
+        // Convert vocabulary into shared strings and build reverse map
+        let mut vocab_arc = FxHashMap::default();
         let mut vocab_r = FxHashMap::default();
-        for (id, token) in &vocab {
-            vocab_r.insert(token.clone(), *id);
+        for (id, token) in vocab.into_iter() {
+            vocab_r.insert(token.clone(), id);
+            vocab_arc.insert(id, Arc::<str>::from(token));
         }
 
         // Create merges map with priority
@@ -127,7 +129,7 @@ impl Tokenizer {
         }
 
         Ok(Self {
-            vocab,
+            vocab: vocab_arc,
             vocab_r,
             merges: merges_map,
             token_types,
@@ -510,60 +512,112 @@ impl Tokenizer {
 
     /// Decode tokens while preserving leading and trailing whitespace.
     pub fn decode_lossless(&self, tokens: &[u32]) -> Result<String, MetalError> {
-        self.decode_internal(tokens)
-    }
+        let mut result = String::new();
+        let mut chunk = String::new();
+        let mut byte_scratch = Vec::new();
 
-    fn decode_internal(&self, tokens: &[u32]) -> Result<String, MetalError> {
-        let mut bytes = Vec::with_capacity(tokens.len());
-        // Skip BOS token if present at the beginning
-        let start_index = if self.add_bos_token
-            && self.special_tokens.bos_token_id.is_some()
-            && tokens.first() == self.special_tokens.bos_token_id.as_ref()
-        {
-            1
-        } else {
-            0
-        };
-
-        for token_id in &tokens[start_index..] {
-            if self.special_tokens.eos_token_id == Some(*token_id) {
-                continue;
-            }
-
-            let token_type = self.token_types.get(token_id).cloned().unwrap_or(1); // Default to normal
-            if token_type == 3 {
-                // Control token
-                continue;
-            }
-
-            if let Some(token) = self.vocab.get(token_id) {
-                if token_type == 6 {
-                    // Byte token
-                    if token.starts_with("<0x") && token.ends_with('>') && token.len() == 6 {
-                        if let Ok(byte) = u8::from_str_radix(&token[3..5], 16) {
-                            bytes.push(byte);
-                        } else {
-                            unimplemented!("handle failed str_Radix")
-                        }
-                    } else {
-                        unimplemented!("handle token missing <0x>")
-                    }
-                } else {
-                    bytes.extend_from_slice(token.as_bytes());
-                }
-            } else {
-                return Err(TokenizerError::InvalidTokenId(*token_id).into());
+        let start_index = self.start_index(tokens);
+        for &token_id in &tokens[start_index..] {
+            if let Some(piece) = self.decode_token_arc(token_id, &mut chunk, &mut byte_scratch)? {
+                result.push_str(piece.as_ref());
             }
         }
 
-        let decoded_text = String::from_utf8_lossy(&bytes).to_string();
-        Ok(self.post_process(decoded_text))
+        Ok(result)
     }
 
-    /// Post-process decoded text to remove BPE artifacts
-    fn post_process(&self, text: String) -> String {
-        // For GPT2, replace special characters with their corresponding whitespace
-        text.replace("Ġ", " ").replace("Ċ", "\n").replace("đ", "\t").replace("  ", " ")
+    /// Decode a single token into a shared string. Tokens that can be reused
+    /// directly return a clone of the vocabulary `Arc`; tokens that require
+    /// byte decoding or post-processing allocate once and move the buffer into
+    /// a new `Arc` without additional copies.
+    pub fn decode_token_arc(
+        &self,
+        token_id: u32,
+        scratch: &mut String,
+        byte_scratch: &mut Vec<u8>,
+    ) -> Result<Option<Arc<str>>, MetalError> {
+        scratch.clear();
+
+        if self.special_tokens.eos_token_id == Some(token_id) {
+            return Ok(None);
+        }
+
+        let token_type = self.token_types.get(&token_id).cloned().unwrap_or(1); // Default to normal
+        if token_type == 3 {
+            // Control token
+            return Ok(None);
+        }
+
+        let token = self.vocab.get(&token_id).ok_or(TokenizerError::InvalidTokenId(token_id))?;
+
+        let arc = match token_type {
+            6 => {
+                byte_scratch.clear();
+                let token_str = token.as_ref();
+                if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
+                    let byte = u8::from_str_radix(&token_str[3..5], 16).map_err(|_| TokenizerError::InvalidTokenId(token_id))?;
+                    byte_scratch.push(byte);
+                    scratch.push_str(&String::from_utf8_lossy(byte_scratch));
+                    Arc::<str>::from(std::mem::take(scratch))
+                } else {
+                    return Err(TokenizerError::InvalidTokenId(token_id).into());
+                }
+            }
+            _ if Self::needs_post_process(token.as_ref()) => {
+                scratch.push_str(token.as_ref());
+                self.post_process_in_place(scratch);
+                Arc::<str>::from(std::mem::take(scratch))
+            }
+            _ => Arc::clone(token),
+        };
+
+        Ok(Some(arc))
+    }
+
+    fn start_index(&self, tokens: &[u32]) -> usize {
+        if self.add_bos_token && self.special_tokens.bos_token_id.is_some() && tokens.first() == self.special_tokens.bos_token_id.as_ref() {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Determine whether the provided token requires post-processing.
+    fn needs_post_process(token: &str) -> bool {
+        token.contains('Ġ') || token.contains('Ċ') || token.contains('đ') || token.contains("  ")
+    }
+
+    /// Post-process decoded text to remove BPE artifacts using in-place updates when
+    /// no replacements are necessary. This keeps the hot path allocation-free.
+    fn post_process_in_place(&self, text: &mut String) {
+        if text.is_empty() {
+            return;
+        }
+
+        let needs_space = text.contains('Ġ');
+        let needs_newline = text.contains('Ċ');
+        let needs_tab = text.contains('đ');
+        let needs_double_space = text.contains("  ");
+
+        if !(needs_space || needs_newline || needs_tab || needs_double_space) {
+            return;
+        }
+
+        let mut processed = text.clone();
+        if needs_space {
+            processed = processed.replace('Ġ', " ");
+        }
+        if needs_newline {
+            processed = processed.replace('Ċ', "\n");
+        }
+        if needs_tab {
+            processed = processed.replace('đ', "\t");
+        }
+        if needs_double_space {
+            processed = processed.replace("  ", " ");
+        }
+
+        *text = processed;
     }
 
     /// Get the vocabulary size
@@ -578,13 +632,13 @@ impl Tokenizer {
 
     /// Get a token by ID (for testing purposes)
     #[cfg(test)]
-    pub fn get_token(&self, id: u32) -> Option<&String> {
-        self.vocab.get(&id)
+    pub fn get_token(&self, id: u32) -> Option<Arc<str>> {
+        self.vocab.get(&id).cloned()
     }
 
     /// Get a token by ID (for debugging purposes)
-    pub fn get_token_debug(&self, id: u32) -> Option<&String> {
-        self.vocab.get(&id)
+    pub fn get_token_debug(&self, id: u32) -> Option<Arc<str>> {
+        self.vocab.get(&id).cloned()
     }
 
     /// Clear the BPE cache

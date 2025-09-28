@@ -1,7 +1,7 @@
-use crate::gguf::{model_loader::GGUFModel, GGUFValue};
+use crate::gguf::{GGUFValue, model_loader::GGUFModel};
 use crate::metallic::{
-    models::{LoadableModel, Qwen25, Qwen25Config},
     Context, MetalError,
+    models::{LoadableModel, Qwen25, Qwen25Config},
 };
 
 fn try_copy(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor) -> Result<(), MetalError> {
@@ -33,17 +33,11 @@ fn pack_weight_transposed_into_fused_slice(
     dst_col_offset: usize,
 ) -> Result<(), MetalError> {
     if src_dims.len() != 2 {
-        return Err(MetalError::InvalidShape(format!(
-            "Expected 2D weight tensor, got {:?}",
-            src_dims
-        )));
+        return Err(MetalError::InvalidShape(format!("Expected 2D weight tensor, got {:?}", src_dims)));
     }
 
     if dst_dims.len() != 2 {
-        return Err(MetalError::InvalidShape(format!(
-            "Fused weight must be 2D, got {:?}",
-            dst_dims
-        )));
+        return Err(MetalError::InvalidShape(format!("Fused weight must be 2D, got {:?}", dst_dims)));
     }
 
     let fused_rows = dst_dims[0];
@@ -88,20 +82,10 @@ fn copy_weight_transposed_into_fused(
     dst_col_offset: usize,
 ) -> Result<(), MetalError> {
     let dst_dims = dst.dims().to_vec();
-    pack_weight_transposed_into_fused_slice(
-        src.as_slice(),
-        src.dims(),
-        dst.as_mut_slice(),
-        &dst_dims,
-        dst_col_offset,
-    )
+    pack_weight_transposed_into_fused_slice(src.as_slice(), src.dims(), dst.as_mut_slice(), &dst_dims, dst_col_offset)
 }
 
-fn copy_bias_into_fused(
-    src: &crate::metallic::Tensor,
-    dst: &mut crate::metallic::Tensor,
-    dst_offset: usize,
-) -> Result<(), MetalError> {
+fn copy_bias_into_fused(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor, dst_offset: usize) -> Result<(), MetalError> {
     if dst_offset + src.len() > dst.len() {
         return Err(MetalError::DimensionMismatch {
             expected: dst.len(),
@@ -188,8 +172,8 @@ mod tests {
         let fused_dims = vec![2, 6];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
-        let err = pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0)
-            .expect_err("expected invalid shape error");
+        let err =
+            pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).expect_err("expected invalid shape error");
 
         match err {
             MetalError::InvalidShape(_) => {}
@@ -329,12 +313,11 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("query.weight")
                     || lname.contains("q.weight")
                     || lname.contains("attention.query.weight"))
+                    && tensor.len() == d_model_layer * d_model_layer
                 {
-                    if tensor.len() == d_model_layer * d_model_layer {
-                        copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, q_offset)
-                            .expect("successful copy for fused Q weight");
-                        continue;
-                    }
+                    copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, q_offset)
+                        .expect("successful copy for fused Q weight");
+                    continue;
                 }
 
                 if (lname.contains("wk")
@@ -344,12 +327,11 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("key.weight")
                     || lname.contains("k.weight")
                     || lname.contains("attention.key.weight"))
+                    && tensor.len() == kv_dim * d_model_layer
                 {
-                    if tensor.len() == kv_dim * d_model_layer {
-                        copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, k_offset)
-                            .expect("successful copy for fused K weight");
-                        continue;
-                    }
+                    copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, k_offset)
+                        .expect("successful copy for fused K weight");
+                    continue;
                 }
 
                 if (lname.contains("wv")
@@ -359,12 +341,11 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("value.weight")
                     || lname.contains("v.weight")
                     || lname.contains("attention.value.weight"))
+                    && tensor.len() == kv_dim * d_model_layer
                 {
-                    if tensor.len() == kv_dim * d_model_layer {
-                        copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, v_offset)
-                            .expect("successful copy for fused V weight");
-                        continue;
-                    }
+                    copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, v_offset)
+                        .expect("successful copy for fused V weight");
+                    continue;
                 }
 
                 // Attention output / projection (wo, outproj, o_proj)
@@ -382,24 +363,24 @@ impl LoadableModel for super::Qwen25 {
                 }
 
                 // Attention biases (optional)
-                if (lname.contains("attn.q.bias") || lname.contains("attn_q.bias") || lname.contains("attention.query.bias")) {
-                    if tensor.len() == d_model_layer {
-                        copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, q_offset).expect("successful copy for fused Q bias");
-                        continue;
-                    }
+                if (lname.contains("attn.q.bias") || lname.contains("attn_q.bias") || lname.contains("attention.query.bias"))
+                    && tensor.len() == d_model_layer
+                {
+                    copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, q_offset).expect("successful copy for fused Q bias");
+                    continue;
                 }
 
-                if (lname.contains("attn.k.bias") || lname.contains("attn_k.bias") || lname.contains("attention.key.bias")) {
-                    if tensor.len() == kv_dim {
-                        copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, k_offset).expect("successful copy for fused K bias");
-                        continue;
-                    }
+                if (lname.contains("attn.k.bias") || lname.contains("attn_k.bias") || lname.contains("attention.key.bias"))
+                    && tensor.len() == kv_dim
+                {
+                    copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, k_offset).expect("successful copy for fused K bias");
+                    continue;
                 }
-                if (lname.contains("attn.v.bias") || lname.contains("attn_v.bias") || lname.contains("attention.value.bias")) {
-                    if tensor.len() == kv_dim {
-                        copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, v_offset).expect("successful copy for fused V bias");
-                        continue;
-                    }
+                if (lname.contains("attn.v.bias") || lname.contains("attn_v.bias") || lname.contains("attention.value.bias"))
+                    && tensor.len() == kv_dim
+                {
+                    copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, v_offset).expect("successful copy for fused V bias");
+                    continue;
                 }
 
                 // FFN down/gate/up (common aliases) - Updated for correct SwiGLU mapping

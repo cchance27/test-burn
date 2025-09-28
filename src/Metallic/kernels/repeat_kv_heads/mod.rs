@@ -67,10 +67,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
         }
 
         let input_dims = input.dims();
-        if input_dims.len() != 3
-            || input_dims[0] != (batch * n_kv_heads) as usize
-            || input_dims[2] != head_dim as usize
-        {
+        if input_dims.len() != 3 || input_dims[0] != (batch * n_kv_heads) as usize || input_dims[2] != head_dim as usize {
             return Err(MetalError::InvalidShape(format!(
                 "Input dims {:?} must be [batch*n_kv_heads, seq, head_dim]",
                 input_dims

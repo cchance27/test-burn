@@ -1,15 +1,15 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, MemoryEvent, MemoryUsage};
+use crate::metallic::Tokenizer;
+use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
-    build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, BlockStat, MemoryBlockStat, MemoryScopeStat,
-    MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
+    BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
+    build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
 };
 use crate::metallic::models::qwen25::Qwen25;
-use crate::metallic::Tokenizer;
 use rand::prelude::*;
 use std::{
-    sync::mpsc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 
@@ -171,7 +171,7 @@ pub fn generate_streaming(
     let mut prompt_processing_duration: Option<Duration> = None;
     let mut generation_start: Option<Instant> = None;
 
-    let mut token_callback = |_token_id, decoded_token: String| -> Result<bool, MetalError> {
+    let mut token_callback = |_token_id, decoded_token: Arc<str>| -> Result<bool, MetalError> {
         token_count += 1;
         let now = Instant::now();
 
@@ -217,7 +217,7 @@ pub fn generate_autoregressive_with_kv_cache(
     host_overheads: &[(String, usize)],
 ) -> Result<Vec<u32>, MetalError> {
     let mut result = Vec::new();
-    let mut callback = |token_id, _decoded_token| -> Result<bool, MetalError> {
+    let mut callback = |token_id, _decoded_token: Arc<str>| -> Result<bool, MetalError> {
         result.push(token_id);
         Ok(true)
     };
@@ -240,7 +240,7 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F>(
     host_overheads: &[(String, usize)],
 ) -> Result<(), MetalError>
 where
-    F: FnMut(u32, String) -> Result<bool, MetalError>,
+    F: FnMut(u32, Arc<str>) -> Result<bool, MetalError>,
 {
     // Ensure KV caches start from a clean slate between generations.
     ctx.kv_caches.clear();
@@ -264,6 +264,7 @@ where
     let mut forward_stats = RollingStat::default();
     let mut output_stats = RollingStat::default();
     let mut sample_stats = RollingStat::default();
+    let mut decode_stats = RollingStat::default();
     let mut block_stats = vec![BlockStat::default(); n_layers];
     let mut softmax_backend_stats = SoftmaxBackendStats::default();
     let mut latencies_ready = false;
@@ -305,7 +306,8 @@ where
     let prompt_len = input_ids.len();
     let vocab_size = qwen.config.vocab_size;
     let mut next_token;
-    let mut last_decoded_len = 0usize;
+    let mut decoded_chunk = String::new();
+    let mut decode_scratch = Vec::new();
 
     if let Some(logits_tensor) = logits_tensor {
         // Extract logits for the very last token of the prompt
@@ -313,23 +315,28 @@ where
         let vocab_logits = logits[0..vocab_size].to_vec();
 
         // Sample the first token
+        let sample_start = Instant::now();
         next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        let sample_duration = sample_start.elapsed();
+        if !sample_duration.is_zero() {
+            sample_stats.record(sample_duration);
+        }
     } else {
         // If there's no prompt, start with token 0.
         next_token = 0;
     }
 
     generated_ids.push(next_token);
-    let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
-    let mut decoded_chunk = String::new();
-    if decoded_full.len() >= last_decoded_len {
-        decoded_chunk.push_str(&decoded_full[last_decoded_len..]);
-    } else {
-        decoded_chunk = decoded_full.clone();
+    let decode_start = Instant::now();
+    let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
+    let decode_duration = decode_start.elapsed();
+    if !decode_duration.is_zero() {
+        decode_stats.record(decode_duration);
     }
-    last_decoded_len = decoded_full.len();
 
-    if !token_callback(next_token, decoded_chunk)? {
+    if let Some(piece) = decoded_piece
+        && !token_callback(next_token, piece)?
+    {
         return Ok(());
     }
 
@@ -440,18 +447,22 @@ where
 
         generated_ids.push(next_token);
 
-        let decoded_full = tokenizer.decode_lossless(&generated_ids[prompt_len..])?;
-        let mut decoded_chunk = String::new();
-        if decoded_full.len() >= last_decoded_len {
-            decoded_chunk.push_str(&decoded_full[last_decoded_len..]);
-        } else {
-            decoded_chunk = decoded_full.clone();
-        }
-        last_decoded_len = decoded_full.len();
-
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
+        }
+
+        let decode_start = Instant::now();
+        let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
+        let decode_duration = decode_start.elapsed();
+        if !decode_duration.is_zero() {
+            decode_stats.record(decode_duration);
+        }
+
+        if let Some(piece) = decoded_piece
+            && !token_callback(next_token, piece)?
+        {
+            break;
         }
 
         if latencies_ready {
@@ -462,6 +473,7 @@ where
                 &softmax_backend_stats,
                 &output_stats,
                 &sample_stats,
+                &decode_stats,
             );
             if let Some(loggers) = metrics_loggers.as_mut() {
                 let log_now = Instant::now();
@@ -492,9 +504,6 @@ where
             }
         }
 
-        if !token_callback(next_token, decoded_chunk)? {
-            break;
-        }
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
         if next_token == eos_token_id {
             break;

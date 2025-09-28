@@ -6,7 +6,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{kernels, Tensor};
+use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};

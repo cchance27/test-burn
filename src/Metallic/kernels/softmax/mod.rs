@@ -71,13 +71,11 @@ pub fn apply_softmax(
     let start = Instant::now();
 
     let can_use_mps = allow_mps && !causal && query_offset == 0 && !preference.forces_kernel();
-    if can_use_mps {
-        if let Some(cache_slot) = cache.as_mut() {
-            let cache_ref: &mut ResourceCache = &mut **cache_slot;
-            try_apply_mps_softmax(ctx, cache_ref, attn, rows, columns)?;
-            ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
-            return Ok(attn.clone());
-        }
+    if can_use_mps && let Some(cache_slot) = cache.as_mut() {
+        let cache_ref: &mut ResourceCache = cache_slot;
+        try_apply_mps_softmax(ctx, cache_ref, attn, rows, columns)?;
+        ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
+        return Ok(attn.clone());
     }
 
     let result = match cache {

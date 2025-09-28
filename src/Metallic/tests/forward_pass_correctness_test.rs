@@ -1,5 +1,5 @@
-use crate::gguf::model_loader::GGUFModelLoader;
 use crate::gguf::GGUFFile;
+use crate::gguf::model_loader::GGUFModelLoader;
 use crate::metallic::kernels::elemwise_add::{BroadcastElemwiseAddOp, ElemwiseAddOp};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
@@ -1420,13 +1420,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     ctx.kv_cache_pool.reset();
     let kv_capacity = input_ids.len().max(1);
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(
-            layer_idx,
-            kv_capacity,
-            batch_size * n_kv_heads,
-            batch_size * n_heads,
-            kv_head_dim,
-        )?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
     println!("--- Comparing incremental forward_step logits against PyTorch reference ---");

@@ -11,7 +11,7 @@ use std::{
     io::{self, BufWriter, Write},
     time::{Duration, Instant},
 };
-use sysinfo::{get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 
 pub const METRICS_LOG_INTERVAL_ENV: &str = "METRICS_LOG_INTERVAL_SECS";
 pub const METRICS_LOG_ENABLED_ENV: &str = "METRICS_LOG_ENABLED";
@@ -495,6 +495,7 @@ pub fn build_latency_rows(
     softmax: &SoftmaxBackendStats,
     output: &RollingStat,
     sample: &RollingStat,
+    decode: &RollingStat,
 ) -> Vec<LatencyRow> {
     let mut rows = Vec::new();
 
@@ -558,6 +559,13 @@ pub fn build_latency_rows(
         label: "Sampling".to_string(),
         last_ms: sample.last_ms(),
         average_ms: sample.average_ms(),
+        level: 0,
+    });
+
+    rows.push(LatencyRow {
+        label: "Decode".to_string(),
+        last_ms: decode.last_ms(),
+        average_ms: decode.average_ms(),
         level: 0,
     });
 

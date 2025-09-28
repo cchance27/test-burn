@@ -1,5 +1,5 @@
-use criterion::{criterion_group, criterion_main, Criterion};
-use test_burn::metallic::kernels::softmax::{apply_softmax, METALLIC_SOFTMAX_BACKEND_ENV};
+use criterion::{Criterion, criterion_group, criterion_main};
+use test_burn::metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
 use test_burn::metallic::resource_cache::ResourceCache;
 use test_burn::metallic::{Context, Tensor};
 
