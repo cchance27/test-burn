@@ -21,5 +21,5 @@ pub trait Cacheable: Clone {
     ///
     /// This method is used by the resource cache to create new instances of
     /// cached resources when they are not found in the cache.
-    fn from_key(key: &Self::Key, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError>;
+    fn from_key(key: &Self::Key, device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError>;
 }

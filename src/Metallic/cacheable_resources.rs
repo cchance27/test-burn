@@ -3,8 +3,8 @@ use super::{
     cacheable::Cacheable,
     error::MetalError,
 };
-use objc2::AnyThread;
 use objc2::rc::Retained;
+use objc2::AnyThread;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
@@ -26,7 +26,8 @@ impl Cacheable for CacheableMpsGemm {
         self.key.clone()
     }
 
-    fn from_key(key: &Self::Key, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
+    fn from_key(key: &Self::Key, device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
+        let device = device.ok_or(MetalError::DeviceNotFound)?;
         let gemm = unsafe {
             MPSMatrixMultiplication::initWithDevice_transposeLeft_transposeRight_resultRows_resultColumns_interiorColumns_alpha_beta(
                 MPSMatrixMultiplication::alloc(),
@@ -61,7 +62,7 @@ impl Cacheable for CacheableMpsMatrixDescriptor {
         self.key.clone()
     }
 
-    fn from_key(key: &Self::Key, _device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
+    fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let descriptor = unsafe {
             MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
                 key.rows,
@@ -91,7 +92,8 @@ impl Cacheable for CacheableMpsSoftMax {
         self.key.clone()
     }
 
-    fn from_key(key: &Self::Key, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
+    fn from_key(key: &Self::Key, device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
+        let device = device.ok_or(MetalError::DeviceNotFound)?;
         let softmax = unsafe { MPSMatrixSoftMax::initWithDevice(MPSMatrixSoftMax::alloc(), device) };
         Ok(Self { softmax, key: key.clone() })
     }

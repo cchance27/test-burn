@@ -7,7 +7,7 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, kernels};
+use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -1070,7 +1070,7 @@ impl Context {
         }
 
         if ensure_cache && self.active_resource_cache.is_none() {
-            self.active_resource_cache = Some(ResourceCache::new());
+            self.active_resource_cache = Some(ResourceCache::with_device(self.device.clone()));
         }
 
         Ok(())

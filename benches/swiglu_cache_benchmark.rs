@@ -3,7 +3,7 @@
 //! This helps quantify the benefit of sharing a [`ResourceCache`] across the individual
 //! matmul and elementwise kernels that make up the composite implementation.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use test_burn::metallic::kernels::swiglu::swiglu_with_optional_cache;
 use test_burn::metallic::resource_cache::ResourceCache;
 use test_burn::metallic::{Context, Tensor};
@@ -37,7 +37,7 @@ fn benchmark_swiglu_cache(c: &mut Criterion) {
         b.iter(|| {
             ctx.reset_pool();
             ctx.clear_cache();
-            let mut cache = ResourceCache::new();
+            let mut cache = ResourceCache::with_device(ctx.device.clone());
             swiglu_with_optional_cache(
                 &mut ctx,
                 &x_normed_flat,

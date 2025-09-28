@@ -68,7 +68,7 @@ fn test_matmul_invalid_shapes() {
     use crate::metallic::resource_cache::ResourceCache;
 
     let context = Context::new().unwrap();
-    let mut cache = ResourceCache::new();
+    let mut cache = ResourceCache::with_device(context.device.clone());
 
     // Test with incompatible matrix dimensions
     let m = 3;

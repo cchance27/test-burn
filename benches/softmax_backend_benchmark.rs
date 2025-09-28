@@ -1,5 +1,5 @@
-use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
+use criterion::{criterion_group, criterion_main, Criterion};
+use test_burn::metallic::kernels::softmax::{apply_softmax, METALLIC_SOFTMAX_BACKEND_ENV};
 use test_burn::metallic::resource_cache::ResourceCache;
 use test_burn::metallic::{Context, Tensor};
 
@@ -34,7 +34,7 @@ fn benchmark_softmax_backends(c: &mut Criterion) {
 
     let mut group = c.benchmark_group("softmax_backend_comparison");
     let mut context = Context::new().unwrap();
-    let mut cache = ResourceCache::new();
+    let mut cache = ResourceCache::with_device(context.device.clone());
 
     group.bench_function("kernel", |b| {
         b.iter(|| {
