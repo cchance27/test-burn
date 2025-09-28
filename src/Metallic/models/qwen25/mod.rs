@@ -440,25 +440,25 @@ impl Qwen25 {
             // Update the KV cache with the new K and V values
             phase_start = Instant::now();
             ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
+            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
-            // Retrieve the full K and V caches for attention
-            let (k_cache, v_cache, _) = ctx
+            // Append the timestep into the repeated KV cache and create a view for attention
+            let group_size = n_heads / n_kv_heads;
+            phase_start = Instant::now();
+            ctx.write_repeated_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)?;
+            let cache_entry = ctx
                 .kv_caches
                 .get(&layer_idx)
                 .cloned()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_history = Qwen25::gather_cache_history(&k_cache, pos + 1, ctx)?;
-            let v_history = Qwen25::gather_cache_history(&v_cache, pos + 1, ctx)?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
-
-            // Repeat K and V to match Q head count for GQA
-            let group_size = n_heads / n_kv_heads;
-            phase_start = Instant::now();
-            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
-            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.repeated_k, pos + 1, ctx)?;
+            let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.repeated_v, pos + 1, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
+
+            let k_repeated = k_repeated_history.tensor;
+            let v_repeated = v_repeated_history.tensor;
 
             // SDPA (causal mask enabled)
             phase_start = Instant::now();
@@ -534,10 +534,7 @@ impl Qwen25 {
     ) -> Result<Tensor, MetalError> {
         let input = history.tensor.clone();
         let input_dims = input.dims();
-        if input_dims.len() != 3
-            || input_dims[0] != batch * n_kv_heads
-            || input_dims[1] != history.active_seq
-            || input_dims[2] != head_dim
+        if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != history.active_seq || input_dims[2] != head_dim
         {
             return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
@@ -575,9 +572,7 @@ impl CacheHistory {
     fn from_tensor(tensor: Tensor) -> Result<Self, MetalError> {
         let dims = tensor.dims();
         if dims.len() != 3 {
-            return Err(MetalError::InvalidShape(
-                "Cache history tensors must be rank-3".to_string(),
-            ));
+            return Err(MetalError::InvalidShape("Cache history tensors must be rank-3".to_string()));
         }
         if dims[1] == 0 {
             return Err(MetalError::InvalidShape(

@@ -1414,11 +1414,18 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     let n_heads = model.config.n_heads;
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
+    let batch_size = 1;
 
     ctx.kv_caches.clear();
     ctx.kv_cache_pool.reset();
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, n_kv_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(
+            layer_idx,
+            model.config.seq_len,
+            batch_size * n_kv_heads,
+            batch_size * n_heads,
+            kv_head_dim,
+        )?;
     }
 
     println!("--- Comparing incremental forward_step logits against PyTorch reference ---");
@@ -1586,23 +1593,19 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
 fn dump_kv_snapshot(ctx: &mut Context, step: usize) {
     ctx.synchronize();
 
-    let mut snapshot: Vec<(usize, Tensor, Tensor, usize)> = ctx
-        .kv_caches
-        .iter()
-        .map(|(&layer_idx, (k, v, capacity))| (layer_idx, k.clone(), v.clone(), *capacity))
-        .collect();
+    let mut snapshot: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
 
-    snapshot.sort_by_key(|(layer_idx, _, _, _)| *layer_idx);
+    snapshot.sort_by_key(|(layer_idx, _)| *layer_idx);
 
-    for (layer_idx, k_tensor, v_tensor, capacity) in snapshot {
-        let dims = k_tensor.dims();
+    for (layer_idx, entry) in snapshot {
+        let dims = entry.k.dims();
         if dims.len() != 3 {
             println!("    Layer {} unexpected dims {:?} while dumping KV snapshot", layer_idx, dims);
             continue;
         }
 
-        let seq_len = dims[0];
-        let batch_heads = dims[1];
+        let batch_heads = dims[0];
+        let seq_len = entry.capacity;
         let head_dim = dims[2];
 
         if step >= seq_len {
@@ -1613,22 +1616,24 @@ fn dump_kv_snapshot(ctx: &mut Context, step: usize) {
             continue;
         }
 
-        let elems_per_step = batch_heads * head_dim;
-        let offset = step * elems_per_step;
-
-        let k_vec = k_tensor.to_vec();
-        let v_vec = v_tensor.to_vec();
+        let elems_per_head = seq_len * head_dim;
+        let k_vec = entry.k.to_vec();
+        let v_vec = entry.v.to_vec();
 
         let heads_to_show = batch_heads.min(2);
         let values_to_show = head_dim.min(8);
 
         println!(
-            "    Layer {} KV slice @ step {} (capacity {}, dims {:?})",
-            layer_idx, step, capacity, dims
+            "    Layer {} KV slice @ step {} (capacity {}, canonical dims {:?}, repeated dims {:?})",
+            layer_idx,
+            step,
+            seq_len,
+            dims,
+            entry.repeated_k.dims()
         );
 
         for head_idx in 0..heads_to_show {
-            let head_offset = offset + head_idx * head_dim;
+            let head_offset = head_idx * elems_per_head + step * head_dim;
             let k_slice = &k_vec[head_offset..head_offset + values_to_show];
             let v_slice = &v_vec[head_offset..head_offset + values_to_show];
 

@@ -98,6 +98,8 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
 
     let prompt_tokens = [1, 2, 3, 4, 5];
     let vocab_size = model.config.vocab_size;
+    let batch = 1;
+    let group_size = model.config.n_heads / model.config.n_kv_heads;
 
     // Pre-allocate KV cache
     let n_kv_heads = model.config.n_kv_heads;
@@ -105,8 +107,9 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let n_heads = model.config.n_heads;
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
+    let batch_size = 1;
     for i in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(i, model.config.seq_len, n_kv_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(i, model.config.seq_len, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
     // --- Multi-step correctness check ---
@@ -121,6 +124,65 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         let hidden_state = model.forward_step(&token_embedding, i, &mut ctx)?;
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
         kv_cache_logits_history.push(logits_tensor.to_vec());
+
+        // Validate that the repeated cache matches the legacy repeat kernel for both K and V.
+        let cache_snapshots: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
+
+        for (layer_idx, entry) in cache_snapshots {
+            let canonical_k_history = Qwen25::gather_cache_history(&entry.k, i + 1, &mut ctx)?;
+            let canonical_v_history = Qwen25::gather_cache_history(&entry.v, i + 1, &mut ctx)?;
+            let repeated_k_history = Qwen25::gather_cache_history(&entry.repeated_k, i + 1, &mut ctx)?;
+            let repeated_v_history = Qwen25::gather_cache_history(&entry.repeated_v, i + 1, &mut ctx)?;
+
+            let expected_k = Qwen25::repeat_kv_heads(&canonical_k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, &mut ctx)?;
+            let expected_v = Qwen25::repeat_kv_heads(&canonical_v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, &mut ctx)?;
+
+            ctx.synchronize();
+
+            let actual_k = repeated_k_history.tensor.as_slice();
+            let actual_v = repeated_v_history.tensor.as_slice();
+            let expected_k_slice = expected_k.as_slice();
+            let expected_v_slice = expected_v.as_slice();
+
+            assert_eq!(
+                actual_k.len(),
+                expected_k_slice.len(),
+                "K repeated length mismatch for layer {} at step {}",
+                layer_idx,
+                i
+            );
+            assert_eq!(
+                actual_v.len(),
+                expected_v_slice.len(),
+                "V repeated length mismatch for layer {} at step {}",
+                layer_idx,
+                i
+            );
+
+            for (idx, (actual, expected)) in actual_k.iter().zip(expected_k_slice.iter()).enumerate() {
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "K repeat mismatch at layer {}, step {}, element {}: got {} expected {}",
+                    layer_idx,
+                    i,
+                    idx,
+                    actual,
+                    expected
+                );
+            }
+
+            for (idx, (actual, expected)) in actual_v.iter().zip(expected_v_slice.iter()).enumerate() {
+                assert!(
+                    (actual - expected).abs() < 1e-5,
+                    "V repeat mismatch at layer {}, step {}, element {}: got {} expected {}",
+                    layer_idx,
+                    i,
+                    idx,
+                    actual,
+                    expected
+                );
+            }
+        }
     }
 
     // 2. Run full `forward` for each sequence length and compare
@@ -225,9 +287,11 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let block = &model.blocks[0];
     let kv_dim = block.kv_dim;
     let kv_head_dim = kv_dim / model.config.n_kv_heads;
-    let batch_heads = 1 * model.config.n_kv_heads;
+    let batch_size = 1;
+    let canonical_heads = batch_size * model.config.n_kv_heads;
+    let repeated_heads = batch_size * model.config.n_heads;
     for layer_idx in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, batch_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, canonical_heads, repeated_heads, kv_head_dim)?;
     }
 
     let collector = new_latency_collector(model.config.n_layers);

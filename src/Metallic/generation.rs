@@ -1,12 +1,12 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::Tokenizer;
-use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
+use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, MemoryEvent, MemoryUsage};
 use crate::metallic::metrics::{
     build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, BlockStat, MemoryBlockStat, MemoryScopeStat,
     MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
 };
 use crate::metallic::models::qwen25::Qwen25;
+use crate::metallic::Tokenizer;
 use rand::prelude::*;
 use std::{
     sync::mpsc,
@@ -282,7 +282,7 @@ where
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
     // --- Prompt Processing Pass ---

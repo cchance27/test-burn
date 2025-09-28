@@ -27,6 +27,19 @@ collector records:
 rows shown in the sidebar so individual phases can be expanded underneath each
 block.
 
+### KV cache lifecycle instrumentation
+
+KV caching now keeps two synchronized views per transformer layer: the
+canonical GQA layout (`[batch * n_kv_heads, seq, head_dim]`) and a persistent
+repeated buffer (`[batch * n_heads, seq, head_dim]`). `Context::write_kv_step`
+appends the latest timestep into the canonical cache, while
+`Context::write_repeated_kv_step` mirrors just that row into the repeated view.
+Incremental generation reuses the repeated buffers directly, so the
+`kv_repeat` latency phase still appears in telemetry but reflects the cheap
+append instead of replaying the full history via the `RepeatKvHeads` kernel.
+This ensures the dashboard continues to show a stable `kv_repeat` duration
+even though the underlying work is now amortized.
+
 ### Softmax backend benchmarking
 
 Softmax normalization now supports two execution paths: the existing
