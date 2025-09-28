@@ -23,7 +23,7 @@ impl Cacheable for CacheableSdpa {
         self.key.clone()
     }
 
-    fn from_key(key: &Self::Key, _device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
+    fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let dim_f32 = key.dim as f32;
         let scale = 1.0 / dim_f32.sqrt();
 

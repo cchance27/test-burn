@@ -9,10 +9,7 @@ fn test_cacheable_trait() {
         seq_k: 16,
         dim: 64,
     };
-    // Create a dummy device for testing (not actually used)
-    #[allow(clippy::transmute_ptr_to_ref)]
-    let dummy_device: &Retained<ProtocolObject<dyn MTLDevice>> = unsafe { std::mem::transmute(&() as *const ()) };
-    let sdpa = CacheableSdpa::from_key(&key, dummy_device).unwrap();
+    let sdpa = CacheableSdpa::from_key(&key, None).unwrap();
     let expected_key = SdpaKey {
         batch: 2,
         seq_q: 8,

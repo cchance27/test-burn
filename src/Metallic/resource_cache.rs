@@ -14,6 +14,7 @@ use rustc_hash::FxHashMap;
 ///
 /// This cache is designed to store and retrieve cacheable resources efficiently.
 pub struct ResourceCache {
+    default_device: Option<Retained<ProtocolObject<dyn MTLDevice>>>,
     gemm_cache: FxHashMap<MpsGemmKey, CacheableMpsGemm>,
     descriptor_cache: FxHashMap<MpsMatrixDescriptorKey, CacheableMpsMatrixDescriptor>,
     softmax_cache: FxHashMap<MpsSoftMaxKey, CacheableMpsSoftMax>,
@@ -23,7 +24,18 @@ pub struct ResourceCache {
 impl ResourceCache {
     /// Create a new, empty resource cache.
     pub fn new() -> Self {
+        Self::with_default_device(None)
+    }
+
+    /// Create a new resource cache that will fall back to the provided device when callers
+    /// don't supply one explicitly.
+    pub fn with_device(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
+        Self::with_default_device(Some(device))
+    }
+
+    fn with_default_device(device: Option<Retained<ProtocolObject<dyn MTLDevice>>>) -> Self {
         Self {
+            default_device: device,
             gemm_cache: FxHashMap::default(),
             descriptor_cache: FxHashMap::default(),
             softmax_cache: FxHashMap::default(),
@@ -33,6 +45,7 @@ impl ResourceCache {
 
     /// Get a cached resource by key, or create it if it doesn't exist.
     fn get_or_create_resource<'a, C: Cacheable>(
+        &'a mut self,
         cache: &'a mut FxHashMap<C::Key, C>,
         key: C::Key,
         device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>,
@@ -40,16 +53,13 @@ impl ResourceCache {
     where
         C::Key: std::hash::Hash + Eq + Clone,
     {
+        let device = match device {
+            Some(device) => Some(device),
+            None => self.default_device.as_ref(),
+        };
+
         if !cache.contains_key(&key) {
-            let resource = match device {
-                Some(d) => C::from_key(&key, d)?,
-                None => {
-                    // This is for device-independent resources like SDPA
-                    #[allow(clippy::transmute_ptr_to_ref)]
-                    let dummy_device: &Retained<ProtocolObject<dyn MTLDevice>> = unsafe { std::mem::transmute(&() as *const ()) };
-                    C::from_key(&key, dummy_device)?
-                }
-            };
+            let resource = C::from_key(&key, device)?;
             cache.insert(key.clone(), resource);
         }
         cache
@@ -63,7 +73,7 @@ impl ResourceCache {
         key: MpsGemmKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixMultiplication>, MetalError> {
-        let cacheable_gemm = Self::get_or_create_resource(&mut self.gemm_cache, key, Some(device))?;
+        let cacheable_gemm = self.get_or_create_resource(&mut self.gemm_cache, key, Some(device))?;
         Ok(cacheable_gemm.gemm.clone())
     }
 
@@ -73,7 +83,7 @@ impl ResourceCache {
         key: MpsMatrixDescriptorKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixDescriptor>, MetalError> {
-        let cacheable_descriptor = Self::get_or_create_resource(&mut self.descriptor_cache, key, Some(device))?;
+        let cacheable_descriptor = self.get_or_create_resource(&mut self.descriptor_cache, key, Some(device))?;
         Ok(cacheable_descriptor.descriptor.clone())
     }
 
@@ -83,7 +93,7 @@ impl ResourceCache {
         key: MpsSoftMaxKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixSoftMax>, MetalError> {
-        let cacheable_softmax = Self::get_or_create_resource(&mut self.softmax_cache, key, Some(device))?;
+        let cacheable_softmax = self.get_or_create_resource(&mut self.softmax_cache, key, Some(device))?;
         Ok(cacheable_softmax.softmax.clone())
     }
 
@@ -91,7 +101,7 @@ impl ResourceCache {
     pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
         let key = SdpaKey { batch, seq_q, seq_k, dim };
         // SDPA creation should never fail, so we unwrap.
-        Self::get_or_create_resource(&mut self.sdpa_cache, key, None).unwrap().clone()
+        self.get_or_create_resource(&mut self.sdpa_cache, key, None).unwrap().clone()
     }
 
     /// Get statistics about the cache.

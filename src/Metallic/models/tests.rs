@@ -1,7 +1,7 @@
 #![cfg(test)]
 use super::*;
+use crate::metallic::{resource_cache::ResourceCache, Operation};
 use crate::metallic::{Context, MetalError};
-use crate::metallic::{Operation, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder as _};
@@ -25,8 +25,8 @@ impl Operation for TestOperation {
 
 #[test]
 fn test_model_basic() -> Result<(), MetalError> {
-    let _context = Context::new()?;
-    let _cache = ResourceCache::new();
+    let context = Context::new()?;
+    let _cache = ResourceCache::with_device(context.device.clone());
 
     // Create a simple test operation
     let test_op = TestOperation;
@@ -45,7 +45,7 @@ fn test_model_basic() -> Result<(), MetalError> {
 #[test]
 fn test_model_empty() -> Result<(), MetalError> {
     let context = Context::new()?;
-    let mut cache = ResourceCache::new();
+    let mut cache = ResourceCache::with_device(context.device.clone());
 
     let model = Model::new(vec![]);
 
