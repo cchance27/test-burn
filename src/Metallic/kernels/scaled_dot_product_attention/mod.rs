@@ -5,9 +5,9 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor,
 };
 
 use std::mem::size_of;
@@ -87,13 +87,13 @@ struct ScaledDotProductAttention {
 
 fn create_sdpa_operation(
     ctx: &mut Context,
-    args: (Tensor, Tensor, Tensor, bool, u32),
+    args: (&Tensor, &Tensor, &Tensor, bool, u32),
     mut cache: Option<&mut ResourceCache>,
     config: SdpaConfig,
 ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-    let (mut q, mut k, mut v, causal, query_offset) = args;
+    let (q, k, v, causal, query_offset) = args;
 
-    ctx.prepare_tensors_for_active_cmd(&mut [&mut q, &mut k, &mut v]);
+    ctx.prepare_tensors_for_active_cmd(&[q, k, v]);
 
     // Validate dimensions
     if q.dims().len() != 3 || k.dims().len() != 3 || v.dims().len() != 3 {
@@ -141,9 +141,8 @@ fn create_sdpa_operation(
         None
     };
 
-    if let Some(buffer) = workspace.as_mut() {
-        let mut tensors = [&mut *buffer];
-        ctx.prepare_tensors_for_active_cmd(&mut tensors);
+    if let Some(buffer) = workspace.as_ref() {
+        ctx.prepare_tensors_for_active_cmd(&[buffer]);
     }
 
     // Process each batch separately to work with 2D matmul operations
@@ -223,15 +222,15 @@ fn create_sdpa_operation(
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
-    type Args = (Tensor, Tensor, Tensor, bool, u32); // (q, k, v, causal, query_offset)
+    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
@@ -240,15 +239,15 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
-    type Args = (Tensor, Tensor, Tensor, bool, u32);
+    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
@@ -257,15 +256,15 @@ impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
-    type Args = (Tensor, Tensor, Tensor, bool, u32);
+    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
@@ -274,15 +273,15 @@ impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
-    type Args = (Tensor, Tensor, Tensor, bool, u32);
+    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
@@ -291,15 +290,15 @@ impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
-    type Args = (Tensor, Tensor, Tensor, bool, u32);
+    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {

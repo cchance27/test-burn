@@ -17,7 +17,7 @@ struct RandomUniform {
 // 3. Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for RandomUniformOp {
     // Input arguments for the call.
-    type Args = (Vec<usize>, f32, f32, Option<u32>);
+    type Args<'a> = (Vec<usize>, f32, f32, Option<u32>);
     // The output type.
 
     // Link to the enum variant in `KernelFunction`.
@@ -27,9 +27,9 @@ impl KernelInvocable for RandomUniformOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {

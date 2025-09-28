@@ -79,10 +79,8 @@ pub fn apply_softmax(
     }
 
     let result = match cache {
-        Some(cache_ref) => {
-            ctx.call_with_cache::<SoftmaxOp>((attn.clone(), rows as u32, columns as u32, causal as u32, query_offset), cache_ref)?
-        }
-        None => ctx.call::<SoftmaxOp>((attn.clone(), rows as u32, columns as u32, causal as u32, query_offset))?,
+        Some(cache_ref) => ctx.call_with_cache::<SoftmaxOp>((attn, rows as u32, columns as u32, causal as u32, query_offset), cache_ref)?,
+        None => ctx.call::<SoftmaxOp>((attn, rows as u32, columns as u32, causal as u32, query_offset))?,
     };
     ctx.record_softmax_backend_sample(SoftmaxBackend::Kernel, start.elapsed());
     Ok(result)
@@ -95,8 +93,7 @@ fn try_apply_mps_softmax(
     rows: usize,
     columns: usize,
 ) -> Result<(), MetalError> {
-    let mut attn_for_prepare = attn.clone();
-    ctx.prepare_tensors_for_active_cmd(&mut [&mut attn_for_prepare]);
+    ctx.prepare_tensors_for_active_cmd(&[attn]);
 
     let descriptor_key = MpsMatrixDescriptorKey {
         rows,
@@ -155,19 +152,19 @@ struct SoftmaxOperation {
 }
 
 impl KernelInvocable for SoftmaxOp {
-    type Args = (Tensor, u32, u32, u32, u32); // (attn, seq_q, seq_k, causal, query_offset)
+    type Args<'a> = (&'a Tensor, u32, u32, u32, u32); // (attn, seq_q, seq_k, causal, query_offset)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::FusedSoftmax)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut attn, seq_q, seq_k, causal, query_offset) = args;
+        let (attn, seq_q, seq_k, causal, query_offset) = args;
 
         // Validate dimensions
         if attn.dims().len() != 2 {
@@ -187,7 +184,7 @@ impl KernelInvocable for SoftmaxOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut attn]);
+        ctx.prepare_tensors_for_active_cmd(&[attn]);
 
         let op = SoftmaxOperation {
             attn: attn.clone(),
@@ -198,7 +195,7 @@ impl KernelInvocable for SoftmaxOp {
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
-        Ok((Box::new(op), attn)) // Return the same tensor since operation is in-place
+        Ok((Box::new(op), attn.clone())) // Return a shallow clone since operation is in-place
     }
 }
 

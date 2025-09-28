@@ -11,19 +11,19 @@ struct Permute {
 }
 
 impl KernelInvocable for PermuteOp {
-    type Args = (Tensor, Vec<u32>);
+    type Args<'a> = (Tensor, Vec<u32>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::Permute)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut src, permute) = args;
+        let (src, permute) = args;
 
         // Validate permutation
         if permute.len() != src.dims().len() {
@@ -47,7 +47,7 @@ impl KernelInvocable for PermuteOp {
             out_dims[i] = src.dims()[p_idx as usize];
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut src]);
+        ctx.prepare_tensors_for_active_cmd(&[&src]);
 
         // Create the output tensor
         let dst = Tensor::create_tensor_pooled(out_dims, ctx)?;

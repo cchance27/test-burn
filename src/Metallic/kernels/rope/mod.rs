@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::{Context, MetalError, Operation, Tensor, resource_cache::ResourceCache};
+use crate::metallic::{resource_cache::ResourceCache, Context, MetalError, Operation, Tensor};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
@@ -23,7 +23,7 @@ struct RoPE {
 
 impl KernelInvocable for RoPEOp {
     /// Input arguments for the call: (input, cos, sin, dim, seq_len, position_offset)
-    type Args = (Tensor, Tensor, Tensor, u32, u32, u32);
+    type Args<'a> = (Tensor, Tensor, Tensor, u32, u32, u32);
 
     /// Link to the enum variant in `KernelFunction`.
     fn function_id() -> Option<KernelFunction> {
@@ -32,13 +32,13 @@ impl KernelInvocable for RoPEOp {
 
     /// This `new` method is called by `ctx.call()`.
     /// It creates the output tensor and the internal `Operation` struct.
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut input, mut cos, mut sin, dim, seq_len, position_offset) = args;
+        let (input, cos, sin, dim, seq_len, position_offset) = args;
 
         // Basic validation
         if dim == 0 || !dim.is_multiple_of(2) {
@@ -75,7 +75,7 @@ impl KernelInvocable for RoPEOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut input, &mut cos, &mut sin]);
+        ctx.prepare_tensors_for_active_cmd(&[&input, &cos, &sin]);
 
         // Create the output tensor with same shape as input
         let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;

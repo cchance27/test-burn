@@ -6,9 +6,9 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor,
 };
 
 // Public struct for matmul with alpha/beta scaling
@@ -31,7 +31,7 @@ struct MatMulAlphaBeta {
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for MatMulAlphaBetaOp {
     // Input arguments for the call - two input tensors + transpose options + alpha/beta
-    type Args = (Tensor, Tensor, Tensor, bool, bool, f32, f32); // (left, right, result, transpose_left, transpose_right, alpha, beta)
+    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, bool, f32, f32);
     // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
@@ -41,20 +41,20 @@ impl KernelInvocable for MatMulAlphaBetaOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>, // MPS doesn't use this
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut left, mut right, mut result, transpose_left, transpose_right, alpha, beta) = args;
+        let (left, right, result, transpose_left, transpose_right, alpha, beta) = args;
 
         // Validate dimensions for matrix multiplication
         if left.dims().len() != 2 || right.dims().len() != 2 {
             return Err(MetalError::InvalidOperation("matmul requires 2D tensors".to_string()));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut left, &mut right, &mut result]);
+        ctx.prepare_tensors_for_active_cmd(&[left, right, result]);
 
         let left_rows = left.dims()[0];
         let left_cols = left.dims()[1];
@@ -142,7 +142,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         };
 
         // Return the boxed operation and the result tensor (already provided)
-        Ok((Box::new(op), result))
+        Ok((Box::new(op), result.clone()))
     }
 }
 

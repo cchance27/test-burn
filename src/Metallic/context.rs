@@ -107,7 +107,7 @@ impl Context {
         })
     }
 
-    pub fn call<K: KernelInvocable>(&mut self, args: K::Args) -> Result<Tensor, MetalError> {
+    pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_>) -> Result<Tensor, MetalError> {
         self.ensure_active_cmd_buffer()?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -208,7 +208,7 @@ impl Context {
         transpose_b: bool,
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for matmul
-        self.call::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b))
+        self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
     }
 
     pub(crate) fn matmul_with_cache(
@@ -219,7 +219,7 @@ impl Context {
         transpose_b: bool,
         cache: &mut ResourceCache,
     ) -> Result<super::Tensor, MetalError> {
-        self.call_with_cache::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b), cache)
+        self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
     }
 
     pub fn fused_qkv_projection(
@@ -273,13 +273,13 @@ impl Context {
 
         let mut linear = self.matmul(x_flat, fused_weight, false, false)?;
         let mut bias = fused_bias.clone();
-        self.prepare_tensors_for_active_cmd(&mut [&mut linear, &mut bias]);
+        self.prepare_tensors_for_active_cmd(&[&linear, &bias]);
 
         let mut q_out = Tensor::create_tensor_pooled(vec![m, d_model], self)?;
         let mut k_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
         let mut v_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
 
-        self.prepare_tensors_for_active_cmd(&mut [&mut q_out, &mut k_out, &mut v_out]);
+        self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out]);
 
         self.ensure_active_cmd_buffer()?;
         let pipeline = self.kernel_manager.get_pipeline(KernelFunction::FusedQkvBiasSplit, &self.device)?;
@@ -340,10 +340,14 @@ impl Context {
         beta: f32,
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for matmul with alpha/beta scaling
-        self.call::<MatMulAlphaBetaOp>((a.clone(), b.clone(), result.clone(), transpose_a, transpose_b, alpha, beta))
+        self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
     }
 
-    pub(crate) fn call_with_cache<K: KernelInvocable>(&mut self, args: K::Args, cache: &mut ResourceCache) -> Result<Tensor, MetalError> {
+    pub(crate) fn call_with_cache<K: KernelInvocable>(
+        &mut self,
+        args: K::Args<'_>,
+        cache: &mut ResourceCache,
+    ) -> Result<Tensor, MetalError> {
         self.ensure_active_cmd_buffer_internal(false)?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -373,7 +377,7 @@ impl Context {
         beta: f32,
         cache: &mut ResourceCache,
     ) -> Result<super::Tensor, MetalError> {
-        self.call_with_cache::<MatMulAlphaBetaOp>((a.clone(), b.clone(), result.clone(), transpose_a, transpose_b, alpha, beta), cache)
+        self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
     }
 
     pub fn get_cache_stats(&self) -> Option<CacheStats> {
@@ -492,7 +496,7 @@ impl Context {
         };
 
         if zero_ready {
-            self.prepare_tensors_for_active_cmd(&mut [&mut k_src, &mut v_src]);
+            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src]);
             self.ensure_active_cmd_buffer()?;
             let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
@@ -622,7 +626,7 @@ impl Context {
 
         let mut k_cache = k_cache_ref;
         let mut v_cache = v_cache_ref;
-        self.prepare_tensors_for_active_cmd(&mut [&mut k_cache, &mut v_cache, &mut k_src, &mut v_src]);
+        self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src]);
 
         let expected_bh = k_cache.dims()[0];
         let expected_hd = k_cache.dims()[2];
@@ -761,7 +765,7 @@ impl Context {
         };
 
         if zero_ready {
-            self.prepare_tensors_for_active_cmd(&mut [&mut k_src, &mut v_src]);
+            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src]);
             self.ensure_active_cmd_buffer()?;
             let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
@@ -875,7 +879,7 @@ impl Context {
         let mut repeated_k = entry.repeated_k.clone();
         let mut repeated_v = entry.repeated_v.clone();
 
-        self.prepare_tensors_for_active_cmd(&mut [&mut repeated_k, &mut repeated_v, &mut k_src, &mut v_src]);
+        self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src]);
 
         let repeated_heads_expected = canonical_heads
             .checked_mul(group_size)
@@ -980,7 +984,7 @@ impl Context {
         view.dims = vec![dims[0], active_steps, dims[2]];
         view.strides = vec![cache.strides[0], cache.strides[1], cache.strides[2]];
 
-        self.prepare_tensors_for_active_cmd(&mut [&mut view]);
+        self.prepare_tensors_for_active_cmd(&[&view]);
 
         Ok((view, dims[1]))
     }
@@ -1004,7 +1008,7 @@ impl Context {
         query_offset: usize,
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOptimizedOp>((q.clone(), k.clone(), v.clone(), causal, query_offset as u32))
+        self.call::<ScaledDotProductAttentionOptimizedOp>((q, k, v, causal, query_offset as u32))
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.
@@ -1032,15 +1036,7 @@ impl Context {
         ffn_down_bias: &Tensor,
     ) -> Result<Tensor, MetalError> {
         // Use the kernel system to call the SwiGLU operation
-        self.call::<SwiGLUOp>((
-            x_normed_flat.clone(),
-            ffn_gate.clone(),
-            ffn_gate_bias.clone(),
-            ffn_up.clone(),
-            ffn_up_bias.clone(),
-            ffn_down.clone(),
-            ffn_down_bias.clone(),
-        ))
+        self.call::<SwiGLUOp>((x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias))
     }
 }
 
@@ -1096,7 +1092,7 @@ impl Context {
         }
     }
 
-    fn prepare_tensor_for_active_cmd(&mut self, tensor: &mut Tensor) {
+    fn prepare_tensor_for_active_cmd(&mut self, tensor: &Tensor) {
         let maybe_dep = tensor.defining_cmd_buffer.borrow().clone();
         if let Some(dep) = maybe_dep {
             if self.active_cmd_buffer.as_ref().map(|active| dep.ptr_eq(active)).unwrap_or(false) {
@@ -1114,7 +1110,7 @@ impl Context {
         }
     }
 
-    pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &mut [&mut Tensor]) {
+    pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &[&Tensor]) {
         for tensor in tensors {
             self.prepare_tensor_for_active_cmd(tensor);
         }

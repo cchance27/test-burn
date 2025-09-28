@@ -14,19 +14,19 @@ struct LayerNorm {
 }
 
 impl KernelInvocable for LayerNormOp {
-    type Args = (Tensor, Tensor, Tensor, u32); // (input, gamma, beta, feature_dim)
+    type Args<'a> = (Tensor, Tensor, Tensor, u32); // (input, gamma, beta, feature_dim)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::LayerNorm)
     }
 
-    fn new(
+    fn new<'a>(
         ctx: &mut Context,
-        args: Self::Args,
+        args: Self::Args<'a>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let (mut input, mut gamma, mut beta, feature_dim) = args;
+        let (input, gamma, beta, feature_dim) = args;
 
         // Validate dimensions
         if input.dims().last() != Some(&(feature_dim as usize)) {
@@ -51,7 +51,7 @@ impl KernelInvocable for LayerNormOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut input, &mut gamma, &mut beta]);
+        ctx.prepare_tensors_for_active_cmd(&[&input, &gamma, &beta]);
 
         let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
 
