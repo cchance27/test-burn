@@ -57,6 +57,7 @@ pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn apply_softmax(
     ctx: &mut Context,
     mut cache: Option<&mut ResourceCache>,

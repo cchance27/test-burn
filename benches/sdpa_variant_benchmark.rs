@@ -8,14 +8,16 @@ use test_burn::metallic::{Context, Tensor};
 
 const ITERATIONS: usize = 1;
 
-fn run_variant<O: KernelInvocable<Args = (Tensor, Tensor, Tensor, bool, u32)>>(
+fn run_variant<O>(
     ctx: &mut Context,
     batch: usize,
     seq_q: usize,
     seq_k: usize,
     dim: usize,
     causal: bool,
-) {
+) where
+    O: for<'a> KernelInvocable<Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32)>,
+{
     let q_tensor = Tensor::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
     let k_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
     let v_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
@@ -24,7 +26,7 @@ fn run_variant<O: KernelInvocable<Args = (Tensor, Tensor, Tensor, bool, u32)>>(
 
     for _ in 0..ITERATIONS {
         let out = ctx
-            .call::<O>((q_tensor.clone(), k_tensor.clone(), v_tensor.clone(), causal, 0))
+            .call::<O>((&q_tensor, &k_tensor, &v_tensor, causal, 0u32))
             .unwrap();
         last_output = Some(out);
     }

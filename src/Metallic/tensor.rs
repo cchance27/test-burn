@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::{operation::CommandBuffer, Context, MetalError};
+use super::{Context, MetalError, operation::CommandBuffer};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;

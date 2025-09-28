@@ -5,9 +5,9 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
+    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
-    Context, MetalError, Operation, Tensor,
 };
 
 use std::mem::size_of;
@@ -135,7 +135,7 @@ fn create_sdpa_operation(
     // Create output tensor
     let out = Tensor::create_tensor_pooled(vec![b, s_q, d], ctx)?;
 
-    let mut workspace = if config.reuse_workspace {
+    let workspace = if config.reuse_workspace {
         Some(Tensor::create_tensor_pooled(vec![s_q, s_k], ctx)?)
     } else {
         None

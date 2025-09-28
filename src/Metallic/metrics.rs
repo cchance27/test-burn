@@ -572,6 +572,7 @@ pub fn build_latency_rows(
     rows
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_memory_rows(
     model_memory: &ModelMemoryNode,
     host: &ScalarStat,

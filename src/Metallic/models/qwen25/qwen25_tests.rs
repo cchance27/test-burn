@@ -283,7 +283,7 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
         rope_freq_base: 1e6,
         rms_eps: 1e-6,
     };
-    let mut model = Qwen25::new(cfg, &mut ctx)?;
+    let model = Qwen25::new(cfg, &mut ctx)?;
 
     let block = &model.blocks[0];
     let kv_dim = block.kv_dim;

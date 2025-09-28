@@ -7,7 +7,7 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{kernels, Tensor};
+use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -271,13 +271,13 @@ impl Context {
             )));
         }
 
-        let mut linear = self.matmul(x_flat, fused_weight, false, false)?;
-        let mut bias = fused_bias.clone();
+        let linear = self.matmul(x_flat, fused_weight, false, false)?;
+        let bias = fused_bias.clone();
         self.prepare_tensors_for_active_cmd(&[&linear, &bias]);
 
-        let mut q_out = Tensor::create_tensor_pooled(vec![m, d_model], self)?;
-        let mut k_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
-        let mut v_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
+        let q_out = Tensor::create_tensor_pooled(vec![m, d_model], self)?;
+        let k_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
+        let v_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
 
         self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out]);
 
@@ -478,8 +478,8 @@ impl Context {
     ) -> Result<(), MetalError> {
         let zero_ready = self.kv_caches.get(&layer_idx).map(|entry| entry.zeroing_complete).unwrap_or(false);
 
-        let mut k_src = k_step.clone();
-        let mut v_src = v_step.clone();
+        let k_src = k_step.clone();
+        let v_src = v_step.clone();
 
         let dims = k_src.dims().to_vec();
         let (bh, seq_in_src, hd) = match dims.len() {
@@ -624,8 +624,8 @@ impl Context {
             )));
         }
 
-        let mut k_cache = k_cache_ref;
-        let mut v_cache = v_cache_ref;
+        let k_cache = k_cache_ref;
+        let v_cache = v_cache_ref;
         self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src]);
 
         let expected_bh = k_cache.dims()[0];
@@ -742,8 +742,8 @@ impl Context {
 
         let zero_ready = self.kv_caches.get(&layer_idx).map(|entry| entry.zeroing_complete).unwrap_or(false);
 
-        let mut k_src = k_step.clone();
-        let mut v_src = v_step.clone();
+        let k_src = k_step.clone();
+        let v_src = v_step.clone();
 
         let k_dims = k_src.dims().to_vec();
         let (canonical_heads, seq_in_src, head_dim) = match k_dims.len() {
@@ -876,8 +876,8 @@ impl Context {
             )));
         }
 
-        let mut repeated_k = entry.repeated_k.clone();
-        let mut repeated_v = entry.repeated_v.clone();
+        let repeated_k = entry.repeated_k.clone();
+        let repeated_v = entry.repeated_v.clone();
 
         self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src]);
 

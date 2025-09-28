@@ -1,13 +1,13 @@
 use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     gguf::GGUFValue,
-    metallic::{resource_cache::ResourceCache, Context, Tensor},
+    metallic::{Context, Tensor, resource_cache::ResourceCache},
 };
 use half::f16;
 use std::collections::HashMap;
 
 fn convert_f16_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
-    if raw.len() % 2 != 0 {
+    if !raw.len().is_multiple_of(2) {
         return Err(GGUFError::InvalidTensorData("F16 tensor byte length must be even".to_string()));
     }
 
