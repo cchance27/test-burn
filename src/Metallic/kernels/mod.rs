@@ -90,6 +90,7 @@ pub enum KernelFunction {
     LayerNorm,
     Permute,
     RepeatKvHeads,
+    RepeatKvHeadsStep,
     Rope,
     RMSNorm,
     Silu,
