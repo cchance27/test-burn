@@ -578,7 +578,11 @@ impl Qwen25 {
         Ok(output)
     }
 
-    fn gather_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub(crate) fn gather_cache_history(
+        cache: &Tensor,
+        steps: usize,
+        ctx: &mut Context,
+    ) -> Result<Tensor, MetalError> {
         let dims = cache.dims();
         if dims.len() != 3 {
             return Err(MetalError::InvalidShape(
@@ -593,29 +597,9 @@ impl Qwen25 {
         }
 
         #[allow(clippy::single_range_in_vec_init)]
-        let cache_view = cache.slice(&[0..steps])?;
-        let view_dims = cache_view.dims();
-        debug_assert_eq!(view_dims.len(), 3);
-        let seq = view_dims[0];
-        let batch_heads = view_dims[1];
-        let head_dim = view_dims[2];
+        let mut cache_view = cache.slice(&[0..steps])?;
+        ctx.prepare_tensors_for_active_cmd(&mut [&mut cache_view]);
 
-        let mut output = Tensor::zeros(vec![batch_heads, seq, head_dim], ctx, true)?;
-        let src = cache_view.as_slice();
-        let dst = output.as_mut_slice();
-
-        let seq_stride = batch_heads * head_dim;
-        let head_stride = head_dim;
-
-        for s in 0..seq {
-            let src_seq_base = s * seq_stride;
-            for bh in 0..batch_heads {
-                let src_idx = src_seq_base + bh * head_stride;
-                let dst_idx = (bh * seq + s) * head_dim;
-                dst[dst_idx..dst_idx + head_dim].copy_from_slice(&src[src_idx..src_idx + head_dim]);
-            }
-        }
-
-        Ok(output)
+        cache_view.permute(&[1, 0, 2], ctx)
     }
 }
