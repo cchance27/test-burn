@@ -176,6 +176,17 @@ impl Context {
         self.call::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b))
     }
 
+    pub(crate) fn matmul_with_cache(
+        &mut self,
+        a: &super::Tensor,
+        b: &super::Tensor,
+        transpose_a: bool,
+        transpose_b: bool,
+        cache: &mut ResourceCache,
+    ) -> Result<super::Tensor, MetalError> {
+        self.call_with_cache::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b), cache)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn matmul_alpha_beta(
         &mut self,

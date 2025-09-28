@@ -25,7 +25,7 @@ impl KernelInvocable for SwiGLUOp {
         ctx: &mut Context,
         args: Self::Args,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: Option<&mut ResourceCache>,
+        cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias) = args;
 
@@ -39,6 +39,7 @@ impl KernelInvocable for SwiGLUOp {
             ffn_up_bias,
             ffn_down,
             ffn_down_bias,
+            cache,
         )?;
 
         // Create a dummy operation since all work is done in this function
@@ -57,6 +58,7 @@ fn execute_swiglu_logic(
     ffn_up_bias: Tensor,
     ffn_down: Tensor,
     ffn_down_bias: Tensor,
+    mut cache: Option<&mut ResourceCache>,
 ) -> Result<Tensor, MetalError> {
     let mut x_normed_flat = x_normed_flat;
     let mut ffn_gate = ffn_gate;
@@ -89,10 +91,16 @@ fn execute_swiglu_logic(
             actual: gate_dims[0],
         });
     };
-    let gate_temp = ctx.matmul(&x_normed_flat, &ffn_gate, false, gate_transpose_b)?;
+    let gate_temp = match cache.as_mut() {
+        Some(cache) => ctx.matmul_with_cache(&x_normed_flat, &ffn_gate, false, gate_transpose_b, *cache)?,
+        None => ctx.matmul(&x_normed_flat, &ffn_gate, false, gate_transpose_b)?,
+    };
 
     // Add gate bias (broadcast over last dim)
-    let gate_out = ctx.call::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias))?;
+    let gate_out = match cache.as_mut() {
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias), *cache)?,
+        None => ctx.call::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias))?,
+    };
 
     // up_proj: [m, d_model] @ weight -> [m, ff_dim]
     let up_dims = ffn_up.dims();
@@ -106,16 +114,28 @@ fn execute_swiglu_logic(
             actual: up_dims[0],
         });
     };
-    let up_temp = ctx.matmul(&x_normed_flat, &ffn_up, false, up_transpose_b)?;
+    let up_temp = match cache.as_mut() {
+        Some(cache) => ctx.matmul_with_cache(&x_normed_flat, &ffn_up, false, up_transpose_b, *cache)?,
+        None => ctx.matmul(&x_normed_flat, &ffn_up, false, up_transpose_b)?,
+    };
 
     // Add up bias
-    let up_out = ctx.call::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias))?;
+    let up_out = match cache.as_mut() {
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias), *cache)?,
+        None => ctx.call::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias))?,
+    };
 
     // SiLU activation on gate_proj
-    let gate_act = ctx.call::<SiluOp>(gate_out)?;
+    let gate_act = match cache.as_mut() {
+        Some(cache) => ctx.call_with_cache::<SiluOp>(gate_out, *cache)?,
+        None => ctx.call::<SiluOp>(gate_out)?,
+    };
 
     // Element-wise multiplication: SiLU(gate_proj) * up_proj -> [m, ff_dim]
-    let hidden = ctx.call::<ElemwiseMulOp>((gate_act, up_out))?;
+    let hidden = match cache.as_mut() {
+        Some(cache) => ctx.call_with_cache::<ElemwiseMulOp>((gate_act, up_out), *cache)?,
+        None => ctx.call::<ElemwiseMulOp>((gate_act, up_out))?,
+    };
 
     // down_proj: [m, ff_dim] @ [ff_dim, d_model] -> [m, d_model]
     let hidden_cols = hidden.dims()[1];
@@ -123,10 +143,16 @@ fn execute_swiglu_logic(
     let ffn_down_cols = ffn_down.dims()[1];
     let ffn_temp = if hidden_cols == ffn_down_rows {
         // Hidden [m, ff_dim] @ ffn_down [ff_dim, d_model] -> [m, d_model]
-        ctx.matmul(&hidden, &ffn_down, false, false)?
+        match cache.as_mut() {
+            Some(cache) => ctx.matmul_with_cache(&hidden, &ffn_down, false, false, *cache)?,
+            None => ctx.matmul(&hidden, &ffn_down, false, false)?,
+        }
     } else if hidden_cols == ffn_down_cols {
         // Hidden [m, ff_dim] @ ffn_down^T [ff_dim, d_model] where stored as [d_model, ff_dim]
-        ctx.matmul(&hidden, &ffn_down, false, true)?
+        match cache.as_mut() {
+            Some(cache) => ctx.matmul_with_cache(&hidden, &ffn_down, false, true, *cache)?,
+            None => ctx.matmul(&hidden, &ffn_down, false, true)?,
+        }
     } else {
         return Err(MetalError::DimensionMismatch {
             expected: hidden_cols,
@@ -135,7 +161,10 @@ fn execute_swiglu_logic(
     };
 
     // Add down bias to final projection output
-    let ffn_out = ctx.call::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias))?;
+    let ffn_out = match cache.as_mut() {
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias), *cache)?,
+        None => ctx.call::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias))?,
+    };
 
     Ok(ffn_out)
 }
