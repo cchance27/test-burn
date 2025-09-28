@@ -109,8 +109,6 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
 
     let (k_canonical_view, cache_stride) = ctx.kv_cache_history_view(&entry.k, seq)?;
     let (v_canonical_view, _) = ctx.kv_cache_history_view(&entry.v, seq)?;
-    let (k_repeated_view, _) = ctx.kv_cache_history_view(&entry.repeated_k, seq)?;
-    let (v_repeated_view, _) = ctx.kv_cache_history_view(&entry.repeated_v, seq)?;
 
     let expected_k = ctx.call::<RepeatKvHeadsOp>((
         k_canonical_view.clone(),
@@ -135,8 +133,25 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
 
     ctx.synchronize();
 
-    let actual_k = k_repeated_view.as_slice();
-    let actual_v = v_repeated_view.as_slice();
+    let repeated_heads = entry.repeated_k.dims()[0];
+    let repeated_stride = entry.repeated_k.dims()[1];
+    let repeated_head_dim = entry.repeated_k.dims()[2];
+    assert_eq!(repeated_head_dim, head_dim);
+
+    let repeated_k_raw = entry.repeated_k.as_slice();
+    let repeated_v_raw = entry.repeated_v.as_slice();
+
+    let mut actual_k = Vec::with_capacity(repeated_heads * seq * head_dim);
+    let mut actual_v = Vec::with_capacity(repeated_heads * seq * head_dim);
+    for bh in 0..repeated_heads {
+        for s in 0..seq {
+            let start = (bh * repeated_stride + s) * head_dim;
+            let end = start + head_dim;
+            actual_k.extend_from_slice(&repeated_k_raw[start..end]);
+            actual_v.extend_from_slice(&repeated_v_raw[start..end]);
+        }
+    }
+
     let expected_k_slice = expected_k.as_slice();
     let expected_v_slice = expected_v.as_slice();
 
