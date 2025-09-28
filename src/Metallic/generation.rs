@@ -255,6 +255,7 @@ where
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1; // Assuming batch size of 1 for now
+    let kv_capacity = (input_ids.len().max(1) + cfg.max_tokens).min(seq_len);
 
     let log_interval = log_interval_from_env();
     let mut metrics_loggers = MetricsLoggers::from_env(log_interval);
@@ -282,7 +283,7 @@ where
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
     // --- Prompt Processing Pass ---
