@@ -1,11 +1,11 @@
 use super::*;
 
-use crate::metallic::Context;
-use crate::metallic::MetalError;
-use crate::metallic::Tensor;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
 use crate::metallic::kernels::silu::SiluOp;
+use crate::metallic::Context;
+use crate::metallic::MetalError;
+use crate::metallic::Tensor;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -167,6 +167,36 @@ fn execute_swiglu_logic(
     };
 
     Ok(ffn_out)
+}
+
+/// Execute the SwiGLU composite with an explicitly provided cache.
+///
+/// This helper mirrors the internal execution used by [`Context::SwiGLU`] but allows
+/// benchmarks and diagnostics to control whether a [`ResourceCache`] is reused across the
+/// composite's constituent kernels.
+#[allow(clippy::too_many_arguments)]
+pub fn swiglu_with_optional_cache(
+    ctx: &mut Context,
+    x_normed_flat: &Tensor,
+    ffn_gate: &Tensor,
+    ffn_gate_bias: &Tensor,
+    ffn_up: &Tensor,
+    ffn_up_bias: &Tensor,
+    ffn_down: &Tensor,
+    ffn_down_bias: &Tensor,
+    cache: Option<&mut ResourceCache>,
+) -> Result<Tensor, MetalError> {
+    execute_swiglu_logic(
+        ctx,
+        x_normed_flat.clone(),
+        ffn_gate.clone(),
+        ffn_gate_bias.clone(),
+        ffn_up.clone(),
+        ffn_up_bias.clone(),
+        ffn_down.clone(),
+        ffn_down_bias.clone(),
+        cache,
+    )
 }
 
 // Implement `Operation` for the internal struct.
