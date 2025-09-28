@@ -2,10 +2,17 @@ use super::*;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
-use objc2_metal_performance_shaders::{MPSDataType, MPSMatrixDescriptor, MPSMatrixMultiplication};
+use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable};
-use crate::metallic::{Context, MetalError, Operation, Tensor, cache_keys::MpsGemmKey, resource_cache::ResourceCache};
+use crate::metallic::{
+    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    Context,
+    MetalError,
+    Operation,
+    Tensor,
+    resource_cache::ResourceCache,
+};
 
 // Public struct for matmul with alpha/beta scaling
 pub struct MatMulAlphaBetaOp;
@@ -98,37 +105,31 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             beta,
         };
 
-        let gemm = cache
-            .ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?
-            .get_or_create_gemm(gemm_key, &ctx.device)?;
+        let cache = cache
+            .ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
+        let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 
         // Create MPS matrix descriptors based on original dimensions (not transposed ones)
-        let left_desc = unsafe {
-            MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
-                left_rows,
-                left_cols,
-                left_cols * std::mem::size_of::<f32>(),
-                MPSDataType::Float32,
-            )
+        let left_desc_key = MpsMatrixDescriptorKey {
+            rows: left_rows,
+            columns: left_cols,
+            row_bytes: left_cols * std::mem::size_of::<f32>(),
         };
+        let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
-        let right_desc = unsafe {
-            MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
-                right_rows,
-                right_cols,
-                right_cols * std::mem::size_of::<f32>(),
-                MPSDataType::Float32,
-            )
+        let right_desc_key = MpsMatrixDescriptorKey {
+            rows: right_rows,
+            columns: right_cols,
+            row_bytes: right_cols * std::mem::size_of::<f32>(),
         };
+        let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
-        let result_desc = unsafe {
-            MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
-                eff_left_rows,
-                eff_right_cols,
-                eff_right_cols * std::mem::size_of::<f32>(),
-                MPSDataType::Float32,
-            )
+        let result_desc_key = MpsMatrixDescriptorKey {
+            rows: eff_left_rows,
+            columns: eff_right_cols,
+            row_bytes: eff_right_cols * std::mem::size_of::<f32>(),
         };
+        let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
         let op = MatMulAlphaBeta {
