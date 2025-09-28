@@ -86,40 +86,52 @@ impl LoadableModel for super::Qwen25 {
             if src_dims.len() != 2 {
                 return Err(MetalError::InvalidShape(format!("Expected 2D weight tensor, got {:?}", src_dims)));
             }
-            let out_features = src_dims[0];
-            let in_features = src_dims[1];
 
             let dst_dims = dst.dims();
             if dst_dims.len() != 2 {
                 return Err(MetalError::InvalidShape(format!("Fused weight must be 2D, got {:?}", dst_dims)));
             }
 
-            if dst_dims[0] != in_features {
-                return Err(MetalError::InvalidShape(format!(
-                    "Fused weight rows {} do not match source input features {}",
-                    dst_dims[0], in_features
-                )));
-            }
+            let fused_rows = dst_dims[0];
+            let fused_cols = dst_dims[1];
 
-            if dst_col_offset + out_features > dst_dims[1] {
+            // GGUF emitters disagree on whether projection weights are stored as
+            // [out, in] or already transposed [in, out]. Detect the orientation by
+            // matching whichever dimension lines up with the fused row count
+            // (the input features) and transpose as needed on copy.
+            let (out_features, in_features, src_is_row_major) = if src_dims[1] == fused_rows {
+                (src_dims[0], src_dims[1], true)
+            } else if src_dims[0] == fused_rows {
+                (src_dims[1], src_dims[0], false)
+            } else {
+                return Err(MetalError::InvalidShape(format!(
+                    "Unable to map weight {:?} into fused layout with {} rows",
+                    src_dims, fused_rows
+                )));
+            };
+
+            if dst_col_offset + out_features > fused_cols {
                 return Err(MetalError::InvalidShape(format!(
                     "Column range [{}..{}) exceeds fused weight width {}",
                     dst_col_offset,
                     dst_col_offset + out_features,
-                    dst_dims[1]
+                    fused_cols
                 )));
             }
 
-            let total_cols = dst_dims[1];
             let src_slice = src.as_slice();
             let dst_slice = dst.as_mut_slice();
 
             for out_idx in 0..out_features {
                 for in_idx in 0..in_features {
-                    let src_index = out_idx * in_features + in_idx;
+                    let src_index = if src_is_row_major {
+                        out_idx * in_features + in_idx
+                    } else {
+                        in_idx * out_features + out_idx
+                    };
                     let dst_row = in_idx;
                     let dst_col = dst_col_offset + out_idx;
-                    let dst_index = dst_row * total_cols + dst_col;
+                    let dst_index = dst_row * fused_cols + dst_col;
                     dst_slice[dst_index] = src_slice[src_index];
                 }
             }
