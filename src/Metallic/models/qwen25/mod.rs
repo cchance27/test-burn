@@ -531,8 +531,10 @@ impl Qwen25 {
         ctx: &mut Context,
     ) -> Result<Tensor, MetalError> {
         let input_dims = input.dims();
-        if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
-            return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
+        if input_dims.len() != 3 || input_dims[0] != seq || input_dims[1] != batch * n_kv_heads || input_dims[2] != head_dim {
+            return Err(MetalError::InvalidShape(
+                "Invalid input dimensions for repeat_kv_heads; expected [seq, batch*n_kv_heads, head_dim]".to_string(),
+            ));
         }
 
         ctx.call::<RepeatKvHeadsOp>((
@@ -564,6 +566,6 @@ impl Qwen25 {
         let mut cache_view = cache.slice(&[0..steps])?;
         ctx.prepare_tensors_for_active_cmd(&mut [&mut cache_view]);
 
-        cache_view.permute(&[1, 0, 2], ctx)
+        Ok(cache_view)
     }
 }

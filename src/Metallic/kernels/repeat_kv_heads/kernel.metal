@@ -25,7 +25,8 @@ kernel void repeat_kv_heads_kernel(device const float* input [[buffer(0)]],
     uint kv_head = h / group_size;
 
     uint input_batch_head = b * n_kv_heads + kv_head;
-    uint input_index = ((input_batch_head * seq) + seq_idx) * head_dim + dim_idx;
+    uint total_batch_heads = batch * n_kv_heads;
+    uint input_index = ((seq_idx * total_batch_heads) + input_batch_head) * head_dim + dim_idx;
 
     output[gid] = input[input_index];
 }

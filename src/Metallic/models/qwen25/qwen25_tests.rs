@@ -261,12 +261,12 @@ fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
 
     for steps in 1..=seq {
         let history = Qwen25::gather_cache_history(&cache, steps, &mut ctx)?;
-        assert_eq!(history.dims(), &[batch_heads, steps, head_dim]);
+        assert_eq!(history.dims(), &[steps, batch_heads, head_dim]);
 
         let gpu_values = history.to_vec();
         let mut expected = Vec::with_capacity(steps * batch_heads * head_dim);
-        for bh in 0..batch_heads {
-            for s in 0..steps {
+        for s in 0..steps {
+            for bh in 0..batch_heads {
                 let src_idx = (s * batch_heads + bh) * head_dim;
                 expected.extend_from_slice(&data[src_idx..src_idx + head_dim]);
             }
