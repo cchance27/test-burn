@@ -1418,7 +1418,14 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     ctx.kv_caches.clear();
     ctx.kv_cache_pool.reset();
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, n_kv_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(
+            layer_idx,
+            model.config.seq_len,
+            1,
+            n_kv_heads,
+            model.config.n_heads,
+            kv_head_dim,
+        )?;
     }
 
     println!("--- Comparing incremental forward_step logits against PyTorch reference ---");
@@ -1589,7 +1596,7 @@ fn dump_kv_snapshot(ctx: &mut Context, step: usize) {
     let mut snapshot: Vec<(usize, Tensor, Tensor, usize)> = ctx
         .kv_caches
         .iter()
-        .map(|(&layer_idx, (k, v, capacity))| (layer_idx, k.clone(), v.clone(), *capacity))
+        .map(|(&layer_idx, cache)| (layer_idx, cache.k.clone(), cache.v.clone(), cache.capacity_seq))
         .collect();
 
     snapshot.sort_by_key(|(layer_idx, _, _, _)| *layer_idx);

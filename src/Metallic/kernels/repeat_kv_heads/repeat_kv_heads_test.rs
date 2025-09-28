@@ -67,3 +67,46 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
 
     Ok(())
 }
+
+#[test]
+fn test_repeat_kv_heads_step_kernel_matches_cpu() -> Result<(), MetalError> {
+    let mut ctx = Context::new()?;
+
+    let batch = 2usize;
+    let n_kv_heads = 2usize;
+    let group_size = 3usize;
+    let n_heads = n_kv_heads * group_size;
+    let seq = 4usize;
+    let head_dim = 5usize;
+
+    let element_count = batch * n_kv_heads * seq * head_dim;
+    let input_data: Vec<f32> = (0..element_count).map(|v| v as f32).collect();
+    let input = Tensor::create_tensor_from_slice(&input_data, vec![seq, batch * n_kv_heads, head_dim], &ctx)?;
+    let output = Tensor::zeros(vec![batch * n_heads, seq, head_dim], &mut ctx, true)?;
+
+    for step in 0..seq {
+        ctx.call::<RepeatKvHeadsStepOp>((
+            input.clone(),
+            output.clone(),
+            step as u32,
+            group_size as u32,
+            n_kv_heads as u32,
+            n_heads as u32,
+            (batch * n_kv_heads) as u32,
+            (batch * n_heads) as u32,
+            seq as u32,
+            head_dim as u32,
+        ))?;
+    }
+    ctx.synchronize();
+
+    let expected = cpu_repeat_kv_heads(&input_data, group_size, batch, n_kv_heads, n_heads, seq, head_dim);
+    assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);
+    let gpu_values = output.as_slice();
+    assert_eq!(gpu_values.len(), expected.len());
+    for (idx, (gpu, cpu)) in gpu_values.iter().zip(expected.iter()).enumerate() {
+        assert!((gpu - cpu).abs() < 1e-5, "Mismatch at index {}: gpu={} expected={}", idx, gpu, cpu);
+    }
+
+    Ok(())
+}

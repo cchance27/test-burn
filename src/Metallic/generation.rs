@@ -282,7 +282,7 @@ where
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, seq_len, batch_size * n_kv_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, seq_len, batch_size, n_kv_heads, n_heads, kv_head_dim)?;
     }
 
     // --- Prompt Processing Pass ---

@@ -370,6 +370,36 @@ impl Tensor {
         })
     }
 
+    pub fn narrow(&self, axis: usize, start: usize, length: usize) -> Result<Tensor, MetalError> {
+        if axis >= self.dims.len() {
+            return Err(MetalError::InvalidShape(format!(
+                "Axis {} is out of bounds for tensor with rank {}",
+                axis,
+                self.dims.len()
+            )));
+        }
+        if start > self.dims[axis] || start + length > self.dims[axis] {
+            return Err(MetalError::InvalidShape(format!(
+                "Invalid narrow range start={} length={} for axis {} with size {}",
+                start,
+                length,
+                axis,
+                self.dims[axis]
+            )));
+        }
+
+        let mut new_dims = self.dims.clone();
+        new_dims[axis] = length;
+
+        let mut tensor = self.clone();
+        let stride = self.strides.get(axis).copied().unwrap_or(0);
+        tensor.offset += start * stride * self.dtype.size_bytes();
+        tensor.dims = new_dims.clone();
+        tensor.strides = Self::compute_strides(&new_dims);
+
+        Ok(tensor)
+    }
+
     /// Allocate and zero-initialize a tensor of the given shape.
     pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Tensor, MetalError> {
         let mut tensor = if use_pool {
