@@ -1,5 +1,5 @@
-use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
+use crate::gguf::GGUFFile;
 use crate::metallic::kernels::elemwise_add::{BroadcastElemwiseAddOp, ElemwiseAddOp};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
@@ -124,26 +124,11 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         ctx.synchronize();
 
         let m = batch * seq;
-        let kv_dim = block.attn_k_weight.dims()[0];
+        let kv_dim = block.kv_dim;
         let kv_head_dim = kv_dim / n_kv_heads;
         let x_flat = x_normed.reshape(vec![m, d_model])?;
 
-        // Q projection + bias
-        let q_temp = ctx.matmul(&x_flat, &block.attn_q_weight, false, true)?;
-        ctx.synchronize();
-        let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
-        ctx.synchronize();
-
-        // K projection + bias
-        let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
-        ctx.synchronize();
-        let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
-        ctx.synchronize();
-
-        // V projection + bias
-        let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
-        ctx.synchronize();
-        let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
+        let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
         ctx.synchronize();
 
         // Rearrange into heads
@@ -372,14 +357,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let d_model = model.config.d_model;
     let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
     // Check the dimensions of the weight tensor to see if it needs to be handled differently
-    println!("Q weight dims: {:?}", block0.attn_q_weight.dims());
-    // The matmul: x_flat [m, d_model] * attn_q_weight [d_model, d_model] = [m, d_model]
-    // This is equivalent to PyTorch: x @ weight
-    // If the weight was transposed during loading from GGUF, we might need to account for that
-    // Try with weight transposed: x_flat [m, d_model] * weight.T [d_model, d_model] = [m, d_model]
-    let q_temp = ctx.matmul(&x_flat, &block0.attn_q_weight, false, true)?; // Transpose the weight
-    ctx.synchronize();
-    let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block0.attn_q_bias.clone()))?;
+    println!("Fused QKV weight dims: {:?}", block0.attn_qkv_weight.dims());
+    let (q_mat, k_mat, v_mat) =
+        ctx.fused_qkv_projection(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, d_model, block0.kv_dim)?;
     ctx.synchronize();
     let rust_q_proj_slice = q_mat.as_slice();
     println!("Rust first Q proj first 10: {:?}", &rust_q_proj_slice[0..10]);
@@ -445,13 +425,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // --- 4. Test First Block K Projection ---
     println!("--- 4. Testing First Block K Projection ---");
-    // Check the dimensions of the K weight tensor
-    println!("K weight dims: {:?}", block0.attn_k_weight.dims());
-    let k_temp = ctx.matmul(&x_flat, &block0.attn_k_weight, false, true)?;
-    ctx.synchronize();
-    println!("K_temp dims: {:?}", k_temp.dims());
-    let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block0.attn_k_bias.clone()))?;
-    ctx.synchronize();
+    let k_mat = k_mat.clone();
     let rust_k_proj_slice = k_mat.as_slice();
     println!("Rust first K proj first 10: {:?}", &rust_k_proj_slice[0..10]);
 
@@ -516,12 +490,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // --- 5. Test First Block V Projection ---
     println!("--- 5. Testing First Block V Projection ---");
-    // Check the dimensions of the V weight tensor
-    println!("V weight dims: {:?}", block0.attn_v_weight.dims());
-    let v_temp = ctx.matmul(&x_flat, &block0.attn_v_weight, false, true)?;
-    ctx.synchronize();
-    let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block0.attn_v_bias.clone()))?;
-    ctx.synchronize();
+    let v_mat = v_mat.clone();
     let rust_v_proj_slice = v_mat.as_slice();
     println!("Rust first V proj first 10: {:?}", &rust_v_proj_slice[0..10]);
 
@@ -593,7 +562,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let n_heads = model.config.n_heads;
     let n_kv_heads = model.config.n_kv_heads;
     let head_dim = d_model / n_heads;
-    let kv_dim = block0.attn_k_weight.dims()[0]; // 128
+    let kv_dim = block0.kv_dim; // 128
     let kv_head_dim = kv_dim / n_kv_heads;
 
     let q_after = q_mat.clone();
@@ -1049,7 +1018,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let n_heads = model.config.n_heads;
     let n_kv_heads = model.config.n_kv_heads;
     let head_dim = d_model / n_heads;
-    let kv_dim_last = model.blocks[last_block_idx].attn_k_weight.dims()[0];
+    let kv_dim_last = model.blocks[last_block_idx].kv_dim;
     let kv_head_dim = kv_dim_last / n_kv_heads;
 
     let final_block_input = run_blocks_up_to(&model, rust_embeddings.clone(), last_block_idx, &mut ctx)?;
@@ -1086,19 +1055,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let m = attn_norm_last_view.dims()[0];
     let x_flat_last = attn_norm_last_view.reshape(vec![m, d_model])?;
 
-    let q_temp_last = ctx.matmul(&x_flat_last, &block_last.attn_q_weight, false, true)?;
-    ctx.synchronize();
-    let q_mat_last = ctx.call::<BroadcastElemwiseAddOp>((q_temp_last, block_last.attn_q_bias.clone()))?;
-    ctx.synchronize();
-
-    let k_temp_last = ctx.matmul(&x_flat_last, &block_last.attn_k_weight, false, true)?;
-    ctx.synchronize();
-    let k_mat_last = ctx.call::<BroadcastElemwiseAddOp>((k_temp_last, block_last.attn_k_bias.clone()))?;
-    ctx.synchronize();
-
-    let v_temp_last = ctx.matmul(&x_flat_last, &block_last.attn_v_weight, false, true)?;
-    ctx.synchronize();
-    let v_mat_last = ctx.call::<BroadcastElemwiseAddOp>((v_temp_last, block_last.attn_v_bias.clone()))?;
+    let (q_mat_last, k_mat_last, v_mat_last) = ctx.fused_qkv_projection(
+        &x_flat_last,
+        &block_last.attn_qkv_weight,
+        &block_last.attn_qkv_bias,
+        d_model,
+        kv_dim_last,
+    )?;
     ctx.synchronize();
 
     // Rearrangement into heads

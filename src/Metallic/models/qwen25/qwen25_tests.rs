@@ -218,7 +218,7 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let mut model = Qwen25::new(cfg, &mut ctx)?;
 
     let block = &model.blocks[0];
-    let kv_dim = block.attn_k_weight.dims()[0];
+    let kv_dim = block.kv_dim;
     let kv_head_dim = kv_dim / model.config.n_kv_heads;
     let batch_heads = 1 * model.config.n_kv_heads;
     for layer_idx in 0..model.config.n_layers {
