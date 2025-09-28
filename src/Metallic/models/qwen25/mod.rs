@@ -578,7 +578,7 @@ impl Qwen25 {
         Ok(output)
     }
 
-    pub(crate) fn gather_cache_history(
+    fn gather_cache_history(
         cache: &Tensor,
         steps: usize,
         ctx: &mut Context,
