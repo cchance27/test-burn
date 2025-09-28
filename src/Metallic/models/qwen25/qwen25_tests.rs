@@ -1,4 +1,5 @@
 #![cfg(test)]
+use crate::metallic::instrumentation::new_latency_collector;
 use crate::metallic::models::{Qwen25, Qwen25Config};
 
 use super::*;
@@ -149,6 +150,93 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         assert!(avg_diff < 1e-5, "Logits mismatch at step {}. Avg diff: {}", i, avg_diff);
         println!("✅ Logits match at step {}.", i);
     }
+
+    Ok(())
+}
+
+#[test]
+fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
+    let mut ctx = Context::new()?;
+
+    let batch = 2usize;
+    let n_kv_heads = 2usize;
+    let group_size = 3usize;
+    let n_heads = n_kv_heads * group_size;
+    let seq = 4usize;
+    let head_dim = 6usize;
+
+    let element_count = batch * n_kv_heads * seq * head_dim;
+    let input_data: Vec<f32> = (0..element_count).map(|v| v as f32).collect();
+    let input = Tensor::create_tensor_from_slice(&input_data, vec![batch * n_kv_heads, seq, head_dim], &ctx)?;
+
+    let expected = {
+        let mut out = vec![0.0f32; batch * n_heads * seq * head_dim];
+        for b in 0..batch {
+            for h_kv in 0..n_kv_heads {
+                let input_offset_base = ((b * n_kv_heads + h_kv) * seq) * head_dim;
+                for g in 0..group_size {
+                    let h = h_kv * group_size + g;
+                    let output_offset_base = ((b * n_heads + h) * seq) * head_dim;
+                    for s in 0..seq {
+                        let input_offset = input_offset_base + s * head_dim;
+                        let output_offset = output_offset_base + s * head_dim;
+                        out[output_offset..output_offset + head_dim].copy_from_slice(&input_data[input_offset..input_offset + head_dim]);
+                    }
+                }
+            }
+        }
+        out
+    };
+
+    let output = Qwen25::repeat_kv_heads(&input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, &mut ctx)?;
+    ctx.synchronize();
+
+    assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);
+    let gpu_values = output.as_slice();
+    assert_eq!(gpu_values.len(), expected.len());
+    for (idx, (gpu, cpu)) in gpu_values.iter().zip(expected.iter()).enumerate() {
+        assert!((gpu - cpu).abs() < 1e-5, "Mismatch at index {}: gpu={} expected={}", idx, gpu, cpu);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
+    let mut ctx = Context::new()?;
+    let cfg = Qwen25Config {
+        n_layers: 1,
+        d_model: 16,
+        ff_dim: 32,
+        n_heads: 2,
+        n_kv_heads: 1,
+        seq_len: 8,
+        vocab_size: 32,
+        rope_freq_base: 1e6,
+        rms_eps: 1e-6,
+    };
+    let mut model = Qwen25::new(cfg, &mut ctx)?;
+
+    let block = &model.blocks[0];
+    let kv_dim = block.attn_k_weight.dims()[0];
+    let kv_head_dim = kv_dim / model.config.n_kv_heads;
+    let batch_heads = 1 * model.config.n_kv_heads;
+    for layer_idx in 0..model.config.n_layers {
+        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, batch_heads, kv_head_dim)?;
+    }
+
+    let collector = new_latency_collector(model.config.n_layers);
+    ctx.set_latency_collector(Some(collector.clone()));
+
+    let input = model.embed(&[0], &mut ctx)?;
+    let _ = model.forward_step(&input, 0, &mut ctx)?;
+    ctx.synchronize();
+    ctx.set_latency_collector(None);
+
+    let snapshot = collector.borrow().snapshot();
+    assert_eq!(snapshot.blocks.len(), model.config.n_layers);
+    let has_kv_repeat = snapshot.blocks[0].phases.iter().any(|phase| phase.label == "kv_repeat");
+    assert!(has_kv_repeat, "kv_repeat phase was not recorded");
 
     Ok(())
 }

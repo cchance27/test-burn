@@ -4,6 +4,7 @@ use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::matmul::MatMulOp;
+use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
@@ -552,37 +553,18 @@ impl Qwen25 {
             return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
-        let output_dims = vec![batch * n_heads, seq, head_dim];
-        let mut output = Tensor::zeros(output_dims, ctx, true)?;
-
-        let input_slice = input.as_slice();
-        let output_slice = output.as_mut_slice();
-
-        for b in 0..batch {
-            for h_kv in 0..n_kv_heads {
-                let input_offset_base = ((b * n_kv_heads + h_kv) * seq) * head_dim;
-                for g in 0..group_size {
-                    let h = h_kv * group_size + g;
-                    let output_offset_base = ((b * n_heads + h) * seq) * head_dim;
-                    for s in 0..seq {
-                        let input_offset = input_offset_base + s * head_dim;
-                        let output_offset = output_offset_base + s * head_dim;
-                        let src = &input_slice[input_offset..input_offset + head_dim];
-                        let dst = &mut output_slice[output_offset..output_offset + head_dim];
-                        dst.copy_from_slice(src);
-                    }
-                }
-            }
-        }
-
-        Ok(output)
+        ctx.call::<RepeatKvHeadsOp>((
+            input.clone(),
+            group_size as u32,
+            batch as u32,
+            n_kv_heads as u32,
+            n_heads as u32,
+            seq as u32,
+            head_dim as u32,
+        ))
     }
 
-    fn gather_cache_history(
-        cache: &Tensor,
-        steps: usize,
-        ctx: &mut Context,
-    ) -> Result<Tensor, MetalError> {
+    fn gather_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
         let dims = cache.dims();
         if dims.len() != 3 {
             return Err(MetalError::InvalidShape(
