@@ -87,11 +87,12 @@ fn copy_weight_transposed_into_fused(
     dst: &mut crate::metallic::Tensor,
     dst_col_offset: usize,
 ) -> Result<(), MetalError> {
+    let dst_dims = dst.dims().to_vec();
     pack_weight_transposed_into_fused_slice(
         src.as_slice(),
         src.dims(),
         dst.as_mut_slice(),
-        dst.dims(),
+        &dst_dims,
         dst_col_offset,
     )
 }
