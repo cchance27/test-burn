@@ -1418,10 +1418,11 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
 
     ctx.kv_caches.clear();
     ctx.kv_cache_pool.reset();
+    let kv_capacity = input_ids.len().max(1);
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(
             layer_idx,
-            model.config.seq_len,
+            kv_capacity,
             batch_size * n_kv_heads,
             batch_size * n_heads,
             kv_head_dim,

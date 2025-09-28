@@ -108,8 +108,9 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1;
+    let kv_capacity = prompt_tokens.len().max(1);
     for i in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(i, model.config.seq_len, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(i, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
     // --- Multi-step correctness check ---
@@ -290,8 +291,9 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let batch_size = 1;
     let canonical_heads = batch_size * model.config.n_kv_heads;
     let repeated_heads = batch_size * model.config.n_heads;
+    let kv_capacity = 1usize;
     for layer_idx in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, canonical_heads, repeated_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, canonical_heads, repeated_heads, kv_head_dim)?;
     }
 
     let collector = new_latency_collector(model.config.n_layers);

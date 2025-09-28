@@ -38,6 +38,7 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
     let group_size = 3usize;
     let n_heads = n_kv_heads * group_size;
     let seq = 4usize;
+    let cache_capacity = seq;
     let head_dim = 5usize;
 
     let element_count = batch * n_kv_heads * seq * head_dim;
@@ -54,7 +55,7 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
         n_heads as u32,
         seq as u32,
         head_dim as u32,
-        seq as u32,
+        cache_capacity as u32,
     ))?;
     ctx.synchronize();
 
@@ -77,10 +78,11 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let group_size = 3usize;
     let n_heads = n_kv_heads * group_size;
     let seq = 4usize;
+    let cache_capacity = seq + 3;
     let head_dim = 5usize;
 
     let layer_idx = 0usize;
-    ctx.alloc_kv_cache(layer_idx, seq, batch * n_kv_heads, batch * n_heads, head_dim)?;
+    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_kv_heads, batch * n_heads, head_dim)?;
 
     for step in 0..seq {
         let mut k_values = Vec::with_capacity(batch * n_kv_heads * head_dim);
@@ -105,7 +107,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         .cloned()
         .expect("kv cache must exist after allocation");
 
-    let (k_canonical_view, _) = ctx.kv_cache_history_view(&entry.k, seq)?;
+    let (k_canonical_view, cache_stride) = ctx.kv_cache_history_view(&entry.k, seq)?;
     let (v_canonical_view, _) = ctx.kv_cache_history_view(&entry.v, seq)?;
     let (k_repeated_view, _) = ctx.kv_cache_history_view(&entry.repeated_k, seq)?;
     let (v_repeated_view, _) = ctx.kv_cache_history_view(&entry.repeated_v, seq)?;
@@ -118,7 +120,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         n_heads as u32,
         seq as u32,
         head_dim as u32,
-        seq as u32,
+        cache_stride as u32,
     ))?;
     let expected_v = ctx.call::<RepeatKvHeadsOp>((
         v_canonical_view.clone(),
@@ -128,7 +130,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         n_heads as u32,
         seq as u32,
         head_dim as u32,
-        seq as u32,
+        cache_stride as u32,
     ))?;
 
     ctx.synchronize();
