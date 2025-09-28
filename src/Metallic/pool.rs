@@ -8,7 +8,7 @@ use std::rc::Rc;
 const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
 const GROWTH_FACTOR: f32 = 1.5;
 const MAX_CHUNKS: usize = 16;
-const MAX_POOL_SIZE: usize = 5 * 1024 * 1024 * 1024; // 5GB
+const DEFAULT_MAX_POOL_SIZE: usize = 5 * 1024 * 1024 * 1024; // 5GB
 
 /// A chunk of memory in the pool.
 pub struct PoolChunk {
@@ -26,11 +26,17 @@ pub struct MemoryPool {
     pub pooled_bytes_allocated: usize,
     pub pooled_allocations: usize,
     pub pool_resets: usize,
+    max_pool_size: usize,
 }
 
 impl MemoryPool {
     /// Creates a new memory pool with an initial chunk.
     pub fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
+        Self::with_limit(device, DEFAULT_MAX_POOL_SIZE)
+    }
+
+    /// Creates a new memory pool with a caller-provided maximum capacity.
+    pub fn with_limit(device: &Retained<ProtocolObject<dyn MTLDevice>>, max_pool_size: usize) -> Result<Self, MetalError> {
         let mut pool = Self {
             chunks: Vec::new(),
             current_chunk: 0,
@@ -38,8 +44,15 @@ impl MemoryPool {
             pooled_bytes_allocated: 0,
             pooled_allocations: 0,
             pool_resets: 0,
+            max_pool_size,
         };
-        pool.allocate_new_chunk(INITIAL_CHUNK_SIZE)?;
+
+        if max_pool_size == 0 {
+            return Err(MetalError::OutOfMemory);
+        }
+
+        let initial_chunk = INITIAL_CHUNK_SIZE.min(max_pool_size);
+        pool.allocate_new_chunk(initial_chunk)?;
         Ok(pool)
     }
 
@@ -78,11 +91,15 @@ impl MemoryPool {
         let last_chunk_size = self.chunks.last().unwrap().capacity;
         let new_chunk_size = ((last_chunk_size as f32 * GROWTH_FACTOR) as usize).max(aligned_size);
 
-        if current_total_size + new_chunk_size > MAX_POOL_SIZE {
+        let remaining_capacity = self.max_pool_size.checked_sub(current_total_size).ok_or(MetalError::OutOfMemory)?;
+
+        if remaining_capacity < aligned_size {
             return Err(MetalError::OutOfMemory);
         }
 
-        self.allocate_new_chunk(new_chunk_size)?;
+        let chunk_size = new_chunk_size.min(remaining_capacity);
+
+        self.allocate_new_chunk(chunk_size)?;
 
         // Now allocate in the new chunk
         let chunk_idx = self.chunks.len() - 1;

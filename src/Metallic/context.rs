@@ -35,8 +35,7 @@ pub struct Context {
     pub rng_seed_counter: u64,
 
     // Per-layer on-device KV caches stored centrally for developer DX.
-    // Keyed by layer index -> (k_cache, v_cache, capacity_seq_len)
-    pub(crate) kv_caches: FxHashMap<usize, (super::Tensor, super::Tensor, usize)>,
+    pub(crate) kv_caches: FxHashMap<usize, KvCacheEntry>,
 
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     active_cmd_buffer: Option<CommandBuffer>,
@@ -49,6 +48,17 @@ pub struct Context {
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
 }
+
+#[derive(Clone)]
+pub(crate) struct KvCacheEntry {
+    pub k: super::Tensor,
+    pub v: super::Tensor,
+    pub repeated_k: super::Tensor,
+    pub repeated_v: super::Tensor,
+    pub capacity: usize,
+}
+
+const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
 
 impl Context {
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.
@@ -73,7 +83,7 @@ impl Context {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device)?;
-        let kv_cache_pool = MemoryPool::new(&device)?;
+        let kv_cache_pool = MemoryPool::with_limit(&device, KV_CACHE_POOL_MAX_BYTES)?;
         Ok(Context {
             device,
             command_queue,
@@ -171,7 +181,11 @@ impl Context {
     /// Capture a snapshot of the current memory usage for both the transient tensor pool
     /// and the persistent KV cache pool.
     pub fn snapshot_memory_usage(&self) -> MemoryUsage {
-        let kv_cache_bytes = self.kv_caches.values().map(|(k, v, _)| k.size_bytes() + v.size_bytes()).sum();
+        let kv_cache_bytes = self
+            .kv_caches
+            .values()
+            .map(|entry| entry.k.size_bytes() + entry.v.size_bytes() + entry.repeated_k.size_bytes() + entry.repeated_v.size_bytes())
+            .sum();
 
         MemoryUsage {
             pool_used: self.pool.used_bytes(),
@@ -375,23 +389,38 @@ impl Context {
 
 impl Context {
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
-    /// Layout: [batch_heads, seq_len, head_dim] (contiguous with full sequence stride preserved).
-    pub fn alloc_kv_cache(&mut self, layer_idx: usize, seq_len: usize, batch_heads: usize, head_dim: usize) -> Result<(), MetalError> {
-        let dims = vec![batch_heads, seq_len, head_dim];
+    /// Layout: canonical [batch * n_kv_heads, seq_len, head_dim] and repeated [batch * n_heads, seq_len, head_dim].
+    #[allow(clippy::too_many_arguments)]
+    pub fn alloc_kv_cache(
+        &mut self,
+        layer_idx: usize,
+        seq_len: usize,
+        canonical_batch_heads: usize,
+        repeated_batch_heads: usize,
+        head_dim: usize,
+    ) -> Result<(), MetalError> {
+        let canonical_dims = vec![canonical_batch_heads, seq_len, head_dim];
+        let repeated_dims = vec![repeated_batch_heads, seq_len, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
-        let k = self.kv_cache_pool.alloc_tensor(dims.clone())?;
-        let v = self.kv_cache_pool.alloc_tensor(dims)?;
+        let k = self.kv_cache_pool.alloc_tensor(canonical_dims.clone())?;
+        let v = self.kv_cache_pool.alloc_tensor(canonical_dims)?;
+        let repeated_k = self.kv_cache_pool.alloc_tensor(repeated_dims.clone())?;
+        let repeated_v = self.kv_cache_pool.alloc_tensor(repeated_dims)?;
 
         // Manually zero the tensors using a blit command
         let k_size = k.size_bytes();
         let v_size = v.size_bytes();
+        let repeated_k_size = repeated_k.size_bytes();
+        let repeated_v_size = repeated_v.size_bytes();
 
         self.ensure_active_cmd_buffer()?;
         let cmd_buf = self.active_command_buffer_mut()?;
         if let Some(encoder) = cmd_buf.raw().blitCommandEncoder() {
             encoder.fillBuffer_range_value(&k.buf, (k.offset..k.offset + k_size).into(), 0);
             encoder.fillBuffer_range_value(&v.buf, (v.offset..v.offset + v_size).into(), 0);
+            encoder.fillBuffer_range_value(&repeated_k.buf, (repeated_k.offset..repeated_k.offset + repeated_k_size).into(), 0);
+            encoder.fillBuffer_range_value(&repeated_v.buf, (repeated_v.offset..repeated_v.offset + repeated_v_size).into(), 0);
             encoder.endEncoding();
         } else {
             return Err(MetalError::OperationNotSupported("Blit encoder not available".into()));
@@ -399,8 +428,19 @@ impl Context {
 
         self.mark_tensor_pending(&k);
         self.mark_tensor_pending(&v);
+        self.mark_tensor_pending(&repeated_k);
+        self.mark_tensor_pending(&repeated_v);
 
-        self.kv_caches.insert(layer_idx, (k, v, seq_len));
+        self.kv_caches.insert(
+            layer_idx,
+            KvCacheEntry {
+                k,
+                v,
+                repeated_k,
+                repeated_v,
+                capacity: seq_len,
+            },
+        );
         Ok(())
     }
 
@@ -417,7 +457,7 @@ impl Context {
         // Lookup the canonical cache tensors and clone their handles so we can work with them
         // while issuing additional commands on `self`.
         let (k_cache_ref, v_cache_ref, capacity_seq_val) = match self.kv_caches.get(&layer_idx) {
-            Some((k_cache, v_cache, capacity_seq)) => (k_cache.clone(), v_cache.clone(), *capacity_seq),
+            Some(entry) => (entry.k.clone(), entry.v.clone(), entry.capacity),
             None => {
                 return Err(MetalError::InvalidOperation(format!(
                     "KV cache for layer {} not allocated",
@@ -544,13 +584,139 @@ impl Context {
         Ok(())
     }
 
+    /// Append a single timestep into the repeated KV cache by copying the canonical slice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_repeated_kv_step(
+        &mut self,
+        layer_idx: usize,
+        step: usize,
+        group_size: usize,
+        k_step: &crate::metallic::Tensor,
+        v_step: &crate::metallic::Tensor,
+    ) -> Result<(), MetalError> {
+        if group_size == 0 {
+            return Err(MetalError::InvalidOperation(
+                "write_repeated_kv_step requires a non-zero group size".into(),
+            ));
+        }
+
+        let entry = self
+            .kv_caches
+            .get(&layer_idx)
+            .cloned()
+            .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
+
+        if step >= entry.capacity {
+            return Err(MetalError::InvalidOperation(format!(
+                "Step {} exceeds KV cache capacity {} for layer {}",
+                step, entry.capacity, layer_idx
+            )));
+        }
+
+        let mut repeated_k = entry.repeated_k.clone();
+        let mut repeated_v = entry.repeated_v.clone();
+        let mut k_src = k_step.clone();
+        let mut v_src = v_step.clone();
+
+        self.prepare_tensors_for_active_cmd(&mut [&mut repeated_k, &mut repeated_v, &mut k_src, &mut v_src]);
+
+        let k_dims = k_src.dims();
+        let (canonical_heads, seq_in_src, head_dim) = match k_dims.len() {
+            2 => (k_dims[0], 1, k_dims[1]),
+            3 => (k_dims[0], k_dims[1], k_dims[2]),
+            _ => (0, 0, 0),
+        };
+        if seq_in_src != 1 {
+            return Err(MetalError::OperationNotSupported(
+                "write_repeated_kv_step expects a single timestep in the source tensor".into(),
+            ));
+        }
+
+        let repeated_heads_expected = canonical_heads
+            .checked_mul(group_size)
+            .ok_or_else(|| MetalError::InvalidOperation("group_size overflow while expanding KV heads".into()))?;
+
+        if repeated_k.dims()[0] != repeated_heads_expected || repeated_k.dims()[2] != head_dim {
+            return Err(MetalError::DimensionMismatch {
+                expected: repeated_heads_expected * head_dim,
+                actual: repeated_k.dims()[0] * repeated_k.dims()[2],
+            });
+        }
+
+        let v_dims = v_src.dims();
+        let (v_heads, v_seq_in_src, v_head_dim) = match v_dims.len() {
+            2 => (v_dims[0], 1, v_dims[1]),
+            3 => (v_dims[0], v_dims[1], v_dims[2]),
+            _ => (0, 0, 0),
+        };
+        if v_heads != canonical_heads || v_head_dim != head_dim || v_seq_in_src != seq_in_src {
+            return Err(MetalError::DimensionMismatch {
+                expected: canonical_heads * head_dim,
+                actual: v_heads * v_head_dim,
+            });
+        }
+
+        let elem_size = std::mem::size_of::<f32>();
+        let copy_bytes = head_dim * elem_size;
+        let repeated_stride_elems = entry.capacity * head_dim;
+
+        let cmd_buf = self.active_command_buffer_mut()?;
+        let encoder = cmd_buf
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+        unsafe {
+            for kv_head in 0..canonical_heads {
+                let src_elem_index = match k_dims.len() {
+                    2 => kv_head * head_dim,
+                    3 => (kv_head * seq_in_src) * head_dim,
+                    _ => unreachable!(),
+                };
+                let v_src_elem_index = match v_dims.len() {
+                    2 => kv_head * head_dim,
+                    3 => (kv_head * v_seq_in_src) * head_dim,
+                    _ => unreachable!(),
+                };
+
+                let src_offset_k = k_src.offset + src_elem_index * elem_size;
+                let src_offset_v = v_src.offset + v_src_elem_index * elem_size;
+
+                for group in 0..group_size {
+                    let repeated_head = kv_head * group_size + group;
+                    let dst_elem_index = repeated_head * repeated_stride_elems + step * head_dim;
+
+                    let dst_offset_k = repeated_k.offset + dst_elem_index * elem_size;
+                    let dst_offset_v = repeated_v.offset + dst_elem_index * elem_size;
+
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &k_src.buf,
+                        src_offset_k,
+                        &repeated_k.buf,
+                        dst_offset_k,
+                        copy_bytes,
+                    );
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &v_src.buf,
+                        src_offset_v,
+                        &repeated_v.buf,
+                        dst_offset_v,
+                        copy_bytes,
+                    );
+                }
+            }
+        }
+        encoder.endEncoding();
+
+        self.mark_tensor_pending(&repeated_k);
+        self.mark_tensor_pending(&repeated_v);
+
+        Ok(())
+    }
+
     /// Create a strided view of the KV cache exposing the first `active_steps` positions in
     /// [batch_heads, steps, head_dim] order while preserving the underlying cache stride.
-    pub fn kv_cache_history_view(
-        &mut self,
-        cache: &Tensor,
-        active_steps: usize,
-    ) -> Result<(Tensor, usize), MetalError> {
+    pub fn kv_cache_history_view(&mut self, cache: &Tensor, active_steps: usize) -> Result<(Tensor, usize), MetalError> {
         let dims = cache.dims();
         if dims.len() != 3 {
             return Err(MetalError::InvalidShape(
