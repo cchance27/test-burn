@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the LayerNorm operation.
 pub struct LayerNormOp;
@@ -53,7 +54,7 @@ impl KernelInvocable for LayerNormOp {
 
         ctx.prepare_tensors_for_active_cmd(&[&input, &gamma, &beta]);
 
-        let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
+        let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         let op = LayerNorm {
             input,
@@ -113,13 +114,13 @@ mod layernorm_test {
         let mut ctx = Context::new()?;
         // Create test data: [2, 3] tensor, so feature_dim=3
         let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let input = Tensor::create_tensor_from_slice(&input_data, vec![2, 3], &ctx)?;
+        let input = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
         // Create gamma and beta with all ones and zeros for simple test
         let gamma_data = vec![1.0, 1.0, 1.0];
-        let gamma = Tensor::create_tensor_from_slice(&gamma_data, vec![3], &ctx)?;
+        let gamma = Tensor::new(vec![3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&gamma_data))?;
         let beta_data = vec![0.0, 0.0, 0.0];
-        let beta = Tensor::create_tensor_from_slice(&beta_data, vec![3], &ctx)?;
+        let beta = Tensor::new(vec![3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&beta_data))?;
 
         let result = ctx.call::<LayerNormOp>((input, gamma, beta, 3))?;
 

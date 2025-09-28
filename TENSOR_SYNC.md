@@ -24,6 +24,14 @@ This project now ships an implicit synchronization model for Metal tensors. The 
 4. **Safer host access.** Replace the plain `RefCell` with `try_borrow` plus a descriptive error to make accidental nested borrows easier to diagnose, and investigate RwLock-based guards if we expand to multi-threaded decoding.
 5. **Resource cache lifetime.** Consider pooling `ResourceCache` instances across command buffers to reuse heavy MPS descriptors instead of tearing them down when we refresh.
 
+## Tensor initialization entry points
+All tensor construction now flows through `Tensor::new`. Callers specify the desired shape alongside two enums:
+
+- [`TensorStorage`] chooses the allocation target (`Dedicated` allocates a fresh `MTLBuffer`, `Pooled` pulls from the transient bump allocator and requires `&mut Context`).
+- [`TensorInit`] describes how to seed the buffer (`Uninitialized`, `CopyFrom(&[f32])`, or `BorrowHost(&[f32])`).
+
+`BorrowHost` remains dedicated-only because the pooled allocator always materializes device memory before staging. Helpers such as `Tensor::zeros` and the memory pool itself are thin wrappers over this API, so future storage modes can extend `TensorStorage`/`TensorInit` without rewriting every call site.
+
 ## Validation Checklist
 - `cargo test --release` on a Metal-capable Mac (many suites require GPU access).
 - `cargo run --release -- ./models/qwen2.5-coder-0.5b-instruct-fp16.gguf "<prompt>"` end-to-end run – ensures lazy sync works under real model load.

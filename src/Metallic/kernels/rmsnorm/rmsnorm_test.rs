@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_rmsnorm_logic() -> Result<(), MetalError> {
@@ -8,11 +8,11 @@ fn test_rmsnorm_logic() -> Result<(), MetalError> {
 
     // Create input tensor with shape [2, 4] (2 rows, 4 features each)
     let input_data = vec![1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
-    let input = Tensor::create_tensor_from_slice(&input_data, vec![2, 4], &ctx)?;
+    let input = Tensor::new(vec![2, 4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     // Create gamma (weight) tensor
     let gamma_data = vec![1.0, 1.0, 1.0, 1.0];
-    let gamma = Tensor::create_tensor_from_slice(&gamma_data, vec![4], &ctx)?;
+    let gamma = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&gamma_data))?;
 
     let feature_dim = 4u32;
 
@@ -70,8 +70,8 @@ fn test_rmsnorm_basic() -> Result<(), MetalError> {
     let gamma_data = vec![1.0, 1.1, 1.2, 1.3];
 
     let dims = vec![batch_size, seq_len, feature_dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let gamma_tensor = Tensor::create_tensor_from_slice(&gamma_data, vec![feature_dim], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let gamma_tensor = Tensor::new(vec![feature_dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&gamma_data))?;
 
     let output_tensor = context.call::<RMSNormOp>((input_tensor, gamma_tensor, feature_dim as u32))?;
     context.synchronize();
@@ -117,8 +117,8 @@ fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
     let gamma_data = vec![1.0, 1.0, 1.0, 1.0];
 
     let dims = vec![batch_size, seq_len, feature_dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let gamma_tensor = Tensor::create_tensor_from_slice(&gamma_data, vec![feature_dim], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let gamma_tensor = Tensor::new(vec![feature_dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&gamma_data))?;
 
     let output_tensor = context.call::<RMSNormOp>((input_tensor, gamma_tensor, feature_dim as u32))?;
     context.synchronize();

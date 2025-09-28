@@ -1,6 +1,6 @@
 use super::*;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Context, Tensor};
+use crate::metallic::{Context, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn zeros_and_ones() {
@@ -14,7 +14,7 @@ fn zeros_and_ones() {
 #[test]
 fn zeros_like_and_ones_like() {
     let mut ctx = Context::new().unwrap();
-    let base = Tensor::create_tensor_from_slice(&[1.0, 2.0, 3.0, 4.0], vec![2, 2], &ctx).unwrap();
+    let base = Tensor::new(vec![2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 2.0, 3.0, 4.0])).unwrap();
     let z = base.zeros_like(&mut ctx).unwrap();
     assert_eq!(z.dims(), base.dims());
     assert!(z.as_slice().iter().all(|&x| x == 0.0));
@@ -26,8 +26,8 @@ fn zeros_like_and_ones_like() {
 #[test]
 fn elementwise_ops_and_fill() {
     let mut ctx = Context::new().unwrap();
-    let a = Tensor::create_tensor_from_slice(&[1.0, 2.0, 3.0, 4.0], vec![2, 2], &ctx).unwrap();
-    let b = Tensor::create_tensor_from_slice(&[5.0, 6.0, 7.0, 8.0], vec![2, 2], &ctx).unwrap();
+    let a = Tensor::new(vec![2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 2.0, 3.0, 4.0])).unwrap();
+    let b = Tensor::new(vec![2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[5.0, 6.0, 7.0, 8.0])).unwrap();
     let c = a.add_elem(&b, &mut ctx).unwrap();
     assert_eq!(c.as_slice(), &[6.0, 8.0, 10.0, 12.0]);
     let d = a.mul_elem(&b, &mut ctx).unwrap();
@@ -43,7 +43,7 @@ fn get_batch_and_from_existing_buffer() {
     let ctx = Context::new().unwrap();
     // base tensor: shape [2,3,4], values 0..24
     let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
-    let mut base = Tensor::create_tensor(vec![2, 3, 4], &ctx).unwrap();
+    let mut base = Tensor::new(vec![2, 3, 4], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).unwrap();
     base.as_mut_slice().copy_from_slice(&data);
 
     // get second batch
@@ -55,7 +55,14 @@ fn get_batch_and_from_existing_buffer() {
 
     // wrap the second batch region using from_existing_buffer
     let offset_bytes = 12 * std::mem::size_of::<f32>();
-    let view = Tensor::from_existing_buffer(base.buf.clone(), vec![3, 4], &base.device, offset_bytes).unwrap();
+    let view = Tensor::from_existing_buffer(
+        base.buf.clone(),
+        vec![3, 4],
+        Dtype::F32,
+        &base.device,
+        offset_bytes,
+    )
+    .unwrap();
     assert_eq!(view.as_slice(), expected.as_slice());
 }
 
@@ -72,7 +79,7 @@ fn arange_helper() {
 fn from_slice_helper() {
     let ctx = Context::new().unwrap();
     let v = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
-    let t = Tensor::create_tensor_from_slice(&v, vec![2, 3], &ctx).unwrap();
+    let t = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v)).unwrap();
     assert_eq!(t.dims(), &[2, 3]);
     assert_eq!(t.to_vec(), v);
 }
@@ -284,7 +291,7 @@ fn strides_and_dtype() {
 }
 
 #[test]
-fn from_slice_no_copy() {
+fn borrow_host_buffer() {
     let mut ctx = Context::new().unwrap();
 
     // Create data that will be managed by the caller
@@ -292,7 +299,12 @@ fn from_slice_no_copy() {
     let dims = vec![2, 3];
 
     // Create tensor without copying - caller must ensure data lives long enough
-    let t = Tensor::from_slice_no_copy(&data, dims, &ctx).unwrap();
+    let t = Tensor::new(
+        dims,
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::BorrowHost(&data),
+    )
+    .unwrap();
 
     ctx.synchronize();
 

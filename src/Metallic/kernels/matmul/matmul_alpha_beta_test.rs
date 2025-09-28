@@ -1,3 +1,4 @@
+use crate::metallic::{TensorInit, TensorStorage};
 #![cfg(test)]
 use super::*;
 
@@ -12,9 +13,9 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // 3x2 matrix
     let c_data = vec![0.5, 1.5, 2.5, 3.5]; // 2x2 matrix (will be used as result with beta)
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?; // Will be used as result with beta
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?; // Will be used as result with beta
 
     let alpha = 0.5;
     let beta = 0.25;
@@ -69,9 +70,9 @@ fn test_matmul_alpha_beta_with_different_values() -> Result<(), MetalError> {
     let b_data: Vec<f32> = (0..(k * n)).map(|i| (i as f32) * 0.3).collect();
     let c_data: Vec<f32> = (0..(m * n)).map(|i| (i as f32) * 0.1).collect();
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?;
 
     let alpha = 2.0;
     let beta = -0.5;
@@ -128,9 +129,9 @@ fn test_matmul_alpha_zero_beta_one() -> Result<(), MetalError> {
     let b_data = vec![5.0, 6.0, 7.0, 8.0];
     let c_data = vec![10.0, 20.0, 30.0, 40.0]; // This should be the result when alpha=0, beta=1
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?;
 
     let alpha = 0.0;
     let beta = 1.0;
@@ -181,9 +182,9 @@ fn test_matmul_alpha_one_beta_zero() -> Result<(), MetalError> {
     let b_data = vec![5.0, 6.0, 7.0, 8.0];
     let c_data = vec![0.0, 0.0, 0.0, 0.0]; // This will be overwritten when alpha=1, beta=0
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?;
 
     let alpha = 1.0;
     let beta = 0.0;

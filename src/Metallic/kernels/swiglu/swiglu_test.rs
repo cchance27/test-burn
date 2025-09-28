@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -19,24 +19,24 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     // Create uniform weights matching PyTorch small example
     // gate_weight all 0.1, shape [ff_dim, d_model]
     let gate_data: Vec<f32> = vec![0.1; ff_dim * d_model];
-    let ffn_gate = Tensor::create_tensor_from_slice(&gate_data, vec![ff_dim, d_model], &ctx)?;
+    let ffn_gate = Tensor::new(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&gate_data))?;
 
     // up_weight all 0.2
     let up_data: Vec<f32> = vec![0.2; ff_dim * d_model];
-    let ffn_up = Tensor::create_tensor_from_slice(&up_data, vec![ff_dim, d_model], &ctx)?;
+    let ffn_up = Tensor::new(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&up_data))?;
 
     // down_weight all 0.3, shape [d_model, ff_dim]
     let down_data: Vec<f32> = vec![0.3; d_model * ff_dim];
-    let ffn_down = Tensor::create_tensor_from_slice(&down_data, vec![d_model, ff_dim], &ctx)?;
+    let ffn_down = Tensor::new(vec![d_model, ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&down_data))?;
 
     // Input all 2.0, [m, d_model]
     let input_data: Vec<f32> = vec![2.0; m * d_model];
-    let x_normed_flat = Tensor::create_tensor_from_slice(&input_data, vec![m, d_model], &ctx)?;
+    let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     // Bias tensors (zeros) for this small test
-    let ffn_gate_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-    let ffn_up_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-    let ffn_down_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
+    let ffn_gate_bias = Tensor::new(vec![ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; ff_dim]))?;
+    let ffn_up_bias = Tensor::new(vec![ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; ff_dim]))?;
+    let ffn_down_bias = Tensor::new(vec![d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; d_model]))?;
     let output = ctx.SwiGLU(
         &x_normed_flat,
         &ffn_gate,
@@ -76,22 +76,22 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
 
     // Dummy zero weights
     let gate_data: Vec<f32> = vec![0.0; ff_dim * d_model];
-    let ffn_gate = Tensor::create_tensor_from_slice(&gate_data, vec![ff_dim, d_model], &ctx)?;
+    let ffn_gate = Tensor::new(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&gate_data))?;
 
     let up_data: Vec<f32> = vec![0.0; ff_dim * d_model];
-    let ffn_up = Tensor::create_tensor_from_slice(&up_data, vec![ff_dim, d_model], &ctx)?;
+    let ffn_up = Tensor::new(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&up_data))?;
 
     let down_data: Vec<f32> = vec![0.0; d_model * ff_dim];
-    let ffn_down = Tensor::create_tensor_from_slice(&down_data, vec![d_model, ff_dim], &ctx)?;
+    let ffn_down = Tensor::new(vec![d_model, ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&down_data))?;
 
     // Biases (zeros)
-    let ffn_gate_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-    let ffn_up_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-    let ffn_down_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
+    let ffn_gate_bias = Tensor::new(vec![ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; ff_dim]))?;
+    let ffn_up_bias = Tensor::new(vec![ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; ff_dim]))?;
+    let ffn_down_bias = Tensor::new(vec![d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; d_model]))?;
 
     // Zero input
     let input_data: Vec<f32> = vec![0.0; m * d_model];
-    let x_normed_flat = Tensor::create_tensor_from_slice(&input_data, vec![m, d_model], &ctx)?;
+    let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     let output = ctx.SwiGLU(
         &x_normed_flat,
@@ -160,14 +160,14 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
 
     // Create weight Tensors
     let mut ctx = Context::new()?;
-    let ffn_gate = Tensor::create_tensor_from_slice(&gate_weight_rust, vec![ff_dim, d_model], &ctx)?;
-    let ffn_up = Tensor::create_tensor_from_slice(&up_weight_rust, vec![ff_dim, d_model], &ctx)?;
-    let ffn_down = Tensor::create_tensor_from_slice(&down_weight_rust, vec![d_model, ff_dim], &ctx)?;
+    let ffn_gate = Tensor::new(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&gate_weight_rust))?;
+    let ffn_up = Tensor::new(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&up_weight_rust))?;
+    let ffn_down = Tensor::new(vec![d_model, ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&down_weight_rust))?;
 
     // Bias tensors (assume zero since JSON doesn't include biases)
-    let ffn_gate_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-    let ffn_up_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; ff_dim], vec![ff_dim], &ctx)?;
-    let ffn_down_bias = Tensor::create_tensor_from_slice(&vec![0.0f32; d_model], vec![d_model], &ctx)?;
+    let ffn_gate_bias = Tensor::new(vec![ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; ff_dim]))?;
+    let ffn_up_bias = Tensor::new(vec![ff_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; ff_dim]))?;
+    let ffn_down_bias = Tensor::new(vec![d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&vec![0.0f32; d_model]))?;
 
     // Load test cases
     let cases_json = fs::read_to_string("pytorch/swiglu_full_qwen25_comparison_data.json").expect("Failed to read cases JSON");
@@ -179,7 +179,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
         assert_eq!(input_len, m * d_model, "Input length mismatch for {}", case.name);
 
         // Create input Tensor [m, d_model]
-        let x_normed_flat = Tensor::create_tensor_from_slice(&case.input, vec![m, d_model], &ctx)?;
+        let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&case.input))?;
 
         // Run swiglu
         let rust_output = ctx.SwiGLU(

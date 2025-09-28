@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 // User-facing struct for the broadcast element-wise add operation.
 pub struct BroadcastElemwiseAddOp;
@@ -36,7 +37,7 @@ impl KernelInvocable for BroadcastElemwiseAddOp {
 
         ctx.prepare_tensors_for_active_cmd(&[&a, &b]);
 
-        let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
+        let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let op = BroadcastElemwiseAdd {
             a,
             b,

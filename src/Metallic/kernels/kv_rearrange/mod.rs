@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the KV rearrange operation.
 pub struct KvRearrangeOp;
@@ -39,7 +40,7 @@ impl KernelInvocable for KvRearrangeOp {
 
         ctx.prepare_tensors_for_active_cmd(&[&input]);
 
-        let output = Tensor::create_tensor_pooled(output_dims, ctx)?;
+        let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         let op = KvRearrange {
             input,
@@ -105,7 +106,7 @@ mod kv_rearrange_test {
         let mut ctx = Context::new()?;
         // Create a simple test tensor [batch*seq, kv_dim] = [2*3, 4] = [6, 4]
         let input_data: Vec<f32> = (0..24).map(|i| i as f32).collect();
-        let input = Tensor::create_tensor_from_slice(&input_data, vec![6, 4], &ctx)?;
+        let input = Tensor::new(vec![6, 4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
         // Test parameters: kv_dim=4, kv_head_dim=2, n_heads=2, n_kv_heads=1, head_dim=2, seq=3
         let result = ctx.call::<KvRearrangeOp>((input, 4, 2, 2, 1, 2, 3))?;

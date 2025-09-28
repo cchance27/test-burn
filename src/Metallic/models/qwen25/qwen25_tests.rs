@@ -1,6 +1,7 @@
 #![cfg(test)]
 use crate::metallic::instrumentation::new_latency_collector;
 use crate::metallic::models::{Qwen25, Qwen25Config};
+use crate::metallic::{TensorInit, TensorStorage};
 
 use super::*;
 
@@ -21,7 +22,7 @@ fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
     let model = Qwen25::new(cfg, &mut ctx)?;
 
     let input_data: Vec<f32> = vec![0.5; model.config.seq_len * model.config.d_model];
-    let input = Tensor::create_tensor_from_slice(&input_data, vec![1, model.config.seq_len, model.config.d_model], &ctx)?;
+    let input = Tensor::new(vec![1, model.config.seq_len, model.config.d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     let out = model.forward(&input, &mut ctx)?;
     assert_eq!(out.dims(), input.dims());
@@ -230,7 +231,7 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
 
     let element_count = batch * n_kv_heads * seq * head_dim;
     let input_data: Vec<f32> = (0..element_count).map(|v| v as f32).collect();
-    let input = Tensor::create_tensor_from_slice(&input_data, vec![batch * n_kv_heads, seq, head_dim], &ctx)?;
+    let input = Tensor::new(vec![batch * n_kv_heads, seq, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
     let history = CacheHistory {
         tensor: input.clone(),
         active_seq: seq,
@@ -328,7 +329,7 @@ fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
         }
     }
 
-    let cache = Tensor::create_tensor_from_slice(&data, vec![batch_heads, seq, head_dim], &ctx)?;
+    let cache = Tensor::new(vec![batch_heads, seq, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
 
     for steps in 1..=seq {
         let history = Qwen25::gather_cache_history(&cache, steps, &mut ctx)?;

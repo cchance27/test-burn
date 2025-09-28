@@ -1,7 +1,7 @@
 use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     gguf::GGUFValue,
-    metallic::{Context, Tensor, resource_cache::ResourceCache},
+    metallic::{Context, Tensor, TensorInit, TensorStorage, resource_cache::ResourceCache},
 };
 use half::f16;
 use std::collections::HashMap;
@@ -68,7 +68,7 @@ impl GGUFModelLoader {
                             dims = vec![151936, 896];
                             //println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                         }
-                        match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
+                        match crate::metallic::Tensor::new(dims, TensorStorage::Dedicated(&_context), TensorInit::CopyFrom(&f32_data)) {
                             Ok(t) => {
                                 tensors.insert(tensor_info.name.clone(), t);
                                 continue;
@@ -111,7 +111,7 @@ impl GGUFModelLoader {
                                     match deq_res {
                                         Ok(f32_data) => {
                                             let dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-                                            match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
+                                            match crate::metallic::Tensor::new(dims, TensorStorage::Dedicated(&_context), TensorInit::CopyFrom(&f32_data)) {
                                                 Ok(t) => {
                                                     tensors.insert(tensor_info.name.clone(), t);
                                                 }
@@ -150,7 +150,7 @@ impl GGUFModelLoader {
                                         dims = vec![151936, 896];
                                         //println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                                     }
-                                    match crate::metallic::Tensor::create_tensor_from_slice(&f32_data, dims, _context) {
+                                    match crate::metallic::Tensor::new(dims, TensorStorage::Dedicated(&_context), TensorInit::CopyFrom(&f32_data)) {
                                         Ok(t) => {
                                             tensors.insert(tensor_info.name.clone(), t);
                                         }

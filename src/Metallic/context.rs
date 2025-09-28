@@ -7,7 +7,7 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, kernels};
+use crate::metallic::{Tensor, kernels, TensorInit, TensorStorage};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -275,9 +275,9 @@ impl Context {
         let bias = fused_bias.clone();
         self.prepare_tensors_for_active_cmd(&[&linear, &bias]);
 
-        let q_out = Tensor::create_tensor_pooled(vec![m, d_model], self)?;
-        let k_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
-        let v_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
+        let q_out = Tensor::new(vec![m, d_model], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+        let k_out = Tensor::new(vec![m, kv_dim], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+        let v_out = Tensor::new(vec![m, kv_dim], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
 
         self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out]);
 

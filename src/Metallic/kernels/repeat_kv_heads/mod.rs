@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 pub struct RepeatKvHeadsOp;
 
@@ -97,7 +98,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
         ctx.prepare_tensors_for_active_cmd(&[&input]);
 
         let output_dims = vec![(batch * n_heads) as usize, seq as usize, head_dim as usize];
-        let output = Tensor::create_tensor_pooled(output_dims, ctx)?;
+        let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let total_elements = output.len() as u32;
 
         let op = RepeatKvHeads {

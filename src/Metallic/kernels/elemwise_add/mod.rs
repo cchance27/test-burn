@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 // Additional Operations for this Metal Kernel (additional functions in the kernel)
 mod elemwise_broadcast_add;
@@ -41,7 +42,7 @@ impl KernelInvocable for ElemwiseAddOp {
             )));
         }
         ctx.prepare_tensors_for_active_cmd(&[&a, &b]);
-        let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
+        let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let op = ElemwiseAdd {
             a,
             b,

@@ -1,12 +1,12 @@
 #![cfg(test)]
 use crate::metallic::kernels::gelu::GeluOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_gelu_logic() -> Result<(), MetalError> {
     let mut ctx = Context::new()?;
     let input_data = vec![-1.0, 0.0, 1.0, 2.0];
-    let input = Tensor::create_tensor_from_slice(&input_data, vec![4], &ctx)?;
+    let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     // Use the kernel via the generic `call` method.
     let result_tensor = ctx.call::<GeluOp>(input)?;
@@ -47,7 +47,7 @@ fn test_gelu_basic() -> Result<(), MetalError> {
 
     let input_data = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -0.5, 0.5, 1.5, -1.5, 0.1];
     let dims = vec![2, 5];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let output_tensor = context.call::<GeluOp>(input_tensor)?;
     context.synchronize();
@@ -84,7 +84,7 @@ fn test_gelu_extremes() -> Result<(), MetalError> {
 
     let input_data = vec![-10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0, -100.0, 100.0, 0.001, -0.001];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let output_tensor = context.call::<GeluOp>(input_tensor)?;
     context.synchronize();
@@ -131,7 +131,7 @@ fn test_gelu_zero_and_symmetry() -> Result<(), MetalError> {
     // Test points around zero and check basic properties
     let input_data = vec![-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let output_tensor = context.call::<GeluOp>(input_tensor)?;
     context.synchronize();
@@ -173,7 +173,7 @@ fn test_gelu_validation_errors() {
     let mut context = Context::new().unwrap();
 
     let dims = vec![2, 3];
-    let input = Tensor::create_tensor(dims.clone(), &context).unwrap();
+    let input = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::Uninitialized).unwrap();
 
     // The new kernel system handles validation at the call site automatically
     // This test is now implicitly covered through the kernel system

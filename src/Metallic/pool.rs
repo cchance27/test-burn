@@ -86,18 +86,18 @@ impl MemoryPool {
                 self.pooled_bytes_allocated += aligned_size;
                 self.pooled_allocations += 1;
 
+                let tensor = Tensor::from_existing_buffer(
+                    self.chunks[chunk_idx].buffer.clone(),
+                    dims.clone(),
+                    dtype,
+                    &self.device,
+                    offset,
+                )?;
+
                 return Ok(PooledAllocation {
                     dtype,
                     element_size,
-                    tensor: Tensor {
-                        buf: self.chunks[chunk_idx].buffer.clone(),
-                        dims: dims.clone(),
-                        strides: Tensor::compute_strides(&dims),
-                        dtype,
-                        device: self.device.clone(),
-                        offset,
-                        defining_cmd_buffer: Rc::new(RefCell::new(None)),
-                    },
+                    tensor,
                 });
             }
         }
@@ -130,18 +130,18 @@ impl MemoryPool {
         self.pooled_bytes_allocated += aligned_size;
         self.pooled_allocations += 1;
 
+        let tensor = Tensor::from_existing_buffer(
+            self.chunks[chunk_idx].buffer.clone(),
+            dims.clone(),
+            dtype,
+            &self.device,
+            offset,
+        )?;
+
         Ok(PooledAllocation {
             dtype,
             element_size,
-            tensor: Tensor {
-                buf: self.chunks[chunk_idx].buffer.clone(),
-                dims: dims.clone(),
-                strides: Tensor::compute_strides(&dims),
-                dtype,
-                device: self.device.clone(),
-                offset,
-                defining_cmd_buffer: Rc::new(RefCell::new(None)),
-            },
+            tensor,
         })
     }
 

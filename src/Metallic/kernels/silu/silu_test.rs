@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::metallic::kernels::silu::SiluOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 // CPU SiLU
 fn cpu_silu(input: &[f32]) -> Vec<f32> {
@@ -20,7 +20,7 @@ fn test_silu_basic() -> Result<(), MetalError> {
 
     let input_data = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -50.0, 50.0];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let output_tensor = context.call::<SiluOp>(input_tensor)?;
     context.synchronize();
@@ -53,7 +53,7 @@ fn test_silu_numerical_stability() -> Result<(), MetalError> {
         -100.0, -50.0, -20.0, -10.0, -1.0, 0.0, 1.0, 10.0, 20.0, 50.0, 100.0,
     ];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let output_tensor = context.call::<SiluOp>(input_tensor)?;
     context.synchronize();
@@ -118,7 +118,7 @@ fn test_silu_extreme_positive_values() -> Result<(), MetalError> {
     // Create input with extremely large positive values
     let input_data = vec![100.0f32, 1000.0f32, 10000.0f32, 1e6f32];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
@@ -192,7 +192,7 @@ fn test_silu_extreme_negative_values() -> Result<(), MetalError> {
     // Create input with extremely large negative values
     let input_data = vec![-100.0f32, -1000.0f32, -10000.0f32, -1e6f32];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
@@ -276,7 +276,7 @@ fn test_silu_mixed_extreme_values() -> Result<(), MetalError> {
     ];
     
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
     let cpu_output = cpu_silu_extreme(&input_data);
 
     let output_tensor = context.call::<SiluOp>(input_tensor)?;
@@ -345,7 +345,7 @@ fn test_silu_edge_values_around_thresholds() -> Result<(), MetalError> {
         -51.0f32, // Below negative threshold
     ];
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
@@ -413,7 +413,7 @@ fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
     }
 
     let dims = vec![input_data.len()];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
     let cpu_output = cpu_silu_extreme(&input_data);
 

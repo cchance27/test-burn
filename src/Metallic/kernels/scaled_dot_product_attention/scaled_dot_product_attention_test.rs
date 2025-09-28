@@ -3,16 +3,16 @@ use rand::Rng as _;
 
 use crate::alternatives::sdpa_burn;
 use crate::metallic::kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
     let mut ctx = Context::new()?;
 
     // Create test tensors: [batch, seq, dim]
-    let q = Tensor::create_tensor_from_slice(&[1.0, 0.5, 0.5, 1.0], vec![1, 2, 2], &ctx)?;
-    let k = Tensor::create_tensor_from_slice(&[1.0, 0.5, 0.5, 1.0], vec![1, 2, 2], &ctx)?;
-    let v = Tensor::create_tensor_from_slice(&[1.0, 0.0, 0.0, 1.0], vec![1, 2, 2], &ctx)?;
+    let q = Tensor::new(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 0.5, 0.5, 1.0]))?;
+    let k = Tensor::new(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 0.5, 0.5, 1.0]))?;
+    let v = Tensor::new(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 0.0, 0.0, 1.0]))?;
 
     // Use the kernel via the generic `call` method.
     let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, false, 0))?;
@@ -30,9 +30,9 @@ fn test_scaled_dot_product_attention_kernel_causal() -> Result<(), MetalError> {
     let mut ctx = Context::new()?;
 
     // Create test tensors: [batch, seq, dim]
-    let q = Tensor::create_tensor_from_slice(&[1.0, 0.5, 0.5, 1.0], vec![1, 2, 2], &ctx)?;
-    let k = Tensor::create_tensor_from_slice(&[1.0, 0.5, 0.5, 1.0], vec![1, 2, 2], &ctx)?;
-    let v = Tensor::create_tensor_from_slice(&[1.0, 0.0, 0.0, 1.0], vec![1, 2, 2], &ctx)?;
+    let q = Tensor::new(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 0.5, 0.5, 1.0]))?;
+    let k = Tensor::new(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 0.5, 0.5, 1.0]))?;
+    let v = Tensor::new(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1.0, 0.0, 0.0, 1.0]))?;
 
     // Use the kernel via the generic `call` method with causal attention.
     let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, true, 0))?;
@@ -97,9 +97,9 @@ fn arange_sdpa_ours_vs_pytorch_causal() {
     let value: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
 
     // Clone the device so the created tensors don't hold an immutable borrow on `context`
-    let q_tensor = Tensor::create_tensor_from_slice(&query, vec![2, 8, 16], &context).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&key, vec![2, 8, 16], &context).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&value, vec![2, 8, 16], &context).unwrap();
+    let q_tensor = Tensor::new(vec![2, 8, 16], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&query)).unwrap();
+    let k_tensor = Tensor::new(vec![2, 8, 16], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&key)).unwrap();
+    let v_tensor = Tensor::new(vec![2, 8, 16], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&value)).unwrap();
 
     let output = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true).unwrap();
     assert_eq!(output.dims(), DIMENSIONS);
@@ -136,9 +136,9 @@ fn arange_sdpa_ours_vs_pytorch_noncausal() {
     let value: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
 
     // Clone the device so the created tensors don't hold an immutable borrow on `context`
-    let q_tensor = Tensor::create_tensor_from_slice(&query, vec![2, 8, 16], &context).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&key, vec![2, 8, 16], &context).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&value, vec![2, 8, 16], &context).unwrap();
+    let q_tensor = Tensor::new(vec![2, 8, 16], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&query)).unwrap();
+    let k_tensor = Tensor::new(vec![2, 8, 16], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&key)).unwrap();
+    let v_tensor = Tensor::new(vec![2, 8, 16], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&value)).unwrap();
 
     let output = context
         .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)
@@ -185,9 +185,9 @@ fn large_sdpa_ours_vs_burn_causal() {
     // Metallic
     use crate::metallic::{Context, Tensor};
     let mut ctx = Context::new().unwrap();
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
     let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true).unwrap();
     let metal_slice = metal_out.as_slice();
 
@@ -251,9 +251,9 @@ fn large_sdpa_ours_vs_burn_noncausal() {
     // Metallic
     use crate::metallic::{Context, Tensor};
     let mut ctx = Context::new().unwrap();
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
     let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false).unwrap();
     let metal_slice = metal_out.as_slice();
 
@@ -303,9 +303,9 @@ fn run_sdpa_test(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: b
     // Metallic
     use crate::metallic::{Context, Tensor};
     let mut ctx = Context::new().unwrap();
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
     let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
 
@@ -390,10 +390,10 @@ fn sdpa_causality_correctness() {
     let mut ctx = Context::new().unwrap();
 
     // Create tensors
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor_base = Tensor::create_tensor_from_slice(&v_data_base, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor_modified = Tensor::create_tensor_from_slice(&v_data_modified, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor_base = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data_base)).unwrap();
+    let v_tensor_modified = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data_modified)).unwrap();
 
     // Run SDPA with causal=True and base V
     let metal_out_base = ctx
@@ -476,9 +476,9 @@ fn test_sdpa_extreme_values() -> Result<(), MetalError> {
     let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| large_value).collect();
     let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| large_value).collect();
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?; // causal = false
 
@@ -512,9 +512,9 @@ fn test_sdpa_extreme_negative_values() -> Result<(), MetalError> {
     let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| negative_value).collect();
     let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| negative_value).collect();
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?; // causal = false
 
@@ -544,9 +544,9 @@ fn test_sdpa_mixed_extreme_values() -> Result<(), MetalError> {
     let k_data = vec![1e6f32, -1e6f32, 1e6f32, -1e6f32];
     let v_data = vec![1e6f32, -1e6f32, 1e6f32, -1e6f32];
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?; // causal = false
 
@@ -580,9 +580,9 @@ fn test_sdpa_causal_extreme_values() -> Result<(), MetalError> {
     let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| large_value).collect();
     let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| large_value).collect();
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true)?; // causal = true
 
@@ -615,9 +615,9 @@ fn test_sdpa_zero_tensors() -> Result<(), MetalError> {
     let k_data = vec![0.0f32; batch * seq_k * dim];
     let v_data = vec![0.0f32; batch * seq_k * dim];
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?; // causal = false
 
@@ -670,9 +670,9 @@ fn compare_sdpa_implementations(
 
     // Metallic implementation
     let mut ctx = Context::new().unwrap();
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
 
     let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
@@ -834,9 +834,9 @@ fn check_row_stochastic_property(batch: usize, seq_q: usize, seq_k: usize, dim: 
 
     // Metallic implementation
     let mut ctx = Context::new().unwrap();
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
 
     let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
@@ -888,9 +888,9 @@ fn property_based_sdpa_test(max_batch: usize, max_seq_q: usize, max_seq_k: usize
 
     // Metallic implementation
     let mut ctx = Context::new().unwrap();
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
 
     let result = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal);
 
@@ -986,9 +986,9 @@ fn sdpa_determinism_check() {
     let mut results: Vec<Vec<f32>> = Vec::new();
     for _ in 0..5 {
         let mut ctx = Context::new().unwrap();
-        let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &ctx).unwrap();
-        let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &ctx).unwrap();
-        let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &ctx).unwrap();
+        let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data)).unwrap();
+        let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data)).unwrap();
+        let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data)).unwrap();
 
         let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
         results.push(metal_out.as_slice().to_vec());

@@ -1,3 +1,4 @@
+use crate::metallic::{TensorInit, TensorStorage};
 #![cfg(test)]
 
 use super::*;
@@ -43,7 +44,7 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
 
     let element_count = batch * n_kv_heads * seq * head_dim;
     let input_data: Vec<f32> = (0..element_count).map(|v| v as f32).collect();
-    let input = Tensor::create_tensor_from_slice(&input_data, vec![batch * n_kv_heads, seq, head_dim], &ctx)?;
+    let input = Tensor::new(vec![batch * n_kv_heads, seq, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     let expected = cpu_repeat_kv_heads(&input_data, group_size, batch, n_kv_heads, n_heads, seq, head_dim);
 
@@ -94,8 +95,8 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
             }
         }
 
-        let k_step = Tensor::create_tensor_from_slice(&k_values, vec![batch * n_kv_heads, 1, head_dim], &ctx)?;
-        let v_step = Tensor::create_tensor_from_slice(&v_values, vec![batch * n_kv_heads, 1, head_dim], &ctx)?;
+        let k_step = Tensor::new(vec![batch * n_kv_heads, 1, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_values))?;
+        let v_step = Tensor::new(vec![batch * n_kv_heads, 1, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_values))?;
 
         ctx.write_kv_step(layer_idx, step, &k_step, &v_step)?;
         ctx.write_repeated_kv_step(layer_idx, step, group_size, &k_step, &v_step)?;

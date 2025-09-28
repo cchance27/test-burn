@@ -1,13 +1,13 @@
 #![cfg(test)]
 use crate::metallic::kernels::permute::PermuteOp;
-use crate::metallic::{Context, Tensor};
+use crate::metallic::{Context, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_permute_2d_transpose() -> Result<(), crate::metallic::MetalError> {
     let mut ctx = Context::new()?;
     // Create a 2x3 tensor: [[1, 2, 3], [4, 5, 6]]
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    let src = Tensor::create_tensor_from_slice(&data, vec![2, 3], &ctx)?;
+    let src = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
 
     // Permute dimensions [1, 0] to transpose: [[1, 4], [2, 5], [3, 6]]
     let permute_indices = vec![1, 0];
@@ -24,7 +24,7 @@ fn test_permute_3d() -> Result<(), crate::metallic::MetalError> {
     let mut ctx = Context::new()?;
     // Create a 2x2x2 tensor
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let src = Tensor::create_tensor_from_slice(&data, vec![2, 2, 2], &ctx)?;
+    let src = Tensor::new(vec![2, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
 
     // Permute dimensions [2, 0, 1]
     let permute_indices = vec![2, 0, 1];
@@ -40,7 +40,7 @@ fn test_permute_identity() -> Result<(), crate::metallic::MetalError> {
     let mut ctx = Context::new()?;
     // Create a 2x3 tensor: [[1, 2, 3], [4, 5, 6]]
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-    let src = Tensor::create_tensor_from_slice(&data, vec![2, 3], &ctx)?;
+    let src = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
 
     // Permute with identity: [0, 1] - should be unchanged
     let permute_indices = vec![0, 1];

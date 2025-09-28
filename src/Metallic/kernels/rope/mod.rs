@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::{Context, MetalError, Operation, Tensor, resource_cache::ResourceCache};
+use crate::metallic::{Context, MetalError, Operation, Tensor, resource_cache::ResourceCache, TensorInit, TensorStorage};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
@@ -78,7 +78,7 @@ impl KernelInvocable for RoPEOp {
         ctx.prepare_tensors_for_active_cmd(&[&input, &cos, &sin]);
 
         // Create the output tensor with same shape as input
-        let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
+        let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         // Create the internal operation struct.
         let op = RoPE {

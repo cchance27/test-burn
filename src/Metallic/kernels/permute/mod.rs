@@ -1,5 +1,6 @@
 use super::*;
 use objc2_metal::MTLResource;
+use crate::metallic::{TensorInit, TensorStorage};
 
 pub struct PermuteOp;
 
@@ -50,7 +51,7 @@ impl KernelInvocable for PermuteOp {
         ctx.prepare_tensors_for_active_cmd(&[&src]);
 
         // Create the output tensor
-        let dst = Tensor::create_tensor_pooled(out_dims, ctx)?;
+        let dst = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         // Validate that input and output tensors have the same number of elements
         if src.len() != dst.len() {

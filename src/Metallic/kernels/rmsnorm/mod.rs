@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 pub struct RMSNormOp;
 
@@ -43,7 +44,7 @@ impl KernelInvocable for RMSNormOp {
 
         ctx.prepare_tensors_for_active_cmd(&[&input, &gamma]);
 
-        let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
+        let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         let op = RMSNorm {
             input,

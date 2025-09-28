@@ -1,4 +1,6 @@
 use super::*;
+use crate::metallic::tensor::Dtype;
+use crate::metallic::{TensorInit, TensorStorage};
 
 #[test]
 fn test_sdpa_invalid_shapes() {
@@ -15,9 +17,9 @@ fn test_sdpa_invalid_shapes() {
     let k_data: Vec<f32> = (0..(batch * seq_k * dim2)).map(|i| (i as f32) * 0.2).collect();
     let v_data: Vec<f32> = (0..(batch * seq_k * dim2)).map(|i| (i as f32) * 0.3).collect();
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim1], &context).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim2], &context).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim2], &context).unwrap();
+    let q_tensor = Tensor::new(vec![batch, seq_q, dim1], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch, seq_k, dim2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch, seq_k, dim2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data)).unwrap();
 
     // This should fail with a dimension mismatch error
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false);
@@ -52,9 +54,9 @@ fn test_sdpa_invalid_batch_dimensions() {
     let k_data: Vec<f32> = (0..(batch2 * seq_k * dim)).map(|i| (i as f32) * 0.2).collect();
     let v_data: Vec<f32> = (0..(batch2 * seq_k * dim)).map(|i| (i as f32) * 0.3).collect();
 
-    let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch1, seq_q, dim], &context).unwrap();
-    let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch2, seq_k, dim], &context).unwrap();
-    let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch2, seq_k, dim], &context).unwrap();
+    let q_tensor = Tensor::new(vec![batch1, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data)).unwrap();
+    let k_tensor = Tensor::new(vec![batch2, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data)).unwrap();
+    let v_tensor = Tensor::new(vec![batch2, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data)).unwrap();
 
     // This should fail with a dimension mismatch error
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false);
@@ -80,9 +82,9 @@ fn test_matmul_invalid_shapes() {
     let b_data: Vec<f32> = (0..(k2 * n)).map(|i| (i as f32) * 0.2).collect();
     let result_data: Vec<f32> = vec![0.0; m * n];
 
-    let _a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k1], &context).unwrap();
-    let _b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k2, n], &context).unwrap();
-    let _result_tensor = Tensor::create_tensor_from_slice(&result_data, vec![m, n], &context).unwrap();
+    let _a_tensor = Tensor::new(vec![m, k1], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data)).unwrap();
+    let _b_tensor = Tensor::new(vec![k2, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data)).unwrap();
+    let _result_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&result_data)).unwrap();
 
     let gemm_key = MpsGemmKey {
         transpose_left: false,
@@ -110,7 +112,7 @@ fn test_tensor_creation_with_mismatched_dimensions() {
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let dims = vec![2, 4]; // Expecting 8 elements but only have 6
 
-    let result = Tensor::create_tensor_from_slice(&data, dims, &context);
+    let result = Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&data));
     assert!(result.is_err(), "Tensor creation should fail with mismatched dimensions");
 
     match result {
@@ -134,7 +136,7 @@ fn test_tensor_from_existing_buffer_invalid_offset() {
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let dims = vec![2, 2];
 
-    let tensor = Tensor::create_tensor_from_slice(&data, dims, &context).unwrap();
+    let tensor = Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&data)).unwrap();
 
     // Try to create a view with an invalid offset
     let invalid_offset = 100 * std::mem::size_of::<f32>(); // Way too large
@@ -142,6 +144,7 @@ fn test_tensor_from_existing_buffer_invalid_offset() {
     let result = Tensor::from_existing_buffer(
         tensor.buf.clone(),
         vec![1, 2], // Smaller dimensions
+        Dtype::F32,
         &context.device,
         invalid_offset,
     );
@@ -168,7 +171,7 @@ fn test_tensor_get_batch_out_of_bounds() {
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let dims = vec![2, 3]; // Only 2 batches (0 and 1)
 
-    let tensor = Tensor::create_tensor_from_slice(&data, dims, &context).unwrap();
+    let tensor = Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&data)).unwrap();
 
     // Try to get a batch that doesn't exist
     let result = tensor.get_batch(2); // Only batches 0 and 1 exist
@@ -195,7 +198,7 @@ fn test_tensor_get_batch_insufficient_dimensions() {
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let dims = vec![4]; // Only 1 dimension, need at least 3 for get_batch
 
-    let tensor = Tensor::create_tensor_from_slice(&data, dims, &context).unwrap();
+    let tensor = Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&data)).unwrap();
 
     // Try to get a batch from a tensor with insufficient dimensions
     let result = tensor.get_batch(0);
@@ -225,7 +228,7 @@ fn test_softmax_invalid_dimensions() {
     let input_data: Vec<f32> = vec![]; // Empty data
     let dims = vec![1, seq_q, seq_k];
 
-    let result = Tensor::create_tensor_from_slice(&input_data, dims, &context);
+    let result = Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data));
     // This might fail at tensor creation time
     if let Ok(attn_tensor) = result {
         let rows_total = if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 };

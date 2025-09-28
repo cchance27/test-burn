@@ -36,7 +36,7 @@ impl KernelInvocable for RandomUniformOp {
         let (dims, min_val, max_val, seed_opt) = args;
 
         // Create the output tensor.
-        let out = Tensor::create_tensor_pooled(dims.clone(), ctx)?;
+        let out = Tensor::new(dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         // Generate or use provided seed
         let seed = seed_opt.unwrap_or_else(|| {
@@ -109,7 +109,7 @@ impl Operation for RandomUniform {
 #[cfg(test)]
 mod random_uniform_test {
     use crate::metallic::kernels::tensors::RandomUniformOp;
-    use crate::metallic::{Context, MetalError};
+use crate::metallic::{Context, MetalError, TensorInit, TensorStorage};
 
     #[test]
     fn test_random_uniform() -> Result<(), MetalError> {

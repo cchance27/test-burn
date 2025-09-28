@@ -73,6 +73,31 @@ pub struct MpsMatrixBatchView {
 /// The buffer is retained while this struct is alive. `as_slice()` provides
 /// an immutable view into the underlying contents; callers must ensure
 /// GPU work has completed (e.g. via command buffer wait) before reading.
+/// Identifies the backing allocation strategy for a new [`Tensor`].
+///
+/// * [`TensorStorage::Dedicated`] allocates a fresh `MTLBuffer` from the
+///   provided [`Context`]. This path supports all initialization modes and is
+///   the correct choice for long-lived model weights or host-borrowed data.
+/// * [`TensorStorage::Pooled`] draws memory from the context's transient bump
+///   allocator. It requires a mutable context reference because it advances the
+///   pool cursor and should only be used for short-lived activations.
+pub enum TensorStorage<'ctx> {
+    Dedicated(&'ctx Context),
+    Pooled(&'ctx mut Context),
+}
+
+/// Describes how the contents of a new [`Tensor`] should be seeded.
+///
+/// * [`TensorInit::Uninitialized`] leaves the backing buffer untouched.
+/// * [`TensorInit::CopyFrom`] copies the provided slice into the allocation.
+/// * [`TensorInit::BorrowHost`] wraps an existing host slice without copying
+///   and therefore requires dedicated storage.
+pub enum TensorInit<'data> {
+    Uninitialized,
+    CopyFrom(&'data [f32]),
+    BorrowHost(&'data [f32]),
+}
+
 #[derive(Clone)]
 pub struct Tensor {
     pub buf: RetainedBuffer,
@@ -185,7 +210,11 @@ impl Tensor {
             return Ok((self.clone(), view));
         }
 
-        let compact = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
+        let compact = Tensor::new(
+            self.dims.clone(),
+            TensorStorage::Pooled(ctx),
+            TensorInit::Uninitialized,
+        )?;
 
         ctx.prepare_tensors_for_active_cmd(&[self]);
 
@@ -250,75 +279,141 @@ impl Tensor {
         self.dims.is_empty()
     }
 
-    /// Create a tensor by copying from a host slice.
-    pub fn create_tensor_from_slice(items: &[f32], dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
-        let num_elements = items.len();
-        let byte_len = std::mem::size_of_val(items);
-        let item_ptr = std::ptr::NonNull::new(items.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
-
-        let buf = unsafe {
-            context
-                .device
-                .newBufferWithBytes_length_options(item_ptr, byte_len, MTLResourceOptions::StorageModeShared)
-                .ok_or(MetalError::BufferFromBytesCreationFailed)?
-        };
-
-        let expected_elements = dims.iter().product::<usize>();
-        if expected_elements != num_elements {
-            return Err(MetalError::DimensionMismatch {
-                expected: expected_elements,
-                actual: num_elements,
-            });
-        }
-
-        Ok(Tensor {
+    fn build_tensor(
+        dims: Vec<usize>,
+        dtype: Dtype,
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        buf: RetainedBuffer,
+        offset: usize,
+    ) -> Tensor {
+        Tensor {
             buf,
             dims: dims.clone(),
             strides: Self::compute_strides(&dims),
-            dtype: Dtype::F32,
-            device: context.device.clone(),
-            offset: 0,
+            dtype,
+            device: device.clone(),
+            offset,
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
-        })
-    }
-
-    /// Create an uninitialized tensor of given shape. Contents are unspecified.
-    pub fn create_tensor(dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
-        let num_elements = dims.iter().product();
-        let byte_len = num_elements * std::mem::size_of::<f32>();
-        let buf = context
-            .device
-            .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-
-        let expected_elements = dims.iter().product::<usize>();
-        if expected_elements != num_elements {
-            return Err(MetalError::DimensionMismatch {
-                expected: expected_elements,
-                actual: num_elements,
-            });
         }
-        Ok(Tensor {
-            buf,
-            dims: dims.clone(),
-            strides: Self::compute_strides(&dims),
-            dtype: Dtype::F32,
-            device: context.device.clone(),
-            offset: 0,
-            defining_cmd_buffer: Rc::new(RefCell::new(None)),
-        })
     }
 
-    /// Create an uninitialized tensor of given shape using pooled memory.
-    #[inline]
-    pub fn create_tensor_pooled(dims: Vec<usize>, ctx: &mut Context) -> Result<Tensor, MetalError> {
-        Ok(ctx.pool.alloc_tensor(dims, Dtype::F32)?.into_tensor())
+    fn validate_init<'data>(dims: &[usize], init: &TensorInit<'data>) -> Result<(), MetalError> {
+        let expected_elements = dims.iter().product::<usize>();
+        match init {
+            TensorInit::Uninitialized => Ok(()),
+            TensorInit::CopyFrom(data) | TensorInit::BorrowHost(data) => {
+                if data.len() != expected_elements {
+                    Err(MetalError::DimensionMismatch {
+                        expected: expected_elements,
+                        actual: data.len(),
+                    })
+                } else {
+                    Ok(())
+                }
+            }
+        }
+    }
+
+    fn new_dedicated<'data>(
+        dims: Vec<usize>,
+        context: &Context,
+        init: TensorInit<'data>,
+    ) -> Result<Tensor, MetalError> {
+        match init {
+            TensorInit::Uninitialized => {
+                let num_elements = dims.iter().product::<usize>();
+                let byte_len = num_elements * std::mem::size_of::<f32>();
+                let buf = context
+                    .device
+                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
+                    .ok_or(MetalError::BufferCreationFailed(byte_len))?;
+                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+            }
+            TensorInit::CopyFrom(items) => {
+                let byte_len = std::mem::size_of_val(items);
+                let item_ptr =
+                    std::ptr::NonNull::new(items.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
+
+                let buf = unsafe {
+                    context
+                        .device
+                        .newBufferWithBytes_length_options(item_ptr, byte_len, MTLResourceOptions::StorageModeShared)
+                        .ok_or(MetalError::BufferFromBytesCreationFailed)?
+                };
+
+                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+            }
+            TensorInit::BorrowHost(data) => {
+                let byte_len = std::mem::size_of_val(data);
+                let item_ptr =
+                    std::ptr::NonNull::new(data.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
+
+                let buf = unsafe {
+                    context
+                        .device
+                        .newBufferWithBytesNoCopy_length_options_deallocator(
+                            item_ptr,
+                            byte_len,
+                            MTLResourceOptions::StorageModeShared,
+                            None,
+                        )
+                        .ok_or(MetalError::BufferFromBytesCreationFailed)?
+                };
+
+                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+            }
+        }
+    }
+
+    fn new_pooled<'data>(
+        dims: Vec<usize>,
+        context: &mut Context,
+        init: TensorInit<'data>,
+    ) -> Result<Tensor, MetalError> {
+        match init {
+            TensorInit::BorrowHost(_) => Err(MetalError::OperationNotSupported(
+                "Borrowed host buffers are only supported with dedicated storage".to_string(),
+            )),
+            TensorInit::Uninitialized => Ok(context.pool.alloc_tensor(dims, Dtype::F32)?.into_tensor()),
+            TensorInit::CopyFrom(data) => {
+                let mut tensor = context.pool.alloc_tensor(dims, Dtype::F32)?.into_tensor();
+                tensor.as_mut_slice().copy_from_slice(data);
+                Ok(tensor)
+            }
+        }
+    }
+
+    /// Create a tensor using the unified initialization path.
+    ///
+    /// Callers provide the desired dimensions, the allocation target, and how
+    /// to seed the contents. [`TensorStorage`] selects between the dedicated
+    /// device allocator and the transient memory pool, while [`TensorInit`]
+    /// controls whether the buffer is left uninitialized, populated by copying
+    /// from a host slice, or wrapped without copying.
+    ///
+    /// The returned tensor always owns Metal-backed storage; when borrowing a
+    /// host slice via [`TensorInit::BorrowHost`] the lifetime of that slice must
+    /// exceed the tensor's lifetime.
+    pub fn new<'ctx, 'data>(
+        dims: Vec<usize>,
+        storage: TensorStorage<'ctx>,
+        init: TensorInit<'data>,
+    ) -> Result<Tensor, MetalError> {
+        Self::validate_init(&dims, &init)?;
+
+        match storage {
+            TensorStorage::Dedicated(context) => Self::new_dedicated(dims, context, init),
+            TensorStorage::Pooled(context) => Self::new_pooled(dims, context, init),
+        }
     }
 
     /// Create a tensor view from an existing Metal buffer without copying.
+    /// The caller supplies the element type to ensure the resulting tensor
+    /// reports the correct logical metadata.
     pub fn from_existing_buffer(
         buffer: RetainedBuffer,
         dims: Vec<usize>,
+        dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         offset: usize,
     ) -> Result<Tensor, MetalError> {
@@ -326,55 +421,7 @@ impl Tensor {
         if offset + expected_bytes > buffer.length() {
             return Err(MetalError::InvalidShape("buffer too small for dims/offset".into()));
         }
-        Ok(Tensor {
-            buf: buffer,
-            dims: dims.clone(),
-            strides: Self::compute_strides(&dims),
-            dtype: Dtype::F32,
-            device: device.clone(),
-            offset,
-            defining_cmd_buffer: Rc::new(RefCell::new(None)),
-        })
-    }
-
-    /// Create a tensor from a host slice without copying data.
-    /// The caller is responsible for ensuring the slice remains valid for the lifetime of the tensor.
-    /// This is more efficient than create_tensor_from_slice for read-only data.
-    pub fn from_slice_no_copy(data: &[f32], dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
-        let num_elements = data.len();
-        let expected_elements = dims.iter().product::<usize>();
-        if expected_elements != num_elements {
-            return Err(MetalError::DimensionMismatch {
-                expected: expected_elements,
-                actual: num_elements,
-            });
-        }
-
-        let byte_len = std::mem::size_of_val(data);
-        let item_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
-
-        // SAFETY: We use no-copy buffer creation, caller must ensure data lifetime
-        let buf = unsafe {
-            context
-                .device
-                .newBufferWithBytesNoCopy_length_options_deallocator(
-                    item_ptr,
-                    byte_len,
-                    MTLResourceOptions::StorageModeShared,
-                    None, // No custom deallocator needed since caller manages lifetime
-                )
-                .ok_or(MetalError::BufferFromBytesCreationFailed)?
-        };
-
-        Ok(Tensor {
-            buf,
-            dims: dims.clone(),
-            strides: Self::compute_strides(&dims),
-            dtype: Dtype::F32,
-            device: context.device.clone(),
-            offset: 0,
-            defining_cmd_buffer: Rc::new(RefCell::new(None)),
-        })
+        Ok(Self::build_tensor(dims, dtype, device, buffer, offset))
     }
 
     fn ensure_ready(&self) {
@@ -502,9 +549,9 @@ impl Tensor {
     /// Allocate and zero-initialize a tensor of the given shape.
     pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Tensor, MetalError> {
         let mut tensor = if use_pool {
-            Self::create_tensor_pooled(dims, context)?
+            Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?
         } else {
-            Self::create_tensor(dims, context)?
+            Self::new(dims, TensorStorage::Dedicated(&*context), TensorInit::Uninitialized)?
         };
         let size = tensor.size_bytes();
 
@@ -574,7 +621,7 @@ impl Tensor {
 
     /// Allocate and zero-initialize a tensor using a provided command buffer (for batching).
     pub fn zeros_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
-        let tensor = Self::create_tensor_pooled(dims, context)?;
+        let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
         let size = tensor.size_bytes();
 
         if size <= Self::cpu_fill_threshold_bytes() {
@@ -599,7 +646,7 @@ impl Tensor {
     pub fn ones_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
         // Calculate total elements before moving dims
         let total_elements: usize = dims.iter().product();
-        let tensor = Self::create_tensor_pooled(dims, context)?;
+        let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Since this is batched, we still need to execute the kernel within the provided command buffer
         // So we need to get the pipeline and encode it manually
@@ -650,7 +697,7 @@ impl Tensor {
             return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
         }
 
-        let tensor = Self::create_tensor_pooled(dims, context)?;
+        let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Get pipeline and encode manually for batching
         let pipeline = context
@@ -687,7 +734,7 @@ impl Tensor {
 
     /// Allocate and fill a tensor with uniform random values using a provided command buffer (for batching).
     pub fn random_uniform_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
-        let tensor = Self::create_tensor_pooled(dims, context)?;
+        let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Get pipeline and encode manually for batching with default [0, 1) range
         let pipeline = context
@@ -738,7 +785,7 @@ impl Tensor {
     pub fn zeros_legacy(dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
         let num_elements = dims.iter().product::<usize>();
         let values = vec![0.0f32; num_elements];
-        Self::create_tensor_from_slice(&values, dims, context)
+        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&values))
     }
 
     /// Allocate and fill a tensor with ones (CPU version).
@@ -746,14 +793,14 @@ impl Tensor {
     pub fn ones_legacy(dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
         let num_elements = dims.iter().product::<usize>();
         let values = vec![1.0f32; num_elements];
-        Self::create_tensor_from_slice(&values, dims, context)
+        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&values))
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape (CPU version).
     #[deprecated(note = "Use arange() with pooled allocation instead")]
     pub fn arange_cpu(num_elements: usize, dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
         let v: Vec<f32> = (0..num_elements).map(|x| x as f32).collect();
-        Self::create_tensor_from_slice(&v, dims, context)
+        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&v))
     }
 
     /// Fast fill a slice of f32 with a scalar value.

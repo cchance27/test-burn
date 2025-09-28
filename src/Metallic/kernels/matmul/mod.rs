@@ -7,9 +7,14 @@ use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixM
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
+    Context,
+    MetalError,
+    Operation,
+    Tensor,
+    TensorInit,
+    TensorStorage,
 };
 
 mod matmul_test;
@@ -94,7 +99,7 @@ impl KernelInvocable for MatMulOp {
         } else {
             vec![eff_left_rows, eff_right_cols]
         };
-        let out = Tensor::create_tensor_pooled(out_dims, ctx)?;
+        let out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let result_view = out.as_mps_matrix_batch_view()?;
 
         // Get or create MPSMatrixMultiplication operation from cache

@@ -31,7 +31,7 @@ impl KernelInvocable for OnesOp {
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         // Create the output tensor.
-        let out = Tensor::create_tensor_pooled(dims.clone(), ctx)?;
+        let out = Tensor::new(dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         // Create the internal operation struct.
         let op = Ones {
@@ -91,7 +91,7 @@ impl Operation for Ones {
 #[cfg(test)]
 mod ones_test {
     use crate::metallic::kernels::tensors::OnesOp;
-    use crate::metallic::{Context, MetalError};
+use crate::metallic::{Context, MetalError, TensorInit, TensorStorage};
 
     #[test]
     fn test_ones() -> Result<(), MetalError> {

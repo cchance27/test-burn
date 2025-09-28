@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::metallic::kernels::matmul::{MatMulAlphaBetaOp, MatMulOp, mps_matrix_from_buffer};
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 // Helpers
 
@@ -118,7 +118,7 @@ fn test_mps_matrix_from_buffer() -> Result<(), crate::metallic::MetalError> {
     let mut ctx = Context::new()?;
 
     // Create a small tensor for testing
-    let tensor = Tensor::create_tensor_pooled(vec![2, 3], &mut ctx)?;
+    let tensor = Tensor::new(vec![2, 3], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
 
     // Create a matrix descriptor for a 2x3 matrix
     let desc = unsafe {
@@ -150,8 +150,8 @@ fn test_matmul_correctness_small_int() -> Result<(), MetalError> {
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2x3 matrix
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // 3x2 matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
 
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 3, 2, false, false);
 
@@ -176,8 +176,8 @@ fn test_matmul_correctness_asymmetric_float() -> Result<(), MetalError> {
     let a_data: Vec<f32> = (0..(m * k)).map(|i| (i as f32 * 0.123) - 1.0).collect();
     let b_data: Vec<f32> = (0..(k * n)).map(|i| (i as f32 * 0.456) + 0.5).collect();
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
 
     let cpu_output = cpu_matmul(&a_data, 5, 4, &b_data, 4, 7, false, false);
 
@@ -219,8 +219,8 @@ fn test_matmul_transpose_right() -> Result<(), MetalError> {
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // A: 2x3
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // B: 2x3 (will be B^T: 3x2)
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![n, k], &context)?; // B is 2x3, but conceptually 3x2 for matmul
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![n, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?; // B is 2x3, but conceptually 3x2 for matmul
 
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, false, true);
 
@@ -262,8 +262,8 @@ fn test_matmul_transpose_left() -> Result<(), MetalError> {
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // A: 2x3 (will be A^T: 3x2)
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // B: 2x3
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![k, m], &context)?; // A is 2x3, but conceptually 3x2 for matmul
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
+    let a_tensor = Tensor::new(vec![k, m], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?; // A is 2x3, but conceptually 3x2 for matmul
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
 
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, true, false);
 
@@ -306,9 +306,9 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // 3x2 matrix (flattened row-major)
     let c_data = vec![0.5, 1.5, 2.5, 3.5]; // 2x2 matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?; // Will be used as result with beta
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?; // Will be used as result with beta
 
     let alpha = 0.5;
     let beta = 0.25;
@@ -384,9 +384,9 @@ fn test_matmul_non_zero_buffer_offsets() -> Result<(), MetalError> {
     let b_slice = &b_data_full[offset_b..offset_b + (k * n)];
     let c_slice = &c_data_full[offset_c..offset_c + (m * n)];
 
-    let a_tensor = Tensor::create_tensor_from_slice(a_slice, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(b_slice, vec![k, n], &context)?;
-    let _c_tensor = Tensor::create_tensor_from_slice(c_slice, vec![m, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(a_slice))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(b_slice))?;
+    let _c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(c_slice))?;
 
     // Expected result: A * B
     // A = [[1, 1.1, 1.2], [1.3, 1.4, 1.5]] (from a_data_full[10..16])
@@ -455,9 +455,9 @@ fn test_matmul_non_zero_buffer_offsets_with_alpha_beta() -> Result<(), MetalErro
     let b_data: Vec<f32> = b_data_full[offset_b..offset_b + (k * n)].to_vec();
     let c_data: Vec<f32> = c_data_full[offset_c..offset_c + (m * n)].to_vec();
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?;
 
     let alpha = 2.0;
     let beta = 0.5;
@@ -532,9 +532,9 @@ fn test_matmul_large_offsets() -> Result<(), MetalError> {
     let b_data: Vec<f32> = b_data_full[offset_b..offset_b + (k * n)].to_vec();
     let c_data: Vec<f32> = c_data_full[offset_c..offset_c + (m * n)].to_vec();
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let _c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let _c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?;
 
     // Expected result: A * B (validated with NumPy)
     // A = [[5.0, 5.01], [5.02, 5.03], [5.04, 5.05]]
@@ -586,8 +586,8 @@ fn test_matmul_no_transpose() -> Result<(), MetalError> {
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2x3 matrix
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // 3x2 matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
     let _result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
     let cpu_output = cpu_matmul(&a_data, m, k, &b_data, k, n, false, false);
 
@@ -639,8 +639,8 @@ fn test_matmul_transpose_both() -> Result<(), MetalError> {
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // 2x3 matrix: [[1,2,3], [4,5,6]]
     let b_data = vec![7.0, 8.0, 9.0, 10.0, 11.0, 12.0]; // 3x2 matrix: [[7,8], [9,10], [11,12]]
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![2, 3], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![3, 2], &context)?;
+    let a_tensor = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![3, 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
 
     // A^T * B^T: A^T = [[1,4], [2,5], [3,6]], B^T = [[7,9,11], [8,10,12]]
     // A^T * B^T = [[1*7+4*8, 1*9+4*10, 1*11+4*12], [2*7+5*8, 2*9+5*10, 2*11+5*12], [3*7+6*8, 3*9+6*10, 3*11+6*12]]
@@ -690,8 +690,8 @@ fn test_matmul_extreme_alpha_scaling() -> Result<(), MetalError> {
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0]; // 4x3 matrix
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // 3x2 matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
     let result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
     // Test with very large alpha value
     let alpha = 1e6f32;
@@ -743,9 +743,9 @@ fn test_matmul_extreme_beta_accumulation() -> Result<(), MetalError> {
     let b_data = vec![7.0, 8.0, 9.0, 1.0, 2.0, 3.0]; // 3x2 matrix (flattened row-major)
     let c_data = vec![0.5, 1.5, 2.5, 3.5]; // 2x2 matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let mut c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?; // Will be used as result with beta
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let mut c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?; // Will be used as result with beta
 
     let alpha = 1.0f32;
     let beta = 1e6f32; // Very large beta
@@ -801,8 +801,8 @@ fn test_matmul_scaled_with_extreme_values() -> Result<(), MetalError> {
     let a_data = vec![1e8f32, -1e8f32, 1e8f32, -1e8f32, 1e8f32, -1e8f32]; // 3x2 matrix with extreme values
     let b_data = vec![2e7f32, -2e7f32, 2e7f32, -2e7f32, 2e7f32, -2e7f32]; // 2x3 matrix with extreme values
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
     let mut result_tensor = Tensor::zeros(vec![m, n], &mut context, true)?;
     // Use alpha that's very small and beta that's very large to test scaling
     let alpha = 1e-8f32;
@@ -854,9 +854,9 @@ fn test_matmul_scaled_alpha_beta_extremes() -> Result<(), MetalError> {
     let b_data = vec![5.0, 6.0, 7.0, 8.0]; // 2x2 matrix
     let c_data = vec![1.0, 1.0, 1.0, 1.0]; // 2x2 matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let mut c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?; // Will be used as result with beta
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let mut c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?; // Will be used as result with beta
 
     // Use extreme alpha and beta values
     let alpha = 1e10f32;
@@ -908,9 +908,9 @@ fn test_matmul_scaling_zero_values() -> Result<(), MetalError> {
     let b_data = vec![1.0, 2.0, 3.0, 4.0]; // Regular matrix
     let c_data = vec![-1.0, -2.0, -3.0, -4.0]; // Regular matrix
 
-    let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-    let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-    let mut c_tensor = Tensor::create_tensor_from_slice(&c_data, vec![m, n], &context)?; // Will be used as result with beta
+    let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+    let mut c_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&c_data))?; // Will be used as result with beta
 
     // Use various scaling factors with zero matrix
     let alpha = 1e6f32;

@@ -2,7 +2,7 @@
 use objc2_metal::MTLComputePipelineState as _;
 
 use crate::metallic::kernels::softmax::SoftmaxOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 // CPU-based softmax for golden testing
 fn cpu_softmax(input: &[f32], seq_q: usize, seq_k: usize, causal: bool) -> Vec<f32> {
@@ -44,7 +44,7 @@ fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
     let seq_q = 2;
     let seq_k = 4;
     let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -101,7 +101,7 @@ fn test_softmax_golden_causal() -> Result<(), MetalError> {
     let seq_q = 2;
     let seq_k = 4;
     let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
@@ -180,7 +180,7 @@ fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
     let input_data = vec![
         1000.0, 2000.0, 3000.0, 4000.0, 5000.0, 6000.0, 7000.0, 8000.0, 9000.0, 10000.0, 11000.0, 12000.0,
     ];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -254,7 +254,7 @@ fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
 
     // Create input with large negative values
     let input_data = vec![-1000.0, -2000.0, -3000.0, -4000.0, -5000.0, -6000.0];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -328,7 +328,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
 
     // Create input with identical values in each row
     let input_data = vec![5.0, 5.0, 5.0, 5.0, -10.0, -10.0, -10.0, -10.0];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -417,7 +417,7 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
         1.0, 2.0, 3.0, 4.0, 10000.0, // Large outlier at the end
         -1.0, -2.0, -3.0, -4.0, 5.0, // Moderate outlier at the end
     ];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -508,7 +508,7 @@ fn test_softmax_extremes_causal_with_extremes() -> Result<(), MetalError> {
 
     // Create input with extreme values and test causal masking
     let input_data = vec![1000.0, -1000.0, 5000.0, -2000.0, 3000.0, -4000.0, 100.0, 200.0, 300.0];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
@@ -646,7 +646,7 @@ fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
         -10000.0, -9999.0, -10001.0, -10002.0, // Very negative values that could cause exp to underflow
         -10000.0, -10000.0, -10000.0, -10000.0, // Identical very negative values
     ];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
@@ -729,7 +729,7 @@ fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
         2.0,
         3.0, // NEG_INFINITY should not affect softmax significantly
     ];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
@@ -823,7 +823,7 @@ fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
         2.0,
         3.0, // NaN in the input
     ];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
@@ -880,7 +880,7 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
         }
     }
 
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
@@ -956,7 +956,7 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
         0.0,   // Zero
         100.0, // Large
     ];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
@@ -1030,7 +1030,7 @@ fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
     let seq_q = 7;
     let seq_k = 13;
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.1).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -1087,7 +1087,7 @@ fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
     let seq_q = 31;
     let seq_k = 257;
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.01).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
@@ -1144,7 +1144,7 @@ fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
     let seq_q = 5;
     let seq_k = 9;
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.2).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
@@ -1216,7 +1216,7 @@ fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
     let seq_q = 17;
     let seq_k = 93;
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.05).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true); // Using causal=true
@@ -1304,7 +1304,7 @@ fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
     let seq_q = 4;
     let seq_k = 8;
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.1).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let result = context.call::<SoftmaxOp>((
@@ -1346,7 +1346,7 @@ fn test_softmax_threadgroup_large_seq_k() -> Result<(), MetalError> {
     let seq_q = 2;
     let seq_k = 128; // Larger than typical threadgroup size
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.05).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let result = context.call::<SoftmaxOp>((
@@ -1388,7 +1388,7 @@ fn test_softmax_threadgroup_very_large_seq_k() -> Result<(), MetalError> {
     let seq_q = 1;
     let seq_k = 512; // Very large sequence length
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.01).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let result = context.call::<SoftmaxOp>((
@@ -1430,7 +1430,7 @@ fn test_softmax_threadgroup_multiple_rows() -> Result<(), MetalError> {
     let seq_q = 16; // Multiple rows
     let seq_k = 64; // Reasonable size per row
     let input_data: Vec<f32> = (0..(seq_q * seq_k)).map(|i| (i as f32) * 0.02).collect();
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+    let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
     let result = context.call::<SoftmaxOp>((
@@ -1469,7 +1469,7 @@ fn test_softmax_logic() -> Result<(), MetalError> {
     let mut ctx = Context::new()?;
     // Create a simple test tensor [2, 3] with values that will produce recognizable softmax results
     let input_data = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]; // Two rows to softmax independently
-    let attn = Tensor::create_tensor_from_slice(&input_data, vec![2, 3], &ctx)?;
+    let attn = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
     // Apply softmax with no causal masking (causal=0)
     let result = ctx.call::<SoftmaxOp>((&attn, softmax_rows_total(&attn, 3), 2, 3, 0, 0))?;
     // Check that each row sums to approximately 1 (property of softmax)

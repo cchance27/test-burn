@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the SiLU operation.
 pub struct SiluOp;
@@ -26,7 +27,7 @@ impl KernelInvocable for SiluOp {
         let input = input;
         ctx.prepare_tensors_for_active_cmd(&[&input]);
 
-        let output = Tensor::create_tensor_pooled(input.dims().to_vec(), ctx)?;
+        let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         let op = Silu {
             input,
@@ -79,7 +80,7 @@ mod silu_test {
     fn test_silu_logic() -> Result<(), MetalError> {
         let mut ctx = Context::new()?;
         let input_data = vec![1.0, -1.0, 0.0, 2.0];
-        let input = Tensor::create_tensor_from_slice(&input_data, vec![4], &ctx)?;
+        let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
         let result = ctx.call::<SiluOp>(input)?;
 

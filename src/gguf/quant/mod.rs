@@ -4,6 +4,7 @@
 use crate::gguf::GGUFDataType;
 use crate::gguf::{GGUFFile, GGUTensorInfo};
 use crate::metallic::Tensor;
+use crate::metallic::{TensorInit, TensorStorage};
 use half::f16;
 use std::convert::TryFrom;
 
@@ -62,7 +63,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                 let float_data: &[f32] =
                     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, data.len() / std::mem::size_of::<f32>()) };
 
-                Tensor::create_tensor_from_slice(float_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(float_data)).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::F16 => {
                 // F16 (IEEE 754 half) stored as little-endian u16 per element
@@ -84,7 +85,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                     let h = f16::from_bits(bits);
                     f32_data.push(h.to_f32());
                 }
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&f32_data)).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::BF16 => {
                 // BF16 (bfloat16) stored as little-endian u16 per element.
@@ -98,7 +99,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                     let bits32 = bits16 << 16;
                     f32_data.push(f32::from_bits(bits32));
                 }
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&f32_data)).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::F64 => {
                 // For F64 tensors, convert to F32
@@ -108,7 +109,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                 // Convert F64 to F32
                 let f32_data: Vec<f32> = f64_data.iter().map(|&x| x as f32).collect();
 
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&f32_data)).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             crate::gguf::GGUFDataType::Q8_0 | crate::gguf::GGUFDataType::Q8_1 => {
                 // For Q8_0/Q8_1 tensors, we need to dequantize to F32
@@ -122,7 +123,7 @@ impl TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor {
                 #[cfg(not(target_arch = "aarch64"))]
                 let f32_data = dequantize_q8_to_f32(data, tensor_info.data_type)?;
 
-                Tensor::create_tensor_from_slice(&f32_data, dims, &context).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
+                Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&f32_data)).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
             _ => {
                 // For other data types, we would need to implement specific dequantization

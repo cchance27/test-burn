@@ -1,4 +1,5 @@
 use super::*;
+use crate::metallic::{TensorInit, TensorStorage};
 
 fn softmax_rows_total(attn_tensor: &Tensor, seq_k: usize) -> u32 {
     if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 }
@@ -22,9 +23,9 @@ fn test_sdpa_determinism_non_causal() -> Result<(), MetalError> {
     let mut results: Vec<Vec<f32>> = Vec::new();
 
     for i in 0..5 {
-        let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-        let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-        let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+        let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+        let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+        let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
         let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?;
         results.push(result.as_slice().to_vec());
@@ -79,9 +80,9 @@ fn test_sdpa_determinism_causal() -> Result<(), MetalError> {
     let mut results: Vec<Vec<f32>> = Vec::new();
 
     for i in 0..5 {
-        let q_tensor = Tensor::create_tensor_from_slice(&q_data, vec![batch, seq_q, dim], &context)?;
-        let k_tensor = Tensor::create_tensor_from_slice(&k_data, vec![batch, seq_k, dim], &context)?;
-        let v_tensor = Tensor::create_tensor_from_slice(&v_data, vec![batch, seq_k, dim], &context)?;
+        let q_tensor = Tensor::new(vec![batch, seq_q, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&q_data))?;
+        let k_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&k_data))?;
+        let v_tensor = Tensor::new(vec![batch, seq_k, dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&v_data))?;
 
         let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true)?;
         results.push(result.as_slice().to_vec());
@@ -137,9 +138,9 @@ fn test_matmul_determinism() -> Result<(), MetalError> {
     let mut results: Vec<Vec<f32>> = Vec::new();
 
     for _ in 0..5 {
-        let a_tensor = Tensor::create_tensor_from_slice(&a_data, vec![m, k], &context)?;
-        let b_tensor = Tensor::create_tensor_from_slice(&b_data, vec![k, n], &context)?;
-        let _result_tensor = Tensor::create_tensor_from_slice(&result_data, vec![m, n], &context)?;
+        let a_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+        let b_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+        let _result_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&result_data))?;
 
         // Use the new kernel system
         let result = context.matmul(&a_tensor, &b_tensor, false, false)?;
@@ -188,7 +189,7 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
     let mut results: Vec<Vec<f32>> = Vec::new();
 
     for _ in 0..5 {
-        let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
+        let input_tensor = Tensor::new(vec![seq_q, seq_k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?; // Reshape to 2D as expected by kernel
         let attn_tensor = input_tensor.clone();
 
         // Apply softmax using the new kernel system (in-place operation)
@@ -238,8 +239,8 @@ fn test_tensor_operations_determinism() -> Result<(), MetalError> {
     let mut mul_results: Vec<Vec<f32>> = Vec::new();
 
     for _ in 0..5 {
-        let tensor1 = Tensor::create_tensor_from_slice(&data1, dims.clone(), &context)?;
-        let tensor2 = Tensor::create_tensor_from_slice(&data2, dims.clone(), &context)?;
+        let tensor1 = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&data1))?;
+        let tensor2 = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&data2))?;
 
         // Addition
         let add_result = tensor1.add_elem(&tensor2, &mut context)?.to_vec();

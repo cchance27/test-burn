@@ -7,8 +7,15 @@ use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::Qwen25;
 use crate::metallic::{
-    context::Context, error::MetalError, generation, generation::GenerationConfig, models::LoadableModel, tensor::Tensor,
+    context::Context,
+    error::MetalError,
+    generation,
+    generation::GenerationConfig,
+    models::LoadableModel,
+    tensor::Tensor,
     tokenizer::Tokenizer,
+    TensorInit,
+    TensorStorage,
 };
 use approx::assert_relative_eq;
 use ndarray::ArrayD;
@@ -175,8 +182,8 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
                 sin_buf[idx] = angle.sin();
             }
         }
-        let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], ctx)?;
-        let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], ctx)?;
+        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
+        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
         let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -194,8 +201,8 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
                 sin_buf_k[idx] = angle.sin();
             }
         }
-        let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], ctx)?;
-        let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], ctx)?;
+        let cos_k = Tensor::new(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf_k))?;
+        let sin_k = Tensor::new(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf_k))?;
         let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -613,10 +620,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
-    let sin_q = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
+    let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
+    let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
     let q_heads_after_rope = {
-        let _out = Tensor::create_tensor_pooled(q_heads.dims().to_vec(), &mut ctx)?;
+        let _out = Tensor::new(q_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
@@ -635,10 +642,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &ctx)?;
-    let sin_k = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
+    let cos_k = Tensor::new(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf_k))?;
+    let sin_k = Tensor::new(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf_k))?;
     let k_heads_after_rope = {
-        let _out = Tensor::create_tensor_pooled(k_heads.dims().to_vec(), &mut ctx)?;
+        let _out = Tensor::new(k_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();
@@ -1108,8 +1115,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q_last = Tensor::create_tensor_from_slice(&cos_buf, vec![seq, dim_half], &ctx)?;
-    let sin_q_last = Tensor::create_tensor_from_slice(&sin_buf, vec![seq, dim_half], &ctx)?;
+    let cos_q_last = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
+    let sin_q_last = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
     let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0))? };
     ctx.synchronize();
 
@@ -1126,10 +1133,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k_last = Tensor::create_tensor_from_slice(&cos_buf_k, vec![seq, dim_half_k], &ctx)?;
-    let sin_k_last = Tensor::create_tensor_from_slice(&sin_buf_k, vec![seq, dim_half_k], &ctx)?;
+    let cos_k_last = Tensor::new(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf_k))?;
+    let sin_k_last = Tensor::new(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf_k))?;
     let k_heads_after_rope_last = {
-        let _out = Tensor::create_tensor_pooled(k_heads_last.dims().to_vec(), &mut ctx)?;
+        let _out = Tensor::new(k_heads_last.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32, 0))?
     };
     ctx.synchronize();

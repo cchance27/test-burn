@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::metallic::kernels::rope::RoPEOp;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
 
 // CPU RoPE reference implementation for testing (pairs elements dim/2 apart)
 fn cpu_rope(input: &[f32], batch: usize, seq_len: usize, dim: usize, cos: &[f32], sin: &[f32]) -> Vec<f32> {
@@ -51,9 +51,9 @@ fn test_rope_basic() -> Result<(), MetalError> {
     }
 
     let dims = vec![batch, seq_len, dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
-    let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let cos_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&cos_data))?;
+    let sin_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&sin_data))?;
 
     let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
@@ -110,9 +110,9 @@ fn test_rope_extreme_large_position_values() -> Result<(), MetalError> {
     }
 
     let dims = vec![batch, seq_len, dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
-    let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let cos_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&cos_data))?;
+    let sin_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&sin_data))?;
 
     let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
@@ -174,9 +174,9 @@ fn test_rope_extreme_angle_values() -> Result<(), MetalError> {
     }
 
     let dims = vec![batch, seq_len, dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
-    let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let cos_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&cos_data))?;
+    let sin_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&sin_data))?;
 
     let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
@@ -238,9 +238,9 @@ fn test_rope_extreme_input_values() -> Result<(), MetalError> {
     }
 
     let dims = vec![batch, seq_len, dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
-    let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let cos_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&cos_data))?;
+    let sin_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&sin_data))?;
 
     let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();
@@ -284,9 +284,9 @@ fn test_rope_extreme_cos_sin_values() -> Result<(), MetalError> {
     }
 
     let dims = vec![batch, seq_len, dim];
-    let input_tensor = Tensor::create_tensor_from_slice(&input_data, dims.clone(), &context)?;
-    let cos_tensor = Tensor::create_tensor_from_slice(&cos_data, vec![seq_len, dim / 2], &context)?;
-    let sin_tensor = Tensor::create_tensor_from_slice(&sin_data, vec![seq_len, dim / 2], &context)?;
+    let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
+    let cos_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&cos_data))?;
+    let sin_tensor = Tensor::new(vec![seq_len, dim / 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&sin_data))?;
 
     let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
     context.synchronize();

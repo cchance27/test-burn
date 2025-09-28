@@ -5,9 +5,14 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
+    Context,
+    MetalError,
+    Operation,
+    Tensor,
+    TensorInit,
+    TensorStorage,
 };
 
 use std::mem::size_of;
@@ -133,14 +138,14 @@ fn create_sdpa_operation(
     let scale = 1.0 / (d as f32).sqrt();
 
     // Create output tensor
-    let out = Tensor::create_tensor_pooled(vec![b, s_q, d], ctx)?;
+    let out = Tensor::new(vec![b, s_q, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
     let attention = if config.reuse_workspace {
-        let buffer = Tensor::create_tensor_pooled(vec![b, s_q, s_k], ctx)?;
+        let buffer = Tensor::new(vec![b, s_q, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         ctx.prepare_tensors_for_active_cmd(&[&buffer]);
         buffer
     } else {
-        Tensor::create_tensor_pooled(vec![b, s_q, s_k], ctx)?
+        Tensor::new(vec![b, s_q, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
     };
 
     ctx.prepare_tensors_for_active_cmd(&[&attention]);
