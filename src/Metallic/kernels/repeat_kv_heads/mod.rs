@@ -7,6 +7,7 @@ struct RepeatKvHeads {
     input: Tensor,
     output: Tensor,
     group_size: u32,
+    batch: u32,
     n_kv_heads: u32,
     n_heads: u32,
     seq: u32,

@@ -47,7 +47,6 @@ pub enum KernelLibrary {
     LayerNorm,
     Permute,
     RepeatKvHeads,
-    RepeatKvHeadsStep,
     Rope,
     RMSNorm,
     Silu,
