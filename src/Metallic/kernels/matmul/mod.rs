@@ -1,6 +1,6 @@
-use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2::AnyThread;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
@@ -58,10 +58,10 @@ impl KernelInvocable for MatMulOp {
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         let (left, right, transpose_left, transpose_right) = args;
 
-        ctx.prepare_tensors_for_active_cmd(&[left, right]);
+        let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
+        let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
 
-        let left_view = left.as_mps_matrix_batch_view()?;
-        let right_view = right.as_mps_matrix_batch_view()?;
+        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor]);
 
         // Calculate effective dimensions based on transpose
         let (eff_left_rows, eff_left_cols) = if transpose_left {
@@ -142,10 +142,10 @@ impl KernelInvocable for MatMulOp {
 
         // Create the internal operation struct.
         let op = MatMul {
-            left_buf: left.buf.clone(),
-            left_offset: left.offset,
-            right_buf: right.buf.clone(),
-            right_offset: right.offset,
+            left_buf: left_tensor.buf.clone(),
+            left_offset: left_tensor.offset,
+            right_buf: right_tensor.buf.clone(),
+            right_offset: right_tensor.offset,
             result_buf: out.buf.clone(),
             result_offset: out.offset,
             left_desc,
