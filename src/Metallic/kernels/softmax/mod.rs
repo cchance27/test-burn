@@ -14,6 +14,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 pub const METALLIC_SOFTMAX_BACKEND_ENV: &str = "METALLIC_SOFTMAX_BACKEND";
+const MAX_SIMD_GROUPS_PER_THREADGROUP: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoftmaxBackendPreference {
@@ -254,9 +255,17 @@ impl Operation for SoftmaxOperation {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
-        // Ensure at least 32 threads per threadgroup to satisfy kernel's reduction assumptions
-        let native = self.pipeline.threadExecutionWidth();
-        let width = if native < 32 { 32 } else { native };
+        // Launch full SIMDGROUP multiples so the kernel can stage per-group reductions safely.
+        let native = self.pipeline.threadExecutionWidth() as usize;
+        let simd_width = native.max(32);
+        let max_threads = self.pipeline.maxTotalThreadsPerThreadgroup() as usize;
+        let max_available_groups = std::cmp::max(1, max_threads / simd_width);
+        let desired_groups = 4; // Good balance of occupancy and register pressure on Apple GPUs.
+        let simd_groups = std::cmp::max(
+            1,
+            std::cmp::min(MAX_SIMD_GROUPS_PER_THREADGROUP, std::cmp::min(max_available_groups, desired_groups)),
+        );
+        let width = simd_width * simd_groups;
         let threads_per_tg = MTLSize {
             width,
             height: 1,

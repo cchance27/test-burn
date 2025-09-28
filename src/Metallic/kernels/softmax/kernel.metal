@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include <metal_simdgroup>
 using namespace metal;
 
 // Fused mask+softmax compute kernel
@@ -9,7 +10,10 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
                                constant uint &query_offset [[buffer(4)]],
                                uint3 tg_pos [[threadgroup_position_in_grid]],
                                uint3 tid3 [[thread_position_in_threadgroup]],
-                               uint3 tptg [[threads_per_threadgroup]]) {
+                               uint3 tptg [[threads_per_threadgroup]],
+                               ushort simd_tid [[thread_index_in_simdgroup]],
+                               ushort simd_gid [[simdgroup_index_in_threadgroup]],
+                               ushort simdgroup_width [[threads_per_simdgroup]]) {
     // One threadgroup processes one row. Threads stride across columns.
     uint row = tg_pos.y;
     uint lane = tid3.x;
@@ -17,11 +21,19 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
     uint base = row * seq_k;
     uint i_q = (row % seq_q) + query_offset;
 
+    constexpr uint MAX_SIMD_GROUPS = 64;
+    constexpr uint INVALID_INDEX = 0xffffffffu;
+    uint simdgroups_per_tg = (tptg.x + simdgroup_width - 1u) / simdgroup_width;
+    simdgroups_per_tg = simdgroups_per_tg > 0u ? simdgroups_per_tg : 1u;
+    uint clamped_simdgroups = simdgroups_per_tg > MAX_SIMD_GROUPS ? MAX_SIMD_GROUPS : simdgroups_per_tg;
+    bool simdgroup_active = simd_gid < clamped_simdgroups;
+
     // Use a more efficient shared memory size based on common hardware
     // Apple GPUs typically have good performance with 256 or 512 threads per group
-    threadgroup float shared_data[256];
-    threadgroup uint shared_indices[256];
-    
+    threadgroup float shared_max[MAX_SIMD_GROUPS];
+    threadgroup uint shared_indices[MAX_SIMD_GROUPS];
+    threadgroup float shared_sum[MAX_SIMD_GROUPS];
+
     // Phase 1: row-wise max reduction with causal masking and index tracking.
     float local_max = -INFINITY;
     uint max_index = 0;
@@ -37,22 +49,34 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
         }
     }
     
-    shared_data[lane] = local_max;
-    shared_indices[lane] = max_index;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // Optimized reduction with fewer iterations, tracking the index of the maximum
-    for (uint offset = stride / 2u; offset > 0u; offset /= 2u) {
-        if (lane < offset) {
-            if (shared_data[lane + offset] > shared_data[lane]) {
-                shared_data[lane] = shared_data[lane + offset];
-                shared_indices[lane] = shared_indices[lane + offset];
-            }
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    float group_max = simdgroup_reduce_max(local_max);
+    uint candidate_index = (local_max == group_max) ? max_index : INVALID_INDEX;
+    uint group_max_index = simdgroup_reduce_min(candidate_index);
+
+    if (simd_is_first() && simdgroup_active) {
+        shared_max[simd_gid] = group_max;
+        shared_indices[simd_gid] = group_max_index;
     }
-    
-    float maxv = shared_data[0];
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_gid == 0) {
+        uint lane_id = static_cast<uint>(simd_tid);
+        float cross_max = (lane_id < clamped_simdgroups) ? shared_max[lane_id] : -INFINITY;
+        float block_max = simdgroup_reduce_max(cross_max);
+        uint cross_index =
+            (lane_id < clamped_simdgroups && cross_max == block_max) ? shared_indices[lane_id] : INVALID_INDEX;
+        uint block_max_index = simdgroup_reduce_min(cross_index);
+
+        if (simd_is_first()) {
+            shared_max[0] = block_max;
+            shared_indices[0] = block_max_index;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float maxv = shared_max[0];
     uint row_max_index = shared_indices[0]; // This is the relative index within the row
 
     // Phase 2: compute exp(x - max) and partial sums
@@ -60,7 +84,7 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
     for (uint c = lane; c < seq_k; c += stride) {
         float xv = attn[base + c];
         // Apply causal mask
-        if (causal_flag == 1u && c > i_q) { 
+        if (causal_flag == 1u && c > i_q) {
             xv = -INFINITY; 
         }
         // Compute exp(x - max) with proper handling for extreme values
@@ -87,19 +111,28 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
         attn[base + c] = e;
         local_sum += e;
     }
-    
-    shared_data[lane] = local_sum;
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-    
-    // Same optimized reduction for sum
-    for (uint offset = stride / 2u; offset > 0u; offset /= 2u) {
-        if (lane < offset) {
-            shared_data[lane] += shared_data[lane + offset];
-        }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float group_sum = simdgroup_reduce_add(local_sum);
+
+    if (simd_is_first() && simdgroup_active) {
+        shared_sum[simd_gid] = group_sum;
     }
-    
-    float sumv = shared_data[0];
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (simd_gid == 0) {
+        uint lane_id = static_cast<uint>(simd_tid);
+        float cross_sum = (lane_id < clamped_simdgroups) ? shared_sum[lane_id] : 0.0f;
+        float block_sum = simdgroup_reduce_add(cross_sum);
+
+        if (simd_is_first()) {
+            shared_sum[0] = block_sum;
+        }
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float sumv = shared_sum[0];
 
     // Phase 3: normalize in place
     for (uint c = lane; c < seq_k; c += stride) {
