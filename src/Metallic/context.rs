@@ -6,7 +6,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
-use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOp;
+use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -416,7 +416,13 @@ impl Context {
         query_offset: usize,
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOp>((q.clone(), k.clone(), v.clone(), causal, query_offset as u32))
+        self.call::<ScaledDotProductAttentionOptimizedOp>((
+            q.clone(),
+            k.clone(),
+            v.clone(),
+            causal,
+            query_offset as u32,
+        ))
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.
