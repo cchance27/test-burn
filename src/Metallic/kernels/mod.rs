@@ -106,6 +106,7 @@ impl KernelFunction {
             KernelFunction::ElemwiseDiv => KernelLibrary::ElemwiseDiv,
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
             KernelFunction::ElemwiseSub => KernelLibrary::ElemwiseSub,
+            KernelFunction::FusedQkvBiasSplit => KernelLibrary::FusedQkv,
             KernelFunction::Gelu => KernelLibrary::Gelu,
             KernelFunction::KvRearrange => KernelLibrary::KvRearrange,
             KernelFunction::LayerNorm => KernelLibrary::LayerNorm,
