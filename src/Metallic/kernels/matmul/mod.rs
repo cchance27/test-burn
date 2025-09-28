@@ -1,14 +1,14 @@
-use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
+use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor,
 };
 
 mod matmul_test;
@@ -33,13 +33,14 @@ struct MatMul {
     pub right_desc: Retained<MPSMatrixDescriptor>,
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
+    pub batch_size: usize,
 }
 
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for MatMulOp {
     // Input arguments for the call - two input tensors + transpose options
     type Args<'a> = (&'a Tensor, &'a Tensor, bool, bool); // (left, right, transpose_left, transpose_right)
-    // The output type
+                                                          // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
     fn function_id() -> Option<KernelFunction> {
@@ -56,28 +57,21 @@ impl KernelInvocable for MatMulOp {
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         let (left, right, transpose_left, transpose_right) = args;
 
-        // Validate dimensions for matrix multiplication
-        if left.dims().len() != 2 || right.dims().len() != 2 {
-            return Err(MetalError::InvalidOperation("matmul requires 2D tensors".to_string()));
-        }
-
         ctx.prepare_tensors_for_active_cmd(&[left, right]);
 
-        let left_rows = left.dims()[0];
-        let left_cols = left.dims()[1];
-        let right_rows = right.dims()[0];
-        let right_cols = right.dims()[1];
+        let left_view = left.as_mps_matrix_batch_view()?;
+        let right_view = right.as_mps_matrix_batch_view()?;
 
         // Calculate effective dimensions based on transpose
         let (eff_left_rows, eff_left_cols) = if transpose_left {
-            (left_cols, left_rows)
+            (left_view.columns, left_view.rows)
         } else {
-            (left_rows, left_cols)
+            (left_view.rows, left_view.columns)
         };
         let (eff_right_rows, eff_right_cols) = if transpose_right {
-            (right_cols, right_rows)
+            (right_view.columns, right_view.rows)
         } else {
-            (right_rows, right_cols)
+            (right_view.rows, right_view.columns)
         };
 
         if eff_left_cols != eff_right_rows {
@@ -87,9 +81,20 @@ impl KernelInvocable for MatMulOp {
             )));
         }
 
+        if left_view.batch != right_view.batch {
+            return Err(MetalError::InvalidOperation(
+                "Batched matmul requires operands to share the same batch size".to_string(),
+            ));
+        }
+
         // Create the output tensor (eff_left_rows x eff_right_cols)
-        let out_dims = vec![eff_left_rows, eff_right_cols];
+        let out_dims = if left_view.batch > 1 {
+            vec![left_view.batch, eff_left_rows, eff_right_cols]
+        } else {
+            vec![eff_left_rows, eff_right_cols]
+        };
         let out = Tensor::create_tensor_pooled(out_dims, ctx)?;
+        let result_view = out.as_mps_matrix_batch_view()?;
 
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
@@ -98,6 +103,7 @@ impl KernelInvocable for MatMulOp {
             result_rows: eff_left_rows,
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
+            batch_size: result_view.batch,
             alpha: 1.0,
             beta: 0.0,
         };
@@ -107,23 +113,29 @@ impl KernelInvocable for MatMulOp {
 
         // Create MPS matrix descriptors based on original dimensions (not transposed ones)
         let left_desc_key = MpsMatrixDescriptorKey {
-            rows: left_rows,
-            columns: left_cols,
-            row_bytes: left_cols * std::mem::size_of::<f32>(),
+            rows: left_view.rows,
+            columns: left_view.columns,
+            row_bytes: left_view.row_bytes,
+            matrices: left_view.batch,
+            matrix_bytes: left_view.matrix_bytes,
         };
         let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
         let right_desc_key = MpsMatrixDescriptorKey {
-            rows: right_rows,
-            columns: right_cols,
-            row_bytes: right_cols * std::mem::size_of::<f32>(),
+            rows: right_view.rows,
+            columns: right_view.columns,
+            row_bytes: right_view.row_bytes,
+            matrices: right_view.batch,
+            matrix_bytes: right_view.matrix_bytes,
         };
         let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
         let result_desc_key = MpsMatrixDescriptorKey {
             rows: eff_left_rows,
             columns: eff_right_cols,
-            row_bytes: eff_right_cols * std::mem::size_of::<f32>(),
+            row_bytes: result_view.row_bytes,
+            matrices: result_view.batch,
+            matrix_bytes: result_view.matrix_bytes,
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
@@ -139,6 +151,7 @@ impl KernelInvocable for MatMulOp {
             right_desc,
             result_desc,
             gemm,
+            batch_size: result_view.batch,
         };
 
         // Return the boxed operation and the output tensor.
@@ -160,6 +173,10 @@ impl Operation for MatMul {
         let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
 
         // Encode the MPS matrix multiplication
+        unsafe {
+            self.gemm.setBatchStart(0 as NSUInteger);
+            self.gemm.setBatchSize(self.batch_size as NSUInteger);
+        }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
         Ok(())
     }
@@ -177,7 +194,16 @@ pub fn mps_matrix_from_buffer(
     offset: usize,
     descriptor: &Retained<MPSMatrixDescriptor>,
 ) -> Retained<MPSMatrix> {
-    let size = unsafe { descriptor.rowBytes() * descriptor.rows() };
+    let rows = unsafe { descriptor.rows() };
+    let row_bytes = unsafe { descriptor.rowBytes() };
+    let matrices = unsafe { descriptor.matrices() };
+    let total_bytes = if matrices <= 1 {
+        row_bytes * rows
+    } else {
+        let matrix_bytes = unsafe { descriptor.matrixBytes() };
+        (matrices - 1) * matrix_bytes + rows * row_bytes
+    };
+    let size = total_bytes;
     debug_assert!(offset + size <= buffer.length(), "matrix dimensions exceed buffer length");
     unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), buffer, offset, descriptor) }
 }

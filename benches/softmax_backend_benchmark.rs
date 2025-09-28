@@ -13,12 +13,12 @@ fn run_softmax(ctx: &mut Context, cache: Option<&mut ResourceCache>, allow_mps: 
     match cache {
         Some(cache_ref) => {
             for _ in 0..ITERATIONS {
-                let _ = apply_softmax(ctx, Some(cache_ref), &attn, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
+                let _ = apply_softmax(ctx, Some(cache_ref), &attn, 1, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
             }
         }
         None => {
             for _ in 0..ITERATIONS {
-                let _ = apply_softmax(ctx, None, &attn, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
+                let _ = apply_softmax(ctx, None, &attn, 1, ROWS, COLUMNS, false, 0, allow_mps).unwrap();
             }
         }
     }

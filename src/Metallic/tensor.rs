@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::{Context, MetalError, operation::CommandBuffer};
+use super::{operation::CommandBuffer, Context, MetalError};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
@@ -59,6 +59,16 @@ pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 // CPU fill threshold in MB
 const DEFAULT_CPU_FILL_THRESHOLD_MB: usize = 1;
 
+/// A lightweight description of a tensor view that can be consumed by MPS matrix APIs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MpsMatrixBatchView {
+    pub batch: usize,
+    pub rows: usize,
+    pub columns: usize,
+    pub row_bytes: usize,
+    pub matrix_bytes: usize,
+}
+
 /// A small zero-copy Tensor backed by a retained Metal buffer.
 /// The buffer is retained while this struct is alive. `as_slice()` provides
 /// an immutable view into the underlying contents; callers must ensure
@@ -86,6 +96,79 @@ impl Tensor {
     #[inline]
     pub fn size_bytes(&self) -> usize {
         self.dims.iter().product::<usize>() * self.dtype.size_bytes()
+    }
+
+    /// Compute a strided matrix view for tensors shaped as `[batch, rows, columns]`.
+    ///
+    /// The returned [`MpsMatrixBatchView`] describes how to interpret the tensor's
+    /// memory layout when binding it to MPS matrix kernels. The function also
+    /// supports 2-D tensors by treating them as a batch of size 1.
+    pub fn as_mps_matrix_batch_view(&self) -> Result<MpsMatrixBatchView, MetalError> {
+        if self.dims.len() < 2 {
+            return Err(MetalError::InvalidShape(
+                "MPS matrix view requires at least 2 dimensions".to_string(),
+            ));
+        }
+
+        let elem_size = self.dtype.size_bytes();
+
+        let (batch, rows, cols, row_stride_elems, matrix_stride_elems) = match self.dims.len() {
+            2 => {
+                let rows = self.dims[0];
+                let cols = self.dims[1];
+                let row_stride = if self.strides.len() == 2 { self.strides[0] } else { cols };
+                let matrix_stride = rows * row_stride;
+                (1, rows, cols, row_stride, matrix_stride)
+            }
+            3 => {
+                let batch = self.dims[0];
+                let rows = self.dims[1];
+                let cols = self.dims[2];
+                let row_stride = if self.strides.len() == 3 { self.strides[1] } else { cols };
+                let matrix_stride = if self.strides.len() == 3 {
+                    self.strides[0]
+                } else {
+                    rows * row_stride
+                };
+                (batch, rows, cols, row_stride, matrix_stride)
+            }
+            _ => {
+                // Treat higher rank tensors as contiguous [batch, rows, cols] by collapsing
+                // the leading dimensions into the batch dimension.
+                let cols = *self
+                    .dims
+                    .last()
+                    .ok_or_else(|| MetalError::InvalidShape("Tensor has no column dimension".to_string()))?;
+                let rows = self
+                    .dims
+                    .iter()
+                    .rev()
+                    .nth(1)
+                    .copied()
+                    .ok_or_else(|| MetalError::InvalidShape("Tensor has no row dimension".to_string()))?;
+                let batch = self.len() / (rows * cols);
+                let row_stride = cols;
+                let matrix_stride = rows * row_stride;
+                (batch, rows, cols, row_stride, matrix_stride)
+            }
+        };
+
+        let row_bytes = row_stride_elems * elem_size;
+        let matrix_bytes = matrix_stride_elems * elem_size;
+
+        if matrix_bytes < rows * row_bytes {
+            return Err(MetalError::InvalidShape(
+                "Tensor strides are too small for requested matrix view".to_string(),
+            ));
+        }
+
+        Ok(MpsMatrixBatchView {
+            batch,
+            rows,
+            columns: cols,
+            row_bytes,
+            matrix_bytes,
+        })
     }
 
     /// Compute strides for contiguous tensor layout

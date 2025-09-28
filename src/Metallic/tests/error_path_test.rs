@@ -90,6 +90,7 @@ fn test_matmul_invalid_shapes() {
         result_rows: m,
         result_columns: n,
         interior_columns: k1, // This won't match k2
+        batch_size: 1,
         alpha: 1.0,
         beta: 0.0,
     };

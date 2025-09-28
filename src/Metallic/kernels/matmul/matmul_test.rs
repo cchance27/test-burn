@@ -1,5 +1,5 @@
 #![cfg(test)]
-use crate::metallic::kernels::matmul::{MatMulAlphaBetaOp, MatMulOp, mps_matrix_from_buffer};
+use crate::metallic::kernels::matmul::{mps_matrix_from_buffer, MatMulAlphaBetaOp, MatMulOp};
 use crate::metallic::{Context, MetalError, Tensor};
 
 // Helpers

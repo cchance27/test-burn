@@ -4,8 +4,8 @@ use super::{
     error::MetalError,
 };
 use objc2::rc::Retained;
-use objc2::AnyThread;
 use objc2::runtime::ProtocolObject;
+use objc2::AnyThread;
 use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
 
@@ -64,12 +64,23 @@ impl Cacheable for CacheableMpsMatrixDescriptor {
 
     fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let descriptor = unsafe {
-            MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
-                key.rows,
-                key.columns,
-                key.row_bytes,
-                objc2_metal_performance_shaders::MPSDataType::Float32,
-            )
+            if key.matrices > 1 || key.matrix_bytes != key.row_bytes * key.rows {
+                MPSMatrixDescriptor::matrixDescriptorWithRows_columns_matrices_rowBytes_matrixBytes_dataType(
+                    key.rows,
+                    key.columns,
+                    key.matrices,
+                    key.row_bytes,
+                    key.matrix_bytes,
+                    objc2_metal_performance_shaders::MPSDataType::Float32,
+                )
+            } else {
+                MPSMatrixDescriptor::matrixDescriptorWithRows_columns_rowBytes_dataType(
+                    key.rows,
+                    key.columns,
+                    key.row_bytes,
+                    objc2_metal_performance_shaders::MPSDataType::Float32,
+                )
+            }
         };
         Ok(Self {
             descriptor,

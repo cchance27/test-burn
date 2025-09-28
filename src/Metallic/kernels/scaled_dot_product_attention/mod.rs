@@ -5,9 +5,9 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor,
 };
 
 use std::mem::size_of;
@@ -135,69 +135,50 @@ fn create_sdpa_operation(
     // Create output tensor
     let out = Tensor::create_tensor_pooled(vec![b, s_q, d], ctx)?;
 
-    let workspace = if config.reuse_workspace {
-        Some(Tensor::create_tensor_pooled(vec![s_q, s_k], ctx)?)
+    let attention = if config.reuse_workspace {
+        let buffer = Tensor::create_tensor_pooled(vec![b, s_q, s_k], ctx)?;
+        ctx.prepare_tensors_for_active_cmd(&[&buffer]);
+        buffer
     } else {
-        None
+        Tensor::create_tensor_pooled(vec![b, s_q, s_k], ctx)?
     };
 
-    if let Some(buffer) = workspace.as_ref() {
-        ctx.prepare_tensors_for_active_cmd(&[buffer]);
-    }
+    ctx.prepare_tensors_for_active_cmd(&[&attention]);
 
-    // Process each batch separately to work with 2D matmul operations
-    for i in 0..b {
-        // Get batch slices for each tensor
-        let q_i = q.get_batch(i)?; // [s_q, d]
-        let k_i = k.get_batch(i)?; // [s_k, d]
-        let v_i = v.get_batch(i)?; // [s_k, d]
-        let out_i = out.get_batch(i)?; // [s_q, d]
+    let (k_operand, transpose_b) = if config.transpose_k {
+        (k.clone(), true)
+    } else {
+        (k.permute(&[0, 2, 1], ctx)?, false)
+    };
 
-        let (k_operand, transpose_b) = if config.transpose_k {
-            (k_i.clone(), true)
-        } else {
-            (k_i.permute(&[1, 0], ctx)?, false)
-        };
+    let qk_scaled_result = match cache.as_deref_mut() {
+        Some(cache_ref) => ctx.matmul_alpha_beta_with_cache(q, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?,
+        None => ctx.matmul_alpha_beta(q, &k_operand, &attention, false, transpose_b, scale, 0.0)?,
+    };
 
-        let attention_seed = match workspace.as_ref() {
-            Some(buffer) => buffer.clone(),
-            None => Tensor::zeros(vec![s_q, s_k], ctx, true)?,
-        };
+    let softmax_result = {
+        let cache_opt = cache.as_deref_mut();
+        crate::metallic::kernels::softmax::apply_softmax(
+            ctx,
+            cache_opt,
+            &qk_scaled_result,
+            b,
+            s_q,
+            s_k,
+            causal,
+            query_offset,
+            config.use_mps_softmax,
+        )?
+    };
 
-        // Perform matmul with scaling in one operation: [s_q, d] @ [d, s_k] = [s_q, s_k] with alpha=scale
-        let qk_scaled_result = match cache.as_deref_mut() {
-            Some(cache_ref) => {
-                ctx.matmul_alpha_beta_with_cache(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0, cache_ref)?
-            }
-            None => ctx.matmul_alpha_beta(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0)?,
-        }; // [s_q, s_k]
-
-        let softmax_result = {
-            let cache_opt = cache.as_deref_mut();
-            crate::metallic::kernels::softmax::apply_softmax(
-                ctx,
-                cache_opt,
-                &qk_scaled_result,
-                s_q,
-                s_k,
-                causal,
-                query_offset,
-                config.use_mps_softmax,
-            )?
-        };
-
-        // softmax_result x V -> out (for this batch)
-        // [s_q, s_k] @ [s_k, d] = [s_q, d]
-        match cache.as_deref_mut() {
-            Some(cache_ref) => {
-                ctx.matmul_alpha_beta_with_cache(&softmax_result, &v_i, &out_i, false, false, 1.0, 0.0, cache_ref)?;
-            }
-            None => {
-                ctx.matmul_alpha_beta(&softmax_result, &v_i, &out_i, false, false, 1.0, 0.0)?;
-            }
-        };
-        // [s_q, d]
-    }
+    match cache.as_deref_mut() {
+        Some(cache_ref) => {
+            ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;
+        }
+        None => {
+            ctx.matmul_alpha_beta(&softmax_result, v, &out, false, false, 1.0, 0.0)?;
+        }
+    };
 
     // Create a dummy operation since all work is done in this function
     Ok((
