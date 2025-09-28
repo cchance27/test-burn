@@ -1,17 +1,9 @@
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 use super::{KernelFunction, KernelInvocable};
-use crate::metallic::{
-    cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
-    resource_cache::ResourceCache,
-    Context, MetalError, Operation, Tensor,
-};
-use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
-
-use std::mem::size_of;
+use crate::metallic::{resource_cache::ResourceCache, Context, MetalError, Operation, Tensor};
 
 mod scaled_dot_product_attention_test;
 
@@ -168,66 +160,24 @@ fn create_sdpa_operation(
 
         // Perform matmul with scaling in one operation: [s_q, d] @ [d, s_k] = [s_q, s_k] with alpha=scale
         let qk_scaled_result = match cache.as_deref_mut() {
-            Some(cache_ref) => ctx.matmul_alpha_beta_with_cache(
-                &q_i,
-                &k_operand,
-                &attention_seed,
-                false,
-                transpose_b,
-                scale,
-                0.0,
-                cache_ref,
-            )?,
-            None => ctx.matmul_alpha_beta(
-                &q_i,
-                &k_operand,
-                &attention_seed,
-                false,
-                transpose_b,
-                scale,
-                0.0,
-            )?,
+            Some(cache_ref) => {
+                ctx.matmul_alpha_beta_with_cache(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0, cache_ref)?
+            }
+            None => ctx.matmul_alpha_beta(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0)?,
         }; // [s_q, s_k]
 
-        let use_mps_softmax = config.use_mps_softmax && !causal && query_offset == 0;
-
-        let softmax_result = if use_mps_softmax {
-            if let Some(cache_ref) = cache.as_deref_mut() {
-                apply_mps_softmax(ctx, cache_ref, &qk_scaled_result, s_q, s_k)?;
-                qk_scaled_result.clone()
-            } else {
-                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (
-                        qk_scaled_result,
-                        s_q as u32,
-                        s_k as u32,
-                        causal as u32,
-                        query_offset,
-                    ),
-                )?
-            }
-        } else {
-            match cache.as_deref_mut() {
-                Some(cache_ref) => ctx.call_with_cache::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (
-                        qk_scaled_result,
-                        s_q as u32,
-                        s_k as u32,
-                        causal as u32,
-                        query_offset,
-                    ),
-                    cache_ref,
-                )?,
-                None => ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (
-                        qk_scaled_result,
-                        s_q as u32,
-                        s_k as u32,
-                        causal as u32,
-                        query_offset,
-                    ),
-                )?,
-            }
+        let softmax_result = {
+            let cache_opt = cache.as_deref_mut();
+            crate::metallic::kernels::softmax::apply_softmax(
+                ctx,
+                cache_opt,
+                &qk_scaled_result,
+                s_q,
+                s_k,
+                causal,
+                query_offset,
+                config.use_mps_softmax,
+            )?
         };
 
         // softmax_result x V -> out (for this batch)
@@ -261,30 +211,6 @@ fn create_sdpa_operation(
         }),
         out,
     ))
-}
-
-fn apply_mps_softmax(ctx: &mut Context, cache: &mut ResourceCache, attn: &Tensor, rows: usize, columns: usize) -> Result<(), MetalError> {
-    let mut attn_for_prepare = attn.clone();
-    ctx.prepare_tensors_for_active_cmd(&mut [&mut attn_for_prepare]);
-
-    let descriptor_key = MpsMatrixDescriptorKey {
-        rows,
-        columns,
-        row_bytes: columns * size_of::<f32>(),
-    };
-    let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
-    let softmax_key = MpsSoftMaxKey { rows, columns };
-    let softmax = cache.get_or_create_softmax(softmax_key, &ctx.device)?;
-
-    let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-    let op = MpsSoftmaxOperation {
-        attn: attn.clone(),
-        descriptor,
-        softmax,
-    };
-    command_buffer.record(&op, cache)?;
-    ctx.mark_tensor_pending(attn);
-    Ok(())
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -383,27 +309,6 @@ impl Operation for ScaledDotProductAttention {
     ) -> Result<(), MetalError> {
         // Since all computation was done in the `new` method of KernelInvocable,
         // this method just returns Ok(())
-        Ok(())
-    }
-}
-
-struct MpsSoftmaxOperation {
-    attn: Tensor,
-    descriptor: Retained<MPSMatrixDescriptor>,
-    softmax: Retained<MPSMatrixSoftMax>,
-}
-
-impl Operation for MpsSoftmaxOperation {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let attn_matrix = mps_matrix_from_buffer(&self.attn.buf, self.attn.offset, &self.descriptor);
-        unsafe {
-            self.softmax
-                .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer, &attn_matrix, &attn_matrix);
-        }
         Ok(())
     }
 }

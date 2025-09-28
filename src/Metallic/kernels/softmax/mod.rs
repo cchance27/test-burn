@@ -1,4 +1,145 @@
 use super::*;
+use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
+use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
+use crate::metallic::resource_cache::ResourceCache;
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::MTLCommandBuffer;
+use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
+use std::env;
+use std::mem::size_of;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
+
+pub const METALLIC_SOFTMAX_BACKEND_ENV: &str = "METALLIC_SOFTMAX_BACKEND";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftmaxBackendPreference {
+    Auto,
+    KernelOnly,
+    MpsOnly,
+}
+
+impl SoftmaxBackendPreference {
+    fn forces_kernel(self) -> bool {
+        matches!(self, Self::KernelOnly)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SoftmaxBackend {
+    Kernel,
+    Mps,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SoftmaxSample {
+    pub backend: SoftmaxBackend,
+    pub duration: Duration,
+}
+
+static BACKEND_PREFERENCE: OnceLock<SoftmaxBackendPreference> = OnceLock::new();
+
+pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
+    *BACKEND_PREFERENCE.get_or_init(|| {
+        let raw = env::var(METALLIC_SOFTMAX_BACKEND_ENV)
+            .unwrap_or_else(|_| "auto".to_string())
+            .to_lowercase();
+        match raw.trim() {
+            "kernel" | "compute" | "pipeline" => SoftmaxBackendPreference::KernelOnly,
+            "mps" | "metal" => SoftmaxBackendPreference::MpsOnly,
+            "auto" | "" | "default" => SoftmaxBackendPreference::Auto,
+            other => {
+                eprintln!("Unknown {METALLIC_SOFTMAX_BACKEND_ENV} value '{other}', falling back to auto");
+                SoftmaxBackendPreference::Auto
+            }
+        }
+    })
+}
+
+pub fn apply_softmax(
+    ctx: &mut Context,
+    mut cache: Option<&mut ResourceCache>,
+    attn: &Tensor,
+    rows: usize,
+    columns: usize,
+    causal: bool,
+    query_offset: u32,
+    allow_mps: bool,
+) -> Result<Tensor, MetalError> {
+    let preference = softmax_backend_preference();
+    let start = Instant::now();
+
+    let can_use_mps = allow_mps && !causal && query_offset == 0 && !preference.forces_kernel();
+    if can_use_mps {
+        if let Some(cache_slot) = cache.as_mut() {
+            let cache_ref: &mut ResourceCache = &mut **cache_slot;
+            try_apply_mps_softmax(ctx, cache_ref, attn, rows, columns)?;
+            ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
+            return Ok(attn.clone());
+        }
+    }
+
+    let result = match cache {
+        Some(cache_ref) => {
+            ctx.call_with_cache::<SoftmaxOp>((attn.clone(), rows as u32, columns as u32, causal as u32, query_offset), cache_ref)?
+        }
+        None => ctx.call::<SoftmaxOp>((attn.clone(), rows as u32, columns as u32, causal as u32, query_offset))?,
+    };
+    ctx.record_softmax_backend_sample(SoftmaxBackend::Kernel, start.elapsed());
+    Ok(result)
+}
+
+fn try_apply_mps_softmax(
+    ctx: &mut Context,
+    cache: &mut ResourceCache,
+    attn: &Tensor,
+    rows: usize,
+    columns: usize,
+) -> Result<(), MetalError> {
+    let mut attn_for_prepare = attn.clone();
+    ctx.prepare_tensors_for_active_cmd(&mut [&mut attn_for_prepare]);
+
+    let descriptor_key = MpsMatrixDescriptorKey {
+        rows,
+        columns,
+        row_bytes: columns * size_of::<f32>(),
+    };
+    let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
+    let softmax_key = MpsSoftMaxKey { rows, columns };
+    let softmax = cache.get_or_create_softmax(softmax_key, &ctx.device)?;
+
+    let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+    let op = SoftmaxMpsOperation {
+        attn: attn.clone(),
+        descriptor,
+        softmax,
+    };
+    command_buffer.record(&op, cache)?;
+    ctx.mark_tensor_pending(attn);
+    Ok(())
+}
+
+struct SoftmaxMpsOperation {
+    attn: Tensor,
+    descriptor: Retained<MPSMatrixDescriptor>,
+    softmax: Retained<MPSMatrixSoftMax>,
+}
+
+impl Operation for SoftmaxMpsOperation {
+    fn encode(
+        &self,
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        _cache: &mut ResourceCache,
+    ) -> Result<(), MetalError> {
+        let attn_matrix = mps_matrix_from_buffer(&self.attn.buf, self.attn.offset, &self.descriptor);
+        unsafe {
+            self.softmax
+                .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer, &attn_matrix, &attn_matrix);
+        }
+        Ok(())
+    }
+}
 
 /// Public, user-facing, zero-sized struct for the Softmax operation.
 pub struct SoftmaxOp;
