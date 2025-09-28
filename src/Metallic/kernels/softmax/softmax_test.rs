@@ -34,6 +34,14 @@ fn cpu_softmax(input: &[f32], seq_q: usize, seq_k: usize, causal: bool) -> Vec<f
     output
 }
 
+fn softmax_rows_total(attn_tensor: &Tensor, seq_k: usize) -> u32 {
+    if seq_k == 0 {
+        0
+    } else {
+        (attn_tensor.len() / seq_k) as u32
+    }
+}
+
 #[test]
 fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
     let mut context = Context::new()?;
@@ -46,7 +54,14 @@ fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
     // Apply softmax using the new kernel system (in-place operation)
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -96,7 +111,14 @@ fn test_softmax_golden_causal() -> Result<(), MetalError> {
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
 
     // Apply softmax using the new kernel system (in-place operation) with causal masking
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        1,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -167,7 +189,14 @@ fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -234,7 +263,14 @@ fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -301,7 +337,14 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -383,7 +426,14 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -467,7 +517,14 @@ fn test_softmax_extremes_causal_with_extremes() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        1,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -598,7 +655,14 @@ fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -674,7 +738,14 @@ fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -761,7 +832,14 @@ fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -811,7 +889,14 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -880,7 +965,14 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
 
     let cpu_output = cpu_softmax_with_infinity(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -947,7 +1039,14 @@ fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -997,7 +1096,14 @@ fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, false);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1047,7 +1153,14 @@ fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true);
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        1,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1112,7 +1225,14 @@ fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
 
     let cpu_output = cpu_softmax(&input_data, seq_q, seq_k, true); // Using causal=true
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 1, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        1,
+        0,
+    ))?;
     context.synchronize();
 
     let metal_output = result.as_slice();
@@ -1191,7 +1311,14 @@ fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1226,7 +1353,14 @@ fn test_softmax_threadgroup_large_seq_k() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1261,7 +1395,14 @@ fn test_softmax_threadgroup_very_large_seq_k() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1296,7 +1437,14 @@ fn test_softmax_threadgroup_multiple_rows() -> Result<(), MetalError> {
     let input_tensor = Tensor::create_tensor_from_slice(&input_data, vec![seq_q, seq_k], &context)?; // Reshape to 2D as expected by kernel
     let attn_tensor = input_tensor.clone();
 
-    let result = context.call::<SoftmaxOp>((&attn_tensor, seq_q as u32, seq_k as u32, 0, 0))?;
+    let result = context.call::<SoftmaxOp>((
+        &attn_tensor,
+        softmax_rows_total(&attn_tensor, seq_k),
+        seq_q as u32,
+        seq_k as u32,
+        0,
+        0,
+    ))?;
     context.synchronize();
 
     // Verify the operation completed successfully
@@ -1327,7 +1475,7 @@ fn test_softmax_logic() -> Result<(), MetalError> {
     let input_data = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]; // Two rows to softmax independently
     let attn = Tensor::create_tensor_from_slice(&input_data, vec![2, 3], &ctx)?;
     // Apply softmax with no causal masking (causal=0)
-    let result = ctx.call::<SoftmaxOp>((&attn, 2, 3, 0, 0))?;
+    let result = ctx.call::<SoftmaxOp>((&attn, softmax_rows_total(&attn, 3), 2, 3, 0, 0))?;
     // Check that each row sums to approximately 1 (property of softmax)
     let result_slice = result.as_slice();
     let row1_sum: f32 = result_slice[0..3].iter().sum();
