@@ -152,3 +152,50 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
 
     Ok(())
 }
+
+#[test]
+fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
+    let mut ctx = Context::new()?;
+
+    let seq = 4;
+    let batch_heads = 3;
+    let head_dim = 5;
+    let mut data = Vec::with_capacity(seq * batch_heads * head_dim);
+    for s in 0..seq {
+        for bh in 0..batch_heads {
+            for d in 0..head_dim {
+                data.push((s * 100 + bh * 10 + d) as f32);
+            }
+        }
+    }
+
+    let cache = Tensor::create_tensor_from_slice(&data, vec![seq, batch_heads, head_dim], &ctx)?;
+
+    for steps in 1..=seq {
+        let history = Qwen25::gather_cache_history(&cache, steps, &mut ctx)?;
+        assert_eq!(history.dims(), &[batch_heads, steps, head_dim]);
+
+        let gpu_values = history.to_vec();
+        let mut expected = Vec::with_capacity(steps * batch_heads * head_dim);
+        for bh in 0..batch_heads {
+            for s in 0..steps {
+                let src_idx = (s * batch_heads + bh) * head_dim;
+                expected.extend_from_slice(&data[src_idx..src_idx + head_dim]);
+            }
+        }
+
+        assert_eq!(gpu_values.len(), expected.len());
+        for (idx, (gpu, exp)) in gpu_values.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (gpu - exp).abs() < 1e-5,
+                "Mismatch at steps={}, element {}: gpu={} expected={}",
+                steps,
+                idx,
+                gpu,
+                exp
+            );
+        }
+    }
+
+    Ok(())
+}
