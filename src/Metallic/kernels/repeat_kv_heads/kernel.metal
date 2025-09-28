@@ -9,7 +9,8 @@ kernel void repeat_kv_heads_kernel(device const float* input [[buffer(0)]],
                                    constant uint& n_heads [[buffer(5)]],
                                    constant uint& seq [[buffer(6)]],
                                    constant uint& head_dim [[buffer(7)]],
-                                   constant uint& total_elements [[buffer(8)]],
+                                   constant uint& cache_stride [[buffer(8)]],
+                                   constant uint& total_elements [[buffer(9)]],
                                    uint gid [[thread_position_in_grid]]) {
     if (gid >= total_elements) {
         return;
@@ -25,7 +26,7 @@ kernel void repeat_kv_heads_kernel(device const float* input [[buffer(0)]],
     uint kv_head = h / group_size;
 
     uint input_batch_head = b * n_kv_heads + kv_head;
-    uint input_index = ((input_batch_head * seq) + seq_idx) * head_dim + dim_idx;
+    uint input_index = ((input_batch_head * cache_stride) + seq_idx) * head_dim + dim_idx;
 
     output[gid] = input[input_index];
 }

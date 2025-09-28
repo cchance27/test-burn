@@ -452,8 +452,8 @@ impl Qwen25 {
             // Repeat K and V to match Q head count for GQA
             let group_size = n_heads / n_kv_heads;
             phase_start = Instant::now();
-            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
-            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
+            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
 
@@ -521,49 +521,49 @@ impl Qwen25 {
     /// Repeat KV heads for GQA to match Q head count
     #[allow(clippy::too_many_arguments)]
     fn repeat_kv_heads(
-        input: &Tensor,
+        history: &CacheHistory,
         group_size: usize,
         batch: usize,
         n_kv_heads: usize,
         n_heads: usize,
-        seq: usize,
         head_dim: usize,
         ctx: &mut Context,
     ) -> Result<Tensor, MetalError> {
+        let input = history.tensor.clone();
         let input_dims = input.dims();
-        if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
+        if input_dims.len() != 3
+            || input_dims[0] != batch * n_kv_heads
+            || input_dims[1] != history.active_seq
+            || input_dims[2] != head_dim
+        {
             return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
         ctx.call::<RepeatKvHeadsOp>((
-            input.clone(),
+            input,
             group_size as u32,
             batch as u32,
             n_kv_heads as u32,
             n_heads as u32,
-            seq as u32,
+            history.active_seq as u32,
             head_dim as u32,
+            history.cache_capacity as u32,
         ))
     }
 
-    fn gather_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
-        let dims = cache.dims();
-        if dims.len() != 3 {
-            return Err(MetalError::InvalidShape(
-                "KV cache tensor must have shape [seq, batch_heads, head_dim]".to_string(),
-            ));
-        }
-        if steps == 0 || steps > dims[0] {
-            return Err(MetalError::InvalidShape(format!(
-                "Requested {} KV steps exceeds cache capacity {}",
-                steps, dims[0]
-            )));
-        }
-
-        #[allow(clippy::single_range_in_vec_init)]
-        let mut cache_view = cache.slice(&[0..steps])?;
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut cache_view]);
-
-        cache_view.permute(&[1, 0, 2], ctx)
+    fn gather_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<CacheHistory, MetalError> {
+        let (view, cache_capacity) = ctx.kv_cache_history_view(cache, steps)?;
+        Ok(CacheHistory {
+            tensor: view,
+            active_seq: steps,
+            cache_capacity,
+        })
     }
+}
+
+#[derive(Clone)]
+struct CacheHistory {
+    tensor: Tensor,
+    active_seq: usize,
+    cache_capacity: usize,
 }
