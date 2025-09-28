@@ -497,7 +497,6 @@ impl LoadableModel for super::Qwen25 {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::pack_weight_transposed_into_fused_slice;

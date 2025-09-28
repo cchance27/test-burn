@@ -3,7 +3,7 @@
 //! This helps quantify the benefit of sharing a [`ResourceCache`] across the individual
 //! matmul and elementwise kernels that make up the composite implementation.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use test_burn::metallic::kernels::swiglu::swiglu_with_optional_cache;
 use test_burn::metallic::resource_cache::ResourceCache;
 use test_burn::metallic::{Context, Tensor};

@@ -5,9 +5,9 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
+    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
-    Context, MetalError, Operation, Tensor,
 };
 
 use std::mem::size_of;
@@ -171,7 +171,7 @@ fn create_sdpa_operation(
         )?
     };
 
-    match cache.as_deref_mut() {
+    match cache {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;
         }

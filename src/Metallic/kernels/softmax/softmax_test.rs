@@ -35,11 +35,7 @@ fn cpu_softmax(input: &[f32], seq_q: usize, seq_k: usize, causal: bool) -> Vec<f
 }
 
 fn softmax_rows_total(attn_tensor: &Tensor, seq_k: usize) -> u32 {
-    if seq_k == 0 {
-        0
-    } else {
-        (attn_tensor.len() / seq_k) as u32
-    }
+    if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 }
 }
 
 #[test]
