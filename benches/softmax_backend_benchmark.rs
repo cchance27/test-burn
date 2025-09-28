@@ -28,7 +28,9 @@ fn run_softmax(ctx: &mut Context, cache: Option<&mut ResourceCache>, allow_mps: 
 
 fn benchmark_softmax_backends(c: &mut Criterion) {
     // Ensure the backend selector defaults to automatic behavior for the benchmark run.
-    std::env::set_var(METALLIC_SOFTMAX_BACKEND_ENV, "auto");
+    unsafe {
+        std::env::set_var(METALLIC_SOFTMAX_BACKEND_ENV, "auto");
+    }
 
     let mut group = c.benchmark_group("softmax_backend_comparison");
     let mut context = Context::new().unwrap();

@@ -56,3 +56,7 @@ harness = false
 [[bench]]
 name = "gguf_quant_benchmark"
 harness = false
+
+[[bench]]
+name = "softmax_backend_benchmark"
+harness = false
