@@ -338,7 +338,6 @@ impl Tensor {
         }
 
         let mut new_dims = self.dims.clone();
-        let new_strides = self.strides.clone();
         let mut new_offset = self.offset;
 
         if !ranges.is_empty() {
@@ -362,42 +361,13 @@ impl Tensor {
 
         Ok(Tensor {
             buf: self.buf.clone(),
-            dims: new_dims,
-            strides: new_strides,
+            dims: new_dims.clone(),
+            strides: Self::compute_strides(&new_dims), // Re-compute for correctness.
             dtype: self.dtype,
             device: self.device.clone(),
             offset: new_offset,
             defining_cmd_buffer: self.defining_cmd_buffer.clone(),
         })
-    }
-
-    pub fn narrow(&self, axis: usize, start: usize, length: usize) -> Result<Tensor, MetalError> {
-        if axis >= self.dims.len() {
-            return Err(MetalError::InvalidShape(format!(
-                "Axis {} is out of bounds for tensor with rank {}",
-                axis,
-                self.dims.len()
-            )));
-        }
-        if start > self.dims[axis] || start + length > self.dims[axis] {
-            return Err(MetalError::InvalidShape(format!(
-                "Invalid narrow range start={} length={} for axis {} with size {}",
-                start,
-                length,
-                axis,
-                self.dims[axis]
-            )));
-        }
-
-        let mut new_dims = self.dims.clone();
-        new_dims[axis] = length;
-
-        let mut tensor = self.clone();
-        let stride = self.strides.get(axis).copied().unwrap_or(0);
-        tensor.offset += start * stride * self.dtype.size_bytes();
-        tensor.dims = new_dims;
-
-        Ok(tensor)
     }
 
     /// Allocate and zero-initialize a tensor of the given shape.
@@ -793,12 +763,7 @@ impl Tensor {
             return Err(MetalError::InvalidShape("batch_index out of bounds".to_string()));
         }
 
-        let elem_stride = self
-            .strides
-            .get(0)
-            .copied()
-            .unwrap_or_else(|| self.dims[1..].iter().product());
-        let batch_size_bytes = elem_stride * self.dtype.size_bytes();
+        let batch_size_bytes = self.dims[1..].iter().product::<usize>() * std::mem::size_of::<f32>();
         let new_offset = self.offset + batch_index * batch_size_bytes;
 
         Ok(Tensor {

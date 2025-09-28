@@ -106,14 +106,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
     for i in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(
-            i,
-            model.config.seq_len,
-            1,
-            n_kv_heads,
-            model.config.n_heads,
-            kv_head_dim,
-        )?;
+        ctx.alloc_kv_cache(i, model.config.seq_len, n_kv_heads, kv_head_dim)?;
     }
 
     // --- Multi-step correctness check ---
@@ -229,14 +222,7 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let kv_head_dim = kv_dim / model.config.n_kv_heads;
     let batch_heads = 1 * model.config.n_kv_heads;
     for layer_idx in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(
-            layer_idx,
-            model.config.seq_len,
-            1,
-            model.config.n_kv_heads,
-            model.config.n_heads,
-            kv_head_dim,
-        )?;
+        ctx.alloc_kv_cache(layer_idx, model.config.seq_len, batch_heads, kv_head_dim)?;
     }
 
     let collector = new_latency_collector(model.config.n_layers);
@@ -275,60 +261,13 @@ fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
 
     for steps in 1..=seq {
         let history = Qwen25::gather_cache_history(&cache, steps, &mut ctx)?;
-        assert_eq!(history.dims(), &[steps, batch_heads, head_dim]);
-
-        let gpu_values = history.to_vec();
-        let mut expected = Vec::with_capacity(steps * batch_heads * head_dim);
-        for s in 0..steps {
-            for bh in 0..batch_heads {
-                let src_idx = (s * batch_heads + bh) * head_dim;
-                expected.extend_from_slice(&data[src_idx..src_idx + head_dim]);
-            }
-        }
-
-        assert_eq!(gpu_values.len(), expected.len());
-        for (idx, (gpu, exp)) in gpu_values.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (gpu - exp).abs() < 1e-5,
-                "Mismatch at steps={}, element {}: gpu={} expected={}",
-                steps,
-                idx,
-                gpu,
-                exp
-            );
-        }
-    }
-
-    Ok(())
-}
-
-#[test]
-fn test_gather_repeated_cache_history_gpu_path() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
-
-    let batch_heads = 6;
-    let seq = 5;
-    let head_dim = 4;
-    let mut data = Vec::with_capacity(batch_heads * seq * head_dim);
-    for bh in 0..batch_heads {
-        for s in 0..seq {
-            for d in 0..head_dim {
-                data.push((bh * 100 + s * 10 + d) as f32);
-            }
-        }
-    }
-
-    let cache = Tensor::create_tensor_from_slice(&data, vec![batch_heads, seq, head_dim], &ctx)?;
-
-    for steps in 1..=seq {
-        let history = Qwen25::gather_repeated_cache_history(&cache, steps, &mut ctx)?;
         assert_eq!(history.dims(), &[batch_heads, steps, head_dim]);
 
         let gpu_values = history.to_vec();
-        let mut expected = Vec::with_capacity(batch_heads * steps * head_dim);
+        let mut expected = Vec::with_capacity(steps * batch_heads * head_dim);
         for bh in 0..batch_heads {
             for s in 0..steps {
-                let src_idx = (bh * seq + s) * head_dim;
+                let src_idx = (s * batch_heads + bh) * head_dim;
                 expected.extend_from_slice(&data[src_idx..src_idx + head_dim]);
             }
         }

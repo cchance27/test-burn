@@ -20,24 +20,6 @@ use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
 
-#[derive(Clone)]
-pub(crate) struct RepeatedKvCache {
-    pub k: super::Tensor,
-    pub v: super::Tensor,
-}
-
-#[derive(Clone)]
-pub(crate) struct LayerKvCache {
-    pub k: super::Tensor,
-    pub v: super::Tensor,
-    pub capacity_seq: usize,
-    pub batch_size: usize,
-    pub n_kv_heads: usize,
-    pub n_heads: usize,
-    pub head_dim: usize,
-    pub repeated: Option<RepeatedKvCache>,
-}
-
 /// The main context for Metal operations.
 pub struct Context {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -53,7 +35,8 @@ pub struct Context {
     pub rng_seed_counter: u64,
 
     // Per-layer on-device KV caches stored centrally for developer DX.
-    pub(crate) kv_caches: FxHashMap<usize, LayerKvCache>,
+    // Keyed by layer index -> (k_cache, v_cache, capacity_seq_len)
+    pub(crate) kv_caches: FxHashMap<usize, (super::Tensor, super::Tensor, usize)>,
 
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     active_cmd_buffer: Option<CommandBuffer>,
@@ -188,17 +171,7 @@ impl Context {
     /// Capture a snapshot of the current memory usage for both the transient tensor pool
     /// and the persistent KV cache pool.
     pub fn snapshot_memory_usage(&self) -> MemoryUsage {
-        let kv_cache_bytes = self
-            .kv_caches
-            .values()
-            .map(|cache| {
-                let mut total = cache.k.size_bytes() + cache.v.size_bytes();
-                if let Some(repeated) = &cache.repeated {
-                    total += repeated.k.size_bytes() + repeated.v.size_bytes();
-                }
-                total
-            })
-            .sum();
+        let kv_cache_bytes = self.kv_caches.values().map(|(k, v, _)| k.size_bytes() + v.size_bytes()).sum();
 
         MemoryUsage {
             pool_used: self.pool.used_bytes(),
@@ -403,50 +376,22 @@ impl Context {
 impl Context {
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
     /// Layout: [seq_len, batch_heads, head_dim] (contiguous).
-    pub fn alloc_kv_cache(
-        &mut self,
-        layer_idx: usize,
-        seq_len: usize,
-        batch_size: usize,
-        n_kv_heads: usize,
-        n_heads: usize,
-        head_dim: usize,
-    ) -> Result<(), MetalError> {
-        if batch_size == 0 {
-            return Err(MetalError::InvalidOperation("batch_size must be greater than zero".into()));
-        }
-        if n_kv_heads == 0 || n_heads == 0 {
-            return Err(MetalError::InvalidOperation(
-                "Head counts for KV cache allocation must be greater than zero".into(),
-            ));
-        }
-
-        let batch_heads = batch_size * n_kv_heads;
+    pub fn alloc_kv_cache(&mut self, layer_idx: usize, seq_len: usize, batch_heads: usize, head_dim: usize) -> Result<(), MetalError> {
         let dims = vec![seq_len, batch_heads, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
         let k = self.kv_cache_pool.alloc_tensor(dims.clone())?;
-        let v = self.kv_cache_pool.alloc_tensor(dims.clone())?;
-
-        let mut repeated: Option<RepeatedKvCache> = None;
-        if n_heads != n_kv_heads {
-            let repeated_heads = batch_size * n_heads;
-            let repeated_dims = vec![repeated_heads, seq_len, head_dim];
-            let k_rep = self.kv_cache_pool.alloc_tensor(repeated_dims.clone())?;
-            let v_rep = self.kv_cache_pool.alloc_tensor(repeated_dims.clone())?;
-            repeated = Some(RepeatedKvCache { k: k_rep, v: v_rep });
-        }
+        let v = self.kv_cache_pool.alloc_tensor(dims)?;
 
         // Manually zero the tensors using a blit command
+        let k_size = k.size_bytes();
+        let v_size = v.size_bytes();
+
         self.ensure_active_cmd_buffer()?;
         let cmd_buf = self.active_command_buffer_mut()?;
         if let Some(encoder) = cmd_buf.raw().blitCommandEncoder() {
-            encoder.fillBuffer_range_value(&k.buf, (k.offset..k.offset + k.size_bytes()).into(), 0);
-            encoder.fillBuffer_range_value(&v.buf, (v.offset..v.offset + v.size_bytes()).into(), 0);
-            if let Some(rep) = &repeated {
-                encoder.fillBuffer_range_value(&rep.k.buf, (rep.k.offset..rep.k.offset + rep.k.size_bytes()).into(), 0);
-                encoder.fillBuffer_range_value(&rep.v.buf, (rep.v.offset..rep.v.offset + rep.v.size_bytes()).into(), 0);
-            }
+            encoder.fillBuffer_range_value(&k.buf, (k.offset..k.offset + k_size).into(), 0);
+            encoder.fillBuffer_range_value(&v.buf, (v.offset..v.offset + v_size).into(), 0);
             encoder.endEncoding();
         } else {
             return Err(MetalError::OperationNotSupported("Blit encoder not available".into()));
@@ -454,24 +399,8 @@ impl Context {
 
         self.mark_tensor_pending(&k);
         self.mark_tensor_pending(&v);
-        if let Some(rep) = &repeated {
-            self.mark_tensor_pending(&rep.k);
-            self.mark_tensor_pending(&rep.v);
-        }
 
-        self.kv_caches.insert(
-            layer_idx,
-            LayerKvCache {
-                k,
-                v,
-                capacity_seq: seq_len,
-                batch_size,
-                n_kv_heads,
-                n_heads,
-                head_dim,
-                repeated,
-            },
-        );
+        self.kv_caches.insert(layer_idx, (k, v, seq_len));
         Ok(())
     }
 
@@ -487,18 +416,8 @@ impl Context {
     ) -> Result<(), MetalError> {
         // Lookup the canonical cache tensors and clone their handles so we can work with them
         // while issuing additional commands on `self`.
-        let (k_cache_ref, v_cache_ref, capacity_seq_val, batch_size, n_kv_heads, n_heads, head_dim, repeated) =
-            match self.kv_caches.get(&layer_idx) {
-                Some(cache) => (
-                    cache.k.clone(),
-                    cache.v.clone(),
-                    cache.capacity_seq,
-                    cache.batch_size,
-                    cache.n_kv_heads,
-                    cache.n_heads,
-                    cache.head_dim,
-                    cache.repeated.clone(),
-                ),
+        let (k_cache_ref, v_cache_ref, capacity_seq_val) = match self.kv_caches.get(&layer_idx) {
+            Some((k_cache, v_cache, capacity_seq)) => (k_cache.clone(), v_cache.clone(), *capacity_seq),
             None => {
                 return Err(MetalError::InvalidOperation(format!(
                     "KV cache for layer {} not allocated",
@@ -593,45 +512,6 @@ impl Context {
 
         self.mark_tensor_pending(&k_cache);
         self.mark_tensor_pending(&v_cache);
-
-        if let Some(repeated_cache) = repeated {
-            let group_size = n_heads
-                .checked_div(n_kv_heads)
-                .ok_or_else(|| MetalError::InvalidOperation("Invalid KV repeat configuration".into()))?;
-
-            let total_heads = batch_size * n_heads;
-            let total_kv_heads = batch_size * n_kv_heads;
-            let seq_len = capacity_seq_val;
-
-            self.call::<crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsStepOp>(
-                (
-                    k_cache.clone(),
-                    repeated_cache.k.clone(),
-                    step as u32,
-                    group_size as u32,
-                    n_kv_heads as u32,
-                    n_heads as u32,
-                    total_kv_heads as u32,
-                    total_heads as u32,
-                    seq_len as u32,
-                    head_dim as u32,
-                ),
-            )?;
-            self.call::<crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsStepOp>(
-                (
-                    v_cache.clone(),
-                    repeated_cache.v.clone(),
-                    step as u32,
-                    group_size as u32,
-                    n_kv_heads as u32,
-                    n_heads as u32,
-                    total_kv_heads as u32,
-                    total_heads as u32,
-                    seq_len as u32,
-                    head_dim as u32,
-                ),
-            )?;
-        }
 
         Ok(())
     }

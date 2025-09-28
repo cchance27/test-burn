@@ -437,28 +437,23 @@ impl Qwen25 {
             // Update the KV cache with the new K and V values
             phase_start = Instant::now();
             ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
-            let cache_entry = ctx
+            // Retrieve the full K and V caches for attention
+            let (k_cache, v_cache, _) = ctx
                 .kv_caches
                 .get(&layer_idx)
                 .cloned()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
+            let k_history = Qwen25::gather_cache_history(&k_cache, pos + 1, ctx)?;
+            let v_history = Qwen25::gather_cache_history(&v_cache, pos + 1, ctx)?;
+            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
+            // Repeat K and V to match Q head count for GQA
             let group_size = n_heads / n_kv_heads;
             phase_start = Instant::now();
-            let (k_repeated, v_repeated) = if let Some(repeated) = cache_entry.repeated.as_ref() {
-                let k_hist = Qwen25::gather_repeated_cache_history(&repeated.k, pos + 1, ctx)?;
-                let v_hist = Qwen25::gather_repeated_cache_history(&repeated.v, pos + 1, ctx)?;
-                (k_hist, v_hist)
-            } else {
-                let k_hist = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
-                let v_hist = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
-                let k_rep = Qwen25::repeat_kv_heads(&k_hist, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
-                let v_rep = Qwen25::repeat_kv_heads(&v_hist, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
-                (k_rep, v_rep)
-            };
+            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
+            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, pos + 1, kv_head_dim, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
 
@@ -536,10 +531,8 @@ impl Qwen25 {
         ctx: &mut Context,
     ) -> Result<Tensor, MetalError> {
         let input_dims = input.dims();
-        if input_dims.len() != 3 || input_dims[0] != seq || input_dims[1] != batch * n_kv_heads || input_dims[2] != head_dim {
-            return Err(MetalError::InvalidShape(
-                "Invalid input dimensions for repeat_kv_heads; expected [seq, batch*n_kv_heads, head_dim]".to_string(),
-            ));
+        if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
+            return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
         ctx.call::<RepeatKvHeadsOp>((
@@ -571,26 +564,6 @@ impl Qwen25 {
         let mut cache_view = cache.slice(&[0..steps])?;
         ctx.prepare_tensors_for_active_cmd(&mut [&mut cache_view]);
 
-        Ok(cache_view)
-    }
-
-    fn gather_repeated_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
-        let dims = cache.dims();
-        if dims.len() != 3 {
-            return Err(MetalError::InvalidShape(
-                "Repeated KV cache tensor must have shape [batch_heads, seq, head_dim]".to_string(),
-            ));
-        }
-        if steps == 0 || steps > dims[1] {
-            return Err(MetalError::InvalidShape(format!(
-                "Requested {} repeated KV steps exceeds cache capacity {}",
-                steps, dims[1]
-            )));
-        }
-
-        let mut cache_view = cache.narrow(1, 0, steps)?;
-        ctx.prepare_tensors_for_active_cmd(&mut [&mut cache_view]);
-
-        Ok(cache_view)
+        cache_view.permute(&[1, 0, 2], ctx)
     }
 }
