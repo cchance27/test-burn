@@ -9,6 +9,7 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
 use rustc_hash::FxHashMap;
+use std::collections::hash_map::Entry;
 
 /// A generic resource cache that uses FxHashMap for high-performance in-memory key-value storage.
 ///
@@ -45,26 +46,23 @@ impl ResourceCache {
 
     /// Get a cached resource by key, or create it if it doesn't exist.
     fn get_or_create_resource<'a, C: Cacheable>(
-        &'a mut self,
         cache: &'a mut FxHashMap<C::Key, C>,
         key: C::Key,
-        device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>,
-    ) -> Result<&'a C, MetalError>
+        explicit_device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>,
+        default_device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>,
+    ) -> Result<&'a mut C, MetalError>
     where
-        C::Key: std::hash::Hash + Eq + Clone,
+        C::Key: std::hash::Hash + Eq,
     {
-        let device = match device {
-            Some(device) => Some(device),
-            None => self.default_device.as_ref(),
-        };
+        let device = explicit_device.or(default_device);
 
-        if !cache.contains_key(&key) {
-            let resource = C::from_key(&key, device)?;
-            cache.insert(key.clone(), resource);
+        match cache.entry(key) {
+            Entry::Occupied(entry) => Ok(entry.into_mut()),
+            Entry::Vacant(entry) => {
+                let resource = C::from_key(entry.key(), device)?;
+                Ok(entry.insert(resource))
+            }
         }
-        cache
-            .get(&key)
-            .ok_or_else(|| MetalError::ResourceNotCached("Failed to retrieve resource from cache".to_string()))
     }
 
     /// Get a cached GEMM operation by key, or create it if it doesn't exist.
@@ -73,7 +71,12 @@ impl ResourceCache {
         key: MpsGemmKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixMultiplication>, MetalError> {
-        let cacheable_gemm = self.get_or_create_resource(&mut self.gemm_cache, key, Some(device))?;
+        let cacheable_gemm = Self::get_or_create_resource(
+            &mut self.gemm_cache,
+            key,
+            Some(device),
+            self.default_device.as_ref(),
+        )?;
         Ok(cacheable_gemm.gemm.clone())
     }
 
@@ -83,7 +86,12 @@ impl ResourceCache {
         key: MpsMatrixDescriptorKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixDescriptor>, MetalError> {
-        let cacheable_descriptor = self.get_or_create_resource(&mut self.descriptor_cache, key, Some(device))?;
+        let cacheable_descriptor = Self::get_or_create_resource(
+            &mut self.descriptor_cache,
+            key,
+            Some(device),
+            self.default_device.as_ref(),
+        )?;
         Ok(cacheable_descriptor.descriptor.clone())
     }
 
@@ -93,7 +101,12 @@ impl ResourceCache {
         key: MpsSoftMaxKey,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixSoftMax>, MetalError> {
-        let cacheable_softmax = self.get_or_create_resource(&mut self.softmax_cache, key, Some(device))?;
+        let cacheable_softmax = Self::get_or_create_resource(
+            &mut self.softmax_cache,
+            key,
+            Some(device),
+            self.default_device.as_ref(),
+        )?;
         Ok(cacheable_softmax.softmax.clone())
     }
 
@@ -101,7 +114,14 @@ impl ResourceCache {
     pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
         let key = SdpaKey { batch, seq_q, seq_k, dim };
         // SDPA creation should never fail, so we unwrap.
-        self.get_or_create_resource(&mut self.sdpa_cache, key, None).unwrap().clone()
+        Self::get_or_create_resource(
+            &mut self.sdpa_cache,
+            key,
+            None,
+            self.default_device.as_ref(),
+        )
+        .unwrap()
+        .clone()
     }
 
     /// Get statistics about the cache.

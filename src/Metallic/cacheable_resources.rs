@@ -4,6 +4,7 @@ use super::{
     error::MetalError,
 };
 use objc2::rc::Retained;
+use objc2::AnyThread;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
