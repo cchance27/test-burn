@@ -38,7 +38,10 @@ Incremental generation reuses the repeated buffers directly, so the
 `kv_repeat` latency phase still appears in telemetry but reflects the cheap
 append instead of replaying the full history via the `RepeatKvHeads` kernel.
 This ensures the dashboard continues to show a stable `kv_repeat` duration
-even though the underlying work is now amortized.
+even though the underlying work is now amortized. The dedicated KV cache pool
+now reserves a higher ceiling (8 GB) to account for the additional repeated
+buffers; the memory collector reports the combined canonical + repeated usage
+per layer so large prompts remain debuggable.
 
 ### Softmax backend benchmarking
 

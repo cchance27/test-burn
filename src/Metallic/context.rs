@@ -58,6 +58,8 @@ pub(crate) struct KvCacheEntry {
     pub capacity: usize,
 }
 
+const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
+
 impl Context {
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.
     /// Falls back to the legacy submit/wait path if no active buffer exists.
@@ -81,7 +83,7 @@ impl Context {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device)?;
-        let kv_cache_pool = MemoryPool::new(&device)?;
+        let kv_cache_pool = MemoryPool::with_limit(&device, KV_CACHE_POOL_MAX_BYTES)?;
         Ok(Context {
             device,
             command_queue,
