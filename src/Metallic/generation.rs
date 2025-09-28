@@ -1,12 +1,12 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::instrumentation::{new_latency_collector, new_memory_collector, MemoryEvent, MemoryUsage};
+use crate::metallic::Tokenizer;
+use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
     build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, BlockStat, MemoryBlockStat, MemoryScopeStat,
     MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
 };
 use crate::metallic::models::qwen25::Qwen25;
-use crate::metallic::Tokenizer;
 use rand::prelude::*;
 use std::{
     sync::mpsc,
@@ -274,10 +274,10 @@ where
     let mut memory_ready = false;
     let mut host_memory = ScalarStat::default();
     let mut process_memory_tracker = ProcessMemoryTracker::new();
-    if let Some(tracker) = process_memory_tracker.as_mut() {
-        if let Some(memory_mb) = tracker.sample_mb() {
-            host_memory.record(memory_mb);
-        }
+    if let Some(tracker) = process_memory_tracker.as_mut()
+        && let Some(memory_mb) = tracker.sample_mb()
+    {
+        host_memory.record(memory_mb);
     }
     let model_memory_tree = build_model_memory_tree(qwen);
 
@@ -425,10 +425,10 @@ where
             output_delta.kv_cache_bytes,
         );
 
-        if let Some(tracker) = process_memory_tracker.as_mut() {
-            if let Some(memory_mb) = tracker.sample_mb() {
-                host_memory.record(memory_mb);
-            }
+        if let Some(tracker) = process_memory_tracker.as_mut()
+            && let Some(memory_mb) = tracker.sample_mb()
+        {
+            host_memory.record(memory_mb);
         }
 
         let logits = logits_tensor.to_vec();
@@ -466,10 +466,8 @@ where
                 let log_now = Instant::now();
                 loggers.log_latency(&rows, log_now, false);
             }
-            if ui_connected {
-                if tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
-                    ui_connected = false;
-                }
+            if ui_connected && tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
+                ui_connected = false;
             }
         }
 
@@ -488,10 +486,8 @@ where
                 let log_now = Instant::now();
                 loggers.log_memory(&rows, log_now, false);
             }
-            if ui_connected {
-                if tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
-                    ui_connected = false;
-                }
+            if ui_connected && tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
+                ui_connected = false;
             }
         }
 

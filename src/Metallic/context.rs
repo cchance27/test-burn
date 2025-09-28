@@ -5,7 +5,7 @@ use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{kernels, Tensor};
+use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -190,6 +190,17 @@ impl Context {
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for matmul
         self.call::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b))
+    }
+
+    pub(crate) fn matmul_with_cache(
+        &mut self,
+        a: &super::Tensor,
+        b: &super::Tensor,
+        transpose_a: bool,
+        transpose_b: bool,
+        cache: &mut ResourceCache,
+    ) -> Result<super::Tensor, MetalError> {
+        self.call_with_cache::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b), cache)
     }
 
     #[allow(clippy::too_many_arguments)]

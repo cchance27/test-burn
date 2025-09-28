@@ -11,7 +11,7 @@ use std::{
     io::{self, BufWriter, Write},
     time::{Duration, Instant},
 };
-use sysinfo::{get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
 
 pub const METRICS_LOG_INTERVAL_ENV: &str = "METRICS_LOG_INTERVAL_SECS";
 pub const METRICS_LOG_ENABLED_ENV: &str = "METRICS_LOG_ENABLED";
@@ -412,20 +412,20 @@ impl MetricsLoggers {
     }
 
     pub fn log_memory(&mut self, rows: &[MemoryRow], now: Instant, force: bool) {
-        if let Some(logger) = self.memory.as_mut() {
-            if let Err(err) = logger.log(rows, now, force) {
-                eprintln!("Failed to log memory metrics: {err}");
-                self.memory = None;
-            }
+        if let Some(logger) = self.memory.as_mut()
+            && let Err(err) = logger.log(rows, now, force)
+        {
+            eprintln!("Failed to log memory metrics: {err}");
+            self.memory = None;
         }
     }
 
     pub fn log_latency(&mut self, rows: &[LatencyRow], now: Instant, force: bool) {
-        if let Some(logger) = self.latency.as_mut() {
-            if let Err(err) = logger.log(rows, now, force) {
-                eprintln!("Failed to log latency metrics: {err}");
-                self.latency = None;
-            }
+        if let Some(logger) = self.latency.as_mut()
+            && let Err(err) = logger.log(rows, now, force)
+        {
+            eprintln!("Failed to log latency metrics: {err}");
+            self.latency = None;
         }
     }
 }
@@ -652,15 +652,12 @@ pub fn build_memory_rows(
 }
 
 pub fn build_model_memory_tree(model: &Qwen25) -> ModelMemoryNode {
-    let mut children = Vec::new();
-
-    children.push(ModelMemoryNode::leaf("Token Embeddings", model.embed_weight.size_bytes()));
-    children.push(ModelMemoryNode::leaf("Output Projection", model.output_weight.size_bytes()));
-    children.push(ModelMemoryNode::leaf("Final Layer Norm", model.final_norm_gamma.size_bytes()));
-    children.push(ModelMemoryNode::leaf(
-        "RoPE Cache",
-        model.rope_cos_cache.size_bytes() + model.rope_sin_cache.size_bytes(),
-    ));
+    let mut children = vec![
+        ModelMemoryNode::leaf("Token Embeddings", model.embed_weight.size_bytes()),
+        ModelMemoryNode::leaf("Output Projection", model.output_weight.size_bytes()),
+        ModelMemoryNode::leaf("Final Layer Norm", model.final_norm_gamma.size_bytes()),
+        ModelMemoryNode::leaf("RoPE Cache", model.rope_cos_cache.size_bytes() + model.rope_sin_cache.size_bytes()),
+    ];
 
     let block_nodes: Vec<ModelMemoryNode> = model
         .blocks

@@ -141,6 +141,8 @@ impl Operation for SoftmaxMpsOperation {
     }
 }
 
+mod softmax_test;
+
 /// Public, user-facing, zero-sized struct for the Softmax operation.
 pub struct SoftmaxOp;
 
@@ -233,31 +235,6 @@ impl Operation for SoftmaxOperation {
         set_bytes(&encoder, 4, &self.query_offset);
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod softmax_test {
-    use super::*;
-
-    #[test]
-    fn test_softmax_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
-        // Create a simple test tensor [2, 3] with values that will produce recognizable softmax results
-        let input_data = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]; // Two rows to softmax independently
-        let attn = Tensor::create_tensor_from_slice(&input_data, vec![2, 3], &ctx)?;
-
-        // Apply softmax with no causal masking (causal=0)
-        let result = ctx.call::<SoftmaxOp>((attn, 2, 3, 0, 0))?;
-
-        // Check that each row sums to approximately 1 (property of softmax)
-        let result_slice = result.as_slice();
-        let row1_sum: f32 = result_slice[0..3].iter().sum();
-        let row2_sum: f32 = result_slice[3..6].iter().sum();
-
-        assert!((row1_sum - 1.0).abs() < 1e-5, "Row 1 sum should be 1.0, got {}", row1_sum);
-        assert!((row2_sum - 1.0).abs() < 1e-5, "Row 2 sum should be 1.0, got {}", row2_sum);
         Ok(())
     }
 }

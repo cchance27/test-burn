@@ -1,7 +1,7 @@
-use crate::gguf::{model_loader::GGUFModel, GGUFValue};
+use crate::gguf::{GGUFValue, model_loader::GGUFModel};
 use crate::metallic::{
-    models::{LoadableModel, Qwen25, Qwen25Config},
     Context, MetalError,
+    models::{LoadableModel, Qwen25, Qwen25Config},
 };
 
 /// Implement the LoadableModel trait so Qwen25 can be created from a GGUFModel
