@@ -4,12 +4,12 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 use super::{KernelFunction, KernelInvocable};
-use crate::metallic::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
     Context, MetalError, Operation, Tensor,
 };
+use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 
 use std::mem::size_of;
 
