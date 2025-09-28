@@ -3,6 +3,7 @@ use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollect
 use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
+use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
@@ -15,6 +16,7 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary};
 use rustc_hash::FxHashMap;
+use std::mem;
 use std::time::Duration;
 
 /// The main context for Metal operations.
@@ -43,6 +45,8 @@ pub struct Context {
     latency_collector: Option<LatencyCollectorHandle>,
     /// Optional memory collector used to capture detailed allocation snapshots.
     memory_collector: Option<MemoryCollectorHandle>,
+    /// Softmax backend samples collected since the last drain.
+    softmax_samples: Vec<SoftmaxSample>,
 }
 
 impl Context {
@@ -84,6 +88,7 @@ impl Context {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
+            softmax_samples: Vec::new(),
         })
     }
 
@@ -134,6 +139,17 @@ impl Context {
         if let Some(collector) = self.latency_collector.as_ref() {
             collector.borrow_mut().record(event, duration);
         }
+    }
+
+    pub(crate) fn record_softmax_backend_sample(&mut self, backend: SoftmaxBackend, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+        self.softmax_samples.push(SoftmaxSample { backend, duration });
+    }
+
+    pub fn take_softmax_samples(&mut self) -> Vec<SoftmaxSample> {
+        mem::take(&mut self.softmax_samples)
     }
 
     /// Registers a memory collector handle for the upcoming operations. Passing `None`

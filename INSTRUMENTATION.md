@@ -27,6 +27,37 @@ collector records:
 rows shown in the sidebar so individual phases can be expanded underneath each
 block.
 
+### Softmax backend benchmarking
+
+Softmax normalization now supports two execution paths: the existing
+`sdpa_fused_softmax` compute kernel and a path that records
+`MPSMatrixSoftMax` through the shared `ResourceCache`. The desired backend is
+selected via the `METALLIC_SOFTMAX_BACKEND` environment variable:
+
+* `auto` (default) keeps the compute pipeline for all legacy call sites but
+  allows attention code paths that opt in to request the MPS variant when it is
+  legal (i.e. no causal masking or query offsets).
+* `kernel`, `compute`, or `pipeline` force the fused compute shader.
+* `mps` or `metal` force the MPS softmax wherever the caller allows it.
+
+During generation, `Context` records per-dispatch softmax timings and the
+metrics layer aggregates them into two new top-level latency rows, **Softmax
+(Kernel)** and **Softmax (MPS)**. These show the most recent and rolling average
+latencies for each backend so you can compare them live in Ratatui or via the
+JSONL logs. Use the new rows to validate the faster option on-device before
+changing the default for production builds.
+
+For offline validation, run the dedicated criterion benchmark to compare both
+paths outside of the generation loop:
+
+```
+cargo bench --bench softmax_backend_benchmark
+```
+
+The benchmark reports separate `kernel` and `mps` measurements using identical
+tensor shapes so you can determine which backend is faster on a given piece of
+hardware.
+
 ## Memory tracking
 
 The memory collector captures pool usage, KV cache growth, and per-phase deltas.

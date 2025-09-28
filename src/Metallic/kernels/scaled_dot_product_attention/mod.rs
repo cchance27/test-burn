@@ -1,7 +1,6 @@
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
@@ -238,30 +237,6 @@ fn create_sdpa_operation(
     ))
 }
 
-fn apply_mps_softmax(ctx: &mut Context, cache: &mut ResourceCache, attn: &Tensor, rows: usize, columns: usize) -> Result<(), MetalError> {
-    let mut attn_for_prepare = attn.clone();
-    ctx.prepare_tensors_for_active_cmd(&mut [&mut attn_for_prepare]);
-
-    let descriptor_key = MpsMatrixDescriptorKey {
-        rows,
-        columns,
-        row_bytes: columns * size_of::<f32>(),
-    };
-    let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
-    let softmax_key = MpsSoftMaxKey { rows, columns };
-    let softmax = cache.get_or_create_softmax(softmax_key, &ctx.device)?;
-
-    let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-    let op = MpsSoftmaxOperation {
-        attn: attn.clone(),
-        descriptor,
-        softmax,
-    };
-    command_buffer.record(&op, cache)?;
-    ctx.mark_tensor_pending(attn);
-    Ok(())
-}
-
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
@@ -358,27 +333,6 @@ impl Operation for ScaledDotProductAttention {
     ) -> Result<(), MetalError> {
         // Since all computation was done in the `new` method of KernelInvocable,
         // this method just returns Ok(())
-        Ok(())
-    }
-}
-
-struct MpsSoftmaxOperation {
-    attn: Tensor,
-    descriptor: Retained<MPSMatrixDescriptor>,
-    softmax: Retained<MPSMatrixSoftMax>,
-}
-
-impl Operation for MpsSoftmaxOperation {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let attn_matrix = mps_matrix_from_buffer(&self.attn.buf, self.attn.offset, &self.descriptor);
-        unsafe {
-            self.softmax
-                .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer, &attn_matrix, &attn_matrix);
-        }
         Ok(())
     }
 }
