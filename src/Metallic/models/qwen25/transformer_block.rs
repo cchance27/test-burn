@@ -2,12 +2,8 @@ use crate::metallic::{Context, MetalError, Tensor};
 
 pub struct TransformerBlock {
     // Attention weights (placeholders matching GGUF shapes)
-    pub attn_q_weight: Tensor,
-    pub attn_q_bias: Tensor,
-    pub attn_k_weight: Tensor,
-    pub attn_k_bias: Tensor,
-    pub attn_v_weight: Tensor,
-    pub attn_v_bias: Tensor,
+    pub attn_qkv_weight: Tensor,
+    pub attn_qkv_bias: Tensor,
     pub attn_out_weight: Tensor,
 
     // Feedforward
@@ -22,20 +18,17 @@ pub struct TransformerBlock {
 
     // Pre-normalization before attention
     pub attn_norm_gamma: Tensor,
+
+    pub kv_dim: usize,
 }
 
 impl TransformerBlock {
     pub fn new(cfg: &super::Qwen25Config, ctx: &mut Context) -> Result<Self, MetalError> {
-        // Q, K, V projections
-        let attn_q_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?;
-        let attn_q_bias = Tensor::zeros(vec![cfg.d_model], ctx, false)?;
-
         let kv_dim = cfg.d_model * cfg.n_kv_heads / cfg.n_heads;
-        let attn_k_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx, false)?;
-        let attn_k_bias = Tensor::zeros(vec![kv_dim], ctx, false)?;
-
-        let attn_v_weight = Tensor::zeros(vec![kv_dim, cfg.d_model], ctx, false)?;
-        let attn_v_bias = Tensor::zeros(vec![kv_dim], ctx, false)?;
+        // Q, K, V projections packed into a single fused matrix stored in row-major layout
+        let qkv_out_dim = cfg.d_model + 2 * kv_dim;
+        let attn_qkv_weight = Tensor::zeros(vec![cfg.d_model, qkv_out_dim], ctx, false)?;
+        let attn_qkv_bias = Tensor::zeros(vec![qkv_out_dim], ctx, false)?;
 
         let attn_out_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?;
 
@@ -58,12 +51,8 @@ impl TransformerBlock {
         let attn_norm_gamma = Tensor::zeros(vec![cfg.d_model], ctx, false)?;
 
         Ok(Self {
-            attn_q_weight,
-            attn_q_bias,
-            attn_k_weight,
-            attn_k_bias,
-            attn_v_weight,
-            attn_v_bias,
+            attn_qkv_weight,
+            attn_qkv_bias,
             attn_out_weight,
             ffn_down,
             ffn_gate,
@@ -73,6 +62,7 @@ impl TransformerBlock {
             ffn_down_bias,
             ffn_norm_gamma,
             attn_norm_gamma,
+            kv_dim,
         })
     }
 }

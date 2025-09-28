@@ -19,6 +19,7 @@ pub mod elemwise_add;
 pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
+pub mod fused_qkv;
 pub mod gelu;
 pub mod kv_rearrange;
 pub mod layernorm;
@@ -40,6 +41,7 @@ pub enum KernelLibrary {
     ElemwiseDiv,
     ElemwiseMul,
     ElemwiseSub,
+    FusedQkv,
     Gelu,
     KvRearrange,
     LayerNorm,
@@ -59,6 +61,7 @@ impl KernelLibrary {
             KernelLibrary::ElemwiseDiv => include_str!("elemwise_div/kernel.metal"),
             KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
             KernelLibrary::ElemwiseSub => include_str!("elemwise_sub/kernel.metal"),
+            KernelLibrary::FusedQkv => include_str!("fused_qkv/kernel.metal"),
             KernelLibrary::Gelu => include_str!("gelu/kernel.metal"),
             KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
             KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
@@ -81,6 +84,7 @@ pub enum KernelFunction {
     ElemwiseDiv,
     ElemwiseMul,
     ElemwiseSub,
+    FusedQkvBiasSplit,
     Gelu,
     KvRearrange,
     LayerNorm,
@@ -122,6 +126,7 @@ impl KernelFunction {
             KernelFunction::ElemwiseDiv => "div_kernel",
             KernelFunction::ElemwiseMul => "mul_kernel",
             KernelFunction::ElemwiseSub => "sub_kernel",
+            KernelFunction::FusedQkvBiasSplit => "fused_qkv_bias_split",
             KernelFunction::Gelu => "gelu_kernel",
             KernelFunction::KvRearrange => "kv_rearrange_kernel",
             KernelFunction::LayerNorm => "layernorm_kernel",

@@ -11,7 +11,7 @@ use std::{
     io::{self, BufWriter, Write},
     time::{Duration, Instant},
 };
-use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System, get_current_pid};
+use sysinfo::{get_current_pid, Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
 pub const METRICS_LOG_INTERVAL_ENV: &str = "METRICS_LOG_INTERVAL_SECS";
 pub const METRICS_LOG_ENABLED_ENV: &str = "METRICS_LOG_ENABLED";
@@ -664,12 +664,23 @@ pub fn build_model_memory_tree(model: &Qwen25) -> ModelMemoryNode {
         .iter()
         .enumerate()
         .map(|(idx, block)| {
+            let elem_bytes = std::mem::size_of::<f32>();
+            let d_model = model.config.d_model;
+            let kv_dim = block.kv_dim;
+            let q_weight_bytes = d_model * d_model * elem_bytes;
+            let k_weight_bytes = d_model * kv_dim * elem_bytes;
+            let v_weight_bytes = d_model * kv_dim * elem_bytes;
+            let q_bias_bytes = d_model * elem_bytes;
+            let k_bias_bytes = kv_dim * elem_bytes;
+            let v_bias_bytes = kv_dim * elem_bytes;
+
             let attn_projections = ModelMemoryNode::branch(
                 "Attention Projections",
                 vec![
-                    ModelMemoryNode::leaf("Q weight", block.attn_q_weight.size_bytes()),
-                    ModelMemoryNode::leaf("K weight", block.attn_k_weight.size_bytes()),
-                    ModelMemoryNode::leaf("V weight", block.attn_v_weight.size_bytes()),
+                    ModelMemoryNode::leaf("Fused QKV weight", block.attn_qkv_weight.size_bytes()),
+                    ModelMemoryNode::leaf("Q weight logical slice", q_weight_bytes),
+                    ModelMemoryNode::leaf("K weight logical slice", k_weight_bytes),
+                    ModelMemoryNode::leaf("V weight logical slice", v_weight_bytes),
                     ModelMemoryNode::leaf("Output weight", block.attn_out_weight.size_bytes()),
                 ],
             );
@@ -677,9 +688,10 @@ pub fn build_model_memory_tree(model: &Qwen25) -> ModelMemoryNode {
             let attn_biases = ModelMemoryNode::branch(
                 "Attention Biases",
                 vec![
-                    ModelMemoryNode::leaf("Q bias", block.attn_q_bias.size_bytes()),
-                    ModelMemoryNode::leaf("K bias", block.attn_k_bias.size_bytes()),
-                    ModelMemoryNode::leaf("V bias", block.attn_v_bias.size_bytes()),
+                    ModelMemoryNode::leaf("Fused QKV bias", block.attn_qkv_bias.size_bytes()),
+                    ModelMemoryNode::leaf("Q bias logical slice", q_bias_bytes),
+                    ModelMemoryNode::leaf("K bias logical slice", k_bias_bytes),
+                    ModelMemoryNode::leaf("V bias logical slice", v_bias_bytes),
                 ],
             );
 

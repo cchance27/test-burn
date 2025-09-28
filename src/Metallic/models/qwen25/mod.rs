@@ -1,7 +1,6 @@
 use crate::gguf::model_loader::GGUFModel;
 use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
 use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
-use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::matmul::MatMulOp;
 use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
@@ -222,19 +221,9 @@ impl Qwen25 {
 
             // QKV GEMMs
             let m = batch * seq;
-            let kv_dim = block.attn_k_weight.dims()[0];
+            let kv_dim = block.kv_dim;
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
-
-            let q_temp = ctx.matmul(&x_flat, &block.attn_q_weight, false, true)?;
-            let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
-
-            let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
-
-            let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
-
-            let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
-
-            let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
+            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
 
             // Defer RoPE until after head rearrangement
             let (q_after, k_after) = (q_mat.clone(), k_mat.clone());
@@ -378,18 +367,11 @@ impl Qwen25 {
 
             // QKV GEMMs for the single token
             let m = batch * seq; // m is always 1 for a single token
-            let kv_dim = block.attn_k_weight.dims()[0];
+            let kv_dim = block.kv_dim;
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
             phase_start = Instant::now();
-            let q_temp = ctx.matmul(&x_flat, &block.attn_q_weight, false, true)?;
-            let q_mat = ctx.call::<BroadcastElemwiseAddOp>((q_temp, block.attn_q_bias.clone()))?;
-
-            let k_temp = ctx.matmul(&x_flat, &block.attn_k_weight, false, true)?;
-            let k_mat = ctx.call::<BroadcastElemwiseAddOp>((k_temp, block.attn_k_bias.clone()))?;
-
-            let v_temp = ctx.matmul(&x_flat, &block.attn_v_weight, false, true)?;
-            let v_mat = ctx.call::<BroadcastElemwiseAddOp>((v_temp, block.attn_v_bias.clone()))?;
+            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_qkv_proj"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_qkv_proj"));
 

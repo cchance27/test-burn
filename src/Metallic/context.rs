@@ -3,18 +3,19 @@ use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollect
 use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
+use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Tensor, kernels};
+use crate::metallic::{kernels, Tensor};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
-use kernels::{KernelInvocable, KernelManager};
+use kernels::{KernelFunction, KernelInvocable, KernelManager};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary};
+use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
@@ -201,6 +202,112 @@ impl Context {
         cache: &mut ResourceCache,
     ) -> Result<super::Tensor, MetalError> {
         self.call_with_cache::<MatMulOp>((a.clone(), b.clone(), transpose_a, transpose_b), cache)
+    }
+
+    pub fn fused_qkv_projection(
+        &mut self,
+        x_flat: &Tensor,
+        fused_weight: &Tensor,
+        fused_bias: &Tensor,
+        d_model: usize,
+        kv_dim: usize,
+    ) -> Result<(Tensor, Tensor, Tensor), MetalError> {
+        let x_dims = x_flat.dims();
+        if x_dims.len() != 2 {
+            return Err(MetalError::InvalidShape(format!(
+                "fused_qkv_projection expects a 2D input [m, d_model], got {:?}",
+                x_dims
+            )));
+        }
+
+        let m = x_dims[0];
+        let in_features = x_dims[1];
+        if in_features != d_model {
+            return Err(MetalError::InvalidShape(format!(
+                "Input feature size {} does not match d_model {}",
+                in_features, d_model
+            )));
+        }
+
+        let weight_dims = fused_weight.dims();
+        if weight_dims.len() != 2 {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused weight must be 2D [d_model, qkv], got {:?}",
+                weight_dims
+            )));
+        }
+
+        let expected_total = d_model + 2 * kv_dim;
+        if weight_dims[0] != d_model || weight_dims[1] != expected_total {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused weight dims {:?} incompatible with d_model {} and kv_dim {}",
+                weight_dims, d_model, kv_dim
+            )));
+        }
+
+        if fused_bias.dims() != [expected_total] {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused bias dims {:?} incompatible with expected total {}",
+                fused_bias.dims(),
+                expected_total
+            )));
+        }
+
+        let mut linear = self.matmul(x_flat, fused_weight, false, false)?;
+        let mut bias = fused_bias.clone();
+        self.prepare_tensors_for_active_cmd(&mut [&mut linear, &mut bias]);
+
+        let mut q_out = Tensor::create_tensor_pooled(vec![m, d_model], self)?;
+        let mut k_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
+        let mut v_out = Tensor::create_tensor_pooled(vec![m, kv_dim], self)?;
+
+        self.prepare_tensors_for_active_cmd(&mut [&mut q_out, &mut k_out, &mut v_out]);
+
+        self.ensure_active_cmd_buffer()?;
+        let pipeline = self.kernel_manager.get_pipeline(KernelFunction::FusedQkvBiasSplit, &self.device)?;
+
+        let cmd_buf = self.active_command_buffer_mut()?;
+        let encoder = cmd_buf
+            .raw()
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        set_compute_pipeline_state(&encoder, &pipeline);
+        set_buffer(&encoder, 0, &linear.buf, linear.offset);
+        set_buffer(&encoder, 1, &bias.buf, bias.offset);
+        set_buffer(&encoder, 2, &q_out.buf, q_out.offset);
+        set_buffer(&encoder, 3, &k_out.buf, k_out.offset);
+        set_buffer(&encoder, 4, &v_out.buf, v_out.offset);
+
+        let rows = m as u32;
+        let q_cols = d_model as u32;
+        let kv_cols = kv_dim as u32;
+        let total_cols = q_cols + 2 * kv_cols;
+        let total_elements = rows * total_cols;
+
+        set_bytes(&encoder, 5, &rows);
+        set_bytes(&encoder, 6, &q_cols);
+        set_bytes(&encoder, 7, &kv_cols);
+
+        let threads_per_tg = MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let groups = MTLSize {
+            width: (total_elements + 255) as usize / 256,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+        encoder.endEncoding();
+
+        self.mark_tensor_pending(&q_out);
+        self.mark_tensor_pending(&k_out);
+        self.mark_tensor_pending(&v_out);
+
+        Ok((q_out, k_out, v_out))
     }
 
     #[allow(clippy::too_many_arguments)]
