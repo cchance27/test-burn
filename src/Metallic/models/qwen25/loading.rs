@@ -4,6 +4,199 @@ use crate::metallic::{
     Context, MetalError,
 };
 
+fn try_copy(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor) -> Result<(), MetalError> {
+    if src.len() != dst.len() {
+        return Err(MetalError::DimensionMismatch {
+            expected: dst.len(),
+            actual: src.len(),
+        });
+    }
+
+    if src.dims == dst.dims {
+        let s = src.as_slice();
+        let d = dst.as_mut_slice();
+        d.copy_from_slice(s);
+        return Ok(());
+    }
+
+    let s = src.as_slice();
+    let d = dst.as_mut_slice();
+    d.copy_from_slice(s);
+    Ok(())
+}
+
+fn pack_weight_transposed_into_fused_slice(
+    src_slice: &[f32],
+    src_dims: &[usize],
+    dst_slice: &mut [f32],
+    dst_dims: &[usize],
+    dst_col_offset: usize,
+) -> Result<(), MetalError> {
+    if src_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Expected 2D weight tensor, got {:?}",
+            src_dims
+        )));
+    }
+
+    if dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Fused weight must be 2D, got {:?}",
+            dst_dims
+        )));
+    }
+
+    let fused_rows = dst_dims[0];
+    let fused_cols = dst_dims[1];
+
+    let (out_features, in_features) = if src_dims[1] == fused_rows {
+        (src_dims[0], src_dims[1])
+    } else if src_dims[0] == fused_rows {
+        (src_dims[1], src_dims[0])
+    } else {
+        return Err(MetalError::InvalidShape(format!(
+            "Unable to map weight {:?} into fused layout with {} rows",
+            src_dims, fused_rows
+        )));
+    };
+
+    if dst_col_offset + out_features > fused_cols {
+        return Err(MetalError::InvalidShape(format!(
+            "Column range [{}..{}) exceeds fused weight width {}",
+            dst_col_offset,
+            dst_col_offset + out_features,
+            fused_cols
+        )));
+    }
+
+    for out_idx in 0..out_features {
+        for in_idx in 0..in_features {
+            let src_index = out_idx * in_features + in_idx;
+            let dst_row = in_idx;
+            let dst_col = dst_col_offset + out_idx;
+            let dst_index = dst_row * fused_cols + dst_col;
+            dst_slice[dst_index] = src_slice[src_index];
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_weight_transposed_into_fused(
+    src: &crate::metallic::Tensor,
+    dst: &mut crate::metallic::Tensor,
+    dst_col_offset: usize,
+) -> Result<(), MetalError> {
+    pack_weight_transposed_into_fused_slice(
+        src.as_slice(),
+        src.dims(),
+        dst.as_mut_slice(),
+        dst.dims(),
+        dst_col_offset,
+    )
+}
+
+fn copy_bias_into_fused(
+    src: &crate::metallic::Tensor,
+    dst: &mut crate::metallic::Tensor,
+    dst_offset: usize,
+) -> Result<(), MetalError> {
+    if dst_offset + src.len() > dst.len() {
+        return Err(MetalError::DimensionMismatch {
+            expected: dst.len(),
+            actual: dst_offset + src.len(),
+        });
+    }
+
+    let s = src.as_slice();
+    let d = dst.as_mut_slice();
+    d[dst_offset..dst_offset + s.len()].copy_from_slice(s);
+    Ok(())
+}
+
+fn parse_layer_index(name: &str) -> Option<usize> {
+    let patterns = ["layers.", "layer.", "blocks.", "block.", "layer_", "layers_"];
+    let lname = name.to_lowercase();
+    for pat in patterns.iter() {
+        if let Some(pos) = lname.find(pat) {
+            let start = pos + pat.len();
+            let mut digits = String::new();
+            for ch in lname[start..].chars() {
+                if ch.is_ascii_digit() {
+                    digits.push(ch);
+                } else {
+                    break;
+                }
+            }
+            if !digits.is_empty()
+                && let Ok(idx) = digits.parse::<usize>()
+            {
+                return Some(idx);
+            }
+        }
+    }
+    let mut found = String::new();
+    for ch in lname.chars() {
+        if ch.is_ascii_digit() {
+            found.push(ch);
+        } else if !found.is_empty() {
+            break;
+        }
+    }
+    if !found.is_empty()
+        && let Ok(idx) = found.parse::<usize>()
+    {
+        return Some(idx);
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pack_weight_transposed_into_fused_slice;
+    use crate::metallic::MetalError;
+
+    #[test]
+    fn pack_weight_transposes_row_major_layouts() {
+        let src_dims = vec![3, 2];
+        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let fused_dims = vec![2, 3];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
+
+        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn pack_weight_transposes_column_major_exports() {
+        let src_dims = vec![2, 3];
+        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let fused_dims = vec![2, 3];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
+
+        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn pack_weight_errors_when_rows_mismatch_fused_input() {
+        let src_dims = vec![4, 3];
+        let src = vec![0.0; 12];
+        let fused_dims = vec![2, 6];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        let err = pack_weight_transposed_into_fused_slice(&src, &src_dims, &mut fused, &fused_dims, 0)
+            .expect_err("expected invalid shape error");
+
+        match err {
+            MetalError::InvalidShape(_) => {}
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+}
+
 /// Implement the LoadableModel trait so Qwen25 can be created from a GGUFModel
 impl LoadableModel for super::Qwen25 {
     fn load_from_gguf(gguf_model: &GGUFModel, ctx: &mut Context) -> Result<Self, MetalError> {
@@ -49,152 +242,6 @@ impl LoadableModel for super::Qwen25 {
 
         // Instantiate Qwen25 with default-initialized weights
         let mut qwen = Qwen25::new(cfg, ctx)?;
-
-        // Helper: attempt to copy from gguf tensor into dst.
-        // Fast-path when shapes match, and a linear fallback when only total element counts match.
-        // We avoid transposing rectangular matrices since GGUF already has the correct layout for our matmuls.
-        fn try_copy(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor) -> Result<(), MetalError> {
-            // Basic size check
-            if src.len() != dst.len() {
-                return Err(MetalError::DimensionMismatch {
-                    expected: dst.len(),
-                    actual: src.len(),
-                });
-            }
-
-            // Exact-shape fast path
-            if src.dims == dst.dims {
-                let s = src.as_slice();
-                let d = dst.as_mut_slice();
-                d.copy_from_slice(s);
-                return Ok(());
-            }
-
-            // Fallback linear copy for other shapes
-            let s = src.as_slice();
-            let d = dst.as_mut_slice();
-            d.copy_from_slice(s);
-            Ok(())
-        }
-
-        fn copy_weight_transposed_into_fused(
-            src: &crate::metallic::Tensor,
-            dst: &mut crate::metallic::Tensor,
-            dst_col_offset: usize,
-        ) -> Result<(), MetalError> {
-            let src_dims = src.dims();
-            if src_dims.len() != 2 {
-                return Err(MetalError::InvalidShape(format!("Expected 2D weight tensor, got {:?}", src_dims)));
-            }
-
-            let dst_dims = dst.dims();
-            if dst_dims.len() != 2 {
-                return Err(MetalError::InvalidShape(format!("Fused weight must be 2D, got {:?}", dst_dims)));
-            }
-
-            let fused_rows = dst_dims[0];
-            let fused_cols = dst_dims[1];
-
-            // GGUF emitters disagree on whether projection weights are stored as
-            // [out, in] or already transposed [in, out]. Detect the orientation by
-            // matching whichever dimension lines up with the fused row count
-            // (the input features) and transpose as needed on copy.
-            let (out_features, in_features, src_is_row_major) = if src_dims[1] == fused_rows {
-                (src_dims[0], src_dims[1], true)
-            } else if src_dims[0] == fused_rows {
-                (src_dims[1], src_dims[0], false)
-            } else {
-                return Err(MetalError::InvalidShape(format!(
-                    "Unable to map weight {:?} into fused layout with {} rows",
-                    src_dims, fused_rows
-                )));
-            };
-
-            if dst_col_offset + out_features > fused_cols {
-                return Err(MetalError::InvalidShape(format!(
-                    "Column range [{}..{}) exceeds fused weight width {}",
-                    dst_col_offset,
-                    dst_col_offset + out_features,
-                    fused_cols
-                )));
-            }
-
-            let src_slice = src.as_slice();
-            let dst_slice = dst.as_mut_slice();
-
-            for out_idx in 0..out_features {
-                for in_idx in 0..in_features {
-                    let src_index = if src_is_row_major {
-                        out_idx * in_features + in_idx
-                    } else {
-                        in_idx * out_features + out_idx
-                    };
-                    let dst_row = in_idx;
-                    let dst_col = dst_col_offset + out_idx;
-                    let dst_index = dst_row * fused_cols + dst_col;
-                    dst_slice[dst_index] = src_slice[src_index];
-                }
-            }
-
-            Ok(())
-        }
-
-        fn copy_bias_into_fused(
-            src: &crate::metallic::Tensor,
-            dst: &mut crate::metallic::Tensor,
-            dst_offset: usize,
-        ) -> Result<(), MetalError> {
-            if dst_offset + src.len() > dst.len() {
-                return Err(MetalError::DimensionMismatch {
-                    expected: dst.len(),
-                    actual: dst_offset + src.len(),
-                });
-            }
-
-            let s = src.as_slice();
-            let d = dst.as_mut_slice();
-            d[dst_offset..dst_offset + s.len()].copy_from_slice(s);
-            Ok(())
-        }
-
-        // layer index extractor (searches for common patterns)
-        fn parse_layer_index(name: &str) -> Option<usize> {
-            let patterns = ["layers.", "layer.", "blocks.", "block.", "layer_", "layers_"];
-            let lname = name.to_lowercase();
-            for pat in patterns.iter() {
-                if let Some(pos) = lname.find(pat) {
-                    let start = pos + pat.len();
-                    let mut digits = String::new();
-                    for ch in lname[start..].chars() {
-                        if ch.is_ascii_digit() {
-                            digits.push(ch);
-                        } else {
-                            break;
-                        }
-                    }
-                    if !digits.is_empty()
-                        && let Ok(idx) = digits.parse::<usize>()
-                    {
-                        return Some(idx);
-                    }
-                }
-            }
-            // fallback: first run of digits
-            let mut found = String::new();
-            for ch in lname.chars() {
-                if ch.is_ascii_digit() {
-                    found.push(ch);
-                } else if !found.is_empty() {
-                    break;
-                }
-            }
-            if !found.is_empty()
-                && let Ok(idx) = found.parse::<usize>()
-            {
-                return Some(idx);
-            }
-            None
-        }
 
         // Iterate gguf tensors and map into Qwen25 where names match heuristics.
         // This mapping is intentionally permissive to handle different exporter naming schemes.
