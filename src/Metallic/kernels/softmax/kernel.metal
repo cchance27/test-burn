@@ -1,14 +1,31 @@
 #include <metal_stdlib>
+
+#if __has_include(<metal_simdgroup>)
 #include <metal_simdgroup>
+#define __TB_HAS_METAL_SIMDGROUP_HEADER__ 1
+#else
+#define __TB_HAS_METAL_SIMDGROUP_HEADER__ 0
+#endif
+
 using namespace metal;
 
 #if !defined(__METAL_SIMDGROUP_REDUCE_AVAILABLE__)
 #define __METAL_SIMDGROUP_REDUCE_AVAILABLE__ 0
 #endif
 
+#if !defined(__METAL_VERSION__)
+#define __METAL_VERSION__ 0
+#endif
+
+#if (__METAL_VERSION__ >= 310 && __TB_HAS_METAL_SIMDGROUP_HEADER__) || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+#define __TB_CAN_USE_SIMDGROUP_REDUCE__ 1
+#else
+#define __TB_CAN_USE_SIMDGROUP_REDUCE__ 0
+#endif
+
 template <typename T>
 inline T reduce_max_simdgroup(T value) {
-#if __METAL_VERSION__ >= 310 || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+#if __TB_CAN_USE_SIMDGROUP_REDUCE__
     return simdgroup_reduce_max(value);
 #else
     return simd_reduce_max(value);
@@ -17,7 +34,7 @@ inline T reduce_max_simdgroup(T value) {
 
 template <typename T>
 inline T reduce_add_simdgroup(T value) {
-#if __METAL_VERSION__ >= 310 || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+#if __TB_CAN_USE_SIMDGROUP_REDUCE__
     return simdgroup_reduce_add(value);
 #else
     return simd_reduce_add(value);
@@ -25,7 +42,7 @@ inline T reduce_add_simdgroup(T value) {
 }
 
 inline uint reduce_min_simdgroup(uint value) {
-#if __METAL_VERSION__ >= 310 || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+#if __TB_CAN_USE_SIMDGROUP_REDUCE__
     return simdgroup_reduce_min(value);
 #else
     return simd_reduce_min(value);
