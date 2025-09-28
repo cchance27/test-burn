@@ -2,6 +2,36 @@
 #include <metal_simdgroup>
 using namespace metal;
 
+#if !defined(__METAL_SIMDGROUP_REDUCE_AVAILABLE__)
+#define __METAL_SIMDGROUP_REDUCE_AVAILABLE__ 0
+#endif
+
+template <typename T>
+inline T reduce_max_simdgroup(T value) {
+#if __METAL_VERSION__ >= 310 || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+    return simdgroup_reduce_max(value);
+#else
+    return simd_reduce_max(value);
+#endif
+}
+
+template <typename T>
+inline T reduce_add_simdgroup(T value) {
+#if __METAL_VERSION__ >= 310 || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+    return simdgroup_reduce_add(value);
+#else
+    return simd_reduce_add(value);
+#endif
+}
+
+inline uint reduce_min_simdgroup(uint value) {
+#if __METAL_VERSION__ >= 310 || __METAL_SIMDGROUP_REDUCE_AVAILABLE__
+    return simdgroup_reduce_min(value);
+#else
+    return simd_reduce_min(value);
+#endif
+}
+
 // Fused mask+softmax compute kernel
 kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
                                constant uint &seq_q [[buffer(1)]],
@@ -49,9 +79,9 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
         }
     }
     
-    float group_max = simdgroup_reduce_max(local_max);
+    float group_max = reduce_max_simdgroup(local_max);
     uint candidate_index = (local_max == group_max) ? max_index : INVALID_INDEX;
-    uint group_max_index = simdgroup_reduce_min(candidate_index);
+    uint group_max_index = reduce_min_simdgroup(candidate_index);
 
     if (simd_is_first() && simdgroup_active) {
         shared_max[simd_gid] = group_max;
@@ -63,10 +93,10 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
     if (simd_gid == 0) {
         uint lane_id = static_cast<uint>(simd_tid);
         float cross_max = (lane_id < clamped_simdgroups) ? shared_max[lane_id] : -INFINITY;
-        float block_max = simdgroup_reduce_max(cross_max);
+        float block_max = reduce_max_simdgroup(cross_max);
         uint cross_index =
             (lane_id < clamped_simdgroups && cross_max == block_max) ? shared_indices[lane_id] : INVALID_INDEX;
-        uint block_max_index = simdgroup_reduce_min(cross_index);
+        uint block_max_index = reduce_min_simdgroup(cross_index);
 
         if (simd_is_first()) {
             shared_max[0] = block_max;
@@ -112,7 +142,7 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
         local_sum += e;
     }
 
-    float group_sum = simdgroup_reduce_add(local_sum);
+    float group_sum = reduce_add_simdgroup(local_sum);
 
     if (simd_is_first() && simdgroup_active) {
         shared_sum[simd_gid] = group_sum;
@@ -123,7 +153,7 @@ kernel void sdpa_fused_softmax(device float* attn [[buffer(0)]],
     if (simd_gid == 0) {
         uint lane_id = static_cast<uint>(simd_tid);
         float cross_sum = (lane_id < clamped_simdgroups) ? shared_sum[lane_id] : 0.0f;
-        float block_sum = simdgroup_reduce_add(cross_sum);
+        float block_sum = reduce_add_simdgroup(cross_sum);
 
         if (simd_is_first()) {
             shared_sum[0] = block_sum;
