@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::{operation::CommandBuffer, Context, MetalError};
+use super::{Context, MetalError, operation::CommandBuffer};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
@@ -185,7 +185,7 @@ impl Tensor {
             return Ok((self.clone(), view));
         }
 
-        let mut compact = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
+        let compact = Tensor::create_tensor_pooled(self.dims.clone(), ctx)?;
 
         ctx.prepare_tensors_for_active_cmd(&[self]);
 
@@ -199,13 +199,15 @@ impl Tensor {
         for batch_idx in 0..view.batch {
             let src_offset = self.offset + batch_idx * view.matrix_bytes;
             let dst_offset = compact.offset + batch_idx * copy_bytes;
-            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                &self.buf,
-                src_offset,
-                &compact.buf,
-                dst_offset,
-                copy_bytes,
-            );
+            unsafe {
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &self.buf,
+                    src_offset,
+                    &compact.buf,
+                    dst_offset,
+                    copy_bytes,
+                );
+            }
         }
         encoder.endEncoding();
 
