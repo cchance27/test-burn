@@ -1,4 +1,4 @@
-use crate::metallic::generation::{generate, GenerationConfig};
+use crate::metallic::generation::{GenerationConfig, generate};
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{Context, MetalError, Tensor, Tokenizer};
 use rustc_hash::FxHashMap;

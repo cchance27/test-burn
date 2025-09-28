@@ -1,7 +1,7 @@
 use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     gguf::GGUFValue,
-    metallic::{resource_cache::ResourceCache, Context, Tensor},
+    metallic::{Context, Tensor, resource_cache::ResourceCache},
 };
 use std::collections::HashMap;
 

@@ -4,7 +4,7 @@ use super::operation::{CommandBuffer, Operation};
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{kernels, Tensor};
+use crate::metallic::{Tensor, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
@@ -191,11 +191,7 @@ impl Context {
         self.call::<MatMulAlphaBetaOp>((a.clone(), b.clone(), result.clone(), transpose_a, transpose_b, alpha, beta))
     }
 
-    pub(crate) fn call_with_cache<K: KernelInvocable>(
-        &mut self,
-        args: K::Args,
-        cache: &mut ResourceCache,
-    ) -> Result<Tensor, MetalError> {
+    pub(crate) fn call_with_cache<K: KernelInvocable>(&mut self, args: K::Args, cache: &mut ResourceCache) -> Result<Tensor, MetalError> {
         self.ensure_active_cmd_buffer_internal(false)?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -225,18 +221,7 @@ impl Context {
         beta: f32,
         cache: &mut ResourceCache,
     ) -> Result<super::Tensor, MetalError> {
-        self.call_with_cache::<MatMulAlphaBetaOp>(
-            (
-                a.clone(),
-                b.clone(),
-                result.clone(),
-                transpose_a,
-                transpose_b,
-                alpha,
-                beta,
-            ),
-            cache,
-        )
+        self.call_with_cache::<MatMulAlphaBetaOp>((a.clone(), b.clone(), result.clone(), transpose_a, transpose_b, alpha, beta), cache)
     }
 
     pub fn get_cache_stats(&self) -> Option<CacheStats> {
@@ -416,13 +401,7 @@ impl Context {
         query_offset: usize,
     ) -> Result<super::Tensor, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOptimizedOp>((
-            q.clone(),
-            k.clone(),
-            v.clone(),
-            causal,
-            query_offset as u32,
-        ))
+        self.call::<ScaledDotProductAttentionOptimizedOp>((q.clone(), k.clone(), v.clone(), causal, query_offset as u32))
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.

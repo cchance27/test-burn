@@ -4,12 +4,12 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 use super::{KernelFunction, KernelInvocable};
+use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
+    Context, MetalError, Operation, Tensor,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
-    Context, MetalError, Operation, Tensor,
 };
-use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 
 use std::mem::size_of;
 
@@ -168,25 +168,10 @@ fn create_sdpa_operation(
 
         // Perform matmul with scaling in one operation: [s_q, d] @ [d, s_k] = [s_q, s_k] with alpha=scale
         let qk_scaled_result = match cache.as_deref_mut() {
-            Some(cache_ref) => ctx.matmul_alpha_beta_with_cache(
-                &q_i,
-                &k_operand,
-                &attention_seed,
-                false,
-                transpose_b,
-                scale,
-                0.0,
-                cache_ref,
-            )?,
-            None => ctx.matmul_alpha_beta(
-                &q_i,
-                &k_operand,
-                &attention_seed,
-                false,
-                transpose_b,
-                scale,
-                0.0,
-            )?,
+            Some(cache_ref) => {
+                ctx.matmul_alpha_beta_with_cache(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0, cache_ref)?
+            }
+            None => ctx.matmul_alpha_beta(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0)?,
         }; // [s_q, s_k]
 
         let use_mps_softmax = config.use_mps_softmax && !causal && query_offset == 0;
@@ -196,37 +181,27 @@ fn create_sdpa_operation(
                 apply_mps_softmax(ctx, cache_ref, &qk_scaled_result, s_q, s_k)?;
                 qk_scaled_result.clone()
             } else {
-                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (
-                        qk_scaled_result,
-                        s_q as u32,
-                        s_k as u32,
-                        causal as u32,
-                        query_offset,
-                    ),
-                )?
+                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
+                    qk_scaled_result,
+                    s_q as u32,
+                    s_k as u32,
+                    causal as u32,
+                    query_offset,
+                ))?
             }
         } else {
             match cache.as_deref_mut() {
                 Some(cache_ref) => ctx.call_with_cache::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (
-                        qk_scaled_result,
-                        s_q as u32,
-                        s_k as u32,
-                        causal as u32,
-                        query_offset,
-                    ),
+                    (qk_scaled_result, s_q as u32, s_k as u32, causal as u32, query_offset),
                     cache_ref,
                 )?,
-                None => ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
-                    (
-                        qk_scaled_result,
-                        s_q as u32,
-                        s_k as u32,
-                        causal as u32,
-                        query_offset,
-                    ),
-                )?,
+                None => ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
+                    qk_scaled_result,
+                    s_q as u32,
+                    s_k as u32,
+                    causal as u32,
+                    query_offset,
+                ))?,
             }
         };
 
