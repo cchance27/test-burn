@@ -1,4 +1,5 @@
 use super::{MetalError, Tensor};
+use crate::metallic::tensor::Dtype;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
@@ -29,6 +30,20 @@ pub struct MemoryPool {
     max_pool_size: usize,
 }
 
+/// Metadata describing an allocation made from the memory pool.
+pub struct PooledAllocation {
+    pub tensor: Tensor,
+    pub dtype: Dtype,
+    pub element_size: usize,
+}
+
+impl PooledAllocation {
+    #[inline]
+    pub fn into_tensor(self) -> Tensor {
+        self.tensor
+    }
+}
+
 impl MemoryPool {
     /// Creates a new memory pool with an initial chunk.
     pub fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
@@ -57,9 +72,10 @@ impl MemoryPool {
     }
 
     /// Allocates a new tensor from the pool, growing if necessary.
-    pub fn alloc_tensor(&mut self, dims: Vec<usize>) -> Result<Tensor, MetalError> {
+    pub fn alloc_tensor(&mut self, dims: Vec<usize>, dtype: Dtype) -> Result<PooledAllocation, MetalError> {
         let num_elements = dims.iter().product::<usize>();
-        let size_bytes = num_elements * std::mem::size_of::<f32>();
+        let element_size = dtype.size_bytes();
+        let size_bytes = num_elements * element_size;
         let aligned_size = align(size_bytes, 256); // Buffers must be 256-byte aligned
 
         // Try to allocate in existing chunks
@@ -70,14 +86,18 @@ impl MemoryPool {
                 self.pooled_bytes_allocated += aligned_size;
                 self.pooled_allocations += 1;
 
-                return Ok(Tensor {
-                    buf: self.chunks[chunk_idx].buffer.clone(),
-                    dims: dims.clone(),
-                    strides: Tensor::compute_strides(&dims),
-                    dtype: crate::metallic::tensor::Dtype::F32,
-                    device: self.device.clone(),
-                    offset,
-                    defining_cmd_buffer: Rc::new(RefCell::new(None)),
+                return Ok(PooledAllocation {
+                    dtype,
+                    element_size,
+                    tensor: Tensor {
+                        buf: self.chunks[chunk_idx].buffer.clone(),
+                        dims: dims.clone(),
+                        strides: Tensor::compute_strides(&dims),
+                        dtype,
+                        device: self.device.clone(),
+                        offset,
+                        defining_cmd_buffer: Rc::new(RefCell::new(None)),
+                    },
                 });
             }
         }
@@ -110,14 +130,18 @@ impl MemoryPool {
         self.pooled_bytes_allocated += aligned_size;
         self.pooled_allocations += 1;
 
-        Ok(Tensor {
-            buf: self.chunks[chunk_idx].buffer.clone(),
-            dims: dims.clone(),
-            strides: Tensor::compute_strides(&dims),
-            dtype: crate::metallic::tensor::Dtype::F32,
-            device: self.device.clone(),
-            offset,
-            defining_cmd_buffer: Rc::new(RefCell::new(None)),
+        Ok(PooledAllocation {
+            dtype,
+            element_size,
+            tensor: Tensor {
+                buf: self.chunks[chunk_idx].buffer.clone(),
+                dims: dims.clone(),
+                strides: Tensor::compute_strides(&dims),
+                dtype,
+                device: self.device.clone(),
+                offset,
+                defining_cmd_buffer: Rc::new(RefCell::new(None)),
+            },
         })
     }
 

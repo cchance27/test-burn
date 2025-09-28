@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::{Context, MetalError, operation::CommandBuffer};
+use super::{operation::CommandBuffer, Context, MetalError};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
@@ -183,7 +183,7 @@ impl Tensor {
     /// Create an uninitialized tensor of given shape using pooled memory.
     #[inline]
     pub fn create_tensor_pooled(dims: Vec<usize>, ctx: &mut Context) -> Result<Tensor, MetalError> {
-        ctx.pool.alloc_tensor(dims)
+        Ok(ctx.pool.alloc_tensor(dims, Dtype::F32)?.into_tensor())
     }
 
     /// Create a tensor view from an existing Metal buffer without copying.

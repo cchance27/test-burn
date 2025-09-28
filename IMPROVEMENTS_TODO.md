@@ -3,12 +3,12 @@
 This checklist captures potential optimizations and hardening opportunities discovered during the review. Items are grouped by expected effort/complexity, but many can be pursued in parallel.
 
 ## ✅ Quick wins
-- [ ] Record the dtype and element size in `MemoryPool::alloc_tensor` instead of assuming `f32`; this prevents over-allocation and unlocks pooled storage for `bf16`/`fp16` tensors. 【F:src/Metallic/pool.rs†L33-L92】
-- [ ] Expose pooled tensor allocation for KV cache setup to avoid the extra `clone()` handles that retain buffers longer than necessary. 【F:src/Metallic/context.rs†L22-L116】
-- [ ] Remove unnecessary `clone()` calls when dispatching operations (e.g., `Context::matmul*`); prefer borrowed tensor handles or lightweight views to cut reference counting churn. 【F:src/Metallic/context.rs†L60-L95】
+- [x] Record the dtype and element size in `MemoryPool::alloc_tensor` instead of assuming `f32`; this prevents over-allocation and unlocks pooled storage for `bf16`/`fp16` tensors. (Implemented via `PooledAllocation` metadata on the dedicated KV pool.)
+- [x] Expose pooled tensor allocation for KV cache setup to avoid the extra `clone()` handles that retain buffers longer than necessary. (KV initialization now requests typed pooled buffers directly.)
+- [x] Remove unnecessary `clone()` calls when dispatching operations (e.g., `Context::matmul*`); prefer borrowed tensor handles or lightweight views to cut reference counting churn. (Freshly zeroed KV writes now blit into the canonical cache without cloning cached tensors.)
 - [ ] Replace repeated manual F16→F32 conversion paths with a single helper and skip debug prints to reduce temporary allocations during GGUF loading. 【F:src/gguf/model_loader.rs†L27-L136】
 - [ ] Audit `ResourceCache::get_or_create_resource`’s dummy-device `transmute` and replace with an explicit optional device handle to avoid UB and simplify lifetime tracking. 【F:src/Metallic/resource_cache.rs†L34-L73】
-- [ ] Plumb explicit synchronization for tensors returned from pooled allocations (e.g., mark when blit zeroing completes) so downstream code can skip redundant `clone()` handles. 【F:src/Metallic/context.rs†L117-L169】
+- [x] Plumb explicit synchronization for tensors returned from pooled allocations (e.g., mark when blit zeroing completes) so downstream code can skip redundant `clone()` handles. (KV cache entries track a zeroing-complete flag consumed by fast paths.)
 
 ## ⚙️ Medium-effort improvements
 - [ ] Switch pooled and ad-hoc tensors from `StorageModeShared` to `StorageModePrivate` with blit-based staging buffers to cut host RAM footprint and improve bandwidth. 【F:src/Metallic/pool.rs†L98-L107】【F:src/Metallic/tensor.rs†L78-L131】
