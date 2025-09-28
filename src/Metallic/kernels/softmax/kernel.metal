@@ -23,6 +23,12 @@ using namespace metal;
 #define __TB_CAN_USE_SIMDGROUP_REDUCE__ 0
 #endif
 
+#if __TB_CAN_USE_SIMDGROUP_REDUCE__ && !__TB_HAS_METAL_SIMDGROUP_HEADER__
+float simdgroup_reduce_max(float) __attribute__((overloadable));
+float simdgroup_reduce_add(float) __attribute__((overloadable));
+uint simdgroup_reduce_min(uint) __attribute__((overloadable));
+#endif
+
 template <typename T>
 inline T reduce_max_simdgroup(T value) {
 #if __TB_CAN_USE_SIMDGROUP_REDUCE__
