@@ -20,9 +20,17 @@ fn run_variant<O: KernelInvocable<Args = (Tensor, Tensor, Tensor, bool, u32)>>(
     let k_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
     let v_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
 
+    let mut last_output = None;
+
     for _ in 0..ITERATIONS {
-        ctx.call::<O>((q_tensor.clone(), k_tensor.clone(), v_tensor.clone(), causal, 0))
+        let out = ctx
+            .call::<O>((q_tensor.clone(), k_tensor.clone(), v_tensor.clone(), causal, 0))
             .unwrap();
+        last_output = Some(out);
+    }
+
+    if let Some(tensor) = last_output {
+        let _ = tensor.to_vec();
     }
 }
 
@@ -38,36 +46,46 @@ fn benchmark_sdpa_variants(c: &mut Criterion) {
 
     group.bench_function("baseline", |b| {
         b.iter(|| {
+            context.synchronize();
             context.pool.reset();
             run_variant::<ScaledDotProductAttentionOp>(&mut context, batch, seq_q, seq_k, dim, causal);
+            context.synchronize();
         })
     });
 
     group.bench_function("no_permute", |b| {
         b.iter(|| {
+            context.synchronize();
             context.pool.reset();
             run_variant::<ScaledDotProductAttentionNoPermuteOp>(&mut context, batch, seq_q, seq_k, dim, causal);
+            context.synchronize();
         })
     });
 
     group.bench_function("workspace_reuse", |b| {
         b.iter(|| {
+            context.synchronize();
             context.pool.reset();
             run_variant::<ScaledDotProductAttentionWorkspaceOp>(&mut context, batch, seq_q, seq_k, dim, causal);
+            context.synchronize();
         })
     });
 
     group.bench_function("mps_softmax", |b| {
         b.iter(|| {
+            context.synchronize();
             context.pool.reset();
             run_variant::<ScaledDotProductAttentionMpsSoftmaxOp>(&mut context, batch, seq_q, seq_k, dim, causal);
+            context.synchronize();
         })
     });
 
     group.bench_function("all_optimizations", |b| {
         b.iter(|| {
+            context.synchronize();
             context.pool.reset();
             run_variant::<ScaledDotProductAttentionOptimizedOp>(&mut context, batch, seq_q, seq_k, dim, causal);
+            context.synchronize();
         })
     });
 

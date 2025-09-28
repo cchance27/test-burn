@@ -46,6 +46,10 @@ name = "sdpa_benchmark"
 harness = false
 
 [[bench]]
+name = "sdpa_variant_benchmark"
+harness = false
+
+[[bench]]
 name = "tensor_benchmark"
 harness = false
 

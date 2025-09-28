@@ -136,11 +136,16 @@ fn create_sdpa_operation(
     // Create output tensor
     let out = Tensor::create_tensor_pooled(vec![b, s_q, d], ctx)?;
 
-    let workspace = if config.reuse_workspace {
+    let mut workspace = if config.reuse_workspace {
         Some(Tensor::create_tensor_pooled(vec![s_q, s_k], ctx)?)
     } else {
         None
     };
+
+    if let Some(buffer) = workspace.as_mut() {
+        let mut tensors = [&mut *buffer];
+        ctx.prepare_tensors_for_active_cmd(&mut tensors);
+    }
 
     // Process each batch separately to work with 2D matmul operations
     for i in 0..b {
@@ -162,36 +167,79 @@ fn create_sdpa_operation(
         };
 
         // Perform matmul with scaling in one operation: [s_q, d] @ [d, s_k] = [s_q, s_k] with alpha=scale
-        let qk_scaled_result = ctx.matmul_alpha_beta(&q_i, &k_operand, &attention_seed, false, transpose_b, scale, 0.0)?; // [s_q, s_k]
+        let qk_scaled_result = match cache.as_deref_mut() {
+            Some(cache_ref) => ctx.matmul_alpha_beta_with_cache(
+                &q_i,
+                &k_operand,
+                &attention_seed,
+                false,
+                transpose_b,
+                scale,
+                0.0,
+                cache_ref,
+            )?,
+            None => ctx.matmul_alpha_beta(
+                &q_i,
+                &k_operand,
+                &attention_seed,
+                false,
+                transpose_b,
+                scale,
+                0.0,
+            )?,
+        }; // [s_q, s_k]
 
         let use_mps_softmax = config.use_mps_softmax && !causal && query_offset == 0;
 
         let softmax_result = if use_mps_softmax {
-            if let Some(cache_ref) = cache.as_mut() {
-                apply_mps_softmax(ctx, *cache_ref, &qk_scaled_result, s_q, s_k)?;
+            if let Some(cache_ref) = cache.as_deref_mut() {
+                apply_mps_softmax(ctx, cache_ref, &qk_scaled_result, s_q, s_k)?;
                 qk_scaled_result.clone()
             } else {
-                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
-                    qk_scaled_result,
-                    s_q as u32,
-                    s_k as u32,
-                    causal as u32,
-                    query_offset,
-                ))?
+                ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
+                    (
+                        qk_scaled_result,
+                        s_q as u32,
+                        s_k as u32,
+                        causal as u32,
+                        query_offset,
+                    ),
+                )?
             }
         } else {
-            ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>((
-                qk_scaled_result,
-                s_q as u32,
-                s_k as u32,
-                causal as u32,
-                query_offset,
-            ))?
+            match cache.as_deref_mut() {
+                Some(cache_ref) => ctx.call_with_cache::<crate::metallic::kernels::softmax::SoftmaxOp>(
+                    (
+                        qk_scaled_result,
+                        s_q as u32,
+                        s_k as u32,
+                        causal as u32,
+                        query_offset,
+                    ),
+                    cache_ref,
+                )?,
+                None => ctx.call::<crate::metallic::kernels::softmax::SoftmaxOp>(
+                    (
+                        qk_scaled_result,
+                        s_q as u32,
+                        s_k as u32,
+                        causal as u32,
+                        query_offset,
+                    ),
+                )?,
+            }
         };
 
         // softmax_result x V -> out (for this batch)
         // [s_q, s_k] @ [s_k, d] = [s_q, d]
-        ctx.matmul_alpha_beta(&softmax_result, &v_i, &out_i, false, false, 1.0, 0.0)?;
+        match cache.as_deref_mut() {
+            Some(cache_ref) => {
+                ctx.matmul_alpha_beta_with_cache(&softmax_result, &v_i, &out_i, false, false, 1.0, 0.0, cache_ref)?;
+            }
+            None => {
+                ctx.matmul_alpha_beta(&softmax_result, &v_i, &out_i, false, false, 1.0, 0.0)?;
+            }
+        };
         // [s_q, d]
     }
 
@@ -228,7 +276,7 @@ fn apply_mps_softmax(ctx: &mut Context, cache: &mut ResourceCache, attn: &Tensor
     let softmax_key = MpsSoftMaxKey { rows, columns };
     let softmax = cache.get_or_create_softmax(softmax_key, &ctx.device)?;
 
-    let command_buffer = ctx.active_command_buffer_mut()?;
+    let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
     let op = MpsSoftmaxOperation {
         attn: attn.clone(),
         descriptor,
