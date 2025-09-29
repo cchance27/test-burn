@@ -11,7 +11,7 @@ use crate::{
 use half::f16;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLDevice, MTLResourceOptions};
+use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLDevice, MTLResourceOptions};
 use std::collections::HashMap;
 
 fn convert_f16_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
