@@ -18,7 +18,7 @@ pub trait KernelInvocable {
 }
 
 /// Manages the compilation and caching of Metal kernel libraries and functions.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct KernelPipelineKey {
     function: KernelFunction,
     dtype: Dtype,
@@ -41,7 +41,10 @@ impl KernelManager {
         dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-        let key = KernelPipelineKey { function: func, dtype };
+        let key = KernelPipelineKey {
+            function: func.clone(),
+            dtype,
+        };
 
         if let Some(pipeline) = self.pipelines.get(&key) {
             return Ok(pipeline.clone());
