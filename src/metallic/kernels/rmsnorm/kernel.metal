@@ -16,21 +16,17 @@ kernel void rmsnorm_kernel_##SUFFIX(device SCALAR* input [[buffer(0)]], \
                                     constant uint& total_elements [[buffer(4)]], \
                                     uint gid [[thread_position_in_grid]]) { \
     if (gid >= total_elements) return; \
-
     uint feature_idx = gid % feature_dim; \
     uint row_idx = gid / feature_dim; \
-
     ACCUM sum_sq = static_cast<ACCUM>(0.0f); \
     ACCUM feature_dim_acc = static_cast<ACCUM>(feature_dim); \
     for (uint f = 0; f < feature_dim; ++f) { \
         ACCUM v = static_cast<ACCUM>(input[row_idx * feature_dim + f]); \
         sum_sq += v * v; \
     } \
-
     ACCUM rms = sqrt(sum_sq / feature_dim_acc + static_cast<ACCUM>(EPS)); \
     ACCUM x = static_cast<ACCUM>(input[gid]); \
     ACCUM gamma_val = static_cast<ACCUM>(gamma[feature_idx]); \
-
     output[gid] = static_cast<SCALAR>((x / rms) * gamma_val); \
 }
 
