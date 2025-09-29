@@ -3,7 +3,7 @@ use crate::metallic::Dtype;
 use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::resource_cache::ResourceCache;
-use crate::metallic::tensor::{KernelElement, MpsMatrixBatchView};
+use crate::metallic::tensor::{KernelElement, MpsMatrixBatchView, Tensor as GenericTensor};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -64,7 +64,7 @@ pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
 pub fn apply_softmax<T: KernelElement>(
     ctx: &mut Context,
     mut cache: Option<&mut ResourceCache>,
-    attn: &Tensor<T>,
+    attn: &GenericTensor<T>,
     batch: usize,
     rows: usize,
     columns: usize,
@@ -73,7 +73,7 @@ pub fn apply_softmax<T: KernelElement>(
     allow_mps: bool,
 ) -> Result<Tensor, MetalError> {
     let attn_guard = attn.ensure_kernel_dtype(ctx, &[Dtype::F32])?;
-    let mut attn_tensor = attn_guard.into_tensor().into_f32()?;
+    let attn_tensor = attn_guard.into_tensor().into_f32()?;
 
     let view = attn_tensor.as_mps_matrix_batch_view()?;
 

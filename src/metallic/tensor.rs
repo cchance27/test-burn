@@ -2,7 +2,7 @@
 mod dtypes;
 
 use super::{Context, MetalError, operation::CommandBuffer};
-use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
+use crate::metallic::encoder::{dispatch_threadgroups, dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::KernelFunction;
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
@@ -936,6 +936,7 @@ impl Tensor<F16Element> {
 
         let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
         let encoder = command_buffer
+            .raw()
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
@@ -975,6 +976,7 @@ impl Tensor<BF16Element> {
 
         let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
         let encoder = command_buffer
+            .raw()
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 

@@ -159,7 +159,7 @@ fn create_sdpa_operation(
 
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();
-        crate::metallic::kernels::softmax::apply_softmax(
+        crate::metallic::kernels::softmax::apply_softmax::<T>(
             ctx,
             cache_opt,
             &qk_scaled_result,
