@@ -318,6 +318,21 @@ impl Tensor {
         }
     }
 
+    fn build_view(&self, dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Tensor {
+        Tensor {
+            buf: self.buf.clone(),
+            dims,
+            strides,
+            dtype: self.dtype,
+            device: self.device.clone(),
+            offset,
+            host_accessible: self.host_accessible,
+            host_access: self.host_access.clone(),
+            command_queue: self.command_queue.clone(),
+            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
+        }
+    }
+
     fn ensure_staging_buffer(&self, size: usize) -> Result<RetainedBuffer, MetalError> {
         let mut state = self.host_access.borrow_mut();
         let needs_new = match state.staging.as_ref() {
@@ -703,9 +718,10 @@ impl Tensor {
 
             let ptr = {
                 let mut state = self.host_access.borrow_mut();
-                let staging = state.staging.as_ref().expect("staging buffer must exist for host write");
+                let staging = state.staging.as_ref().expect("staging buffer must exist for host write").clone();
                 state.host_dirty = true;
                 state.staging_valid = true;
+                drop(state);
                 unsafe { staging.contents().as_ptr() as *mut f32 }
             };
 
@@ -720,15 +736,7 @@ impl Tensor {
 
     #[inline]
     pub fn flatten(&self) -> Tensor {
-        Tensor {
-            buf: self.buf.clone(),
-            dims: vec![self.len()],
-            strides: vec![1],
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: self.offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        }
+        self.build_view(vec![self.len()], vec![1], self.offset)
     }
 
     pub fn reshape(&self, new_dims: Vec<usize>) -> Result<Tensor, MetalError> {
@@ -740,15 +748,7 @@ impl Tensor {
                 actual: actual_elements,
             });
         }
-        Ok(Tensor {
-            buf: self.buf.clone(),
-            dims: new_dims.clone(),
-            strides: Self::compute_strides(&new_dims),
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: self.offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        })
+        Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), self.offset))
     }
 
     pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Tensor, MetalError> {
@@ -787,15 +787,7 @@ impl Tensor {
             new_offset += start * self.strides[0] * self.dtype.size_bytes();
         }
 
-        Ok(Tensor {
-            buf: self.buf.clone(),
-            dims: new_dims.clone(),
-            strides: Self::compute_strides(&new_dims), // Re-compute for correctness.
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: new_offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        })
+        Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), new_offset))
     }
 
     /// Allocate and zero-initialize a tensor of the given shape.
@@ -841,6 +833,7 @@ impl Tensor {
         }
         let mut tensor = context.call::<ArangeOp>(num_elements)?;
         tensor.dims = dims;
+        tensor.strides = Self::compute_strides(&tensor.dims);
         Ok(tensor)
     }
 
@@ -1177,6 +1170,9 @@ impl Tensor {
             dtype: a.dtype,
             device: a.device.clone(),
             offset: 0,
+            host_accessible: true,
+            host_access: Rc::new(RefCell::new(HostAccessState::new())),
+            command_queue: a.command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         };
         let aslice = a.as_slice();
@@ -1208,15 +1204,7 @@ impl Tensor {
             Self::compute_strides(&self.dims[1..])
         };
 
-        Ok(Tensor {
-            buf: self.buf.clone(),
-            dims: self.dims[1..].to_vec(),
-            strides: new_strides,
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: new_offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        })
+        Ok(self.build_view(self.dims[1..].to_vec(), new_strides, new_offset))
     }
 
     /// Check tensor values for numerical stability issues
