@@ -1,5 +1,5 @@
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
+    Context, Dtype, MetalError, Operation, Tensor,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
 };
@@ -120,26 +120,116 @@ impl KernelFunction {
         }
     }
 
-    fn name(&self) -> &'static str {
+    fn name_for_dtype(&self, dtype: Dtype) -> &'static str {
         match self {
-            KernelFunction::ElemwiseAdd => "add_kernel",
-            KernelFunction::ElemwiseBroadcastAdd => "broadcast_add_kernel",
-            KernelFunction::ElemwiseDiv => "div_kernel",
-            KernelFunction::ElemwiseMul => "mul_kernel",
-            KernelFunction::ElemwiseSub => "sub_kernel",
-            KernelFunction::FusedQkvBiasSplit => "fused_qkv_bias_split",
-            KernelFunction::Gelu => "gelu_kernel",
-            KernelFunction::KvRearrange => "kv_rearrange_kernel",
-            KernelFunction::LayerNorm => "layernorm_kernel",
-            KernelFunction::Permute => "permute_kernel",
-            KernelFunction::RepeatKvHeads => "repeat_kv_heads_kernel",
-            KernelFunction::Rope => "rope_kernel",
-            KernelFunction::RMSNorm => "rmsnorm_kernel",
-            KernelFunction::Silu => "silu_kernel",
-            KernelFunction::FusedSoftmax => "sdpa_fused_softmax",
-            KernelFunction::Arange => "arange_kernel",
-            KernelFunction::Ones => "ones_kernel",
-            KernelFunction::RandomUniform => "random_uniform",
+            KernelFunction::ElemwiseAdd => match dtype {
+                Dtype::F32 => "add_kernel_f32",
+                Dtype::F16 => "add_kernel_f16",
+                Dtype::BF16 => "add_kernel_bf16",
+                _ => "add_kernel_f32",
+            },
+            KernelFunction::ElemwiseBroadcastAdd => match dtype {
+                Dtype::F32 => "broadcast_add_kernel_f32",
+                Dtype::F16 => "broadcast_add_kernel_f16",
+                Dtype::BF16 => "broadcast_add_kernel_bf16",
+                _ => "broadcast_add_kernel_f32",
+            },
+            KernelFunction::ElemwiseDiv => match dtype {
+                Dtype::F32 => "div_kernel_f32",
+                Dtype::F16 => "div_kernel_f16",
+                Dtype::BF16 => "div_kernel_bf16",
+                _ => "div_kernel_f32",
+            },
+            KernelFunction::ElemwiseMul => match dtype {
+                Dtype::F32 => "mul_kernel_f32",
+                Dtype::F16 => "mul_kernel_f16",
+                Dtype::BF16 => "mul_kernel_bf16",
+                _ => "mul_kernel_f32",
+            },
+            KernelFunction::ElemwiseSub => match dtype {
+                Dtype::F32 => "sub_kernel_f32",
+                Dtype::F16 => "sub_kernel_f16",
+                Dtype::BF16 => "sub_kernel_bf16",
+                _ => "sub_kernel_f32",
+            },
+            KernelFunction::FusedQkvBiasSplit => match dtype {
+                Dtype::F32 => "fused_qkv_bias_split_f32",
+                Dtype::F16 => "fused_qkv_bias_split_f16",
+                Dtype::BF16 => "fused_qkv_bias_split_bf16",
+                _ => "fused_qkv_bias_split_f32",
+            },
+            KernelFunction::Gelu => match dtype {
+                Dtype::F32 => "gelu_kernel_f32",
+                Dtype::F16 => "gelu_kernel_f16",
+                Dtype::BF16 => "gelu_kernel_bf16",
+                _ => "gelu_kernel_f32",
+            },
+            KernelFunction::KvRearrange => match dtype {
+                Dtype::F32 => "kv_rearrange_kernel_f32",
+                Dtype::F16 => "kv_rearrange_kernel_f16",
+                Dtype::BF16 => "kv_rearrange_kernel_bf16",
+                _ => "kv_rearrange_kernel_f32",
+            },
+            KernelFunction::LayerNorm => match dtype {
+                Dtype::F32 => "layernorm_kernel_f32",
+                Dtype::F16 => "layernorm_kernel_f16",
+                Dtype::BF16 => "layernorm_kernel_bf16",
+                _ => "layernorm_kernel_f32",
+            },
+            KernelFunction::Permute => match dtype {
+                Dtype::F32 => "permute_kernel_f32",
+                Dtype::F16 => "permute_kernel_f16",
+                Dtype::BF16 => "permute_kernel_bf16",
+                _ => "permute_kernel_f32",
+            },
+            KernelFunction::RepeatKvHeads => match dtype {
+                Dtype::F32 => "repeat_kv_heads_kernel_f32",
+                Dtype::F16 => "repeat_kv_heads_kernel_f16",
+                Dtype::BF16 => "repeat_kv_heads_kernel_bf16",
+                _ => "repeat_kv_heads_kernel_f32",
+            },
+            KernelFunction::Rope => match dtype {
+                Dtype::F32 => "rope_kernel_f32",
+                Dtype::F16 => "rope_kernel_f16",
+                Dtype::BF16 => "rope_kernel_bf16",
+                _ => "rope_kernel_f32",
+            },
+            KernelFunction::RMSNorm => match dtype {
+                Dtype::F32 => "rmsnorm_kernel_f32",
+                Dtype::F16 => "rmsnorm_kernel_f16",
+                Dtype::BF16 => "rmsnorm_kernel_bf16",
+                _ => "rmsnorm_kernel_f32",
+            },
+            KernelFunction::Silu => match dtype {
+                Dtype::F32 => "silu_kernel_f32",
+                Dtype::F16 => "silu_kernel_f16",
+                Dtype::BF16 => "silu_kernel_bf16",
+                _ => "silu_kernel_f32",
+            },
+            KernelFunction::FusedSoftmax => match dtype {
+                Dtype::F32 => "sdpa_fused_softmax_f32",
+                Dtype::F16 => "sdpa_fused_softmax_f16",
+                Dtype::BF16 => "sdpa_fused_softmax_bf16",
+                _ => "sdpa_fused_softmax_f32",
+            },
+            KernelFunction::Arange => match dtype {
+                Dtype::F32 => "arange_kernel_f32",
+                Dtype::F16 => "arange_kernel_f16",
+                Dtype::BF16 => "arange_kernel_bf16",
+                _ => "arange_kernel_f32",
+            },
+            KernelFunction::Ones => match dtype {
+                Dtype::F32 => "ones_kernel_f32",
+                Dtype::F16 => "ones_kernel_f16",
+                Dtype::BF16 => "ones_kernel_bf16",
+                _ => "ones_kernel_f32",
+            },
+            KernelFunction::RandomUniform => match dtype {
+                Dtype::F32 => "random_uniform_f32",
+                Dtype::F16 => "random_uniform_f16",
+                Dtype::BF16 => "random_uniform_bf16",
+                _ => "random_uniform_f32",
+            },
         }
     }
 }

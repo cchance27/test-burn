@@ -1,4 +1,4 @@
-use crate::metallic::TensorElement;
+use crate::metallic::{Dtype, TensorElement};
 
 use super::*;
 
@@ -18,10 +18,16 @@ pub trait KernelInvocable {
 }
 
 /// Manages the compilation and caching of Metal kernel libraries and functions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct KernelPipelineKey {
+    function: KernelFunction,
+    dtype: Dtype,
+}
+
 #[derive(Default)]
 pub struct KernelManager {
     libraries: FxHashMap<KernelLibrary, Retained<ProtocolObject<dyn MTLLibrary>>>,
-    pipelines: FxHashMap<KernelFunction, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pipelines: FxHashMap<KernelPipelineKey, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 impl KernelManager {
@@ -32,9 +38,12 @@ impl KernelManager {
     pub fn get_pipeline(
         &mut self,
         func: KernelFunction,
+        dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-        if let Some(pipeline) = self.pipelines.get(&func) {
+        let key = KernelPipelineKey { function: func, dtype };
+
+        if let Some(pipeline) = self.pipelines.get(&key) {
             return Ok(pipeline.clone());
         }
 
@@ -51,7 +60,7 @@ impl KernelManager {
             lib
         };
 
-        let fn_name = NSString::from_str(func.name());
+        let fn_name = NSString::from_str(func.name_for_dtype(dtype));
         let metal_fn = library
             .newFunctionWithName(&fn_name)
             .ok_or_else(|| MetalError::FunctionCreationFailed(fn_name.to_string()))?;
@@ -59,7 +68,7 @@ impl KernelManager {
             .newComputePipelineStateWithFunction_error(&metal_fn)
             .map_err(|_err| MetalError::PipelineCreationFailed)?;
 
-        self.pipelines.insert(func, pipeline.clone());
+        self.pipelines.insert(key, pipeline.clone());
         Ok(pipeline)
     }
 }

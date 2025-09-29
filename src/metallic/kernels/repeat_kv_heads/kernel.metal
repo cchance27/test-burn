@@ -1,32 +1,43 @@
 #include <metal_stdlib>
 using namespace metal;
 
-kernel void repeat_kv_heads_kernel(device const float* input [[buffer(0)]],
-                                   device float* output [[buffer(1)]],
-                                   constant uint& group_size [[buffer(2)]],
-                                   constant uint& batch [[buffer(3)]],
-                                   constant uint& n_kv_heads [[buffer(4)]],
-                                   constant uint& n_heads [[buffer(5)]],
-                                   constant uint& seq [[buffer(6)]],
-                                   constant uint& head_dim [[buffer(7)]],
-                                   constant uint& cache_stride [[buffer(8)]],
-                                   constant uint& total_elements [[buffer(9)]],
-                                   uint gid [[thread_position_in_grid]]) {
-    if (gid >= total_elements) {
-        return;
-    }
+#define FOR_EACH_FLOAT_TYPE(OP) \
+    OP(float, f32) \
+    OP(half, f16) \
+    OP(bfloat, bf16)
 
-    uint dim_idx = gid % head_dim;
-    uint tmp = gid / head_dim;
-    uint seq_idx = tmp % seq;
-    uint batch_head_idx = tmp / seq;
+#define DEFINE_REPEAT_KV_KERNEL(SCALAR, SUFFIX) \
+kernel void repeat_kv_heads_kernel_##SUFFIX(device const SCALAR* input [[buffer(0)]], \
+                                            device SCALAR* output [[buffer(1)]], \
+                                            constant uint& group_size [[buffer(2)]], \
+                                            constant uint& batch [[buffer(3)]], \
+                                            constant uint& n_kv_heads [[buffer(4)]], \
+                                            constant uint& n_heads [[buffer(5)]], \
+                                            constant uint& seq [[buffer(6)]], \
+                                            constant uint& head_dim [[buffer(7)]], \
+                                            constant uint& cache_stride [[buffer(8)]], \
+                                            constant uint& total_elements [[buffer(9)]], \
+                                            uint gid [[thread_position_in_grid]]) { \
+    if (gid >= total_elements) { \
+        return; \
+    } \
 
-    uint b = batch_head_idx / n_heads;
-    uint h = batch_head_idx % n_heads;
-    uint kv_head = h / group_size;
+    uint dim_idx = gid % head_dim; \
+    uint tmp = gid / head_dim; \
+    uint seq_idx = tmp % seq; \
+    uint batch_head_idx = tmp / seq; \
 
-    uint input_batch_head = b * n_kv_heads + kv_head;
-    uint input_index = ((input_batch_head * cache_stride) + seq_idx) * head_dim + dim_idx;
+    uint b = batch_head_idx / n_heads; \
+    uint h = batch_head_idx % n_heads; \
+    uint kv_head = h / group_size; \
 
-    output[gid] = input[input_index];
+    uint input_batch_head = b * n_kv_heads + kv_head; \
+    uint input_index = ((input_batch_head * cache_stride) + seq_idx) * head_dim + dim_idx; \
+
+    output[gid] = input[input_index]; \
 }
+
+FOR_EACH_FLOAT_TYPE(DEFINE_REPEAT_KV_KERNEL)
+
+#undef DEFINE_REPEAT_KV_KERNEL
+#undef FOR_EACH_FLOAT_TYPE

@@ -10,7 +10,7 @@ mod tests {
     #[test]
     fn kernel_symbol_exists() {
         // Ensure the Metal source is included during compilation by touching the library enum.
-        let name = KernelFunction::FusedQkvBiasSplit.name();
-        assert_eq!(name, "fused_qkv_bias_split");
+        let name = KernelFunction::FusedQkvBiasSplit.name_for_dtype(crate::metallic::Dtype::F32);
+        assert_eq!(name, "fused_qkv_bias_split_f32");
     }
 }

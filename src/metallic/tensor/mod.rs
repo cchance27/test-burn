@@ -977,7 +977,7 @@ impl<T: TensorElement> Tensor<T> {
         // So we need to get the pipeline and encode it manually
         let pipeline = context
             .kernel_manager
-            .get_pipeline(crate::metallic::kernels::KernelFunction::Ones, &context.device)?;
+            .get_pipeline(crate::metallic::kernels::KernelFunction::Ones, T::DTYPE, &context.device)?;
 
         let encoder = command_buffer
             .raw()
@@ -1028,7 +1028,7 @@ impl<T: TensorElement> Tensor<T> {
         // Get pipeline and encode manually for batching
         let pipeline = context
             .kernel_manager
-            .get_pipeline(crate::metallic::kernels::KernelFunction::Arange, &context.device)?;
+            .get_pipeline(crate::metallic::kernels::KernelFunction::Arange, T::DTYPE, &context.device)?;
 
         let encoder = command_buffer
             .raw()
@@ -1064,9 +1064,10 @@ impl<T: TensorElement> Tensor<T> {
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Get pipeline and encode manually for batching with default [0, 1) range
-        let pipeline = context
-            .kernel_manager
-            .get_pipeline(crate::metallic::kernels::KernelFunction::RandomUniform, &context.device)?;
+        let pipeline =
+            context
+                .kernel_manager
+                .get_pipeline(crate::metallic::kernels::KernelFunction::RandomUniform, T::DTYPE, &context.device)?;
 
         let encoder = command_buffer
             .raw()
