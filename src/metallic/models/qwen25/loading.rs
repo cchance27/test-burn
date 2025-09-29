@@ -1,10 +1,10 @@
 use crate::gguf::{GGUFValue, model_loader::GGUFModel};
 use crate::metallic::{
-    Context, MetalError,
+    Context, MetalError, TensorF32,
     models::{LoadableModel, Qwen25, Qwen25Config},
 };
 
-fn try_copy(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor) -> Result<(), MetalError> {
+fn try_copy(src: &TensorF32, dst: &mut TensorF32) -> Result<(), MetalError> {
     if src.len() != dst.len() {
         return Err(MetalError::DimensionMismatch {
             expected: dst.len(),
@@ -76,16 +76,12 @@ fn pack_weight_transposed_into_fused_slice(
     Ok(())
 }
 
-fn copy_weight_transposed_into_fused(
-    src: &crate::metallic::Tensor,
-    dst: &mut crate::metallic::Tensor,
-    dst_col_offset: usize,
-) -> Result<(), MetalError> {
+fn copy_weight_transposed_into_fused(src: &TensorF32, dst: &mut TensorF32, dst_col_offset: usize) -> Result<(), MetalError> {
     let dst_dims = dst.dims().to_vec();
     pack_weight_transposed_into_fused_slice(src.as_slice(), src.dims(), dst.as_mut_slice(), &dst_dims, dst_col_offset)
 }
 
-fn copy_bias_into_fused(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor, dst_offset: usize) -> Result<(), MetalError> {
+fn copy_bias_into_fused(src: &TensorF32, dst: &mut TensorF32, dst_offset: usize) -> Result<(), MetalError> {
     if dst_offset + src.len() > dst.len() {
         return Err(MetalError::DimensionMismatch {
             expected: dst.len(),
@@ -184,7 +180,20 @@ impl LoadableModel for super::Qwen25 {
 
         // Iterate gguf tensors and map into Qwen25 where names match heuristics.
         // This mapping is intentionally permissive to handle different exporter naming schemes.
-        for (name, tensor) in &gguf_model.tensors {
+        for (name, stored_tensor) in &gguf_model.tensors {
+            let tensor_guard = match stored_tensor.ensure_f32(name, &*ctx) {
+                Ok(handle) => handle,
+                Err(err) => {
+                    println!(
+                        "Skipping tensor '{}' (dtype={:?}) after f32 materialization failure: {:?}",
+                        name,
+                        stored_tensor.dtype(),
+                        err
+                    );
+                    continue;
+                }
+            };
+            let tensor = &*tensor_guard;
             let lname = name.to_lowercase();
 
             // Embedding and weight tying for token embeddings

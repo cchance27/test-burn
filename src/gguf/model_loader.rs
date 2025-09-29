@@ -1,41 +1,15 @@
-use super::{GGUFDataType, GGUFError, GGUFFile};
+use super::{GGUFDataType, GGUFError, GGUFFile, GGUFRawTensor};
 use crate::{
     gguf::{GGUFValue, GGUTensorInfo},
-    metallic::{Context, Tensor, TensorInit, TensorStorage},
+    metallic::{
+        BF16Element, Context, Dtype, F16Element, F32Element, GenericTensor, Tensor as LegacyTensor, TensorBF16, TensorElement, TensorF16,
+        TensorF32, TensorStorage,
+    },
 };
-use half::f16;
+use crate::metallic::tensor::TensorInit;
+use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
-
-fn convert_f16_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
-    if !raw.len().is_multiple_of(2) {
-        return Err(GGUFError::InvalidTensorData("F16 tensor byte length must be even".to_string()));
-    }
-
-    let elem_count = raw.len() / 2;
-    let mut f32_data = Vec::with_capacity(elem_count);
-
-    for chunk in raw.chunks_exact(2) {
-        let bits = u16::from_le_bytes([chunk[0], chunk[1]]);
-        f32_data.push(f16::from_bits(bits).to_f32());
-    }
-
-    Ok(f32_data)
-}
-
-fn convert_bf16_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
-    if !raw.len().is_multiple_of(2) {
-        return Err(GGUFError::InvalidTensorData("BF16 tensor byte length must be even".to_string()));
-    }
-
-    let mut f32_data = Vec::with_capacity(raw.len() / 2);
-    for chunk in raw.chunks_exact(2) {
-        let bits16 = u16::from_le_bytes([chunk[0], chunk[1]]) as u32;
-        let bits32 = bits16 << 16;
-        f32_data.push(f32::from_bits(bits32));
-    }
-
-    Ok(f32_data)
-}
+use std::ops::Deref;
 
 fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     if !raw.len().is_multiple_of(8) {
@@ -53,30 +27,24 @@ fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     Ok(f32_data)
 }
 
-fn tensor_from_slice(tensor_name: &str, dims: Vec<usize>, data: &[f32], context: &Context) -> Result<Tensor, GGUFError> {
-    Tensor::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
+fn tensor_from_slice<T: TensorElement>(
+    tensor_name: &str,
+    dims: Vec<usize>,
+    data: &[T::Scalar],
+    context: &Context,
+) -> Result<GenericTensor<T>, GGUFError> {
+    GenericTensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
         .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
 }
 
-fn convert_f32_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
-    if !raw.len().is_multiple_of(std::mem::size_of::<f32>()) {
-        return Err(GGUFError::InvalidTensorData(
-            "F32 tensor byte length must be divisible by 4".to_string(),
-        ));
-    }
-
-    let mut data = Vec::with_capacity(raw.len() / std::mem::size_of::<f32>());
-    for chunk in raw.chunks_exact(std::mem::size_of::<f32>()) {
-        // SAFETY: `chunks_exact` guarantees chunk length matches the requested size.
-        let bytes: [u8; std::mem::size_of::<f32>()] = chunk.try_into().unwrap();
-        data.push(f32::from_le_bytes(bytes));
-    }
-    Ok(data)
-}
-
-fn tensor_from_bytes(tensor_name: &str, dims: Vec<usize>, bytes: &[u8], context: &Context) -> Result<Tensor, GGUFError> {
-    let data = convert_f32_bytes(bytes)?;
-    tensor_from_slice(tensor_name, dims, &data, context)
+fn materialize_f32_from_tensor<T: TensorElement>(
+    tensor_name: &str,
+    tensor: &GenericTensor<T>,
+    context: &Context,
+) -> Result<TensorF32, GGUFError> {
+    let host = tensor.to_f32_vec();
+    TensorF32::from_f32_slice(tensor.dims.clone(), TensorStorage::Dedicated(context), &host)
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to materialize f32 tensor '{}': {}", tensor_name, err)))
 }
 
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
@@ -104,7 +72,7 @@ impl GGUFModelLoader {
 
     /// Load a model from the GGUF file
     pub fn load_model(&self, context: &Context) -> Result<GGUFModel, GGUFError> {
-        let mut tensors = HashMap::new();
+        let mut tensors: HashMap<String, GGUFTensor> = HashMap::new();
 
         for tensor_info in &self.gguf_file.tensors {
             match self.load_tensor(context, tensor_info) {
@@ -117,8 +85,8 @@ impl GGUFModelLoader {
                         tensor_info.name, err, tensor_info.data_type
                     );
 
-                    if let Ok(fallback) = Tensor::try_from((&self.gguf_file, tensor_info)) {
-                        tensors.insert(tensor_info.name.clone(), fallback);
+                    if let Ok(fallback) = LegacyTensor::try_from((&self.gguf_file, tensor_info)) {
+                        tensors.insert(tensor_info.name.clone(), GGUFTensor::from(fallback));
                     }
                 }
             }
@@ -130,110 +98,186 @@ impl GGUFModelLoader {
         })
     }
 
-    fn load_tensor(&self, context: &Context, tensor_info: &GGUTensorInfo) -> Result<Tensor, GGUFError> {
-        let raw = self.gguf_file.get_tensor_data(tensor_info)?;
+    fn load_tensor(&self, context: &Context, tensor_info: &GGUTensorInfo) -> Result<GGUFTensor, GGUFError> {
         let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
         adjust_embedding_dims(&tensor_info.name, &mut dims);
         let expected_elements: usize = dims.iter().product();
 
-        match tensor_info.data_type {
-            GGUFDataType::F32 => {
-                if !raw.len().is_multiple_of(std::mem::size_of::<f32>()) {
-                    return Err(GGUFError::InvalidTensorData(format!(
-                        "F32 tensor '{}' byte length {} is not divisible by 4",
-                        tensor_info.name,
-                        raw.len()
-                    )));
-                }
-                let actual = raw.len() / std::mem::size_of::<f32>();
-                if actual != expected_elements {
+        let view = tensor_info.into(&self.gguf_file)?;
+        match view {
+            GGUFRawTensor::F32(values) => {
+                if values.len() != expected_elements {
                     return Err(GGUFError::DimensionMismatch {
                         expected: expected_elements,
-                        actual,
+                        actual: values.len(),
                     });
                 }
-                tensor_from_bytes(&tensor_info.name, dims, raw, context)
+                let tensor = tensor_from_slice::<F32Element>(&tensor_info.name, dims.clone(), values, context)?;
+                Ok(GGUFTensor::from(tensor))
             }
-            GGUFDataType::F16 => {
-                let f32_data = convert_f16_bytes(raw)?;
-                if f32_data.len() != expected_elements {
+            GGUFRawTensor::F16(values) => {
+                if values.len() != expected_elements {
                     return Err(GGUFError::DimensionMismatch {
                         expected: expected_elements,
-                        actual: f32_data.len(),
+                        actual: values.len(),
                     });
                 }
-                tensor_from_slice(&tensor_info.name, dims, &f32_data, context)
+                let tensor = tensor_from_slice::<F16Element>(&tensor_info.name, dims.clone(), values, context)?;
+                Ok(GGUFTensor::from(tensor))
             }
-            GGUFDataType::BF16 => {
-                let f32_data = convert_bf16_bytes(raw)?;
-                if f32_data.len() != expected_elements {
+            GGUFRawTensor::BF16(values) => {
+                if values.len() != expected_elements {
                     return Err(GGUFError::DimensionMismatch {
                         expected: expected_elements,
-                        actual: f32_data.len(),
+                        actual: values.len(),
                     });
                 }
-                tensor_from_slice(&tensor_info.name, dims, &f32_data, context)
+                let tensor = tensor_from_slice::<BF16Element>(&tensor_info.name, dims.clone(), values, context)?;
+                Ok(GGUFTensor::from(tensor))
             }
-            GGUFDataType::F64 => {
-                let f32_data = convert_f64_bytes(raw)?;
-                if f32_data.len() != expected_elements {
-                    return Err(GGUFError::DimensionMismatch {
-                        expected: expected_elements,
-                        actual: f32_data.len(),
-                    });
+            GGUFRawTensor::Bytes(raw, data_type) => match data_type {
+                GGUFDataType::F64 => {
+                    let f32_data = convert_f64_bytes(raw)?;
+                    if f32_data.len() != expected_elements {
+                        return Err(GGUFError::DimensionMismatch {
+                            expected: expected_elements,
+                            actual: f32_data.len(),
+                        });
+                    }
+                    let tensor = tensor_from_slice::<F32Element>(&tensor_info.name, dims.clone(), &f32_data, context)?;
+                    Ok(GGUFTensor::from(tensor))
                 }
-                tensor_from_slice(&tensor_info.name, dims, &f32_data, context)
-            }
-            GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
-                #[cfg(target_arch = "aarch64")]
-                let dequant = crate::gguf::quant::dequantize_q8_to_f32_simd(raw, tensor_info.data_type)
-                    .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
-                #[cfg(not(target_arch = "aarch64"))]
-                let dequant = crate::gguf::quant::dequantize_q8_to_f32(raw, tensor_info.data_type)
-                    .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
+                GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
+                    #[cfg(target_arch = "aarch64")]
+                    let dequant = crate::gguf::quant::dequantize_q8_to_f32_simd(raw, data_type)
+                        .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
+                    #[cfg(not(target_arch = "aarch64"))]
+                    let dequant = crate::gguf::quant::dequantize_q8_to_f32(raw, data_type)
+                        .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
 
-                if dequant.len() != expected_elements {
-                    return Err(GGUFError::DimensionMismatch {
-                        expected: expected_elements,
-                        actual: dequant.len(),
-                    });
+                    if dequant.len() != expected_elements {
+                        return Err(GGUFError::DimensionMismatch {
+                            expected: expected_elements,
+                            actual: dequant.len(),
+                        });
+                    }
+                    let tensor = tensor_from_slice::<F32Element>(&tensor_info.name, dims.clone(), &dequant, context)?;
+                    Ok(GGUFTensor::from(tensor))
                 }
-                tensor_from_slice(&tensor_info.name, dims, &dequant, context)
-            }
-            _ => Err(GGUFError::InvalidTensorData(format!(
-                "Unsupported tensor data type: {:?}",
-                tensor_info.data_type
-            ))),
+                _ => Err(GGUFError::InvalidTensorData(format!(
+                    "Unsupported tensor data type: {:?}",
+                    data_type
+                ))),
+            },
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Heterogeneous tensor container for GGUF weights.
+pub enum GGUFTensor {
+    F32(TensorF32),
+    F16 {
+        tensor: TensorF16,
+        cached_f32: RefCell<Option<TensorF32>>,
+    },
+    BF16 {
+        tensor: TensorBF16,
+        cached_f32: RefCell<Option<TensorF32>>,
+    },
+}
 
-    #[test]
-    fn convert_f32_bytes_handles_misaligned_slice() {
-        let values = [1.0f32, 2.5, -3.75];
-        let mut storage = Vec::with_capacity(values.len() * std::mem::size_of::<f32>() + 2);
-        storage.push(0); // introduce a one-byte offset for misalignment
-        for value in values {
-            storage.extend_from_slice(&value.to_le_bytes());
+impl From<TensorF32> for GGUFTensor {
+    fn from(tensor: TensorF32) -> Self {
+        Self::F32(tensor)
+    }
+}
+
+impl From<TensorF16> for GGUFTensor {
+    fn from(tensor: TensorF16) -> Self {
+        Self::F16 {
+            tensor,
+            cached_f32: RefCell::new(None),
         }
-        storage.push(0); // padding to avoid reading past the buffer in debug modes
+    }
+}
 
-        let start = 1;
-        let end = start + values.len() * std::mem::size_of::<f32>();
-        let misaligned = &storage[start..end];
+impl From<TensorBF16> for GGUFTensor {
+    fn from(tensor: TensorBF16) -> Self {
+        Self::BF16 {
+            tensor,
+            cached_f32: RefCell::new(None),
+        }
+    }
+}
 
-        let converted = convert_f32_bytes(misaligned).expect("misaligned slice should convert");
-        assert_eq!(converted, values);
+/// Guard type that yields an `&TensorF32` whether the backing storage is native f32 or lazily materialized.
+pub enum F32TensorGuard<'a> {
+    Borrowed(&'a TensorF32),
+    Cached(Ref<'a, TensorF32>),
+}
+
+impl<'a> Deref for F32TensorGuard<'a> {
+    type Target = TensorF32;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            F32TensorGuard::Borrowed(tensor) => tensor,
+            F32TensorGuard::Cached(tensor) => &*tensor,
+        }
+    }
+}
+
+impl GGUFTensor {
+    pub fn dtype(&self) -> Dtype {
+        match self {
+            GGUFTensor::F32(_) => Dtype::F32,
+            GGUFTensor::F16 { .. } => Dtype::F16,
+            GGUFTensor::BF16 { .. } => Dtype::BF16,
+        }
+    }
+
+    pub fn ensure_f32<'a>(&'a self, name: &str, context: &Context) -> Result<F32TensorGuard<'a>, GGUFError> {
+        match self {
+            GGUFTensor::F32(tensor) => Ok(F32TensorGuard::Borrowed(tensor)),
+            GGUFTensor::F16 { tensor, cached_f32 } => {
+                if cached_f32.borrow().is_none() {
+                    let converted = materialize_f32_from_tensor(name, tensor, context)?;
+                    *cached_f32.borrow_mut() = Some(converted);
+                }
+                let guard = Ref::map(cached_f32.borrow(), |opt| opt.as_ref().expect("f32 cache populated"));
+                Ok(F32TensorGuard::Cached(guard))
+            }
+            GGUFTensor::BF16 { tensor, cached_f32 } => {
+                if cached_f32.borrow().is_none() {
+                    let converted = materialize_f32_from_tensor(name, tensor, context)?;
+                    *cached_f32.borrow_mut() = Some(converted);
+                }
+                let guard = Ref::map(cached_f32.borrow(), |opt| opt.as_ref().expect("f32 cache populated"));
+                Ok(F32TensorGuard::Cached(guard))
+            }
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        match self {
+            GGUFTensor::F32(tensor) => tensor.len(),
+            GGUFTensor::F16 { tensor, .. } => tensor.len(),
+            GGUFTensor::BF16 { tensor, .. } => tensor.len(),
+        }
+    }
+
+    pub fn dims(&self) -> &[usize] {
+        match self {
+            GGUFTensor::F32(tensor) => tensor.dims(),
+            GGUFTensor::F16 { tensor, .. } => tensor.dims(),
+            GGUFTensor::BF16 { tensor, .. } => tensor.dims(),
+        }
     }
 }
 
 /// A model loaded from a GGUF file
 pub struct GGUFModel {
-    pub tensors: HashMap<String, Tensor>,
+    pub tensors: HashMap<String, GGUFTensor>,
     pub metadata: super::GGUFMetadata,
 }
 
@@ -255,7 +299,7 @@ impl GGUFModel {
     create_metadata_getter!(get_metadata_f32_or, GGUFValue::F32, f32);
 
     /// Get a tensor by name
-    pub fn get_tensor(&self, name: &str) -> Option<&Tensor> {
+    pub fn get_tensor(&self, name: &str) -> Option<&GGUFTensor> {
         self.tensors.get(name)
     }
 
