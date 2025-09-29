@@ -207,6 +207,10 @@ fn f16_elementwise_promotes_to_f32() {
     let converted = a.ensure_kernel_dtype(&mut ctx, &[Dtype::F16, Dtype::F32]).unwrap();
     assert!(!converted.converted(), "should reuse native dtype when supported");
 
+    let prefer_f32 = a.ensure_kernel_dtype(&mut ctx, &[Dtype::F32, Dtype::F16]).unwrap();
+    assert!(prefer_f32.converted(), "first supported dtype should take precedence");
+    assert_eq!(prefer_f32.tensor().dtype(), Dtype::F32);
+
     let guard = a.ensure_kernel_dtype(&mut ctx, &[Dtype::F32]).unwrap();
     assert!(guard.converted(), "promotion to f32 should report conversion");
     assert_eq!(guard.tensor().dtype(), Dtype::F32);

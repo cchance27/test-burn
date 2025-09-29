@@ -1014,8 +1014,11 @@ impl KernelElement for F32Element {
             ));
         }
 
-        if supported.iter().any(|dtype| *dtype == Dtype::F32) {
-            return Ok(KernelTensorGuard::new(KernelTensor::F32(tensor.clone()), false));
+        for &target in supported {
+            match target {
+                Dtype::F32 => return Ok(KernelTensorGuard::new(KernelTensor::F32(tensor.clone()), false)),
+                _ => continue,
+            }
         }
 
         Err(MetalError::OperationNotSupported(format!(
@@ -1032,14 +1035,14 @@ impl KernelElement for F16Element {
             ));
         }
 
-        if supported.iter().any(|dtype| *dtype == Dtype::F16) {
-            return Ok(KernelTensorGuard::new(KernelTensor::F16(tensor.clone()), false));
-        }
-
         for &target in supported {
-            if target == Dtype::F32 {
-                let promoted = tensor.materialize_as_f32(ctx)?;
-                return Ok(KernelTensorGuard::new(KernelTensor::F32(promoted), true));
+            match target {
+                Dtype::F16 => return Ok(KernelTensorGuard::new(KernelTensor::F16(tensor.clone()), false)),
+                Dtype::F32 => {
+                    let promoted = tensor.materialize_as_f32(ctx)?;
+                    return Ok(KernelTensorGuard::new(KernelTensor::F32(promoted), true));
+                }
+                _ => continue,
             }
         }
 
@@ -1058,14 +1061,14 @@ impl KernelElement for BF16Element {
             ));
         }
 
-        if supported.iter().any(|dtype| *dtype == Dtype::BF16) {
-            return Ok(KernelTensorGuard::new(KernelTensor::BF16(tensor.clone()), false));
-        }
-
         for &target in supported {
-            if target == Dtype::F32 {
-                let promoted = tensor.materialize_as_f32(ctx)?;
-                return Ok(KernelTensorGuard::new(KernelTensor::F32(promoted), true));
+            match target {
+                Dtype::BF16 => return Ok(KernelTensorGuard::new(KernelTensor::BF16(tensor.clone()), false)),
+                Dtype::F32 => {
+                    let promoted = tensor.materialize_as_f32(ctx)?;
+                    return Ok(KernelTensorGuard::new(KernelTensor::F32(promoted), true));
+                }
+                _ => continue,
             }
         }
 
