@@ -15,8 +15,8 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ops::{Add, Div, Mul, Sub};
-use std::rc::{Rc, Weak};
-use std::sync::{Mutex, OnceLock};
+use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Supported data types for tensors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +86,7 @@ impl HostAccessState {
     }
 }
 
-type HostAccessRegistry = HashMap<usize, Vec<Weak<RefCell<HostAccessState>>>>;
+type HostAccessRegistry = HashMap<usize, Vec<Weak<Mutex<HostAccessState>>>>;
 
 fn host_access_registry() -> &'static Mutex<HostAccessRegistry> {
     static REGISTRY: OnceLock<Mutex<HostAccessRegistry>> = OnceLock::new();
@@ -94,10 +94,10 @@ fn host_access_registry() -> &'static Mutex<HostAccessRegistry> {
 }
 
 fn buffer_registry_key(buffer: &RetainedBuffer) -> usize {
-    buffer.as_ptr().cast::<c_void>().as_ptr() as usize
+    Retained::as_ptr(buffer).cast::<c_void>() as usize
 }
 
-fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: usize) -> Rc<RefCell<HostAccessState>> {
+fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: usize) -> Arc<Mutex<HostAccessState>> {
     let mut registry = host_access_registry().lock().expect("host access registry mutex poisoned");
     let entry = registry.entry(buffer_registry_key(buffer)).or_insert_with(Vec::new);
 
@@ -105,10 +105,10 @@ fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: u
     let req_end = offset.saturating_add(len_bytes);
     let mut idx = 0;
     while idx < entry.len() {
-        if let Some(state_rc) = entry[idx].upgrade() {
+        if let Some(state_arc) = entry[idx].upgrade() {
             let mut selected = false;
             {
-                let mut state = state_rc.borrow_mut();
+                let mut state = state_arc.lock().expect("host access state mutex poisoned");
                 let state_start = state.base_offset;
                 let state_end = state.region_end();
                 if req_start >= state_start && req_end <= state_end {
@@ -128,7 +128,7 @@ fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: u
             }
 
             if selected {
-                return state_rc;
+                return state_arc;
             }
 
             idx += 1;
@@ -137,9 +137,9 @@ fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: u
         }
     }
 
-    let state_rc = Rc::new(RefCell::new(HostAccessState::new(offset, len_bytes)));
-    entry.push(Rc::downgrade(&state_rc));
-    state_rc
+    let state_arc = Arc::new(Mutex::new(HostAccessState::new(offset, len_bytes)));
+    entry.push(Arc::downgrade(&state_arc));
+    state_arc
 }
 
 /// A lightweight description of a tensor view that can be consumed by MPS matrix APIs.
@@ -195,7 +195,7 @@ pub struct Tensor {
     /// Byte offset into the buffer.
     pub offset: usize,
     host_accessible: bool,
-    host_access: Rc<RefCell<HostAccessState>>,
+    host_access: Arc<Mutex<HostAccessState>>,
     command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 
     /// The command buffer that must complete before this tensor's data is safe for host access.
@@ -372,7 +372,7 @@ impl Tensor {
     ) -> Tensor {
         let len_bytes = dims.iter().product::<usize>() * dtype.size_bytes();
         let host_access = if host_accessible {
-            Rc::new(RefCell::new(HostAccessState::new(offset, len_bytes)))
+            Arc::new(Mutex::new(HostAccessState::new(offset, len_bytes)))
         } else {
             shared_host_access_state(&buf, offset, len_bytes)
         };
@@ -407,7 +407,7 @@ impl Tensor {
     }
 
     fn ensure_staging_buffer(&self) -> Result<Option<RetainedBuffer>, MetalError> {
-        let mut state = self.host_access.borrow_mut();
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         let target_size = state.region_len;
         if target_size == 0 {
             state.staging = None;
@@ -448,7 +448,7 @@ impl Tensor {
         };
 
         let (base_offset, region_len, skip_copy) = {
-            let state = self.host_access.borrow();
+            let state = self.host_access.lock().expect("host access state mutex poisoned");
             let skip = state.host_dirty || state.staging_valid;
             (state.base_offset, state.region_len, skip)
         };
@@ -470,7 +470,7 @@ impl Tensor {
         command_buffer.commit();
         command_buffer.wait();
 
-        let mut state = self.host_access.borrow_mut();
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         state.staging_valid = true;
         state.host_dirty = false;
         Ok(())
@@ -492,7 +492,7 @@ impl Tensor {
         };
 
         let (base_offset, region_len, needs_copy) = {
-            let state = self.host_access.borrow();
+            let state = self.host_access.lock().expect("host access state mutex poisoned");
             let needs_copy = !state.host_dirty && !state.staging_valid;
             (state.base_offset, state.region_len, needs_copy)
         };
@@ -511,7 +511,7 @@ impl Tensor {
             command_buffer.commit();
             command_buffer.wait();
 
-            let mut state = self.host_access.borrow_mut();
+            let mut state = self.host_access.lock().expect("host access state mutex poisoned");
             state.staging_valid = true;
         }
 
@@ -523,7 +523,7 @@ impl Tensor {
             return;
         }
 
-        let mut state = self.host_access.borrow_mut();
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         state.staging_valid = false;
         state.host_dirty = false;
     }
@@ -533,7 +533,7 @@ impl Tensor {
             return Ok(());
         }
 
-        let mut state = self.host_access.borrow_mut();
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         if !state.host_dirty {
             return Ok(());
         }
@@ -566,7 +566,7 @@ impl Tensor {
         command_buffer.commit();
         command_buffer.wait();
 
-        let mut state = self.host_access.borrow_mut();
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         state.host_dirty = false;
         state.staging_valid = true;
         Ok(())
@@ -763,7 +763,7 @@ impl Tensor {
             }
 
             let ptr = {
-                let state = self.host_access.borrow();
+                let state = self.host_access.lock().expect("host access state mutex poisoned");
                 let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
                 let byte_offset = self.offset.saturating_sub(state.base_offset);
                 debug_assert!(byte_offset % std::mem::size_of::<f32>() == 0);
@@ -803,7 +803,7 @@ impl Tensor {
             }
 
             let ptr = {
-                let mut state = self.host_access.borrow_mut();
+                let mut state = self.host_access.lock().expect("host access state mutex poisoned");
                 let staging = state.staging.as_ref().expect("staging buffer must exist for host write").clone();
                 state.host_dirty = true;
                 state.staging_valid = true;
@@ -1259,7 +1259,7 @@ impl Tensor {
             device: a.device.clone(),
             offset: 0,
             host_accessible: true,
-            host_access: Rc::new(RefCell::new(HostAccessState::new(0, byte_len))),
+            host_access: Arc::new(Mutex::new(HostAccessState::new(0, byte_len))),
             command_queue: a.command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         };
