@@ -7,8 +7,8 @@ use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::Qwen25;
 use crate::metallic::{
-    TensorInit, TensorStorage, context::Context, error::MetalError, generation, generation::GenerationConfig, models::LoadableModel,
-    tensor::Tensor, tokenizer::Tokenizer,
+    Tensor, TensorInit, TensorStorage, context::Context, error::MetalError, generation, generation::GenerationConfig,
+    models::LoadableModel, tokenizer::Tokenizer,
 };
 use approx::assert_relative_eq;
 use ndarray::ArrayD;
