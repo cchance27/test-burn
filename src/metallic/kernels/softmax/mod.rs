@@ -122,7 +122,7 @@ fn try_apply_mps_softmax(
     rows: usize,
     columns: usize,
 ) -> Result<(), MetalError> {
-    ctx.prepare_tensors_for_active_cmd(&[attn]);
+    ctx.prepare_tensors_for_active_cmd(&[attn])?;
 
     let descriptor_key = MpsMatrixDescriptorKey {
         rows,
@@ -229,7 +229,7 @@ impl KernelInvocable for SoftmaxOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[attn]);
+        ctx.prepare_tensors_for_active_cmd(&[attn])?;
 
         let op = SoftmaxOperation {
             attn: attn.clone(),

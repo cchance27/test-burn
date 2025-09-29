@@ -94,7 +94,7 @@ fn create_sdpa_operation(
 ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
     let (q, k, v, causal, query_offset) = args;
 
-    ctx.prepare_tensors_for_active_cmd(&[q, k, v]);
+    ctx.prepare_tensors_for_active_cmd(&[q, k, v])?;
 
     // Validate dimensions
     if q.dims().len() != 3 || k.dims().len() != 3 || v.dims().len() != 3 {
@@ -138,13 +138,13 @@ fn create_sdpa_operation(
 
     let attention = if config.reuse_workspace {
         let buffer = Tensor::new(vec![b, s_q, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
-        ctx.prepare_tensors_for_active_cmd(&[&buffer]);
+        ctx.prepare_tensors_for_active_cmd(&[&buffer])?;
         buffer
     } else {
         Tensor::new(vec![b, s_q, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
     };
 
-    ctx.prepare_tensors_for_active_cmd(&[&attention]);
+    ctx.prepare_tensors_for_active_cmd(&[&attention])?;
 
     let (k_operand, transpose_b) = if config.transpose_k {
         (k.clone(), true)

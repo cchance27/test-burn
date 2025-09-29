@@ -59,6 +59,23 @@ pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 // CPU fill threshold in MB
 const DEFAULT_CPU_FILL_THRESHOLD_MB: usize = 1;
 
+#[derive(Clone)]
+struct HostAccessState {
+    staging: Option<RetainedBuffer>,
+    staging_valid: bool,
+    host_dirty: bool,
+}
+
+impl HostAccessState {
+    fn new() -> Self {
+        Self {
+            staging: None,
+            staging_valid: false,
+            host_dirty: false,
+        }
+    }
+}
+
 /// A lightweight description of a tensor view that can be consumed by MPS matrix APIs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MpsMatrixBatchView {
@@ -111,6 +128,9 @@ pub struct Tensor {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// Byte offset into the buffer.
     pub offset: usize,
+    host_accessible: bool,
+    host_access: Rc<RefCell<HostAccessState>>,
+    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 
     /// The command buffer that must complete before this tensor's data is safe for host access.
     /// None indicates the tensor is already synchronized with the CPU.
@@ -212,7 +232,7 @@ impl Tensor {
 
         let compact = Tensor::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
-        ctx.prepare_tensors_for_active_cmd(&[self]);
+        ctx.prepare_tensors_for_active_cmd(&[self])?;
 
         let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
         let encoder = command_buffer
@@ -279,8 +299,10 @@ impl Tensor {
         dims: Vec<usize>,
         dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         buf: RetainedBuffer,
         offset: usize,
+        host_accessible: bool,
     ) -> Tensor {
         Tensor {
             buf,
@@ -289,8 +311,166 @@ impl Tensor {
             dtype,
             device: device.clone(),
             offset,
+            host_accessible,
+            host_access: Rc::new(RefCell::new(HostAccessState::new())),
+            command_queue: command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         }
+    }
+
+    fn ensure_staging_buffer(&self, size: usize) -> Result<RetainedBuffer, MetalError> {
+        let mut state = self.host_access.borrow_mut();
+        let needs_new = match state.staging.as_ref() {
+            Some(buf) => buf.length() < size,
+            None => true,
+        };
+
+        if needs_new {
+            let buffer = self
+                .device
+                .newBufferWithLength_options(size, MTLResourceOptions::StorageModeShared)
+                .ok_or(MetalError::BufferCreationFailed(size))?;
+            state.staging = Some(buffer);
+            state.staging_valid = false;
+        }
+
+        Ok(state.staging.as_ref().expect("staging buffer must exist after allocation").clone())
+    }
+
+    fn ensure_staging_for_read(&self) -> Result<(), MetalError> {
+        if self.host_accessible {
+            return Ok(());
+        }
+
+        let len_bytes = self.size_bytes();
+        if len_bytes == 0 {
+            return Ok(());
+        }
+
+        let staging = self.ensure_staging_buffer(len_bytes)?;
+
+        {
+            let state = self.host_access.borrow();
+            if state.host_dirty || state.staging_valid {
+                return Ok(());
+            }
+        }
+
+        let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+        unsafe {
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, self.offset, &staging, 0, len_bytes);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.wait();
+
+        let mut state = self.host_access.borrow_mut();
+        state.staging_valid = true;
+        state.host_dirty = false;
+        Ok(())
+    }
+
+    fn ensure_staging_for_write(&self) -> Result<(), MetalError> {
+        if self.host_accessible {
+            return Ok(());
+        }
+
+        let len_bytes = self.size_bytes();
+        if len_bytes == 0 {
+            return Ok(());
+        }
+
+        let staging = self.ensure_staging_buffer(len_bytes)?;
+
+        let needs_copy = {
+            let state = self.host_access.borrow();
+            !state.host_dirty && !state.staging_valid
+        };
+
+        if needs_copy {
+            let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
+            let encoder = command_buffer
+                .raw()
+                .blitCommandEncoder()
+                .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+            unsafe {
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, self.offset, &staging, 0, len_bytes);
+            }
+            encoder.endEncoding();
+            command_buffer.commit();
+            command_buffer.wait();
+
+            let mut state = self.host_access.borrow_mut();
+            state.staging_valid = true;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn mark_device_dirty(&self) {
+        if self.host_accessible {
+            return;
+        }
+
+        let mut state = self.host_access.borrow_mut();
+        state.staging_valid = false;
+        state.host_dirty = false;
+    }
+
+    pub(crate) fn flush_host_writes(&self) -> Result<(), MetalError> {
+        if self.host_accessible {
+            return Ok(());
+        }
+
+        let should_flush = {
+            let state = self.host_access.borrow();
+            state.host_dirty
+        };
+
+        if !should_flush {
+            return Ok(());
+        }
+
+        let len_bytes = self.size_bytes();
+        if len_bytes == 0 {
+            let mut state = self.host_access.borrow_mut();
+            state.host_dirty = false;
+            state.staging_valid = true;
+            return Ok(());
+        }
+
+        let staging = {
+            let state = self.host_access.borrow();
+            state
+                .staging
+                .as_ref()
+                .expect("staging buffer must exist when host_dirty is set")
+                .clone()
+        };
+
+        let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+        unsafe {
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &self.buf, self.offset, len_bytes);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.wait();
+
+        let mut state = self.host_access.borrow_mut();
+        state.host_dirty = false;
+        state.staging_valid = true;
+        Ok(())
     }
 
     fn validate_init<'data>(dims: &[usize], init: &TensorInit<'data>) -> Result<(), MetalError> {
@@ -317,22 +497,56 @@ impl Tensor {
                 let byte_len = num_elements * std::mem::size_of::<f32>();
                 let buf = context
                     .device
-                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
+                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModePrivate)
                     .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+                Ok(Self::build_tensor(
+                    dims,
+                    Dtype::F32,
+                    &context.device,
+                    &context.command_queue,
+                    buf,
+                    0,
+                    false,
+                ))
             }
             TensorInit::CopyFrom(items) => {
                 let byte_len = std::mem::size_of_val(items);
                 let item_ptr = std::ptr::NonNull::new(items.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
 
-                let buf = unsafe {
+                let dest_buf = context
+                    .device
+                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModePrivate)
+                    .ok_or(MetalError::BufferCreationFailed(byte_len))?;
+
+                let staging_buf = unsafe {
                     context
                         .device
                         .newBufferWithBytes_length_options(item_ptr, byte_len, MTLResourceOptions::StorageModeShared)
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 };
 
-                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+                let mut command_buffer = CommandBuffer::new(&context.command_queue)?;
+                let encoder = command_buffer
+                    .raw()
+                    .blitCommandEncoder()
+                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging_buf, 0, &dest_buf, 0, byte_len);
+                }
+                encoder.endEncoding();
+                command_buffer.commit();
+                command_buffer.wait();
+
+                Ok(Self::build_tensor(
+                    dims,
+                    Dtype::F32,
+                    &context.device,
+                    &context.command_queue,
+                    dest_buf,
+                    0,
+                    false,
+                ))
             }
             TensorInit::BorrowHost(data) => {
                 let byte_len = std::mem::size_of_val(data);
@@ -350,7 +564,15 @@ impl Tensor {
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 };
 
-                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+                Ok(Self::build_tensor(
+                    dims,
+                    Dtype::F32,
+                    &context.device,
+                    &context.command_queue,
+                    buf,
+                    0,
+                    true,
+                ))
             }
         }
     }
@@ -397,13 +619,23 @@ impl Tensor {
         dims: Vec<usize>,
         dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         offset: usize,
+        host_accessible: bool,
     ) -> Result<Tensor, MetalError> {
         let expected_bytes = dims.iter().product::<usize>() * std::mem::size_of::<f32>();
         if offset + expected_bytes > buffer.length() {
             return Err(MetalError::InvalidShape("buffer too small for dims/offset".into()));
         }
-        Ok(Self::build_tensor(dims, dtype, device, buffer, offset))
+        Ok(Self::build_tensor(
+            dims,
+            dtype,
+            device,
+            command_queue,
+            buffer,
+            offset,
+            host_accessible,
+        ))
     }
 
     fn ensure_ready(&self) {
@@ -419,8 +651,26 @@ impl Tensor {
     #[inline]
     pub fn as_slice(&self) -> &[f32] {
         self.ensure_ready();
-        let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const f32;
-        unsafe { std::slice::from_raw_parts(ptr, self.len()) }
+        if self.host_accessible {
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const f32;
+            unsafe { std::slice::from_raw_parts(ptr, self.len()) }
+        } else {
+            self.ensure_staging_for_read()
+                .expect("failed to populate staging buffer for tensor read");
+
+            let len = self.len();
+            if len == 0 {
+                return &[];
+            }
+
+            let ptr = {
+                let state = self.host_access.borrow();
+                let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
+                unsafe { staging.contents().as_ptr() as *const f32 }
+            };
+
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        }
     }
 
     /// Copy the tensor contents to a host Vec.
@@ -439,8 +689,28 @@ impl Tensor {
     /// Mutable host view of the buffer. Ensure no concurrent GPU access.
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
         self.ensure_ready();
-        let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut f32;
-        unsafe { std::slice::from_raw_parts_mut(ptr, self.len()) }
+        if self.host_accessible {
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut f32;
+            unsafe { std::slice::from_raw_parts_mut(ptr, self.len()) }
+        } else {
+            self.ensure_staging_for_write()
+                .expect("failed to prepare staging buffer for tensor write");
+
+            let len = self.len();
+            if len == 0 {
+                return unsafe { std::slice::from_raw_parts_mut(std::ptr::NonNull::<f32>::dangling().as_ptr(), 0) };
+            }
+
+            let ptr = {
+                let mut state = self.host_access.borrow_mut();
+                let staging = state.staging.as_ref().expect("staging buffer must exist for host write");
+                state.host_dirty = true;
+                state.staging_valid = true;
+                unsafe { staging.contents().as_ptr() as *mut f32 }
+            };
+
+            unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+        }
     }
 
     #[inline]
@@ -620,6 +890,7 @@ impl Tensor {
         }
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -664,6 +935,7 @@ impl Tensor {
         encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -710,6 +982,7 @@ impl Tensor {
         encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -758,6 +1031,7 @@ impl Tensor {
         encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }

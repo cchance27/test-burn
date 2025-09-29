@@ -48,7 +48,7 @@ impl KernelInvocable for PermuteOp {
             out_dims[i] = src.dims()[p_idx as usize];
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&src]);
+        ctx.prepare_tensors_for_active_cmd(&[&src])?;
 
         // Create the output tensor
         let dst = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;

@@ -52,7 +52,7 @@ impl KernelInvocable for LayerNormOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&input, &gamma, &beta]);
+        ctx.prepare_tensors_for_active_cmd(&[&input, &gamma, &beta])?;
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 

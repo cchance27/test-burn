@@ -35,7 +35,7 @@ impl KernelInvocable for ElemwiseDivOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&a, &b]);
+        ctx.prepare_tensors_for_active_cmd(&[&a, &b])?;
 
         let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 

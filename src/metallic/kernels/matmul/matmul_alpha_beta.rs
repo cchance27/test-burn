@@ -55,7 +55,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
         let result_view = result.as_mps_matrix_batch_view()?;
 
-        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor, result]);
+        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor, result])?;
 
         // Calculate effective dimensions based on transpose
         let (eff_left_rows, eff_left_cols) = if transpose_left {

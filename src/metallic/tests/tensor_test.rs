@@ -70,7 +70,16 @@ fn get_batch_and_from_existing_buffer() {
 
     // wrap the second batch region using from_existing_buffer
     let offset_bytes = 12 * std::mem::size_of::<f32>();
-    let view = Tensor::from_existing_buffer(base.buf.clone(), vec![3, 4], Dtype::F32, &base.device, offset_bytes).unwrap();
+    let view = Tensor::from_existing_buffer(
+        base.buf.clone(),
+        vec![3, 4],
+        Dtype::F32,
+        &base.device,
+        &ctx.command_queue,
+        offset_bytes,
+        false,
+    )
+    .unwrap();
     assert_eq!(view.as_slice(), expected.as_slice());
 }
 
