@@ -125,7 +125,7 @@ fn buffer_registry_key(buffer: &RetainedBuffer) -> usize {
 
 fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: usize) -> Arc<Mutex<HostAccessState>> {
     let mut registry = host_access_registry().lock().expect("host access registry mutex poisoned");
-    let entry = registry.entry(buffer_registry_key(buffer)).or_insert_with(Vec::new);
+    let entry = registry.entry(buffer_registry_key(buffer)).or_default();
 
     let req_start = offset;
     let req_end = offset.saturating_add(len_bytes);
@@ -483,7 +483,7 @@ impl Tensor {
             return Ok(());
         }
 
-        let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let command_buffer = CommandBuffer::new(&self.command_queue)?;
         let encoder = command_buffer
             .raw()
             .blitCommandEncoder()
@@ -524,7 +524,7 @@ impl Tensor {
         };
 
         if needs_copy && region_len != 0 {
-            let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
+            let command_buffer = CommandBuffer::new(&self.command_queue)?;
             let encoder = command_buffer
                 .raw()
                 .blitCommandEncoder()
@@ -579,7 +579,7 @@ impl Tensor {
         let region_len = state.region_len;
         drop(state);
 
-        let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let command_buffer = CommandBuffer::new(&self.command_queue)?;
         let encoder = command_buffer
             .raw()
             .blitCommandEncoder()
@@ -650,7 +650,7 @@ impl Tensor {
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 };
 
-                let mut command_buffer = CommandBuffer::new(&context.command_queue)?;
+                let command_buffer = CommandBuffer::new(&context.command_queue)?;
                 let encoder = command_buffer
                     .raw()
                     .blitCommandEncoder()
@@ -792,7 +792,7 @@ impl Tensor {
                 let state = self.host_access.lock().expect("host access state mutex poisoned");
                 let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
                 let byte_offset = self.offset.saturating_sub(state.base_offset);
-                debug_assert!(byte_offset % std::mem::size_of::<f32>() == 0);
+                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<f32>()));
                 unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const f32 }
             };
 
@@ -834,7 +834,7 @@ impl Tensor {
                 state.host_dirty = true;
                 state.staging_valid = true;
                 let byte_offset = self.offset.saturating_sub(state.base_offset);
-                debug_assert!(byte_offset % std::mem::size_of::<f32>() == 0);
+                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<f32>()));
                 drop(state);
                 unsafe { (staging.contents().as_ptr() as *mut u8).add(byte_offset) as *mut f32 }
             };

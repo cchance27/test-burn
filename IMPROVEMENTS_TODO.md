@@ -12,7 +12,7 @@ This checklist captures potential optimizations and hardening opportunities disc
 - [x] Plumb explicit synchronization for tensors returned from pooled allocations (e.g., mark when blit zeroing completes) so downstream code can skip redundant `clone()` handles. (KV cache entries track a zeroing-complete flag consumed by fast paths.)
 
 ## ⚙️ Medium-effort improvements
-- [ ] Switch pooled and ad-hoc tensors from `StorageModeShared` to `StorageModePrivate` with blit-based staging buffers to cut host RAM footprint and improve bandwidth. 【F:src/metallic/pool.rs†L98-L107】【F:src/metallic/tensor.rs†L78-L131】
+- [x] Switch pooled and ad-hoc tensors from `StorageModeShared` to `StorageModePrivate` with blit-based staging buffers to cut host RAM footprint and improve bandwidth. 【F:src/metallic/pool.rs†L98-L107】【F:src/metallic/tensor.rs†L78-L131】
 - [ ] Introduce a dedicated host staging allocator (possibly using `MTLHeap` or `MTLBuffer` recycling) to avoid allocating new shared buffers for every GGUF tensor. 【F:src/gguf/model_loader.rs†L20-L135】
 - [ ] Add lazy, demand-paged GGUF tensor loading (memory-mapped files plus per-layer uploads) instead of materializing the full model as `Vec<f32>` in RAM. 【F:src/gguf/model_loader.rs†L35-L135】
 - [ ] Expand `Tensor` to carry dtype metadata through kernels and loaders so models can stay in native precision (e.g., keep weights in `bf16/fp16` until a kernel demands `fp32`). 【F:src/metallic/tensor.rs†L19-L140】

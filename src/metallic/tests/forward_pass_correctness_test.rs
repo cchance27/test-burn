@@ -175,8 +175,8 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
                 sin_buf[idx] = angle.sin();
             }
         }
-        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
-        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
+        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(&cos_buf))?;
+        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(&sin_buf))?;
         let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -196,12 +196,12 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
         }
         let cos_k = Tensor::new(
             vec![seq, dim_half_k],
-            TensorStorage::Dedicated(&ctx),
+            TensorStorage::Dedicated(ctx),
             TensorInit::CopyFrom(&cos_buf_k),
         )?;
         let sin_k = Tensor::new(
             vec![seq, dim_half_k],
-            TensorStorage::Dedicated(&ctx),
+            TensorStorage::Dedicated(ctx),
             TensorInit::CopyFrom(&sin_buf_k),
         )?;
         let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
