@@ -111,7 +111,11 @@ impl GGUFModelLoader {
                                     match deq_res {
                                         Ok(f32_data) => {
                                             let dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-                                            match crate::metallic::Tensor::new(dims, TensorStorage::Dedicated(&_context), TensorInit::CopyFrom(&f32_data)) {
+                                            match crate::metallic::Tensor::new(
+                                                dims,
+                                                TensorStorage::Dedicated(&_context),
+                                                TensorInit::CopyFrom(&f32_data),
+                                            ) {
                                                 Ok(t) => {
                                                     tensors.insert(tensor_info.name.clone(), t);
                                                 }
@@ -150,7 +154,11 @@ impl GGUFModelLoader {
                                         dims = vec![151936, 896];
                                         //println!("Swapped dims for token_embd.weight to [vocab, d_model]");
                                     }
-                                    match crate::metallic::Tensor::new(dims, TensorStorage::Dedicated(&_context), TensorInit::CopyFrom(&f32_data)) {
+                                    match crate::metallic::Tensor::new(
+                                        dims,
+                                        TensorStorage::Dedicated(&_context),
+                                        TensorInit::CopyFrom(&f32_data),
+                                    ) {
                                         Ok(t) => {
                                             tensors.insert(tensor_info.name.clone(), t);
                                         }
