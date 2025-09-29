@@ -2,14 +2,14 @@
 
 The instrumentation layer is split into two cooperating pieces:
 
-* `src/Metallic/instrumentation.rs` exposes lightweight collectors that the
+* `src/metallic/instrumentation.rs` exposes lightweight collectors that the
   Metal context installs while kernels run.  The collectors record structured
   latency (`LatencyEvent`) and memory (`MemoryEvent`) measurements for the
   forward pass, individual transformer blocks, and any labelled block phases.
-  Model code (for example `src/Metallic/models/qwen25/mod.rs`) emits events
+  Model code (for example `src/metallic/models/qwen25/mod.rs`) emits events
   around attention/MLP calls so the collectors can capture fine‑grained timing
   and allocation deltas.
-* `src/Metallic/metrics.rs` converts the collector snapshots into the data used
+* `src/metallic/metrics.rs` converts the collector snapshots into the data used
   by the Ratatui dashboard.  It maintains rolling statistics for latency,
   aggregates per-scope memory usage, builds the static model weight tree, and
   optionally persists metrics to disk.

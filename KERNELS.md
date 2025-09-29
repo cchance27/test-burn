@@ -188,13 +188,13 @@ To maintain quality, add a test file for your new kernel.
     ```rust
     #![cfg(test)]
     use crate::metallic::kernels::my_kernel::MyKernelOp;
-    use crate::metallic::{Context, Tensor};
+    use crate::metallic::{Context, Tensor, TensorInit, TensorStorage};
 
     #[test]
     fn test_my_kernel_logic() -> Result<(), MetalError> {
         let mut ctx = Context::new()?;
-        let a = Tensor::create_tensor_from_slice(&[1., 2.], vec![2], &ctx)?;
-        let b = Tensor::create_tensor_from_slice(&[3., 4.], vec![2], &ctx)?;
+        let a = Tensor::new(vec![2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[1., 2.]))?;
+        let b = Tensor::new(vec![2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&[3., 4.]))?;
 
         // Use the kernel via the generic `call` method.
         let result_tensor = ctx.call::<MyKernelOp>((a, b))?;
