@@ -14,7 +14,7 @@ use objc2_metal::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::ops::{Add, Div, Mul, Sub};
+use std::ops::{Add, Deref, Div, Mul, Sub};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -58,12 +58,38 @@ impl Dtype {
 
 pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
+#[derive(Clone)]
+struct ThreadSafeBuffer {
+    inner: RetainedBuffer,
+}
+
+impl ThreadSafeBuffer {
+    fn new(inner: RetainedBuffer) -> Self {
+        Self { inner }
+    }
+
+    fn clone_inner(&self) -> RetainedBuffer {
+        self.inner.clone()
+    }
+}
+
+unsafe impl Send for ThreadSafeBuffer {}
+unsafe impl Sync for ThreadSafeBuffer {}
+
+impl Deref for ThreadSafeBuffer {
+    type Target = RetainedBuffer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 // CPU fill threshold in MB
 const DEFAULT_CPU_FILL_THRESHOLD_MB: usize = 1;
 
 #[derive(Clone)]
 struct HostAccessState {
-    staging: Option<RetainedBuffer>,
+    staging: Option<ThreadSafeBuffer>,
     staging_valid: bool,
     host_dirty: bool,
     base_offset: usize,
@@ -425,11 +451,11 @@ impl Tensor {
                 .device
                 .newBufferWithLength_options(target_size, MTLResourceOptions::StorageModeShared)
                 .ok_or(MetalError::BufferCreationFailed(target_size))?;
-            state.staging = Some(buffer);
+            state.staging = Some(ThreadSafeBuffer::new(buffer));
             state.staging_valid = false;
         }
 
-        Ok(state.staging.as_ref().cloned())
+        Ok(state.staging.as_ref().map(ThreadSafeBuffer::clone_inner))
     }
 
     fn ensure_staging_for_read(&self) -> Result<(), MetalError> {
@@ -548,7 +574,7 @@ impl Tensor {
             .staging
             .as_ref()
             .expect("staging buffer must exist when host_dirty is set")
-            .clone();
+            .clone_inner();
         let base_offset = state.base_offset;
         let region_len = state.region_len;
         drop(state);
