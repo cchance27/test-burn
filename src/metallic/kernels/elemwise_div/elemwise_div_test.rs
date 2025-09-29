@@ -1,5 +1,5 @@
 use super::elemwise_div::ElemwiseDivOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 fn cpu_elemwise_div(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b.iter()).map(|(x, y)| x / y).collect()
@@ -7,7 +7,7 @@ fn cpu_elemwise_div(a: &[f32], b: &[f32]) -> Vec<f32> {
 
 #[test]
 fn test_elemwise_div_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0];
     let b_data = vec![0.5, 1.0, 1.5, 2.0];
@@ -29,7 +29,7 @@ fn test_elemwise_div_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_div_1d() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let b_data = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
@@ -51,7 +51,7 @@ fn test_elemwise_div_1d() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_div_3d() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let b_data = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
@@ -73,7 +73,7 @@ fn test_elemwise_div_3d() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_div_by_one() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0];
     let b_data = vec![1.0, 1.0, 1.0, 1.0]; // Dividing by 1 should leave values unchanged
@@ -95,7 +95,7 @@ fn test_elemwise_div_by_one() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_div_with_fractions() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0];
     let b_data = vec![2.0, 4.0, 6.0, 8.0];
@@ -128,7 +128,7 @@ fn test_elemwise_div_with_fractions() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_div_large_tensor() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let size = 1024;
     let a_data: Vec<f32> = (1..=size).map(|i| i as f32 * 0.5).collect();
@@ -163,7 +163,7 @@ fn test_elemwise_div_large_tensor() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_div_floating_precision() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Using floating point numbers that may introduce precision errors
     let a_data = vec![1.1, 2.2, 3.3, 4.4];

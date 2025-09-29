@@ -1,9 +1,9 @@
 use crate::metallic::kernels::gelu::GeluOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_gelu_logic() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let input_data = vec![-1.0, 0.0, 1.0, 2.0];
     let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
@@ -42,7 +42,7 @@ fn cpu_gelu(input: &[f32]) -> Vec<f32> {
 
 #[test]
 fn test_gelu_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let input_data = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -0.5, 0.5, 1.5, -1.5, 0.1];
     let dims = vec![2, 5];
@@ -79,7 +79,7 @@ fn test_gelu_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_gelu_extremes() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let input_data = vec![-10.0, -5.0, -1.0, 0.0, 1.0, 5.0, 10.0, -100.0, 100.0, 0.001, -0.001];
     let dims = vec![input_data.len()];
@@ -125,7 +125,7 @@ fn test_gelu_extremes() -> Result<(), MetalError> {
 
 #[test]
 fn test_gelu_zero_and_symmetry() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Test points around zero and check basic properties
     let input_data = vec![-2.0, -1.0, -0.5, 0.0, 0.5, 1.0, 2.0];
@@ -169,7 +169,7 @@ fn test_gelu_zero_and_symmetry() -> Result<(), MetalError> {
 
 #[test]
 fn test_gelu_validation_errors() {
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     let dims = vec![2, 3];
     let input = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::Uninitialized).unwrap();

@@ -1,5 +1,5 @@
 use crate::metallic::kernels::matmul::{MatMulAlphaBetaOp, MatMulOp, mps_matrix_from_buffer};
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // Helpers
 
@@ -114,7 +114,7 @@ fn cpu_matmul_scaled(
 // Tests for MatMul Below
 #[test]
 fn test_mps_matrix_from_buffer() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     // Create a small tensor for testing
     let tensor = Tensor::new(vec![2, 3], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
@@ -141,7 +141,7 @@ fn test_mps_matrix_from_buffer() -> Result<(), crate::metallic::MetalError> {
 
 #[test]
 fn test_matmul_correctness_small_int() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2; // A rows
     let k = 3; // A cols / B rows
     let n = 2; // B cols
@@ -167,7 +167,7 @@ fn test_matmul_correctness_small_int() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_correctness_asymmetric_float() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 5;
     let k = 4;
     let n = 7;
@@ -210,7 +210,7 @@ fn test_matmul_correctness_asymmetric_float() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_transpose_right() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2; // A rows
     let k = 3; // A cols
     let n = 2; // B rows (after transpose)
@@ -253,7 +253,7 @@ fn test_matmul_transpose_right() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_transpose_left() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 3; // A rows (after transpose)
     let k = 2; // A cols
     let n = 3; // B cols
@@ -296,7 +296,7 @@ fn test_matmul_transpose_left() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 3;
     let n = 2;
@@ -355,7 +355,7 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_non_zero_buffer_offsets() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 3;
     let n = 2;
@@ -429,7 +429,7 @@ fn test_matmul_non_zero_buffer_offsets() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_non_zero_buffer_offsets_with_alpha_beta() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 2;
     let n = 2;
@@ -507,7 +507,7 @@ fn test_matmul_non_zero_buffer_offsets_with_alpha_beta() -> Result<(), MetalErro
 
 #[test]
 fn test_matmul_large_offsets() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 3;
     let k = 2;
     let n = 4;
@@ -577,7 +577,7 @@ fn test_matmul_large_offsets() -> Result<(), MetalError> {
 // Mat Mull Transpose tests
 #[test]
 fn test_matmul_no_transpose() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 3;
     let n = 2;
@@ -624,7 +624,7 @@ fn test_matmul_no_transpose() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_transpose_both() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     // A is 2x3, A^T is 3x2
     // B is 2x4, B^T is 4x2 (note: for A^T * B^T, A^T cols must equal B^T rows)
     // A^T * B^T = 3x2 * 4x2 -> This won't work since 2 != 4
@@ -681,7 +681,7 @@ fn test_matmul_transpose_both() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_extreme_alpha_scaling() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 4;
     let k = 3;
     let n = 2;
@@ -733,7 +733,7 @@ fn test_matmul_extreme_alpha_scaling() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_extreme_beta_accumulation() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 3;
     let n = 2;
@@ -791,7 +791,7 @@ fn test_matmul_extreme_beta_accumulation() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_scaled_with_extreme_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 3;
     let k = 2;
     let n = 3;
@@ -844,7 +844,7 @@ fn test_matmul_scaled_with_extreme_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_scaled_alpha_beta_extremes() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 2;
     let n = 2;
@@ -898,7 +898,7 @@ fn test_matmul_scaled_alpha_beta_extremes() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_scaling_zero_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 2;
     let n = 2;

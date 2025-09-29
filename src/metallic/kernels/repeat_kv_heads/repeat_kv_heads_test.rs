@@ -1,4 +1,4 @@
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
 use super::*;
 
@@ -31,7 +31,7 @@ fn cpu_repeat_kv_heads(
 
 #[test]
 fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let batch = 2usize;
     let n_kv_heads = 2usize;
@@ -75,7 +75,7 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
 
 #[test]
 fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let batch = 2usize;
     let n_kv_heads = 2usize;

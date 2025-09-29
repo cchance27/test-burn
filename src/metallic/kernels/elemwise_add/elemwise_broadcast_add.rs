@@ -1,31 +1,31 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 // User-facing struct for the broadcast element-wise add operation.
 pub struct BroadcastElemwiseAddOp;
 
 // Internal struct that holds the operation data.
-struct BroadcastElemwiseAdd {
-    a: Tensor,
-    b: Tensor,
-    out: Tensor,
+struct BroadcastElemwiseAdd<T: TensorElement> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    out: Tensor<T>,
     b_len: usize,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for BroadcastElemwiseAddOp {
-    type Args<'a> = (Tensor, Tensor);
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::ElemwiseBroadcastAdd)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (a, b) = args;
         let b_len = b.len();
         if b_len == 0 {
@@ -49,7 +49,7 @@ impl KernelInvocable for BroadcastElemwiseAddOp {
     }
 }
 
-impl Operation for BroadcastElemwiseAdd {
+impl<T: TensorElement> Operation for BroadcastElemwiseAdd<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

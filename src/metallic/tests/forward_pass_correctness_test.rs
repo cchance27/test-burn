@@ -6,6 +6,7 @@ use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::Qwen25;
+use crate::metallic::{F32Element, TensorElement};
 use crate::metallic::{
     Tensor, TensorInit, TensorStorage, context::Context, error::MetalError, generation, generation::GenerationConfig,
     models::LoadableModel, tokenizer::Tokenizer,
@@ -17,16 +18,16 @@ use std::env;
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
-fn repeat_kv_heads(
-    input: &Tensor,
+fn repeat_kv_heads<T: TensorElement>(
+    input: &Tensor<T>,
     group_size: usize,
     batch: usize,
     n_kv_heads: usize,
     n_heads: usize,
     seq: usize,
     head_dim: usize,
-    ctx: &mut Context,
-) -> Result<Tensor, MetalError> {
+    ctx: &mut Context<T>,
+) -> Result<Tensor<T>, MetalError> {
     let input_dims = input.dims();
     if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
         return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
@@ -72,7 +73,7 @@ fn squeeze_leading_batch(shape: &[usize]) -> Vec<usize> {
     }
 }
 
-fn compare_tensor_summary(name: &str, rust_tensor: &Tensor, py_data: &ArrayD<f32>, epsilon: f32, significant_threshold: f32) {
+fn compare_tensor_summary(name: &str, rust_tensor: &Tensor<F32Element>, py_data: &ArrayD<f32>, epsilon: f32, significant_threshold: f32) {
     let rust_slice = rust_tensor.as_slice();
     let py_slice = py_data.as_slice().expect("Failed to get slice from ndarray for comparison");
     assert_eq!(rust_slice.len(), py_slice.len(), "{} length mismatch", name);
@@ -103,7 +104,7 @@ fn compare_tensor_summary(name: &str, rust_tensor: &Tensor, py_data: &ArrayD<f32
     assert_relative_eq!(max_diff, 0.0, epsilon = epsilon);
 }
 
-fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
+fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to: usize, ctx: &mut Context<F32Element>) -> Result<Tensor<F32Element>, MetalError> {
     if up_to == 0 {
         return Ok(x);
     }
@@ -175,8 +176,8 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
                 sin_buf[idx] = angle.sin();
             }
         }
-        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(&cos_buf))?;
-        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(&sin_buf))?;
+        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::<F32Element>::CopyFrom(&cos_buf))?;
+        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::<F32Element>::CopyFrom(&sin_buf))?;
         let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -256,10 +257,10 @@ fn run_blocks_up_to(model: &Qwen25, mut x: Tensor, up_to: usize, ctx: &mut Conte
 #[test]
 fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // --- Setup ---
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
-    let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
+    let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
     let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
@@ -835,7 +836,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let (py_down_proj_data, py_down_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__down_proj_out.npy"));
 
     // Function to compare rust and py tensors without assertion (diagnostic)
-    fn compare_tensors_no_assert(rust_t: &Tensor, py_data: &ArrayD<f32>, name: &str) -> f32 {
+    fn compare_tensors_no_assert(rust_t: &Tensor<F32Element>, py_data: &ArrayD<f32>, name: &str) -> f32 {
         let rust_slice = rust_t.as_slice();
         let py_slice = py_data.as_slice().unwrap();
         let mut max_diff = 0.0;
@@ -854,7 +855,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let _ = compare_tensors_no_assert(&up_proj_out, &py_gate_proj_data, "Up vs Py Gate (diag)");
 
     // Function to compare rust and py tensors
-    fn compare_tensors(rust_t: &Tensor, py_data: &ArrayD<f32>, _py_shape: &[usize], name: &str, epsilon: f32) {
+    fn compare_tensors(rust_t: &Tensor<F32Element>, py_data: &ArrayD<f32>, _py_shape: &[usize], name: &str, epsilon: f32) {
         let rust_slice = rust_t.as_slice();
         let py_slice = py_data.as_slice().unwrap();
         let mut diff_count = 0;
@@ -1365,10 +1366,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
 #[test]
 fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
-    let gguf_file = GGUFFile::load(gguf_path).expect("Failed to load GGUF file");
+    let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
     let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
@@ -1613,7 +1614,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     Ok(())
 }
 
-fn dump_kv_snapshot(ctx: &mut Context, step: usize) {
+fn dump_kv_snapshot<T: TensorElement>(ctx: &mut Context<T>, step: usize) {
     ctx.synchronize();
 
     let mut snapshot: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();

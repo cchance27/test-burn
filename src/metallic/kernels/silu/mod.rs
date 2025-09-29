@@ -1,30 +1,30 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
+mod silu_test;
 
 /// Public, user-facing, zero-sized struct for the SiLU operation.
 pub struct SiluOp;
 
 /// Internal struct that holds data for the Operation trait.
-struct Silu {
-    input: Tensor,
-    output: Tensor,
+struct Silu<T: TensorElement> {
+    input: Tensor<T>,
+    output: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for SiluOp {
-    type Args<'a> = Tensor;
+    type Args<'a, T: TensorElement> = Tensor<T>;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::Silu)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        input: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        input: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let input = input;
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         ctx.prepare_tensors_for_active_cmd(&[&input])?;
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
@@ -39,7 +39,7 @@ impl KernelInvocable for SiluOp {
     }
 }
 
-impl Operation for Silu {
+impl<T: TensorElement> Operation for Silu<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -68,35 +68,6 @@ impl Operation for Silu {
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod silu_test {
-    use super::*;
-
-    #[test]
-    fn test_silu_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
-        let input_data = vec![1.0, -1.0, 0.0, 2.0];
-        let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
-
-        let result = ctx.call::<SiluOp>(input)?;
-
-        // SiLU(x) = x * sigmoid(x)
-        let expected: Vec<f32> = input_data.iter().map(|&x| x * (1.0 / (1.0 + (-x).exp()))).collect();
-        let result_slice = result.as_slice();
-
-        for (i, (result_val, expected_val)) in result_slice.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (result_val - expected_val).abs() < 1e-5,
-                "Mismatch at index {}: got {}, expected {}",
-                i,
-                result_val,
-                expected_val
-            );
-        }
         Ok(())
     }
 }

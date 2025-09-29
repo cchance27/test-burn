@@ -1,13 +1,13 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{F32Element, TensorElement, TensorInit, TensorStorage};
 
-fn softmax_rows_total(attn_tensor: &Tensor, seq_k: usize) -> u32 {
+fn softmax_rows_total<T: TensorElement>(attn_tensor: &Tensor<T>, seq_k: usize) -> u32 {
     if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 }
 }
 
 #[test]
 fn test_sdpa_determinism_non_causal() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 2;
     let seq_q = 4;
@@ -44,7 +44,7 @@ fn test_sdpa_determinism_non_causal() -> Result<(), MetalError> {
 
         // Reinitialize context for each run to ensure clean state
         if i < 4 {
-            context = Context::new()?;
+            context = Context::<F32Element>::new()?;
         }
     }
 
@@ -76,7 +76,7 @@ fn test_sdpa_determinism_non_causal() -> Result<(), MetalError> {
 
 #[test]
 fn test_sdpa_determinism_causal() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 2;
     let seq_q = 4;
@@ -113,7 +113,7 @@ fn test_sdpa_determinism_causal() -> Result<(), MetalError> {
 
         // Reinitialize context for each run to ensure clean state
         if i < 4 {
-            context = Context::new()?;
+            context = Context::<F32Element>::new()?;
         }
     }
 
@@ -147,7 +147,7 @@ fn test_sdpa_determinism_causal() -> Result<(), MetalError> {
 fn test_matmul_determinism() -> Result<(), MetalError> {
     use crate::metallic::kernels::matmul::MatMulOp;
 
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let m = 4;
     let k = 4;
@@ -201,7 +201,7 @@ fn test_matmul_determinism() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_determinism() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 4;
     let seq_k = 4;
@@ -256,7 +256,7 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
 
 #[test]
 fn test_tensor_operations_determinism() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let dims = vec![2, 3];
     let data1: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];

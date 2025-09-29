@@ -1,13 +1,10 @@
 #![allow(unused_imports)]
-pub use context::Context;
+pub use context::{Context, ContextConfig};
 pub use error::MetalError;
 pub use tensor::{
-    BF16Element, Dtype, F16Element, F32Element, Tensor as GenericTensor, TensorBF16, TensorElement, TensorF16, TensorF32,
-    TensorInit as GenericTensorInit, TensorStorage,
+    BF16Element, Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage,
 };
 
-pub type Tensor = TensorF32;
-pub type TensorInit<'data> = tensor::TensorInit<'data, F32Element>;
 pub use tokenizer::{SpecialTokens, Tokenizer, TokenizerError};
 
 pub mod cache_keys;

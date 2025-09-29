@@ -1,5 +1,5 @@
 use crate::metallic::kernels::elemwise_sub::ElemwiseSubOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 fn cpu_elemwise_sub(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b.iter()).map(|(x, y)| x - y).collect()
@@ -7,7 +7,7 @@ fn cpu_elemwise_sub(a: &[f32], b: &[f32]) -> Vec<f32> {
 
 #[test]
 fn test_elemwise_sub_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0];
     let b_data = vec![0.5, 1.5, 2.5, 3.5];

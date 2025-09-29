@@ -1,31 +1,31 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 pub struct ElemwiseSubOp;
 
 #[cfg(test)]
 mod elemwise_sub_test;
 
-struct ElemwiseSub {
-    a: Tensor,
-    b: Tensor,
-    out: Tensor,
+struct ElemwiseSub<T: TensorElement> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for ElemwiseSubOp {
-    type Args<'a> = (Tensor, Tensor);
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::ElemwiseSub)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (a, b) = args;
         if a.dims() != b.dims() {
             return Err(MetalError::InvalidShape(format!(
@@ -50,7 +50,7 @@ impl KernelInvocable for ElemwiseSubOp {
     }
 }
 
-impl Operation for ElemwiseSub {
+impl<T: TensorElement> Operation for ElemwiseSub<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

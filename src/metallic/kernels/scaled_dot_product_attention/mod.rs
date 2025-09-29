@@ -5,7 +5,7 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor, TensorInit, TensorStorage,
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
     resource_cache::ResourceCache,
 };
@@ -71,11 +71,11 @@ pub struct ScaledDotProductAttentionOptimizedOp;
 
 // Internal struct that holds the operation - we'll use existing kernels to implement it
 #[allow(dead_code)]
-struct ScaledDotProductAttention {
-    pub q: Tensor,
-    pub k: Tensor,
-    pub v: Tensor,
-    pub output: Tensor,
+struct ScaledDotProductAttention<T: TensorElement> {
+    pub q: Tensor<T>,
+    pub k: Tensor<T>,
+    pub v: Tensor<T>,
+    pub output: Tensor<T>,
     pub causal: bool,
     pub batch: usize,
     pub seq_q: usize,
@@ -86,12 +86,12 @@ struct ScaledDotProductAttention {
     pub config: SdpaConfig,
 }
 
-fn create_sdpa_operation(
-    ctx: &mut Context,
-    args: (&Tensor, &Tensor, &Tensor, bool, u32),
+fn create_sdpa_operation<T: TensorElement>(
+    ctx: &mut Context<T>,
+    args: (&Tensor<T>, &Tensor<T>, &Tensor<T>, bool, u32),
     mut cache: Option<&mut ResourceCache>,
     config: SdpaConfig,
-) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
     let (q, k, v, causal, query_offset) = args;
 
     ctx.prepare_tensors_for_active_cmd(&[q, k, v])?;
@@ -204,92 +204,92 @@ fn create_sdpa_operation(
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::BASELINE)
     }
 }
 
 impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::NO_PERMUTE)
     }
 }
 
 impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::WORKSPACE)
     }
 }
 
 impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::MPS_SOFTMAX)
     }
 }
 
 impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::ALL)
     }
 }
 
 // Implement `Operation` for the internal struct.
-impl Operation for ScaledDotProductAttention {
+impl<T: TensorElement> Operation for ScaledDotProductAttention<T> {
     fn encode(
         &self,
         _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

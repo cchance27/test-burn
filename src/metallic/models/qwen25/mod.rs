@@ -8,7 +8,7 @@ use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::LoadableModel;
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, Tensor, TensorElement};
 use std::time::Instant;
 
 mod qwen25_tests;
@@ -32,19 +32,19 @@ pub struct Qwen25Config {
     pub rms_eps: f32,
 }
 
-pub struct Qwen25 {
+pub struct Qwen25<T: TensorElement> {
     pub config: Qwen25Config,
-    pub blocks: Vec<TransformerBlock>,
-    pub embed_weight: Tensor,
-    pub output_weight: Tensor,
-    pub final_norm_gamma: Tensor,
-    pub rope_cos_cache: Tensor,
-    pub rope_sin_cache: Tensor,
+    pub blocks: Vec<TransformerBlock<T>>,
+    pub embed_weight: Tensor<T>,
+    pub output_weight: Tensor<T>,
+    pub final_norm_gamma: Tensor<T>,
+    pub rope_cos_cache: Tensor<T>,
+    pub rope_sin_cache: Tensor<T>,
 }
 
-impl Qwen25 {
+impl<T: TensorElement> Qwen25<T> {
     /// Embed tokens into d_model dimensional vectors
-    pub fn embed(&self, tokens: &[u32], ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn embed(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         let batch = 1; // For now, assume batch size of 1
         let seq = tokens.len();
 
@@ -77,7 +77,7 @@ impl Qwen25 {
     }
 
     /// Apply the output layer to convert from d_model to vocab_size
-    pub fn output(&self, hidden: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn output(&self, hidden: &Tensor<T>, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         // Validate input shape: expect [batch, seq, d_model]
         let dims = hidden.dims();
         if dims.len() != 3 {
@@ -112,13 +112,13 @@ impl Qwen25 {
     }
 
     /// Forward pass that takes tokens as input and returns logits
-    pub fn forward_tokens(&self, tokens: &[u32], ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn forward_tokens(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         // Embed tokens
         let embedded = self.embed(tokens, ctx)?;
 
         let embedded_slice = embedded.as_slice();
-        let embedded_max = embedded_slice.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let embedded_min = embedded_slice.iter().cloned().fold(f32::INFINITY, f32::min);
+        let embedded_max = embedded_slice.iter().map(|&v| T::to_f32(v)).fold(f32::NEG_INFINITY, f32::max);
+        let embedded_min = embedded_slice.iter().map(|&v| T::to_f32(v)).fold(f32::INFINITY, f32::min);
         println!("Embedded stats - max: {:.4}, min: {:.4}", embedded_max, embedded_min);
 
         // Additional debug: sample first few values
@@ -142,7 +142,7 @@ impl Qwen25 {
         Ok(logits)
     }
 
-    pub fn new(config: Qwen25Config, ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn new(config: Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         // allocate embed and output weights
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
         let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
@@ -170,8 +170,8 @@ impl Qwen25 {
                 let exponent = (2 * i) as f32 / head_dim as f32;
                 let inv_freq = 1.0f32 / config.rope_freq_base.powf(exponent);
                 let angle = pos as f32 * inv_freq;
-                cos_slice[idx] = angle.cos();
-                sin_slice[idx] = angle.sin();
+                cos_slice[idx] = T::from_f32(angle.cos());
+                sin_slice[idx] = T::from_f32(angle.sin());
             }
         }
 
@@ -186,7 +186,7 @@ impl Qwen25 {
         })
     }
 
-    pub fn forward(&self, input: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn forward(&self, input: &Tensor<T>, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         // Validate input shape: expect [batch, seq, d_model]
         let dims = input.dims();
         if dims.len() != 3 {
@@ -340,7 +340,7 @@ impl Qwen25 {
     }
 
     /// Step-forward for autoregressive generation with KV caching.
-    pub fn forward_step(&self, input: &Tensor, pos: usize, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn forward_step(&self, input: &Tensor<T>, pos: usize, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         // Validate input shape: expect [batch, 1, d_model]
         let dims = input.dims();
         if dims.len() != 3 || dims[1] != 1 {
@@ -524,14 +524,14 @@ impl Qwen25 {
     /// Repeat KV heads for GQA to match Q head count
     #[allow(clippy::too_many_arguments)]
     fn repeat_kv_heads(
-        history: &CacheHistory,
+        history: &CacheHistory<T>,
         group_size: usize,
         batch: usize,
         n_kv_heads: usize,
         n_heads: usize,
         head_dim: usize,
-        ctx: &mut Context,
-    ) -> Result<Tensor, MetalError> {
+        ctx: &mut Context<T>,
+    ) -> Result<Tensor<T>, MetalError> {
         let input = history.tensor.clone();
         let input_dims = input.dims();
         if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != history.active_seq || input_dims[2] != head_dim
@@ -551,7 +551,7 @@ impl Qwen25 {
         ))
     }
 
-    fn gather_cache_history(cache: &Tensor, steps: usize, ctx: &mut Context) -> Result<CacheHistory, MetalError> {
+    fn gather_cache_history(cache: &Tensor<T>, steps: usize, ctx: &mut Context<T>) -> Result<CacheHistory<T>, MetalError> {
         let (view, cache_capacity) = ctx.kv_cache_history_view(cache, steps)?;
         Ok(CacheHistory {
             tensor: view,
@@ -562,14 +562,14 @@ impl Qwen25 {
 }
 
 #[derive(Clone)]
-struct CacheHistory {
-    tensor: Tensor,
+struct CacheHistory<T: TensorElement> {
+    tensor: Tensor<T>,
     active_seq: usize,
     cache_capacity: usize,
 }
 
-impl CacheHistory {
-    fn from_tensor(tensor: Tensor) -> Result<Self, MetalError> {
+impl<T: TensorElement> CacheHistory<T> {
+    fn from_tensor(tensor: Tensor<T>) -> Result<Self, MetalError> {
         let dims = tensor.dims();
         if dims.len() != 3 {
             return Err(MetalError::InvalidShape("Cache history tensors must be rank-3".to_string()));

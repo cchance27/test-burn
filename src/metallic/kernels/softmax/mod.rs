@@ -3,6 +3,7 @@ use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::resource_cache::ResourceCache;
 use crate::metallic::tensor::MpsMatrixBatchView;
+use crate::metallic::TensorElement;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -60,17 +61,17 @@ pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply_softmax(
-    ctx: &mut Context,
+pub fn apply_softmax<T: TensorElement>(
+    ctx: &mut Context<T>,
     mut cache: Option<&mut ResourceCache>,
-    attn: &Tensor,
+    attn: &Tensor<T>,
     batch: usize,
     rows: usize,
     columns: usize,
     causal: bool,
     query_offset: u32,
     allow_mps: bool,
-) -> Result<Tensor, MetalError> {
+) -> Result<Tensor<T>, MetalError> {
     let view = attn.as_mps_matrix_batch_view()?;
 
     if view.rows != rows || view.columns != columns {
@@ -113,10 +114,10 @@ pub fn apply_softmax(
     Ok(result)
 }
 
-fn try_apply_mps_softmax(
-    ctx: &mut Context,
+fn try_apply_mps_softmax<T: TensorElement>(
+    ctx: &mut Context<T>,
     cache: &mut ResourceCache,
-    attn: &Tensor,
+    attn: &Tensor<T>,
     view: &MpsMatrixBatchView,
     batch: usize,
     rows: usize,
@@ -147,14 +148,14 @@ fn try_apply_mps_softmax(
     Ok(())
 }
 
-struct SoftmaxMpsOperation {
-    attn: Tensor,
+struct SoftmaxMpsOperation<T: TensorElement> {
+    attn: Tensor<T>,
     descriptor: Retained<MPSMatrixDescriptor>,
     softmax: Retained<MPSMatrixSoftMax>,
     batch: usize,
 }
 
-impl Operation for SoftmaxMpsOperation {
+impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -178,8 +179,8 @@ mod softmax_test;
 pub struct SoftmaxOp;
 
 /// Internal struct that holds data for the Operation trait.
-struct SoftmaxOperation {
-    attn: Tensor,
+struct SoftmaxOperation<T: TensorElement> {
+    attn: Tensor<T>,
     rows_total: u32,
     seq_q: u32,
     seq_k: u32,
@@ -189,18 +190,18 @@ struct SoftmaxOperation {
 }
 
 impl KernelInvocable for SoftmaxOp {
-    type Args<'a> = (&'a Tensor, u32, u32, u32, u32, u32); // (attn, rows_total, seq_q, seq_k, causal, query_offset)
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, u32, u32, u32, u32, u32); // (attn, rows_total, seq_q, seq_k, causal, query_offset)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::FusedSoftmax)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (attn, rows_total, seq_q, seq_k, causal, query_offset) = args;
 
         // Validate dimensions
@@ -245,7 +246,7 @@ impl KernelInvocable for SoftmaxOp {
     }
 }
 
-impl Operation for SoftmaxOperation {
+impl<T: TensorElement> Operation for SoftmaxOperation<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

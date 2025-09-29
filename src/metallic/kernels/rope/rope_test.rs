@@ -1,5 +1,5 @@
 use crate::metallic::kernels::rope::RoPEOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // CPU RoPE reference implementation for testing (pairs elements dim/2 apart)
 fn cpu_rope(input: &[f32], batch: usize, seq_len: usize, dim: usize, cos: &[f32], sin: &[f32]) -> Vec<f32> {
@@ -24,7 +24,7 @@ fn cpu_rope(input: &[f32], batch: usize, seq_len: usize, dim: usize, cos: &[f32]
 
 #[test]
 fn test_rope_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 2usize;
     let seq_len = 3usize;
@@ -90,7 +90,7 @@ fn test_rope_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_rope_extreme_large_position_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 1usize;
     let seq_len = 10000usize; // Very large sequence length
@@ -162,7 +162,7 @@ fn test_rope_extreme_large_position_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_rope_extreme_angle_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 1usize;
     let seq_len = 8usize;
@@ -234,7 +234,7 @@ fn test_rope_extreme_angle_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_rope_extreme_input_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 1usize;
     let seq_len = 4usize;
@@ -288,7 +288,7 @@ fn test_rope_extreme_input_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_rope_extreme_cos_sin_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let batch = 1usize;
     let seq_len = 2usize;

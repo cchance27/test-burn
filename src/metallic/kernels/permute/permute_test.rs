@@ -1,9 +1,9 @@
 use crate::metallic::kernels::permute::PermuteOp;
-use crate::metallic::{Context, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_permute_2d_transpose() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     // Create a 2x3 tensor: [[1, 2, 3], [4, 5, 6]]
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let src = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
@@ -20,7 +20,7 @@ fn test_permute_2d_transpose() -> Result<(), crate::metallic::MetalError> {
 
 #[test]
 fn test_permute_3d() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     // Create a 2x2x2 tensor
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let src = Tensor::new(vec![2, 2, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
@@ -36,7 +36,7 @@ fn test_permute_3d() -> Result<(), crate::metallic::MetalError> {
 
 #[test]
 fn test_permute_identity() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     // Create a 2x3 tensor: [[1, 2, 3], [4, 5, 6]]
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let src = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&data))?;
@@ -71,7 +71,7 @@ fn manual_reassemble(out_heads: &[f32], batch: usize, n_heads: usize, seq: usize
 }
 
 fn run_case(batch: usize, n_heads: usize, seq: usize, head_dim: usize) {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let bh = batch * n_heads;
     let d_model = n_heads * head_dim;
     let numel = bh * seq * head_dim;

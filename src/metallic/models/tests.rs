@@ -1,6 +1,7 @@
 #![cfg(test)]
 use super::*;
-use crate::metallic::{Context, MetalError};
+use crate::metallic::context::ContextConfig;
+use crate::metallic::{Context, F32Element, MetalError, TensorElement};
 use crate::metallic::{Operation, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -25,7 +26,7 @@ impl Operation for TestOperation {
 
 #[test]
 fn test_model_basic() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let context: Context<F32Element> = Context::with_config(ContextConfig::default())?;
     let _cache = ResourceCache::with_device(context.device.clone());
 
     // Create a simple test operation
@@ -44,7 +45,7 @@ fn test_model_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_model_empty() -> Result<(), MetalError> {
-    let context = Context::new()?;
+    let context: Context<F32Element> = Context::with_config(ContextConfig::default())?;
     let mut cache = ResourceCache::with_device(context.device.clone());
 
     let model = Model::new(vec![]);
@@ -54,7 +55,7 @@ fn test_model_empty() -> Result<(), MetalError> {
     assert_eq!(model.len(), 0);
 
     // Running empty model should return error
-    let inputs = vec![];
+    let inputs: Vec<Tensor<F32Element>> = vec![];
     let result = model.forward(&inputs, &context.command_queue, &mut cache);
     assert!(result.is_err()); // Should error on empty model
 
@@ -92,12 +93,12 @@ impl Model {
 
     /// Run the model forward with the given input tensors.
     /// Returns the output tensors from the final operation.
-    pub fn forward(
+    pub fn forward<T: TensorElement>(
         &self,
-        inputs: &[Tensor],
+        inputs: &[Tensor<T>],
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         cache: &mut ResourceCache,
-    ) -> Result<Vec<Tensor>, MetalError> {
+    ) -> Result<Vec<Tensor<T>>, MetalError> {
         if self.operations.is_empty() {
             return Err(MetalError::InvalidShape("Model has no operations".to_string()));
         }

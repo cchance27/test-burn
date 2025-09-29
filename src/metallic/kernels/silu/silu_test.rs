@@ -1,5 +1,6 @@
+#![cfg(test)]
 use crate::metallic::kernels::silu::SiluOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // CPU SiLU
 fn cpu_silu(input: &[f32]) -> Vec<f32> {
@@ -15,7 +16,7 @@ fn cpu_silu(input: &[f32]) -> Vec<f32> {
 
 #[test]
 fn test_silu_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let input_data = vec![-2.0, -1.0, 0.0, 1.0, 2.0, -50.0, 50.0];
     let dims = vec![input_data.len()];
@@ -44,7 +45,7 @@ fn test_silu_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_silu_numerical_stability() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     
 
     // Test with extreme values that could cause overflow in exp computation
@@ -112,7 +113,7 @@ fn cpu_silu_extreme(input: &[f32]) -> Vec<f32> {
 
 #[test]
 fn test_silu_extreme_positive_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Create input with extremely large positive values
     let input_data = vec![100.0f32, 1000.0f32, 10000.0f32, 1e6f32];
@@ -186,7 +187,7 @@ fn test_silu_extreme_positive_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_silu_extreme_negative_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Create input with extremely large negative values
     let input_data = vec![-100.0f32, -1000.0f32, -10000.0f32, -1e6f32];
@@ -260,7 +261,7 @@ fn test_silu_extreme_negative_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_silu_mixed_extreme_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Create input with mixed extreme values
     let input_data = vec![
@@ -326,7 +327,7 @@ fn test_silu_mixed_extreme_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_silu_edge_values_around_thresholds() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Test around key thresholds in the SiLU implementation
     let input_data = vec![
@@ -396,7 +397,7 @@ fn test_silu_edge_values_around_thresholds() -> Result<(), MetalError> {
 
 #[test]
 fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Create a larger tensor with mixed extreme values
     let size = 1000;
@@ -461,3 +462,26 @@ fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
 
     Ok(())
 }
+    #[test]
+    fn test_silu_logic() -> Result<(), MetalError> {
+        let mut ctx = Context::<F32Element>::new()?;
+        let input_data = vec![1.0, -1.0, 0.0, 2.0];
+        let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
+
+        let result = ctx.call::<SiluOp>(input)?;
+
+        // SiLU(x) = x * sigmoid(x)
+        let expected: Vec<f32> = input_data.iter().map(|&x| x * (1.0 / (1.0 + (-x).exp()))).collect();
+        let result_slice = result.as_slice();
+
+        for (i, (result_val, expected_val)) in result_slice.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (result_val - expected_val).abs() < 1e-5,
+                "Mismatch at index {}: got {}, expected {}",
+                i,
+                result_val,
+                expected_val
+            );
+        }
+        Ok(())
+    }

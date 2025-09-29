@@ -1,4 +1,6 @@
 use crate::metallic::tensor::Dtype;
+use crate::metallic::F32Element;
+use crate::metallic::Tensor;
 use objc2::AnyThread;
 use objc2::rc::autoreleasepool;
 use objc2_metal::MTLCommandBuffer;
@@ -168,7 +170,7 @@ pub fn scaled_dot_product_attention_metal(
         }
 
         // Wrap the output buffer in our Tensor API and copy out via to_vec for consistency
-        let out_tensor = crate::metallic::Tensor::from_existing_buffer(
+        let out_tensor = Tensor::<F32Element>::from_existing_buffer(
             out_buf.clone(),
             vec![batch, seq_q, dim],
             Dtype::F32,

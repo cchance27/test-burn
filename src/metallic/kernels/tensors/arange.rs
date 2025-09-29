@@ -1,21 +1,21 @@
 use super::*;
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_compute_pipeline_state};
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct ArangeOp;
 
 // 2. Internal struct that holds data for the `Operation` trait.
-struct Arange {
+struct Arange<T: TensorElement> {
     length: usize,
-    out: Tensor,
+    out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ArangeOp {
     // Input arguments for the call.
-    type Args<'a> = usize;
+    type Args<'a, T: TensorElement> = usize;
     // The output type.
 
     // Link to the enum variant in `KernelFunction`.
@@ -25,12 +25,12 @@ impl KernelInvocable for ArangeOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new<'a>(
-        ctx: &mut Context,
-        length: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        length: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Create the output tensor.
         let out = Tensor::new(vec![length], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
@@ -48,7 +48,7 @@ impl KernelInvocable for ArangeOp {
 
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for Arange {
+impl<T: TensorElement> Operation for Arange<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -84,11 +84,11 @@ impl Operation for Arange {
 #[cfg(test)]
 mod arange_test {
     use crate::metallic::kernels::tensors::ArangeOp;
-    use crate::metallic::{Context, MetalError, TensorInit, TensorStorage};
+    use crate::metallic::{Context, F32Element, MetalError, TensorInit, TensorStorage};
 
     #[test]
     fn test_arange() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
+        let mut ctx = Context::<F32Element>::new()?;
         let result = ctx.call::<ArangeOp>(5)?;
 
         assert_eq!(result.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0]);

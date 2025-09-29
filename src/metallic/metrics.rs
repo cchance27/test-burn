@@ -2,6 +2,7 @@ use crate::app_event::{LatencyRow, MemoryRow};
 use crate::metallic::instrumentation::{BlockMemorySnapshot, MemoryUsage};
 use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::models::qwen25::Qwen25;
+use crate::metallic::TensorElement;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::json;
@@ -660,7 +661,7 @@ pub fn build_memory_rows(
     rows
 }
 
-pub fn build_model_memory_tree(model: &Qwen25) -> ModelMemoryNode {
+pub fn build_model_memory_tree<T: TensorElement>(model: &Qwen25<T>) -> ModelMemoryNode {
     let mut children = vec![
         ModelMemoryNode::leaf("Token Embeddings", model.embed_weight.size_bytes()),
         ModelMemoryNode::leaf("Output Projection", model.output_weight.size_bytes()),

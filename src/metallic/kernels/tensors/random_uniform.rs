@@ -1,24 +1,24 @@
 use super::*;
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct RandomUniformOp;
 
 // 2. Internal struct that holds data for the `Operation` trait.
-struct RandomUniform {
+struct RandomUniform<T: TensorElement> {
     dims: Vec<usize>,
     min_val: f32,
     max_val: f32,
     seed: u32,
-    out: Tensor,
+    out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for RandomUniformOp {
     // Input arguments for the call.
-    type Args<'a> = (Vec<usize>, f32, f32, Option<u32>);
+    type Args<'a, T: TensorElement> = (Vec<usize>, f32, f32, Option<u32>);
     // The output type.
 
     // Link to the enum variant in `KernelFunction`.
@@ -28,12 +28,12 @@ impl KernelInvocable for RandomUniformOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (dims, min_val, max_val, seed_opt) = args;
 
         // Create the output tensor.
@@ -63,7 +63,7 @@ impl KernelInvocable for RandomUniformOp {
 
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for RandomUniform {
+impl<T: TensorElement> Operation for RandomUniform<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -110,11 +110,11 @@ impl Operation for RandomUniform {
 #[cfg(test)]
 mod random_uniform_test {
     use crate::metallic::kernels::tensors::RandomUniformOp;
-    use crate::metallic::{Context, MetalError, TensorInit, TensorStorage};
+    use crate::metallic::{Context, F32Element, MetalError, TensorInit, TensorStorage};
 
     #[test]
     fn test_random_uniform() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
+        let mut ctx = Context::<F32Element>::new()?;
         let result = ctx.call::<RandomUniformOp>((vec![5], 0.0, 1.0, Some(42)))?;
 
         let values = result.as_slice();

@@ -1,6 +1,6 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::Tokenizer;
+use crate::metallic::{TensorElement, Tokenizer};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
     BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
@@ -38,19 +38,20 @@ impl Default for GenerationConfig {
 /// Sample from logits using top-k and top-p (nucleus) sampling.
 /// - `logits` is a slice of f32 representing vocabulary logits.
 ///   Returns selected token index.
-pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature: f32) -> usize {
+pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, top_p: f32, temperature: f32) -> usize {
     // Handle deterministic (greedy) sampling when temperature is zero or non-finite.
     if temperature <= 0.0 || !temperature.is_finite() {
         return logits
             .iter()
             .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .map(|(i, &v)| (i, T::to_f32(v)))  // Convert to f32 for comparison
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(i, _)| i)
             .unwrap_or(0);
     }
 
     // Apply temperature scaling and convert to positive scores
-    let mut scaled: Vec<f32> = logits.iter().map(|&v| v / temperature).collect();
+    let mut scaled: Vec<f32> = logits.iter().map(|&v| T::to_f32(v) / temperature).collect();
 
     // Stabilize by subtracting max before exponentiation to prevent overflow
     // Filter out any infinity/nan values first
@@ -131,10 +132,10 @@ pub fn sample_top_k_top_p(logits: &[f32], top_k: usize, top_p: f32, temperature:
 
 /// High-level end-to-end generation pipeline that combines tokenization, embedding,
 /// model inference, and sampling into a complete inference loop.
-pub fn generate(
-    qwen: &mut Qwen25,
+pub fn generate<T: TensorElement>(
+    qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
-    ctx: &mut Context,
+    ctx: &mut Context<T>,
     prompt: &str,
     cfg: &GenerationConfig,
 ) -> Result<String, MetalError> {
@@ -148,10 +149,10 @@ pub fn generate(
 }
 
 /// High-level end-to-end generation pipeline with token streaming support
-pub fn generate_streaming(
-    qwen: &mut Qwen25,
+pub fn generate_streaming<T: TensorElement> (
+    qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
-    ctx: &mut Context,
+    ctx: &mut Context<T>,
     prompt: &str,
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
@@ -208,10 +209,10 @@ pub fn generate_streaming(
 
 /// High-level autoregressive generation loop using Qwen25 with KV caches for debugging.
 /// This implementation processes the full context each time for comparison.
-pub fn generate_autoregressive_with_kv_cache(
-    qwen: &mut Qwen25,
+pub fn generate_autoregressive_with_kv_cache<T: TensorElement> (
+    qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
-    ctx: &mut Context,
+    ctx: &mut Context<T>,
     input_ids: &[u32],
     cfg: &GenerationConfig,
     host_overheads: &[(String, usize)],
@@ -230,10 +231,10 @@ pub fn generate_autoregressive_with_kv_cache(
 
 /// High-level autoregressive generation loop with streaming support using Qwen25 with KV Caching.
 #[allow(clippy::too_many_arguments)]
-pub fn generate_autoregressive_with_kv_cache_streaming<F>(
-    qwen: &mut Qwen25,
+pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
+    qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
-    ctx: &mut Context,
+    ctx: &mut Context<T>,
     input_ids: &[u32],
     cfg: &GenerationConfig,
     token_callback: &mut F,
@@ -290,7 +291,7 @@ where
 
     // --- Prompt Processing Pass ---
     // Process the prompt token by token to warm up the KV cache.
-    let mut logits_tensor: Option<Tensor> = None;
+    let mut logits_tensor: Option<Tensor<T>> = None;
     if !input_ids.is_empty() {
         ctx.clear_cache(); // It's okay to clear the resource cache
         for (i, &token_id) in input_ids.iter().enumerate() {
@@ -317,7 +318,7 @@ where
 
         // Sample the first token
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        next_token = sample_top_k_top_p::<T>(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
@@ -444,7 +445,7 @@ where
         let vocab_logits = logits[0..vocab_size].to_vec();
 
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        next_token = sample_top_k_top_p::<T>(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
 
         generated_ids.push(next_token);
 

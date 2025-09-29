@@ -1,28 +1,27 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 pub struct GeluOp;
 
-struct Gelu {
-    input: Tensor,
-    output: Tensor,
+struct Gelu<T: TensorElement> {
+    input: Tensor<T>,
+    output: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for GeluOp {
-    type Args<'a> = Tensor;
+    type Args<'a, T: TensorElement> = Tensor<T>;
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::Gelu)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        input: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        input: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
-        let input = input;
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         ctx.prepare_tensors_for_active_cmd(&[&input])?;
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
@@ -37,7 +36,7 @@ impl KernelInvocable for GeluOp {
     }
 }
 
-impl Operation for Gelu {
+impl<T: TensorElement> Operation for Gelu<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

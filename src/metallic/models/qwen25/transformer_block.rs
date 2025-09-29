@@ -1,30 +1,32 @@
-use crate::metallic::{Context, MetalError, Tensor};
+use crate::metallic::{Context, MetalError, TensorElement};
+use crate::metallic::tensor::Tensor;
 
-pub struct TransformerBlock {
+pub struct TransformerBlock<T: TensorElement> {
     // Attention weights (placeholders matching GGUF shapes)
-    pub attn_qkv_weight: Tensor,
-    pub attn_qkv_bias: Tensor,
-    pub attn_out_weight: Tensor,
+    pub attn_qkv_weight: Tensor<T>,
+    pub attn_qkv_bias: Tensor<T>,
+    pub attn_out_weight: Tensor<T>,
 
     // Feedforward
-    pub ffn_down: Tensor,
-    pub ffn_gate: Tensor,
-    pub ffn_up: Tensor,
+    pub ffn_down: Tensor<T>,
+    pub ffn_gate: Tensor<T>,
+    pub ffn_up: Tensor<T>,
     // Biases for the FFN projections
-    pub ffn_gate_bias: Tensor,
-    pub ffn_up_bias: Tensor,
-    pub ffn_down_bias: Tensor,
-    pub ffn_norm_gamma: Tensor,
+    pub ffn_gate_bias: Tensor<T>,
+    pub ffn_up_bias: Tensor<T>,
+    pub ffn_down_bias: Tensor<T>,
+    pub ffn_norm_gamma: Tensor<T>,
 
     // Pre-normalization before attention
-    pub attn_norm_gamma: Tensor,
+    pub attn_norm_gamma: Tensor<T>,
 
     pub kv_dim: usize,
 }
 
-impl TransformerBlock {
-    pub fn new(cfg: &super::Qwen25Config, ctx: &mut Context) -> Result<Self, MetalError> {
+impl<T> TransformerBlock<T> where T: TensorElement {
+    pub fn new(cfg: &super::Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         let kv_dim = cfg.d_model * cfg.n_kv_heads / cfg.n_heads;
+        
         // Q, K, V projections packed into a single fused matrix stored in row-major layout
         let qkv_out_dim = cfg.d_model + 2 * kv_dim;
         let attn_qkv_weight = Tensor::zeros(vec![cfg.d_model, qkv_out_dim], ctx, false)?;

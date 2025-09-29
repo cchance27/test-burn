@@ -1,9 +1,9 @@
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_rmsnorm_logic() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     // Create input tensor with shape [2, 4] (2 rows, 4 features each)
     let input_data = vec![1.0, 2.0, 3.0, 4.0, -1.0, -2.0, -3.0, -4.0];
@@ -51,7 +51,7 @@ fn cpu_rmsnorm(input: &[f32], feature_dim: usize, gamma: &[f32], eps: f32) -> Ve
 
 #[test]
 fn test_rmsnorm_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let feature_dim = 4;
     let batch_size = 2;
@@ -106,7 +106,7 @@ fn test_rmsnorm_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let feature_dim = 4;
     let batch_size = 1;

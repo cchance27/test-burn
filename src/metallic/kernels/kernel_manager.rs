@@ -1,18 +1,20 @@
+use crate::metallic::TensorElement;
+
 use super::*;
 
 /// A trait for kernel operations that can be invoked via `Context::call`.
 pub trait KernelInvocable {
-    type Args<'a>;
+    type Args<'a, T: TensorElement>;
 
     fn function_id() -> Option<KernelFunction>;
 
     #[allow(clippy::new_ret_no_self)]
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError>;
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError>;
 }
 
 /// Manages the compilation and caching of Metal kernel libraries and functions.

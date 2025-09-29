@@ -1,7 +1,7 @@
 use objc2_metal::MTLComputePipelineState as _;
 
 use crate::metallic::kernels::softmax::SoftmaxOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // CPU-based softmax for golden testing
 fn cpu_softmax(input: &[f32], seq_q: usize, seq_k: usize, causal: bool) -> Vec<f32> {
@@ -33,13 +33,13 @@ fn cpu_softmax(input: &[f32], seq_q: usize, seq_k: usize, causal: bool) -> Vec<f
     output
 }
 
-fn softmax_rows_total(attn_tensor: &Tensor, seq_k: usize) -> u32 {
+fn softmax_rows_total(attn_tensor: &Tensor<F32Element>, seq_k: usize) -> u32 {
     if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 }
 }
 
 #[test]
 fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let seq_q = 2;
     let seq_k = 4;
     let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -100,7 +100,7 @@ fn test_softmax_golden_non_causal() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_golden_causal() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let seq_q = 2;
     let seq_k = 4;
     let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
@@ -178,7 +178,7 @@ fn test_softmax_golden_causal() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 3;
     let seq_k = 4;
@@ -258,7 +258,7 @@ fn test_softmax_extremes_large_positive_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 2;
     let seq_k = 3;
@@ -336,7 +336,7 @@ fn test_softmax_extremes_large_negative_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 2;
     let seq_k = 4;
@@ -426,7 +426,7 @@ fn test_softmax_extremes_identical_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 2;
     let seq_k = 5;
@@ -524,7 +524,7 @@ fn test_softmax_extremes_single_large_outlier() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_causal_with_extremes() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 3;
     let seq_k = 3;
@@ -663,7 +663,7 @@ fn cpu_softmax_with_infinity(input: &[f32], seq_q: usize, seq_k: usize, causal: 
 
 #[test]
 fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 2;
     let seq_k = 4;
@@ -744,7 +744,7 @@ fn test_softmax_extremes_underflow_scenarios() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 2;
     let seq_k = 4;
@@ -846,7 +846,7 @@ fn test_softmax_extremes_infinity_scenarios() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 1;
     let seq_k = 4;
@@ -904,7 +904,7 @@ fn test_softmax_extremes_nan_scenarios() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 1;
     let seq_k = 2048; // Large sequence length
@@ -983,7 +983,7 @@ fn test_softmax_extremes_large_sequences() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 1;
     let seq_k = 8;
@@ -1072,7 +1072,7 @@ fn test_softmax_extremes_very_large_positive_and_negative_mixed() -> Result<(), 
 
 #[test]
 fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 7;
     let seq_k = 13;
@@ -1133,7 +1133,7 @@ fn test_softmax_irregular_sizes_1() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 31;
     let seq_k = 257;
@@ -1194,7 +1194,7 @@ fn test_softmax_irregular_sizes_2() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 5;
     let seq_k = 9;
@@ -1270,7 +1270,7 @@ fn test_softmax_causal_irregular_sizes() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let seq_q = 17;
     let seq_k = 93;
@@ -1348,7 +1348,7 @@ fn test_softmax_causal_large_irregular() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Get the pipeline through the new kernel system
     let pipeline = context
@@ -1407,7 +1407,7 @@ fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_threadgroup_large_seq_k() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Test with a larger sequence length that requires many threads per threadgroup
     let seq_q = 2;
@@ -1453,7 +1453,7 @@ fn test_softmax_threadgroup_large_seq_k() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_threadgroup_very_large_seq_k() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Test with a very large sequence length
     let seq_q = 1;
@@ -1499,7 +1499,7 @@ fn test_softmax_threadgroup_very_large_seq_k() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_threadgroup_multiple_rows() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Test with multiple rows to ensure threadgroup handling works across rows
     let seq_q = 16; // Multiple rows
@@ -1545,7 +1545,7 @@ fn test_softmax_threadgroup_multiple_rows() -> Result<(), MetalError> {
 
 #[test]
 fn test_softmax_logic() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     // Create a simple test tensor [2, 3] with values that will produce recognizable softmax results
     let input_data = vec![1.0, 2.0, 3.0, 1.0, 2.0, 3.0]; // Two rows to softmax independently
     let attn = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;

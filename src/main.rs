@@ -7,11 +7,9 @@ use std::{env, io::stdout, process, sync::mpsc, thread, time::Duration};
 
 use test_burn::{
     app_event::{AppEvent, LatencyRow, MemoryRow},
-    gguf,
+    gguf::{model_loader::GGUFModelLoader, GGUFFile},
     metallic::{
-        Context, Tokenizer,
-        generation::{GenerationConfig, generate_streaming},
-        models::Qwen25,
+        generation::{generate_streaming, GenerationConfig},  Context, ContextConfig, Dtype, F32Element, Tokenizer
     },
 };
 
@@ -26,29 +24,29 @@ fn main() -> Result<()> {
             process::exit(1);
         }
     };
-    let prompt = args.next().unwrap_or_else(|| "Hello World".to_string());
+    let prompt = args.next().unwrap_or_else(|| "Create a short javascript hello world app.".to_string());
 
     let (tx, rx) = mpsc::channel();
 
     let generation_handle = thread::spawn(move || -> Result<()> {
-        tx.send(AppEvent::StatusUpdate("Loading GGUF...".to_string()))?;
-        let gguf = gguf::GGUFFile::load(&gguf_path)?;
+        tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
+        let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
 
         tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
-        let mut ctx = Context::new()?;
+        let mut ctx= Context::<F32Element>::with_config(ContextConfig::new(Dtype::F32))?;
 
         tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
-        let loader = gguf::model_loader::GGUFModelLoader::new(gguf);
+        let loader = GGUFModelLoader::new(gguf);
         let mapped_bytes = loader.mapped_len();
         let host_overheads = if mapped_bytes > 0 {
-            vec![("GGUF File Mapping".to_string(), mapped_bytes)]
+            vec![("GGUF File MMAP".to_string(), mapped_bytes)]
         } else {
             Vec::new()
         };
         let gguf_model = loader.load_model(&ctx)?;
 
         tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
-        let mut qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
+        let mut qwen = gguf_model.instantiate(&mut ctx)?;
 
         tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
         let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;

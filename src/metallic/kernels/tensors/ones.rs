@@ -1,21 +1,21 @@
 use super::*;
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct OnesOp;
 
 // 2. Internal struct that holds data for the `Operation` trait.
-struct Ones {
+struct Ones<T: TensorElement> {
     dims: Vec<usize>,
-    out: Tensor,
+    out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for OnesOp {
     // Input arguments for the call.
-    type Args<'a> = Vec<usize>;
+    type Args<'a, T: TensorElement> = Vec<usize>;
     // The output type.
 
     // Link to the enum variant in `KernelFunction`.
@@ -25,12 +25,12 @@ impl KernelInvocable for OnesOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new<'a>(
-        ctx: &mut Context,
-        dims: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        dims: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Create the output tensor.
         let out = Tensor::new(dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
@@ -48,7 +48,7 @@ impl KernelInvocable for OnesOp {
 
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for Ones {
+impl<T: TensorElement> Operation for Ones<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -92,11 +92,11 @@ impl Operation for Ones {
 #[cfg(test)]
 mod ones_test {
     use crate::metallic::kernels::tensors::OnesOp;
-    use crate::metallic::{Context, MetalError, TensorInit, TensorStorage};
+    use crate::metallic::{Context, F32Element, MetalError, TensorInit, TensorStorage};
 
     #[test]
     fn test_ones() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
+        let mut ctx: Context<F32Element> = Context::<F32Element>::new()?;
         let result = ctx.call::<OnesOp>(vec![5])?;
 
         assert_eq!(result.as_slice(), &[1.0, 1.0, 1.0, 1.0, 1.0]);

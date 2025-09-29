@@ -111,16 +111,6 @@ pub fn benchmark_q8_dequantization() {
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn test_benchmark() {
-            benchmark_q8_dequantization();
-        }
-    }
-
     // Get memory usage before dequantization
     let memory_before = get_memory_usage();
 

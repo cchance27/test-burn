@@ -1,6 +1,6 @@
 use super::{Context, Tensor, error::MetalError, resource_cache::ResourceCache};
 
-use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
+use crate::metallic::{encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, TensorElement};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{
@@ -21,14 +21,18 @@ pub trait Operation {
     fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError>;
 }
 
+
+//TODO: Aren't these operations supposed to be in kernels?
+
+
 /// An operation that fills a tensor with a constant value.
-pub struct FillConstant {
-    pub dst: Tensor,
+pub struct FillConstant<T: TensorElement> {
+    pub dst: Tensor<T>,
     pub value: f32,
     pub ones_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
-impl Operation for FillConstant {
+impl<T: TensorElement> Operation for FillConstant<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -77,13 +81,13 @@ impl Operation for FillConstant {
 }
 
 /// An operation that fills a tensor with sequential values (0..n).
-pub struct Arange {
-    pub dst: Tensor,
+pub struct Arange<T: TensorElement>  {
+    pub dst: Tensor<T>,
     pub num_elements: usize,
     pub pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl Operation for Arange {
+impl<T: TensorElement>  Operation for Arange<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -110,13 +114,13 @@ impl Operation for Arange {
 }
 
 /// An operation that fills a tensor with uniform random values.
-pub struct RandomUniform {
-    pub dst: Tensor,
+pub struct RandomUniform<T: TensorElement> {
+    pub dst: Tensor<T>,
     pub seed: u64,
     pub pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl Operation for RandomUniform {
+impl<T: TensorElement> Operation for RandomUniform<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

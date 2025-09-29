@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 // Additional Operations for this Metal Kernel (additional functions in the kernel)
 mod elemwise_broadcast_add;
@@ -15,26 +15,26 @@ mod elemwise_add_test;
 pub struct ElemwiseAddOp;
 
 // Internal struct that holds the operation data.
-struct ElemwiseAdd {
-    a: Tensor,
-    b: Tensor,
-    out: Tensor,
+struct ElemwiseAdd<T: TensorElement> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for ElemwiseAddOp {
-    type Args<'a> = (Tensor, Tensor);
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::ElemwiseAdd)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (a, b) = args;
         if a.dims() != b.dims() {
             return Err(MetalError::InvalidShape(format!(
@@ -55,7 +55,7 @@ impl KernelInvocable for ElemwiseAddOp {
     }
 }
 
-impl Operation for ElemwiseAdd {
+impl<T: TensorElement> Operation for ElemwiseAdd<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

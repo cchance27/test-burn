@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::{Context, MetalError, Operation, Tensor, TensorInit, TensorStorage, resource_cache::ResourceCache};
+use crate::metallic::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
@@ -10,11 +10,11 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 pub struct RoPEOp;
 
 /// Internal struct that holds data for the `Operation` trait.
-struct RoPE {
-    input: Tensor,
-    output: Tensor,
-    cos: Tensor,
-    sin: Tensor,
+struct RoPE<T: TensorElement> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+    cos: Tensor<T>,
+    sin: Tensor<T>,
     dim: u32,
     seq_len: u32,
     position_offset: u32,
@@ -23,7 +23,7 @@ struct RoPE {
 
 impl KernelInvocable for RoPEOp {
     /// Input arguments for the call: (input, cos, sin, dim, seq_len, position_offset)
-    type Args<'a> = (Tensor, Tensor, Tensor, u32, u32, u32);
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, u32, u32, u32);
 
     /// Link to the enum variant in `KernelFunction`.
     fn function_id() -> Option<KernelFunction> {
@@ -32,12 +32,12 @@ impl KernelInvocable for RoPEOp {
 
     /// This `new` method is called by `ctx.call()`.
     /// It creates the output tensor and the internal `Operation` struct.
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, cos, sin, dim, seq_len, position_offset) = args;
 
         // Basic validation
@@ -97,7 +97,7 @@ impl KernelInvocable for RoPEOp {
     }
 }
 
-impl Operation for RoPE {
+impl<T: TensorElement> Operation for RoPE<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

@@ -1,10 +1,10 @@
 use super::*;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Context, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn zeros_and_ones() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let t0 = Tensor::zeros(vec![2, 3, 4], &mut ctx, true).unwrap();
     assert!(t0.as_slice().iter().all(|&x| x == 0.0));
     let t1 = Tensor::ones(vec![2, 3, 4], &mut ctx).unwrap();
@@ -13,7 +13,7 @@ fn zeros_and_ones() {
 
 #[test]
 fn zeros_like_and_ones_like() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let base = Tensor::new(
         vec![2, 2],
         TensorStorage::Dedicated(&ctx),
@@ -30,7 +30,7 @@ fn zeros_like_and_ones_like() {
 
 #[test]
 fn elementwise_ops_and_fill() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let a = Tensor::new(
         vec![2, 2],
         TensorStorage::Dedicated(&ctx),
@@ -55,7 +55,7 @@ fn elementwise_ops_and_fill() {
 
 #[test]
 fn get_batch_and_from_existing_buffer() {
-    let ctx = Context::new().unwrap();
+    let ctx = Context::<F32Element>::new().unwrap();
     // base tensor: shape [2,3,4], values 0..24
     let data: Vec<f32> = (0..24).map(|x| x as f32).collect();
     let mut base = Tensor::new(vec![2, 3, 4], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).unwrap();
@@ -70,7 +70,7 @@ fn get_batch_and_from_existing_buffer() {
 
     // wrap the second batch region using from_existing_buffer
     let offset_bytes = 12 * std::mem::size_of::<f32>();
-    let view = Tensor::from_existing_buffer(
+    let view = Tensor::<F32Element>::from_existing_buffer(
         base.buf.clone(),
         vec![3, 4],
         Dtype::F32,
@@ -85,7 +85,7 @@ fn get_batch_and_from_existing_buffer() {
 
 #[test]
 fn arange_helper() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let t = Tensor::arange(6, vec![2, 3], &mut ctx).unwrap();
     ctx.synchronize();
     assert_eq!(t.dims(), &[2, 3]);
@@ -94,7 +94,7 @@ fn arange_helper() {
 
 #[test]
 fn from_slice_helper() {
-    let ctx = Context::new().unwrap();
+    let ctx = Context::<F32Element>::new().unwrap();
     let v = vec![10.0, 11.0, 12.0, 13.0, 14.0, 15.0];
     let t = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v)).unwrap();
     assert_eq!(t.dims(), &[2, 3]);
@@ -103,7 +103,7 @@ fn from_slice_helper() {
 
 #[test]
 fn pool_growth_behavior() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Initial chunk is 256MB, allocate tensors that would exceed this
     // Each f32 is 4 bytes, so 256MB = 67,108,864 elements
@@ -137,7 +137,7 @@ fn pool_growth_behavior() {
 
 #[test]
 fn pool_reset_invalidates_tensors() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Allocate some tensors
     let t1 = Tensor::zeros(vec![100, 100], &mut ctx, true).unwrap();
@@ -161,13 +161,15 @@ fn pool_reset_invalidates_tensors() {
     let t3 = Tensor::zeros(vec![50, 50], &mut ctx, true).unwrap();
     let t4 = Tensor::ones(vec![50, 50], &mut ctx).unwrap();
 
+    ctx.synchronize();
+    
     assert!(t3.as_slice().iter().all(|&x| x == 0.0));
     assert!(t4.as_slice().iter().all(|&x| x == 1.0));
 }
 
 #[test]
 fn offset_correctness_across_chunks() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Allocate first tensor to take some space
     let t1 = Tensor::zeros(vec![1000, 1000], &mut ctx, true).unwrap(); // ~4MB
@@ -193,7 +195,7 @@ fn offset_correctness_across_chunks() {
 
 #[test]
 fn cpu_fill_with_offsets() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Allocate first tensor to create offset
     let _t1 = Tensor::zeros(vec![500, 500], &mut ctx, true).unwrap();
@@ -218,8 +220,8 @@ fn cpu_fill_with_offsets() {
 
 #[test]
 fn random_determinism_with_seed_counter() {
-    let mut ctx1 = Context::new().unwrap();
-    let mut ctx2 = Context::new().unwrap();
+    let mut ctx1 = Context::<F32Element>::new().unwrap();
+    let mut ctx2 = Context::<F32Element>::new().unwrap();
 
     // Create tensors with same seed counter state
     let t1 = Tensor::random_uniform(vec![10, 10], &mut ctx1).unwrap();
@@ -243,7 +245,7 @@ fn random_determinism_with_seed_counter() {
 
 #[test]
 fn batched_operations_correctness() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Test batched operations
     let cb = crate::metallic::operation::CommandBuffer::new(&ctx.command_queue).unwrap();
@@ -265,7 +267,7 @@ fn batched_operations_correctness() {
 
 #[test]
 fn synchronization_contract() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Immediate helpers should not wait - create tensor but don't read immediately
     let t1 = Tensor::random_uniform(vec![100, 100], &mut ctx).unwrap();
@@ -289,7 +291,7 @@ fn synchronization_contract() {
 
 #[test]
 fn strides_and_dtype() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Test contiguous strides computation
     let t = Tensor::zeros(vec![2, 3, 4], &mut ctx, true).unwrap();
@@ -309,7 +311,7 @@ fn strides_and_dtype() {
 
 #[test]
 fn borrow_host_buffer() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Create data that will be managed by the caller
     let data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];

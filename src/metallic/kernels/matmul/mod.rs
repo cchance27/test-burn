@@ -7,7 +7,7 @@ use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixM
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor, TensorInit, TensorStorage,
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
 };
@@ -42,7 +42,7 @@ struct MatMul {
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for MatMulOp {
     // Input arguments for the call - two input tensors + transpose options
-    type Args<'a> = (&'a Tensor, &'a Tensor, bool, bool); // (left, right, transpose_left, transpose_right)
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, bool, bool); // (left, right, transpose_left, transpose_right)
     // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
@@ -52,12 +52,12 @@ impl KernelInvocable for MatMulOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>, // MPS doesn't use this
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (left, right, transpose_left, transpose_right) = args;
 
         let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
@@ -164,7 +164,7 @@ impl KernelInvocable for MatMulOp {
 
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for MatMul {
+impl Operation for MatMul{
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

@@ -1,9 +1,9 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
 #[test]
 fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 3;
     let n = 2;
@@ -60,7 +60,7 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_alpha_beta_with_different_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 3;
     let k = 2;
     let n = 4;
@@ -119,7 +119,7 @@ fn test_matmul_alpha_beta_with_different_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_alpha_zero_beta_one() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 2;
     let n = 2;
@@ -172,7 +172,7 @@ fn test_matmul_alpha_zero_beta_one() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_alpha_one_beta_zero() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
     let m = 2;
     let k = 2;
     let n = 2;

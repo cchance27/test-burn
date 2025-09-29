@@ -7,7 +7,7 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{F32Element, Tensor, TensorInit, TensorStorage, kernels};
+use crate::metallic::{kernels, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -21,8 +21,29 @@ use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
 
+#[derive(Clone, Debug)]
+pub struct ContextConfig {
+    tensor_dtype: Dtype,
+}
+
+impl ContextConfig {
+    pub fn new(dtype: Dtype) -> Self {
+        Self { tensor_dtype: dtype }
+    }
+
+    pub fn tensor_dtype(&self) -> Dtype {
+        self.tensor_dtype
+    }
+}
+
+impl Default for ContextConfig {
+    fn default() -> Self {
+        Self::new(Dtype::F32)
+    }
+}
+
 /// The main context for Metal operations.
-pub struct Context {
+pub struct Context<T: TensorElement> {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub pool: MemoryPool,
@@ -36,7 +57,7 @@ pub struct Context {
     pub rng_seed_counter: u64,
 
     // Per-layer on-device KV caches stored centrally for developer DX.
-    pub(crate) kv_caches: FxHashMap<usize, KvCacheEntry>,
+    pub(crate) kv_caches: FxHashMap<usize, KvCacheEntry<T>>,
 
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     active_cmd_buffer: Option<CommandBuffer>,
@@ -48,14 +69,16 @@ pub struct Context {
     memory_collector: Option<MemoryCollectorHandle>,
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
+
+    config: ContextConfig,
 }
 
 #[derive(Clone)]
-pub(crate) struct KvCacheEntry {
-    pub k: super::Tensor,
-    pub v: super::Tensor,
-    pub repeated_k: super::Tensor,
-    pub repeated_v: super::Tensor,
+pub(crate) struct KvCacheEntry<T: TensorElement> {
+    pub k: Tensor<T>,
+    pub v: Tensor<T>,
+    pub repeated_k: Tensor<T>,
+    pub repeated_v: Tensor<T>,
     #[allow(dead_code)]
     pub dtype: Dtype,
     pub element_size: usize,
@@ -65,7 +88,7 @@ pub(crate) struct KvCacheEntry {
 
 const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
 
-impl Context {
+impl<T: TensorElement> Context<T> {
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.
     /// Falls back to the legacy submit/wait path if no active buffer exists.
     pub fn synchronize(&mut self) {
@@ -85,30 +108,40 @@ impl Context {
     }
 
     pub fn new() -> Result<Self, MetalError> {
+        Self::with_config(ContextConfig::default())
+    }
+
+    pub fn with_config(config: ContextConfig) -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
-        Ok(Context {
-            device,
-            command_queue,
-            pool,
-            kv_cache_pool,
-            kernel_manager: KernelManager::new(),
-            pooled_bytes_allocated: 0,
-            pooled_allocations: 0,
-            pool_resets: 0,
-            rng_seed_counter: 0,
-            kv_caches: FxHashMap::default(),
-            active_cmd_buffer: None,
-            active_resource_cache: None,
-            latency_collector: None,
-            memory_collector: None,
-            softmax_samples: Vec::new(),
-        })
+
+        Ok(Context::<T> {
+               device,
+               command_queue,
+               pool,
+               kv_cache_pool,
+               kernel_manager: KernelManager::new(),
+               pooled_bytes_allocated: 0,
+               pooled_allocations: 0,
+               pool_resets: 0,
+               rng_seed_counter: 0,
+               kv_caches: FxHashMap::default(),
+               active_cmd_buffer: None,
+               active_resource_cache: None,
+               latency_collector: None,
+               memory_collector: None,
+               softmax_samples: Vec::new(),
+               config,
+            })
     }
 
-    pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_>) -> Result<Tensor, MetalError> {
+    pub fn tensor_dtype(&self) -> Dtype {
+        self.config.tensor_dtype()
+    }
+
+    pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
         self.ensure_active_cmd_buffer()?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -203,34 +236,35 @@ impl Context {
 
     pub fn matmul(
         &mut self,
-        a: &super::Tensor,
-        b: &super::Tensor,
+        a: &Tensor<T>,
+        b: &Tensor<T>,
         transpose_a: bool,
         transpose_b: bool,
-    ) -> Result<super::Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for matmul
         self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
     }
 
     pub(crate) fn matmul_with_cache(
         &mut self,
-        a: &super::Tensor,
-        b: &super::Tensor,
+        a: &Tensor<T>,
+        b: &Tensor<T>,
         transpose_a: bool,
         transpose_b: bool,
         cache: &mut ResourceCache,
-    ) -> Result<super::Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
     }
 
+    #[allow(clippy::type_complexity)]
     pub fn fused_qkv_projection(
         &mut self,
-        x_flat: &Tensor,
-        fused_weight: &Tensor,
-        fused_bias: &Tensor,
+        x_flat: &Tensor<T>,
+        fused_weight: &Tensor<T>,
+        fused_bias: &Tensor<T>,
         d_model: usize,
         kv_dim: usize,
-    ) -> Result<(Tensor, Tensor, Tensor), MetalError> {
+    ) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>), MetalError> {
         let x_dims = x_flat.dims();
         if x_dims.len() != 2 {
             return Err(MetalError::InvalidShape(format!(
@@ -332,23 +366,23 @@ impl Context {
     #[allow(clippy::too_many_arguments)]
     pub fn matmul_alpha_beta(
         &mut self,
-        a: &super::Tensor,
-        b: &super::Tensor,
-        result: &super::Tensor,
+        a: &Tensor<T>,
+        b: &Tensor<T>,
+        result: &Tensor<T>,
         transpose_a: bool,
         transpose_b: bool,
         alpha: f32,
         beta: f32,
-    ) -> Result<super::Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for matmul with alpha/beta scaling
         self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
     }
 
     pub(crate) fn call_with_cache<K: KernelInvocable>(
         &mut self,
-        args: K::Args<'_>,
+        args: K::Args<'_, T>,
         cache: &mut ResourceCache,
-    ) -> Result<Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         self.ensure_active_cmd_buffer_internal(false)?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -369,15 +403,15 @@ impl Context {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn matmul_alpha_beta_with_cache(
         &mut self,
-        a: &super::Tensor,
-        b: &super::Tensor,
-        result: &super::Tensor,
+        a: &Tensor<T>,
+        b: &Tensor<T>,
+        result: &Tensor<T>,
         transpose_a: bool,
         transpose_b: bool,
         alpha: f32,
         beta: f32,
         cache: &mut ResourceCache,
-    ) -> Result<super::Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
     }
 
@@ -394,9 +428,7 @@ impl Context {
     pub fn reset_pool(&mut self) {
         self.pool.reset();
     }
-}
 
-impl Context {
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
     /// Layout: canonical [batch * n_kv_heads, seq_len, head_dim] and repeated [batch * n_heads, seq_len, head_dim].
     #[allow(clippy::too_many_arguments)]
@@ -412,10 +444,10 @@ impl Context {
         let repeated_dims = vec![repeated_batch_heads, seq_len, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
-        let k_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(canonical_dims.clone())?;
-        let v_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(canonical_dims)?;
-        let repeated_k_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(repeated_dims.clone())?;
-        let repeated_v_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(repeated_dims)?;
+        let k_allocation = self.kv_cache_pool.alloc_tensor::<T>(canonical_dims.clone())?;
+        let v_allocation = self.kv_cache_pool.alloc_tensor::<T>(canonical_dims)?;
+        let repeated_k_allocation = self.kv_cache_pool.alloc_tensor::<T>(repeated_dims.clone())?;
+        let repeated_v_allocation = self.kv_cache_pool.alloc_tensor::<T>(repeated_dims)?;
 
         let dtype = k_allocation.dtype();
         let element_size = k_allocation.element_size();
@@ -474,8 +506,8 @@ impl Context {
         &mut self,
         layer_idx: usize,
         step: usize,
-        k_step: &crate::metallic::Tensor,
-        v_step: &crate::metallic::Tensor,
+        k_step: &Tensor<T>,
+        v_step: &Tensor<T>,
     ) -> Result<(), MetalError> {
         let zero_ready = self.kv_caches.get(&layer_idx).map(|entry| entry.zeroing_complete).unwrap_or(false);
 
@@ -734,8 +766,8 @@ impl Context {
         layer_idx: usize,
         step: usize,
         group_size: usize,
-        k_step: &crate::metallic::Tensor,
-        v_step: &crate::metallic::Tensor,
+        k_step: &Tensor<T>,
+        v_step: &Tensor<T>,
     ) -> Result<(), MetalError> {
         if group_size == 0 {
             return Err(MetalError::InvalidOperation(
@@ -970,7 +1002,7 @@ impl Context {
 
     /// Create a strided view of the KV cache exposing the first `active_steps` positions in
     /// [batch_heads, steps, head_dim] order while preserving the underlying cache stride.
-    pub fn kv_cache_history_view(&mut self, cache: &Tensor, active_steps: usize) -> Result<(Tensor, usize), MetalError> {
+    pub fn kv_cache_history_view(&mut self, cache: &Tensor<T>, active_steps: usize) -> Result<(Tensor<T>, usize), MetalError> {
         let dims = cache.dims();
         if dims.len() != 3 {
             return Err(MetalError::InvalidShape(
@@ -996,22 +1028,22 @@ impl Context {
 
     pub fn scaled_dot_product_attention(
         &mut self,
-        q: &super::Tensor,
-        k: &super::Tensor,
-        v: &super::Tensor,
+        q: &Tensor<T>,
+        k: &Tensor<T>,
+        v: &Tensor<T>,
         causal: bool,
-    ) -> Result<super::Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         self.scaled_dot_product_attention_with_offset(q, k, v, causal, 0)
     }
 
     pub fn scaled_dot_product_attention_with_offset(
         &mut self,
-        q: &super::Tensor,
-        k: &super::Tensor,
-        v: &super::Tensor,
+        q: &Tensor<T>,
+        k: &Tensor<T>,
+        v: &Tensor<T>,
         causal: bool,
         query_offset: usize,
-    ) -> Result<super::Tensor, MetalError> {
+    ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for SDPA
         self.call::<ScaledDotProductAttentionOptimizedOp>((q, k, v, causal, query_offset as u32))
     }
@@ -1032,20 +1064,18 @@ impl Context {
     #[allow(non_snake_case)]
     pub fn SwiGLU(
         &mut self,
-        x_normed_flat: &Tensor,
-        ffn_gate: &Tensor,
-        ffn_gate_bias: &Tensor,
-        ffn_up: &Tensor,
-        ffn_up_bias: &Tensor,
-        ffn_down: &Tensor,
-        ffn_down_bias: &Tensor,
-    ) -> Result<Tensor, MetalError> {
+        x_normed_flat: &Tensor<T>,
+        ffn_gate: &Tensor<T>,
+        ffn_gate_bias: &Tensor<T>,
+        ffn_up: &Tensor<T>,
+        ffn_up_bias: &Tensor<T>,
+        ffn_down: &Tensor<T>,
+        ffn_down_bias: &Tensor<T>,
+    ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system to call the SwiGLU operation
         self.call::<SwiGLUOp>((x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias))
     }
-}
 
-impl Context {
     fn ensure_active_cmd_buffer(&mut self) -> Result<(), MetalError> {
         self.ensure_active_cmd_buffer_internal(true)
     }
@@ -1091,14 +1121,14 @@ impl Context {
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
     }
 
-    pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor) {
+    pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor<T>) {
         tensor.mark_device_dirty();
         if let Some(active) = &self.active_cmd_buffer {
             tensor.defining_cmd_buffer.borrow_mut().replace(active.clone());
         }
     }
 
-    fn prepare_tensor_for_active_cmd(&mut self, tensor: &Tensor) -> Result<(), MetalError> {
+    fn prepare_tensor_for_active_cmd(&mut self, tensor: &Tensor<T>) -> Result<(), MetalError> {
         tensor.flush_host_writes()?;
         let maybe_dep = tensor.defining_cmd_buffer.borrow().clone();
         if let Some(dep) = maybe_dep {
@@ -1118,7 +1148,7 @@ impl Context {
         Ok(())
     }
 
-    pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &[&Tensor]) -> Result<(), MetalError> {
+    pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &[&Tensor<T>]) -> Result<(), MetalError> {
         for tensor in tensors {
             self.prepare_tensor_for_active_cmd(tensor)?;
         }

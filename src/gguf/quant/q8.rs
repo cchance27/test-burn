@@ -1,5 +1,5 @@
 //! Q8 quantization support for GGUF format
-use crate::gguf::{GGUFDataType, GGUFError};
+use crate::gguf::{GGUFDataType, GGUFError, tensor_info::GGUTensorInfo};
 use half::f16;
 
 /// Dequantize Q8_0/Q8_1 tensor data to F32
@@ -88,7 +88,7 @@ pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<
 
 /// Temporary function to debug Q8 format
 #[allow(dead_code)]
-pub fn debug_q8_format(tensor_info: &crate::gguf::GGUTensorInfo, data: &[u8]) -> Result<(), GGUFError> {
+pub fn debug_q8_format(tensor_info: &GGUTensorInfo, data: &[u8]) -> Result<(), GGUFError> {
     println!("Tensor: {}", tensor_info.name);
     println!("Data type: {:?}", tensor_info.data_type);
     println!("Data length: {}", data.len());

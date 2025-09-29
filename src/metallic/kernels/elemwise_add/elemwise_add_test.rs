@@ -1,5 +1,5 @@
 use crate::metallic::kernels::elemwise_add::elemwise_add::ElemwiseAddOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 fn cpu_elemwise_add(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()
@@ -7,7 +7,7 @@ fn cpu_elemwise_add(a: &[f32], b: &[f32]) -> Vec<f32> {
 
 #[test]
 fn test_elemwise_add_basic() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0];
     let b_data = vec![0.5, 1.5, 2.5, 3.5];
@@ -29,7 +29,7 @@ fn test_elemwise_add_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_add_1d() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let b_data = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6];
@@ -51,7 +51,7 @@ fn test_elemwise_add_1d() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_add_3d() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let a_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
     let b_data = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8];
@@ -73,7 +73,7 @@ fn test_elemwise_add_3d() -> Result<(), MetalError> {
 
 #[test]
 fn test_elemwise_add_large_tensor() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     let size = 1024;
     let a_data: Vec<f32> = (0..size).map(|i| i as f32 * 0.5).collect();

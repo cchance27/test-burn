@@ -1,4 +1,4 @@
-use crate::metallic::generation::sample_top_k_top_p;
+use crate::metallic::{generation::sample_top_k_top_p, F32Element};
 
 #[test]
 fn test_sample_top_k_top_p_extreme_logits() {
@@ -8,7 +8,7 @@ fn test_sample_top_k_top_p_extreme_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p(&extreme_logits, top_k, top_p, temperature);
+    let result = sample_top_k_top_p::<F32Element>(&extreme_logits, top_k, top_p, temperature);
 
     // Should return a valid token index without panic
     assert!(
@@ -27,7 +27,7 @@ fn test_sample_top_k_top_p_extreme_temperature() {
     let top_p = 0.95;
     let temperature = 1e-6f32; // Very small temperature
 
-    let result = sample_top_k_top_p(&logits, top_k, top_p, temperature);
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
     // Should return a valid token index without panic
     assert!(
@@ -46,7 +46,7 @@ fn test_sample_top_k_top_p_extreme_negative_temperature() {
     let top_p = 0.95;
     let temperature = -1.0f32; // Negative temperature
 
-    let result = sample_top_k_top_p(&logits, top_k, top_p, temperature);
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
     // Should return a valid token index without panic
     assert!(
@@ -65,7 +65,7 @@ fn test_sample_top_k_top_p_all_same_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p(&logits, top_k, top_p, temperature);
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
     // Should return a valid token index without panic
     assert!(
@@ -87,7 +87,7 @@ fn test_sample_top_k_top_p_extremely_large_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p(&logits, top_k, top_p, temperature);
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
     // Should return a valid token index without panic
     assert!(
@@ -108,7 +108,7 @@ fn test_sample_top_k_top_p_extremely_small_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p(&logits, top_k, top_p, temperature);
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
     // Should return a valid token index without panic
     assert!(

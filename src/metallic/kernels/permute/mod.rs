@@ -1,29 +1,29 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 use objc2_metal::MTLResource;
 
 pub struct PermuteOp;
 
-struct Permute {
-    src: Tensor,
-    dst: Tensor,
+struct Permute<T: TensorElement> {
+    src: Tensor<T>,
+    dst: Tensor<T>,
     permute: Vec<u32>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for PermuteOp {
-    type Args<'a> = (Tensor, Vec<u32>);
+    type Args<'a, T: TensorElement> = (Tensor<T>, Vec<u32>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::Permute)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (src, permute) = args;
 
         // Validate permutation
@@ -75,7 +75,7 @@ impl KernelInvocable for PermuteOp {
     }
 }
 
-impl Operation for Permute {
+impl<T: TensorElement> Operation for Permute<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

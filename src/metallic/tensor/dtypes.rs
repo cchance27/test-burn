@@ -1,3 +1,5 @@
+use std::fmt::{Debug, Display};
+
 use half::{bf16, f16};
 
 /// Supported data types for tensors
@@ -41,7 +43,7 @@ impl Dtype {
 /// Trait describing how a tensor element is represented on the host.
 pub trait TensorElement: Copy + Send + Sync + 'static {
     /// Host scalar type corresponding to the tensor element.
-    type Scalar: Copy + Send + Sync + 'static;
+    type Scalar: Copy + Send + Sync + PartialEq + PartialOrd + Display + Debug + 'static;
 
     /// [`Dtype`] tag for this tensor element.
     const DTYPE: Dtype;
@@ -75,6 +77,18 @@ pub trait TensorElement: Copy + Send + Sync + 'static {
             *dst = Self::from_f32(value);
         }
     }
+
+    /// Check if the scalar value is finite (not NaN or infinite)
+    fn is_finite(value: Self::Scalar) -> bool;
+
+    /// Calculate the absolute value of the scalar
+    fn abs(value: Self::Scalar) -> Self::Scalar;
+
+    /// Find the maximum of two values
+    fn max(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar;
+
+    /// Find the minimum of two values
+    fn min(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar;
 }
 
 /// Marker type for `f32` tensors.
@@ -105,6 +119,26 @@ impl TensorElement for F32Element {
     fn copy_from_f32_slice(src: &[f32], dest: &mut [Self::Scalar]) {
         dest.copy_from_slice(src);
     }
+
+    #[inline]
+    fn is_finite(value: Self::Scalar) -> bool {
+        value.is_finite()
+    }
+
+    #[inline]
+    fn abs(value: Self::Scalar) -> Self::Scalar {
+        value.abs()
+    }
+
+    #[inline]
+    fn max(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
+        a.max(b)
+    }
+
+    #[inline]
+    fn min(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
+        a.min(b)
+    }
 }
 
 /// Marker type for `f16` tensors.
@@ -125,6 +159,27 @@ impl TensorElement for F16Element {
     fn to_f32(value: Self::Scalar) -> f32 {
         value.to_f32()
     }
+
+    #[inline]
+    fn is_finite(value: Self::Scalar) -> bool {
+        value.is_finite()
+    }
+
+    #[inline]
+    fn abs(value: Self::Scalar) -> Self::Scalar {
+        use num_traits::float::FloatCore;
+        value.abs()
+    }
+
+    #[inline]
+    fn max(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
+        if a > b { a } else { b }
+    }
+
+    #[inline]
+    fn min(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
+        if a < b { a } else { b }
+    }
 }
 
 /// Marker type for `bf16` tensors.
@@ -144,5 +199,26 @@ impl TensorElement for BF16Element {
     #[inline]
     fn to_f32(value: Self::Scalar) -> f32 {
         value.to_f32()
+    }
+
+    #[inline]
+    fn is_finite(value: Self::Scalar) -> bool {
+        value.is_finite()
+    }
+
+    #[inline]
+    fn abs(value: Self::Scalar) -> Self::Scalar {
+        use num_traits::float::FloatCore;
+        value.abs()
+    }
+
+    #[inline]
+    fn max(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
+        a.max(b)
+    }
+
+    #[inline]
+    fn min(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
+        a.min(b)
     }
 }

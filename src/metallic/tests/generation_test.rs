@@ -1,11 +1,11 @@
 use crate::metallic::generation::{GenerationConfig, generate};
 use crate::metallic::models::{Qwen25, Qwen25Config};
-use crate::metallic::{Context, MetalError, Tensor, Tokenizer};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
 
 #[test]
 fn test_generation_pipeline() {
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let cfg = Qwen25Config {
         n_layers: 1,
         d_model: 8,
@@ -64,7 +64,7 @@ fn test_generation_pipeline() {
 
 #[test]
 fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
         n_layers: 2,
         d_model: 32,
@@ -94,9 +94,9 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
     };
 
     // --- Run 1: No-Cache Reference Implementation ---
-    fn generate_reference(
-        model: &mut Qwen25,
-        ctx: &mut Context,
+    fn generate_reference<T: TensorElement>(
+        model: &mut Qwen25<T>,
+        ctx: &mut Context<T>,
         input_ids: &[u32],
         gen_cfg: &GenerationConfig,
     ) -> Result<Vec<u32>, MetalError> {

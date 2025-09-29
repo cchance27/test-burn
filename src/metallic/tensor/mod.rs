@@ -156,9 +156,9 @@ pub struct MpsMatrixBatchView {
 /// * [`TensorStorage::Pooled`] draws memory from the context's transient bump
 ///   allocator. It requires a mutable context reference because it advances the
 ///   pool cursor and should only be used for short-lived activations.
-pub enum TensorStorage<'ctx> {
-    Dedicated(&'ctx Context),
-    Pooled(&'ctx mut Context),
+pub enum TensorStorage<'ctx, T: TensorElement> {
+    Dedicated(&'ctx Context<T>),
+    Pooled(&'ctx mut Context<T>),
 }
 
 /// Describes how the contents of a new [`Tensor`] should be seeded.
@@ -195,10 +195,6 @@ pub struct Tensor<T: TensorElement> {
     pub(crate) defining_cmd_buffer: Rc<RefCell<Option<CommandBuffer>>>,
     marker: PhantomData<T>,
 }
-
-pub type TensorF32 = Tensor<F32Element>;
-pub type TensorF16 = Tensor<F16Element>;
-pub type TensorBF16 = Tensor<BF16Element>;
 
 impl<T: TensorElement> Tensor<T> {
     #[inline]
@@ -542,7 +538,7 @@ impl<T: TensorElement> Tensor<T> {
         }
     }
 
-    fn new_dedicated<'data>(dims: Vec<usize>, context: &Context, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
+    fn new_dedicated<'data>(dims: Vec<usize>, context: &Context<T>, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
         match init {
             TensorInit::Uninitialized => {
                 let num_elements = dims.iter().product::<usize>();
@@ -612,7 +608,7 @@ impl<T: TensorElement> Tensor<T> {
         }
     }
 
-    fn new_pooled<'data>(dims: Vec<usize>, context: &mut Context, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
+    fn new_pooled<'data>(dims: Vec<usize>, context: &mut Context<T>, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
         match init {
             TensorInit::BorrowHost(_) => Err(MetalError::OperationNotSupported(
                 "Borrowed host buffers are only supported with dedicated storage".to_string(),
@@ -637,7 +633,7 @@ impl<T: TensorElement> Tensor<T> {
     /// The returned tensor always owns Metal-backed storage; when borrowing a
     /// host slice via [`TensorInit::BorrowHost`] the lifetime of that slice must
     /// exceed the tensor's lifetime.
-    pub fn new<'ctx, 'data>(dims: Vec<usize>, storage: TensorStorage<'ctx>, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
+    pub fn new<'ctx, 'data>(dims: Vec<usize>, storage: TensorStorage<'ctx, T>, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
         Self::validate_init(&dims, &init)?;
 
         match storage {
@@ -820,20 +816,20 @@ impl<T: TensorElement> Tensor<T> {
     }
 
     /// Create a tensor initialized from an `f32` slice by converting into the element type.
-    pub fn from_f32_slice<'ctx>(dims: Vec<usize>, storage: TensorStorage<'ctx>, data: &[f32]) -> Result<Self, MetalError> {
+    pub fn from_f32_slice<'ctx>(dims: Vec<usize>, storage: TensorStorage<'ctx, T>, data: &[f32]) -> Result<Self, MetalError> {
         let converted = T::from_f32_slice(data);
         Self::new(dims, storage, TensorInit::CopyFrom(converted.as_slice()))
     }
 }
 
-impl Tensor<F32Element> {
+impl<T: TensorElement> Tensor<T> {
     /// Ensure the tensor exposes a contiguous batch view suitable for batched MPS kernels.
     ///
     /// When the tensor represents a strided view into a larger cache (e.g. KV cache history)
     /// the first matrix in each batch may begin `matrix_bytes` bytes apart even if only a
     /// subset of the logical rows are active. Batched MPS operations require each matrix to
     /// be tightly packed, so this helper materializes a compact copy when padding is present.
-    pub fn ensure_mps_contiguous_batch(&self, ctx: &mut Context) -> Result<(Self, MpsMatrixBatchView), MetalError> {
+    pub fn ensure_mps_contiguous_batch(&self, ctx: &mut Context<T>) -> Result<(Self, MpsMatrixBatchView), MetalError> {
         let view = self.as_mps_matrix_batch_view()?;
 
         let needs_copy = view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes;
@@ -874,7 +870,7 @@ impl Tensor<F32Element> {
     }
 
     /// Allocate and zero-initialize a tensor of the given shape.
-    pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Self, MetalError> {
+    pub fn zeros(dims: Vec<usize>, context: &mut Context<T>, use_pool: bool) -> Result<Self, MetalError> {
         let mut tensor = if use_pool {
             Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?
         } else {
@@ -884,7 +880,7 @@ impl Tensor<F32Element> {
 
         if size <= Self::cpu_fill_threshold_bytes() {
             // CPU fill path for small tensors (use optimized fast fill)
-            Self::fast_fill_f32(tensor.as_mut_slice(), 0.0f32);
+            Self::fast_fill_slice(tensor.as_mut_slice(), T::from_f32(0.0f32));
         } else {
             // GPU fill path for large tensors encoded onto the active command buffer
             {
@@ -905,12 +901,12 @@ impl Tensor<F32Element> {
 
     /// Create a tensor of all ones with the given shape.
     #[inline]
-    pub fn ones(dims: Vec<usize>, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn ones(dims: Vec<usize>, context: &mut Context<T>) -> Result<Self, MetalError> {
         context.call::<OnesOp>(dims)
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape.
-    pub fn arange(num_elements: usize, dims: Vec<usize>, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn arange(num_elements: usize, dims: Vec<usize>, context: &mut Context<T>) -> Result<Self, MetalError> {
         if dims.iter().product::<usize>() != num_elements {
             return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
         }
@@ -922,19 +918,19 @@ impl Tensor<F32Element> {
 
     /// Create a zeros tensor with the same shape.
     #[inline]
-    pub fn zeros_like(&self, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn zeros_like(&self, context: &mut Context<T>) -> Result<Self, MetalError> {
         Self::zeros(self.dims.clone(), context, true)
     }
 
     /// Create a ones tensor with the same shape.
     #[inline]
-    pub fn ones_like(&self, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn ones_like(&self, context: &mut Context<T>) -> Result<Self, MetalError> {
         Self::ones(self.dims.clone(), context)
     }
 
     /// Allocate and fill a tensor with uniform random values between 0 and 1.
     #[inline]
-    pub fn random_uniform(dims: Vec<usize>, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn random_uniform(dims: Vec<usize>, context: &mut Context<T>) -> Result<Self, MetalError> {
         // Backwards-compatible simple random uniform in [0,1)
         context.call::<RandomUniformOp>((dims, 0.0, 1.0, None))
     }
@@ -942,13 +938,13 @@ impl Tensor<F32Element> {
     /// Fill a new tensor with uniform random values in [min, max).
     /// Uses the device random pipeline for best performance.
     #[inline]
-    pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut Context<T>) -> Result<Self, MetalError> {
         let tensor = context.call::<RandomUniformOp>((dims, min, max, None))?;
         Ok(tensor)
     }
 
     /// Allocate and zero-initialize a tensor using a provided command buffer (for batching).
-    pub fn zeros_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn zeros_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context<T>) -> Result<Self, MetalError> {
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
         let size = tensor.size_bytes();
 
@@ -972,7 +968,7 @@ impl Tensor<F32Element> {
     }
 
     /// Allocate and fill a tensor with ones using a provided command buffer (for batching).
-    pub fn ones_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn ones_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context<T>) -> Result<Self, MetalError> {
         // Calculate total elements before moving dims
         let total_elements: usize = dims.iter().product();
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
@@ -1021,7 +1017,7 @@ impl Tensor<F32Element> {
         num_elements: usize,
         dims: Vec<usize>,
         command_buffer: &CommandBuffer,
-        context: &mut Context,
+        context: &mut Context<T>,
     ) -> Result<Self, MetalError> {
         if dims.iter().product::<usize>() != num_elements {
             return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
@@ -1064,7 +1060,7 @@ impl Tensor<F32Element> {
     }
 
     /// Allocate and fill a tensor with uniform random values using a provided command buffer (for batching).
-    pub fn random_uniform_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Self, MetalError> {
+    pub fn random_uniform_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context<T>) -> Result<Self, MetalError> {
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Get pipeline and encode manually for batching with default [0, 1) range
@@ -1114,39 +1110,39 @@ impl Tensor<F32Element> {
 
     /// Allocate and zero-initialize a tensor of the given shape (CPU version).
     #[deprecated(note = "Use zeros() with pooled allocation instead")]
-    pub fn zeros_legacy(dims: Vec<usize>, context: &Context) -> Result<Self, MetalError> {
+    pub fn zeros_legacy(dims: Vec<usize>, context: &Context<T>) -> Result<Self, MetalError> {
         let num_elements = dims.iter().product::<usize>();
-        let values = vec![0.0f32; num_elements];
-        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&values))
+        let values: Vec<T::Scalar> = vec![T::from_f32(0.0f32); num_elements];
+        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::<T>::CopyFrom(&values))
     }
 
     /// Allocate and fill a tensor with ones (CPU version).
     #[deprecated(note = "Use ones() with pooled allocation instead")]
-    pub fn ones_legacy(dims: Vec<usize>, context: &Context) -> Result<Self, MetalError> {
+    pub fn ones_legacy(dims: Vec<usize>, context: &Context<T>) -> Result<Self, MetalError> {
         let num_elements = dims.iter().product::<usize>();
-        let values = vec![1.0f32; num_elements];
-        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&values))
+        let values: Vec<T::Scalar> = vec![T::from_f32(1.0f32); num_elements];
+        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::<T>::CopyFrom(&values))
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape (CPU version).
     #[deprecated(note = "Use arange() with pooled allocation instead")]
-    pub fn arange_cpu(num_elements: usize, dims: Vec<usize>, context: &Context) -> Result<Self, MetalError> {
-        let v: Vec<f32> = (0..num_elements).map(|x| x as f32).collect();
-        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&v))
+    pub fn arange_cpu(num_elements: usize, dims: Vec<usize>, context: &Context<T>) -> Result<Self, MetalError> {
+        let v: Vec<T::Scalar> = (0..num_elements).map(|x| T::from_f32(x as f32)).collect();
+        Self::new(dims, TensorStorage::Dedicated(context), TensorInit::<T>::CopyFrom(&v))
     }
 
-    /// Fast fill a slice of f32 with a scalar value.
+    /// Fast fill a slice of generic scalars with a scalar value.
     /// Uses a fast path for zeros (write_bytes) and an exponential memcpy-based
     /// fill for other values to leverage memcpy/vectorized copies instead of
     /// a per-element scalar loop.
-    fn fast_fill_f32(slice: &mut [f32], value: f32) {
+    fn fast_fill_slice(slice: &mut [T::Scalar], value: T::Scalar) {
         if slice.is_empty() {
             return;
         }
         // Zero-specialized path: write bytes directly (very fast).
-        if value == 0.0f32 {
+        if T::to_f32(value) == 0.0f32 {
             unsafe {
-                // Write bytes: number of bytes = len * size_of::<f32>()
+                // Write bytes: number of bytes = len * size_of::<T::Scalar>()
                 std::ptr::write_bytes(slice.as_mut_ptr() as *mut u8, 0u8, std::mem::size_of_val(slice));
             }
             return;
@@ -1170,11 +1166,12 @@ impl Tensor<F32Element> {
 
     /// Fill the tensor in-place with a scalar value (optimized).
     pub fn fill(&mut self, value: f32) {
+        let converted_value = T::from_f32(value);
         let slice = self.as_mut_slice();
-        Self::fast_fill_f32(slice, value);
+        Self::fast_fill_slice(slice, converted_value);
     }
 
-    pub fn permute(&self, permute: &[usize], ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn permute(&self, permute: &[usize], ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if permute.len() != self.dims.len() {
             return Err(MetalError::InvalidShape("Permutation length must match tensor rank".to_string()));
         }
@@ -1186,7 +1183,7 @@ impl Tensor<F32Element> {
     }
 
     /// Element-wise add, returns a new tensor on the same device.
-    pub fn add_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn add_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1198,7 +1195,7 @@ impl Tensor<F32Element> {
     }
 
     /// Element-wise sub, returns a new tensor on the same device.
-    pub fn sub_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn sub_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1210,7 +1207,7 @@ impl Tensor<F32Element> {
     }
 
     /// Element-wise mul, returns a new tensor on the same device.
-    pub fn mul_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn mul_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1221,7 +1218,7 @@ impl Tensor<F32Element> {
         ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))
     }
 
-    pub fn div_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn div_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1233,14 +1230,17 @@ impl Tensor<F32Element> {
     }
 
     /// Element-wise scalar add.
-    pub fn add_scalar(&self, value: f32, ctx: &mut Context) -> Result<Self, MetalError> {
+    pub fn add_scalar(&self, value: f32, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         // DEBT: This is inefficient. A dedicated kernel for scalar operations would be better.
         let mut scalar_tensor = Self::zeros_like(self, ctx)?;
         scalar_tensor.fill(value);
         self.add_elem(&scalar_tensor, ctx)
     }
 
-    fn unary_elementwise<F: Fn(f32) -> f32>(a: &Self, f: F) -> Result<Self, MetalError> {
+    fn unary_elementwise<F>(a: &Self, f: F) -> Result<Self, MetalError> 
+    where 
+        F: Fn(f32) -> f32 
+    {
         let byte_len = a.size_bytes();
         let buf = a
             .device
@@ -1262,7 +1262,9 @@ impl Tensor<F32Element> {
         let aslice = a.as_slice();
         let oslice = out.as_mut_slice();
         for i in 0..a.len() {
-            oslice[i] = f(aslice[i]);
+            let input_val = T::to_f32(aslice[i]);
+            let output_val = f(input_val);
+            oslice[i] = T::from_f32(output_val);
         }
         Ok(out)
     }
@@ -1295,17 +1297,17 @@ impl Tensor<F32Element> {
     pub fn validate_numerical_stability(&self) -> Result<(), MetalError> {
         let data = self.as_slice();
         for (i, &val) in data.iter().enumerate() {
-            if !val.is_finite() {
+            if !T::is_finite(val) {
                 return Err(MetalError::InvalidOperation(format!(
                     "Non-finite value detected at index {}: {} in tensor with shape {:?}",
-                    i, val, self.dims
+                    i, T::to_f32(val), self.dims
                 )));
             }
             // Check for extremely large values that might cause overflow in subsequent operations
-            if val.abs() > 1e6 {
+            if T::to_f32(T::abs(val)) > 1e6 {
                 eprintln!(
                     "Warning: Very large value detected at index {}: {} in tensor with shape {:?}. This could cause numerical instability.",
-                    i, val, self.dims
+                    i, T::to_f32(val), self.dims
                 );
             }
         }

@@ -1,32 +1,32 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the LayerNorm operation.
 pub struct LayerNormOp;
 
 /// Internal struct that holds data for the Operation trait.
-struct LayerNorm {
-    input: Tensor,
-    output: Tensor,
-    gamma: Tensor,
-    beta: Tensor,
+struct LayerNorm<T: TensorElement> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+    gamma: Tensor<T>,
+    beta: Tensor<T>,
     feature_dim: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for LayerNormOp {
-    type Args<'a> = (Tensor, Tensor, Tensor, u32); // (input, gamma, beta, feature_dim)
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, u32); // (input, gamma, beta, feature_dim)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::LayerNorm)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, gamma, beta, feature_dim) = args;
 
         // Validate dimensions
@@ -69,7 +69,7 @@ impl KernelInvocable for LayerNormOp {
     }
 }
 
-impl Operation for LayerNorm {
+impl<T: TensorElement> Operation for LayerNorm<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -107,11 +107,13 @@ impl Operation for LayerNorm {
 
 #[cfg(test)]
 mod layernorm_test {
+    use crate::metallic::F32Element;
+
     use super::*;
 
     #[test]
     fn test_layernorm_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
+        let mut ctx = Context::<F32Element>::new()?;
         // Create test data: [2, 3] tensor, so feature_dim=3
         let input_data = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let input = Tensor::new(vec![2, 3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;

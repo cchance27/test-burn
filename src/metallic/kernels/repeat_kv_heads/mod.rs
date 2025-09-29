@@ -1,11 +1,11 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 pub struct RepeatKvHeadsOp;
 
-struct RepeatKvHeads {
-    input: Tensor,
-    output: Tensor,
+struct RepeatKvHeads<T: TensorElement> {
+    input: Tensor<T>,
+    output: Tensor<T>,
     group_size: u32,
     batch: u32,
     n_kv_heads: u32,
@@ -18,18 +18,18 @@ struct RepeatKvHeads {
 }
 
 impl KernelInvocable for RepeatKvHeadsOp {
-    type Args<'a> = (Tensor, u32, u32, u32, u32, u32, u32, u32);
+    type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, u32, u32, u32, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::RepeatKvHeads)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride) = args;
 
         if group_size == 0 {
@@ -119,7 +119,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
     }
 }
 
-impl Operation for RepeatKvHeads {
+impl<T: TensorElement> Operation for RepeatKvHeads<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

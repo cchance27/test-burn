@@ -1,5 +1,5 @@
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -8,7 +8,7 @@ use super::*;
 
 #[test]
 fn test_swiglu_small_uniform() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     // Small dimensions matching PyTorch verification example
     let d_model: usize = 4;
@@ -91,7 +91,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
 
 #[test]
 fn test_swiglu_zero_input() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let d_model: usize = 4;
     let ff_dim: usize = 8;
@@ -206,7 +206,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
     let down_weight_rust = down_weight_py; // already [d_model, ff_dim]
 
     // Create weight Tensors
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let ffn_gate = Tensor::new(
         vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),

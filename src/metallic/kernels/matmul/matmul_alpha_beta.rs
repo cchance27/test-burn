@@ -7,7 +7,7 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
+    Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
 };
@@ -33,7 +33,7 @@ struct MatMulAlphaBeta {
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for MatMulAlphaBetaOp {
     // Input arguments for the call - two input tensors + transpose options + alpha/beta
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, bool, f32, f32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, bool, f32, f32);
     // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
@@ -43,12 +43,12 @@ impl KernelInvocable for MatMulAlphaBetaOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>, // MPS doesn't use this
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (left, right, result, transpose_left, transpose_right, alpha, beta) = args;
 
         let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;

@@ -1,13 +1,13 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the KV rearrange operation.
 pub struct KvRearrangeOp;
 
 /// Internal struct that holds data for the Operation trait.
-struct KvRearrange {
-    input: Tensor,  // [M, kv_dim]
-    output: Tensor, // [batch*n_heads, seq, head_dim]
+struct KvRearrange<T: TensorElement> {
+    input: Tensor<T>,  // [M, kv_dim]
+    output: Tensor<T>, // [batch*n_heads, seq, head_dim]
     kv_dim: u32,
     kv_head_dim: u32,
     n_heads: u32,
@@ -18,18 +18,18 @@ struct KvRearrange {
 }
 
 impl KernelInvocable for KvRearrangeOp {
-    type Args<'a> = (Tensor, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
+    type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::KvRearrange)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq) = args;
 
         // Calculate output dimensions: [batch*n_heads, seq, head_dim]
@@ -58,7 +58,7 @@ impl KernelInvocable for KvRearrangeOp {
     }
 }
 
-impl Operation for KvRearrange {
+impl<T: TensorElement> Operation for KvRearrange<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -99,11 +99,13 @@ impl Operation for KvRearrange {
 
 #[cfg(test)]
 mod kv_rearrange_test {
+    use crate::metallic::F32Element;
+
     use super::*;
 
     #[test]
     fn test_kv_rearrange_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::new()?;
+        let mut ctx = Context::<F32Element>::new()?;
         // Create a simple test tensor [batch*seq, kv_dim] = [2*3, 4] = [6, 4]
         let input_data: Vec<f32> = (0..24).map(|i| i as f32).collect();
         let input = Tensor::new(vec![6, 4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;

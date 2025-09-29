@@ -6,27 +6,30 @@ use crate::metallic::Tensor;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
 use crate::metallic::kernels::silu::SiluOp;
+use crate::metallic::TensorElement;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
 
 /// Dummy struct for SwiGLU operation since all work is done in the `new` method
-pub struct SwiGLU;
+pub struct SwiGLU<T: TensorElement> {
+    _phantom: std::marker::PhantomData<T>,
+}
 
 impl KernelInvocable for SwiGLUOp {
-    type Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, &'a Tensor, &'a Tensor, &'a Tensor, &'a Tensor);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {
         // This is a composite operation using existing kernels, so we don't need a specific kernel function
         None
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias) = args;
 
         // Execute the SwiGLU operation logic directly in the new method
@@ -43,23 +46,23 @@ impl KernelInvocable for SwiGLUOp {
         )?;
 
         // Create a dummy operation since all work is done in this function
-        Ok((Box::new(SwiGLU), output))
+        Ok((Box::new(SwiGLU { _phantom: std::marker::PhantomData::<T> }), output))
     }
 }
 
 /// Execute the SwiGLU operation logic by calling the individual kernels in sequence
 #[allow(clippy::too_many_arguments)]
-fn execute_swiglu_logic(
-    ctx: &mut Context,
-    x_normed_flat: &Tensor,
-    ffn_gate: &Tensor,
-    ffn_gate_bias: &Tensor,
-    ffn_up: &Tensor,
-    ffn_up_bias: &Tensor,
-    ffn_down: &Tensor,
-    ffn_down_bias: &Tensor,
+fn execute_swiglu_logic<T: TensorElement>(
+    ctx: &mut Context<T>,
+    x_normed_flat: &Tensor<T>,
+    ffn_gate: &Tensor<T>,
+    ffn_gate_bias: &Tensor<T>,
+    ffn_up: &Tensor<T>,
+    ffn_up_bias: &Tensor<T>,
+    ffn_down: &Tensor<T>,
+    ffn_down_bias: &Tensor<T>,
     mut cache: Option<&mut ResourceCache>,
-) -> Result<Tensor, MetalError> {
+) -> Result<Tensor<T>, MetalError> {
     ctx.prepare_tensors_for_active_cmd(&[x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias])?;
     let d_model = x_normed_flat.dims()[1];
 
@@ -159,17 +162,17 @@ fn execute_swiglu_logic(
 /// benchmarks and diagnostics to control whether a [`ResourceCache`] is reused across the
 /// composite's constituent kernels.
 #[allow(clippy::too_many_arguments)]
-pub fn swiglu_with_optional_cache(
-    ctx: &mut Context,
-    x_normed_flat: &Tensor,
-    ffn_gate: &Tensor,
-    ffn_gate_bias: &Tensor,
-    ffn_up: &Tensor,
-    ffn_up_bias: &Tensor,
-    ffn_down: &Tensor,
-    ffn_down_bias: &Tensor,
+pub fn swiglu_with_optional_cache<T: TensorElement>(
+    ctx: &mut Context<T>,
+    x_normed_flat: &Tensor<T>,
+    ffn_gate: &Tensor<T>,
+    ffn_gate_bias: &Tensor<T>,
+    ffn_up: &Tensor<T>,
+    ffn_up_bias: &Tensor<T>,
+    ffn_down: &Tensor<T>,
+    ffn_down_bias: &Tensor<T>,
     cache: Option<&mut ResourceCache>,
-) -> Result<Tensor, MetalError> {
+) -> Result<Tensor<T>, MetalError> {
     execute_swiglu_logic(
         ctx,
         x_normed_flat,
@@ -184,7 +187,7 @@ pub fn swiglu_with_optional_cache(
 }
 
 // Implement `Operation` for the internal struct.
-impl Operation for SwiGLU {
+impl<T: TensorElement> Operation for SwiGLU<T> {
     fn encode(
         &self,
         _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

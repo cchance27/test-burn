@@ -10,7 +10,7 @@ use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::metallic::MetalError;
+use crate::{gguf::file::GGUFMetadata, metallic::MetalError};
 
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
     let mut bs = (b'!'..=b'~').chain(b'\xa1'..=b'\xac').chain(b'\xae'..=b'\xff').collect::<Vec<_>>();
@@ -172,7 +172,7 @@ impl Tokenizer {
     }
 
     /// Create a tokenizer from GGUF metadata
-    pub fn from_gguf_metadata(metadata: &crate::gguf::GGUFMetadata) -> Result<Self, MetalError> {
+    pub fn from_gguf_metadata(metadata: &GGUFMetadata) -> Result<Self, MetalError> {
         // Extract vocabulary
         let tokens_value = metadata.entries.get("tokenizer.ggml.tokens").ok_or(TokenizerError::MissingData)?;
 

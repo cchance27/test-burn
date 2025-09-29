@@ -1,29 +1,29 @@
 use super::*;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 
 pub struct RMSNormOp;
 
-struct RMSNorm {
-    input: Tensor,
-    output: Tensor,
-    gamma: Tensor,
+struct RMSNorm<T: TensorElement> {
+    input: Tensor<T>,
+    output: Tensor<T>,
+    gamma: Tensor<T>,
     feature_dim: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for RMSNormOp {
-    type Args<'a> = (Tensor, Tensor, u32); // (input, gamma, feature_dim)
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, u32); // (input, gamma, feature_dim)
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::RMSNorm)
     }
 
-    fn new<'a>(
-        ctx: &mut Context,
-        args: Self::Args<'a>,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, gamma, feature_dim) = args;
 
         // Validate dimensions
@@ -58,7 +58,7 @@ impl KernelInvocable for RMSNormOp {
     }
 }
 
-impl Operation for RMSNorm {
+impl<T: TensorElement> Operation for RMSNorm<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

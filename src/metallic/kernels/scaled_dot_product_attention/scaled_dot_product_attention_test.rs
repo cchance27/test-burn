@@ -2,11 +2,11 @@ use rand::Rng as _;
 
 use crate::alternatives::sdpa_burn;
 use crate::metallic::kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
-use crate::metallic::{Context, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 #[test]
 fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     // Create test tensors: [batch, seq, dim]
     let q = Tensor::new(
@@ -38,7 +38,7 @@ fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
 
 #[test]
 fn test_scaled_dot_product_attention_kernel_causal() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     // Create test tensors: [batch, seq, dim]
     let q = Tensor::new(
@@ -114,7 +114,7 @@ fn arange_sdpa_ours_vs_pytorch_causal() {
     use crate::metallic::{Context, Tensor};
     let pytorch_arange_causal = (0..256).map(|x| x as f32).collect::<Vec<_>>();
 
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let query: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
     let key: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
     let value: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
@@ -153,7 +153,7 @@ fn arange_sdpa_burn_vs_pytorch_noncausal() {
 fn arange_sdpa_ours_vs_pytorch_noncausal() {
     use crate::metallic::{Context, Tensor};
 
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let query: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
     let key: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
     let value: Vec<f32> = (0..NUM_ELEMENTS).map(|x| x as f32).collect();
@@ -207,7 +207,7 @@ fn large_sdpa_ours_vs_burn_causal() {
 
     // Metallic
     use crate::metallic::{Context, Tensor};
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let q_tensor = Tensor::new(
         vec![batch, seq_q, dim],
         TensorStorage::Dedicated(&ctx),
@@ -288,7 +288,7 @@ fn large_sdpa_ours_vs_burn_noncausal() {
 
     // Metallic
     use crate::metallic::{Context, Tensor};
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let q_tensor = Tensor::new(
         vec![batch, seq_q, dim],
         TensorStorage::Dedicated(&ctx),
@@ -355,7 +355,7 @@ fn run_sdpa_test(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: b
 
     // Metallic
     use crate::metallic::{Context, Tensor};
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let q_tensor = Tensor::new(
         vec![batch, seq_q, dim],
         TensorStorage::Dedicated(&ctx),
@@ -455,7 +455,7 @@ fn sdpa_causality_correctness() {
         9.0, 9.0, // value 2 (should be masked for queries 0 and 1)
     ];
 
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
 
     // Create tensors
     let q_tensor = Tensor::new(
@@ -549,7 +549,7 @@ fn sdpa_causality_correctness() {
 
 #[test]
 fn test_sdpa_extreme_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Ensure the fused softmax pipeline is available
 
@@ -598,7 +598,7 @@ fn test_sdpa_extreme_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_sdpa_extreme_negative_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Test with very negative values in query, key, and value tensors
     let batch = 1;
@@ -642,7 +642,7 @@ fn test_sdpa_extreme_negative_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_sdpa_mixed_extreme_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Ensure the fused softmax pipeline is available
 
@@ -689,7 +689,7 @@ fn test_sdpa_mixed_extreme_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_sdpa_causal_extreme_values() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Ensure the fused softmax pipeline is available
 
@@ -737,7 +737,7 @@ fn test_sdpa_causal_extreme_values() -> Result<(), MetalError> {
 
 #[test]
 fn test_sdpa_zero_tensors() -> Result<(), MetalError> {
-    let mut context = Context::new()?;
+    let mut context = Context::<F32Element>::new()?;
 
     // Ensure the fused softmax pipeline is available
 
@@ -817,7 +817,7 @@ fn compare_sdpa_implementations(
     let burn_slice = burn_data.as_slice::<f32>().unwrap();
 
     // Metallic implementation
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let q_tensor = Tensor::new(
         vec![batch, seq_q, dim],
         TensorStorage::Dedicated(&ctx),
@@ -996,7 +996,7 @@ fn check_row_stochastic_property(batch: usize, seq_q: usize, seq_k: usize, dim: 
     let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Metallic implementation
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let q_tensor = Tensor::new(
         vec![batch, seq_q, dim],
         TensorStorage::Dedicated(&ctx),
@@ -1065,7 +1065,7 @@ fn property_based_sdpa_test(max_batch: usize, max_seq_q: usize, max_seq_k: usize
     let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|_| rng.random_range(-1.0..1.0)).collect();
 
     // Metallic implementation
-    let mut ctx = Context::new().unwrap();
+    let mut ctx = Context::<F32Element>::new().unwrap();
     let q_tensor = Tensor::new(
         vec![batch, seq_q, dim],
         TensorStorage::Dedicated(&ctx),
@@ -1178,7 +1178,7 @@ fn sdpa_determinism_check() {
     // Run SDPA multiple times
     let mut results: Vec<Vec<f32>> = Vec::new();
     for _ in 0..5 {
-        let mut ctx = Context::new().unwrap();
+        let mut ctx = Context::<F32Element>::new().unwrap();
         let q_tensor = Tensor::new(
             vec![batch, seq_q, dim],
             TensorStorage::Dedicated(&ctx),

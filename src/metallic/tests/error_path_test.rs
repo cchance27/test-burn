@@ -1,10 +1,10 @@
 use super::*;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
 #[test]
 fn test_sdpa_invalid_shapes() {
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     // Test with incompatible dimensions
     let batch = 2;
@@ -56,7 +56,7 @@ fn test_sdpa_invalid_shapes() {
 
 #[test]
 fn test_sdpa_invalid_batch_dimensions() {
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     // Test with different batch sizes
     let batch1 = 2;
@@ -99,7 +99,7 @@ fn test_matmul_invalid_shapes() {
     use crate::metallic::kernels::matmul::MatMulOp;
     use crate::metallic::resource_cache::ResourceCache;
 
-    let context = Context::new().unwrap();
+    let context = Context::<F32Element>::new().unwrap();
     let mut cache = ResourceCache::with_device(context.device.clone());
 
     // Test with incompatible matrix dimensions
@@ -137,7 +137,7 @@ fn test_matmul_invalid_shapes() {
 
 #[test]
 fn test_tensor_creation_with_mismatched_dimensions() {
-    let context = Context::new().unwrap();
+    let context = Context::<F32Element>::new().unwrap();
 
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let dims = vec![2, 4]; // Expecting 8 elements but only have 6
@@ -161,7 +161,7 @@ fn test_tensor_creation_with_mismatched_dimensions() {
 
 #[test]
 fn test_tensor_from_existing_buffer_invalid_offset() {
-    let context = Context::new().unwrap();
+    let context = Context::<F32Element>::new().unwrap();
 
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let dims = vec![2, 2];
@@ -171,7 +171,7 @@ fn test_tensor_from_existing_buffer_invalid_offset() {
     // Try to create a view with an invalid offset
     let invalid_offset = 100 * std::mem::size_of::<f32>(); // Way too large
 
-    let result = Tensor::from_existing_buffer(
+    let result = Tensor::<F32Element>::from_existing_buffer(
         tensor.buf.clone(),
         vec![1, 2], // Smaller dimensions
         Dtype::F32,
@@ -198,7 +198,7 @@ fn test_tensor_from_existing_buffer_invalid_offset() {
 
 #[test]
 fn test_tensor_get_batch_out_of_bounds() {
-    let context = Context::new().unwrap();
+    let context = Context::<F32Element>::new().unwrap();
 
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
     let dims = vec![2, 3]; // Only 2 batches (0 and 1)
@@ -225,7 +225,7 @@ fn test_tensor_get_batch_out_of_bounds() {
 
 #[test]
 fn test_tensor_get_batch_insufficient_dimensions() {
-    let context = Context::new().unwrap();
+    let context = Context::<F32Element>::new().unwrap();
 
     let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
     let dims = vec![4]; // Only 1 dimension, need at least 3 for get_batch
@@ -252,7 +252,7 @@ fn test_tensor_get_batch_insufficient_dimensions() {
 
 #[test]
 fn test_softmax_invalid_dimensions() {
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     // Try with dimensions that might cause issues
     let seq_q = 0; // Invalid dimension

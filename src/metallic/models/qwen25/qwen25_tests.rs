@@ -1,13 +1,13 @@
 #![cfg(test)]
 use crate::metallic::instrumentation::new_latency_collector;
 use crate::metallic::models::{Qwen25, Qwen25Config};
-use crate::metallic::{TensorInit, TensorStorage};
+use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
 use super::*;
 
 #[test]
 fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
         n_layers: 2,
         d_model: 8,
@@ -35,7 +35,7 @@ fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
 
 #[test]
 fn test_qwen25_embed() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
         n_layers: 1,
         d_model: 8,
@@ -61,7 +61,7 @@ fn test_qwen25_embed() -> Result<(), MetalError> {
 
 #[test]
 fn test_qwen25_forward_tokens() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
         n_layers: 1,
         d_model: 8,
@@ -87,7 +87,7 @@ fn test_qwen25_forward_tokens() -> Result<(), MetalError> {
 
 #[test]
 fn test_kv_cache_correctness() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
         n_layers: 1,
         d_model: 16,
@@ -224,7 +224,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
 
 #[test]
 fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let batch = 2usize;
     let n_kv_heads = 2usize;
@@ -280,7 +280,7 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
 
 #[test]
 fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
         n_layers: 1,
         d_model: 16,
@@ -323,7 +323,7 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
 
 #[test]
 fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let mut ctx = Context::<F32Element>::new()?;
 
     let seq = 4;
     let batch_heads = 3;
