@@ -279,52 +279,6 @@ impl<T: TensorElement> Tensor<T> {
         })
     }
 
-    /// Ensure the tensor exposes a contiguous batch view suitable for batched MPS kernels.
-    ///
-    /// When the tensor represents a strided view into a larger cache (e.g. KV cache history)
-    /// the first matrix in each batch may begin `matrix_bytes` bytes apart even if only a
-    /// subset of the logical rows are active.  Batched MPS operations require each matrix to
-    /// be tightly packed, so this helper materializes a compact copy when padding is present.
-    pub fn ensure_mps_contiguous_batch(&self, ctx: &mut Context) -> Result<(Self, MpsMatrixBatchView), MetalError> {
-        let view = self.as_mps_matrix_batch_view()?;
-
-        let needs_copy = view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes;
-        if !needs_copy {
-            return Ok((self.clone(), view));
-        }
-
-        let compact = Self::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
-
-        ctx.prepare_tensors_for_active_cmd(&[self])?;
-
-        let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-        let encoder = command_buffer
-            .raw()
-            .blitCommandEncoder()
-            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
-
-        let copy_bytes = view.rows * view.row_bytes;
-        for batch_idx in 0..view.batch {
-            let src_offset = self.offset + batch_idx * view.matrix_bytes;
-            let dst_offset = compact.offset + batch_idx * copy_bytes;
-            unsafe {
-                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &self.buf,
-                    src_offset,
-                    &compact.buf,
-                    dst_offset,
-                    copy_bytes,
-                );
-            }
-        }
-        encoder.endEncoding();
-
-        ctx.mark_tensor_pending(&compact);
-
-        let compact_view = compact.as_mps_matrix_batch_view()?;
-        Ok((compact, compact_view))
-    }
-
     /// Compute strides for contiguous tensor layout
     pub fn compute_strides(dims: &[usize]) -> Vec<usize> {
         let mut strides = vec![0; dims.len()];
@@ -663,9 +617,9 @@ impl<T: TensorElement> Tensor<T> {
             TensorInit::BorrowHost(_) => Err(MetalError::OperationNotSupported(
                 "Borrowed host buffers are only supported with dedicated storage".to_string(),
             )),
-            TensorInit::Uninitialized => Ok(context.pool.alloc_tensor(dims, T::DTYPE)?.into_tensor()),
+            TensorInit::Uninitialized => Ok(context.pool.alloc_tensor::<T>(dims)?.into_tensor()),
             TensorInit::CopyFrom(data) => {
-                let mut tensor = context.pool.alloc_tensor(dims, T::DTYPE)?.into_tensor();
+                let mut tensor = context.pool.alloc_tensor::<T>(dims)?.into_tensor();
                 tensor.as_mut_slice().copy_from_slice(data);
                 Ok(tensor)
             }
@@ -873,6 +827,55 @@ impl<T: TensorElement> Tensor<T> {
 }
 
 impl Tensor<F32Element> {
+    /// Ensure the tensor exposes a contiguous batch view suitable for batched MPS kernels.
+    ///
+    /// When the tensor represents a strided view into a larger cache (e.g. KV cache history)
+    /// the first matrix in each batch may begin `matrix_bytes` bytes apart even if only a
+    /// subset of the logical rows are active. Batched MPS operations require each matrix to
+    /// be tightly packed, so this helper materializes a compact copy when padding is present.
+    pub fn ensure_mps_contiguous_batch(
+        &self,
+        ctx: &mut Context,
+    ) -> Result<(Self, MpsMatrixBatchView), MetalError> {
+        let view = self.as_mps_matrix_batch_view()?;
+
+        let needs_copy = view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes;
+        if !needs_copy {
+            return Ok((self.clone(), view));
+        }
+
+        let compact = Self::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        ctx.prepare_tensors_for_active_cmd(&[self])?;
+
+        let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+
+        let copy_bytes = view.rows * view.row_bytes;
+        for batch_idx in 0..view.batch {
+            let src_offset = self.offset + batch_idx * view.matrix_bytes;
+            let dst_offset = compact.offset + batch_idx * copy_bytes;
+            unsafe {
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &self.buf,
+                    src_offset,
+                    &compact.buf,
+                    dst_offset,
+                    copy_bytes,
+                );
+            }
+        }
+        encoder.endEncoding();
+
+        ctx.mark_tensor_pending(&compact);
+
+        let compact_view = compact.as_mps_matrix_batch_view()?;
+        Ok((compact, compact_view))
+    }
+
     /// Allocate and zero-initialize a tensor of the given shape.
     pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Self, MetalError> {
         let mut tensor = if use_pool {

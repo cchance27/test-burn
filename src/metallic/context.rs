@@ -7,7 +7,7 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, TensorInit, TensorStorage, kernels};
+use crate::metallic::{F32Element, Tensor, TensorInit, TensorStorage, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -412,10 +412,10 @@ impl Context {
         let repeated_dims = vec![repeated_batch_heads, seq_len, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
-        let k_allocation = self.kv_cache_pool.alloc_tensor(canonical_dims.clone(), Dtype::F32)?;
-        let v_allocation = self.kv_cache_pool.alloc_tensor(canonical_dims, Dtype::F32)?;
-        let repeated_k_allocation = self.kv_cache_pool.alloc_tensor(repeated_dims.clone(), Dtype::F32)?;
-        let repeated_v_allocation = self.kv_cache_pool.alloc_tensor(repeated_dims, Dtype::F32)?;
+        let k_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(canonical_dims.clone())?;
+        let v_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(canonical_dims)?;
+        let repeated_k_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(repeated_dims.clone())?;
+        let repeated_v_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(repeated_dims)?;
 
         let dtype = k_allocation.dtype;
         let element_size = k_allocation.element_size;

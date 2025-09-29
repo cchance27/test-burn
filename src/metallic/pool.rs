@@ -1,5 +1,5 @@
-use super::{MetalError, Tensor};
-use crate::metallic::tensor::Dtype;
+use super::MetalError;
+use crate::metallic::tensor::{Dtype, Tensor, TensorElement};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLDevice, MTLResourceOptions};
@@ -32,15 +32,15 @@ pub struct MemoryPool {
 }
 
 /// Metadata describing an allocation made from the memory pool.
-pub struct PooledAllocation {
-    pub tensor: Tensor,
+pub struct PooledAllocation<T: TensorElement> {
+    pub tensor: Tensor<T>,
     pub dtype: Dtype,
     pub element_size: usize,
 }
 
-impl PooledAllocation {
+impl<T: TensorElement> PooledAllocation<T> {
     #[inline]
-    pub fn into_tensor(self) -> Tensor {
+    pub fn into_tensor(self) -> Tensor<T> {
         self.tensor
     }
 }
@@ -81,7 +81,8 @@ impl MemoryPool {
     }
 
     /// Allocates a new tensor from the pool, growing if necessary.
-    pub fn alloc_tensor(&mut self, dims: Vec<usize>, dtype: Dtype) -> Result<PooledAllocation, MetalError> {
+    pub fn alloc_tensor<T: TensorElement>(&mut self, dims: Vec<usize>) -> Result<PooledAllocation<T>, MetalError> {
+        let dtype = T::DTYPE;
         let num_elements = dims.iter().product::<usize>();
         let element_size = dtype.size_bytes();
         let size_bytes = num_elements * element_size;
