@@ -98,6 +98,9 @@ impl KernelInvocable for MatMulOp {
         };
         let out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let result_view = out.as_mps_matrix_batch_view()?;
+        let left_dtype = left_tensor.dtype;
+        let right_dtype = right_tensor.dtype;
+        let result_dtype = out.dtype;
 
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
@@ -121,6 +124,7 @@ impl KernelInvocable for MatMulOp {
             row_bytes: left_view.row_bytes,
             matrices: left_view.batch,
             matrix_bytes: left_view.matrix_bytes,
+            dtype: left_dtype,
         };
         let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
@@ -130,6 +134,7 @@ impl KernelInvocable for MatMulOp {
             row_bytes: right_view.row_bytes,
             matrices: right_view.batch,
             matrix_bytes: right_view.matrix_bytes,
+            dtype: right_dtype,
         };
         let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
@@ -139,6 +144,7 @@ impl KernelInvocable for MatMulOp {
             row_bytes: result_view.row_bytes,
             matrices: result_view.batch,
             matrix_bytes: result_view.matrix_bytes,
+            dtype: result_dtype,
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
@@ -164,7 +170,7 @@ impl KernelInvocable for MatMulOp {
 
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for MatMul{
+impl Operation for MatMul {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

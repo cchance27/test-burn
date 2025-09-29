@@ -1,9 +1,9 @@
 use super::*;
+use crate::metallic::TensorElement;
 use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::resource_cache::ResourceCache;
 use crate::metallic::tensor::MpsMatrixBatchView;
-use crate::metallic::TensorElement;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -125,12 +125,14 @@ fn try_apply_mps_softmax<T: TensorElement>(
 ) -> Result<(), MetalError> {
     ctx.prepare_tensors_for_active_cmd(&[attn])?;
 
+    let dtype = attn.dtype;
     let descriptor_key = MpsMatrixDescriptorKey {
         rows,
         columns,
         row_bytes: view.row_bytes,
         matrices: view.batch,
         matrix_bytes: view.matrix_bytes,
+        dtype,
     };
     let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
     let softmax_key = MpsSoftMaxKey { rows, columns };

@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
 
+use crate::metallic::tensor::dtypes::Dtype;
+
 /// Key for MPS matrix multiplication operations.
 ///
 /// This key uniquely identifies an MPS matrix multiplication operation
@@ -57,6 +59,7 @@ pub struct MpsMatrixDescriptorKey {
     pub row_bytes: usize,
     pub matrices: usize,
     pub matrix_bytes: usize,
+    pub dtype: Dtype,
 }
 
 impl PartialEq for MpsMatrixDescriptorKey {
@@ -66,6 +69,7 @@ impl PartialEq for MpsMatrixDescriptorKey {
             && self.row_bytes == other.row_bytes
             && self.matrices == other.matrices
             && self.matrix_bytes == other.matrix_bytes
+            && self.dtype == other.dtype
     }
 }
 
@@ -78,6 +82,7 @@ impl Hash for MpsMatrixDescriptorKey {
         self.row_bytes.hash(state);
         self.matrices.hash(state);
         self.matrix_bytes.hash(state);
+        self.dtype.hash(state);
     }
 }
 

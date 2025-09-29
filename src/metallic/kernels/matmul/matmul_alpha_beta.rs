@@ -104,6 +104,9 @@ impl KernelInvocable for MatMulAlphaBetaOp {
 
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
+        let left_dtype = left_tensor.dtype;
+        let right_dtype = right_tensor.dtype;
+        let result_dtype = result.dtype;
 
         // Create MPS matrix descriptors based on original dimensions (not transposed ones)
         let left_desc_key = MpsMatrixDescriptorKey {
@@ -112,6 +115,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             row_bytes: left_view.row_bytes,
             matrices: left_view.batch,
             matrix_bytes: left_view.matrix_bytes,
+            dtype: left_dtype,
         };
         let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
@@ -121,6 +125,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             row_bytes: right_view.row_bytes,
             matrices: right_view.batch,
             matrix_bytes: right_view.matrix_bytes,
+            dtype: right_dtype,
         };
         let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
@@ -130,6 +135,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             row_bytes: result_view.row_bytes,
             matrices: result_view.batch,
             matrix_bytes: result_view.matrix_bytes,
+            dtype: result_dtype,
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
