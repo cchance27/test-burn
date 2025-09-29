@@ -58,11 +58,25 @@ fn tensor_from_slice(tensor_name: &str, dims: Vec<usize>, data: &[f32], context:
         .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
 }
 
+fn convert_f32_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
+    if !raw.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return Err(GGUFError::InvalidTensorData(
+            "F32 tensor byte length must be divisible by 4".to_string(),
+        ));
+    }
+
+    let mut data = Vec::with_capacity(raw.len() / std::mem::size_of::<f32>());
+    for chunk in raw.chunks_exact(std::mem::size_of::<f32>()) {
+        // SAFETY: `chunks_exact` guarantees chunk length matches the requested size.
+        let bytes: [u8; std::mem::size_of::<f32>()] = chunk.try_into().unwrap();
+        data.push(f32::from_le_bytes(bytes));
+    }
+    Ok(data)
+}
+
 fn tensor_from_bytes(tensor_name: &str, dims: Vec<usize>, bytes: &[u8], context: &Context) -> Result<Tensor, GGUFError> {
-    debug_assert!(bytes.len().is_multiple_of(std::mem::size_of::<f32>()));
-    let elem_count = bytes.len() / std::mem::size_of::<f32>();
-    let data = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, elem_count) };
-    tensor_from_slice(tensor_name, dims, data, context)
+    let data = convert_f32_bytes(bytes)?;
+    tensor_from_slice(tensor_name, dims, &data, context)
 }
 
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
@@ -191,6 +205,29 @@ impl GGUFModelLoader {
                 tensor_info.data_type
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_f32_bytes_handles_misaligned_slice() {
+        let values = [1.0f32, 2.5, -3.75];
+        let mut storage = Vec::with_capacity(values.len() * std::mem::size_of::<f32>() + 2);
+        storage.push(0); // introduce a one-byte offset for misalignment
+        for value in values {
+            storage.extend_from_slice(&value.to_le_bytes());
+        }
+        storage.push(0); // padding to avoid reading past the buffer in debug modes
+
+        let start = 1;
+        let end = start + values.len() * std::mem::size_of::<f32>();
+        let misaligned = &storage[start..end];
+
+        let converted = convert_f32_bytes(misaligned).expect("misaligned slice should convert");
+        assert_eq!(converted, values);
     }
 }
 
