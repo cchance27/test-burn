@@ -1,5 +1,5 @@
 #![allow(unused_imports)]
-pub use context::Context;
+pub use context::{Context, ContextOptions};
 pub use error::MetalError;
 pub use tensor::{
     BF16Element, Dtype, F16Element, F32Element, KernelElement, KernelTensor, KernelTensorGuard, Tensor as GenericTensor, TensorBF16,

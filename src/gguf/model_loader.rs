@@ -113,7 +113,24 @@ impl GGUFModelLoader {
                     });
                 }
                 let tensor = tensor_from_slice::<F32Element>(&tensor_info.name, dims.clone(), values, context)?;
-                Ok(GGUFTensor::from(tensor))
+                let target_dtype = resolve_weight_dtype(context, Dtype::F32);
+                Ok(match target_dtype {
+                    Dtype::F32 => GGUFTensor::from(tensor),
+                    Dtype::F16 => {
+                        let converted = convert_tensor_element::<F32Element, F16Element>(&tensor_info.name, &tensor, context)?;
+                        GGUFTensor::from(converted)
+                    }
+                    Dtype::BF16 => {
+                        let converted = convert_tensor_element::<F32Element, BF16Element>(&tensor_info.name, &tensor, context)?;
+                        GGUFTensor::from(converted)
+                    }
+                    other => {
+                        return Err(GGUFError::InvalidTensorData(format!(
+                            "Unsupported target dtype {:?} for tensor '{}'",
+                            other, tensor_info.name
+                        )));
+                    }
+                })
             }
             GGUFRawTensor::F16(values) => {
                 if values.len() != expected_elements {
@@ -123,7 +140,24 @@ impl GGUFModelLoader {
                     });
                 }
                 let tensor = tensor_from_slice::<F16Element>(&tensor_info.name, dims.clone(), values, context)?;
-                Ok(GGUFTensor::from(tensor))
+                let target_dtype = resolve_weight_dtype(context, Dtype::F16);
+                Ok(match target_dtype {
+                    Dtype::F16 => GGUFTensor::from(tensor),
+                    Dtype::F32 => {
+                        let converted = convert_tensor_element::<F16Element, F32Element>(&tensor_info.name, &tensor, context)?;
+                        GGUFTensor::from(converted)
+                    }
+                    Dtype::BF16 => {
+                        let converted = convert_tensor_element::<F16Element, BF16Element>(&tensor_info.name, &tensor, context)?;
+                        GGUFTensor::from(converted)
+                    }
+                    other => {
+                        return Err(GGUFError::InvalidTensorData(format!(
+                            "Unsupported target dtype {:?} for tensor '{}'",
+                            other, tensor_info.name
+                        )));
+                    }
+                })
             }
             GGUFRawTensor::BF16(values) => {
                 if values.len() != expected_elements {
@@ -133,7 +167,24 @@ impl GGUFModelLoader {
                     });
                 }
                 let tensor = tensor_from_slice::<BF16Element>(&tensor_info.name, dims.clone(), values, context)?;
-                Ok(GGUFTensor::from(tensor))
+                let target_dtype = resolve_weight_dtype(context, Dtype::BF16);
+                Ok(match target_dtype {
+                    Dtype::BF16 => GGUFTensor::from(tensor),
+                    Dtype::F32 => {
+                        let converted = convert_tensor_element::<BF16Element, F32Element>(&tensor_info.name, &tensor, context)?;
+                        GGUFTensor::from(converted)
+                    }
+                    Dtype::F16 => {
+                        let converted = convert_tensor_element::<BF16Element, F16Element>(&tensor_info.name, &tensor, context)?;
+                        GGUFTensor::from(converted)
+                    }
+                    other => {
+                        return Err(GGUFError::InvalidTensorData(format!(
+                            "Unsupported target dtype {:?} for tensor '{}'",
+                            other, tensor_info.name
+                        )));
+                    }
+                })
             }
             GGUFRawTensor::Bytes(raw, data_type) => match data_type {
                 GGUFDataType::F64 => {
@@ -145,7 +196,24 @@ impl GGUFModelLoader {
                         });
                     }
                     let tensor = tensor_from_slice::<F32Element>(&tensor_info.name, dims.clone(), &f32_data, context)?;
-                    Ok(GGUFTensor::from(tensor))
+                    let target_dtype = resolve_weight_dtype(context, Dtype::F32);
+                    Ok(match target_dtype {
+                        Dtype::F32 => GGUFTensor::from(tensor),
+                        Dtype::F16 => {
+                            let converted = convert_tensor_element::<F32Element, F16Element>(&tensor_info.name, &tensor, context)?;
+                            GGUFTensor::from(converted)
+                        }
+                        Dtype::BF16 => {
+                            let converted = convert_tensor_element::<F32Element, BF16Element>(&tensor_info.name, &tensor, context)?;
+                            GGUFTensor::from(converted)
+                        }
+                        other => {
+                            return Err(GGUFError::InvalidTensorData(format!(
+                                "Unsupported target dtype {:?} for tensor '{}'",
+                                other, tensor_info.name
+                            )));
+                        }
+                    })
                 }
                 GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
                     #[cfg(target_arch = "aarch64")]
@@ -340,4 +408,42 @@ impl GGUFModel {
             Err(_e) => Err(super::GGUFError::InvalidData),
         }
     }
+}
+fn convert_tensor_element<S: TensorElement, D: TensorElement>(
+    tensor_name: &str,
+    tensor: &GenericTensor<S>,
+    context: &Context,
+) -> Result<GenericTensor<D>, GGUFError> {
+    let host = tensor.to_f32_vec();
+    GenericTensor::<D>::from_f32_slice(tensor.dims.clone(), TensorStorage::Dedicated(context), &host).map_err(|err| {
+        GGUFError::InvalidTensorData(format!(
+            "Failed to convert tensor '{}' from {:?} to {:?}: {}",
+            tensor_name,
+            S::DTYPE,
+            D::DTYPE,
+            err
+        ))
+    })
+}
+
+fn can_convert_dtype(src: Dtype, dst: Dtype) -> bool {
+    matches!(src, Dtype::F32 | Dtype::F16 | Dtype::BF16) && matches!(dst, Dtype::F32 | Dtype::F16 | Dtype::BF16)
+}
+
+fn resolve_weight_dtype(context: &Context, file_dtype: Dtype) -> Dtype {
+    let prefs = context.weight_dtype_preference();
+
+    for &preferred in prefs {
+        if preferred == file_dtype {
+            return preferred;
+        }
+    }
+
+    for &preferred in prefs {
+        if can_convert_dtype(file_dtype, preferred) {
+            return preferred;
+        }
+    }
+
+    file_dtype
 }

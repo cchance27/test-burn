@@ -21,6 +21,40 @@ use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
 
+#[derive(Clone, Debug)]
+pub struct ContextOptions {
+    /// Preferred storage dtypes for model weights in priority order.
+    pub weight_dtype_preference: Vec<Dtype>,
+}
+
+impl Default for ContextOptions {
+    fn default() -> Self {
+        Self {
+            weight_dtype_preference: vec![Dtype::F32],
+        }
+    }
+}
+
+fn normalize_weight_preferences(mut prefs: Vec<Dtype>) -> Vec<Dtype> {
+    let mut normalized = Vec::with_capacity(prefs.len().max(1));
+
+    for dtype in prefs.drain(..) {
+        if !matches!(dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16) {
+            continue;
+        }
+        if normalized.contains(&dtype) {
+            continue;
+        }
+        normalized.push(dtype);
+    }
+
+    if normalized.is_empty() {
+        normalized.push(Dtype::F32);
+    }
+
+    normalized
+}
+
 /// The main context for Metal operations.
 pub struct Context {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -34,6 +68,9 @@ pub struct Context {
     pub pool_resets: usize,
     // RNG seed counter for deterministic random generation
     pub rng_seed_counter: u64,
+
+    /// Preferred storage dtypes for long-lived model weights loaded via GGUF.
+    weight_dtype_preference: Vec<Dtype>,
 
     // Per-layer on-device KV caches stored centrally for developer DX.
     pub(crate) kv_caches: FxHashMap<usize, KvCacheEntry>,
@@ -85,6 +122,10 @@ impl Context {
     }
 
     pub fn new() -> Result<Self, MetalError> {
+        Self::with_options(ContextOptions::default())
+    }
+
+    pub fn with_options(options: ContextOptions) -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
@@ -105,7 +146,12 @@ impl Context {
             latency_collector: None,
             memory_collector: None,
             softmax_samples: Vec::new(),
+            weight_dtype_preference: normalize_weight_preferences(options.weight_dtype_preference),
         })
+    }
+
+    pub fn weight_dtype_preference(&self) -> &[Dtype] {
+        &self.weight_dtype_preference
     }
 
     pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_>) -> Result<Tensor, MetalError> {
