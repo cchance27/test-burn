@@ -1,5 +1,6 @@
 use super::*;
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
+use crate::metallic::{TensorInit, TensorStorage};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct OnesOp;
