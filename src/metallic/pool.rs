@@ -34,11 +34,19 @@ pub struct MemoryPool {
 /// Metadata describing an allocation made from the memory pool.
 pub struct PooledAllocation<T: TensorElement> {
     pub tensor: Tensor<T>,
-    pub dtype: Dtype,
-    pub element_size: usize,
 }
 
 impl<T: TensorElement> PooledAllocation<T> {
+    #[inline]
+    pub fn dtype(&self) -> Dtype {
+        T::DTYPE
+    }
+
+    #[inline]
+    pub fn element_size(&self) -> usize {
+        T::DTYPE.size_bytes()
+    }
+
     #[inline]
     pub fn into_tensor(self) -> Tensor<T> {
         self.tensor
@@ -106,11 +114,7 @@ impl MemoryPool {
                     false,
                 )?;
 
-                return Ok(PooledAllocation {
-                    dtype,
-                    element_size,
-                    tensor,
-                });
+                return Ok(PooledAllocation { tensor });
             }
         }
 
@@ -152,11 +156,7 @@ impl MemoryPool {
             false,
         )?;
 
-        Ok(PooledAllocation {
-            dtype,
-            element_size,
-            tensor,
-        })
+        Ok(PooledAllocation { tensor })
     }
 
     /// Attempts to allocate in a specific chunk, returns offset if successful.

@@ -833,10 +833,7 @@ impl Tensor<F32Element> {
     /// the first matrix in each batch may begin `matrix_bytes` bytes apart even if only a
     /// subset of the logical rows are active. Batched MPS operations require each matrix to
     /// be tightly packed, so this helper materializes a compact copy when padding is present.
-    pub fn ensure_mps_contiguous_batch(
-        &self,
-        ctx: &mut Context,
-    ) -> Result<(Self, MpsMatrixBatchView), MetalError> {
+    pub fn ensure_mps_contiguous_batch(&self, ctx: &mut Context) -> Result<(Self, MpsMatrixBatchView), MetalError> {
         let view = self.as_mps_matrix_batch_view()?;
 
         let needs_copy = view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes;
