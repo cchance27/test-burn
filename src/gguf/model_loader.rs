@@ -1,17 +1,9 @@
 use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     gguf::{GGUFValue, GGUTensorInfo},
-    metallic::{
-        Context, Tensor,
-        error::MetalError,
-        operation::CommandBuffer,
-        tensor::{Dtype, RetainedBuffer},
-    },
+    metallic::{Context, Tensor, TensorInit, TensorStorage},
 };
 use half::f16;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLDevice, MTLResourceOptions};
 use std::collections::HashMap;
 
 fn convert_f16_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
@@ -61,144 +53,30 @@ fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     Ok(f32_data)
 }
 
-const STAGING_ALIGNMENT: usize = 64 * 1024;
-
-fn align_up(value: usize, alignment: usize) -> usize {
-    if value == 0 {
-        0
-    } else {
-        value.div_ceil(alignment) * alignment
-    }
+fn tensor_from_slice(tensor_name: &str, dims: Vec<usize>, data: &[f32], context: &Context) -> Result<Tensor, GGUFError> {
+    Tensor::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
 }
 
-struct HostStagingBuffer {
-    buffer: RetainedBuffer,
-    capacity: usize,
-}
-
-struct HostStagingAllocator {
-    device: Retained<ProtocolObject<dyn MTLDevice>>,
-    free_list: Vec<HostStagingBuffer>,
-}
-
-impl HostStagingAllocator {
-    fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
-        Self {
-            device: device.clone(),
-            free_list: Vec::new(),
-        }
+fn convert_f32_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
+    if !raw.len().is_multiple_of(std::mem::size_of::<f32>()) {
+        return Err(GGUFError::InvalidTensorData(
+            "F32 tensor byte length must be divisible by 4".to_string(),
+        ));
     }
 
-    fn acquire(&mut self, required_bytes: usize) -> Result<HostStagingLease<'_>, MetalError> {
-        let buffer = if let Some(idx) = self.free_list.iter().position(|entry| entry.capacity >= required_bytes) {
-            self.free_list.swap_remove(idx)
-        } else {
-            self.allocate_buffer(required_bytes)?
-        };
-
-        Ok(HostStagingLease {
-            allocator: self,
-            buffer: Some(buffer),
-        })
+    let mut data = Vec::with_capacity(raw.len() / std::mem::size_of::<f32>());
+    for chunk in raw.chunks_exact(std::mem::size_of::<f32>()) {
+        // SAFETY: `chunks_exact` guarantees chunk length matches the requested size.
+        let bytes: [u8; std::mem::size_of::<f32>()] = chunk.try_into().unwrap();
+        data.push(f32::from_le_bytes(bytes));
     }
-
-    fn allocate_buffer(&self, required_bytes: usize) -> Result<HostStagingBuffer, MetalError> {
-        let capacity = std::cmp::max(align_up(required_bytes, STAGING_ALIGNMENT), STAGING_ALIGNMENT);
-        let buffer = self
-            .device
-            .newBufferWithLength_options(capacity, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(capacity))?;
-
-        Ok(HostStagingBuffer { buffer, capacity })
-    }
+    Ok(data)
 }
 
-struct HostStagingLease<'a> {
-    allocator: &'a mut HostStagingAllocator,
-    buffer: Option<HostStagingBuffer>,
-}
-
-impl<'a> HostStagingLease<'a> {
-    fn as_mut_slice(&mut self, len: usize) -> &mut [u8] {
-        let buf = self.buffer.as_ref().expect("staging buffer missing");
-        assert!(len <= buf.capacity, "requested slice exceeds staging capacity");
-        unsafe { std::slice::from_raw_parts_mut(buf.buffer.contents().as_ptr() as *mut u8, len) }
-    }
-
-    fn buffer(&self) -> &RetainedBuffer {
-        &self.buffer.as_ref().expect("staging buffer missing").buffer
-    }
-}
-
-impl<'a> Drop for HostStagingLease<'a> {
-    fn drop(&mut self) {
-        if let Some(buf) = self.buffer.take() {
-            self.allocator.free_list.push(buf);
-        }
-    }
-}
-
-fn metal_to_tensor_error(tensor_name: &str, stage: &str, err: MetalError) -> GGUFError {
-    GGUFError::InvalidTensorData(format!("{} for tensor '{}': {}", stage, tensor_name, err))
-}
-
-fn upload_f32_tensor_from_bytes(
-    tensor_name: &str,
-    dims: Vec<usize>,
-    bytes: &[u8],
-    context: &Context,
-    staging: &mut HostStagingAllocator,
-) -> Result<Tensor, GGUFError> {
-    let byte_len = bytes.len();
-
-    let dest_buf = context
-        .device
-        .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModePrivate)
-        .ok_or_else(|| {
-            metal_to_tensor_error(
-                tensor_name,
-                "Failed to allocate device buffer",
-                MetalError::BufferCreationFailed(byte_len),
-            )
-        })?;
-
-    if byte_len > 0 {
-        let mut lease = staging
-            .acquire(byte_len)
-            .map_err(|err| metal_to_tensor_error(tensor_name, "Failed to allocate staging buffer", err))?;
-
-        lease.as_mut_slice(byte_len).copy_from_slice(bytes);
-
-        let command_buffer = CommandBuffer::new(&context.command_queue)
-            .map_err(|err| metal_to_tensor_error(tensor_name, "Failed to create command buffer", err))?;
-
-        let encoder = command_buffer
-            .raw()
-            .blitCommandEncoder()
-            .ok_or_else(|| GGUFError::InvalidTensorData(format!("Blit encoder not available while uploading tensor '{}'", tensor_name)))?;
-
-        unsafe {
-            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(lease.buffer(), 0, &dest_buf, 0, byte_len);
-        }
-        encoder.endEncoding();
-        command_buffer.commit();
-        command_buffer.wait();
-    }
-
-    Tensor::from_existing_buffer(dest_buf, dims, Dtype::F32, &context.device, &context.command_queue, 0, false)
-        .map_err(|err| metal_to_tensor_error(tensor_name, "Failed to finalize tensor", err))
-}
-
-fn upload_f32_tensor_from_slice(
-    tensor_name: &str,
-    dims: Vec<usize>,
-    data: &[f32],
-    context: &Context,
-    staging: &mut HostStagingAllocator,
-) -> Result<Tensor, GGUFError> {
-    let byte_len = std::mem::size_of_val(data);
-    let bytes = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, byte_len) };
-    upload_f32_tensor_from_bytes(tensor_name, dims, bytes, context, staging)
+fn tensor_from_bytes(tensor_name: &str, dims: Vec<usize>, bytes: &[u8], context: &Context) -> Result<Tensor, GGUFError> {
+    let data = convert_f32_bytes(bytes)?;
+    tensor_from_slice(tensor_name, dims, &data, context)
 }
 
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
@@ -227,10 +105,9 @@ impl GGUFModelLoader {
     /// Load a model from the GGUF file
     pub fn load_model(&self, context: &Context) -> Result<GGUFModel, GGUFError> {
         let mut tensors = HashMap::new();
-        let mut staging_allocator = HostStagingAllocator::new(&context.device);
 
         for tensor_info in &self.gguf_file.tensors {
-            match self.load_tensor(context, &mut staging_allocator, tensor_info) {
+            match self.load_tensor(context, tensor_info) {
                 Ok(tensor) => {
                     tensors.insert(tensor_info.name.clone(), tensor);
                 }
@@ -253,7 +130,7 @@ impl GGUFModelLoader {
         })
     }
 
-    fn load_tensor(&self, context: &Context, staging: &mut HostStagingAllocator, tensor_info: &GGUTensorInfo) -> Result<Tensor, GGUFError> {
+    fn load_tensor(&self, context: &Context, tensor_info: &GGUTensorInfo) -> Result<Tensor, GGUFError> {
         let raw = self.gguf_file.get_tensor_data(tensor_info)?;
         let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
         adjust_embedding_dims(&tensor_info.name, &mut dims);
@@ -275,7 +152,7 @@ impl GGUFModelLoader {
                         actual,
                     });
                 }
-                upload_f32_tensor_from_bytes(&tensor_info.name, dims, raw, context, staging)
+                tensor_from_bytes(&tensor_info.name, dims, raw, context)
             }
             GGUFDataType::F16 => {
                 let f32_data = convert_f16_bytes(raw)?;
@@ -285,7 +162,7 @@ impl GGUFModelLoader {
                         actual: f32_data.len(),
                     });
                 }
-                upload_f32_tensor_from_slice(&tensor_info.name, dims, &f32_data, context, staging)
+                tensor_from_slice(&tensor_info.name, dims, &f32_data, context)
             }
             GGUFDataType::BF16 => {
                 let f32_data = convert_bf16_bytes(raw)?;
@@ -295,7 +172,7 @@ impl GGUFModelLoader {
                         actual: f32_data.len(),
                     });
                 }
-                upload_f32_tensor_from_slice(&tensor_info.name, dims, &f32_data, context, staging)
+                tensor_from_slice(&tensor_info.name, dims, &f32_data, context)
             }
             GGUFDataType::F64 => {
                 let f32_data = convert_f64_bytes(raw)?;
@@ -305,7 +182,7 @@ impl GGUFModelLoader {
                         actual: f32_data.len(),
                     });
                 }
-                upload_f32_tensor_from_slice(&tensor_info.name, dims, &f32_data, context, staging)
+                tensor_from_slice(&tensor_info.name, dims, &f32_data, context)
             }
             GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
                 #[cfg(target_arch = "aarch64")]
@@ -321,13 +198,36 @@ impl GGUFModelLoader {
                         actual: dequant.len(),
                     });
                 }
-                upload_f32_tensor_from_slice(&tensor_info.name, dims, &dequant, context, staging)
+                tensor_from_slice(&tensor_info.name, dims, &dequant, context)
             }
             _ => Err(GGUFError::InvalidTensorData(format!(
                 "Unsupported tensor data type: {:?}",
                 tensor_info.data_type
             ))),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn convert_f32_bytes_handles_misaligned_slice() {
+        let values = [1.0f32, 2.5, -3.75];
+        let mut storage = Vec::with_capacity(values.len() * std::mem::size_of::<f32>() + 2);
+        storage.push(0); // introduce a one-byte offset for misalignment
+        for value in values {
+            storage.extend_from_slice(&value.to_le_bytes());
+        }
+        storage.push(0); // padding to avoid reading past the buffer in debug modes
+
+        let start = 1;
+        let end = start + values.len() * std::mem::size_of::<f32>();
+        let misaligned = &storage[start..end];
+
+        let converted = convert_f32_bytes(misaligned).expect("misaligned slice should convert");
+        assert_eq!(converted, values);
     }
 }
 

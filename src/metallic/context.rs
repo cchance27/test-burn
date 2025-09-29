@@ -417,11 +417,11 @@ impl Context {
         let repeated_k_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(repeated_dims.clone())?;
         let repeated_v_allocation = self.kv_cache_pool.alloc_tensor::<F32Element>(repeated_dims)?;
 
-        let dtype = k_allocation.dtype;
-        let element_size = k_allocation.element_size;
-        debug_assert_eq!(dtype, v_allocation.dtype);
-        debug_assert_eq!(dtype, repeated_k_allocation.dtype);
-        debug_assert_eq!(dtype, repeated_v_allocation.dtype);
+        let dtype = k_allocation.dtype();
+        let element_size = k_allocation.element_size();
+        debug_assert_eq!(dtype, v_allocation.dtype());
+        debug_assert_eq!(dtype, repeated_k_allocation.dtype());
+        debug_assert_eq!(dtype, repeated_v_allocation.dtype());
 
         let k = k_allocation.into_tensor();
         let v = v_allocation.into_tensor();
