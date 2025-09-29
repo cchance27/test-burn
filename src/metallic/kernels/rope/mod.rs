@@ -75,7 +75,7 @@ impl KernelInvocable for RoPEOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&input, &cos, &sin]);
+        ctx.prepare_tensors_for_active_cmd(&[&input, &cos, &sin])?;
 
         // Create the output tensor with same shape as input
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;

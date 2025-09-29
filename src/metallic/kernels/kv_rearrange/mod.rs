@@ -38,7 +38,7 @@ impl KernelInvocable for KvRearrangeOp {
         let batch = input_m / seq as usize;
         let output_dims = vec![batch * n_heads as usize, seq as usize, head_dim as usize];
 
-        ctx.prepare_tensors_for_active_cmd(&[&input]);
+        ctx.prepare_tensors_for_active_cmd(&[&input])?;
 
         let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 

@@ -43,7 +43,7 @@ impl KernelInvocable for ElemwiseAddOp {
                 b.dims(),
             )));
         }
-        ctx.prepare_tensors_for_active_cmd(&[&a, &b]);
+        ctx.prepare_tensors_for_active_cmd(&[&a, &b])?;
         let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let op = ElemwiseAdd {
             a,

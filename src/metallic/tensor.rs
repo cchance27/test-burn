@@ -12,9 +12,11 @@ use objc2_metal::{
     MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
-use std::ops::{Add, Div, Mul, Sub};
+use std::ops::{Add, Deref, Div, Mul, Sub};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 /// Supported data types for tensors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,8 +58,115 @@ impl Dtype {
 
 pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
+#[derive(Clone)]
+struct ThreadSafeBuffer {
+    inner: RetainedBuffer,
+}
+
+impl ThreadSafeBuffer {
+    fn new(inner: RetainedBuffer) -> Self {
+        Self { inner }
+    }
+
+    fn clone_inner(&self) -> RetainedBuffer {
+        self.inner.clone()
+    }
+}
+
+unsafe impl Send for ThreadSafeBuffer {}
+unsafe impl Sync for ThreadSafeBuffer {}
+
+impl Deref for ThreadSafeBuffer {
+    type Target = RetainedBuffer;
+
+    fn deref(&self) -> &Self::Target {
+        &self.inner
+    }
+}
+
 // CPU fill threshold in MB
 const DEFAULT_CPU_FILL_THRESHOLD_MB: usize = 1;
+
+#[derive(Clone)]
+struct HostAccessState {
+    staging: Option<ThreadSafeBuffer>,
+    staging_valid: bool,
+    host_dirty: bool,
+    base_offset: usize,
+    region_len: usize,
+}
+
+impl HostAccessState {
+    fn new(base_offset: usize, region_len: usize) -> Self {
+        Self {
+            staging: None,
+            staging_valid: false,
+            host_dirty: false,
+            base_offset,
+            region_len,
+        }
+    }
+
+    fn region_end(&self) -> usize {
+        self.base_offset.saturating_add(self.region_len)
+    }
+}
+
+type HostAccessRegistry = HashMap<usize, Vec<Weak<Mutex<HostAccessState>>>>;
+
+fn host_access_registry() -> &'static Mutex<HostAccessRegistry> {
+    static REGISTRY: OnceLock<Mutex<HostAccessRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn buffer_registry_key(buffer: &RetainedBuffer) -> usize {
+    Retained::as_ptr(buffer).cast::<c_void>() as usize
+}
+
+fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: usize) -> Arc<Mutex<HostAccessState>> {
+    let mut registry = host_access_registry().lock().expect("host access registry mutex poisoned");
+    let entry = registry.entry(buffer_registry_key(buffer)).or_default();
+
+    let req_start = offset;
+    let req_end = offset.saturating_add(len_bytes);
+    let mut idx = 0;
+    while idx < entry.len() {
+        if let Some(state_arc) = entry[idx].upgrade() {
+            let mut selected = false;
+            {
+                let mut state = state_arc.lock().expect("host access state mutex poisoned");
+                let state_start = state.base_offset;
+                let state_end = state.region_end();
+                if req_start >= state_start && req_end <= state_end {
+                    selected = true;
+                } else if req_end > state_start && req_start < state_end {
+                    let new_start = req_start.min(state_start);
+                    let new_end = req_end.max(state_end);
+                    if new_start != state_start || new_end != state_end {
+                        state.base_offset = new_start;
+                        state.region_len = new_end - new_start;
+                        state.staging = None;
+                        state.staging_valid = false;
+                        state.host_dirty = false;
+                    }
+                    selected = true;
+                }
+            }
+
+            if selected {
+                return state_arc;
+            }
+
+            idx += 1;
+        } else {
+            entry.remove(idx);
+        }
+    }
+
+    let state_arc = Arc::new(Mutex::new(HostAccessState::new(offset, len_bytes)));
+    entry.push(Arc::downgrade(&state_arc));
+    state_arc
+}
 
 /// A lightweight description of a tensor view that can be consumed by MPS matrix APIs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -111,6 +220,9 @@ pub struct Tensor {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
     /// Byte offset into the buffer.
     pub offset: usize,
+    host_accessible: bool,
+    host_access: Arc<Mutex<HostAccessState>>,
+    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
 
     /// The command buffer that must complete before this tensor's data is safe for host access.
     /// None indicates the tensor is already synchronized with the CPU.
@@ -212,7 +324,7 @@ impl Tensor {
 
         let compact = Tensor::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
-        ctx.prepare_tensors_for_active_cmd(&[self]);
+        ctx.prepare_tensors_for_active_cmd(&[self])?;
 
         let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
         let encoder = command_buffer
@@ -279,9 +391,18 @@ impl Tensor {
         dims: Vec<usize>,
         dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         buf: RetainedBuffer,
         offset: usize,
+        host_accessible: bool,
     ) -> Tensor {
+        let len_bytes = dims.iter().product::<usize>() * dtype.size_bytes();
+        let host_access = if host_accessible {
+            Arc::new(Mutex::new(HostAccessState::new(offset, len_bytes)))
+        } else {
+            shared_host_access_state(&buf, offset, len_bytes)
+        };
+
         Tensor {
             buf,
             dims: dims.clone(),
@@ -289,8 +410,192 @@ impl Tensor {
             dtype,
             device: device.clone(),
             offset,
+            host_accessible,
+            host_access,
+            command_queue: command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         }
+    }
+
+    fn build_view(&self, dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Tensor {
+        Tensor {
+            buf: self.buf.clone(),
+            dims,
+            strides,
+            dtype: self.dtype,
+            device: self.device.clone(),
+            offset,
+            host_accessible: self.host_accessible,
+            host_access: self.host_access.clone(),
+            command_queue: self.command_queue.clone(),
+            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
+        }
+    }
+
+    fn ensure_staging_buffer(&self) -> Result<Option<RetainedBuffer>, MetalError> {
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+        let target_size = state.region_len;
+        if target_size == 0 {
+            state.staging = None;
+            state.staging_valid = true;
+            return Ok(None);
+        }
+
+        let needs_new = match state.staging.as_ref() {
+            Some(buf) => buf.length() < target_size,
+            None => true,
+        };
+
+        if needs_new {
+            let buffer = self
+                .device
+                .newBufferWithLength_options(target_size, MTLResourceOptions::StorageModeShared)
+                .ok_or(MetalError::BufferCreationFailed(target_size))?;
+            state.staging = Some(ThreadSafeBuffer::new(buffer));
+            state.staging_valid = false;
+        }
+
+        Ok(state.staging.as_ref().map(ThreadSafeBuffer::clone_inner))
+    }
+
+    fn ensure_staging_for_read(&self) -> Result<(), MetalError> {
+        if self.host_accessible {
+            return Ok(());
+        }
+
+        let len_bytes = self.size_bytes();
+        if len_bytes == 0 {
+            return Ok(());
+        }
+
+        let staging = match self.ensure_staging_buffer()? {
+            Some(buf) => buf,
+            None => return Ok(()),
+        };
+
+        let (base_offset, region_len, skip_copy) = {
+            let state = self.host_access.lock().expect("host access state mutex poisoned");
+            let skip = state.host_dirty || state.staging_valid;
+            (state.base_offset, state.region_len, skip)
+        };
+
+        if skip_copy || region_len == 0 {
+            return Ok(());
+        }
+
+        let command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+        unsafe {
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.wait();
+
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+        state.staging_valid = true;
+        state.host_dirty = false;
+        Ok(())
+    }
+
+    fn ensure_staging_for_write(&self) -> Result<(), MetalError> {
+        if self.host_accessible {
+            return Ok(());
+        }
+
+        let len_bytes = self.size_bytes();
+        if len_bytes == 0 {
+            return Ok(());
+        }
+
+        let staging = match self.ensure_staging_buffer()? {
+            Some(buf) => buf,
+            None => return Ok(()),
+        };
+
+        let (base_offset, region_len, needs_copy) = {
+            let state = self.host_access.lock().expect("host access state mutex poisoned");
+            let needs_copy = !state.host_dirty && !state.staging_valid;
+            (state.base_offset, state.region_len, needs_copy)
+        };
+
+        if needs_copy && region_len != 0 {
+            let command_buffer = CommandBuffer::new(&self.command_queue)?;
+            let encoder = command_buffer
+                .raw()
+                .blitCommandEncoder()
+                .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+            unsafe {
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
+            }
+            encoder.endEncoding();
+            command_buffer.commit();
+            command_buffer.wait();
+
+            let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+            state.staging_valid = true;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn mark_device_dirty(&self) {
+        if self.host_accessible {
+            return;
+        }
+
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+        state.staging_valid = false;
+        state.host_dirty = false;
+    }
+
+    pub(crate) fn flush_host_writes(&self) -> Result<(), MetalError> {
+        if self.host_accessible {
+            return Ok(());
+        }
+
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+        if !state.host_dirty {
+            return Ok(());
+        }
+
+        if state.region_len == 0 {
+            state.host_dirty = false;
+            state.staging_valid = true;
+            return Ok(());
+        }
+
+        let staging = state
+            .staging
+            .as_ref()
+            .expect("staging buffer must exist when host_dirty is set")
+            .clone_inner();
+        let base_offset = state.base_offset;
+        let region_len = state.region_len;
+        drop(state);
+
+        let command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+        unsafe {
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &self.buf, base_offset, region_len);
+        }
+        encoder.endEncoding();
+        command_buffer.commit();
+        command_buffer.wait();
+
+        let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+        state.host_dirty = false;
+        state.staging_valid = true;
+        Ok(())
     }
 
     fn validate_init<'data>(dims: &[usize], init: &TensorInit<'data>) -> Result<(), MetalError> {
@@ -317,22 +622,56 @@ impl Tensor {
                 let byte_len = num_elements * std::mem::size_of::<f32>();
                 let buf = context
                     .device
-                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
+                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModePrivate)
                     .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+                Ok(Self::build_tensor(
+                    dims,
+                    Dtype::F32,
+                    &context.device,
+                    &context.command_queue,
+                    buf,
+                    0,
+                    false,
+                ))
             }
             TensorInit::CopyFrom(items) => {
                 let byte_len = std::mem::size_of_val(items);
                 let item_ptr = std::ptr::NonNull::new(items.as_ptr() as *mut c_void).ok_or(MetalError::NullPointer)?;
 
-                let buf = unsafe {
+                let dest_buf = context
+                    .device
+                    .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModePrivate)
+                    .ok_or(MetalError::BufferCreationFailed(byte_len))?;
+
+                let staging_buf = unsafe {
                     context
                         .device
                         .newBufferWithBytes_length_options(item_ptr, byte_len, MTLResourceOptions::StorageModeShared)
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 };
 
-                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+                let command_buffer = CommandBuffer::new(&context.command_queue)?;
+                let encoder = command_buffer
+                    .raw()
+                    .blitCommandEncoder()
+                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging_buf, 0, &dest_buf, 0, byte_len);
+                }
+                encoder.endEncoding();
+                command_buffer.commit();
+                command_buffer.wait();
+
+                Ok(Self::build_tensor(
+                    dims,
+                    Dtype::F32,
+                    &context.device,
+                    &context.command_queue,
+                    dest_buf,
+                    0,
+                    false,
+                ))
             }
             TensorInit::BorrowHost(data) => {
                 let byte_len = std::mem::size_of_val(data);
@@ -350,7 +689,15 @@ impl Tensor {
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 };
 
-                Ok(Self::build_tensor(dims, Dtype::F32, &context.device, buf, 0))
+                Ok(Self::build_tensor(
+                    dims,
+                    Dtype::F32,
+                    &context.device,
+                    &context.command_queue,
+                    buf,
+                    0,
+                    true,
+                ))
             }
         }
     }
@@ -397,13 +744,23 @@ impl Tensor {
         dims: Vec<usize>,
         dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         offset: usize,
+        host_accessible: bool,
     ) -> Result<Tensor, MetalError> {
         let expected_bytes = dims.iter().product::<usize>() * std::mem::size_of::<f32>();
         if offset + expected_bytes > buffer.length() {
             return Err(MetalError::InvalidShape("buffer too small for dims/offset".into()));
         }
-        Ok(Self::build_tensor(dims, dtype, device, buffer, offset))
+        Ok(Self::build_tensor(
+            dims,
+            dtype,
+            device,
+            command_queue,
+            buffer,
+            offset,
+            host_accessible,
+        ))
     }
 
     fn ensure_ready(&self) {
@@ -419,8 +776,28 @@ impl Tensor {
     #[inline]
     pub fn as_slice(&self) -> &[f32] {
         self.ensure_ready();
-        let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const f32;
-        unsafe { std::slice::from_raw_parts(ptr, self.len()) }
+        if self.host_accessible {
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const f32;
+            unsafe { std::slice::from_raw_parts(ptr, self.len()) }
+        } else {
+            self.ensure_staging_for_read()
+                .expect("failed to populate staging buffer for tensor read");
+
+            let len = self.len();
+            if len == 0 {
+                return &[];
+            }
+
+            let ptr = {
+                let state = self.host_access.lock().expect("host access state mutex poisoned");
+                let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
+                let byte_offset = self.offset.saturating_sub(state.base_offset);
+                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<f32>()));
+                unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const f32 }
+            };
+
+            unsafe { std::slice::from_raw_parts(ptr, len) }
+        }
     }
 
     /// Copy the tensor contents to a host Vec.
@@ -439,8 +816,31 @@ impl Tensor {
     /// Mutable host view of the buffer. Ensure no concurrent GPU access.
     pub fn as_mut_slice(&mut self) -> &mut [f32] {
         self.ensure_ready();
-        let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut f32;
-        unsafe { std::slice::from_raw_parts_mut(ptr, self.len()) }
+        if self.host_accessible {
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut f32;
+            unsafe { std::slice::from_raw_parts_mut(ptr, self.len()) }
+        } else {
+            self.ensure_staging_for_write()
+                .expect("failed to prepare staging buffer for tensor write");
+
+            let len = self.len();
+            if len == 0 {
+                return unsafe { std::slice::from_raw_parts_mut(std::ptr::NonNull::<f32>::dangling().as_ptr(), 0) };
+            }
+
+            let ptr = {
+                let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+                let staging = state.staging.as_ref().expect("staging buffer must exist for host write").clone();
+                state.host_dirty = true;
+                state.staging_valid = true;
+                let byte_offset = self.offset.saturating_sub(state.base_offset);
+                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<f32>()));
+                drop(state);
+                unsafe { (staging.contents().as_ptr() as *mut u8).add(byte_offset) as *mut f32 }
+            };
+
+            unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+        }
     }
 
     #[inline]
@@ -450,15 +850,7 @@ impl Tensor {
 
     #[inline]
     pub fn flatten(&self) -> Tensor {
-        Tensor {
-            buf: self.buf.clone(),
-            dims: vec![self.len()],
-            strides: vec![1],
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: self.offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        }
+        self.build_view(vec![self.len()], vec![1], self.offset)
     }
 
     pub fn reshape(&self, new_dims: Vec<usize>) -> Result<Tensor, MetalError> {
@@ -470,15 +862,7 @@ impl Tensor {
                 actual: actual_elements,
             });
         }
-        Ok(Tensor {
-            buf: self.buf.clone(),
-            dims: new_dims.clone(),
-            strides: Self::compute_strides(&new_dims),
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: self.offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        })
+        Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), self.offset))
     }
 
     pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Tensor, MetalError> {
@@ -517,15 +901,7 @@ impl Tensor {
             new_offset += start * self.strides[0] * self.dtype.size_bytes();
         }
 
-        Ok(Tensor {
-            buf: self.buf.clone(),
-            dims: new_dims.clone(),
-            strides: Self::compute_strides(&new_dims), // Re-compute for correctness.
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: new_offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        })
+        Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), new_offset))
     }
 
     /// Allocate and zero-initialize a tensor of the given shape.
@@ -571,6 +947,7 @@ impl Tensor {
         }
         let mut tensor = context.call::<ArangeOp>(num_elements)?;
         tensor.dims = dims;
+        tensor.strides = Self::compute_strides(&tensor.dims);
         Ok(tensor)
     }
 
@@ -620,6 +997,7 @@ impl Tensor {
         }
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -664,6 +1042,7 @@ impl Tensor {
         encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -710,6 +1089,7 @@ impl Tensor {
         encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -758,6 +1138,7 @@ impl Tensor {
         encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
+        tensor.mark_device_dirty();
 
         Ok(tensor)
     }
@@ -903,6 +1284,9 @@ impl Tensor {
             dtype: a.dtype,
             device: a.device.clone(),
             offset: 0,
+            host_accessible: true,
+            host_access: Arc::new(Mutex::new(HostAccessState::new(0, byte_len))),
+            command_queue: a.command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         };
         let aslice = a.as_slice();
@@ -934,15 +1318,7 @@ impl Tensor {
             Self::compute_strides(&self.dims[1..])
         };
 
-        Ok(Tensor {
-            buf: self.buf.clone(),
-            dims: self.dims[1..].to_vec(),
-            strides: new_strides,
-            dtype: self.dtype,
-            device: self.device.clone(),
-            offset: new_offset,
-            defining_cmd_buffer: self.defining_cmd_buffer.clone(),
-        })
+        Ok(self.build_view(self.dims[1..].to_vec(), new_strides, new_offset))
     }
 
     /// Check tensor values for numerical stability issues

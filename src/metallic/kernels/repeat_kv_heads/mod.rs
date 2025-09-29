@@ -95,7 +95,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&input]);
+        ctx.prepare_tensors_for_active_cmd(&[&input])?;
 
         let output_dims = vec![(batch * n_heads) as usize, seq as usize, head_dim as usize];
         let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;

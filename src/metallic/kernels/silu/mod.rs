@@ -25,7 +25,7 @@ impl KernelInvocable for SiluOp {
         _cache: std::option::Option<&mut crate::metallic::resource_cache::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor), MetalError> {
         let input = input;
-        ctx.prepare_tensors_for_active_cmd(&[&input]);
+        ctx.prepare_tensors_for_active_cmd(&[&input])?;
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 

@@ -60,7 +60,7 @@ fn execute_swiglu_logic(
     ffn_down_bias: &Tensor,
     mut cache: Option<&mut ResourceCache>,
 ) -> Result<Tensor, MetalError> {
-    ctx.prepare_tensors_for_active_cmd(&[x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias]);
+    ctx.prepare_tensors_for_active_cmd(&[x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias])?;
     let d_model = x_normed_flat.dims()[1];
 
     // gate_proj: [m, d_model] @ weight -> [m, ff_dim]

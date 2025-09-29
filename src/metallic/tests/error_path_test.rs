@@ -176,7 +176,9 @@ fn test_tensor_from_existing_buffer_invalid_offset() {
         vec![1, 2], // Smaller dimensions
         Dtype::F32,
         &context.device,
+        &context.command_queue,
         invalid_offset,
+        false,
     );
 
     assert!(result.is_err(), "Tensor creation should fail with invalid offset");

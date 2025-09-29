@@ -2,7 +2,7 @@ use super::{MetalError, Tensor};
 use crate::metallic::tensor::Dtype;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLDevice, MTLResourceOptions};
 use std::cell::RefCell;
 use std::rc::Rc;
 
@@ -23,6 +23,7 @@ pub struct MemoryPool {
     chunks: Vec<PoolChunk>,
     current_chunk: usize,
     device: Retained<ProtocolObject<dyn MTLDevice>>,
+    command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     // Metrics counters
     pub pooled_bytes_allocated: usize,
     pub pooled_allocations: usize,
@@ -46,16 +47,24 @@ impl PooledAllocation {
 
 impl MemoryPool {
     /// Creates a new memory pool with an initial chunk.
-    pub fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<Self, MetalError> {
-        Self::with_limit(device, DEFAULT_MAX_POOL_SIZE)
+    pub fn new(
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
+    ) -> Result<Self, MetalError> {
+        Self::with_limit(device, command_queue, DEFAULT_MAX_POOL_SIZE)
     }
 
     /// Creates a new memory pool with a caller-provided maximum capacity.
-    pub fn with_limit(device: &Retained<ProtocolObject<dyn MTLDevice>>, max_pool_size: usize) -> Result<Self, MetalError> {
+    pub fn with_limit(
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        max_pool_size: usize,
+    ) -> Result<Self, MetalError> {
         let mut pool = Self {
             chunks: Vec::new(),
             current_chunk: 0,
             device: device.clone(),
+            command_queue: command_queue.clone(),
             pooled_bytes_allocated: 0,
             pooled_allocations: 0,
             pool_resets: 0,
@@ -86,8 +95,15 @@ impl MemoryPool {
                 self.pooled_bytes_allocated += aligned_size;
                 self.pooled_allocations += 1;
 
-                let tensor =
-                    Tensor::from_existing_buffer(self.chunks[chunk_idx].buffer.clone(), dims.clone(), dtype, &self.device, offset)?;
+                let tensor = Tensor::from_existing_buffer(
+                    self.chunks[chunk_idx].buffer.clone(),
+                    dims.clone(),
+                    dtype,
+                    &self.device,
+                    &self.command_queue,
+                    offset,
+                    false,
+                )?;
 
                 return Ok(PooledAllocation {
                     dtype,
@@ -125,7 +141,15 @@ impl MemoryPool {
         self.pooled_bytes_allocated += aligned_size;
         self.pooled_allocations += 1;
 
-        let tensor = Tensor::from_existing_buffer(self.chunks[chunk_idx].buffer.clone(), dims.clone(), dtype, &self.device, offset)?;
+        let tensor = Tensor::from_existing_buffer(
+            self.chunks[chunk_idx].buffer.clone(),
+            dims.clone(),
+            dtype,
+            &self.device,
+            &self.command_queue,
+            offset,
+            false,
+        )?;
 
         Ok(PooledAllocation {
             dtype,
@@ -164,7 +188,7 @@ impl MemoryPool {
     fn allocate_new_chunk(&mut self, size: usize) -> Result<(), MetalError> {
         let buffer = self
             .device
-            .newBufferWithLength_options(size, MTLResourceOptions::StorageModeShared)
+            .newBufferWithLength_options(size, MTLResourceOptions::StorageModePrivate)
             .ok_or(MetalError::BufferCreationFailed(size))?;
 
         self.chunks.push(PoolChunk {

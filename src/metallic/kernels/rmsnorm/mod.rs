@@ -42,7 +42,7 @@ impl KernelInvocable for RMSNormOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&input, &gamma]);
+        ctx.prepare_tensors_for_active_cmd(&[&input, &gamma])?;
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 

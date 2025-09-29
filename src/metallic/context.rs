@@ -87,8 +87,8 @@ impl Context {
     pub fn new() -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
-        let pool = MemoryPool::new(&device)?;
-        let kv_cache_pool = MemoryPool::with_limit(&device, KV_CACHE_POOL_MAX_BYTES)?;
+        let pool = MemoryPool::new(&device, &command_queue)?;
+        let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         Ok(Context {
             device,
             command_queue,
@@ -274,13 +274,13 @@ impl Context {
 
         let linear = self.matmul(x_flat, fused_weight, false, false)?;
         let bias = fused_bias.clone();
-        self.prepare_tensors_for_active_cmd(&[&linear, &bias]);
+        self.prepare_tensors_for_active_cmd(&[&linear, &bias])?;
 
         let q_out = Tensor::new(vec![m, d_model], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
         let k_out = Tensor::new(vec![m, kv_dim], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
         let v_out = Tensor::new(vec![m, kv_dim], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
 
-        self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out]);
+        self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out])?;
 
         self.ensure_active_cmd_buffer()?;
         let pipeline = self.kernel_manager.get_pipeline(KernelFunction::FusedQkvBiasSplit, &self.device)?;
@@ -497,7 +497,7 @@ impl Context {
         };
 
         if zero_ready {
-            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src]);
+            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src])?;
             self.ensure_active_cmd_buffer()?;
             let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
@@ -599,7 +599,9 @@ impl Context {
                 entry.zeroing_complete = false;
                 if let Some(active) = active_cmd_clone {
                     entry.k.defining_cmd_buffer.borrow_mut().replace(active.clone());
+                    entry.k.mark_device_dirty();
                     entry.v.defining_cmd_buffer.borrow_mut().replace(active);
+                    entry.v.mark_device_dirty();
                 }
             }
 
@@ -627,7 +629,7 @@ impl Context {
 
         let k_cache = k_cache_ref;
         let v_cache = v_cache_ref;
-        self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src]);
+        self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src])?;
 
         let expected_bh = k_cache.dims()[0];
         let expected_hd = k_cache.dims()[2];
@@ -766,7 +768,7 @@ impl Context {
         };
 
         if zero_ready {
-            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src]);
+            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src])?;
             self.ensure_active_cmd_buffer()?;
             let encoder = {
                 let cmd_buf = self.active_command_buffer_mut()?;
@@ -856,7 +858,9 @@ impl Context {
                 entry.zeroing_complete = false;
                 if let Some(active) = active_cmd_clone {
                     entry.repeated_k.defining_cmd_buffer.borrow_mut().replace(active.clone());
+                    entry.repeated_k.mark_device_dirty();
                     entry.repeated_v.defining_cmd_buffer.borrow_mut().replace(active);
+                    entry.repeated_v.mark_device_dirty();
                 }
             }
 
@@ -880,7 +884,7 @@ impl Context {
         let repeated_k = entry.repeated_k.clone();
         let repeated_v = entry.repeated_v.clone();
 
-        self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src]);
+        self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src])?;
 
         let repeated_heads_expected = canonical_heads
             .checked_mul(group_size)
@@ -985,7 +989,7 @@ impl Context {
         view.dims = vec![dims[0], active_steps, dims[2]];
         view.strides = vec![cache.strides[0], cache.strides[1], cache.strides[2]];
 
-        self.prepare_tensors_for_active_cmd(&[&view]);
+        self.prepare_tensors_for_active_cmd(&[&view])?;
 
         Ok((view, dims[1]))
     }
@@ -1088,32 +1092,36 @@ impl Context {
     }
 
     pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor) {
+        tensor.mark_device_dirty();
         if let Some(active) = &self.active_cmd_buffer {
             tensor.defining_cmd_buffer.borrow_mut().replace(active.clone());
         }
     }
 
-    fn prepare_tensor_for_active_cmd(&mut self, tensor: &Tensor) {
+    fn prepare_tensor_for_active_cmd(&mut self, tensor: &Tensor) -> Result<(), MetalError> {
+        tensor.flush_host_writes()?;
         let maybe_dep = tensor.defining_cmd_buffer.borrow().clone();
         if let Some(dep) = maybe_dep {
             if self.active_cmd_buffer.as_ref().map(|active| dep.ptr_eq(active)).unwrap_or(false) {
-                return;
+                return Ok(());
             }
 
             if dep.is_completed() {
                 tensor.defining_cmd_buffer.borrow_mut().take();
-                return;
+                return Ok(());
             }
 
             dep.commit();
             dep.wait();
             tensor.defining_cmd_buffer.borrow_mut().take();
         }
+        Ok(())
     }
 
-    pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &[&Tensor]) {
+    pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &[&Tensor]) -> Result<(), MetalError> {
         for tensor in tensors {
-            self.prepare_tensor_for_active_cmd(tensor);
+            self.prepare_tensor_for_active_cmd(tensor)?;
         }
+        Ok(())
     }
 }
