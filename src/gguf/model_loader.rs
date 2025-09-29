@@ -67,7 +67,7 @@ fn align_up(value: usize, alignment: usize) -> usize {
     if value == 0 {
         0
     } else {
-        ((value + alignment - 1) / alignment) * alignment
+        value.div_ceil(alignment) * alignment
     }
 }
 
@@ -201,7 +201,7 @@ fn upload_f32_tensor_from_slice(
     upload_f32_tensor_from_bytes(tensor_name, dims, bytes, context, staging)
 }
 
-fn adjust_embedding_dims(name: &str, dims: &mut Vec<usize>) {
+fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
     if name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
         dims.swap(0, 1);
     }
