@@ -58,6 +58,13 @@ fn repeat_kv_heads<T: TensorElement>(
     Ok(output)
 }
 
+/// Adjust this alias to run the correctness suite at different precisions (e.g. `F16Element`).
+type TestElement = F32Element;
+
+fn take_first_as_f32<T: TensorElement>(slice: &[T::Scalar], count: usize) -> Vec<f32> {
+    slice.iter().take(count).map(|&value| T::to_f32(value)).collect()
+}
+
 fn load_npy_tensor<P: AsRef<Path>>(path: P) -> (ndarray::ArrayD<f32>, Vec<usize>) {
     let reader = std::fs::File::open(path).expect("Failed to open npy file");
     let arr = ArrayD::<f32>::read_npy(reader).expect("Failed to read npy data");
@@ -73,7 +80,13 @@ fn squeeze_leading_batch(shape: &[usize]) -> Vec<usize> {
     }
 }
 
-fn compare_tensor_summary(name: &str, rust_tensor: &Tensor<F32Element>, py_data: &ArrayD<f32>, epsilon: f32, significant_threshold: f32) {
+fn compare_tensor_summary<T: TensorElement>(
+    name: &str,
+    rust_tensor: &Tensor<T>,
+    py_data: &ArrayD<f32>,
+    epsilon: f32,
+    significant_threshold: f32,
+) {
     let rust_slice = rust_tensor.as_slice();
     let py_slice = py_data.as_slice().expect("Failed to get slice from ndarray for comparison");
     assert_eq!(rust_slice.len(), py_slice.len(), "{} length mismatch", name);
@@ -81,6 +94,8 @@ fn compare_tensor_summary(name: &str, rust_tensor: &Tensor<F32Element>, py_data:
     let mut diff_count = 0usize;
     let mut max_diff = 0f32;
     for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+        let r = T::to_f32(*r);
+        let p = *p;
         let diff = (r - p).abs();
         if diff > significant_threshold {
             if diff_count < 10 {
@@ -104,7 +119,12 @@ fn compare_tensor_summary(name: &str, rust_tensor: &Tensor<F32Element>, py_data:
     assert_relative_eq!(max_diff, 0.0, epsilon = epsilon);
 }
 
-fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to: usize, ctx: &mut Context<F32Element>) -> Result<Tensor<F32Element>, MetalError> {
+fn run_blocks_up_to<T: TensorElement>(
+    model: &Qwen25<T>,
+    mut x: Tensor<T>,
+    up_to: usize,
+    ctx: &mut Context<T>,
+) -> Result<Tensor<T>, MetalError> {
     if up_to == 0 {
         return Ok(x);
     }
@@ -176,8 +196,8 @@ fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to
                 sin_buf[idx] = angle.sin();
             }
         }
-        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::<F32Element>::CopyFrom(&cos_buf))?;
-        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::<F32Element>::CopyFrom(&sin_buf))?;
+        let cos_q = Tensor::<T>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &cos_buf)?;
+        let sin_q = Tensor::<T>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &sin_buf)?;
         let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -195,16 +215,8 @@ fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to
                 sin_buf_k[idx] = angle.sin();
             }
         }
-        let cos_k = Tensor::new(
-            vec![seq, dim_half_k],
-            TensorStorage::Dedicated(ctx),
-            TensorInit::CopyFrom(&cos_buf_k),
-        )?;
-        let sin_k = Tensor::new(
-            vec![seq, dim_half_k],
-            TensorStorage::Dedicated(ctx),
-            TensorInit::CopyFrom(&sin_buf_k),
-        )?;
+        let cos_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &cos_buf_k)?;
+        let sin_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &sin_buf_k)?;
         let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -257,7 +269,7 @@ fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to
 #[test]
 fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // --- Setup ---
-    let mut ctx = Context::<F32Element>::new()?;
+    let mut ctx = Context::<TestElement>::new()?;
 
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
@@ -265,7 +277,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
     let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let embed_slice = model.embed_weight.as_slice();
-    println!("Loaded embed first 10: {:?}", &embed_slice[0..10]);
+    println!("Loaded embed first 10: {:?}", take_first_as_f32::<TestElement>(embed_slice, 10));
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
     let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
 
@@ -297,6 +309,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_embeddings_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if diff_count < 10 {
@@ -322,7 +336,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let x_normed_attn = ctx.call::<RMSNormOp>((rust_embeddings.clone(), block0.attn_norm_gamma.clone(), model.config.d_model as u32))?;
     ctx.synchronize();
     let rust_attn_norm_slice = x_normed_attn.as_slice();
-    println!("Rust first attn norm first 10: {:?}", &rust_attn_norm_slice[0..10]);
+    println!(
+        "Rust first attn norm first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_attn_norm_slice, 10)
+    );
 
     let (py_attn_norm_data, py_attn_norm_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_norm.npy"));
 
@@ -337,6 +354,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_attn_norm_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if attn_norm_diff_count < 10 {
@@ -371,7 +390,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         ctx.fused_qkv_projection(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, d_model, block0.kv_dim)?;
     ctx.synchronize();
     let rust_q_proj_slice = q_mat.as_slice();
-    println!("Rust first Q proj first 10: {:?}", &rust_q_proj_slice[0..10]);
+    println!(
+        "Rust first Q proj first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_q_proj_slice, 10)
+    );
 
     let (py_q_proj_data, py_q_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__q_proj_out.npy"));
 
@@ -408,6 +430,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_q_proj_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if q_proj_diff_count < 10 {
@@ -436,7 +460,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("--- 4. Testing First Block K Projection ---");
     let k_mat = k_mat.clone();
     let rust_k_proj_slice = k_mat.as_slice();
-    println!("Rust first K proj first 10: {:?}", &rust_k_proj_slice[0..10]);
+    println!(
+        "Rust first K proj first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_k_proj_slice, 10)
+    );
 
     let (py_k_proj_data, py_k_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__k_proj_out.npy"));
 
@@ -473,6 +500,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_k_proj_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if k_proj_diff_count < 10 {
@@ -501,7 +530,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("--- 5. Testing First Block V Projection ---");
     let v_mat = v_mat.clone();
     let rust_v_proj_slice = v_mat.as_slice();
-    println!("Rust first V proj first 10: {:?}", &rust_v_proj_slice[0..10]);
+    println!(
+        "Rust first V proj first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_v_proj_slice, 10)
+    );
 
     let (py_v_proj_data, py_v_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__v_proj_out.npy"));
 
@@ -538,6 +570,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_v_proj_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if v_proj_diff_count < 10 {
@@ -622,8 +656,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
-    let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
+    let cos_q = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &cos_buf)?;
+    let sin_q = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &sin_buf)?;
     let q_heads_after_rope = {
         let _out = Tensor::new(q_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?
@@ -644,16 +678,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&cos_buf_k),
-    )?;
-    let sin_k = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&sin_buf_k),
-    )?;
+    let cos_k = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &cos_buf_k)?;
+    let sin_k = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &sin_buf_k)?;
     let k_heads_after_rope = {
         let _out = Tensor::new(k_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0))?
@@ -707,6 +733,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_attn_out_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-4 {
             if attn_out_diff_count < 10 {
@@ -836,11 +864,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let (py_down_proj_data, py_down_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__down_proj_out.npy"));
 
     // Function to compare rust and py tensors without assertion (diagnostic)
-    fn compare_tensors_no_assert(rust_t: &Tensor<F32Element>, py_data: &ArrayD<f32>, name: &str) -> f32 {
+    fn compare_tensors_no_assert<T: TensorElement>(rust_t: &Tensor<T>, py_data: &ArrayD<f32>, name: &str) -> f32 {
         let rust_slice = rust_t.as_slice();
         let py_slice = py_data.as_slice().unwrap();
         let mut max_diff = 0.0;
         for (r, p) in rust_slice.iter().zip(py_slice.iter()) {
+            let r = T::to_f32(*r);
+            let p = *p;
             let diff = (r - p).abs();
             if diff > max_diff {
                 max_diff = diff;
@@ -855,12 +885,14 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let _ = compare_tensors_no_assert(&up_proj_out, &py_gate_proj_data, "Up vs Py Gate (diag)");
 
     // Function to compare rust and py tensors
-    fn compare_tensors(rust_t: &Tensor<F32Element>, py_data: &ArrayD<f32>, _py_shape: &[usize], name: &str, epsilon: f32) {
+    fn compare_tensors<T: TensorElement>(rust_t: &Tensor<T>, py_data: &ArrayD<f32>, name: &str, epsilon: f32) {
         let rust_slice = rust_t.as_slice();
         let py_slice = py_data.as_slice().unwrap();
         let mut diff_count = 0;
         let mut max_diff = 0.0;
         for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+            let r = T::to_f32(*r);
+            let p = *p;
             let diff = (r - p).abs();
             if diff > 1e-4 {
                 if diff_count < 10 {
@@ -883,11 +915,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
 
     // Compare each
-    compare_tensors(&gate_proj_out, &py_gate_proj_data, &py_gate_proj_shape, "Gate proj", 1e-3);
-    compare_tensors(&up_proj_out, &py_up_proj_data, &py_up_proj_shape, "Up proj", 1e-3);
-    compare_tensors(&silu_out, &py_silu_data, &py_silu_shape, "Silu", 1e-3);
-    compare_tensors(&mul_out, &py_mul_data, &py_mul_shape, "Mul", 1e-3);
-    compare_tensors(&down_proj_out, &py_down_proj_data, &py_down_proj_shape, "Down proj", 1e-3);
+    compare_tensors(&gate_proj_out, &py_gate_proj_data, "Gate proj", 1e-3);
+    compare_tensors(&up_proj_out, &py_up_proj_data, "Up proj", 1e-3);
+    compare_tensors(&silu_out, &py_silu_data, "Silu", 1e-3);
+    compare_tensors(&mul_out, &py_mul_data, "Mul", 1e-3);
+    compare_tensors(&down_proj_out, &py_down_proj_data, "Down proj", 1e-3);
 
     // Existing mlp_out load and comparison follows
     // Load PyTorch mlp_out (captured directly from the MLP module, pre-residual)
@@ -922,6 +954,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         let mut mlp_out_diff_count = 0;
         let mut mlp_out_max_diff = 0.0;
         for (i, (rust_val, py_val)) in rust_mlp_out_slice.iter().zip(py_expected_residual.iter()).enumerate() {
+            let rust_val = TestElement::to_f32(*rust_val);
+            let py_val = *py_val;
             let diff = (rust_val - py_val).abs();
             if diff > 1e-4 {
                 if mlp_out_diff_count < 10 {
@@ -966,6 +1000,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_hidden_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-3 {
             if hidden_diff_count < 10 {
@@ -1005,6 +1041,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .zip(py_logits_data.as_slice().expect("Failed to get slice from ndarray"))
         .enumerate()
     {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-3 {
             if logits_diff_count < 10 {
@@ -1125,8 +1163,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q_last = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
-    let sin_q_last = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
+    let cos_q_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &cos_buf)?;
+    let sin_q_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &sin_buf)?;
     let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0))? };
     ctx.synchronize();
 
@@ -1143,16 +1181,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k_last = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&cos_buf_k),
-    )?;
-    let sin_k_last = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&sin_buf_k),
-    )?;
+    let cos_k_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &cos_buf_k)?;
+    let sin_k_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &sin_buf_k)?;
     let k_heads_after_rope_last = {
         let _out = Tensor::new(
             k_heads_last.dims().to_vec(),
@@ -1366,7 +1396,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
 #[test]
 fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::<F32Element>::new()?;
+    let mut ctx = Context::<TestElement>::new()?;
 
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
@@ -1424,7 +1454,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         let prefix_embedding = model.embed(prefix, &mut ctx)?;
         let prefix_hidden = model.forward(&prefix_embedding, &mut ctx)?;
         let prefix_logits_tensor = model.output(&prefix_hidden, &mut ctx)?;
-        let prefix_logits = prefix_logits_tensor.to_vec();
+        let prefix_logits = prefix_logits_tensor.to_f32_vec();
 
         let start = pos * vocab_size;
         let end = start + vocab_size;
@@ -1460,7 +1490,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         let token_embedding = model.embed(&[token_id], &mut ctx)?;
         let hidden_state = model.forward_step(&token_embedding, pos, &mut ctx)?;
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
-        let kv_logits = logits_tensor.to_vec();
+        let kv_logits = logits_tensor.to_f32_vec();
 
         assert_eq!(kv_logits.len(), vocab_size, "forward_step logits should be a single vocab slice");
 
