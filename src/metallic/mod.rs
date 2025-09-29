@@ -25,5 +25,4 @@ pub mod models;
 
 pub mod kernels;
 
-#[cfg(test)]
 mod tests;

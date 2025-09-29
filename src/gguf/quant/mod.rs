@@ -35,7 +35,6 @@ pub fn dequantize_q8(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, B
 }
 
 // Benchmark modules
-#[cfg(test)]
 mod tests;
 
 // Converting between GGUFTensors and Metallic Tensors

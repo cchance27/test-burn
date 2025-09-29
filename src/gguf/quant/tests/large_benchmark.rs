@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 
 /// Benchmark the Q8 dequantization performance with large data

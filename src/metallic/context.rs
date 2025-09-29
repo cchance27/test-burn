@@ -56,6 +56,7 @@ pub(crate) struct KvCacheEntry {
     pub v: super::Tensor,
     pub repeated_k: super::Tensor,
     pub repeated_v: super::Tensor,
+    #[allow(dead_code)]
     pub dtype: Dtype,
     pub element_size: usize,
     pub zeroing_complete: bool,

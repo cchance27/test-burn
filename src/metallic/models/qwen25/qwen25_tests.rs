@@ -1,3 +1,4 @@
+#![cfg(test)]
 use crate::metallic::instrumentation::new_latency_collector;
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{TensorInit, TensorStorage};

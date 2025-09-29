@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Benchmark for Q8 quantization operations
 use crate::gguf::GGUFDataType;
 use crate::gguf::quant::q8;

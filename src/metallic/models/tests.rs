@@ -1,3 +1,4 @@
+#![cfg(test)]
 use super::*;
 use crate::metallic::{Context, MetalError};
 use crate::metallic::{Operation, resource_cache::ResourceCache};
