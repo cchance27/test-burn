@@ -1,4 +1,6 @@
 #![allow(dead_code)]
+mod dtypes;
+
 use super::{Context, MetalError, operation::CommandBuffer};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
@@ -6,6 +8,7 @@ use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
 use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
 use crate::metallic::kernels::elemwise_sub::ElemwiseSubOp;
 use crate::metallic::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
+pub use dtypes::*;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLComputeCommandEncoder,
@@ -14,47 +17,10 @@ use objc2_metal::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::marker::PhantomData;
 use std::ops::{Add, Deref, Div, Mul, Sub};
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-
-/// Supported data types for tensors
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dtype {
-    F32,
-    F16,
-    BF16,
-    I32,
-    I64,
-    U32,
-    U8,
-}
-
-impl Dtype {
-    /// Size in bytes for this data type
-    pub fn size_bytes(&self) -> usize {
-        match self {
-            Dtype::F32 => 4,
-            Dtype::F16 | Dtype::BF16 => 2,
-            Dtype::I32 | Dtype::U32 => 4,
-            Dtype::I64 => 8,
-            Dtype::U8 => 1,
-        }
-    }
-
-    /// Metal format string for this data type
-    pub fn metal_format(&self) -> &'static str {
-        match self {
-            Dtype::F32 => "float",
-            Dtype::F16 => "half",
-            Dtype::BF16 => "bfloat",
-            Dtype::I32 => "int",
-            Dtype::I64 => "long",
-            Dtype::U32 => "uint",
-            Dtype::U8 => "uchar",
-        }
-    }
-}
 
 pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
@@ -201,14 +167,14 @@ pub enum TensorStorage<'ctx> {
 /// * [`TensorInit::CopyFrom`] copies the provided slice into the allocation.
 /// * [`TensorInit::BorrowHost`] wraps an existing host slice without copying
 ///   and therefore requires dedicated storage.
-pub enum TensorInit<'data> {
+pub enum TensorInit<'data, T: TensorElement> {
     Uninitialized,
-    CopyFrom(&'data [f32]),
-    BorrowHost(&'data [f32]),
+    CopyFrom(&'data [T::Scalar]),
+    BorrowHost(&'data [T::Scalar]),
 }
 
 #[derive(Clone)]
-pub struct Tensor {
+pub struct Tensor<T: TensorElement> {
     pub buf: RetainedBuffer,
     /// Shape of the tensor in elements (e.g. [batch, seq_q, dim])
     pub dims: Vec<usize>,
@@ -227,9 +193,14 @@ pub struct Tensor {
     /// The command buffer that must complete before this tensor's data is safe for host access.
     /// None indicates the tensor is already synchronized with the CPU.
     pub(crate) defining_cmd_buffer: Rc<RefCell<Option<CommandBuffer>>>,
+    marker: PhantomData<T>,
 }
 
-impl Tensor {
+pub type TensorF32 = Tensor<F32Element>;
+pub type TensorF16 = Tensor<F16Element>;
+pub type TensorBF16 = Tensor<BF16Element>;
+
+impl<T: TensorElement> Tensor<T> {
     #[inline]
     pub fn size_bytes(&self) -> usize {
         self.dims.iter().product::<usize>() * self.dtype.size_bytes()
@@ -314,7 +285,7 @@ impl Tensor {
     /// the first matrix in each batch may begin `matrix_bytes` bytes apart even if only a
     /// subset of the logical rows are active.  Batched MPS operations require each matrix to
     /// be tightly packed, so this helper materializes a compact copy when padding is present.
-    pub fn ensure_mps_contiguous_batch(&self, ctx: &mut Context) -> Result<(Tensor, MpsMatrixBatchView), MetalError> {
+    pub fn ensure_mps_contiguous_batch(&self, ctx: &mut Context) -> Result<(Self, MpsMatrixBatchView), MetalError> {
         let view = self.as_mps_matrix_batch_view()?;
 
         let needs_copy = view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes;
@@ -322,7 +293,7 @@ impl Tensor {
             return Ok((self.clone(), view));
         }
 
-        let compact = Tensor::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+        let compact = Self::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         ctx.prepare_tensors_for_active_cmd(&[self])?;
 
@@ -373,7 +344,7 @@ impl Tensor {
 
     /// Helper function to bind a tensor to a compute encoder with correct offset
     #[inline]
-    fn bind_tensor(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, tensor: &Tensor) {
+    fn bind_tensor(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, tensor: &Self) {
         set_buffer(encoder, index, &tensor.buf, tensor.offset);
     }
 
@@ -389,13 +360,13 @@ impl Tensor {
 
     fn build_tensor(
         dims: Vec<usize>,
-        dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         buf: RetainedBuffer,
         offset: usize,
         host_accessible: bool,
-    ) -> Tensor {
+    ) -> Self {
+        let dtype = T::DTYPE;
         let len_bytes = dims.iter().product::<usize>() * dtype.size_bytes();
         let host_access = if host_accessible {
             Arc::new(Mutex::new(HostAccessState::new(offset, len_bytes)))
@@ -403,7 +374,7 @@ impl Tensor {
             shared_host_access_state(&buf, offset, len_bytes)
         };
 
-        Tensor {
+        Self {
             buf,
             dims: dims.clone(),
             strides: Self::compute_strides(&dims),
@@ -414,11 +385,12 @@ impl Tensor {
             host_access,
             command_queue: command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
+            marker: PhantomData,
         }
     }
 
-    fn build_view(&self, dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Tensor {
-        Tensor {
+    fn build_view(&self, dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Self {
+        Self {
             buf: self.buf.clone(),
             dims,
             strides,
@@ -429,6 +401,7 @@ impl Tensor {
             host_access: self.host_access.clone(),
             command_queue: self.command_queue.clone(),
             defining_cmd_buffer: self.defining_cmd_buffer.clone(),
+            marker: PhantomData,
         }
     }
 
@@ -598,7 +571,7 @@ impl Tensor {
         Ok(())
     }
 
-    fn validate_init<'data>(dims: &[usize], init: &TensorInit<'data>) -> Result<(), MetalError> {
+    fn validate_init<'data>(dims: &[usize], init: &TensorInit<'data, T>) -> Result<(), MetalError> {
         let expected_elements = dims.iter().product::<usize>();
         match init {
             TensorInit::Uninitialized => Ok(()),
@@ -615,24 +588,16 @@ impl Tensor {
         }
     }
 
-    fn new_dedicated<'data>(dims: Vec<usize>, context: &Context, init: TensorInit<'data>) -> Result<Tensor, MetalError> {
+    fn new_dedicated<'data>(dims: Vec<usize>, context: &Context, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
         match init {
             TensorInit::Uninitialized => {
                 let num_elements = dims.iter().product::<usize>();
-                let byte_len = num_elements * std::mem::size_of::<f32>();
+                let byte_len = num_elements * std::mem::size_of::<T::Scalar>();
                 let buf = context
                     .device
                     .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModePrivate)
                     .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-                Ok(Self::build_tensor(
-                    dims,
-                    Dtype::F32,
-                    &context.device,
-                    &context.command_queue,
-                    buf,
-                    0,
-                    false,
-                ))
+                Ok(Self::build_tensor(dims, &context.device, &context.command_queue, buf, 0, false))
             }
             TensorInit::CopyFrom(items) => {
                 let byte_len = std::mem::size_of_val(items);
@@ -665,7 +630,6 @@ impl Tensor {
 
                 Ok(Self::build_tensor(
                     dims,
-                    Dtype::F32,
                     &context.device,
                     &context.command_queue,
                     dest_buf,
@@ -689,27 +653,19 @@ impl Tensor {
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 };
 
-                Ok(Self::build_tensor(
-                    dims,
-                    Dtype::F32,
-                    &context.device,
-                    &context.command_queue,
-                    buf,
-                    0,
-                    true,
-                ))
+                Ok(Self::build_tensor(dims, &context.device, &context.command_queue, buf, 0, true))
             }
         }
     }
 
-    fn new_pooled<'data>(dims: Vec<usize>, context: &mut Context, init: TensorInit<'data>) -> Result<Tensor, MetalError> {
+    fn new_pooled<'data>(dims: Vec<usize>, context: &mut Context, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
         match init {
             TensorInit::BorrowHost(_) => Err(MetalError::OperationNotSupported(
                 "Borrowed host buffers are only supported with dedicated storage".to_string(),
             )),
-            TensorInit::Uninitialized => Ok(context.pool.alloc_tensor(dims, Dtype::F32)?.into_tensor()),
+            TensorInit::Uninitialized => Ok(context.pool.alloc_tensor(dims, T::DTYPE)?.into_tensor()),
             TensorInit::CopyFrom(data) => {
-                let mut tensor = context.pool.alloc_tensor(dims, Dtype::F32)?.into_tensor();
+                let mut tensor = context.pool.alloc_tensor(dims, T::DTYPE)?.into_tensor();
                 tensor.as_mut_slice().copy_from_slice(data);
                 Ok(tensor)
             }
@@ -727,7 +683,7 @@ impl Tensor {
     /// The returned tensor always owns Metal-backed storage; when borrowing a
     /// host slice via [`TensorInit::BorrowHost`] the lifetime of that slice must
     /// exceed the tensor's lifetime.
-    pub fn new<'ctx, 'data>(dims: Vec<usize>, storage: TensorStorage<'ctx>, init: TensorInit<'data>) -> Result<Tensor, MetalError> {
+    pub fn new<'ctx, 'data>(dims: Vec<usize>, storage: TensorStorage<'ctx>, init: TensorInit<'data, T>) -> Result<Self, MetalError> {
         Self::validate_init(&dims, &init)?;
 
         match storage {
@@ -747,20 +703,20 @@ impl Tensor {
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         offset: usize,
         host_accessible: bool,
-    ) -> Result<Tensor, MetalError> {
-        let expected_bytes = dims.iter().product::<usize>() * std::mem::size_of::<f32>();
+    ) -> Result<Self, MetalError> {
+        if dtype != T::DTYPE {
+            return Err(MetalError::InvalidOperation(format!(
+                "dtype mismatch: expected {:?}, got {:?}",
+                T::DTYPE,
+                dtype
+            )));
+        }
+
+        let expected_bytes = dims.iter().product::<usize>() * std::mem::size_of::<T::Scalar>();
         if offset + expected_bytes > buffer.length() {
             return Err(MetalError::InvalidShape("buffer too small for dims/offset".into()));
         }
-        Ok(Self::build_tensor(
-            dims,
-            dtype,
-            device,
-            command_queue,
-            buffer,
-            offset,
-            host_accessible,
-        ))
+        Ok(Self::build_tensor(dims, device, command_queue, buffer, offset, host_accessible))
     }
 
     fn ensure_ready(&self) {
@@ -774,10 +730,10 @@ impl Tensor {
 
     /// Immutable host view of the buffer. Ensure GPU work has completed before reading.
     #[inline]
-    pub fn as_slice(&self) -> &[f32] {
+    pub fn as_slice(&self) -> &[T::Scalar] {
         self.ensure_ready();
         if self.host_accessible {
-            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const f32;
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const T::Scalar;
             unsafe { std::slice::from_raw_parts(ptr, self.len()) }
         } else {
             self.ensure_staging_for_read()
@@ -792,8 +748,8 @@ impl Tensor {
                 let state = self.host_access.lock().expect("host access state mutex poisoned");
                 let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
                 let byte_offset = self.offset.saturating_sub(state.base_offset);
-                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<f32>()));
-                unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const f32 }
+                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<T::Scalar>()));
+                unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const T::Scalar }
             };
 
             unsafe { std::slice::from_raw_parts(ptr, len) }
@@ -802,7 +758,7 @@ impl Tensor {
 
     /// Copy the tensor contents to a host Vec.
     #[inline]
-    pub fn to_vec(&self) -> Vec<f32> {
+    pub fn to_vec(&self) -> Vec<T::Scalar> {
         self.as_slice().to_vec()
     }
 
@@ -814,10 +770,10 @@ impl Tensor {
     }
 
     /// Mutable host view of the buffer. Ensure no concurrent GPU access.
-    pub fn as_mut_slice(&mut self) -> &mut [f32] {
+    pub fn as_mut_slice(&mut self) -> &mut [T::Scalar] {
         self.ensure_ready();
         if self.host_accessible {
-            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut f32;
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut T::Scalar;
             unsafe { std::slice::from_raw_parts_mut(ptr, self.len()) }
         } else {
             self.ensure_staging_for_write()
@@ -825,7 +781,7 @@ impl Tensor {
 
             let len = self.len();
             if len == 0 {
-                return unsafe { std::slice::from_raw_parts_mut(std::ptr::NonNull::<f32>::dangling().as_ptr(), 0) };
+                return unsafe { std::slice::from_raw_parts_mut(std::ptr::NonNull::<T::Scalar>::dangling().as_ptr(), 0) };
             }
 
             let ptr = {
@@ -834,9 +790,9 @@ impl Tensor {
                 state.host_dirty = true;
                 state.staging_valid = true;
                 let byte_offset = self.offset.saturating_sub(state.base_offset);
-                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<f32>()));
+                debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<T::Scalar>()));
                 drop(state);
-                unsafe { (staging.contents().as_ptr() as *mut u8).add(byte_offset) as *mut f32 }
+                unsafe { (staging.contents().as_ptr() as *mut u8).add(byte_offset) as *mut T::Scalar }
             };
 
             unsafe { std::slice::from_raw_parts_mut(ptr, len) }
@@ -849,11 +805,11 @@ impl Tensor {
     }
 
     #[inline]
-    pub fn flatten(&self) -> Tensor {
+    pub fn flatten(&self) -> Self {
         self.build_view(vec![self.len()], vec![1], self.offset)
     }
 
-    pub fn reshape(&self, new_dims: Vec<usize>) -> Result<Tensor, MetalError> {
+    pub fn reshape(&self, new_dims: Vec<usize>) -> Result<Self, MetalError> {
         let expected_elements: usize = new_dims.iter().product();
         let actual_elements = self.len();
         if expected_elements != actual_elements {
@@ -865,7 +821,7 @@ impl Tensor {
         Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), self.offset))
     }
 
-    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Tensor, MetalError> {
+    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Self, MetalError> {
         if ranges.len() > self.dims.len() {
             return Err(MetalError::InvalidShape(
                 "Number of slice ranges cannot exceed tensor rank".to_string(),
@@ -904,8 +860,21 @@ impl Tensor {
         Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), new_offset))
     }
 
+    /// Convert the tensor contents to a `Vec<f32>` using the element conversion rules.
+    pub fn to_f32_vec(&self) -> Vec<f32> {
+        T::to_f32_vec(self.as_slice())
+    }
+
+    /// Create a tensor initialized from an `f32` slice by converting into the element type.
+    pub fn from_f32_slice<'ctx>(dims: Vec<usize>, storage: TensorStorage<'ctx>, data: &[f32]) -> Result<Self, MetalError> {
+        let converted = T::from_f32_slice(data);
+        Self::new(dims, storage, TensorInit::CopyFrom(converted.as_slice()))
+    }
+}
+
+impl Tensor<F32Element> {
     /// Allocate and zero-initialize a tensor of the given shape.
-    pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Tensor, MetalError> {
+    pub fn zeros(dims: Vec<usize>, context: &mut Context, use_pool: bool) -> Result<Self, MetalError> {
         let mut tensor = if use_pool {
             Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?
         } else {
@@ -936,12 +905,12 @@ impl Tensor {
 
     /// Create a tensor of all ones with the given shape.
     #[inline]
-    pub fn ones(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn ones(dims: Vec<usize>, context: &mut Context) -> Result<Self, MetalError> {
         context.call::<OnesOp>(dims)
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape.
-    pub fn arange(num_elements: usize, dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn arange(num_elements: usize, dims: Vec<usize>, context: &mut Context) -> Result<Self, MetalError> {
         if dims.iter().product::<usize>() != num_elements {
             return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
         }
@@ -953,19 +922,19 @@ impl Tensor {
 
     /// Create a zeros tensor with the same shape.
     #[inline]
-    pub fn zeros_like(&self, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn zeros_like(&self, context: &mut Context) -> Result<Self, MetalError> {
         Self::zeros(self.dims.clone(), context, true)
     }
 
     /// Create a ones tensor with the same shape.
     #[inline]
-    pub fn ones_like(&self, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn ones_like(&self, context: &mut Context) -> Result<Self, MetalError> {
         Self::ones(self.dims.clone(), context)
     }
 
     /// Allocate and fill a tensor with uniform random values between 0 and 1.
     #[inline]
-    pub fn random_uniform(dims: Vec<usize>, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn random_uniform(dims: Vec<usize>, context: &mut Context) -> Result<Self, MetalError> {
         // Backwards-compatible simple random uniform in [0,1)
         context.call::<RandomUniformOp>((dims, 0.0, 1.0, None))
     }
@@ -973,13 +942,13 @@ impl Tensor {
     /// Fill a new tensor with uniform random values in [min, max).
     /// Uses the device random pipeline for best performance.
     #[inline]
-    pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut Context) -> Result<Self, MetalError> {
         let tensor = context.call::<RandomUniformOp>((dims, min, max, None))?;
         Ok(tensor)
     }
 
     /// Allocate and zero-initialize a tensor using a provided command buffer (for batching).
-    pub fn zeros_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn zeros_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Self, MetalError> {
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
         let size = tensor.size_bytes();
 
@@ -1003,7 +972,7 @@ impl Tensor {
     }
 
     /// Allocate and fill a tensor with ones using a provided command buffer (for batching).
-    pub fn ones_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn ones_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Self, MetalError> {
         // Calculate total elements before moving dims
         let total_elements: usize = dims.iter().product();
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
@@ -1053,7 +1022,7 @@ impl Tensor {
         dims: Vec<usize>,
         command_buffer: &CommandBuffer,
         context: &mut Context,
-    ) -> Result<Tensor, MetalError> {
+    ) -> Result<Self, MetalError> {
         if dims.iter().product::<usize>() != num_elements {
             return Err(MetalError::InvalidShape("dims product must match num_elements".to_string()));
         }
@@ -1095,7 +1064,7 @@ impl Tensor {
     }
 
     /// Allocate and fill a tensor with uniform random values using a provided command buffer (for batching).
-    pub fn random_uniform_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn random_uniform_batched(dims: Vec<usize>, command_buffer: &CommandBuffer, context: &mut Context) -> Result<Self, MetalError> {
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Get pipeline and encode manually for batching with default [0, 1) range
@@ -1145,7 +1114,7 @@ impl Tensor {
 
     /// Allocate and zero-initialize a tensor of the given shape (CPU version).
     #[deprecated(note = "Use zeros() with pooled allocation instead")]
-    pub fn zeros_legacy(dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
+    pub fn zeros_legacy(dims: Vec<usize>, context: &Context) -> Result<Self, MetalError> {
         let num_elements = dims.iter().product::<usize>();
         let values = vec![0.0f32; num_elements];
         Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&values))
@@ -1153,7 +1122,7 @@ impl Tensor {
 
     /// Allocate and fill a tensor with ones (CPU version).
     #[deprecated(note = "Use ones() with pooled allocation instead")]
-    pub fn ones_legacy(dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
+    pub fn ones_legacy(dims: Vec<usize>, context: &Context) -> Result<Self, MetalError> {
         let num_elements = dims.iter().product::<usize>();
         let values = vec![1.0f32; num_elements];
         Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&values))
@@ -1161,7 +1130,7 @@ impl Tensor {
 
     /// Create an arange tensor (0..n as f32) with the given shape (CPU version).
     #[deprecated(note = "Use arange() with pooled allocation instead")]
-    pub fn arange_cpu(num_elements: usize, dims: Vec<usize>, context: &Context) -> Result<Tensor, MetalError> {
+    pub fn arange_cpu(num_elements: usize, dims: Vec<usize>, context: &Context) -> Result<Self, MetalError> {
         let v: Vec<f32> = (0..num_elements).map(|x| x as f32).collect();
         Self::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(&v))
     }
@@ -1205,7 +1174,7 @@ impl Tensor {
         Self::fast_fill_f32(slice, value);
     }
 
-    pub fn permute(&self, permute: &[usize], ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn permute(&self, permute: &[usize], ctx: &mut Context) -> Result<Self, MetalError> {
         if permute.len() != self.dims.len() {
             return Err(MetalError::InvalidShape("Permutation length must match tensor rank".to_string()));
         }
@@ -1217,7 +1186,7 @@ impl Tensor {
     }
 
     /// Element-wise add, returns a new tensor on the same device.
-    pub fn add_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn add_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1229,7 +1198,7 @@ impl Tensor {
     }
 
     /// Element-wise sub, returns a new tensor on the same device.
-    pub fn sub_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn sub_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1241,7 +1210,7 @@ impl Tensor {
     }
 
     /// Element-wise mul, returns a new tensor on the same device.
-    pub fn mul_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn mul_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1252,7 +1221,7 @@ impl Tensor {
         ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))
     }
 
-    pub fn div_elem(&self, other: &Tensor, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn div_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
                 expected: self.len(),
@@ -1264,20 +1233,20 @@ impl Tensor {
     }
 
     /// Element-wise scalar add.
-    pub fn add_scalar(&self, value: f32, ctx: &mut Context) -> Result<Tensor, MetalError> {
+    pub fn add_scalar(&self, value: f32, ctx: &mut Context) -> Result<Self, MetalError> {
         // DEBT: This is inefficient. A dedicated kernel for scalar operations would be better.
-        let mut scalar_tensor = Tensor::zeros_like(self, ctx)?;
+        let mut scalar_tensor = Self::zeros_like(self, ctx)?;
         scalar_tensor.fill(value);
         self.add_elem(&scalar_tensor, ctx)
     }
 
-    fn unary_elementwise<F: Fn(f32) -> f32>(a: &Tensor, f: F) -> Result<Tensor, MetalError> {
+    fn unary_elementwise<F: Fn(f32) -> f32>(a: &Self, f: F) -> Result<Self, MetalError> {
         let byte_len = a.size_bytes();
         let buf = a
             .device
             .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
             .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-        let mut out = Tensor {
+        let mut out = Self {
             buf,
             dims: a.dims.clone(),
             strides: Self::compute_strides(&a.dims),
@@ -1288,6 +1257,7 @@ impl Tensor {
             host_access: Arc::new(Mutex::new(HostAccessState::new(0, byte_len))),
             command_queue: a.command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
+            marker: PhantomData,
         };
         let aslice = a.as_slice();
         let oslice = out.as_mut_slice();
@@ -1297,7 +1267,7 @@ impl Tensor {
         Ok(out)
     }
 
-    pub fn get_batch(&self, batch_index: usize) -> Result<Tensor, MetalError> {
+    pub fn get_batch(&self, batch_index: usize) -> Result<Self, MetalError> {
         if self.dims.len() < 3 {
             return Err(MetalError::InvalidShape("get_batch requires at least 3 dimensions".to_string()));
         }
