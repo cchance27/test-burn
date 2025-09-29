@@ -12,9 +12,11 @@ use objc2_metal::{
     MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
 };
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::ops::{Add, Div, Mul, Sub};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
+use std::sync::{Mutex, OnceLock};
 
 /// Supported data types for tensors
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,16 +66,80 @@ struct HostAccessState {
     staging: Option<RetainedBuffer>,
     staging_valid: bool,
     host_dirty: bool,
+    base_offset: usize,
+    region_len: usize,
 }
 
 impl HostAccessState {
-    fn new() -> Self {
+    fn new(base_offset: usize, region_len: usize) -> Self {
         Self {
             staging: None,
             staging_valid: false,
             host_dirty: false,
+            base_offset,
+            region_len,
         }
     }
+
+    fn region_end(&self) -> usize {
+        self.base_offset.saturating_add(self.region_len)
+    }
+}
+
+type HostAccessRegistry = HashMap<usize, Vec<Weak<RefCell<HostAccessState>>>>;
+
+fn host_access_registry() -> &'static Mutex<HostAccessRegistry> {
+    static REGISTRY: OnceLock<Mutex<HostAccessRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn buffer_registry_key(buffer: &RetainedBuffer) -> usize {
+    buffer.as_ptr().cast::<c_void>().as_ptr() as usize
+}
+
+fn shared_host_access_state(buffer: &RetainedBuffer, offset: usize, len_bytes: usize) -> Rc<RefCell<HostAccessState>> {
+    let mut registry = host_access_registry().lock().expect("host access registry mutex poisoned");
+    let entry = registry.entry(buffer_registry_key(buffer)).or_insert_with(Vec::new);
+
+    let req_start = offset;
+    let req_end = offset.saturating_add(len_bytes);
+    let mut idx = 0;
+    while idx < entry.len() {
+        if let Some(state_rc) = entry[idx].upgrade() {
+            let mut selected = false;
+            {
+                let mut state = state_rc.borrow_mut();
+                let state_start = state.base_offset;
+                let state_end = state.region_end();
+                if req_start >= state_start && req_end <= state_end {
+                    selected = true;
+                } else if req_end > state_start && req_start < state_end {
+                    let new_start = req_start.min(state_start);
+                    let new_end = req_end.max(state_end);
+                    if new_start != state_start || new_end != state_end {
+                        state.base_offset = new_start;
+                        state.region_len = new_end - new_start;
+                        state.staging = None;
+                        state.staging_valid = false;
+                        state.host_dirty = false;
+                    }
+                    selected = true;
+                }
+            }
+
+            if selected {
+                return state_rc;
+            }
+
+            idx += 1;
+        } else {
+            entry.remove(idx);
+        }
+    }
+
+    let state_rc = Rc::new(RefCell::new(HostAccessState::new(offset, len_bytes)));
+    entry.push(Rc::downgrade(&state_rc));
+    state_rc
 }
 
 /// A lightweight description of a tensor view that can be consumed by MPS matrix APIs.
@@ -304,6 +370,13 @@ impl Tensor {
         offset: usize,
         host_accessible: bool,
     ) -> Tensor {
+        let len_bytes = dims.iter().product::<usize>() * dtype.size_bytes();
+        let host_access = if host_accessible {
+            Rc::new(RefCell::new(HostAccessState::new(offset, len_bytes)))
+        } else {
+            shared_host_access_state(&buf, offset, len_bytes)
+        };
+
         Tensor {
             buf,
             dims: dims.clone(),
@@ -312,7 +385,7 @@ impl Tensor {
             device: device.clone(),
             offset,
             host_accessible,
-            host_access: Rc::new(RefCell::new(HostAccessState::new())),
+            host_access,
             command_queue: command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         }
@@ -333,23 +406,30 @@ impl Tensor {
         }
     }
 
-    fn ensure_staging_buffer(&self, size: usize) -> Result<RetainedBuffer, MetalError> {
+    fn ensure_staging_buffer(&self) -> Result<Option<RetainedBuffer>, MetalError> {
         let mut state = self.host_access.borrow_mut();
+        let target_size = state.region_len;
+        if target_size == 0 {
+            state.staging = None;
+            state.staging_valid = true;
+            return Ok(None);
+        }
+
         let needs_new = match state.staging.as_ref() {
-            Some(buf) => buf.length() < size,
+            Some(buf) => buf.length() < target_size,
             None => true,
         };
 
         if needs_new {
             let buffer = self
                 .device
-                .newBufferWithLength_options(size, MTLResourceOptions::StorageModeShared)
-                .ok_or(MetalError::BufferCreationFailed(size))?;
+                .newBufferWithLength_options(target_size, MTLResourceOptions::StorageModeShared)
+                .ok_or(MetalError::BufferCreationFailed(target_size))?;
             state.staging = Some(buffer);
             state.staging_valid = false;
         }
 
-        Ok(state.staging.as_ref().expect("staging buffer must exist after allocation").clone())
+        Ok(state.staging.as_ref().cloned())
     }
 
     fn ensure_staging_for_read(&self) -> Result<(), MetalError> {
@@ -362,13 +442,19 @@ impl Tensor {
             return Ok(());
         }
 
-        let staging = self.ensure_staging_buffer(len_bytes)?;
+        let staging = match self.ensure_staging_buffer()? {
+            Some(buf) => buf,
+            None => return Ok(()),
+        };
 
-        {
+        let (base_offset, region_len, skip_copy) = {
             let state = self.host_access.borrow();
-            if state.host_dirty || state.staging_valid {
-                return Ok(());
-            }
+            let skip = state.host_dirty || state.staging_valid;
+            (state.base_offset, state.region_len, skip)
+        };
+
+        if skip_copy || region_len == 0 {
+            return Ok(());
         }
 
         let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
@@ -378,7 +464,7 @@ impl Tensor {
             .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
 
         unsafe {
-            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, self.offset, &staging, 0, len_bytes);
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
         }
         encoder.endEncoding();
         command_buffer.commit();
@@ -400,14 +486,18 @@ impl Tensor {
             return Ok(());
         }
 
-        let staging = self.ensure_staging_buffer(len_bytes)?;
-
-        let needs_copy = {
-            let state = self.host_access.borrow();
-            !state.host_dirty && !state.staging_valid
+        let staging = match self.ensure_staging_buffer()? {
+            Some(buf) => buf,
+            None => return Ok(()),
         };
 
-        if needs_copy {
+        let (base_offset, region_len, needs_copy) = {
+            let state = self.host_access.borrow();
+            let needs_copy = !state.host_dirty && !state.staging_valid;
+            (state.base_offset, state.region_len, needs_copy)
+        };
+
+        if needs_copy && region_len != 0 {
             let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
             let encoder = command_buffer
                 .raw()
@@ -415,7 +505,7 @@ impl Tensor {
                 .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
 
             unsafe {
-                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, self.offset, &staging, 0, len_bytes);
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
             }
             encoder.endEncoding();
             command_buffer.commit();
@@ -443,31 +533,25 @@ impl Tensor {
             return Ok(());
         }
 
-        let should_flush = {
-            let state = self.host_access.borrow();
-            state.host_dirty
-        };
-
-        if !should_flush {
+        let mut state = self.host_access.borrow_mut();
+        if !state.host_dirty {
             return Ok(());
         }
 
-        let len_bytes = self.size_bytes();
-        if len_bytes == 0 {
-            let mut state = self.host_access.borrow_mut();
+        if state.region_len == 0 {
             state.host_dirty = false;
             state.staging_valid = true;
             return Ok(());
         }
 
-        let staging = {
-            let state = self.host_access.borrow();
-            state
-                .staging
-                .as_ref()
-                .expect("staging buffer must exist when host_dirty is set")
-                .clone()
-        };
+        let staging = state
+            .staging
+            .as_ref()
+            .expect("staging buffer must exist when host_dirty is set")
+            .clone();
+        let base_offset = state.base_offset;
+        let region_len = state.region_len;
+        drop(state);
 
         let mut command_buffer = CommandBuffer::new(&self.command_queue)?;
         let encoder = command_buffer
@@ -476,7 +560,7 @@ impl Tensor {
             .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
 
         unsafe {
-            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &self.buf, self.offset, len_bytes);
+            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &self.buf, base_offset, region_len);
         }
         encoder.endEncoding();
         command_buffer.commit();
@@ -681,7 +765,9 @@ impl Tensor {
             let ptr = {
                 let state = self.host_access.borrow();
                 let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
-                unsafe { staging.contents().as_ptr() as *const f32 }
+                let byte_offset = self.offset.saturating_sub(state.base_offset);
+                debug_assert!(byte_offset % std::mem::size_of::<f32>() == 0);
+                unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const f32 }
             };
 
             unsafe { std::slice::from_raw_parts(ptr, len) }
@@ -721,8 +807,10 @@ impl Tensor {
                 let staging = state.staging.as_ref().expect("staging buffer must exist for host write").clone();
                 state.host_dirty = true;
                 state.staging_valid = true;
+                let byte_offset = self.offset.saturating_sub(state.base_offset);
+                debug_assert!(byte_offset % std::mem::size_of::<f32>() == 0);
                 drop(state);
-                unsafe { staging.contents().as_ptr() as *mut f32 }
+                unsafe { (staging.contents().as_ptr() as *mut u8).add(byte_offset) as *mut f32 }
             };
 
             unsafe { std::slice::from_raw_parts_mut(ptr, len) }
@@ -1171,7 +1259,7 @@ impl Tensor {
             device: a.device.clone(),
             offset: 0,
             host_accessible: true,
-            host_access: Rc::new(RefCell::new(HostAccessState::new())),
+            host_access: Rc::new(RefCell::new(HostAccessState::new(0, byte_len))),
             command_queue: a.command_queue.clone(),
             defining_cmd_buffer: Rc::new(RefCell::new(None)),
         };
