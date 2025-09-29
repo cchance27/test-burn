@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::metallic::tensor::Dtype;
+
 #[derive(Error, Debug)]
 pub enum MetalError {
     #[error("Device not found")]
@@ -38,6 +40,8 @@ pub enum MetalError {
     TokenizerError(Box<crate::metallic::tokenizer::TokenizerError>),
     #[error("Regex Error: {0}")]
     RegexError(Box<fancy_regex::Error>),
+    #[error("Tensor dtype mismatch: expected {expected:?}, got {actual:?}")]
+    DtypeMismatch { expected: Dtype, actual: Dtype },
 }
 
 impl From<crate::metallic::tokenizer::TokenizerError> for MetalError {

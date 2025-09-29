@@ -7,7 +7,7 @@ using namespace metal;
     OP(bfloat, float, bf16)
 
 #define DEFINE_GELU_KERNEL(SCALAR, ACCUM, SUFFIX) \
-// More numerically stable GELU implementation \
+    /* More numerically stable GELU implementation */ \
 kernel void gelu_kernel_##SUFFIX( \
     device SCALAR* input [[buffer(0)]], \
     device SCALAR* output [[buffer(1)]], \

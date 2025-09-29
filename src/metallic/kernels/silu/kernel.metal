@@ -7,7 +7,7 @@ using namespace metal;
     OP(bfloat, float, bf16)
 
 #define DEFINE_SILU_KERNEL(SCALAR, ACCUM, SUFFIX) \
-// SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x)) \
+    /* SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x)) */ \
 kernel void silu_kernel_##SUFFIX(device SCALAR* input [[buffer(0)]], \
                                 device SCALAR* output [[buffer(1)]], \
                                 constant uint& total_elements [[buffer(2)]], \

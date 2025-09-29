@@ -7,7 +7,7 @@ use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{F32Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels};
+use crate::metallic::{kernels, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -108,10 +108,18 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub fn new() -> Result<Self, MetalError> {
-        Self::with_config(ContextConfig::default())
+        Self::with_config(ContextConfig::new(T::DTYPE))
     }
 
     pub fn with_config(config: ContextConfig) -> Result<Self, MetalError> {
+        let requested_dtype = config.tensor_dtype();
+        if requested_dtype != T::DTYPE {
+            return Err(MetalError::DtypeMismatch {
+                expected: T::DTYPE,
+                actual: requested_dtype,
+            });
+        }
+
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
@@ -138,14 +146,14 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub fn tensor_dtype(&self) -> Dtype {
-        self.config.tensor_dtype()
+        T::DTYPE
     }
 
     pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
         self.ensure_active_cmd_buffer()?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
-            Some(self.kernel_manager.get_pipeline(kernel_func, self.tensor_dtype(), &self.device)?)
+            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
             None // For MPS operations that don't need a pipeline
         };
@@ -313,7 +321,7 @@ impl<T: TensorElement> Context<T> {
         self.ensure_active_cmd_buffer()?;
         let pipeline = self
             .kernel_manager
-            .get_pipeline(KernelFunction::FusedQkvBiasSplit, self.tensor_dtype(), &self.device)?;
+            .get_pipeline(KernelFunction::FusedQkvBiasSplit, T::DTYPE, &self.device)?;
 
         let cmd_buf = self.active_command_buffer_mut()?;
         let encoder = cmd_buf
@@ -382,7 +390,7 @@ impl<T: TensorElement> Context<T> {
         self.ensure_active_cmd_buffer_internal(false)?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
-            Some(self.kernel_manager.get_pipeline(kernel_func, self.tensor_dtype(), &self.device)?)
+            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
             None
         };
