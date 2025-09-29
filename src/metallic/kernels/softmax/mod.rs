@@ -1,8 +1,9 @@
 use super::*;
+use crate::metallic::Dtype;
 use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::resource_cache::ResourceCache;
-use crate::metallic::tensor::MpsMatrixBatchView;
+use crate::metallic::tensor::{KernelElement, MpsMatrixBatchView};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -60,10 +61,10 @@ pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn apply_softmax(
+pub fn apply_softmax<T: KernelElement>(
     ctx: &mut Context,
     mut cache: Option<&mut ResourceCache>,
-    attn: &Tensor,
+    attn: &Tensor<T>,
     batch: usize,
     rows: usize,
     columns: usize,
@@ -71,7 +72,10 @@ pub fn apply_softmax(
     query_offset: u32,
     allow_mps: bool,
 ) -> Result<Tensor, MetalError> {
-    let view = attn.as_mps_matrix_batch_view()?;
+    let attn_guard = attn.ensure_kernel_dtype(ctx, &[Dtype::F32])?;
+    let mut attn_tensor = attn_guard.into_tensor().into_f32()?;
+
+    let view = attn_tensor.as_mps_matrix_batch_view()?;
 
     if view.rows != rows || view.columns != columns {
         return Err(MetalError::InvalidShape(format!(
@@ -97,17 +101,31 @@ pub fn apply_softmax(
     let can_use_mps = allow_mps && !causal && query_offset == 0 && !preference.forces_kernel();
     if can_use_mps && let Some(cache_slot) = cache.as_mut() {
         let cache_ref: &mut ResourceCache = cache_slot;
-        try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns)?;
+        try_apply_mps_softmax(ctx, cache_ref, &attn_tensor, &view, batch, rows, columns)?;
         ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
-        return Ok(attn.clone());
+        return Ok(attn_tensor);
     }
 
     let result = match cache {
         Some(cache_ref) => ctx.call_with_cache::<SoftmaxOp>(
-            (attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset),
+            (
+                &attn_tensor,
+                rows_total as u32,
+                rows as u32,
+                columns as u32,
+                causal as u32,
+                query_offset,
+            ),
             cache_ref,
         )?,
-        None => ctx.call::<SoftmaxOp>((attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset))?,
+        None => ctx.call::<SoftmaxOp>((
+            &attn_tensor,
+            rows_total as u32,
+            rows as u32,
+            columns as u32,
+            causal as u32,
+            query_offset,
+        ))?,
     };
     ctx.record_softmax_backend_sample(SoftmaxBackend::Kernel, start.elapsed());
     Ok(result)

@@ -3,6 +3,7 @@ mod dtypes;
 
 use super::{Context, MetalError, operation::CommandBuffer};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
+use crate::metallic::kernels::KernelFunction;
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::kernels::elemwise_div::ElemwiseDivOp;
 use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
@@ -199,6 +200,105 @@ pub struct Tensor<T: TensorElement> {
 pub type TensorF32 = Tensor<F32Element>;
 pub type TensorF16 = Tensor<F16Element>;
 pub type TensorBF16 = Tensor<BF16Element>;
+
+#[derive(Clone)]
+pub enum KernelTensor {
+    F32(TensorF32),
+    F16(TensorF16),
+    BF16(TensorBF16),
+}
+
+impl KernelTensor {
+    pub fn dtype(&self) -> Dtype {
+        match self {
+            KernelTensor::F32(_) => Dtype::F32,
+            KernelTensor::F16(_) => Dtype::F16,
+            KernelTensor::BF16(_) => Dtype::BF16,
+        }
+    }
+
+    pub fn into_f32(self) -> Result<TensorF32, MetalError> {
+        match self {
+            KernelTensor::F32(tensor) => Ok(tensor),
+            KernelTensor::F16(_) | KernelTensor::BF16(_) => Err(MetalError::OperationNotSupported(
+                "Kernel tensor is not materialized as f32".to_string(),
+            )),
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<&TensorF32> {
+        match self {
+            KernelTensor::F32(tensor) => Some(tensor),
+            _ => None,
+        }
+    }
+
+    pub fn into_bf16(self) -> Result<TensorBF16, MetalError> {
+        match self {
+            KernelTensor::BF16(tensor) => Ok(tensor),
+            _ => Err(MetalError::OperationNotSupported(
+                "Kernel tensor is not materialized as bf16".to_string(),
+            )),
+        }
+    }
+
+    pub fn into_f16(self) -> Result<TensorF16, MetalError> {
+        match self {
+            KernelTensor::F16(tensor) => Ok(tensor),
+            _ => Err(MetalError::OperationNotSupported(
+                "Kernel tensor is not materialized as f16".to_string(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct KernelTensorGuard {
+    tensor: KernelTensor,
+    converted: bool,
+}
+
+impl KernelTensorGuard {
+    pub fn new(tensor: KernelTensor, converted: bool) -> Self {
+        Self { tensor, converted }
+    }
+
+    pub fn converted(&self) -> bool {
+        self.converted
+    }
+
+    pub fn dtype(&self) -> Dtype {
+        self.tensor.dtype()
+    }
+
+    pub fn tensor(&self) -> &KernelTensor {
+        &self.tensor
+    }
+
+    pub fn into_tensor(self) -> KernelTensor {
+        self.tensor
+    }
+}
+
+pub trait KernelElement: TensorElement {
+    fn ensure_kernel_dtype(tensor: &Tensor<Self>, ctx: &mut Context, supported: &[Dtype]) -> Result<KernelTensorGuard, MetalError>;
+}
+
+fn ensure_tensor_ready_for_kernel<T: TensorElement>(tensor: &Tensor<T>) -> Result<(), MetalError> {
+    tensor.flush_host_writes()?;
+    let maybe_dep = tensor.defining_cmd_buffer.borrow().clone();
+    if let Some(dep) = maybe_dep {
+        if dep.is_completed() {
+            tensor.defining_cmd_buffer.borrow_mut().take();
+            return Ok(());
+        }
+
+        dep.commit();
+        dep.wait();
+        tensor.defining_cmd_buffer.borrow_mut().take();
+    }
+    Ok(())
+}
 
 impl<T: TensorElement> Tensor<T> {
     #[inline]
@@ -826,6 +926,219 @@ impl<T: TensorElement> Tensor<T> {
     }
 }
 
+impl Tensor<F16Element> {
+    fn materialize_as_f32(&self, ctx: &mut Context) -> Result<TensorF32, MetalError> {
+        ensure_tensor_ready_for_kernel(self)?;
+
+        let result = TensorF32::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        let pipeline = ctx.kernel_manager.get_pipeline(KernelFunction::ConvertF16ToF32, &ctx.device)?;
+
+        let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let total_elements = self.len() as u32;
+        set_compute_pipeline_state(&encoder, &pipeline);
+        set_buffer(&encoder, 0, &self.buf, self.offset);
+        set_buffer(&encoder, 1, &result.buf, result.offset);
+        set_bytes(&encoder, 2, &total_elements);
+
+        let threads_per_tg = MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let groups = MTLSize {
+            width: total_elements.div_ceil(256) as usize,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+        encoder.endEncoding();
+
+        ctx.mark_tensor_pending(&result);
+
+        Ok(result)
+    }
+}
+
+impl Tensor<BF16Element> {
+    fn materialize_as_f32(&self, ctx: &mut Context) -> Result<TensorF32, MetalError> {
+        ensure_tensor_ready_for_kernel(self)?;
+
+        let result = TensorF32::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        let pipeline = ctx.kernel_manager.get_pipeline(KernelFunction::ConvertBF16ToF32, &ctx.device)?;
+
+        let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let total_elements = self.len() as u32;
+        set_compute_pipeline_state(&encoder, &pipeline);
+        set_buffer(&encoder, 0, &self.buf, self.offset);
+        set_buffer(&encoder, 1, &result.buf, result.offset);
+        set_bytes(&encoder, 2, &total_elements);
+
+        let threads_per_tg = MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let groups = MTLSize {
+            width: total_elements.div_ceil(256) as usize,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+        encoder.endEncoding();
+
+        ctx.mark_tensor_pending(&result);
+
+        Ok(result)
+    }
+}
+
+impl KernelElement for F32Element {
+    fn ensure_kernel_dtype(tensor: &TensorF32, _ctx: &mut Context, supported: &[Dtype]) -> Result<KernelTensorGuard, MetalError> {
+        if supported.is_empty() {
+            return Err(MetalError::OperationNotSupported(
+                "Kernel advertised no supported dtypes".to_string(),
+            ));
+        }
+
+        if supported.iter().any(|dtype| *dtype == Dtype::F32) {
+            return Ok(KernelTensorGuard::new(KernelTensor::F32(tensor.clone()), false));
+        }
+
+        Err(MetalError::OperationNotSupported(format!(
+            "Kernel does not support f32 inputs; advertised {supported:?}",
+        )))
+    }
+}
+
+impl KernelElement for F16Element {
+    fn ensure_kernel_dtype(tensor: &TensorF16, ctx: &mut Context, supported: &[Dtype]) -> Result<KernelTensorGuard, MetalError> {
+        if supported.is_empty() {
+            return Err(MetalError::OperationNotSupported(
+                "Kernel advertised no supported dtypes".to_string(),
+            ));
+        }
+
+        if supported.iter().any(|dtype| *dtype == Dtype::F16) {
+            return Ok(KernelTensorGuard::new(KernelTensor::F16(tensor.clone()), false));
+        }
+
+        for &target in supported {
+            if target == Dtype::F32 {
+                let promoted = tensor.materialize_as_f32(ctx)?;
+                return Ok(KernelTensorGuard::new(KernelTensor::F32(promoted), true));
+            }
+        }
+
+        Err(MetalError::OperationNotSupported(format!(
+            "Kernel does not support {:?} inputs; advertised {supported:?}",
+            tensor.dtype
+        )))
+    }
+}
+
+impl KernelElement for BF16Element {
+    fn ensure_kernel_dtype(tensor: &TensorBF16, ctx: &mut Context, supported: &[Dtype]) -> Result<KernelTensorGuard, MetalError> {
+        if supported.is_empty() {
+            return Err(MetalError::OperationNotSupported(
+                "Kernel advertised no supported dtypes".to_string(),
+            ));
+        }
+
+        if supported.iter().any(|dtype| *dtype == Dtype::BF16) {
+            return Ok(KernelTensorGuard::new(KernelTensor::BF16(tensor.clone()), false));
+        }
+
+        for &target in supported {
+            if target == Dtype::F32 {
+                let promoted = tensor.materialize_as_f32(ctx)?;
+                return Ok(KernelTensorGuard::new(KernelTensor::F32(promoted), true));
+            }
+        }
+
+        Err(MetalError::OperationNotSupported(format!(
+            "Kernel does not support {:?} inputs; advertised {supported:?}",
+            tensor.dtype
+        )))
+    }
+}
+
+impl<T: KernelElement> Tensor<T> {
+    pub fn ensure_kernel_dtype(&self, ctx: &mut Context, supported: &[Dtype]) -> Result<KernelTensorGuard, MetalError> {
+        T::ensure_kernel_dtype(self, ctx, supported)
+    }
+
+    fn ensure_f32_for_kernel(&self, ctx: &mut Context) -> Result<(TensorF32, bool), MetalError> {
+        let guard = self.ensure_kernel_dtype(ctx, &[Dtype::F32])?;
+        let converted = guard.converted();
+        let tensor = guard.into_tensor().into_f32()?;
+        Ok((tensor, converted))
+    }
+
+    pub fn add_elem<U: KernelElement>(&self, other: &Tensor<U>, ctx: &mut Context) -> Result<TensorF32, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        let (left, _) = self.ensure_f32_for_kernel(ctx)?;
+        let (right, _) = other.ensure_f32_for_kernel(ctx)?;
+        ctx.call::<ElemwiseAddOp>((left, right))
+    }
+
+    pub fn sub_elem<U: KernelElement>(&self, other: &Tensor<U>, ctx: &mut Context) -> Result<TensorF32, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        let (left, _) = self.ensure_f32_for_kernel(ctx)?;
+        let (right, _) = other.ensure_f32_for_kernel(ctx)?;
+        ctx.call::<ElemwiseSubOp>((left, right))
+    }
+
+    pub fn mul_elem<U: KernelElement>(&self, other: &Tensor<U>, ctx: &mut Context) -> Result<TensorF32, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        let (left, _) = self.ensure_f32_for_kernel(ctx)?;
+        let (right, _) = other.ensure_f32_for_kernel(ctx)?;
+        ctx.call::<ElemwiseMulOp>((left, right))
+    }
+
+    pub fn div_elem<U: KernelElement>(&self, other: &Tensor<U>, ctx: &mut Context) -> Result<TensorF32, MetalError> {
+        if self.dims != other.dims {
+            return Err(MetalError::DimensionMismatch {
+                expected: self.len(),
+                actual: other.len(),
+            });
+        }
+
+        let (left, _) = self.ensure_f32_for_kernel(ctx)?;
+        let (right, _) = other.ensure_f32_for_kernel(ctx)?;
+        ctx.call::<ElemwiseDivOp>((left, right))
+    }
+}
+
 impl Tensor<F32Element> {
     /// Ensure the tensor exposes a contiguous batch view suitable for batched MPS kernels.
     ///
@@ -1183,53 +1496,6 @@ impl Tensor<F32Element> {
 
         use crate::metallic::kernels::permute::PermuteOp;
         ctx.call::<PermuteOp>((self.clone(), permute_u32))
-    }
-
-    /// Element-wise add, returns a new tensor on the same device.
-    pub fn add_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
-        if self.dims != other.dims {
-            return Err(MetalError::DimensionMismatch {
-                expected: self.len(),
-                actual: other.len(),
-            });
-        }
-
-        ctx.call::<ElemwiseAddOp>((self.clone(), other.clone()))
-    }
-
-    /// Element-wise sub, returns a new tensor on the same device.
-    pub fn sub_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
-        if self.dims != other.dims {
-            return Err(MetalError::DimensionMismatch {
-                expected: self.len(),
-                actual: other.len(),
-            });
-        }
-
-        ctx.call::<ElemwiseSubOp>((self.clone(), other.clone()))
-    }
-
-    /// Element-wise mul, returns a new tensor on the same device.
-    pub fn mul_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
-        if self.dims != other.dims {
-            return Err(MetalError::DimensionMismatch {
-                expected: self.len(),
-                actual: other.len(),
-            });
-        }
-
-        ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))
-    }
-
-    pub fn div_elem(&self, other: &Self, ctx: &mut Context) -> Result<Self, MetalError> {
-        if self.dims != other.dims {
-            return Err(MetalError::DimensionMismatch {
-                expected: self.len(),
-                actual: other.len(),
-            });
-        }
-
-        ctx.call::<ElemwiseDivOp>((self.clone(), other.clone()))
     }
 
     /// Element-wise scalar add.

@@ -6,7 +6,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
-use crate::metallic::tensor::Dtype;
+use crate::metallic::tensor::{Dtype, KernelElement};
 use crate::metallic::{F32Element, Tensor, TensorInit, TensorStorage, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
@@ -201,26 +201,32 @@ impl Context {
         }
     }
 
-    pub fn matmul(
+    pub fn matmul<A: KernelElement, B: KernelElement>(
         &mut self,
-        a: &super::Tensor,
-        b: &super::Tensor,
+        a: &crate::metallic::tensor::Tensor<A>,
+        b: &crate::metallic::tensor::Tensor<B>,
         transpose_a: bool,
         transpose_b: bool,
     ) -> Result<super::Tensor, MetalError> {
+        let a_f32 = a.ensure_kernel_dtype(self, &[Dtype::F32])?.into_tensor().into_f32()?;
+        let b_f32 = b.ensure_kernel_dtype(self, &[Dtype::F32])?.into_tensor().into_f32()?;
+
         // Use the kernel system for matmul
-        self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+        self.call::<MatMulOp>((&a_f32, &b_f32, transpose_a, transpose_b))
     }
 
-    pub(crate) fn matmul_with_cache(
+    pub(crate) fn matmul_with_cache<A: KernelElement, B: KernelElement>(
         &mut self,
-        a: &super::Tensor,
-        b: &super::Tensor,
+        a: &crate::metallic::tensor::Tensor<A>,
+        b: &crate::metallic::tensor::Tensor<B>,
         transpose_a: bool,
         transpose_b: bool,
         cache: &mut ResourceCache,
     ) -> Result<super::Tensor, MetalError> {
-        self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
+        let a_f32 = a.ensure_kernel_dtype(self, &[Dtype::F32])?.into_tensor().into_f32()?;
+        let b_f32 = b.ensure_kernel_dtype(self, &[Dtype::F32])?.into_tensor().into_f32()?;
+
+        self.call_with_cache::<MatMulOp>((&a_f32, &b_f32, transpose_a, transpose_b), cache)
     }
 
     pub fn fused_qkv_projection(

@@ -62,3 +62,27 @@ kernel void ones_kernel(
         }
     }
 }
+
+kernel void convert_f16_to_f32(
+    device const half *src [[buffer(0)]],
+    device float *dst [[buffer(1)]],
+    constant uint &total_elements [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total_elements) {
+        return;
+    }
+    dst[gid] = float(src[gid]);
+}
+
+kernel void convert_bf16_to_f32(
+    device const bfloat *src [[buffer(0)]],
+    device float *dst [[buffer(1)]],
+    constant uint &total_elements [[buffer(2)]],
+    uint gid [[thread_position_in_grid]]
+) {
+    if (gid >= total_elements) {
+        return;
+    }
+    dst[gid] = float(src[gid]);
+}

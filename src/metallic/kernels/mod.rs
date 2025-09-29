@@ -97,6 +97,8 @@ pub enum KernelFunction {
     Arange,
     Ones,
     RandomUniform,
+    ConvertF16ToF32,
+    ConvertBF16ToF32,
 }
 
 impl KernelFunction {
@@ -116,7 +118,11 @@ impl KernelFunction {
             KernelFunction::RMSNorm => KernelLibrary::RMSNorm,
             KernelFunction::Silu => KernelLibrary::Silu,
             KernelFunction::FusedSoftmax => KernelLibrary::Softmax,
-            KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
+            KernelFunction::Arange
+            | KernelFunction::Ones
+            | KernelFunction::RandomUniform
+            | KernelFunction::ConvertF16ToF32
+            | KernelFunction::ConvertBF16ToF32 => KernelLibrary::Tensors,
         }
     }
 
@@ -140,6 +146,8 @@ impl KernelFunction {
             KernelFunction::Arange => "arange_kernel",
             KernelFunction::Ones => "ones_kernel",
             KernelFunction::RandomUniform => "random_uniform",
+            KernelFunction::ConvertF16ToF32 => "convert_f16_to_f32",
+            KernelFunction::ConvertBF16ToF32 => "convert_bf16_to_f32",
         }
     }
 }

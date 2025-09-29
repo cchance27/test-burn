@@ -1,6 +1,6 @@
 use super::*;
-use crate::metallic::tensor::Dtype;
-use crate::metallic::{Context, Tensor, TensorInit, TensorStorage};
+use crate::metallic::Dtype;
+use crate::metallic::{Context, Tensor, TensorBF16, TensorF16, TensorInit, TensorStorage};
 
 #[test]
 fn zeros_and_ones() {
@@ -189,6 +189,64 @@ fn offset_correctness_across_chunks() {
 
     // Also verify t1 is still correct (zeros)
     assert!(t1.as_slice().iter().all(|&x| x == 0.0));
+}
+
+#[test]
+fn f16_elementwise_promotes_to_f32() {
+    let mut ctx = Context::new().unwrap();
+
+    let dims = vec![2, 2];
+    let a =
+        TensorF16::from_f32_slice(dims.clone(), TensorStorage::Dedicated(&ctx), &[1.0, 2.0, 3.0, 4.0]).expect("failed to build f16 tensor");
+    let b =
+        TensorF16::from_f32_slice(dims.clone(), TensorStorage::Dedicated(&ctx), &[5.0, 6.0, 7.0, 8.0]).expect("failed to build f16 tensor");
+
+    assert_eq!(a.dtype, Dtype::F16);
+    assert_eq!(b.dtype, Dtype::F16);
+
+    let converted = a.ensure_kernel_dtype(&mut ctx, &[Dtype::F16, Dtype::F32]).unwrap();
+    assert!(!converted.converted(), "should reuse native dtype when supported");
+
+    let guard = a.ensure_kernel_dtype(&mut ctx, &[Dtype::F32]).unwrap();
+    assert!(guard.converted(), "promotion to f32 should report conversion");
+    assert_eq!(guard.tensor().dtype(), Dtype::F32);
+
+    let sum = a.add_elem(&b, &mut ctx).expect("elementwise add should succeed");
+    ctx.synchronize();
+    assert_eq!(sum.dtype, Dtype::F32);
+    assert_eq!(a.dtype, Dtype::F16, "source tensor metadata must remain untouched");
+    assert_eq!(b.dtype, Dtype::F16, "source tensor metadata must remain untouched");
+}
+
+#[test]
+fn bf16_matmul_promotes_to_f32() {
+    let mut ctx = Context::new().unwrap();
+
+    let a =
+        TensorBF16::from_f32_slice(vec![2, 2], TensorStorage::Dedicated(&ctx), &[1.0, 2.0, 3.0, 4.0]).expect("failed to build bf16 tensor");
+    let b =
+        TensorBF16::from_f32_slice(vec![2, 2], TensorStorage::Dedicated(&ctx), &[4.0, 3.0, 2.0, 1.0]).expect("failed to build bf16 tensor");
+
+    let result = ctx.matmul(&a, &b, false, false).expect("matmul should succeed");
+    ctx.synchronize();
+    assert_eq!(result.dtype, Dtype::F32);
+    assert_eq!(a.dtype, Dtype::BF16);
+    assert_eq!(b.dtype, Dtype::BF16);
+}
+
+#[test]
+fn softmax_accepts_f16_inputs() {
+    let mut ctx = Context::new().unwrap();
+
+    let attn = TensorF16::from_f32_slice(vec![1, 2, 2], TensorStorage::Dedicated(&ctx), &[0.5, 0.0, -0.5, 0.0])
+        .expect("failed to build f16 tensor");
+
+    let output =
+        crate::metallic::kernels::softmax::apply_softmax(&mut ctx, None, &attn, 1, 2, 2, false, 0, true).expect("softmax should succeed");
+
+    ctx.synchronize();
+    assert_eq!(output.dtype, Dtype::F32);
+    assert_eq!(attn.dtype, Dtype::F16);
 }
 
 #[test]

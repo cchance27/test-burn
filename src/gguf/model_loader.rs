@@ -1,4 +1,5 @@
 use super::{GGUFDataType, GGUFError, GGUFFile, GGUFRawTensor};
+use crate::metallic::tensor::TensorInit;
 use crate::{
     gguf::{GGUFValue, GGUTensorInfo},
     metallic::{
@@ -6,7 +7,6 @@ use crate::{
         TensorF32, TensorStorage,
     },
 };
-use crate::metallic::tensor::TensorInit;
 use std::cell::{Ref, RefCell};
 use std::collections::HashMap;
 use std::ops::Deref;

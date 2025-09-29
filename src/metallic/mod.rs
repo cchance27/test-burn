@@ -2,8 +2,8 @@
 pub use context::Context;
 pub use error::MetalError;
 pub use tensor::{
-    BF16Element, Dtype, F16Element, F32Element, Tensor as GenericTensor, TensorBF16, TensorElement, TensorF16, TensorF32,
-    TensorInit as GenericTensorInit, TensorStorage,
+    BF16Element, Dtype, F16Element, F32Element, KernelElement, KernelTensor, KernelTensorGuard, Tensor as GenericTensor, TensorBF16,
+    TensorElement, TensorF16, TensorF32, TensorInit as GenericTensorInit, TensorStorage,
 };
 
 pub type Tensor = TensorF32;
