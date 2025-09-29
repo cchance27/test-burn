@@ -1,8 +1,8 @@
 use crate::app_event::{LatencyRow, MemoryRow};
+use crate::metallic::TensorElement;
 use crate::metallic::instrumentation::{BlockMemorySnapshot, MemoryUsage};
 use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::models::qwen25::Qwen25;
-use crate::metallic::TensorElement;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::json;
@@ -674,7 +674,7 @@ pub fn build_model_memory_tree<T: TensorElement>(model: &Qwen25<T>) -> ModelMemo
         .iter()
         .enumerate()
         .map(|(idx, block)| {
-            let elem_bytes = std::mem::size_of::<f32>();
+            let elem_bytes = T::DTYPE.size_bytes();
             let d_model = model.config.d_model;
             let kv_dim = block.kv_dim;
             let q_weight_bytes = d_model * d_model * elem_bytes;

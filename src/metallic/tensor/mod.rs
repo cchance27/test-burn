@@ -1237,9 +1237,9 @@ impl<T: TensorElement> Tensor<T> {
         self.add_elem(&scalar_tensor, ctx)
     }
 
-    fn unary_elementwise<F>(a: &Self, f: F) -> Result<Self, MetalError> 
-    where 
-        F: Fn(f32) -> f32 
+    fn unary_elementwise<F>(a: &Self, f: F) -> Result<Self, MetalError>
+    where
+        F: Fn(f32) -> f32,
     {
         let byte_len = a.size_bytes();
         let buf = a
@@ -1277,7 +1277,7 @@ impl<T: TensorElement> Tensor<T> {
             return Err(MetalError::InvalidShape("batch_index out of bounds".to_string()));
         }
 
-        let elem_size = std::mem::size_of::<f32>();
+        let elem_size = self.dtype.size_bytes();
         let batch_stride_elems = if self.strides.len() == self.dims.len() && !self.strides.is_empty() {
             self.strides[0]
         } else {
@@ -1300,14 +1300,18 @@ impl<T: TensorElement> Tensor<T> {
             if !T::is_finite(val) {
                 return Err(MetalError::InvalidOperation(format!(
                     "Non-finite value detected at index {}: {} in tensor with shape {:?}",
-                    i, T::to_f32(val), self.dims
+                    i,
+                    T::to_f32(val),
+                    self.dims
                 )));
             }
             // Check for extremely large values that might cause overflow in subsequent operations
             if T::to_f32(T::abs(val)) > 1e6 {
                 eprintln!(
                     "Warning: Very large value detected at index {}: {} in tensor with shape {:?}. This could cause numerical instability.",
-                    i, T::to_f32(val), self.dims
+                    i,
+                    T::to_f32(val),
+                    self.dims
                 );
             }
         }
