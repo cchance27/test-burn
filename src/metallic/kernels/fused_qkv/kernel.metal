@@ -16,19 +16,15 @@ kernel void fused_qkv_bias_split_##SUFFIX( \
     constant uint& rows [[buffer(5)]], \
     constant uint& q_cols [[buffer(6)]], \
     constant uint& kv_cols [[buffer(7)]], \
-    uint gid [[thread_position_in_grid]]) \
-{ \
+    uint gid [[thread_position_in_grid]]) { \
     uint total_cols = q_cols + 2 * kv_cols; \
     uint total = rows * total_cols; \
     if (gid >= total) { \
         return; \
     } \
-
     uint row = gid / total_cols; \
     uint col = gid % total_cols; \
-
     ACCUM value = static_cast<ACCUM>(qkv_linear[gid]) + static_cast<ACCUM>(bias[col]); \
-
     if (col < q_cols) { \
         uint out_idx = row * q_cols + col; \
         q_out[out_idx] = static_cast<SCALAR>(value); \

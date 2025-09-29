@@ -7,24 +7,22 @@ using namespace metal;
     OP(bfloat, float, bf16)
 
 #define DEFINE_SOFTMAX_KERNEL(SCALAR, ACCUM, SUFFIX) \
-// Fused mask+softmax compute kernel \
-kernel void sdpa_fused_softmax_##SUFFIX(device SCALAR* attn [[buffer(0)]], \
-                                        constant uint &seq_q [[buffer(1)]], \
-                                        constant uint &seq_k [[buffer(2)]], \
-                                        constant uint &causal_flag [[buffer(3)]], \
-                                        constant uint &query_offset [[buffer(4)]], \
-                                        uint3 tg_pos [[threadgroup_position_in_grid]], \
-                                        uint3 tid3 [[thread_position_in_threadgroup]], \
-                                        uint3 tptg [[threads_per_threadgroup]]) { \
+kernel void sdpa_fused_softmax_##SUFFIX( \
+    device SCALAR* attn [[buffer(0)]], \
+    constant uint& seq_q [[buffer(1)]], \
+    constant uint& seq_k [[buffer(2)]], \
+    constant uint& causal_flag [[buffer(3)]], \
+    constant uint& query_offset [[buffer(4)]], \
+    uint3 tg_pos [[threadgroup_position_in_grid]], \
+    uint3 tid3 [[thread_position_in_threadgroup]], \
+    uint3 tptg [[threads_per_threadgroup]]) { \
     uint row = tg_pos.y; \
     uint lane = tid3.x; \
     uint stride = tptg.x; \
     uint base = row * seq_k; \
     uint i_q = (row % seq_q) + query_offset; \
-
     threadgroup ACCUM shared_data[256]; \
     threadgroup uint shared_indices[256]; \
-
     ACCUM local_max = -INFINITY; \
     uint max_index = 0; \
     for (uint c = lane; c < seq_k; c += stride) { \
@@ -37,11 +35,9 @@ kernel void sdpa_fused_softmax_##SUFFIX(device SCALAR* attn [[buffer(0)]], \
             max_index = c; \
         } \
     } \
-
     shared_data[lane] = local_max; \
     shared_indices[lane] = max_index; \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
-
     for (uint offset = stride / 2u; offset > 0u; offset /= 2u) { \
         if (lane < offset) { \
             if (shared_data[lane + offset] > shared_data[lane]) { \
@@ -51,10 +47,8 @@ kernel void sdpa_fused_softmax_##SUFFIX(device SCALAR* attn [[buffer(0)]], \
         } \
         threadgroup_barrier(mem_flags::mem_threadgroup); \
     } \
-
     ACCUM maxv = shared_data[0]; \
     uint row_max_index = shared_indices[0]; \
-
     ACCUM local_sum = static_cast<ACCUM>(0.0f); \
     for (uint c = lane; c < seq_k; c += stride) { \
         ACCUM xv = static_cast<ACCUM>(attn[base + c]); \
@@ -79,19 +73,15 @@ kernel void sdpa_fused_softmax_##SUFFIX(device SCALAR* attn [[buffer(0)]], \
         attn[base + c] = static_cast<SCALAR>(e); \
         local_sum += e; \
     } \
-
     shared_data[lane] = local_sum; \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
-
     for (uint offset = stride / 2u; offset > 0u; offset /= 2u) { \
         if (lane < offset) { \
             shared_data[lane] += shared_data[lane + offset]; \
         } \
         threadgroup_barrier(mem_flags::mem_threadgroup); \
     } \
-
     ACCUM sumv = shared_data[0]; \
-
     for (uint c = lane; c < seq_k; c += stride) { \
         if (isnan(sumv)) { \
             attn[base + c] = static_cast<SCALAR>(sumv); \
@@ -101,12 +91,10 @@ kernel void sdpa_fused_softmax_##SUFFIX(device SCALAR* attn [[buffer(0)]], \
         } else { \
             if (causal_flag == 1u && c > i_q) { \
                 attn[base + c] = static_cast<SCALAR>(0.0f); \
+            } else if (c == row_max_index) { \
+                attn[base + c] = static_cast<SCALAR>(1.0f); \
             } else { \
-                if (c == row_max_index) { \
-                    attn[base + c] = static_cast<SCALAR>(1.0f); \
-                } else { \
-                    attn[base + c] = static_cast<SCALAR>(0.0f); \
-                } \
+                attn[base + c] = static_cast<SCALAR>(0.0f); \
             } \
         } \
     } \
