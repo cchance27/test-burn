@@ -2,8 +2,8 @@ use super::{GGUFDataType, GGUFError, GGUFFile, GGUFRawTensor};
 use crate::{
     gguf::{GGUFValue, GGUTensorInfo},
     metallic::{
-        BF16Element, Context, Dtype, F32Element, GenericTensor, Tensor as LegacyTensor, TensorBF16, TensorElement, TensorF16, TensorF32,
-        TensorInit as GenericTensorInit, TensorStorage,
+        BF16Element, Context, Dtype, F16Element, F32Element, GenericTensor, Tensor as LegacyTensor, TensorBF16, TensorElement, TensorF16,
+        TensorF32, TensorInit as GenericTensorInit, TensorStorage,
     },
 };
 use std::cell::{Ref, RefCell};
@@ -32,7 +32,7 @@ fn tensor_from_slice<T: TensorElement>(
     data: &[T::Scalar],
     context: &Context,
 ) -> Result<GenericTensor<T>, GGUFError> {
-    GenericTensor::<T>::new(dims, TensorStorage::Dedicated(context), GenericTensorInit::CopyFrom(data))
+    GenericTensor::<T>::new(dims, TensorStorage::Dedicated(context), GenericTensorInit::<T>::CopyFrom(data))
         .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
 }
 
@@ -221,7 +221,7 @@ impl<'a> Deref for F32TensorGuard<'a> {
     fn deref(&self) -> &Self::Target {
         match self {
             F32TensorGuard::Borrowed(tensor) => tensor,
-            F32TensorGuard::Cached(ref tensor) => tensor,
+            F32TensorGuard::Cached(tensor) => tensor.as_ref(),
         }
     }
 }
