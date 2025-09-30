@@ -186,13 +186,27 @@ fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
         )));
     }
 
-    for out_idx in 0..out_features {
+    if src_dims[1] == fused_rows {
+        // Source stored as [out_features, in_features] in row-major order.
+        for out_idx in 0..out_features {
+            for in_idx in 0..in_features {
+                let src_index = out_idx * in_features + in_idx;
+                let dst_row = in_idx;
+                let dst_col = dst_col_offset + out_idx;
+                let dst_index = dst_row * fused_cols + dst_col;
+                dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+            }
+        }
+    } else {
+        // Source already matches the runtime layout [in_features, out_features].
         for in_idx in 0..in_features {
-            let src_index = out_idx * in_features + in_idx;
-            let dst_row = in_idx;
-            let dst_col = dst_col_offset + out_idx;
-            let dst_index = dst_row * fused_cols + dst_col;
-            dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+            for out_idx in 0..out_features {
+                let src_index = in_idx * out_features + out_idx;
+                let dst_row = in_idx;
+                let dst_col = dst_col_offset + out_idx;
+                let dst_index = dst_row * fused_cols + dst_col;
+                dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+            }
         }
     }
 
@@ -645,7 +659,7 @@ mod tests {
     }
 
     #[test]
-    fn pack_weight_transposes_column_major_exports() {
+    fn pack_weight_handles_already_transposed_layouts() {
         let src_dims = vec![2, 3];
         let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let fused_dims = vec![2, 3];
@@ -653,7 +667,7 @@ mod tests {
 
         pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
 
-        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+        assert_eq!(fused, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
 
     #[test]
