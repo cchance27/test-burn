@@ -36,6 +36,8 @@ pub enum MetalError {
     OperationNotSupported(String),
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+    #[error("Unsupported dtype {dtype:?} for {operation}")]
+    UnsupportedDtype { operation: &'static str, dtype: Dtype },
     #[error("Tokenizer error: {0}")]
     TokenizerError(Box<crate::metallic::tokenizer::TokenizerError>),
     #[error("Regex Error: {0}")]

@@ -41,10 +41,7 @@ impl KernelManager {
         dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-        let key = KernelPipelineKey {
-            function: func.clone(),
-            dtype,
-        };
+        let key = KernelPipelineKey { function: func, dtype };
 
         if let Some(pipeline) = self.pipelines.get(&key) {
             return Ok(pipeline.clone());
@@ -63,7 +60,7 @@ impl KernelManager {
             lib
         };
 
-        let fn_name = NSString::from_str(func.name_for_dtype(dtype));
+        let fn_name = NSString::from_str(func.name_for_dtype(dtype)?);
         let metal_fn = library
             .newFunctionWithName(&fn_name)
             .ok_or_else(|| MetalError::FunctionCreationFailed(fn_name.to_string()))?;

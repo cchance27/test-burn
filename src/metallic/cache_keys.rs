@@ -91,11 +91,12 @@ impl Hash for MpsMatrixDescriptorKey {
 pub struct MpsSoftMaxKey {
     pub rows: usize,
     pub columns: usize,
+    pub dtype: Dtype,
 }
 
 impl PartialEq for MpsSoftMaxKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows && self.columns == other.columns
+        self.rows == other.rows && self.columns == other.columns && self.dtype == other.dtype
     }
 }
 
@@ -105,6 +106,7 @@ impl Hash for MpsSoftMaxKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.rows.hash(state);
         self.columns.hash(state);
+        self.dtype.hash(state);
     }
 }
 
