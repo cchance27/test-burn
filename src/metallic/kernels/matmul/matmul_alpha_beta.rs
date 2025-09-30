@@ -1,4 +1,4 @@
-use super::*;
+use super::{Bf16GemmConversion, *};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -7,7 +7,7 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor, TensorElement,
+    Context, Dtype, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
 };
@@ -28,6 +28,8 @@ struct MatMulAlphaBeta {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+    pub bf16_aux: Option<Bf16GemmConversion>,
+    pub needs_result_prelude: bool,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -122,6 +124,50 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             return Ok((Box::new(NoopOperation), output));
         }
 
+        let uses_bf16_fastpath = left_dtype == Dtype::BF16;
+
+        let mut matmul_left_view = left_view;
+        let mut matmul_right_view = right_view;
+        let mut matmul_result_view = result_view;
+
+        let mut matmul_left_buf = left_tensor.buf.clone();
+        let mut matmul_left_offset = left_tensor.offset;
+        let mut matmul_right_buf = right_tensor.buf.clone();
+        let mut matmul_right_offset = right_tensor.offset;
+        let mut matmul_result_buf = result.buf.clone();
+        let mut matmul_result_offset = result.offset;
+
+        let mut left_desc_dtype = left_dtype;
+        let mut right_desc_dtype = right_dtype;
+        let mut result_desc_dtype = result_dtype;
+
+        let mut bf16_aux_struct = None;
+
+        if uses_bf16_fastpath {
+            let conversion = Bf16GemmConversion::new(ctx, &left_tensor, left_view, &right_tensor, right_view, result, result_view)?;
+
+            let (temp_left_buf, temp_left_offset) = conversion.left_temp();
+            let (temp_right_buf, temp_right_offset) = conversion.right_temp();
+            let (temp_result_buf, temp_result_offset) = conversion.result_temp();
+
+            matmul_left_buf = temp_left_buf.clone();
+            matmul_left_offset = temp_left_offset;
+            matmul_right_buf = temp_right_buf.clone();
+            matmul_right_offset = temp_right_offset;
+            matmul_result_buf = temp_result_buf.clone();
+            matmul_result_offset = temp_result_offset;
+
+            matmul_left_view = conversion.left_view();
+            matmul_right_view = conversion.right_view();
+            matmul_result_view = conversion.result_view();
+
+            left_desc_dtype = Dtype::F16;
+            right_desc_dtype = Dtype::F16;
+            result_desc_dtype = Dtype::F16;
+
+            bf16_aux_struct = Some(conversion);
+        }
+
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
             transpose_left,
@@ -129,7 +175,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             result_rows: eff_left_rows,
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
-            batch_size: result_view.batch,
+            batch_size: matmul_result_view.batch,
             alpha,
             beta,
         };
@@ -137,50 +183,52 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 
-        // Create MPS matrix descriptors based on original dimensions (not transposed ones)
+        // Create MPS matrix descriptors based on the buffers consumed by MPS
         let left_desc_key = MpsMatrixDescriptorKey {
-            rows: left_view.rows,
-            columns: left_view.columns,
-            row_bytes: left_view.row_bytes,
-            matrices: left_view.batch,
-            matrix_bytes: left_view.matrix_bytes,
-            dtype: left_dtype,
+            rows: matmul_left_view.rows,
+            columns: matmul_left_view.columns,
+            row_bytes: matmul_left_view.row_bytes,
+            matrices: matmul_left_view.batch,
+            matrix_bytes: matmul_left_view.matrix_bytes,
+            dtype: left_desc_dtype,
         };
         let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
         let right_desc_key = MpsMatrixDescriptorKey {
-            rows: right_view.rows,
-            columns: right_view.columns,
-            row_bytes: right_view.row_bytes,
-            matrices: right_view.batch,
-            matrix_bytes: right_view.matrix_bytes,
-            dtype: right_dtype,
+            rows: matmul_right_view.rows,
+            columns: matmul_right_view.columns,
+            row_bytes: matmul_right_view.row_bytes,
+            matrices: matmul_right_view.batch,
+            matrix_bytes: matmul_right_view.matrix_bytes,
+            dtype: right_desc_dtype,
         };
         let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
         let result_desc_key = MpsMatrixDescriptorKey {
             rows: eff_left_rows,
             columns: eff_right_cols,
-            row_bytes: result_view.row_bytes,
-            matrices: result_view.batch,
-            matrix_bytes: result_view.matrix_bytes,
-            dtype: result_dtype,
+            row_bytes: matmul_result_view.row_bytes,
+            matrices: matmul_result_view.batch,
+            matrix_bytes: matmul_result_view.matrix_bytes,
+            dtype: result_desc_dtype,
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
         let op = MatMulAlphaBeta {
-            left_buf: left_tensor.buf.clone(),
-            left_offset: left_tensor.offset,
-            right_buf: right_tensor.buf.clone(),
-            right_offset: right_tensor.offset,
-            result_buf: result.buf.clone(),
-            result_offset: result.offset,
+            left_buf: matmul_left_buf,
+            left_offset: matmul_left_offset,
+            right_buf: matmul_right_buf,
+            right_offset: matmul_right_offset,
+            result_buf: matmul_result_buf,
+            result_offset: matmul_result_offset,
             left_desc,
             right_desc,
             result_desc,
             gemm,
-            batch_size: result_view.batch,
+            batch_size: matmul_result_view.batch,
+            bf16_aux: bf16_aux_struct,
+            needs_result_prelude: uses_bf16_fastpath && beta != 0.0,
         };
 
         // Return the boxed operation and the result tensor (already provided)
@@ -196,6 +244,13 @@ impl Operation for MatMulAlphaBeta {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        if let Some(aux) = &self.bf16_aux {
+            aux.encode_inputs(command_buffer)?;
+            if self.needs_result_prelude {
+                aux.encode_result_from_bf16(command_buffer)?;
+            }
+        }
+
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -207,6 +262,9 @@ impl Operation for MatMulAlphaBeta {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+        if let Some(aux) = &self.bf16_aux {
+            aux.encode_result_to_bf16(command_buffer)?;
+        }
         Ok(())
     }
 }

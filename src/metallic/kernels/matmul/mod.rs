@@ -2,15 +2,18 @@ use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLSize};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable};
+use crate::metallic::tensor::MpsMatrixBatchView;
 use crate::metallic::{
-    Context, Dtype, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    Context, Dtype, F16Element, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
 };
+use std::convert::TryFrom;
 
 #[cfg(test)]
 mod matmul_test;
@@ -37,6 +40,27 @@ struct MatMul {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+    pub bf16_aux: Option<Bf16GemmConversion>,
+}
+
+struct Bf16GemmConversion {
+    left_src_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    left_src_offset: usize,
+    right_src_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    right_src_offset: usize,
+    result_dst_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    result_dst_offset: usize,
+    left_temp: Tensor<F16Element>,
+    left_view: MpsMatrixBatchView,
+    right_temp: Tensor<F16Element>,
+    right_view: MpsMatrixBatchView,
+    result_temp: Tensor<F16Element>,
+    result_view: MpsMatrixBatchView,
+    cast_to_f16: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    cast_from_f16: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    left_elements: u32,
+    right_elements: u32,
+    result_elements: u32,
 }
 
 struct NoopOperation;
@@ -142,6 +166,50 @@ impl KernelInvocable for MatMulOp {
             return Ok((Box::new(NoopOperation), out));
         }
 
+        let uses_bf16_fastpath = left_dtype == Dtype::BF16;
+
+        let mut matmul_left_view = left_view;
+        let mut matmul_right_view = right_view;
+        let mut matmul_result_view = result_view;
+
+        let mut matmul_left_buf = left_tensor.buf.clone();
+        let mut matmul_left_offset = left_tensor.offset;
+        let mut matmul_right_buf = right_tensor.buf.clone();
+        let mut matmul_right_offset = right_tensor.offset;
+        let mut matmul_result_buf = out.buf.clone();
+        let mut matmul_result_offset = out.offset;
+
+        let mut left_desc_dtype = left_dtype;
+        let mut right_desc_dtype = right_dtype;
+        let mut result_desc_dtype = result_dtype;
+
+        let mut bf16_aux_struct = None;
+
+        if uses_bf16_fastpath {
+            let conversion = Bf16GemmConversion::new(ctx, &left_tensor, left_view, &right_tensor, right_view, &out, result_view)?;
+
+            let (temp_left_buf, temp_left_offset) = conversion.left_temp();
+            let (temp_right_buf, temp_right_offset) = conversion.right_temp();
+            let (temp_result_buf, temp_result_offset) = conversion.result_temp();
+
+            matmul_left_buf = temp_left_buf.clone();
+            matmul_left_offset = temp_left_offset;
+            matmul_right_buf = temp_right_buf.clone();
+            matmul_right_offset = temp_right_offset;
+            matmul_result_buf = temp_result_buf.clone();
+            matmul_result_offset = temp_result_offset;
+
+            matmul_left_view = conversion.left_view();
+            matmul_right_view = conversion.right_view();
+            matmul_result_view = conversion.result_view();
+
+            left_desc_dtype = Dtype::F16;
+            right_desc_dtype = Dtype::F16;
+            result_desc_dtype = Dtype::F16;
+
+            bf16_aux_struct = Some(conversion);
+        }
+
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
             transpose_left,
@@ -149,7 +217,7 @@ impl KernelInvocable for MatMulOp {
             result_rows: eff_left_rows,
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
-            batch_size: result_view.batch,
+            batch_size: matmul_result_view.batch,
             alpha: 1.0,
             beta: 0.0,
         };
@@ -157,50 +225,51 @@ impl KernelInvocable for MatMulOp {
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 
-        // Create MPS matrix descriptors based on original dimensions (not transposed ones)
+        // Create MPS matrix descriptors based on the buffers consumed by MPS
         let left_desc_key = MpsMatrixDescriptorKey {
-            rows: left_view.rows,
-            columns: left_view.columns,
-            row_bytes: left_view.row_bytes,
-            matrices: left_view.batch,
-            matrix_bytes: left_view.matrix_bytes,
-            dtype: left_dtype,
+            rows: matmul_left_view.rows,
+            columns: matmul_left_view.columns,
+            row_bytes: matmul_left_view.row_bytes,
+            matrices: matmul_left_view.batch,
+            matrix_bytes: matmul_left_view.matrix_bytes,
+            dtype: left_desc_dtype,
         };
         let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
         let right_desc_key = MpsMatrixDescriptorKey {
-            rows: right_view.rows,
-            columns: right_view.columns,
-            row_bytes: right_view.row_bytes,
-            matrices: right_view.batch,
-            matrix_bytes: right_view.matrix_bytes,
-            dtype: right_dtype,
+            rows: matmul_right_view.rows,
+            columns: matmul_right_view.columns,
+            row_bytes: matmul_right_view.row_bytes,
+            matrices: matmul_right_view.batch,
+            matrix_bytes: matmul_right_view.matrix_bytes,
+            dtype: right_desc_dtype,
         };
         let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
         let result_desc_key = MpsMatrixDescriptorKey {
             rows: eff_left_rows,
             columns: eff_right_cols,
-            row_bytes: result_view.row_bytes,
-            matrices: result_view.batch,
-            matrix_bytes: result_view.matrix_bytes,
-            dtype: result_dtype,
+            row_bytes: matmul_result_view.row_bytes,
+            matrices: matmul_result_view.batch,
+            matrix_bytes: matmul_result_view.matrix_bytes,
+            dtype: result_desc_dtype,
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
         let op = MatMul {
-            left_buf: left_tensor.buf.clone(),
-            left_offset: left_tensor.offset,
-            right_buf: right_tensor.buf.clone(),
-            right_offset: right_tensor.offset,
-            result_buf: out.buf.clone(),
-            result_offset: out.offset,
+            left_buf: matmul_left_buf,
+            left_offset: matmul_left_offset,
+            right_buf: matmul_right_buf,
+            right_offset: matmul_right_offset,
+            result_buf: matmul_result_buf,
+            result_offset: matmul_result_offset,
             left_desc,
             right_desc,
             result_desc,
             gemm,
-            batch_size: result_view.batch,
+            batch_size: matmul_result_view.batch,
+            bf16_aux: bf16_aux_struct,
         };
 
         // Return the boxed operation and the output tensor.
@@ -216,6 +285,10 @@ impl Operation for MatMul {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        if let Some(aux) = &self.bf16_aux {
+            aux.encode_inputs(command_buffer)?;
+        }
+
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -227,8 +300,192 @@ impl Operation for MatMul {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
+        if let Some(aux) = &self.bf16_aux {
+            aux.encode_result_to_bf16(command_buffer)?;
+        }
         Ok(())
     }
+}
+
+impl Bf16GemmConversion {
+    fn new<T: TensorElement>(
+        ctx: &mut Context<T>,
+        left_tensor: &Tensor<T>,
+        left_view: MpsMatrixBatchView,
+        right_tensor: &Tensor<T>,
+        right_view: MpsMatrixBatchView,
+        result_tensor: &Tensor<T>,
+        result_view: MpsMatrixBatchView,
+    ) -> Result<Self, MetalError> {
+        let left_temp = ctx.pool.alloc_tensor::<F16Element>(left_tensor.dims.clone())?.into_tensor();
+        let right_temp = ctx.pool.alloc_tensor::<F16Element>(right_tensor.dims.clone())?.into_tensor();
+        let result_temp = ctx.pool.alloc_tensor::<F16Element>(result_tensor.dims.clone())?.into_tensor();
+
+        let left_view_f16 = left_temp.as_mps_matrix_batch_view()?;
+        let right_view_f16 = right_temp.as_mps_matrix_batch_view()?;
+        let result_view_f16 = result_temp.as_mps_matrix_batch_view()?;
+
+        let left_elements = usize_to_u32(left_temp.len(), "left matmul operand")?;
+        let right_elements = usize_to_u32(right_temp.len(), "right matmul operand")?;
+        let result_elements = usize_to_u32(result_temp.len(), "result matmul operand")?;
+
+        let cast_to_f16 = ctx
+            .kernel_manager
+            .get_pipeline(KernelFunction::CastToF16, Dtype::BF16, &ctx.device)?;
+        let cast_from_f16 = ctx
+            .kernel_manager
+            .get_pipeline(KernelFunction::CastFromF16, Dtype::BF16, &ctx.device)?;
+
+        Ok(Self {
+            left_src_buf: left_tensor.buf.clone(),
+            left_src_offset: left_tensor.offset,
+            right_src_buf: right_tensor.buf.clone(),
+            right_src_offset: right_tensor.offset,
+            result_dst_buf: result_tensor.buf.clone(),
+            result_dst_offset: result_tensor.offset,
+            left_temp,
+            left_view: left_view_f16,
+            right_temp,
+            right_view: right_view_f16,
+            result_temp,
+            result_view: result_view_f16,
+            cast_to_f16,
+            cast_from_f16,
+            left_elements,
+            right_elements,
+            result_elements,
+        })
+    }
+
+    fn encode_inputs(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Result<(), MetalError> {
+        if self.left_elements > 0 {
+            encode_cast_kernel(
+                command_buffer,
+                &self.cast_to_f16,
+                &self.left_src_buf,
+                self.left_src_offset,
+                &self.left_temp.buf,
+                self.left_temp.offset,
+                self.left_elements,
+            )?;
+        }
+
+        if self.right_elements > 0 {
+            encode_cast_kernel(
+                command_buffer,
+                &self.cast_to_f16,
+                &self.right_src_buf,
+                self.right_src_offset,
+                &self.right_temp.buf,
+                self.right_temp.offset,
+                self.right_elements,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    fn encode_result_from_bf16(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Result<(), MetalError> {
+        if self.result_elements == 0 {
+            return Ok(());
+        }
+
+        encode_cast_kernel(
+            command_buffer,
+            &self.cast_to_f16,
+            &self.result_dst_buf,
+            self.result_dst_offset,
+            &self.result_temp.buf,
+            self.result_temp.offset,
+            self.result_elements,
+        )
+    }
+
+    fn encode_result_to_bf16(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Result<(), MetalError> {
+        if self.result_elements == 0 {
+            return Ok(());
+        }
+
+        encode_cast_kernel(
+            command_buffer,
+            &self.cast_from_f16,
+            &self.result_temp.buf,
+            self.result_temp.offset,
+            &self.result_dst_buf,
+            self.result_dst_offset,
+            self.result_elements,
+        )
+    }
+
+    fn left_view(&self) -> MpsMatrixBatchView {
+        self.left_view
+    }
+
+    fn right_view(&self) -> MpsMatrixBatchView {
+        self.right_view
+    }
+
+    fn result_view(&self) -> MpsMatrixBatchView {
+        self.result_view
+    }
+
+    fn left_temp(&self) -> (&Retained<ProtocolObject<dyn MTLBuffer>>, usize) {
+        (&self.left_temp.buf, self.left_temp.offset)
+    }
+
+    fn right_temp(&self) -> (&Retained<ProtocolObject<dyn MTLBuffer>>, usize) {
+        (&self.right_temp.buf, self.right_temp.offset)
+    }
+
+    fn result_temp(&self) -> (&Retained<ProtocolObject<dyn MTLBuffer>>, usize) {
+        (&self.result_temp.buf, self.result_temp.offset)
+    }
+}
+
+fn encode_cast_kernel(
+    command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    src_buf: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    src_offset: usize,
+    dst_buf: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    dst_offset: usize,
+    total_elements: u32,
+) -> Result<(), MetalError> {
+    if total_elements == 0 {
+        return Ok(());
+    }
+
+    let encoder = command_buffer
+        .computeCommandEncoder()
+        .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+    set_compute_pipeline_state(&encoder, pipeline);
+    set_buffer(&encoder, 0, src_buf, src_offset);
+    set_buffer(&encoder, 1, dst_buf, dst_offset);
+    set_bytes(&encoder, 2, &total_elements);
+
+    let threads_per_tg = MTLSize {
+        width: 256,
+        height: 1,
+        depth: 1,
+    };
+    let groups = MTLSize {
+        width: ((total_elements as usize) + 255) / 256,
+        height: 1,
+        depth: 1,
+    };
+
+    if groups.width > 0 {
+        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+    }
+
+    encoder.endEncoding();
+    Ok(())
+}
+
+fn usize_to_u32(value: usize, context: &str) -> Result<u32, MetalError> {
+    u32::try_from(value).map_err(|_| MetalError::InvalidOperation(format!("{context} exceeds u32 range")))
 }
 
 fn cpu_matmul_fallback<T: TensorElement>(
@@ -310,7 +567,7 @@ fn cpu_matmul_fallback<T: TensorElement>(
 }
 
 fn requires_cpu_matmul(dtypes: &[Dtype]) -> bool {
-    dtypes.iter().any(|dtype| !matches!(dtype, Dtype::F32 | Dtype::F16))
+    dtypes.iter().any(|dtype| !matches!(dtype, Dtype::F32 | Dtype::F16 | Dtype::BF16))
 }
 
 /// Create an `MPSMatrix` view into an existing `MTLBuffer`.
