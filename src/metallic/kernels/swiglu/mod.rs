@@ -261,7 +261,9 @@ fn execute_swiglu_logic<T: TensorElement>(
 
         let gate_view = fused_temp.slice_last_dim(0..hidden_dim)?;
         let up_view = fused_temp.slice_last_dim(hidden_dim..expected_cols)?;
-        (gate_view, up_view)
+        let gate_temp = ctx.materialize_contiguous_view(gate_view)?;
+        let up_temp = ctx.materialize_contiguous_view(up_view)?;
+        (gate_temp, up_temp)
     } else {
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;

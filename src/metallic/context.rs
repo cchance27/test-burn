@@ -281,13 +281,9 @@ impl<T: TensorElement> Context<T> {
         let k_range_end = d_model + kv_dim;
         let v_range_end = expected_total;
 
-        let q_out = linear.slice_last_dim(0..q_range_end)?;
-        let k_out = linear.slice_last_dim(d_model..k_range_end)?;
-        let v_out = linear.slice_last_dim(k_range_end..v_range_end)?;
-
-        self.mark_tensor_pending(&q_out);
-        self.mark_tensor_pending(&k_out);
-        self.mark_tensor_pending(&v_out);
+        let q_out = self.materialize_contiguous_view(linear.slice_last_dim(0..q_range_end)?)?;
+        let k_out = self.materialize_contiguous_view(linear.slice_last_dim(d_model..k_range_end)?)?;
+        let v_out = self.materialize_contiguous_view(linear.slice_last_dim(k_range_end..v_range_end)?)?;
 
         Ok((q_out, k_out, v_out))
     }
@@ -1053,6 +1049,49 @@ impl<T: TensorElement> Context<T> {
     pub(crate) fn active_command_buffer_mut_without_cache(&mut self) -> Result<&mut CommandBuffer, MetalError> {
         self.ensure_active_cmd_buffer_internal(false)?;
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
+    }
+
+    pub(crate) fn materialize_contiguous_view(&mut self, view: Tensor<T>) -> Result<Tensor<T>, MetalError> {
+        if view.strides == Tensor::<T>::compute_strides(view.dims()) {
+            return Ok(view);
+        }
+
+        let dims = view.dims().to_vec();
+        let contiguous = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+
+        self.prepare_tensors_for_active_cmd(&[&view])?;
+
+        let source_view = view.as_mps_matrix_batch_view()?;
+        let dest_view = contiguous.as_mps_matrix_batch_view()?;
+        let elem_size = view.dtype.size_bytes();
+
+        let command_buffer = self.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+
+        for batch_idx in 0..source_view.batch {
+            for row_idx in 0..source_view.rows {
+                let src_offset = view.offset + batch_idx * source_view.matrix_bytes + row_idx * source_view.row_bytes;
+                let dst_offset = contiguous.offset + batch_idx * dest_view.matrix_bytes + row_idx * dest_view.row_bytes;
+                let copy_bytes = dest_view.columns * elem_size;
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &view.buf,
+                        src_offset,
+                        &contiguous.buf,
+                        dst_offset,
+                        copy_bytes,
+                    );
+                }
+            }
+        }
+
+        encoder.endEncoding();
+        self.mark_tensor_pending(&contiguous);
+
+        Ok(contiguous)
     }
 
     pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor<T>) {
