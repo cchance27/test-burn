@@ -73,6 +73,102 @@ fn tensor_from_f16_slice<T: TensorElement>(
     Ok(tensor)
 }
 
+fn tensor_from_q8_bytes<T: TensorElement>(
+    tensor_name: &str,
+    dims: Vec<usize>,
+    expected_elements: usize,
+    raw: &[u8],
+    data_type: GGUFDataType,
+    context: &Context<T>,
+) -> Result<Tensor<T>, GGUFError> {
+    let (block_size, delta_offset, weight_offset) = match data_type {
+        GGUFDataType::Q8_0 => (34usize, None, 2usize),
+        GGUFDataType::Q8_1 => (36usize, Some(2usize), 4usize),
+        other => {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Unsupported Q8 tensor data type: {:?}",
+                other
+            )))
+        }
+    };
+
+    if raw.len() % block_size != 0 {
+        return Err(GGUFError::InvalidTensorData(format!(
+            "Tensor '{}' data length {} is not a multiple of block size {}",
+            tensor_name,
+            raw.len(),
+            block_size
+        )));
+    }
+
+    let weights_per_block = 32usize;
+    let num_blocks = raw.len() / block_size;
+    let total_weights = num_blocks * weights_per_block;
+    if total_weights < expected_elements {
+        return Err(GGUFError::InvalidTensorData(format!(
+            "Tensor '{}' expects {} elements but Q8 blocks only contain {}",
+            tensor_name, expected_elements, total_weights
+        )));
+    }
+
+    let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+        .map_err(|err| GGUFError::InvalidTensorData(format!(
+            "Failed to allocate tensor '{}': {}",
+            tensor_name, err
+        )))?;
+
+    {
+        let slice = tensor.as_mut_slice();
+        let mut write_index = 0usize;
+
+        for block_idx in 0..num_blocks {
+            let block_start = block_idx * block_size;
+            let block = &raw[block_start..block_start + block_size];
+
+            let scale_bits = u16::from_le_bytes([block[0], block[1]]);
+            let scale = f16::from_bits(scale_bits).to_f32();
+
+            let delta = if let Some(offset) = delta_offset {
+                let delta_bits = u16::from_le_bytes([block[offset], block[offset + 1]]);
+                f16::from_bits(delta_bits).to_f32()
+            } else {
+                0.0f32
+            };
+
+            let weights = &block[weight_offset..weight_offset + weights_per_block];
+            for &quantized in weights {
+                if write_index >= expected_elements {
+                    break;
+                }
+
+                let value = (quantized as i8) as f32 * scale + delta;
+                slice[write_index] = T::from_f32(value);
+                write_index += 1;
+            }
+
+            if write_index >= expected_elements {
+                break;
+            }
+        }
+
+        if write_index != expected_elements {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor '{}' expected {} elements but only wrote {} from Q8 data",
+                tensor_name, expected_elements, write_index
+            )));
+        }
+    }
+
+    tensor
+        .flush_host_writes()
+        .map_err(|err| GGUFError::InvalidTensorData(format!(
+            "Failed to synchronize tensor '{}': {}",
+            tensor_name, err
+        )))?;
+
+    Ok(tensor)
+}
+
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
     if name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
         dims.swap(0, 1);
@@ -177,21 +273,14 @@ impl GGUFModelLoader {
                     Ok(GGUFTensor::from(tensor))
                 }
                 GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
-                    #[cfg(target_arch = "aarch64")]
-                    let dequant = crate::gguf::quant::dequantize_q8_to_f32_simd(raw, data_type)
-                        .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
-                    #[cfg(not(target_arch = "aarch64"))]
-                    let dequant = crate::gguf::quant::dequantize_q8_to_f32(raw, data_type)
-                        .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
-
-                    if dequant.len() != expected_elements {
-                        return Err(GGUFError::DimensionMismatch {
-                            expected: expected_elements,
-                            actual: dequant.len(),
-                        });
-                    }
-                    // Convert F32 values to target type T
-                    let tensor = tensor_from_f32_slice::<T>(&tensor_info.name, dims.clone(), &dequant, context)?;
+                    let tensor = tensor_from_q8_bytes::<T>(
+                        &tensor_info.name,
+                        dims.clone(),
+                        expected_elements,
+                        raw,
+                        data_type,
+                        context,
+                    )?;
                     Ok(GGUFTensor::from(tensor))
                 }
                 _ => Err(GGUFError::InvalidTensorData(format!(
