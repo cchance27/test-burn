@@ -15,7 +15,6 @@ This checklist captures potential optimizations and hardening opportunities disc
 - [ ] Add fallbacks for compact attention (paged KV, sliding window) so long-context runs don’t require enormous contiguous buffers. 【F:src/metallic/context.rs†L117-L169】
 
 ## 🚀 Longer-term upgrades
-- [ ] Integrate mixed-precision kernels (FP16/BF16) alongside FP32 to shrink bandwidth and memory pressure; gate on device capabilities. 【F:src/metallic/tensor.rs†L19-L140】【F:src/metallic/kernels】
 - [ ] Support per-layer offload strategies (weights in memory-mapped CPU space, activations/KV in VRAM) with configurable placement policies. 【F:src/gguf/model_loader.rs†L20-L135】【F:src/metallic/context.rs†L18-L169】
 - [ ] Move pooled allocations onto `MTLHeaps` to enable sub-allocations with explicit residency management and defragmentation hooks. 【F:src/metallic/pool.rs†L12-L110】
 - [ ] Develop a background residency manager that migrates rarely used tensors back to host (or compresses them) when pool pressure is high. 【F:src/metallic/context.rs†L18-L169】
