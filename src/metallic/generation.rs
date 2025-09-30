@@ -1,5 +1,4 @@
 use super::{Context, MetalError, Tensor};
-use crate::app_event::AppEvent;
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
     BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
@@ -7,6 +6,7 @@ use crate::metallic::metrics::{
 };
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::{TensorElement, Tokenizer};
+use crate::{alert, app_event::AppEvent};
 use rand::prelude::*;
 use std::{
     sync::{Arc, mpsc},
@@ -485,7 +485,9 @@ where
             );
             if let Some(loggers) = metrics_loggers.as_mut() {
                 let log_now = Instant::now();
-                loggers.log_latency(&rows, log_now, false);
+                if let Err(err) = loggers.log_latency(&rows, log_now, false) {
+                    alert::emit_warning(tx, format!("Failed to log latency metrics: {err}"));
+                }
             }
             if ui_connected && tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
                 ui_connected = false;
@@ -505,7 +507,9 @@ where
             );
             if let Some(loggers) = metrics_loggers.as_mut() {
                 let log_now = Instant::now();
-                loggers.log_memory(&rows, log_now, false);
+                if let Err(err) = loggers.log_memory(&rows, log_now, false) {
+                    alert::emit_warning(tx, format!("Failed to log memory metrics: {err}"));
+                }
             }
             if ui_connected && tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
                 ui_connected = false;
