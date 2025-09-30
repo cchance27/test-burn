@@ -5,6 +5,8 @@ use crate::metallic::Dtype;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
 use crate::metallic::TensorElement;
+use crate::metallic::TensorInit;
+use crate::metallic::TensorStorage;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
@@ -261,7 +263,9 @@ fn execute_swiglu_logic<T: TensorElement>(
 
         let gate_view = fused_temp.slice_last_dim(0..hidden_dim)?;
         let up_view = fused_temp.slice_last_dim(hidden_dim..expected_cols)?;
-        (gate_view, up_view)
+        let gate_temp = materialize_contiguous_if_needed(ctx, gate_view)?;
+        let up_temp = materialize_contiguous_if_needed(ctx, up_view)?;
+        (gate_temp, up_temp)
     } else {
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;
@@ -340,6 +344,49 @@ fn execute_swiglu_logic<T: TensorElement>(
     };
 
     Ok(ffn_out)
+}
+
+fn materialize_contiguous_if_needed<T: TensorElement>(ctx: &mut Context<T>, view: Tensor<T>) -> Result<Tensor<T>, MetalError> {
+    if view.strides == Tensor::compute_strides(view.dims()) {
+        return Ok(view);
+    }
+
+    let dims = view.dims().to_vec();
+    let contiguous = Tensor::new(dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+    ctx.prepare_tensors_for_active_cmd(&[&view])?;
+
+    let source_view = view.as_mps_matrix_batch_view()?;
+    let dest_view = contiguous.as_mps_matrix_batch_view()?;
+    let elem_size = view.dtype.size_bytes();
+
+    let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+    let encoder = command_buffer
+        .raw()
+        .blitCommandEncoder()
+        .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+
+    for batch_idx in 0..source_view.batch {
+        for row_idx in 0..source_view.rows {
+            let src_offset = view.offset + batch_idx * source_view.matrix_bytes + row_idx * source_view.row_bytes;
+            let dst_offset = contiguous.offset + batch_idx * dest_view.matrix_bytes + row_idx * dest_view.row_bytes;
+            let copy_bytes = dest_view.columns * elem_size;
+            unsafe {
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &view.buf,
+                    src_offset,
+                    &contiguous.buf,
+                    dst_offset,
+                    copy_bytes,
+                );
+            }
+        }
+    }
+
+    encoder.endEncoding();
+    ctx.mark_tensor_pending(&contiguous);
+
+    Ok(contiguous)
 }
 
 /// Execute the SwiGLU composite with an explicitly provided cache.
