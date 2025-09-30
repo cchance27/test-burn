@@ -3,7 +3,7 @@ use crate::metallic::{
     Context, Dtype, MetalError, Tensor, TensorElement,
     models::{LoadableModel, Qwen25, Qwen25Config},
 };
-use std::borrow::Cow;
+use std::{any::TypeId, borrow::Cow};
 
 fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f32]> {
     if T::DTYPE == Dtype::F32 {
@@ -30,6 +30,53 @@ fn copy_f32_into_tensor<TDst: TensorElement>(src: &[f32], dst: &mut Tensor<TDst>
     Ok(())
 }
 
+fn copy_tensor_data_into_slice<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst_slice: &mut [TDst::Scalar],
+) -> Result<(), MetalError> {
+    if src.len() != dst_slice.len() {
+        return Err(MetalError::DimensionMismatch {
+            expected: dst_slice.len(),
+            actual: src.len(),
+        });
+    }
+
+    if TypeId::of::<TSrc::Scalar>() == TypeId::of::<TDst::Scalar>()
+        && std::mem::size_of::<TSrc::Scalar>() == std::mem::size_of::<TDst::Scalar>()
+    {
+        let src_slice = src.as_slice();
+        unsafe {
+            let typed_src = std::slice::from_raw_parts(src_slice.as_ptr() as *const TDst::Scalar, src_slice.len());
+            dst_slice.copy_from_slice(typed_src);
+        }
+        return Ok(());
+    }
+
+    match (TSrc::DTYPE, TDst::DTYPE) {
+        (Dtype::F32, _) => {
+            let src_slice = src.as_slice();
+            debug_assert_eq!(std::mem::size_of::<TSrc::Scalar>(), std::mem::size_of::<f32>());
+            let src_f32 = unsafe { std::slice::from_raw_parts(src_slice.as_ptr() as *const f32, src_slice.len()) };
+            TDst::copy_from_f32_slice(src_f32, dst_slice);
+            Ok(())
+        }
+        (_, Dtype::F32) => {
+            let src_slice = src.as_slice();
+            debug_assert_eq!(std::mem::size_of::<TDst::Scalar>(), std::mem::size_of::<f32>());
+            let dst_f32 = unsafe { std::slice::from_raw_parts_mut(dst_slice.as_mut_ptr() as *mut f32, dst_slice.len()) };
+            for (dst, value) in dst_f32.iter_mut().zip(src_slice.iter().copied()) {
+                *dst = TSrc::to_f32(value);
+            }
+            Ok(())
+        }
+        _ => {
+            let src_slice = tensor_data_as_f32(src);
+            TDst::copy_from_f32_slice(src_slice.as_ref(), dst_slice);
+            Ok(())
+        }
+    }
+}
+
 fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>, dst: &mut Tensor<TDst>) -> Result<(), MetalError> {
     if src.len() != dst.len() {
         return Err(MetalError::DimensionMismatch {
@@ -38,8 +85,8 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
         });
     }
 
-    let src_slice = tensor_data_as_f32(src);
-    copy_f32_into_tensor(src_slice.as_ref(), dst)
+    let dst_slice = dst.as_mut_slice();
+    copy_tensor_data_into_slice(src, dst_slice)
 }
 
 fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
@@ -115,10 +162,9 @@ fn copy_bias_into_fused<TSrc: TensorElement, TDst: TensorElement>(
         });
     }
 
-    let s = tensor_data_as_f32(src);
-    let d = &mut dst.as_mut_slice()[dst_offset..dst_offset + s.len()];
-    TDst::copy_from_f32_slice(s.as_ref(), d);
-    Ok(())
+    let end = dst_offset + src.len();
+    let dst_slice = &mut dst.as_mut_slice()[dst_offset..end];
+    copy_tensor_data_into_slice(src, dst_slice)
 }
 
 fn parse_layer_index(name: &str) -> Option<usize> {
