@@ -166,10 +166,10 @@ fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
     let fused_rows = dst_dims[0];
     let fused_cols = dst_dims[1];
 
-    let (out_features, in_features) = if src_dims[1] == fused_rows {
-        (src_dims[0], src_dims[1])
-    } else if src_dims[0] == fused_rows {
-        (src_dims[1], src_dims[0])
+    let (in_features, out_features, needs_transpose) = if src_dims[0] == fused_rows {
+        (src_dims[0], src_dims[1], false)
+    } else if src_dims[1] == fused_rows {
+        (src_dims[1], src_dims[0], true)
     } else {
         return Err(MetalError::InvalidShape(format!(
             "Unable to map weight {:?} into fused layout with {} rows",
@@ -186,7 +186,7 @@ fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
         )));
     }
 
-    if src_dims[1] == fused_rows {
+    if needs_transpose {
         // Source stored as [out_features, in_features] in row-major order.
         for out_idx in 0..out_features {
             for in_idx in 0..in_features {
@@ -668,6 +668,18 @@ mod tests {
         pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
 
         assert_eq!(fused, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    }
+
+    #[test]
+    fn pack_weight_prefers_runtime_layout_when_dims_match_fused_rows() {
+        let src_dims = vec![2, 2];
+        let src = vec![1.0, 2.0, 3.0, 4.0];
+        let fused_dims = vec![2, 4];
+        let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
+
+        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 1).unwrap();
+
+        assert_eq!(fused, vec![0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0]);
     }
 
     #[test]
