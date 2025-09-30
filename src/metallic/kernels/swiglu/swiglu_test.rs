@@ -157,6 +157,83 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     Ok(())
 }
 
+#[test]
+fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+
+    let d_model: usize = 4;
+    let ff_dim: usize = 6; // Not divisible by the vector width
+    let m: usize = 1;
+
+    let gate_data: Vec<f32> = vec![0.1; ff_dim * d_model];
+    let ffn_gate = Tensor::new(
+        vec![ff_dim, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&gate_data),
+    )?;
+
+    let up_data: Vec<f32> = vec![0.2; ff_dim * d_model];
+    let ffn_up = Tensor::new(
+        vec![ff_dim, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&up_data),
+    )?;
+
+    let down_data: Vec<f32> = vec![0.3; d_model * ff_dim];
+    let ffn_down = Tensor::new(
+        vec![d_model, ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&down_data),
+    )?;
+
+    let input_data: Vec<f32> = vec![2.0; m * d_model];
+    let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
+
+    let ffn_gate_bias = Tensor::new(
+        vec![ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.0f32; ff_dim]),
+    )?;
+    let ffn_up_bias = Tensor::new(
+        vec![ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.0f32; ff_dim]),
+    )?;
+    let ffn_down_bias = Tensor::new(
+        vec![d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.0f32; d_model]),
+    )?;
+
+    let output = ctx.SwiGLU(
+        &x_normed_flat,
+        &ffn_gate,
+        &ffn_gate_bias,
+        &ffn_up,
+        &ffn_up_bias,
+        &ffn_down,
+        &ffn_down_bias,
+        None,
+    )?;
+    ctx.synchronize();
+
+    let expected = 1.5897012_f32;
+    let tol = 1e-3_f32;
+    let output_slice = output.as_slice();
+    assert_eq!(output_slice.len(), m * d_model);
+    for &val in output_slice {
+        assert!(
+            (val - expected).abs() < tol,
+            "Expected ≈{:.4}, got {:.4} (diff {:.6})",
+            expected,
+            val,
+            (val - expected).abs()
+        );
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {

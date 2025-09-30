@@ -11,11 +11,13 @@ use test_burn::metallic::{Context, F32Element, Tensor};
 const BATCH: usize = 4;
 const SEQ: usize = 128;
 const D_MODEL: usize = 1024;
-const FF_DIM: usize = 4096;
+const FF_DIM_VECTOR: usize = 4096;
+const FF_DIM_SCALAR: usize = 4098;
 
 #[allow(clippy::type_complexity)]
 fn prepare_inputs(
     ctx: &mut Context<F32Element>,
+    ff_dim: usize,
 ) -> (
     Tensor<F32Element>,
     Tensor<F32Element>,
@@ -27,22 +29,22 @@ fn prepare_inputs(
 ) {
     let m = BATCH * SEQ;
     let x_normed_flat = Tensor::<F32Element>::random_uniform(vec![m, D_MODEL], ctx).unwrap();
-    let ffn_gate = Tensor::<F32Element>::random_uniform(vec![FF_DIM, D_MODEL], ctx).unwrap();
-    let ffn_gate_bias = Tensor::<F32Element>::random_uniform(vec![FF_DIM], ctx).unwrap();
-    let ffn_up = Tensor::<F32Element>::random_uniform(vec![FF_DIM, D_MODEL], ctx).unwrap();
-    let ffn_up_bias = Tensor::<F32Element>::random_uniform(vec![FF_DIM], ctx).unwrap();
-    let ffn_down = Tensor::<F32Element>::random_uniform(vec![D_MODEL, FF_DIM], ctx).unwrap();
+    let ffn_gate = Tensor::<F32Element>::random_uniform(vec![ff_dim, D_MODEL], ctx).unwrap();
+    let ffn_gate_bias = Tensor::<F32Element>::random_uniform(vec![ff_dim], ctx).unwrap();
+    let ffn_up = Tensor::<F32Element>::random_uniform(vec![ff_dim, D_MODEL], ctx).unwrap();
+    let ffn_up_bias = Tensor::<F32Element>::random_uniform(vec![ff_dim], ctx).unwrap();
+    let ffn_down = Tensor::<F32Element>::random_uniform(vec![D_MODEL, ff_dim], ctx).unwrap();
     let ffn_down_bias = Tensor::<F32Element>::random_uniform(vec![D_MODEL], ctx).unwrap();
 
     (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias)
 }
 
-fn benchmark_swiglu_cache(c: &mut Criterion) {
+fn benchmark_variant(c: &mut Criterion, label: &str, ff_dim: usize) {
     let mut ctx = Context::new().unwrap();
-    let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias) = prepare_inputs(&mut ctx);
+    let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias) = prepare_inputs(&mut ctx, ff_dim);
     ctx.synchronize();
 
-    let mut group = c.benchmark_group("swiglu_cache");
+    let mut group = c.benchmark_group(format!("swiglu_cache_{label}"));
 
     group.bench_function("with_cache", |b| {
         b.iter(|| {
@@ -88,6 +90,11 @@ fn benchmark_swiglu_cache(c: &mut Criterion) {
     });
 
     group.finish();
+}
+
+fn benchmark_swiglu_cache(c: &mut Criterion) {
+    benchmark_variant(c, "vectorized", FF_DIM_VECTOR);
+    benchmark_variant(c, "scalar_fallback", FF_DIM_SCALAR);
 }
 
 criterion_group!(benches, benchmark_swiglu_cache);

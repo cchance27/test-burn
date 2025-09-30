@@ -1,6 +1,7 @@
 use super::*;
 
 use crate::metallic::Context;
+use crate::metallic::Dtype;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
 use crate::metallic::TensorElement;
@@ -23,6 +24,7 @@ struct SwiGLUFusedActivation<T: TensorElement> {
     up_bias: Tensor<T>,
     total_elements: u32,
     bias_len: u32,
+    vector_width: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
@@ -85,6 +87,12 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
         ctx.prepare_tensors_for_active_cmd(&[&gate, &gate_bias, &up, &up_bias])?;
 
         let out = up.clone();
+        let vector_width = if matches!(T::DTYPE, Dtype::F32 | Dtype::F16) && hidden_dim % 4 == 0 {
+            4
+        } else {
+            1
+        };
+
         let op = SwiGLUFusedActivation {
             gate,
             gate_bias,
@@ -92,6 +100,7 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
             up_bias,
             total_elements: out.len() as u32,
             bias_len: hidden_dim as u32,
+            vector_width,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
@@ -114,8 +123,16 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
             height: 1,
             depth: 1,
         };
+        let total_threads = if self.vector_width > 1 {
+            let vectorized = self.total_elements / self.vector_width;
+            let remainder = self.total_elements % self.vector_width;
+            vectorized + remainder
+        } else {
+            self.total_elements
+        };
+
         let groups = MTLSize {
-            width: self.total_elements.div_ceil(256) as usize,
+            width: ((total_threads as usize) + threads_per_tg.width - 1) / threads_per_tg.width,
             height: 1,
             depth: 1,
         };
@@ -127,6 +144,7 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
         set_buffer(&encoder, 3, &self.up_bias.buf, self.up_bias.offset);
         set_bytes(&encoder, 4, &self.total_elements);
         set_bytes(&encoder, 5, &self.bias_len);
+        set_bytes(&encoder, 6, &self.vector_width);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();
@@ -198,13 +216,7 @@ fn execute_swiglu_logic<T: TensorElement>(
     fused_gate_up: Option<&Tensor<T>>,
     mut cache: Option<&mut ResourceCache>,
 ) -> Result<Tensor<T>, MetalError> {
-    ctx.prepare_tensors_for_active_cmd(&[
-        x_normed_flat,
-        ffn_gate_bias,
-        ffn_up_bias,
-        ffn_down,
-        ffn_down_bias,
-    ])?;
+    ctx.prepare_tensors_for_active_cmd(&[x_normed_flat, ffn_gate_bias, ffn_up_bias, ffn_down, ffn_down_bias])?;
     if let Some(fused) = fused_gate_up {
         ctx.prepare_tensors_for_active_cmd(&[fused])?;
     }
