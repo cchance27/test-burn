@@ -5,7 +5,7 @@ use crate::metallic::{TensorElement, TensorInit, TensorStorage};
 mod elemwise_broadcast_add;
 #[cfg(test)]
 mod elemwise_broadcast_add_test;
-pub use elemwise_broadcast_add::BroadcastElemwiseAddOp;
+pub use elemwise_broadcast_add::{BroadcastElemwiseAddInplaceOp, BroadcastElemwiseAddOp};
 
 // Tests for Main Operation
 #[cfg(test)]

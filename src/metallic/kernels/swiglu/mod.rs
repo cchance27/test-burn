@@ -4,7 +4,7 @@ use crate::metallic::Context;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
 use crate::metallic::TensorElement;
-use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
 use crate::metallic::kernels::silu::SiluOp;
 
@@ -98,8 +98,8 @@ fn execute_swiglu_logic<T: TensorElement>(
 
     // Add gate bias (broadcast over last dim)
     let gate_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias.clone()), cache)?,
-        None => ctx.call::<BroadcastElemwiseAddOp>((gate_temp, ffn_gate_bias.clone()))?,
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddInplaceOp>((gate_temp, ffn_gate_bias.clone()), cache)?,
+        None => ctx.call::<BroadcastElemwiseAddInplaceOp>((gate_temp, ffn_gate_bias.clone()))?,
     };
 
     // up_proj: [m, d_model] @ weight -> [m, ff_dim]
@@ -121,8 +121,8 @@ fn execute_swiglu_logic<T: TensorElement>(
 
     // Add up bias
     let up_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias.clone()), cache)?,
-        None => ctx.call::<BroadcastElemwiseAddOp>((up_temp, ffn_up_bias.clone()))?,
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddInplaceOp>((up_temp, ffn_up_bias.clone()), cache)?,
+        None => ctx.call::<BroadcastElemwiseAddInplaceOp>((up_temp, ffn_up_bias.clone()))?,
     };
 
     // SiLU activation on gate_proj
@@ -162,8 +162,8 @@ fn execute_swiglu_logic<T: TensorElement>(
 
     // Add down bias to final projection output
     let ffn_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias.clone()), cache)?,
-        None => ctx.call::<BroadcastElemwiseAddOp>((ffn_temp, ffn_down_bias.clone()))?,
+        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddInplaceOp>((ffn_temp, ffn_down_bias.clone()), cache)?,
+        None => ctx.call::<BroadcastElemwiseAddInplaceOp>((ffn_temp, ffn_down_bias.clone()))?,
     };
 
     Ok(ffn_out)
