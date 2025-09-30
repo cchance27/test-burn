@@ -23,6 +23,10 @@ use test_burn::{
     metallic::{
         Context, F16Element, Tokenizer,
         generation::{GenerationConfig, generate_streaming},
+        metrics::{
+            MemoryBlockStat, MemoryScopeStat, ModelMemoryNode, ProcessMemoryTracker, ScalarStat, build_memory_rows,
+            build_model_memory_tree, sample_process_memory,
+        },
     },
 };
 
@@ -48,31 +52,93 @@ fn main() -> Result<()> {
         let worker_tx = tx.clone();
         thread::spawn(move || -> Result<()> {
             let worker = || -> Result<()> {
+                let mut process_memory_tracker = ProcessMemoryTracker::new();
+                let mut host_memory = ScalarStat::default();
+                let mut model_memory_tree = ModelMemoryNode::branch("Model Weights", Vec::new());
+                let mut host_overheads: Vec<(String, usize)> = Vec::new();
+
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
+
                 worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
                 let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
                 let mut ctx = Context::<F16Element>::new()?;
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
                 let loader = GGUFModelLoader::new(gguf);
+                host_overheads.clear();
                 let mapped_bytes = loader.mapped_len();
-                let host_overheads = if mapped_bytes > 0 {
-                    vec![("GGUF File MMAP".to_string(), mapped_bytes)]
-                } else {
-                    Vec::new()
-                };
+                if mapped_bytes > 0 {
+                    host_overheads.push(("GGUF File MMAP".to_string(), mapped_bytes));
+                }
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
                 let gguf_model = loader.load_model()?;
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
                 let mut qwen = gguf_model.instantiate(&mut ctx)?;
+                model_memory_tree = build_model_memory_tree(&qwen);
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
                 let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
                 let tokens = tokenizer.encode(&prompt)?;
                 worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
+                emit_startup_memory_update(
+                    &worker_tx,
+                    &mut process_memory_tracker,
+                    &mut host_memory,
+                    &model_memory_tree,
+                    &host_overheads,
+                )?;
 
                 let cfg = GenerationConfig {
                     max_tokens: 4096,
@@ -82,7 +148,17 @@ fn main() -> Result<()> {
                 };
 
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx, &host_overheads)?;
+                generate_streaming(
+                    &mut qwen,
+                    &tokenizer,
+                    &mut ctx,
+                    &prompt,
+                    &cfg,
+                    &worker_tx,
+                    &host_overheads,
+                    &mut host_memory,
+                    &mut process_memory_tracker,
+                )?;
                 worker_tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
                 Ok(())
             };
@@ -368,6 +444,31 @@ impl AppState {
             self.focus = FocusArea::Metrics;
         }
     }
+}
+
+fn emit_startup_memory_update(
+    tx: &mpsc::Sender<AppEvent>,
+    tracker: &mut Option<ProcessMemoryTracker>,
+    host_memory: &mut ScalarStat,
+    model_memory_tree: &ModelMemoryNode,
+    host_overheads: &[(String, usize)],
+) -> Result<(), mpsc::SendError<AppEvent>> {
+    sample_process_memory(tracker, host_memory);
+    let empty_embed = MemoryScopeStat::default();
+    let empty_forward = MemoryScopeStat::default();
+    let empty_output = MemoryScopeStat::default();
+    let empty_blocks: Vec<MemoryBlockStat> = Vec::new();
+    let rows = build_memory_rows(
+        model_memory_tree,
+        host_memory,
+        &empty_embed,
+        &empty_forward,
+        None,
+        &empty_blocks,
+        &empty_output,
+        host_overheads,
+    );
+    tx.send(AppEvent::MemoryUpdate(rows))
 }
 
 fn setup_terminal() -> Result<Terminal<impl Backend>> {

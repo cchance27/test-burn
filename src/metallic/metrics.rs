@@ -374,6 +374,14 @@ impl ProcessMemoryTracker {
     }
 }
 
+pub fn sample_process_memory(tracker: &mut Option<ProcessMemoryTracker>, host_memory: &mut ScalarStat) {
+    if let Some(tracker) = tracker.as_mut()
+        && let Some(memory_mb) = tracker.sample_mb()
+    {
+        host_memory.record(memory_mb);
+    }
+}
+
 pub struct MetricsLoggers {
     memory: Option<JsonlLogger>,
     latency: Option<JsonlLogger>,

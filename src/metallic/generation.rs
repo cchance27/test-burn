@@ -2,7 +2,7 @@ use super::{Context, MetalError, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
     BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat, ScalarStat,
-    SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
+    SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::{TensorElement, Tokenizer};
@@ -163,6 +163,8 @@ pub fn generate_streaming<T: TensorElement>(
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
     host_overheads: &[(String, usize)],
+    host_memory: &mut ScalarStat,
+    process_memory_tracker: &mut Option<ProcessMemoryTracker>,
 ) -> Result<(), MetalError> {
     // Build full prompt string following Qwen2.5 chat template
     let full_prompt = format!(
@@ -208,7 +210,18 @@ pub fn generate_streaming<T: TensorElement>(
     };
 
     // Generate tokens using the new KV cache approach
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx, host_overheads)?;
+    generate_autoregressive_with_kv_cache_streaming(
+        qwen,
+        tokenizer,
+        ctx,
+        &input_ids,
+        cfg,
+        &mut token_callback,
+        tx,
+        host_overheads,
+        host_memory,
+        process_memory_tracker,
+    )?;
 
     Ok(())
 }
@@ -230,7 +243,20 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     };
 
     let (tx, _) = mpsc::channel();
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx, host_overheads)?;
+    let mut host_memory = ScalarStat::default();
+    let mut process_memory_tracker = ProcessMemoryTracker::new();
+    generate_autoregressive_with_kv_cache_streaming(
+        qwen,
+        tokenizer,
+        ctx,
+        input_ids,
+        cfg,
+        &mut callback,
+        &tx,
+        host_overheads,
+        &mut host_memory,
+        &mut process_memory_tracker,
+    )?;
 
     Ok(result)
 }
@@ -246,6 +272,8 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
     token_callback: &mut F,
     tx: &mpsc::Sender<AppEvent>,
     host_overheads: &[(String, usize)],
+    host_memory: &mut ScalarStat,
+    process_memory_tracker: &mut Option<ProcessMemoryTracker>,
 ) -> Result<(), MetalError>
 where
     F: FnMut(u32, Arc<str>) -> Result<bool, MetalError>,
@@ -282,13 +310,7 @@ where
     let mut memory_blocks = vec![MemoryBlockStat::default(); n_layers];
     let mut latest_forward_usage: Option<MemoryUsage> = None;
     let mut memory_ready = false;
-    let mut host_memory = ScalarStat::default();
-    let mut process_memory_tracker = ProcessMemoryTracker::new();
-    if let Some(tracker) = process_memory_tracker.as_mut()
-        && let Some(memory_mb) = tracker.sample_mb()
-    {
-        host_memory.record(memory_mb);
-    }
+    sample_process_memory(process_memory_tracker, host_memory);
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
@@ -296,11 +318,7 @@ where
     }
 
     latest_forward_usage = Some(ctx.snapshot_memory_usage());
-    if let Some(tracker) = process_memory_tracker.as_mut()
-        && let Some(memory_mb) = tracker.sample_mb()
-    {
-        host_memory.record(memory_mb);
-    }
+    sample_process_memory(process_memory_tracker, host_memory);
 
     // --- Prompt Processing Pass ---
     // Process the prompt token by token to warm up the KV cache.
@@ -463,11 +481,7 @@ where
             output_delta.kv_cache_bytes,
         );
 
-        if let Some(tracker) = process_memory_tracker.as_mut()
-            && let Some(memory_mb) = tracker.sample_mb()
-        {
-            host_memory.record(memory_mb);
-        }
+        sample_process_memory(process_memory_tracker, host_memory);
 
         let logits = logits_tensor.to_vec();
         let vocab_logits = logits[0..vocab_size].to_vec();
