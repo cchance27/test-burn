@@ -286,7 +286,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
-    let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
+    let gguf_model = loader.load_model().expect("Failed to load GGUF model");
     let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let embed_slice = model.embed_weight.as_slice();
     println!("Loaded embed first 10: {:?}", take_first_as_f32::<TestElement>(embed_slice, 10));
@@ -1437,7 +1437,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
     let loader = GGUFModelLoader::new(gguf_file);
-    let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
+    let gguf_model = loader.load_model().expect("Failed to load GGUF model");
     let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
 

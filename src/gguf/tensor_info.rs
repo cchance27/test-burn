@@ -10,7 +10,7 @@ pub enum GGUFRawTensor<'data> {
     Bytes(&'data [u8], GGUFDataType),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GGUTensorInfo {
     pub name: String,
     pub dimensions: Vec<u64>,

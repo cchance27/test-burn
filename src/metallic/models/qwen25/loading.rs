@@ -1,6 +1,6 @@
-use crate::gguf::{GGUFValue, model_loader::GGUFModel, model_loader::GGUFTensor};
+use crate::gguf::{GGUFValue, model_loader::GGUFModel};
 use crate::metallic::{
-    Context, Dtype, MetalError, Tensor, TensorElement, TensorInit, TensorStorage,
+    Context, Dtype, MetalError, Tensor, TensorElement,
     models::{LoadableModel, Qwen25, Qwen25Config},
 };
 use std::borrow::Cow;
@@ -40,17 +40,6 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
 
     let src_slice = tensor_data_as_f32(src);
     copy_f32_into_tensor(src_slice.as_ref(), dst)
-}
-
-fn upload_tensor_to_context<TSrc: TensorElement, TDst: TensorElement>(
-    src: &Tensor<TSrc>,
-    ctx: &Context<TDst>,
-) -> Result<Tensor<TDst>, MetalError> {
-    let dims = src.dims().to_vec();
-    let src_as_f32 = tensor_data_as_f32(src);
-    let converted: Vec<TDst::Scalar> = src_as_f32.as_ref().iter().copied().map(TDst::from_f32).collect();
-
-    Tensor::new(dims, TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(&converted))
 }
 
 fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
@@ -442,26 +431,27 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
         // Instantiate Qwen25 with default-initialized weights
         let mut qwen = Qwen25::new(cfg, ctx)?;
 
-        for (name, stored_tensor) in &gguf_model.tensors {
+        for (name, descriptor) in &gguf_model.tensors {
             let lname = name.to_lowercase();
-            let result = match stored_tensor {
-                GGUFTensor::F32(tensor) => {
-                    let new_tensor = upload_tensor_to_context(tensor, &*ctx)?;
-                    load_tensor_into_model(&lname, &new_tensor, &mut qwen)
+            match gguf_model.materialize_tensor::<T>(name, &*ctx) {
+                Ok(materialized) => {
+                    if let Err(err) = load_tensor_into_model(&lname, &materialized, &mut qwen) {
+                        println!(
+                            "Skipping tensor '{}' (dtype={:?}) after load failure: {:?}",
+                            name,
+                            descriptor.data_type(),
+                            err
+                        );
+                    }
                 }
-                GGUFTensor::F16 { tensor, .. } => {
-                    let new_tensor = upload_tensor_to_context(tensor, &*ctx)?;
-                    load_tensor_into_model(&lname, &new_tensor, &mut qwen)
+                Err(err) => {
+                    println!(
+                        "Failed to materialize tensor '{}' (dtype={:?}): {:?}",
+                        name,
+                        descriptor.data_type(),
+                        err
+                    );
                 }
-            };
-
-            if let Err(err) = result {
-                println!(
-                    "Skipping tensor '{}' (dtype={:?}) after load failure: {:?}",
-                    name,
-                    stored_tensor.dtype(),
-                    err
-                );
             }
         }
 

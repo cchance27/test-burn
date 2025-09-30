@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         } else {
             Vec::new()
         };
-        let gguf_model = loader.load_model(&ctx)?;
+        let gguf_model = loader.load_model()?;
 
         tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
         let mut qwen = gguf_model.instantiate(&mut ctx)?;
