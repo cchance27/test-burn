@@ -198,7 +198,13 @@ fn execute_swiglu_logic<T: TensorElement>(
     fused_gate_up: Option<&Tensor<T>>,
     mut cache: Option<&mut ResourceCache>,
 ) -> Result<Tensor<T>, MetalError> {
-    ctx.prepare_tensors_for_active_cmd(&[x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias])?;
+    ctx.prepare_tensors_for_active_cmd(&[
+        x_normed_flat,
+        ffn_gate_bias,
+        ffn_up_bias,
+        ffn_down,
+        ffn_down_bias,
+    ])?;
     if let Some(fused) = fused_gate_up {
         ctx.prepare_tensors_for_active_cmd(&[fused])?;
     }
@@ -243,6 +249,7 @@ fn execute_swiglu_logic<T: TensorElement>(
         (gate_view, up_view)
     } else {
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
+        ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;
         let gate_dims = ffn_gate.dims();
         let gate_transpose_b = if gate_dims[0] == d_model {
             false
@@ -260,6 +267,7 @@ fn execute_swiglu_logic<T: TensorElement>(
         };
 
         // up_proj: [m, d_model] @ weight -> [m, ff_dim]
+        ctx.prepare_tensors_for_active_cmd(&[ffn_up])?;
         let up_dims = ffn_up.dims();
         let up_transpose_b = if up_dims[0] == d_model {
             false
