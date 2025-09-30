@@ -8,6 +8,7 @@ use crate::metallic::TensorElement;
 use crate::metallic::TensorInit;
 use crate::metallic::TensorStorage;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use objc2_metal::MTLBlitCommandEncoder;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
