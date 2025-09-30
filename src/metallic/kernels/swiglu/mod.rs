@@ -144,6 +144,7 @@ impl KernelInvocable for SwiGLUOp {
         &'a Tensor<T>,
         &'a Tensor<T>,
         &'a Tensor<T>,
+        Option<&'a Tensor<T>>,
     );
 
     fn function_id() -> Option<KernelFunction> {
@@ -157,7 +158,7 @@ impl KernelInvocable for SwiGLUOp {
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias) = args;
+        let (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias, fused_gate_up) = args;
 
         // Execute the SwiGLU operation logic directly in the new method
         let output = execute_swiglu_logic(
@@ -169,6 +170,7 @@ impl KernelInvocable for SwiGLUOp {
             ffn_up_bias,
             ffn_down,
             ffn_down_bias,
+            fused_gate_up,
             cache,
         )?;
 
@@ -193,43 +195,88 @@ fn execute_swiglu_logic<T: TensorElement>(
     ffn_up_bias: &Tensor<T>,
     ffn_down: &Tensor<T>,
     ffn_down_bias: &Tensor<T>,
+    fused_gate_up: Option<&Tensor<T>>,
     mut cache: Option<&mut ResourceCache>,
 ) -> Result<Tensor<T>, MetalError> {
     ctx.prepare_tensors_for_active_cmd(&[x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias])?;
+    if let Some(fused) = fused_gate_up {
+        ctx.prepare_tensors_for_active_cmd(&[fused])?;
+    }
     let d_model = x_normed_flat.dims()[1];
+    let hidden_dim = ffn_gate_bias.len();
 
-    // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
-    let gate_dims = ffn_gate.dims();
-    let gate_transpose_b = if gate_dims[0] == d_model {
-        false
-    } else if gate_dims[1] == d_model {
-        true
-    } else {
+    if hidden_dim != ffn_up_bias.len() {
         return Err(MetalError::DimensionMismatch {
-            expected: d_model,
-            actual: gate_dims[0],
+            expected: hidden_dim,
+            actual: ffn_up_bias.len(),
         });
-    };
-    let gate_temp = match cache.as_mut() {
-        Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_gate, false, gate_transpose_b, cache)?,
-        None => ctx.matmul(x_normed_flat, ffn_gate, false, gate_transpose_b)?,
-    };
+    }
 
-    // up_proj: [m, d_model] @ weight -> [m, ff_dim]
-    let up_dims = ffn_up.dims();
-    let up_transpose_b = if up_dims[0] == d_model {
-        false
-    } else if up_dims[1] == d_model {
-        true
+    let (gate_temp, up_temp) = if let Some(fused_weight) = fused_gate_up {
+        let fused_dims = fused_weight.dims();
+        if fused_dims.len() != 2 {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused gate/up weight must be 2D, got {:?}",
+                fused_dims
+            )));
+        }
+
+        let expected_cols = hidden_dim * 2;
+        let fused_transpose_b = if fused_dims[0] == d_model && fused_dims[1] == expected_cols {
+            false
+        } else if fused_dims[0] == expected_cols && fused_dims[1] == d_model {
+            true
+        } else {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused gate/up weight dims {:?} incompatible with d_model {} and ff_dim {}",
+                fused_dims, d_model, hidden_dim
+            )));
+        };
+
+        let fused_temp = match cache.as_mut() {
+            Some(cache) => ctx.matmul_with_cache(x_normed_flat, fused_weight, false, fused_transpose_b, cache)?,
+            None => ctx.matmul(x_normed_flat, fused_weight, false, fused_transpose_b)?,
+        };
+
+        let gate_view = fused_temp.slice_last_dim(0..hidden_dim)?;
+        let up_view = fused_temp.slice_last_dim(hidden_dim..expected_cols)?;
+        (gate_view, up_view)
     } else {
-        return Err(MetalError::DimensionMismatch {
-            expected: d_model,
-            actual: up_dims[0],
-        });
-    };
-    let up_temp = match cache.as_mut() {
-        Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_up, false, up_transpose_b, cache)?,
-        None => ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?,
+        // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
+        let gate_dims = ffn_gate.dims();
+        let gate_transpose_b = if gate_dims[0] == d_model {
+            false
+        } else if gate_dims[1] == d_model {
+            true
+        } else {
+            return Err(MetalError::DimensionMismatch {
+                expected: d_model,
+                actual: gate_dims[0],
+            });
+        };
+        let gate_temp = match cache.as_mut() {
+            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_gate, false, gate_transpose_b, cache)?,
+            None => ctx.matmul(x_normed_flat, ffn_gate, false, gate_transpose_b)?,
+        };
+
+        // up_proj: [m, d_model] @ weight -> [m, ff_dim]
+        let up_dims = ffn_up.dims();
+        let up_transpose_b = if up_dims[0] == d_model {
+            false
+        } else if up_dims[1] == d_model {
+            true
+        } else {
+            return Err(MetalError::DimensionMismatch {
+                expected: d_model,
+                actual: up_dims[0],
+            });
+        };
+        let up_temp = match cache.as_mut() {
+            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_up, false, up_transpose_b, cache)?,
+            None => ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?,
+        };
+
+        (gate_temp, up_temp)
     };
 
     // Fuse bias additions, SiLU, and elementwise multiply
@@ -287,6 +334,7 @@ pub fn swiglu_with_optional_cache<T: TensorElement>(
     ffn_up_bias: &Tensor<T>,
     ffn_down: &Tensor<T>,
     ffn_down_bias: &Tensor<T>,
+    fused_gate_up: Option<&Tensor<T>>,
     cache: Option<&mut ResourceCache>,
 ) -> Result<Tensor<T>, MetalError> {
     execute_swiglu_logic(
@@ -298,6 +346,7 @@ pub fn swiglu_with_optional_cache<T: TensorElement>(
         ffn_up_bias,
         ffn_down,
         ffn_down_bias,
+        fused_gate_up,
         cache,
     )
 }

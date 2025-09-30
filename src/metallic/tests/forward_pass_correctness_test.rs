@@ -266,6 +266,7 @@ fn run_blocks_up_to<T: TensorElement>(
             &block.ffn_up_bias,
             &block.ffn_down,
             &block.ffn_down_bias,
+            Some(&block.ffn_gate_up_weight),
         )?;
         ctx.synchronize();
         let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
@@ -1298,6 +1299,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         &block_last.ffn_up_bias,
         &block_last.ffn_down,
         &block_last.ffn_down_bias,
+        Some(&block_last.ffn_gate_up_weight),
     )?;
     ctx.synchronize();
     let ffn_output_last = ffn_output_flat_last.reshape(vec![1, seq, d_model])?;

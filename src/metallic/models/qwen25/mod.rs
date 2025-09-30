@@ -321,6 +321,7 @@ impl<T: TensorElement> Qwen25<T> {
                 &block.ffn_up_bias,
                 &block.ffn_down,
                 &block.ffn_down_bias,
+                Some(&block.ffn_gate_up_weight),
             )?;
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
@@ -492,6 +493,7 @@ impl<T: TensorElement> Qwen25<T> {
                 &block.ffn_up_bias,
                 &block.ffn_down,
                 &block.ffn_down_bias,
+                Some(&block.ffn_gate_up_weight),
             )?;
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "mlp_swiglu"), phase_start.elapsed());

@@ -58,6 +58,7 @@ fn benchmark_swiglu_cache(c: &mut Criterion) {
                 &ffn_up_bias,
                 &ffn_down,
                 &ffn_down_bias,
+                None,
                 Some(&mut cache),
             )
             .unwrap();
@@ -78,6 +79,7 @@ fn benchmark_swiglu_cache(c: &mut Criterion) {
                 &ffn_up_bias,
                 &ffn_down,
                 &ffn_down_bias,
+                None,
                 None,
             )
             .unwrap();

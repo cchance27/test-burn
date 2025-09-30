@@ -65,6 +65,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
         &ffn_up_bias,
         &ffn_down,
         &ffn_down_bias,
+        None,
     )?;
     ctx.synchronize();
 
@@ -145,6 +146,7 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
         &ffn_up_bias,
         &ffn_down,
         &ffn_down_bias,
+        None,
     )?;
 
     let output_slice = output.as_slice();
@@ -258,6 +260,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
             &ffn_up_bias,
             &ffn_down,
             &ffn_down_bias,
+            None,
         )?;
         ctx.synchronize(); // Sync to ensure GPU ops complete before CPU read
         let rust_output_flat = rust_output.as_slice().to_vec();
