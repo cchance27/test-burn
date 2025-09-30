@@ -295,6 +295,13 @@ where
         ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
+    latest_forward_usage = Some(ctx.snapshot_memory_usage());
+    if let Some(tracker) = process_memory_tracker.as_mut()
+        && let Some(memory_mb) = tracker.sample_mb()
+    {
+        host_memory.record(memory_mb);
+    }
+
     // --- Prompt Processing Pass ---
     // Process the prompt token by token to warm up the KV cache.
     let mut logits_tensor: Option<Tensor<T>> = None;
@@ -351,6 +358,32 @@ where
     // --- Autoregressive Generation Loop ---
     // Now, generate tokens one by one using the KV cache.
     let mut ui_connected = true;
+
+    let mut emit_memory_rows = |force: bool| {
+        let rows = build_memory_rows(
+            &model_memory_tree,
+            &host_memory,
+            &memory_embed,
+            &memory_forward,
+            latest_forward_usage,
+            &memory_blocks,
+            &memory_output,
+            host_overheads,
+        );
+        if let Some(loggers) = metrics_loggers.as_mut() {
+            let log_now = Instant::now();
+            if let Err(err) = loggers.log_memory(&rows, log_now, force) {
+                alert::emit_warning(tx, format!("Failed to log memory metrics: {err}"));
+            }
+        }
+        if ui_connected {
+            if tx.send(AppEvent::MemoryUpdate(rows.clone())).is_err() {
+                ui_connected = false;
+            }
+        }
+    };
+
+    emit_memory_rows(true);
     for i in 0..cfg.max_tokens - 1 {
         ctx.reset_pool();
         ctx.clear_cache();
@@ -495,25 +528,7 @@ where
         }
 
         if memory_ready {
-            let rows = build_memory_rows(
-                &model_memory_tree,
-                &host_memory,
-                &memory_embed,
-                &memory_forward,
-                latest_forward_usage,
-                &memory_blocks,
-                &memory_output,
-                host_overheads,
-            );
-            if let Some(loggers) = metrics_loggers.as_mut() {
-                let log_now = Instant::now();
-                if let Err(err) = loggers.log_memory(&rows, log_now, false) {
-                    alert::emit_warning(tx, format!("Failed to log memory metrics: {err}"));
-                }
-            }
-            if ui_connected && tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
-                ui_connected = false;
-            }
+            emit_memory_rows(false);
         }
 
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);

@@ -676,35 +676,17 @@ pub fn build_model_memory_tree<T: TensorElement>(model: &Qwen25<T>) -> ModelMemo
         .iter()
         .enumerate()
         .map(|(idx, block)| {
-            let elem_bytes = T::DTYPE.size_bytes();
-            let d_model = model.config.d_model;
-            let kv_dim = block.kv_dim;
-            let q_weight_bytes = d_model * d_model * elem_bytes;
-            let k_weight_bytes = d_model * kv_dim * elem_bytes;
-            let v_weight_bytes = d_model * kv_dim * elem_bytes;
-            let q_bias_bytes = d_model * elem_bytes;
-            let k_bias_bytes = kv_dim * elem_bytes;
-            let v_bias_bytes = kv_dim * elem_bytes;
-
             let attn_projections = ModelMemoryNode::branch(
                 "Attention Projections",
                 vec![
                     ModelMemoryNode::leaf("Fused QKV weight", block.attn_qkv_weight.size_bytes()),
-                    ModelMemoryNode::leaf("Q weight logical slice", q_weight_bytes),
-                    ModelMemoryNode::leaf("K weight logical slice", k_weight_bytes),
-                    ModelMemoryNode::leaf("V weight logical slice", v_weight_bytes),
                     ModelMemoryNode::leaf("Output weight", block.attn_out_weight.size_bytes()),
                 ],
             );
 
             let attn_biases = ModelMemoryNode::branch(
                 "Attention Biases",
-                vec![
-                    ModelMemoryNode::leaf("Fused QKV bias", block.attn_qkv_bias.size_bytes()),
-                    ModelMemoryNode::leaf("Q bias logical slice", q_bias_bytes),
-                    ModelMemoryNode::leaf("K bias logical slice", k_bias_bytes),
-                    ModelMemoryNode::leaf("V bias logical slice", v_bias_bytes),
-                ],
+                vec![ModelMemoryNode::leaf("Fused QKV bias", block.attn_qkv_bias.size_bytes())],
             );
 
             let feedforward = ModelMemoryNode::branch(
@@ -806,16 +788,16 @@ fn unattributed_host_row(host: &ScalarStat, tracked_mb: f64) -> Option<MemoryRow
 
 fn baseline_host_row(host: &ScalarStat, tracked_mb: f64) -> Option<(MemoryRow, f64)> {
     let baseline = host.baseline_mb()?;
-    let explained = tracked_mb.min(baseline);
-    if explained <= 0.0 {
+    let remaining = (baseline - tracked_mb).max(0.0);
+    if remaining < 1.0 {
         return None;
     }
 
     let row = MemoryRow {
         label: "Process Baseline (Other)".to_string(),
         level: 1,
-        current_total_mb: explained,
-        peak_total_mb: explained,
+        current_total_mb: remaining,
+        peak_total_mb: remaining,
         current_pool_mb: 0.0,
         peak_pool_mb: 0.0,
         current_kv_mb: 0.0,
@@ -828,7 +810,7 @@ fn baseline_host_row(host: &ScalarStat, tracked_mb: f64) -> Option<(MemoryRow, f
         show_absolute: false,
     };
 
-    Some((row, explained))
+    Some((row, remaining))
 }
 
 fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
@@ -854,10 +836,10 @@ fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
         rows.push(MemoryRow {
             label: "pool".to_string(),
             level: 2,
-            current_total_mb: used_mb,
-            peak_total_mb: used_mb,
-            current_pool_mb: 0.0,
-            peak_pool_mb: 0.0,
+            current_total_mb: 0.0,
+            peak_total_mb: 0.0,
+            current_pool_mb: used_mb,
+            peak_pool_mb: used_mb,
             current_kv_mb: 0.0,
             peak_kv_mb: 0.0,
             current_kv_cache_mb: 0.0,
@@ -892,12 +874,12 @@ fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
         rows.push(MemoryRow {
             label: "kv".to_string(),
             level: 2,
-            current_total_mb: used_mb,
-            peak_total_mb: used_mb,
+            current_total_mb: 0.0,
+            peak_total_mb: 0.0,
             current_pool_mb: 0.0,
             peak_pool_mb: 0.0,
-            current_kv_mb: 0.0,
-            peak_kv_mb: 0.0,
+            current_kv_mb: used_mb,
+            peak_kv_mb: used_mb,
             current_kv_cache_mb: 0.0,
             peak_kv_cache_mb: 0.0,
             absolute_pool_mb: 0.0,
@@ -908,14 +890,14 @@ fn append_reserved_pool_rows(usage: &MemoryUsage, rows: &mut Vec<MemoryRow>) {
         rows.push(MemoryRow {
             label: "kv-cache".to_string(),
             level: 2,
-            current_total_mb: cache_mb,
-            peak_total_mb: cache_mb,
+            current_total_mb: 0.0,
+            peak_total_mb: 0.0,
             current_pool_mb: 0.0,
             peak_pool_mb: 0.0,
             current_kv_mb: 0.0,
             peak_kv_mb: 0.0,
-            current_kv_cache_mb: 0.0,
-            peak_kv_cache_mb: 0.0,
+            current_kv_cache_mb: cache_mb,
+            peak_kv_cache_mb: cache_mb,
             absolute_pool_mb: 0.0,
             absolute_kv_mb: 0.0,
             absolute_kv_cache_mb: 0.0,
@@ -929,8 +911,5 @@ fn bytes_to_mb(bytes: usize) -> f64 {
 }
 
 fn usage_tracked_mb(usage: &MemoryUsage) -> f64 {
-    let pool_mb = bytes_to_mb(usage.pool_used.max(usage.pool_capacity));
-    let kv_mb = bytes_to_mb(usage.kv_used.max(usage.kv_capacity));
-    let kv_cache_mb = bytes_to_mb(usage.kv_cache_bytes);
-    pool_mb + kv_mb + kv_cache_mb
+    bytes_to_mb(usage.pool_capacity) + bytes_to_mb(usage.kv_capacity) + bytes_to_mb(usage.kv_cache_bytes)
 }
