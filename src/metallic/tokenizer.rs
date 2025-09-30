@@ -170,7 +170,7 @@ impl Tokenizer {
         let merges: Vec<(String, String)> = merges_source.into_iter().collect();
         Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
     }
-
+    
     /// Create a tokenizer from GGUF metadata
     pub fn from_gguf_metadata(metadata: &GGUFMetadata) -> Result<Self, MetalError> {
         // Extract vocabulary
