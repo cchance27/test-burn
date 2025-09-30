@@ -452,14 +452,58 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
 fn extract_config_from_ggufmodel(gguf_model: &GGUFModel) -> Qwen25Config {
     // Build config heuristically from metadata (fallbacks kept consistent with qwen25::new)
     // Get our metadata sizes with variations and defaults
-    let d_model = gguf_model.get_metadata_u32_or(&["qwen2.d_model", "model.d_model"], 896) as usize;
-    let ff_dim = gguf_model.get_metadata_u32_or(&["qwen2.ff_dim", "model.ff_dim"], 4864) as usize;
-    let n_heads = gguf_model.get_metadata_u32_or(&["qwen2.n_heads", "model.n_heads"], 14) as usize;
-    let n_kv_heads = gguf_model.get_metadata_u32_or(&["qwen2.n_kv_heads", "model.n_kv_heads"], 2) as usize;
-    let n_layers = gguf_model.get_metadata_u32_or(&["qwen2.n_layers", "model.n_layers"], 24) as usize;
+    let d_model = gguf_model.get_metadata_u32_or(
+        &[
+            "qwen2.d_model",
+            "model.d_model",
+            "qwen2.embedding_length",
+            "model.hidden_size",
+            "llama.embedding_length",
+        ],
+        896,
+    ) as usize;
+    let ff_dim = gguf_model.get_metadata_u32_or(
+        &[
+            "qwen2.ff_dim",
+            "model.ff_dim",
+            "qwen2.feed_forward_length",
+            "model.intermediate_size",
+        ],
+        4864,
+    ) as usize;
+    let n_heads = gguf_model.get_metadata_u32_or(
+        &[
+            "qwen2.n_heads",
+            "model.n_heads",
+            "qwen2.attention.head_count",
+            "model.num_attention_heads",
+        ],
+        14,
+    ) as usize;
+    let n_kv_heads = gguf_model.get_metadata_u32_or(
+        &[
+            "qwen2.n_kv_heads",
+            "model.n_kv_heads",
+            "qwen2.attention.head_count_kv",
+            "model.num_key_value_heads",
+        ],
+        2,
+    ) as usize;
+    let n_layers = gguf_model.get_metadata_u32_or(
+        &["qwen2.n_layers", "model.n_layers", "qwen2.block_count", "model.num_hidden_layers"],
+        24,
+    ) as usize;
     let seq_len = gguf_model.get_metadata_u32_or(&["qwen2.context_length", "model.context_length"], 32768) as usize;
-    let rope_freq_base = gguf_model.get_metadata_f32_or(&["qwen2.rope_theta", "qwen2.rope.freq_base"], 1_000_000.0);
-    let rms_eps = gguf_model.get_metadata_f32_or(&["qwen2.rms_norm_eps", "qwen2.rope.rms_eps"], 1e-6);
+    let rope_freq_base = gguf_model.get_metadata_f32_or(&["qwen2.rope_theta", "qwen2.rope.freq_base", "model.rope.freq_base"], 1_000_000.0);
+    let rms_eps = gguf_model.get_metadata_f32_or(
+        &[
+            "qwen2.rms_norm_eps",
+            "qwen2.rope.rms_eps",
+            "qwen2.attention.layer_norm_rms_epsilon",
+            "model.rms_norm_eps",
+        ],
+        1e-6,
+    );
 
     // Determine vocabulary size:
     // 1) Prefer explicit `vocab_size` or `model.vocab_size` metadata
