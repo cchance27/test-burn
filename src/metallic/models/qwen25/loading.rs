@@ -86,7 +86,7 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
     }
 
     let dst_slice = dst.as_mut_slice();
-    copy_tensor_data_into_slice(src, dst_slice)
+    copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
 }
 
 fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
@@ -164,7 +164,7 @@ fn copy_bias_into_fused<TSrc: TensorElement, TDst: TensorElement>(
 
     let end = dst_offset + src.len();
     let dst_slice = &mut dst.as_mut_slice()[dst_offset..end];
-    copy_tensor_data_into_slice(src, dst_slice)
+    copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
 }
 
 fn parse_layer_index(name: &str) -> Option<usize> {
