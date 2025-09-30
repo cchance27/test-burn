@@ -352,10 +352,10 @@ impl GGUFModel {
         &self,
         ctx: &mut crate::metallic::Context<T>,
     ) -> Result<L, super::GGUFError> {
-        // Delegate to the metallic::model::Model::load helper. Map MetalError -> GGUFError::InvalidData with context.
+        // Delegate to the metallic::model::Model::load helper. Map MetalError -> GGUFError::InvalidTensorData with context.
         match crate::metallic::models::load::<L, T>(self, ctx) {
             Ok(v) => Ok(v),
-            Err(_e) => Err(super::GGUFError::InvalidData),
+            Err(e) => Err(super::GGUFError::InvalidTensorData(e.to_string())),
         }
     }
 }

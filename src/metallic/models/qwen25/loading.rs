@@ -192,11 +192,11 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         if is_output_unset && tensor.len() == qwen.output_weight.len() {
             copy_tensor_into(tensor, &mut qwen.output_weight)?;
         } else if is_output_unset {
-            println!(
+            return Err(MetalError::InvalidOperation(format!(
                 "MAPPING -> token_embd.weight size mismatch: {} vs {}",
                 tensor.len(),
                 qwen.output_weight.len()
-            );
+            )));
         }
         return Ok(());
     }
@@ -433,26 +433,16 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
 
         for (name, descriptor) in &gguf_model.tensors {
             let lname = name.to_lowercase();
-            match gguf_model.materialize_tensor::<T>(name, &*ctx) {
-                Ok(materialized) => {
-                    if let Err(err) = load_tensor_into_model(&lname, &materialized, &mut qwen) {
-                        println!(
-                            "Skipping tensor '{}' (dtype={:?}) after load failure: {:?}",
-                            name,
-                            descriptor.data_type(),
-                            err
-                        );
-                    }
-                }
-                Err(err) => {
-                    println!(
-                        "Failed to materialize tensor '{}' (dtype={:?}): {:?}",
-                        name,
-                        descriptor.data_type(),
-                        err
-                    );
-                }
-            }
+            let materialized = gguf_model.materialize_tensor::<T>(name, &*ctx).map_err(|err| {
+                MetalError::InvalidOperation(format!(
+                    "Failed to materialize tensor '{}' (dtype={:?}): {err}",
+                    name,
+                    descriptor.data_type()
+                ))
+            })?;
+
+            load_tensor_into_model(&lname, &materialized, &mut qwen)
+                .map_err(|err| MetalError::InvalidOperation(format!("Failed to load tensor '{}' into model: {err}", name)))?;
         }
 
         Ok(qwen)
