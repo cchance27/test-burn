@@ -150,6 +150,32 @@ fn copy_weight_transposed_into_fused<TSrc: TensorElement, TDst: TensorElement>(
     pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), src.dims(), dst.as_mut_slice(), &dst_dims, dst_col_offset)
 }
 
+fn copy_fused_gate_up_weight<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    if src.len() != dst.len() {
+        return Err(MetalError::DimensionMismatch {
+            expected: dst.len(),
+            actual: src.len(),
+        });
+    }
+
+    let src_dims = src.dims().to_vec();
+    let dst_dims = dst.dims().to_vec();
+
+    if src_dims == dst_dims {
+        return copy_tensor_into(src, dst);
+    }
+
+    if src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0] {
+        let src_slice = tensor_data_as_f32(src);
+        return pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), &src_dims, dst.as_mut_slice(), &dst_dims, 0);
+    }
+
+    copy_tensor_into(src, dst)
+}
+
 fn copy_bias_into_fused<TSrc: TensorElement, TDst: TensorElement>(
     src: &Tensor<TSrc>,
     dst: &mut Tensor<TDst>,
@@ -330,6 +356,18 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             && tensor.len() == kv_dim
         {
             copy_bias_into_fused(tensor, &mut block.attn_qkv_bias, v_offset)?;
+            return Ok(());
+        }
+
+        if ((lname.contains("fused") && lname.contains("gate") && lname.contains("up"))
+            || lname.contains("gate_up_proj.weight")
+            || lname.contains("gateup_proj.weight")
+            || lname.contains("gate_up.weight")
+            || lname.contains("gateup.weight")
+            || lname.contains("ffn_gate_up"))
+            && tensor.len() == block.ffn_gate_up_weight.len()
+        {
+            copy_fused_gate_up_weight(tensor, &mut block.ffn_gate_up_weight)?;
             return Ok(());
         }
 
