@@ -1,7 +1,7 @@
 use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     gguf::GGUFValue,
-    metallic::{Context, Tensor, resource_cache::ResourceCache},
+    metallic::{resource_cache::ResourceCache, Context, Tensor},
 };
 use std::collections::HashMap;
 
@@ -213,6 +213,12 @@ macro_rules! create_metadata_getter {
                     return *v; // Return the found value
                 }
             }
+            println!(
+                "Warning: metadata keys {:?} not found for {}, using default {:?}",
+                names,
+                stringify!($func_name),
+                or
+            );
             or // Return the default value if nothing was found
         }
     };
