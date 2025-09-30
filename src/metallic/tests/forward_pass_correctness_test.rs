@@ -65,6 +65,10 @@ fn take_first_as_f32<T: TensorElement>(slice: &[T::Scalar], count: usize) -> Vec
     slice.iter().take(count).map(|&value| T::to_f32(value)).collect()
 }
 
+fn quantize_reference_for_dtype<T: TensorElement>(values: &[f32]) -> Vec<f32> {
+    values.iter().copied().map(|v| T::to_f32(T::from_f32(v))).collect()
+}
+
 fn load_npy_tensor<P: AsRef<Path>>(path: P) -> (ndarray::ArrayD<f32>, Vec<usize>) {
     let reader = std::fs::File::open(path).expect("Failed to open npy file");
     let arr = ArrayD::<f32>::read_npy(reader).expect("Failed to read npy data");
@@ -91,9 +95,11 @@ fn compare_tensor_summary<T: TensorElement>(
     let py_slice = py_data.as_slice().expect("Failed to get slice from ndarray for comparison");
     assert_eq!(rust_slice.len(), py_slice.len(), "{} length mismatch", name);
 
+    let py_quantized = quantize_reference_for_dtype::<T>(py_slice);
+
     let mut diff_count = 0usize;
     let mut max_diff = 0f32;
-    for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+    for (i, (r, p)) in rust_slice.iter().zip(py_quantized.iter()).enumerate() {
         let r = T::to_f32(*r);
         let p = *p;
         let diff = (r - p).abs();
@@ -304,11 +310,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut diff_count = 0;
     let mut max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_embeddings_slice
-        .iter()
-        .zip(py_embeddings_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_embeddings_slice =
+        quantize_reference_for_dtype::<TestElement>(py_embeddings_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_embeddings_slice.iter().zip(py_embeddings_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -349,11 +353,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut attn_norm_diff_count = 0;
     let mut attn_norm_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_attn_norm_slice
-        .iter()
-        .zip(py_attn_norm_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_attn_norm_slice =
+        quantize_reference_for_dtype::<TestElement>(py_attn_norm_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_attn_norm_slice.iter().zip(py_attn_norm_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -425,11 +427,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut q_proj_diff_count = 0;
     let mut q_proj_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_q_proj_slice
-        .iter()
-        .zip(py_q_proj_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_q_proj_slice = quantize_reference_for_dtype::<TestElement>(py_q_proj_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_q_proj_slice.iter().zip(py_q_proj_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -495,11 +494,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut k_proj_diff_count = 0;
     let mut k_proj_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_k_proj_slice
-        .iter()
-        .zip(py_k_proj_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_k_proj_slice = quantize_reference_for_dtype::<TestElement>(py_k_proj_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_k_proj_slice.iter().zip(py_k_proj_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -565,11 +561,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut v_proj_diff_count = 0;
     let mut v_proj_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_v_proj_slice
-        .iter()
-        .zip(py_v_proj_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_v_proj_slice = quantize_reference_for_dtype::<TestElement>(py_v_proj_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_v_proj_slice.iter().zip(py_v_proj_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -728,11 +721,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_attn_out_slice = attn_out.as_slice();
     let mut attn_out_diff_count = 0;
     let mut attn_out_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_attn_out_slice
-        .iter()
-        .zip(py_attn_out_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_attn_out_slice =
+        quantize_reference_for_dtype::<TestElement>(py_attn_out_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_attn_out_slice.iter().zip(py_attn_out_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -866,9 +857,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Function to compare rust and py tensors without assertion (diagnostic)
     fn compare_tensors_no_assert<T: TensorElement>(rust_t: &Tensor<T>, py_data: &ArrayD<f32>, name: &str) -> f32 {
         let rust_slice = rust_t.as_slice();
-        let py_slice = py_data.as_slice().unwrap();
+        let py_quantized = quantize_reference_for_dtype::<T>(py_data.as_slice().unwrap());
         let mut max_diff = 0.0;
-        for (r, p) in rust_slice.iter().zip(py_slice.iter()) {
+        for (r, p) in rust_slice.iter().zip(py_quantized.iter()) {
             let r = T::to_f32(*r);
             let p = *p;
             let diff = (r - p).abs();
@@ -887,10 +878,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Function to compare rust and py tensors
     fn compare_tensors<T: TensorElement>(rust_t: &Tensor<T>, py_data: &ArrayD<f32>, name: &str, epsilon: f32) {
         let rust_slice = rust_t.as_slice();
-        let py_slice = py_data.as_slice().unwrap();
+        let py_quantized = quantize_reference_for_dtype::<T>(py_data.as_slice().unwrap());
         let mut diff_count = 0;
         let mut max_diff = 0.0;
-        for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+        for (i, (r, p)) in rust_slice.iter().zip(py_quantized.iter()).enumerate() {
             let r = T::to_f32(*r);
             let p = *p;
             let diff = (r - p).abs();
@@ -931,13 +922,19 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Compare residual result to PyTorch expected residual: mlp_out + (embeddings + attn_out)
     {
-        let py_mlp_out = py_mlp_out_data.as_slice().expect("Failed to get slice from ndarray for py_mlp_out");
-        let py_attn_out = py_attn_out_data
-            .as_slice()
-            .expect("Failed to get slice from ndarray for py_attn_out");
-        let py_embeddings = py_embeddings_data
-            .as_slice()
-            .expect("Failed to get slice from ndarray for py_embeddings");
+        let py_mlp_out = quantize_reference_for_dtype::<TestElement>(
+            py_mlp_out_data.as_slice().expect("Failed to get slice from ndarray for py_mlp_out"),
+        );
+        let py_attn_out = quantize_reference_for_dtype::<TestElement>(
+            py_attn_out_data
+                .as_slice()
+                .expect("Failed to get slice from ndarray for py_attn_out"),
+        );
+        let py_embeddings = quantize_reference_for_dtype::<TestElement>(
+            py_embeddings_data
+                .as_slice()
+                .expect("Failed to get slice from ndarray for py_embeddings"),
+        );
         let total_elems = py_mlp_out.len();
         assert_eq!(py_attn_out.len(), total_elems, "Py attn_out length mismatch");
         assert_eq!(py_embeddings.len(), total_elems, "Py embeddings length mismatch");
@@ -995,11 +992,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_hidden_slice = full_hidden.as_slice();
     let mut hidden_diff_count = 0;
     let mut hidden_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_hidden_slice
-        .iter()
-        .zip(py_hidden_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_hidden_slice = quantize_reference_for_dtype::<TestElement>(py_hidden_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_hidden_slice.iter().zip(py_hidden_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -1036,11 +1030,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_logits_slice = logits.as_slice();
     let mut logits_diff_count = 0;
     let mut logits_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_logits_slice
-        .iter()
-        .zip(py_logits_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_logits_slice = quantize_reference_for_dtype::<TestElement>(py_logits_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_logits_slice.iter().zip(py_logits_slice.iter()).enumerate() {
         let rust_val = TestElement::to_f32(*rust_val);
         let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
@@ -1290,9 +1281,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let last_position = seq - 1;
     let offset = last_position * vocab_size;
     let rust_last_logits = &rust_logits_slice[offset..offset + vocab_size];
-    let py_logits_slice = py_logits_data
-        .as_slice()
-        .expect("Failed to get slice from ndarray for PyTorch logits");
+    let py_logits_slice = quantize_reference_for_dtype::<TestElement>(
+        py_logits_data
+            .as_slice()
+            .expect("Failed to get slice from ndarray for PyTorch logits"),
+    );
     let py_last_logits = &py_logits_slice[offset..offset + vocab_size];
 
     let rust_argmax = rust_last_logits
@@ -1410,9 +1403,11 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     let input_ids = tokenizer.encode(&input_text)?;
 
     let (py_logits_data, py_logits_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/logits_pre_softmax.npy"));
-    let py_logits_flat = py_logits_data
-        .as_slice()
-        .expect("Failed to get slice from ndarray for PyTorch logits");
+    let py_logits_flat = quantize_reference_for_dtype::<TestElement>(
+        py_logits_data
+            .as_slice()
+            .expect("Failed to get slice from ndarray for PyTorch logits"),
+    );
 
     let vocab_size = model.config.vocab_size;
     assert!(
