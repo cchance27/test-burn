@@ -90,6 +90,38 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             )));
         }
 
+        let left_dtype = left_tensor.dtype;
+        let right_dtype = right_tensor.dtype;
+        let result_dtype = result.dtype;
+
+        let requires_cpu = requires_cpu_matmul(&[left_dtype, right_dtype, result_dtype]);
+
+        if requires_cpu {
+            let mut output = result.clone();
+            let beta_data = if beta != 0.0 { Some(result.to_vec()) } else { None };
+
+            cpu_matmul_fallback(
+                &left_tensor,
+                &left_view,
+                transpose_left,
+                &right_tensor,
+                &right_view,
+                transpose_right,
+                &mut output,
+                &result_view,
+                eff_left_rows,
+                eff_left_cols,
+                eff_right_cols,
+                alpha,
+                beta,
+                beta_data.as_deref(),
+            )?;
+
+            output.flush_host_writes()?;
+
+            return Ok((Box::new(NoopOperation), output));
+        }
+
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
             transpose_left,
@@ -104,9 +136,6 @@ impl KernelInvocable for MatMulAlphaBetaOp {
 
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
-        let left_dtype = left_tensor.dtype;
-        let right_dtype = right_tensor.dtype;
-        let result_dtype = result.dtype;
 
         // Create MPS matrix descriptors based on original dimensions (not transposed ones)
         let left_desc_key = MpsMatrixDescriptorKey {

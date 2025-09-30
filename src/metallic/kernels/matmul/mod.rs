@@ -117,9 +117,9 @@ impl KernelInvocable for MatMulOp {
         debug_assert_eq!(left_dtype, right_dtype);
         debug_assert_eq!(left_dtype, result_dtype);
 
-        let uses_bf16 = left_dtype == Dtype::BF16;
+        let requires_cpu = requires_cpu_matmul(&[left_dtype, right_dtype, result_dtype]);
 
-        if uses_bf16 {
+        if requires_cpu {
             cpu_matmul_fallback(
                 &left_tensor,
                 &left_view,
@@ -132,6 +132,9 @@ impl KernelInvocable for MatMulOp {
                 eff_left_rows,
                 eff_left_cols,
                 eff_right_cols,
+                1.0,
+                0.0,
+                None,
             )?;
 
             out.flush_host_writes()?;
@@ -240,6 +243,9 @@ fn cpu_matmul_fallback<T: TensorElement>(
     eff_left_rows: usize,
     eff_left_cols: usize,
     eff_right_cols: usize,
+    alpha: f32,
+    beta: f32,
+    beta_input: Option<&[T::Scalar]>,
 ) -> Result<(), MetalError> {
     let elem_size = std::mem::size_of::<T::Scalar>();
 
@@ -260,6 +266,9 @@ fn cpu_matmul_fallback<T: TensorElement>(
     let left_data = left.as_slice();
     let right_data = right.as_slice();
     let out_data = out.as_mut_slice();
+
+    let beta_slice = beta_input.unwrap_or(&[]);
+    let apply_beta = beta_input.is_some() && beta != 0.0;
 
     let batch = result_view.batch.max(1);
 
@@ -285,12 +294,23 @@ fn cpu_matmul_fallback<T: TensorElement>(
                 }
 
                 let result_index = result_base + row * result_row_stride + col;
-                out_data[result_index] = T::from_f32(acc);
+                let scaled = acc * alpha;
+                let combined = if apply_beta {
+                    let existing = T::to_f32(beta_slice[result_index]);
+                    scaled + beta * existing
+                } else {
+                    scaled
+                };
+                out_data[result_index] = T::from_f32(combined);
             }
         }
     }
 
     Ok(())
+}
+
+fn requires_cpu_matmul(dtypes: &[Dtype]) -> bool {
+    dtypes.iter().any(|dtype| !matches!(dtype, Dtype::F32 | Dtype::F16))
 }
 
 /// Create an `MPSMatrix` view into an existing `MTLBuffer`.
