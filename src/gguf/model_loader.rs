@@ -258,15 +258,21 @@ impl GGUFModel {
 
     /// Instantiate a concrete Metallic model that implements `LoadableModel`.
     /// This allows callers to do:
-    ///   let gguf_model = GGUFModelLoader::new(...).load_model(...)?
+    ///   let mut gguf_model = GGUFModelLoader::new(...).load_model(...)?
     ///   let qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
     pub fn instantiate<T: crate::metallic::models::LoadableModel>(
-        &self,
+        &mut self,
         ctx: &mut crate::metallic::Context,
     ) -> Result<T, super::GGUFError> {
         // Delegate to the metallic::model::Model::load helper. Map MetalError -> GGUFError::InvalidData with context.
         match crate::metallic::models::load::<T>(self, ctx) {
-            Ok(v) => Ok(v),
+            Ok(v) => {
+                // The GGUF tensors back the intermediate host copies of model weights.
+                // Once the concrete model has been instantiated we can release them to
+                // avoid doubling the resident memory footprint for large checkpoints.
+                self.tensors.clear();
+                Ok(v)
+            }
             Err(_e) => Err(super::GGUFError::InvalidData),
         }
     }
