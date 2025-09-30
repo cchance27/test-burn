@@ -20,7 +20,7 @@ pub struct GGUTensorInfo {
 
 impl GGUTensorInfo {
     /// Interpret the raw tensor buffer as a typed slice when possible.
-    pub fn into<'a>(&self, file: &'a GGUFFile) -> Result<GGUFRawTensor<'a>, GGUFError> {
+    pub fn view<'a>(&self, file: &'a GGUFFile) -> Result<GGUFRawTensor<'a>, GGUFError> {
         let raw = file.get_tensor_data(self)?;
 
         match self.data_type {

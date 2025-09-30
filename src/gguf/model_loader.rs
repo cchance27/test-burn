@@ -239,7 +239,7 @@ impl GGUFTensor {
     }
 
     pub fn materialize<T: TensorElement>(&self, file: &GGUFFile, context: &Context<T>) -> Result<Tensor<T>, GGUFError> {
-        let view = self.info.into(file)?;
+        let view = self.info.view(file)?;
         match view {
             GGUFRawTensor::F32(values) => {
                 if values.len() != self.expected_elements {
