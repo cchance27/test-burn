@@ -5,8 +5,6 @@ use crate::metallic::MetalError;
 use crate::metallic::Tensor;
 use crate::metallic::TensorElement;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
-use crate::metallic::kernels::silu::SiluOp;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -14,6 +12,127 @@ pub struct SwiGLUOp;
 /// Dummy struct for SwiGLU operation since all work is done in the `new` method
 pub struct SwiGLU<T: TensorElement> {
     _phantom: std::marker::PhantomData<T>,
+}
+
+pub struct SwiGLUFusedActivationOp;
+
+struct SwiGLUFusedActivation<T: TensorElement> {
+    gate: Tensor<T>,
+    gate_bias: Tensor<T>,
+    up_inout: Tensor<T>,
+    up_bias: Tensor<T>,
+    total_elements: u32,
+    bias_len: u32,
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+}
+
+impl KernelInvocable for SwiGLUFusedActivationOp {
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>);
+
+    fn function_id() -> Option<KernelFunction> {
+        Some(KernelFunction::SwigluFusedActivation)
+    }
+
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
+        pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+        _cache: Option<&mut ResourceCache>,
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
+        let (gate, gate_bias, up, up_bias) = args;
+
+        if gate.dims() != up.dims() {
+            return Err(MetalError::InvalidShape(format!(
+                "SwiGLU fused activation expects matching gate/up dims, got {:?} vs {:?}",
+                gate.dims(),
+                up.dims()
+            )));
+        }
+
+        if gate_bias.dims().len() != 1 {
+            return Err(MetalError::InvalidShape(format!(
+                "Gate bias must be 1D, got {:?}",
+                gate_bias.dims()
+            )));
+        }
+
+        if up_bias.dims().len() != 1 {
+            return Err(MetalError::InvalidShape(format!("Up bias must be 1D, got {:?}", up_bias.dims())));
+        }
+
+        let dims = gate.dims();
+        if dims.is_empty() {
+            return Err(MetalError::InvalidShape(
+                "SwiGLU fused activation expects non-empty dims".to_string(),
+            ));
+        }
+
+        let hidden_dim = *dims.last().expect("non-empty dims");
+        if gate_bias.len() != hidden_dim {
+            return Err(MetalError::DimensionMismatch {
+                expected: hidden_dim,
+                actual: gate_bias.len(),
+            });
+        }
+
+        if up_bias.len() != hidden_dim {
+            return Err(MetalError::DimensionMismatch {
+                expected: hidden_dim,
+                actual: up_bias.len(),
+            });
+        }
+
+        ctx.prepare_tensors_for_active_cmd(&[&gate, &gate_bias, &up, &up_bias])?;
+
+        let out = up.clone();
+        let op = SwiGLUFusedActivation {
+            gate,
+            gate_bias,
+            up_inout: out.clone(),
+            up_bias,
+            total_elements: out.len() as u32,
+            bias_len: hidden_dim as u32,
+            pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+        };
+
+        Ok((Box::new(op), out))
+    }
+}
+
+impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
+    fn encode(
+        &self,
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        _cache: &mut ResourceCache,
+    ) -> Result<(), MetalError> {
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let threads_per_tg = MTLSize {
+            width: 256,
+            height: 1,
+            depth: 1,
+        };
+        let groups = MTLSize {
+            width: self.total_elements.div_ceil(256) as usize,
+            height: 1,
+            depth: 1,
+        };
+
+        set_compute_pipeline_state(&encoder, &self.pipeline);
+        set_buffer(&encoder, 0, &self.gate.buf, self.gate.offset);
+        set_buffer(&encoder, 1, &self.up_inout.buf, self.up_inout.offset);
+        set_buffer(&encoder, 2, &self.gate_bias.buf, self.gate_bias.offset);
+        set_buffer(&encoder, 3, &self.up_bias.buf, self.up_bias.offset);
+        set_bytes(&encoder, 4, &self.total_elements);
+        set_bytes(&encoder, 5, &self.bias_len);
+
+        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+        encoder.endEncoding();
+
+        Ok(())
+    }
 }
 
 impl KernelInvocable for SwiGLUOp {
@@ -96,12 +215,6 @@ fn execute_swiglu_logic<T: TensorElement>(
         None => ctx.matmul(x_normed_flat, ffn_gate, false, gate_transpose_b)?,
     };
 
-    // Add gate bias (broadcast over last dim)
-    let gate_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddInplaceOp>((gate_temp, ffn_gate_bias.clone()), cache)?,
-        None => ctx.call::<BroadcastElemwiseAddInplaceOp>((gate_temp, ffn_gate_bias.clone()))?,
-    };
-
     // up_proj: [m, d_model] @ weight -> [m, ff_dim]
     let up_dims = ffn_up.dims();
     let up_transpose_b = if up_dims[0] == d_model {
@@ -119,22 +232,12 @@ fn execute_swiglu_logic<T: TensorElement>(
         None => ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?,
     };
 
-    // Add up bias
-    let up_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddInplaceOp>((up_temp, ffn_up_bias.clone()), cache)?,
-        None => ctx.call::<BroadcastElemwiseAddInplaceOp>((up_temp, ffn_up_bias.clone()))?,
-    };
-
-    // SiLU activation on gate_proj
-    let gate_act = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<SiluOp>(gate_out, cache)?,
-        None => ctx.call::<SiluOp>(gate_out)?,
-    };
-
-    // Element-wise multiplication: SiLU(gate_proj) * up_proj -> [m, ff_dim]
+    // Fuse bias additions, SiLU, and elementwise multiply
     let hidden = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<ElemwiseMulOp>((gate_act, up_out), cache)?,
-        None => ctx.call::<ElemwiseMulOp>((gate_act, up_out))?,
+        Some(cache) => {
+            ctx.call_with_cache::<SwiGLUFusedActivationOp>((gate_temp, ffn_gate_bias.clone(), up_temp, ffn_up_bias.clone()), cache)?
+        }
+        None => ctx.call::<SwiGLUFusedActivationOp>((gate_temp, ffn_gate_bias.clone(), up_temp, ffn_up_bias.clone()))?,
     };
 
     // down_proj: [m, ff_dim] @ [ff_dim, d_model] -> [m, d_model]
