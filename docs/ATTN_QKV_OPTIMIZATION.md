@@ -41,6 +41,6 @@ Because these operations run back-to-back they occupy the same latency band that
 2. Update the Qwen25 block to consume the fused tensor and slice Q/K/V views before RoPE.
 3. Validate with the metrics dashboard and ask a teammate to benchmark on-device since we cannot execute Metal workloads inside CI.
 
-The fused projection now ships as `Context::fused_qkv_projection`, which emits separate Q/K/V tensors via the Metal kernel in `kernels/fused_qkv`. Weight packing happens during GGUF load so runtime matmuls no longer require transposed operands.【F:src/metallic/context.rs†L205-L299】【F:src/metallic/models/qwen25/loading.rs†L77-L358】
+The fused projection now ships as `Context::fused_qkv_projection`, which issues a single matmul, applies the fused bias in place, and materializes Q/K/V as lightweight views into that shared buffer—no bespoke Metal kernel required.【F:src/metallic/context.rs†L228-L312】【F:src/metallic/models/qwen25/loading.rs†L77-L358】
 
 Following these steps should turn **attn_qkv_proj** from the second-slowest phase into a smaller slice of the block latency budget while maintaining clean layering and synchronization safety.

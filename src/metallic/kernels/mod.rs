@@ -19,7 +19,6 @@ pub mod elemwise_add;
 pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
-pub mod fused_qkv;
 pub mod gelu;
 pub mod kv_rearrange;
 pub mod layernorm;
@@ -42,7 +41,6 @@ pub enum KernelLibrary {
     ElemwiseDiv,
     ElemwiseMul,
     ElemwiseSub,
-    FusedQkv,
     Gelu,
     KvRearrange,
     LayerNorm,
@@ -64,7 +62,6 @@ impl KernelLibrary {
             KernelLibrary::ElemwiseDiv => include_str!("elemwise_div/kernel.metal"),
             KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
             KernelLibrary::ElemwiseSub => include_str!("elemwise_sub/kernel.metal"),
-            KernelLibrary::FusedQkv => include_str!("fused_qkv/kernel.metal"),
             KernelLibrary::Gelu => include_str!("gelu/kernel.metal"),
             KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
             KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
@@ -92,7 +89,6 @@ pub enum KernelFunction {
     ElemwiseDiv,
     ElemwiseMul,
     ElemwiseSub,
-    FusedQkvBiasSplit,
     Gelu,
     KvRearrange,
     LayerNorm,
@@ -118,7 +114,6 @@ impl KernelFunction {
             KernelFunction::ElemwiseDiv => KernelLibrary::ElemwiseDiv,
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
             KernelFunction::ElemwiseSub => KernelLibrary::ElemwiseSub,
-            KernelFunction::FusedQkvBiasSplit => KernelLibrary::FusedQkv,
             KernelFunction::Gelu => KernelLibrary::Gelu,
             KernelFunction::KvRearrange => KernelLibrary::KvRearrange,
             KernelFunction::LayerNorm => KernelLibrary::LayerNorm,
@@ -155,8 +150,6 @@ impl KernelFunction {
             (KernelFunction::ElemwiseMul, F16) => "mul_kernel_f16",
             (KernelFunction::ElemwiseSub, F32) => "sub_kernel_f32",
             (KernelFunction::ElemwiseSub, F16) => "sub_kernel_f16",
-            (KernelFunction::FusedQkvBiasSplit, F32) => "fused_qkv_bias_split_f32",
-            (KernelFunction::FusedQkvBiasSplit, F16) => "fused_qkv_bias_split_f16",
             (KernelFunction::Gelu, F32) => "gelu_kernel_f32",
             (KernelFunction::Gelu, F16) => "gelu_kernel_f16",
             (KernelFunction::KvRearrange, F32) => "kv_rearrange_kernel_f32",
