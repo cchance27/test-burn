@@ -7,7 +7,7 @@ use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixM
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    Context, Dtype, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
 };
@@ -37,6 +37,18 @@ struct MatMul {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+}
+
+struct NoopOperation;
+
+impl Operation for NoopOperation {
+    fn encode(
+        &self,
+        _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        _cache: &mut ResourceCache,
+    ) -> Result<(), MetalError> {
+        Ok(())
+    }
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -96,11 +108,36 @@ impl KernelInvocable for MatMulOp {
         } else {
             vec![eff_left_rows, eff_right_cols]
         };
-        let out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+        let mut out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let result_view = out.as_mps_matrix_batch_view()?;
         let left_dtype = left_tensor.dtype;
         let right_dtype = right_tensor.dtype;
         let result_dtype = out.dtype;
+
+        debug_assert_eq!(left_dtype, right_dtype);
+        debug_assert_eq!(left_dtype, result_dtype);
+
+        let uses_bf16 = left_dtype == Dtype::BF16;
+
+        if uses_bf16 {
+            cpu_matmul_fallback(
+                &left_tensor,
+                &left_view,
+                transpose_left,
+                &right_tensor,
+                &right_view,
+                transpose_right,
+                &mut out,
+                &result_view,
+                eff_left_rows,
+                eff_left_cols,
+                eff_right_cols,
+            )?;
+
+            out.flush_host_writes()?;
+
+            return Ok((Box::new(NoopOperation), out));
+        }
 
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
@@ -189,6 +226,71 @@ impl Operation for MatMul {
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
         Ok(())
     }
+}
+
+fn cpu_matmul_fallback<T: TensorElement>(
+    left: &Tensor<T>,
+    left_view: &MpsMatrixBatchView,
+    transpose_left: bool,
+    right: &Tensor<T>,
+    right_view: &MpsMatrixBatchView,
+    transpose_right: bool,
+    out: &mut Tensor<T>,
+    result_view: &MpsMatrixBatchView,
+    eff_left_rows: usize,
+    eff_left_cols: usize,
+    eff_right_cols: usize,
+) -> Result<(), MetalError> {
+    let elem_size = std::mem::size_of::<T::Scalar>();
+
+    debug_assert_eq!(left_view.row_bytes % elem_size, 0);
+    debug_assert_eq!(right_view.row_bytes % elem_size, 0);
+    debug_assert_eq!(result_view.row_bytes % elem_size, 0);
+    debug_assert_eq!(left_view.matrix_bytes % elem_size, 0);
+    debug_assert_eq!(right_view.matrix_bytes % elem_size, 0);
+    debug_assert_eq!(result_view.matrix_bytes % elem_size, 0);
+
+    let left_row_stride = left_view.row_bytes / elem_size;
+    let left_batch_stride = left_view.matrix_bytes / elem_size;
+    let right_row_stride = right_view.row_bytes / elem_size;
+    let right_batch_stride = right_view.matrix_bytes / elem_size;
+    let result_row_stride = result_view.row_bytes / elem_size;
+    let result_batch_stride = result_view.matrix_bytes / elem_size;
+
+    let left_data = left.as_slice();
+    let right_data = right.as_slice();
+    let out_data = out.as_mut_slice();
+
+    let batch = result_view.batch.max(1);
+
+    for batch_idx in 0..batch {
+        let left_base = batch_idx * left_batch_stride;
+        let right_base = batch_idx * right_batch_stride;
+        let result_base = batch_idx * result_batch_stride;
+
+        for row in 0..eff_left_rows {
+            for col in 0..eff_right_cols {
+                let mut acc = 0.0f32;
+
+                for k in 0..eff_left_cols {
+                    let (left_row_idx, left_col_idx) = if transpose_left { (k, row) } else { (row, k) };
+                    let left_index = left_base + left_row_idx * left_row_stride + left_col_idx;
+
+                    let (right_row_idx, right_col_idx) = if transpose_right { (col, k) } else { (k, col) };
+                    let right_index = right_base + right_row_idx * right_row_stride + right_col_idx;
+
+                    let left_val = T::to_f32(left_data[left_index]);
+                    let right_val = T::to_f32(right_data[right_index]);
+                    acc += left_val * right_val;
+                }
+
+                let result_index = result_base + row * result_row_stride + col;
+                out_data[result_index] = T::from_f32(acc);
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Create an `MPSMatrix` view into an existing `MTLBuffer`.
