@@ -1,13 +1,8 @@
-use crate::gguf::model_loader::GGUFModel;
-use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
 use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
-use crate::metallic::kernels::matmul::MatMulOp;
 use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
-use crate::metallic::kernels::silu::SiluOp;
-use crate::metallic::models::LoadableModel;
 use crate::metallic::{Context, MetalError, Tensor, TensorElement};
 use std::time::Instant;
 

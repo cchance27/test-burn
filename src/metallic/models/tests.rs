@@ -1,7 +1,5 @@
 #![cfg(test)]
-use super::*;
-use crate::metallic::context::ContextConfig;
-use crate::metallic::{Context, F32Element, MetalError, TensorElement};
+use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorElement};
 use crate::metallic::{Operation, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -26,7 +24,7 @@ impl Operation for TestOperation {
 
 #[test]
 fn test_model_basic() -> Result<(), MetalError> {
-    let context: Context<F32Element> = Context::with_config(ContextConfig::default())?;
+    let context: Context<F32Element> = Context::new()?;
     let _cache = ResourceCache::with_device(context.device.clone());
 
     // Create a simple test operation
@@ -45,7 +43,7 @@ fn test_model_basic() -> Result<(), MetalError> {
 
 #[test]
 fn test_model_empty() -> Result<(), MetalError> {
-    let context: Context<F32Element> = Context::with_config(ContextConfig::default())?;
+    let context: Context<F32Element> = Context::new()?;
     let mut cache = ResourceCache::with_device(context.device.clone());
 
     let model = Model::new(vec![]);
@@ -76,7 +74,7 @@ fn test_model_multiple_operations() -> Result<(), MetalError> {
 }
 
 /// A simple model runner that holds a sequence of operations and runs them in order.
-pub struct Model {
+struct Model {
     operations: Vec<Box<dyn Operation>>,
 }
 
@@ -96,7 +94,7 @@ impl Model {
     pub fn forward<T: TensorElement>(
         &self,
         inputs: &[Tensor<T>],
-        command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
+        command_queue: &Retained<ProtocolObject<dyn objc2_metal::MTLCommandQueue>>,
         cache: &mut ResourceCache,
     ) -> Result<Vec<Tensor<T>>, MetalError> {
         if self.operations.is_empty() {
@@ -104,7 +102,7 @@ impl Model {
         }
 
         // Create a command buffer for this forward pass
-        let mut cmd_buf = CommandBuffer::new(command_queue)?;
+        let mut cmd_buf = crate::metallic::CommandBuffer::new(command_queue)?;
 
         // For now, we assume the first operation takes the inputs directly
         // In a more sophisticated implementation, we might need to handle

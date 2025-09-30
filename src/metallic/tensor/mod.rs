@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-mod dtypes;
-
 use super::{Context, MetalError, operation::CommandBuffer};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
@@ -11,18 +8,19 @@ use crate::metallic::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
 pub use dtypes::*;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLDevice, MTLResourceOptions, MTLSize,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
-use std::ops::{Add, Deref, Div, Mul, Sub};
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+
+pub mod dtypes;
 
 #[derive(Clone)]
 struct ThreadSafeBuffer {
@@ -290,12 +288,6 @@ impl<T: TensorElement> Tensor<T> {
     #[inline]
     fn cpu_fill_threshold_bytes() -> usize {
         DEFAULT_CPU_FILL_THRESHOLD_MB * 1024 * 1024
-    }
-
-    /// Helper function to bind a tensor to a compute encoder with correct offset
-    #[inline]
-    fn bind_tensor(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, tensor: &Self) {
-        set_buffer(encoder, index, &tensor.buf, tensor.offset);
     }
 
     #[inline]
@@ -1236,38 +1228,6 @@ impl<T: TensorElement> Tensor<T> {
         let mut scalar_tensor = Self::zeros_like(self, ctx)?;
         scalar_tensor.fill(value);
         self.add_elem(&scalar_tensor, ctx)
-    }
-
-    fn unary_elementwise<F>(a: &Self, f: F) -> Result<Self, MetalError>
-    where
-        F: Fn(f32) -> f32,
-    {
-        let byte_len = a.size_bytes();
-        let buf = a
-            .device
-            .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-        let mut out = Self {
-            buf,
-            dims: a.dims.clone(),
-            strides: Self::compute_strides(&a.dims),
-            dtype: a.dtype,
-            device: a.device.clone(),
-            offset: 0,
-            host_accessible: true,
-            host_access: Arc::new(Mutex::new(HostAccessState::new(0, byte_len))),
-            command_queue: a.command_queue.clone(),
-            defining_cmd_buffer: Rc::new(RefCell::new(None)),
-            marker: PhantomData,
-        };
-        let aslice = a.as_slice();
-        let oslice = out.as_mut_slice();
-        for i in 0..a.len() {
-            let input_val = T::to_f32(aslice[i]);
-            let output_val = f(input_val);
-            oslice[i] = T::from_f32(output_val);
-        }
-        Ok(out)
     }
 
     pub fn get_batch(&self, batch_index: usize) -> Result<Self, MetalError> {

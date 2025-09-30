@@ -1,6 +1,6 @@
 use crate::metallic::generation::{GenerationConfig, generate};
 use crate::metallic::models::{Qwen25, Qwen25Config};
-use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorElement, Tokenizer};
+use crate::metallic::{Context, F32Element, MetalError, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
 
 #[test]

@@ -1,6 +1,6 @@
-use crate::metallic::tensor::Dtype;
 use crate::metallic::F32Element;
 use crate::metallic::Tensor;
+use crate::metallic::tensor::Dtype;
 use objc2::AnyThread;
 use objc2::rc::autoreleasepool;
 use objc2_metal::MTLCommandBuffer;

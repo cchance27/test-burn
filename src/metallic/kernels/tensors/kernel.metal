@@ -22,8 +22,7 @@ float hash(uint2 seed) {
 
 #define FOR_EACH_FLOAT_TYPE(OP) \
     OP(float, float, f32) \
-    OP(half, float, f16) \
-    OP(bfloat, float, bf16)
+    OP(half, float, f16)
 
 #define DEFINE_RANDOM_UNIFORM_KERNEL(SCALAR, ACCUM, SUFFIX) \
 kernel void random_uniform_##SUFFIX( \

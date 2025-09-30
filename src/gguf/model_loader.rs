@@ -7,9 +7,7 @@ use crate::metallic::tensor::TensorInit;
 use crate::metallic::{Tensor, TensorElement};
 use crate::{
     gguf::GGUFValue,
-    metallic::{
-        BF16Element, Context, Dtype, F16Element, F32Element, TensorStorage,
-    },
+    metallic::{Context, Dtype, F16Element, F32Element, TensorStorage},
 };
 use std::cell::{Ref, RefCell};
 use std::ops::Deref;
@@ -135,18 +133,6 @@ impl GGUFModelLoader {
                 let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
                 Ok(GGUFTensor::from(tensor))
             }
-            GGUFRawTensor::BF16(values) => {
-                if values.len() != expected_elements {
-                    return Err(GGUFError::DimensionMismatch {
-                        expected: expected_elements,
-                        actual: values.len(),
-                    });
-                }
-                // Convert BF16 values to target type T via f32
-                let converted_values: Vec<T::Scalar> = values.iter().copied().map(half::bf16::to_f32).map(T::from_f32).collect();
-                let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
-                Ok(GGUFTensor::from(tensor))
-            }
             GGUFRawTensor::Bytes(raw, data_type) => match data_type {
                 GGUFDataType::F64 => {
                     let f32_data = convert_f64_bytes(raw)?;
@@ -175,7 +161,7 @@ impl GGUFModelLoader {
                             actual: dequant.len(),
                         });
                     }
-                    // Convert F32 values to target type T  
+                    // Convert F32 values to target type T
                     let converted_values: Vec<T::Scalar> = dequant.iter().copied().map(T::from_f32).collect();
                     let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
                     Ok(GGUFTensor::from(tensor))
@@ -196,10 +182,6 @@ pub enum GGUFTensor {
         tensor: Tensor<F16Element>,
         cached_f32: RefCell<Option<Tensor<F32Element>>>,
     },
-    BF16 {
-        tensor: Tensor<BF16Element>,
-        cached_f32: RefCell<Option<Tensor<F32Element>>>,
-    },
 }
 
 impl From<Tensor<F32Element>> for GGUFTensor {
@@ -211,15 +193,6 @@ impl From<Tensor<F32Element>> for GGUFTensor {
 impl From<Tensor<F16Element>> for GGUFTensor {
     fn from(tensor: Tensor<F16Element>) -> Self {
         Self::F16 {
-            tensor,
-            cached_f32: RefCell::new(None),
-        }
-    }
-}
-
-impl From<Tensor<BF16Element>> for GGUFTensor {
-    fn from(tensor: Tensor<BF16Element>) -> Self {
-        Self::BF16 {
             tensor,
             cached_f32: RefCell::new(None),
         }
@@ -248,7 +221,6 @@ impl GGUFTensor {
         match self {
             GGUFTensor::F32(_) => Dtype::F32,
             GGUFTensor::F16 { .. } => Dtype::F16,
-            GGUFTensor::BF16 { .. } => Dtype::BF16,
         }
     }
 
@@ -256,7 +228,6 @@ impl GGUFTensor {
         match self {
             GGUFTensor::F32(tensor) => tensor.is_empty(),
             GGUFTensor::F16 { tensor, .. } => tensor.is_empty(),
-            GGUFTensor::BF16 { tensor, .. } => tensor.is_empty(),
         }
     }
 
@@ -264,7 +235,6 @@ impl GGUFTensor {
         match self {
             GGUFTensor::F32(tensor) => tensor.len(),
             GGUFTensor::F16 { tensor, .. } => tensor.len(),
-            GGUFTensor::BF16 { tensor, .. } => tensor.len(),
         }
     }
 
@@ -272,7 +242,6 @@ impl GGUFTensor {
         match self {
             GGUFTensor::F32(tensor) => tensor.dims(),
             GGUFTensor::F16 { tensor, .. } => tensor.dims(),
-            GGUFTensor::BF16 { tensor, .. } => tensor.dims(),
         }
     }
 }

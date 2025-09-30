@@ -3,9 +3,8 @@ using namespace metal;
 
 #define FOR_EACH_FLOAT_TYPE(OP) \
     OP(float, float, f32) \
-    OP(half, float, f16) \
-    OP(bfloat, float, bf16)
-
+    OP(half, float, f16)
+    
 #define DEFINE_GELU_KERNEL(SCALAR, ACCUM, SUFFIX) \
     /* More numerically stable GELU implementation */ \
 kernel void gelu_kernel_##SUFFIX( \

@@ -99,53 +99,6 @@ impl GGUFDataType {
             _ => Self::Unknown(value),
         }
     }
-
-    // Return the raw numeric code used in the GGUF file for this data type.
-    //fn as_u32(&self) -> u32 {
-    //    match self {
-    //        Self::F32 => 0,
-    //        Self::F16 => 1,
-    //        Self::Q4_0 => 2,
-    //        Self::Q4_1 => 3,
-    //        Self::Q4_2 => 4,
-    //        Self::Q4_3 => 5,
-    //        Self::Q5_0 => 6,
-    //        Self::Q5_1 => 7,
-    //        Self::Q8_0 => 8,
-    //        Self::Q8_1 => 9,
-    //        Self::Q2K => 10,
-    //        Self::Q3K => 11,
-    //        Self::Q4K => 12,
-    //        Self::Q5K => 13,
-    //        Self::Q6K => 14,
-    //        Self::Q8K => 15,
-    //        Self::IQ2XXS => 16,
-    //        Self::IQ2XS => 17,
-    //        Self::IQ3XXS => 18,
-    //        Self::IQ1S => 19,
-    //        Self::IQ4NL => 20,
-    //        Self::IQ3S => 21,
-    //        Self::IQ2S => 22,
-    //        Self::IQ4XS => 23,
-    //        Self::I8 => 24,
-    //        Self::I16 => 25,
-    //        Self::I32 => 26,
-    //        Self::I64 => 27,
-    //        Self::F64 => 28,
-    //        Self::IQ1M => 29,
-    //        Self::BF16 => 30,
-    //        Self::Q4044 => 31,
-    //        Self::Q4048 => 32,
-    //        Self::Q4088 => 33,
-    //        Self::TQ10 => 34,
-    //        Self::TQ20 => 35,
-    //        Self::IQ4NL44 => 36,
-    //        Self::IQ4NL48 => 37,
-    //        Self::IQ4NL88 => 38,
-    //        Self::Array => 39,
-    //        Self::Unknown(value) => *value,
-    //    }
-    //}
 }
 
 #[derive(Debug)]

@@ -6,7 +6,7 @@
 use burn::prelude::Backend;
 use burn::tensor::{Distribution, Float, Int, Tensor as BurnTensor};
 use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::{Context, Tensor};
+use test_burn::metallic::{Context, F32Element, Tensor};
 type MyBackend = burn::backend::Metal;
 
 fn benchmark_random_uniform_creation(c: &mut Criterion) {
@@ -14,7 +14,7 @@ fn benchmark_random_uniform_creation(c: &mut Criterion) {
     let seq = 512;
     let dim = 64;
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("random_uniform_creation");
 
     group.bench_function("burn", |b| {
@@ -36,7 +36,7 @@ fn benchmark_random_uniform_creation(c: &mut Criterion) {
 fn benchmark_arange_creation(c: &mut Criterion) {
     let num_elements: usize = 8 * 512 * 64;
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("arange_creation");
 
     group.bench_function("burn", |b| {
@@ -66,7 +66,7 @@ fn benchmark_arange_creation(c: &mut Criterion) {
 fn benchmark_zeros_creation(c: &mut Criterion) {
     let shape = [8, 512, 64];
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("zeros_creation");
 
     group.bench_function("burn", |b| {
@@ -89,7 +89,7 @@ fn benchmark_zeros_creation(c: &mut Criterion) {
 fn benchmark_ones_creation(c: &mut Criterion) {
     let shape = [8, 512, 64];
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("ones_creation");
 
     group.bench_function("burn", |b| {
@@ -111,7 +111,7 @@ fn benchmark_ones_creation(c: &mut Criterion) {
 
 fn benchmark_batched_operations(c: &mut Criterion) {
     let shape = [8, 512, 64];
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("batched_operations");
 
     // Benchmark individual operations
@@ -143,7 +143,7 @@ fn benchmark_batched_operations(c: &mut Criterion) {
 
 fn benchmark_large_tensor_gpu_fallback(c: &mut Criterion) {
     let large_shape = [64, 512, 512]; // ~67MB tensor - should trigger GPU path
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("large_tensor_gpu_fallback");
 
     group.bench_function("zeros_large", |b| {
@@ -174,7 +174,7 @@ fn benchmark_ones_scaling(c: &mut Criterion) {
         ("16mb", 16 * 1024 * 1024 / 4),
     ];
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let mut group = c.benchmark_group("ones_scaling");
 
     for (name, num_elements) in sizes {
@@ -207,7 +207,7 @@ fn benchmark_zeros_scaling(c: &mut Criterion) {
         ("16mb", 16 * 1024 * 1024 / 4),
     ];
     let device = <MyBackend as burn::prelude::Backend>::Device::default();
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     let mut group = c.benchmark_group("zero_scaling");
     for (name, num_elements) in sizes {

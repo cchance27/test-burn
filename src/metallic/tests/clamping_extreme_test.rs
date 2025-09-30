@@ -1,4 +1,4 @@
-use crate::metallic::{generation::sample_top_k_top_p, F32Element};
+use crate::metallic::{F32Element, generation::sample_top_k_top_p};
 
 #[test]
 fn test_sample_top_k_top_p_extreme_logits() {

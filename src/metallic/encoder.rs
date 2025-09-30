@@ -1,5 +1,5 @@
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 use std::ffi::c_void;
 
 /// Sets the compute pipeline state for a command encoder.

@@ -3,9 +3,8 @@ using namespace metal;
 
 #define FOR_EACH_FLOAT_TYPE(OP) \
     OP(float, float, f32) \
-    OP(half, float, f16) \
-    OP(bfloat, float, bf16)
-
+    OP(half, float, f16)
+    
 #define DEFINE_ELEMWISE_SUB_KERNEL(SCALAR, ACCUM, SUFFIX) \
 kernel void sub_kernel_##SUFFIX(device const SCALAR* a [[buffer(0)]], \
                                 device const SCALAR* b [[buffer(1)]], \

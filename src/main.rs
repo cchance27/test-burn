@@ -7,9 +7,10 @@ use std::{env, io::stdout, process, sync::mpsc, thread, time::Duration};
 
 use test_burn::{
     app_event::{AppEvent, LatencyRow, MemoryRow},
-    gguf::{model_loader::GGUFModelLoader, GGUFFile},
+    gguf::{GGUFFile, model_loader::GGUFModelLoader},
     metallic::{
-        generation::{generate_streaming, GenerationConfig},  Context, ContextConfig, Dtype, F32Element, Tokenizer
+        Context, F16Element, Tokenizer,
+        generation::{GenerationConfig, generate_streaming},
     },
 };
 
@@ -24,7 +25,9 @@ fn main() -> Result<()> {
             process::exit(1);
         }
     };
-    let prompt = args.next().unwrap_or_else(|| "Create a short javascript hello world app.".to_string());
+    let prompt = args
+        .next()
+        .unwrap_or_else(|| "Create a short javascript hello world app.".to_string());
 
     let (tx, rx) = mpsc::channel();
 
@@ -33,7 +36,7 @@ fn main() -> Result<()> {
         let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
 
         tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
-        let mut ctx= Context::<F32Element>::with_config(ContextConfig::new(Dtype::F32))?;
+        let mut ctx = Context::<F16Element>::new()?;
 
         tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
         let loader = GGUFModelLoader::new(gguf);

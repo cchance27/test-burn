@@ -10,7 +10,6 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::env;
-use std::mem::size_of;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -116,6 +115,7 @@ pub fn apply_softmax<T: TensorElement>(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_apply_mps_softmax<T: TensorElement>(
     ctx: &mut Context<T>,
     cache: &mut ResourceCache,

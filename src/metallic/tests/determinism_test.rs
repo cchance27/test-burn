@@ -145,8 +145,6 @@ fn test_sdpa_determinism_causal() -> Result<(), MetalError> {
 
 #[test]
 fn test_matmul_determinism() -> Result<(), MetalError> {
-    use crate::metallic::kernels::matmul::MatMulOp;
-
     let mut context = Context::<F32Element>::new()?;
 
     let m = 4;

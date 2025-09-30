@@ -46,12 +46,9 @@ fn test_silu_basic() -> Result<(), MetalError> {
 #[test]
 fn test_silu_numerical_stability() -> Result<(), MetalError> {
     let mut context = Context::<F32Element>::new()?;
-    
 
     // Test with extreme values that could cause overflow in exp computation
-    let input_data = vec![
-        -100.0, -50.0, -20.0, -10.0, -1.0, 0.0, 1.0, 10.0, 20.0, 50.0, 100.0,
-    ];
+    let input_data = vec![-100.0, -50.0, -20.0, -10.0, -1.0, 0.0, 1.0, 10.0, 20.0, 50.0, 100.0];
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
@@ -62,11 +59,7 @@ fn test_silu_numerical_stability() -> Result<(), MetalError> {
 
     // Check that the output values are finite (not NaN or infinity)
     for &val in metal_output {
-        assert!(
-            val.is_finite(),
-            "SiLU output contains non-finite value: {}",
-            val
-        );
+        assert!(val.is_finite(), "SiLU output contains non-finite value: {}", val);
     }
 
     let cpu_output = cpu_silu(&input_data);
@@ -134,11 +127,7 @@ fn test_silu_extreme_positive_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -208,11 +197,7 @@ fn test_silu_extreme_negative_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -274,7 +259,7 @@ fn test_silu_mixed_extreme_values() -> Result<(), MetalError> {
         50.1f32,  // Just above positive clamp threshold
         -50.1f32, // Just below negative clamp threshold
     ];
-    
+
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
     let cpu_output = cpu_silu_extreme(&input_data);
@@ -291,11 +276,7 @@ fn test_silu_mixed_extreme_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -361,11 +342,7 @@ fn test_silu_edge_values_around_thresholds() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -404,10 +381,10 @@ fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
     let mut input_data = Vec::with_capacity(size);
     for i in 0..size {
         match i % 4 {
-            0 => input_data.push(i as f32 * 0.1),        // gradually increasing positive
-            1 => input_data.push(-(i as f32) * 0.1),     // gradually decreasing negative
-            2 => input_data.push(1000.0),                 // large positive
-            3 => input_data.push(-1000.0),                // large negative
+            0 => input_data.push(i as f32 * 0.1),    // gradually increasing positive
+            1 => input_data.push(-(i as f32) * 0.1), // gradually decreasing negative
+            2 => input_data.push(1000.0),            // large positive
+            3 => input_data.push(-1000.0),           // large negative
             _ => unreachable!(),
         }
     }
@@ -429,11 +406,7 @@ fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
         let metal_val = metal_output[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
-        let rel_err = if cpu_val.abs() > 1e-8 {
-            diff / cpu_val.abs()
-        } else {
-            diff
-        };
+        let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };
 
         // Check for NaN or Infinity
         assert!(
@@ -462,26 +435,26 @@ fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
 
     Ok(())
 }
-    #[test]
-    fn test_silu_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::<F32Element>::new()?;
-        let input_data = vec![1.0, -1.0, 0.0, 2.0];
-        let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
+#[test]
+fn test_silu_logic() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+    let input_data = vec![1.0, -1.0, 0.0, 2.0];
+    let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
-        let result = ctx.call::<SiluOp>(input)?;
+    let result = ctx.call::<SiluOp>(input)?;
 
-        // SiLU(x) = x * sigmoid(x)
-        let expected: Vec<f32> = input_data.iter().map(|&x| x * (1.0 / (1.0 + (-x).exp()))).collect();
-        let result_slice = result.as_slice();
+    // SiLU(x) = x * sigmoid(x)
+    let expected: Vec<f32> = input_data.iter().map(|&x| x * (1.0 / (1.0 + (-x).exp()))).collect();
+    let result_slice = result.as_slice();
 
-        for (i, (result_val, expected_val)) in result_slice.iter().zip(expected.iter()).enumerate() {
-            assert!(
-                (result_val - expected_val).abs() < 1e-5,
-                "Mismatch at index {}: got {}, expected {}",
-                i,
-                result_val,
-                expected_val
-            );
-        }
-        Ok(())
+    for (i, (result_val, expected_val)) in result_slice.iter().zip(expected.iter()).enumerate() {
+        assert!(
+            (result_val - expected_val).abs() < 1e-5,
+            "Mismatch at index {}: got {}, expected {}",
+            i,
+            result_val,
+            expected_val
+        );
     }
+    Ok(())
+}

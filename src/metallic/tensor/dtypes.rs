@@ -2,18 +2,13 @@ use std::fmt::{Debug, Display};
 
 use serde::{Deserialize, Serialize};
 
-use half::{bf16, f16};
+use half::f16;
 
 /// Supported data types for tensors
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Dtype {
     F32,
     F16,
-    BF16,
-    I32,
-    I64,
-    U32,
-    U8,
 }
 
 impl Dtype {
@@ -21,10 +16,10 @@ impl Dtype {
     pub fn size_bytes(&self) -> usize {
         match self {
             Dtype::F32 => 4,
-            Dtype::F16 | Dtype::BF16 => 2,
-            Dtype::I32 | Dtype::U32 => 4,
-            Dtype::I64 => 8,
-            Dtype::U8 => 1,
+            Dtype::F16 => 2, //Dtype::BF16 => 2,
+                             //Dtype::I32 | Dtype::U32 => 4,
+                             //Dtype::I64 => 8,
+                             //Dtype::U8 => 1,
         }
     }
 
@@ -33,11 +28,11 @@ impl Dtype {
         match self {
             Dtype::F32 => "float",
             Dtype::F16 => "half",
-            Dtype::BF16 => "bfloat",
-            Dtype::I32 => "int",
-            Dtype::I64 => "long",
-            Dtype::U32 => "uint",
-            Dtype::U8 => "uchar",
+            //Dtype::BF16 => "bfloat",
+            //Dtype::I32 => "int",
+            //Dtype::I64 => "long",
+            //Dtype::U32 => "uint",
+            //Dtype::U8 => "uchar",
         }
     }
 }
@@ -181,46 +176,5 @@ impl TensorElement for F16Element {
     #[inline]
     fn min(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
         if a < b { a } else { b }
-    }
-}
-
-/// Marker type for `bf16` tensors.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct BF16Element;
-
-impl TensorElement for BF16Element {
-    type Scalar = bf16;
-
-    const DTYPE: Dtype = Dtype::BF16;
-
-    #[inline]
-    fn from_f32(value: f32) -> Self::Scalar {
-        bf16::from_f32(value)
-    }
-
-    #[inline]
-    fn to_f32(value: Self::Scalar) -> f32 {
-        value.to_f32()
-    }
-
-    #[inline]
-    fn is_finite(value: Self::Scalar) -> bool {
-        value.is_finite()
-    }
-
-    #[inline]
-    fn abs(value: Self::Scalar) -> Self::Scalar {
-        use num_traits::float::FloatCore;
-        value.abs()
-    }
-
-    #[inline]
-    fn max(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
-        a.max(b)
-    }
-
-    #[inline]
-    fn min(a: Self::Scalar, b: Self::Scalar) -> Self::Scalar {
-        a.min(b)
     }
 }

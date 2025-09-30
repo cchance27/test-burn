@@ -1,13 +1,13 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use test_burn::metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
 use test_burn::metallic::resource_cache::ResourceCache;
-use test_burn::metallic::{Context, Tensor};
+use test_burn::metallic::{Context, F32Element, Tensor};
 
 const ITERATIONS: usize = 5;
 const ROWS: usize = 512;
 const COLUMNS: usize = 512;
 
-fn run_softmax(ctx: &mut Context, cache: Option<&mut ResourceCache>, allow_mps: bool) {
+fn run_softmax(ctx: &mut Context<F32Element>, cache: Option<&mut ResourceCache>, allow_mps: bool) {
     let attn = Tensor::random_uniform(vec![ROWS, COLUMNS], ctx).unwrap();
 
     match cache {

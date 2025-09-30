@@ -1,18 +1,15 @@
-use super::{Context, Tensor, error::MetalError, resource_cache::ResourceCache};
+use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
 
-use crate::metallic::{encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, TensorElement};
+use crate::metallic::{
+    TensorElement,
+    encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
+};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBlitCommandEncoder as _, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputeCommandEncoder as _, MTLComputePipelineState, MTLSize,
-};
+use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState, MTLSize};
 use std::{
     rc::Rc,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
@@ -21,9 +18,7 @@ pub trait Operation {
     fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError>;
 }
 
-
 //TODO: Aren't these operations supposed to be in kernels?
-
 
 /// An operation that fills a tensor with a constant value.
 pub struct FillConstant<T: TensorElement> {
@@ -81,13 +76,13 @@ impl<T: TensorElement> Operation for FillConstant<T> {
 }
 
 /// An operation that fills a tensor with sequential values (0..n).
-pub struct Arange<T: TensorElement>  {
+pub struct Arange<T: TensorElement> {
     pub dst: Tensor<T>,
     pub num_elements: usize,
     pub pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl<T: TensorElement>  Operation for Arange<T> {
+impl<T: TensorElement> Operation for Arange<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

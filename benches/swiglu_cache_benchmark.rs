@@ -6,22 +6,33 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use test_burn::metallic::kernels::swiglu::swiglu_with_optional_cache;
 use test_burn::metallic::resource_cache::ResourceCache;
-use test_burn::metallic::{Context, Tensor};
+use test_burn::metallic::{Context, F32Element, Tensor};
 
 const BATCH: usize = 4;
 const SEQ: usize = 128;
 const D_MODEL: usize = 1024;
 const FF_DIM: usize = 4096;
 
-fn prepare_inputs(ctx: &mut Context) -> (Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor) {
+#[allow(clippy::type_complexity)]
+fn prepare_inputs(
+    ctx: &mut Context<F32Element>,
+) -> (
+    Tensor<F32Element>,
+    Tensor<F32Element>,
+    Tensor<F32Element>,
+    Tensor<F32Element>,
+    Tensor<F32Element>,
+    Tensor<F32Element>,
+    Tensor<F32Element>,
+) {
     let m = BATCH * SEQ;
-    let x_normed_flat = Tensor::random_uniform(vec![m, D_MODEL], ctx).unwrap();
-    let ffn_gate = Tensor::random_uniform(vec![FF_DIM, D_MODEL], ctx).unwrap();
-    let ffn_gate_bias = Tensor::random_uniform(vec![FF_DIM], ctx).unwrap();
-    let ffn_up = Tensor::random_uniform(vec![FF_DIM, D_MODEL], ctx).unwrap();
-    let ffn_up_bias = Tensor::random_uniform(vec![FF_DIM], ctx).unwrap();
-    let ffn_down = Tensor::random_uniform(vec![D_MODEL, FF_DIM], ctx).unwrap();
-    let ffn_down_bias = Tensor::random_uniform(vec![D_MODEL], ctx).unwrap();
+    let x_normed_flat = Tensor::<F32Element>::random_uniform(vec![m, D_MODEL], ctx).unwrap();
+    let ffn_gate = Tensor::<F32Element>::random_uniform(vec![FF_DIM, D_MODEL], ctx).unwrap();
+    let ffn_gate_bias = Tensor::<F32Element>::random_uniform(vec![FF_DIM], ctx).unwrap();
+    let ffn_up = Tensor::<F32Element>::random_uniform(vec![FF_DIM, D_MODEL], ctx).unwrap();
+    let ffn_up_bias = Tensor::<F32Element>::random_uniform(vec![FF_DIM], ctx).unwrap();
+    let ffn_down = Tensor::<F32Element>::random_uniform(vec![D_MODEL, FF_DIM], ctx).unwrap();
+    let ffn_down_bias = Tensor::<F32Element>::random_uniform(vec![D_MODEL], ctx).unwrap();
 
     (x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias)
 }

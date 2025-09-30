@@ -1,4 +1,4 @@
-use super::{Bf16GemmConversion, *};
+use super::*;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -7,7 +7,7 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    Context, Dtype, MetalError, Operation, Tensor, TensorElement,
+    Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
 };
@@ -28,8 +28,6 @@ struct MatMulAlphaBeta {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
-    pub bf16_aux: Option<Bf16GemmConversion>,
-    pub needs_result_prelude: bool,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -96,77 +94,20 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let right_dtype = right_tensor.dtype;
         let result_dtype = result.dtype;
 
-        let requires_cpu = requires_cpu_matmul(&[left_dtype, right_dtype, result_dtype]);
+        let matmul_left_view = left_view;
+        let matmul_right_view = right_view;
+        let matmul_result_view = result_view;
 
-        if requires_cpu {
-            let mut output = result.clone();
-            let beta_data = if beta != 0.0 { Some(result.to_vec()) } else { None };
+        let matmul_left_buf = left_tensor.buf.clone();
+        let matmul_left_offset = left_tensor.offset;
+        let matmul_right_buf = right_tensor.buf.clone();
+        let matmul_right_offset = right_tensor.offset;
+        let matmul_result_buf = result.buf.clone();
+        let matmul_result_offset = result.offset;
 
-            cpu_matmul_fallback(
-                &left_tensor,
-                &left_view,
-                transpose_left,
-                &right_tensor,
-                &right_view,
-                transpose_right,
-                &mut output,
-                &result_view,
-                eff_left_rows,
-                eff_left_cols,
-                eff_right_cols,
-                alpha,
-                beta,
-                beta_data.as_deref(),
-            )?;
-
-            output.flush_host_writes()?;
-
-            return Ok((Box::new(NoopOperation), output));
-        }
-
-        let uses_bf16_fastpath = left_dtype == Dtype::BF16;
-
-        let mut matmul_left_view = left_view;
-        let mut matmul_right_view = right_view;
-        let mut matmul_result_view = result_view;
-
-        let mut matmul_left_buf = left_tensor.buf.clone();
-        let mut matmul_left_offset = left_tensor.offset;
-        let mut matmul_right_buf = right_tensor.buf.clone();
-        let mut matmul_right_offset = right_tensor.offset;
-        let mut matmul_result_buf = result.buf.clone();
-        let mut matmul_result_offset = result.offset;
-
-        let mut left_desc_dtype = left_dtype;
-        let mut right_desc_dtype = right_dtype;
-        let mut result_desc_dtype = result_dtype;
-
-        let mut bf16_aux_struct = None;
-
-        if uses_bf16_fastpath {
-            let conversion = Bf16GemmConversion::new(ctx, &left_tensor, left_view, &right_tensor, right_view, result, result_view)?;
-
-            let (temp_left_buf, temp_left_offset) = conversion.left_temp();
-            let (temp_right_buf, temp_right_offset) = conversion.right_temp();
-            let (temp_result_buf, temp_result_offset) = conversion.result_temp();
-
-            matmul_left_buf = temp_left_buf.clone();
-            matmul_left_offset = temp_left_offset;
-            matmul_right_buf = temp_right_buf.clone();
-            matmul_right_offset = temp_right_offset;
-            matmul_result_buf = temp_result_buf.clone();
-            matmul_result_offset = temp_result_offset;
-
-            matmul_left_view = conversion.left_view();
-            matmul_right_view = conversion.right_view();
-            matmul_result_view = conversion.result_view();
-
-            left_desc_dtype = Dtype::F32;
-            right_desc_dtype = Dtype::F32;
-            result_desc_dtype = Dtype::F32;
-
-            bf16_aux_struct = Some(conversion);
-        }
+        let left_desc_dtype = left_dtype;
+        let right_desc_dtype = right_dtype;
+        let result_desc_dtype = result_dtype;
 
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
@@ -227,8 +168,6 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             result_desc,
             gemm,
             batch_size: matmul_result_view.batch,
-            bf16_aux: bf16_aux_struct,
-            needs_result_prelude: uses_bf16_fastpath && beta != 0.0,
         };
 
         // Return the boxed operation and the result tensor (already provided)
@@ -244,13 +183,6 @@ impl Operation for MatMulAlphaBeta {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
-        if let Some(aux) = &self.bf16_aux {
-            aux.encode_inputs(command_buffer)?;
-            if self.needs_result_prelude {
-                aux.encode_result_from_bf16(command_buffer)?;
-            }
-        }
-
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -262,9 +194,6 @@ impl Operation for MatMulAlphaBeta {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
-        if let Some(aux) = &self.bf16_aux {
-            aux.encode_result_to_bf16(command_buffer)?;
-        }
         Ok(())
     }
 }

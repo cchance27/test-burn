@@ -4,17 +4,17 @@ use test_burn::metallic::kernels::scaled_dot_product_attention::{
     ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp,
     ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp,
 };
-use test_burn::metallic::{Context, Tensor};
+use test_burn::metallic::{Context, F32Element, Tensor};
 
 const ITERATIONS: usize = 1;
 
-fn run_variant_batched<O>(ctx: &mut Context, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
+fn run_variant_batched<O>(ctx: &mut Context<F32Element>, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
 where
-    O: for<'a> KernelInvocable<Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32)>,
+    O: for<'a> KernelInvocable<Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32)>,
 {
-    let q_tensor = Tensor::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
-    let k_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
-    let v_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
+    let q_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
+    let k_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
+    let v_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
 
     let mut last_output = None;
 
@@ -28,21 +28,21 @@ where
     }
 }
 
-fn run_variant_per_batch<O>(ctx: &mut Context, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
+fn run_variant_per_batch<O>(ctx: &mut Context<F32Element>, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
 where
-    O: for<'a> KernelInvocable<Args<'a> = (&'a Tensor, &'a Tensor, &'a Tensor, bool, u32)>,
+    O: for<'a> KernelInvocable<Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32)>,
 {
-    let q_tensor = Tensor::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
-    let k_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
-    let v_tensor = Tensor::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
+    let q_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
+    let k_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
+    let v_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
 
-    let q_batches: Vec<Tensor> = (0..batch)
+    let q_batches: Vec<Tensor<F32Element>> = (0..batch)
         .map(|i| q_tensor.get_batch(i).unwrap().reshape(vec![1, seq_q, dim]).unwrap())
         .collect();
-    let k_batches: Vec<Tensor> = (0..batch)
+    let k_batches: Vec<Tensor<F32Element>> = (0..batch)
         .map(|i| k_tensor.get_batch(i).unwrap().reshape(vec![1, seq_k, dim]).unwrap())
         .collect();
-    let v_batches: Vec<Tensor> = (0..batch)
+    let v_batches: Vec<Tensor<F32Element>> = (0..batch)
         .map(|i| v_tensor.get_batch(i).unwrap().reshape(vec![1, seq_k, dim]).unwrap())
         .collect();
 
@@ -62,7 +62,7 @@ where
 
 fn benchmark_sdpa_variants(c: &mut Criterion) {
     let mut group = c.benchmark_group("sdpa_variant_comparison");
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     let batch = 8;
     let seq_q = 512;

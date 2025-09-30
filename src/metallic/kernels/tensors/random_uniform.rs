@@ -110,7 +110,7 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
 #[cfg(test)]
 mod random_uniform_test {
     use crate::metallic::kernels::tensors::RandomUniformOp;
-    use crate::metallic::{Context, F32Element, MetalError, TensorInit, TensorStorage};
+    use crate::metallic::{Context, F32Element, MetalError};
 
     #[test]
     fn test_random_uniform() -> Result<(), MetalError> {

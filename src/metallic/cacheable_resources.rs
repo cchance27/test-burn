@@ -92,11 +92,6 @@ fn mps_data_type_for_dtype(dtype: Dtype) -> objc2_metal_performance_shaders::MPS
     match dtype {
         Dtype::F32 => MPSDataType::Float32,
         Dtype::F16 => MPSDataType::Float16,
-        Dtype::BF16 => MPSDataType::BFloat16,
-        Dtype::I32 => MPSDataType::Int32,
-        Dtype::I64 => MPSDataType::Int64,
-        Dtype::U32 => MPSDataType::UInt32,
-        Dtype::U8 => MPSDataType::UInt8,
     }
 }
 

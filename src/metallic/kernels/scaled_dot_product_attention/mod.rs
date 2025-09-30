@@ -3,14 +3,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 
 use super::{KernelFunction, KernelInvocable};
-use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
-use crate::metallic::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
-    cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey},
-    resource_cache::ResourceCache,
-};
-
-use std::mem::size_of;
+use crate::metallic::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache};
 
 #[cfg(test)]
 mod scaled_dot_product_attention_test;

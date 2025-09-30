@@ -3,8 +3,7 @@ using namespace metal;
 
 #define FOR_EACH_FLOAT_TYPE(OP) \
     OP(float, f32) \
-    OP(half, f16) \
-    OP(bfloat, bf16)
+    OP(half, f16)
 
 #define DEFINE_KV_REARRANGE_KERNEL(SCALAR, SUFFIX) \
 kernel void kv_rearrange_kernel_##SUFFIX( \

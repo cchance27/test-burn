@@ -1,13 +1,13 @@
 use super::error::MetalError;
 use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollectorHandle, MemoryEvent, MemoryUsage};
-use super::operation::{CommandBuffer, Operation};
+use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{kernels, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -16,31 +16,10 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLSize};
+use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLSize};
 use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
-
-#[derive(Clone, Debug)]
-pub struct ContextConfig {
-    tensor_dtype: Dtype,
-}
-
-impl ContextConfig {
-    pub fn new(dtype: Dtype) -> Self {
-        Self { tensor_dtype: dtype }
-    }
-
-    pub fn tensor_dtype(&self) -> Dtype {
-        self.tensor_dtype
-    }
-}
-
-impl Default for ContextConfig {
-    fn default() -> Self {
-        Self::new(Dtype::F32)
-    }
-}
 
 /// The main context for Metal operations.
 pub struct Context<T: TensorElement> {
@@ -69,8 +48,7 @@ pub struct Context<T: TensorElement> {
     memory_collector: Option<MemoryCollectorHandle>,
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
-
-    config: ContextConfig,
+    //config: ContextConfig,
 }
 
 #[derive(Clone)]
@@ -108,18 +86,6 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub fn new() -> Result<Self, MetalError> {
-        Self::with_config(ContextConfig::new(T::DTYPE))
-    }
-
-    pub fn with_config(config: ContextConfig) -> Result<Self, MetalError> {
-        let requested_dtype = config.tensor_dtype();
-        if requested_dtype != T::DTYPE {
-            return Err(MetalError::DtypeMismatch {
-                expected: T::DTYPE,
-                actual: requested_dtype,
-            });
-        }
-
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
@@ -141,7 +107,7 @@ impl<T: TensorElement> Context<T> {
             latency_collector: None,
             memory_collector: None,
             softmax_samples: Vec::new(),
-            config,
+            //config,
         })
     }
 

@@ -38,7 +38,10 @@ pub fn dequantize_q8(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, B
 mod tests;
 
 // Converting between GGUFTensors and Metallic Tensors
-impl<T> TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor<T> where T: TensorElement{
+impl<T> TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor<T>
+where
+    T: TensorElement,
+{
     type Error = Box<dyn std::error::Error>;
 
     fn try_from(value: (&GGUFFile, &GGUTensorInfo)) -> Result<Self, Self::Error> {
@@ -61,10 +64,10 @@ impl<T> TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor<T> where T: TensorElemen
                 // For F32 tensors, we can directly copy the data
                 let float_data: &[f32] =
                     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, data.len() / std::mem::size_of::<f32>()) };
-                
+
                 // Convert to the target tensor element type
                 let converted_data: Vec<T::Scalar> = float_data.iter().copied().map(T::from_f32).collect();
-                
+
                 Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&converted_data))
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
@@ -90,25 +93,7 @@ impl<T> TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor<T> where T: TensorElemen
                 }
                 // Convert to the target tensor element type
                 let converted_data: Vec<T::Scalar> = f32_data.iter().copied().map(T::from_f32).collect();
-                
-                Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&converted_data))
-                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
-            }
-            crate::gguf::GGUFDataType::BF16 => {
-                // BF16 (bfloat16) stored as little-endian u16 per element.
-                // To convert to f32, left-shift 16 bits into a u32 and reinterpret.
-                let elem_count = data.len() / 2;
-                let mut f32_data = Vec::with_capacity(elem_count);
-                for i in 0..elem_count {
-                    let lo = data[2 * i] as u32;
-                    let hi = data[2 * i + 1] as u32;
-                    let bits16 = lo | (hi << 8);
-                    let bits32 = bits16 << 16;
-                    f32_data.push(f32::from_bits(bits32));
-                }
-                // Convert to the target tensor element type
-                let converted_data: Vec<T::Scalar> = f32_data.iter().copied().map(T::from_f32).collect();
-                
+
                 Tensor::new(dims, TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&converted_data))
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)
             }
@@ -119,7 +104,7 @@ impl<T> TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor<T> where T: TensorElemen
 
                 // Convert F64 to F32
                 let f32_data: Vec<f32> = f64_data.iter().map(|&x| x as f32).collect();
-                
+
                 // Convert to the target tensor element type
                 let converted_data: Vec<T::Scalar> = f32_data.iter().copied().map(T::from_f32).collect();
 
@@ -137,7 +122,7 @@ impl<T> TryFrom<(&GGUFFile, &GGUTensorInfo)> for Tensor<T> where T: TensorElemen
 
                 #[cfg(not(target_arch = "aarch64"))]
                 let f32_data = dequantize_q8_to_f32(data, tensor_info.data_type)?;
-                
+
                 // Convert to the target tensor element type
                 let converted_data: Vec<T::Scalar> = f32_data.iter().copied().map(T::from_f32).collect();
 
