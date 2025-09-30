@@ -9,6 +9,7 @@ use crate::{
     gguf::GGUFValue,
     metallic::{Context, Dtype, F16Element, F32Element, TensorStorage},
 };
+use half::f16;
 use std::cell::{Ref, RefCell};
 use std::ops::Deref;
 
@@ -28,14 +29,58 @@ fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     Ok(f32_data)
 }
 
-fn tensor_from_slice<T: TensorElement>(
+fn tensor_from_f32_slice<T: TensorElement>(
     tensor_name: &str,
     dims: Vec<usize>,
-    data: &[T::Scalar],
+    data: &[f32],
     context: &Context<T>,
 ) -> Result<Tensor<T>, GGUFError> {
-    Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
-        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
+    if T::DTYPE == Dtype::F32 {
+        Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
+            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
+    } else {
+        let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+
+        {
+            let slice = tensor.as_mut_slice();
+            T::copy_from_f32_slice(data, slice);
+        }
+
+        tensor
+            .flush_host_writes()
+            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+        Ok(tensor)
+    }
+}
+
+fn tensor_from_f16_slice<T: TensorElement>(
+    tensor_name: &str,
+    dims: Vec<usize>,
+    data: &[f16],
+    context: &Context<T>,
+) -> Result<Tensor<T>, GGUFError> {
+    if T::DTYPE == Dtype::F16 {
+        Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
+            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
+    } else {
+        let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+
+        {
+            let slice = tensor.as_mut_slice();
+            for (dst, src) in slice.iter_mut().zip(data.iter().copied()) {
+                *dst = T::from_f32(src.to_f32());
+            }
+        }
+
+        tensor
+            .flush_host_writes()
+            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+        Ok(tensor)
+    }
 }
 
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
@@ -116,9 +161,7 @@ impl GGUFModelLoader {
                         actual: values.len(),
                     });
                 }
-                // Convert F32 values to target type T
-                let converted_values: Vec<T::Scalar> = values.iter().copied().map(T::from_f32).collect();
-                let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
+                let tensor = tensor_from_f32_slice::<T>(&tensor_info.name, dims.clone(), values, context)?;
                 Ok(GGUFTensor::from(tensor))
             }
             GGUFRawTensor::F16(values) => {
@@ -128,9 +171,7 @@ impl GGUFModelLoader {
                         actual: values.len(),
                     });
                 }
-                // Convert F16 values to target type T via f32
-                let converted_values: Vec<T::Scalar> = values.iter().copied().map(half::f16::to_f32).map(T::from_f32).collect();
-                let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
+                let tensor = tensor_from_f16_slice::<T>(&tensor_info.name, dims.clone(), values, context)?;
                 Ok(GGUFTensor::from(tensor))
             }
             GGUFRawTensor::Bytes(raw, data_type) => match data_type {
@@ -142,9 +183,7 @@ impl GGUFModelLoader {
                             actual: f32_data.len(),
                         });
                     }
-                    // Convert F32 values to target type T
-                    let converted_values: Vec<T::Scalar> = f32_data.iter().copied().map(T::from_f32).collect();
-                    let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
+                    let tensor = tensor_from_f32_slice::<T>(&tensor_info.name, dims.clone(), &f32_data, context)?;
                     Ok(GGUFTensor::from(tensor))
                 }
                 GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
@@ -162,8 +201,7 @@ impl GGUFModelLoader {
                         });
                     }
                     // Convert F32 values to target type T
-                    let converted_values: Vec<T::Scalar> = dequant.iter().copied().map(T::from_f32).collect();
-                    let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
+                    let tensor = tensor_from_f32_slice::<T>(&tensor_info.name, dims.clone(), &dequant, context)?;
                     Ok(GGUFTensor::from(tensor))
                 }
                 _ => Err(GGUFError::InvalidTensorData(format!(
