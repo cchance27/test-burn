@@ -1,9 +1,15 @@
 //! Q8 quantization support for GGUF format
-use crate::gguf::{GGUFDataType, GGUFError};
+use crate::gguf::GGUFDataType;
 use half::f16;
 
 /// Dequantize Q8_0/Q8_1 tensor data to F32
 pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    let mut f32_data = vec![0.0f32; required_output_len(data, data_type)?];
+    dequantize_q8_to_f32_into(data, data_type, &mut f32_data)?;
+    Ok(f32_data)
+}
+
+fn required_output_len(data: &[u8], data_type: GGUFDataType) -> Result<usize, Box<dyn std::error::Error>> {
     // Q8_0 format:
     // - Each block contains 32 weights
     // - Each block has:
@@ -17,7 +23,7 @@ pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<
     //   * 2 bytes: half-precision (f16) delta value
     //   * 32 bytes: 8-bit quantized weights
 
-    let (block_size, scale_offset, delta_offset, weight_offset) = match data_type {
+    let (block_size, ..) = match data_type {
         GGUFDataType::Q8_0 => (34, 0, None, 2),    // 2 (scale) + 32 (weights) = 34 bytes per block
         GGUFDataType::Q8_1 => (36, 0, Some(2), 4), // 2 (scale) + 2 (delta) + 32 (weights) = 36 bytes per block
         _ => return Err("Invalid data type for Q8 dequantization".into()),
@@ -25,13 +31,35 @@ pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<
 
     // Calculate number of blocks
     let num_blocks = data.len() / block_size;
+    Ok(num_blocks * 32)
+}
 
+/// Dequantize Q8_0/Q8_1 tensor data into a caller-provided buffer.
+pub fn dequantize_q8_to_f32_into(
+    data: &[u8],
+    data_type: GGUFDataType,
+    dst: &mut [f32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (block_size, scale_offset, delta_offset, weight_offset) = match data_type {
+        GGUFDataType::Q8_0 => (34, 0, None, 2),
+        GGUFDataType::Q8_1 => (36, 0, Some(2), 4),
+        _ => return Err("Invalid data type for Q8 dequantization".into()),
+    };
+
+    if data.len() % block_size != 0 {
+        return Err("Q8 tensor data is not an even multiple of the block size".into());
+    }
+
+    let num_blocks = data.len() / block_size;
     let weights_per_block = 32;
     let total_weights = num_blocks * weights_per_block;
-    let mut f32_data = Vec::with_capacity(total_weights);
-
-    // Pre-allocate space to avoid repeated allocations
-    f32_data.resize(total_weights, 0.0);
+    if dst.len() != total_weights {
+        return Err(format!(
+            "destination slice has length {}, expected {} elements",
+            dst.len(), total_weights
+        )
+        .into());
+    }
 
     // Process blocks in a more efficient way
     for block_idx in 0..num_blocks {
@@ -66,10 +94,10 @@ pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<
             let w2 = weight_data[i + 2] as i8;
             let w3 = weight_data[i + 3] as i8;
 
-            f32_data[output_offset + i] = (w0 as f32) * scale + delta;
-            f32_data[output_offset + i + 1] = (w1 as f32) * scale + delta;
-            f32_data[output_offset + i + 2] = (w2 as f32) * scale + delta;
-            f32_data[output_offset + i + 3] = (w3 as f32) * scale + delta;
+            dst[output_offset + i] = (w0 as f32) * scale + delta;
+            dst[output_offset + i + 1] = (w1 as f32) * scale + delta;
+            dst[output_offset + i + 2] = (w2 as f32) * scale + delta;
+            dst[output_offset + i + 3] = (w3 as f32) * scale + delta;
 
             i += 4;
         }
@@ -78,12 +106,11 @@ pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<
         while i < weights_per_block {
             let weight_i8 = weight_data[i] as i8;
             let f32_value = (weight_i8 as f32) * scale + delta;
-            f32_data[output_offset + i] = f32_value;
+            dst[output_offset + i] = f32_value;
             i += 1;
         }
     }
-
-    Ok(f32_data)
+    Ok(())
 }
 
 /// Temporary function to debug Q8 format

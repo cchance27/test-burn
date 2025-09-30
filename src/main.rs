@@ -45,13 +45,13 @@ fn main() -> Result<()> {
         } else {
             Vec::new()
         };
-        let mut gguf_model = loader.load_model(&ctx)?;
+        let gguf_model = loader.load_model()?;
 
         tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
         let mut qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
 
         tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-        let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+        let tokenizer = Tokenizer::from_gguf_metadata(gguf_model.metadata())?;
 
         tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
         let tokens = tokenizer.encode(&prompt)?;

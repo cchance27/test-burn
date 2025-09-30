@@ -9,21 +9,49 @@ use std::arch::aarch64::*;
 /// Dequantize Q8_0/Q8_1 tensor data to F32 using SIMD optimization
 #[cfg(target_arch = "aarch64")]
 pub fn dequantize_q8_to_f32_simd(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    let (block_size, scale_offset, delta_offset, weight_offset) = match data_type {
-        GGUFDataType::Q8_0 => (34, 0, None, 2),    // 2 (scale) + 32 (weights) = 34 bytes per block
-        GGUFDataType::Q8_1 => (36, 0, Some(2), 4), // 2 (scale) + 2 (delta) + 32 (weights) = 36 bytes per block
+    let weights_per_block = 32;
+    let block_size = match data_type {
+        GGUFDataType::Q8_0 => 34,
+        GGUFDataType::Q8_1 => 36,
         _ => return Err("Invalid data type for Q8 dequantization".into()),
     };
 
-    // Calculate number of blocks
+    if data.len() % block_size != 0 {
+        return Err("Q8 tensor data is not an even multiple of the block size".into());
+    }
+
     let num_blocks = data.len() / block_size;
+    let mut f32_data = vec![0.0f32; num_blocks * weights_per_block];
+    dequantize_q8_to_f32_simd_into(data, data_type, &mut f32_data)?;
+    Ok(f32_data)
+}
 
+#[cfg(target_arch = "aarch64")]
+pub fn dequantize_q8_to_f32_simd_into(
+    data: &[u8],
+    data_type: GGUFDataType,
+    dst: &mut [f32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (block_size, scale_offset, delta_offset, weight_offset) = match data_type {
+        GGUFDataType::Q8_0 => (34, 0, None, 2),
+        GGUFDataType::Q8_1 => (36, 0, Some(2), 4),
+        _ => return Err("Invalid data type for Q8 dequantization".into()),
+    };
+
+    if data.len() % block_size != 0 {
+        return Err("Q8 tensor data is not an even multiple of the block size".into());
+    }
+
+    let num_blocks = data.len() / block_size;
     let weights_per_block = 32;
-    let total_weights = num_blocks * weights_per_block;
-    let mut f32_data = Vec::with_capacity(total_weights);
-
-    // Pre-allocate space to avoid repeated allocations
-    f32_data.resize(total_weights, 0.0);
+    if dst.len() != num_blocks * weights_per_block {
+        return Err(format!(
+            "destination slice has length {}, expected {} elements",
+            dst.len(),
+            num_blocks * weights_per_block
+        )
+        .into());
+    }
 
     // Process blocks using NEON SIMD instructions
     for block_idx in 0..num_blocks {
@@ -82,10 +110,10 @@ pub fn dequantize_q8_to_f32_simd(data: &[u8], data_type: GGUFDataType) -> Result
                 let result_f32x4_high_1 = vmlaq_f32(delta_vec, weights_f32x4_high_1, scale_vec);
 
                 // Store results
-                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i), result_f32x4_low_0);
-                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i + 4), result_f32x4_low_1);
-                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i + 8), result_f32x4_high_0);
-                vst1q_f32(f32_data.as_mut_ptr().add(output_offset + i + 12), result_f32x4_high_1);
+                vst1q_f32(dst.as_mut_ptr().add(output_offset + i), result_f32x4_low_0);
+                vst1q_f32(dst.as_mut_ptr().add(output_offset + i + 4), result_f32x4_low_1);
+                vst1q_f32(dst.as_mut_ptr().add(output_offset + i + 8), result_f32x4_high_0);
+                vst1q_f32(dst.as_mut_ptr().add(output_offset + i + 12), result_f32x4_high_1);
             }
             i += 16;
         }
@@ -94,17 +122,25 @@ pub fn dequantize_q8_to_f32_simd(data: &[u8], data_type: GGUFDataType) -> Result
         while i < weights_per_block {
             let weight_i8 = weight_data[i] as i8;
             let f32_value = (weight_i8 as f32) * scale + delta;
-            f32_data[output_offset + i] = f32_value;
+            dst[output_offset + i] = f32_value;
             i += 1;
         }
     }
 
-    Ok(f32_data)
+    Ok(())
 }
 
-/// Fallback implementation for non-AArch64 architectures
 #[cfg(not(target_arch = "aarch64"))]
 pub fn dequantize_q8_to_f32_simd(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
-    // Fall back to the regular implementation
     super::q8::dequantize_q8_to_f32(data, data_type)
 }
+
+#[cfg(not(target_arch = "aarch64"))]
+pub fn dequantize_q8_to_f32_simd_into(
+    data: &[u8],
+    data_type: GGUFDataType,
+    dst: &mut [f32],
+) -> Result<(), Box<dyn std::error::Error>> {
+    super::q8::dequantize_q8_to_f32_into(data, data_type, dst)
+}
+

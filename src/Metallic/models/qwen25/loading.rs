@@ -45,14 +45,14 @@ impl LoadableModel for super::Qwen25 {
         // 1) Prefer explicit `vocab_size` or `model.vocab_size` metadata
         // 2) Otherwise, if GGUF provides `tokenizer.ggml.tokens` (an array), use its length
         // 3) Fallback to legacy default (32000)
-        let vocab_size = if let Some(GGUFValue::U32(v)) = gguf_model
-            .metadata
+        let metadata = gguf_model.metadata();
+        let vocab_size = if let Some(GGUFValue::U32(v)) = metadata
             .entries
             .get("vocab_size")
-            .or_else(|| gguf_model.metadata.entries.get("model.vocab_size"))
+            .or_else(|| metadata.entries.get("model.vocab_size"))
         {
             *v as usize
-        } else if let Some(GGUFValue::Array(arr)) = gguf_model.metadata.entries.get("tokenizer.ggml.tokens") {
+        } else if let Some(GGUFValue::Array(arr)) = metadata.entries.get("tokenizer.ggml.tokens") {
             // Use tokenizer token count when available to avoid token-id out-of-range errors.
             arr.len()
         } else {
@@ -77,28 +77,23 @@ impl LoadableModel for super::Qwen25 {
         // Helper: attempt to copy from gguf tensor into dst.
         // Fast-path when shapes match, and a linear fallback when only total element counts match.
         // We avoid transposing rectangular matrices since GGUF already has the correct layout for our matmuls.
-        fn try_copy(src: &crate::metallic::Tensor, dst: &mut crate::metallic::Tensor) -> Result<(), MetalError> {
-            // Basic size check
-            if src.len() != dst.len() {
-                return Err(MetalError::DimensionMismatch {
-                    expected: dst.len(),
-                    actual: src.len(),
-                });
+        fn try_copy(
+            gguf_model: &GGUFModel,
+            tensor_info: &crate::gguf::GGUTensorInfo,
+            dst: &mut crate::metallic::Tensor,
+        ) -> Result<(), MetalError> {
+            let expected = dst.len();
+            let actual = gguf_model.tensor_element_count(tensor_info);
+            if actual != expected {
+                return Err(MetalError::DimensionMismatch { expected, actual });
             }
 
-            // Exact-shape fast path
-            if src.dims == dst.dims {
-                let s = src.as_slice();
-                let d = dst.as_mut_slice();
-                d.copy_from_slice(s);
-                return Ok(());
-            }
-
-            // Fallback linear copy for other shapes
-            let s = src.as_slice();
-            let d = dst.as_mut_slice();
-            d.copy_from_slice(s);
-            Ok(())
+            gguf_model
+                .copy_tensor_to_f32(tensor_info, dst.as_mut_slice())
+                .map_err(|e| MetalError::InvalidOperation(format!(
+                    "failed to copy tensor '{}' into destination: {}",
+                    tensor_info.name, e
+                )))
         }
 
         // layer index extractor (searches for common patterns)
@@ -142,63 +137,53 @@ impl LoadableModel for super::Qwen25 {
 
         // Iterate gguf tensors and map into Qwen25 where names match heuristics.
         // This mapping is intentionally permissive to handle different exporter naming schemes.
-        for (name, tensor) in &gguf_model.tensors {
+        for tensor_info in gguf_model.tensor_infos() {
+            let name = &tensor_info.name;
             let lname = name.to_lowercase();
+            let len = gguf_model.tensor_element_count(tensor_info);
 
             // Embedding and weight tying for token embeddings
-            if ((lname.contains("token") && lname.contains("emb")) || lname.contains("tok_emb") || lname.contains("tokembedding"))
-                && tensor.len() == qwen.embed_weight.len()
+            if ((lname.contains("token") && lname.contains("emb"))
+                || lname.contains("tok_emb")
+                || lname.contains("tokembedding"))
+                && len == qwen.embed_weight.len()
             {
-                // For this model, the data is already laid out for [vocab, d_model] despite GGUF dims; linear copy
-                let src_slice = tensor.as_slice();
-                let dst_slice = qwen.embed_weight.as_mut_slice();
-                dst_slice.copy_from_slice(src_slice);
-                //println!("MAPPING DEBUG: Linear copy for token_embd to [vocab, d_model]");
-
+                try_copy(gguf_model, tensor_info, &mut qwen.embed_weight)?;
                 continue;
             }
 
             // Output / lm_head
-            if (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
-                && tensor.len() == qwen.output_weight.len()
+            if (lname.contains("lm_head")
+                || lname.contains("lmhead")
+                || (lname.contains("output") && lname.contains("weight")))
+                && len == qwen.output_weight.len()
             {
-                try_copy(tensor, &mut qwen.output_weight).expect("succesfull copy");
+                try_copy(gguf_model, tensor_info, &mut qwen.output_weight)?;
                 continue;
             }
 
             // Final norm (output_norm)
-            if lname.contains("output_norm")
+            if (lname.contains("output_norm")
                 || lname.contains("final_norm")
-                || lname == "norm.weight" && tensor.len() == qwen.final_norm_gamma.len()
+                || (lname == "norm.weight" && len == qwen.final_norm_gamma.len()))
             {
-                try_copy(tensor, &mut qwen.final_norm_gamma).expect("successful copy");
+                try_copy(gguf_model, tensor_info, &mut qwen.final_norm_gamma)?;
                 continue;
             }
 
             // Handle weight tying - if this is the token embedding and we haven't set output weights yet,
             // use it as the output weight
             if lname.contains("token_embd") && lname.contains("weight") {
-                // Check if output_weight is still all zeros (not set)
                 let output_slice = qwen.output_weight.as_slice();
                 let is_output_unset = output_slice.iter().all(|&x| x == 0.0);
 
                 if is_output_unset {
-                    // The GGUF token_embd.weight has shape [d_model, vocab_size] which matches our output_weight shape
-                    if tensor.len() == qwen.output_weight.len() {
-                        match try_copy(tensor, &mut qwen.output_weight) {
-                            Ok(()) => {
-                                //println!("MAPPING -> Applied weight tying: token_embd.weight -> output_weight");
-                            }
-                            Err(e) => {
-                                println!("MAPPING -> token_embd.weight copy to output_weight failed: {:?}", e);
-                            }
+                    if len == qwen.output_weight.len() {
+                        if let Err(e) = try_copy(gguf_model, tensor_info, &mut qwen.output_weight) {
+                            println!("MAPPING -> token_embd.weight copy to output_weight failed: {:?}", e);
                         }
                     } else {
-                        println!(
-                            "MAPPING -> token_embd.weight size mismatch: {} vs {}",
-                            tensor.len(),
-                            qwen.output_weight.len()
-                        );
+                        println!("MAPPING -> token_embd.weight size mismatch: {} vs {}", len, qwen.output_weight.len());
                     }
                 }
                 continue;
@@ -212,7 +197,6 @@ impl LoadableModel for super::Qwen25 {
                 let block = &mut qwen.blocks[layer_idx];
 
                 // Attention projections (many exporters use different names)
-                // Query
                 if (lname.contains("wq")
                     || lname.contains("attn.q")
                     || lname.contains("attn_q")
@@ -220,13 +204,12 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("query.weight")
                     || lname.contains("q.weight")
                     || lname.contains("attention.query.weight"))
-                    && tensor.len() == block.attn_q_weight.len()
+                    && len == block.attn_q_weight.len()
                 {
-                    try_copy(tensor, &mut block.attn_q_weight).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_q_weight)?;
                     continue;
                 }
 
-                // Key
                 if (lname.contains("wk")
                     || lname.contains("attn.k")
                     || lname.contains("attn_k")
@@ -234,13 +217,12 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("key.weight")
                     || lname.contains("k.weight")
                     || lname.contains("attention.key.weight"))
-                    && tensor.len() == block.attn_k_weight.len()
+                    && len == block.attn_k_weight.len()
                 {
-                    try_copy(tensor, &mut block.attn_k_weight).expect("successful copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_k_weight)?;
                     continue;
                 }
 
-                // Value
                 if (lname.contains("wv")
                     || lname.contains("attn.v")
                     || lname.contains("attn_v")
@@ -248,12 +230,12 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("value.weight")
                     || lname.contains("v.weight")
                     || lname.contains("attention.value.weight"))
-                    && tensor.len() == block.attn_v_weight.len()
+                    && len == block.attn_v_weight.len()
                 {
-                    try_copy(tensor, &mut block.attn_v_weight).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_v_weight)?;
                     continue;
                 }
-                // Attention output / projection (wo, outproj, o_proj)
+
                 if (lname.contains("wo")
                     || lname.contains("attn_out")
                     || lname.contains("attn.out")
@@ -261,92 +243,63 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("o.weight")
                     || lname.contains("out.weight")
                     || lname.contains("attention.output.weight"))
-                    && tensor.len() == block.attn_out_weight.len()
+                    && len == block.attn_out_weight.len()
                 {
-                    try_copy(tensor, &mut block.attn_out_weight).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_out_weight)?;
                     continue;
                 }
 
-                // Attention biases (optional)
-                if (lname.contains("attn.q.bias") || lname.contains("attn_q.bias") || lname.contains("attention.query.bias"))
-                    && tensor.len() == block.attn_q_bias.len()
+                if (lname.contains("attn.q.bias")
+                    || lname.contains("attn_q.bias")
+                    || lname.contains("attention.query.bias"))
+                    && len == block.attn_q_bias.len()
                 {
-                    try_copy(tensor, &mut block.attn_q_bias).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_q_bias)?;
                     continue;
                 }
 
-                if (lname.contains("attn.k.bias") || lname.contains("attn_k.bias") || lname.contains("attention.key.bias"))
-                    && tensor.len() == block.attn_k_bias.len()
+                if (lname.contains("attn.k.bias")
+                    || lname.contains("attn_k.bias")
+                    || lname.contains("attention.key.bias"))
+                    && len == block.attn_k_bias.len()
                 {
-                    try_copy(tensor, &mut block.attn_k_bias).expect("succesfull copy");
-                    continue;
-                }
-                if (lname.contains("attn.v.bias") || lname.contains("attn_v.bias") || lname.contains("attention.value.bias"))
-                    && tensor.len() == block.attn_v_bias.len()
-                {
-                    try_copy(tensor, &mut block.attn_v_bias).expect("succesfull copy");
-                    continue;
-                }
-                if (lname.contains("attn.v.bias") || lname.contains("attn_v.bias") || lname.contains("attention.value.bias"))
-                    && tensor.len() == block.attn_v_bias.len()
-                {
-                    try_copy(tensor, &mut block.attn_v_bias).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_k_bias)?;
                     continue;
                 }
 
-                // FFN down/gate/up (common aliases) - Updated for correct SwiGLU mapping
-                // gate_proj (for SiLU activation)
+                if (lname.contains("attn.v.bias")
+                    || lname.contains("attn_v.bias")
+                    || lname.contains("attention.value.bias"))
+                    && len == block.attn_v_bias.len()
+                {
+                    try_copy(gguf_model, tensor_info, &mut block.attn_v_bias)?;
+                    continue;
+                }
+
                 if (lname.contains("mlp.gate_proj.weight")
                     || lname.contains("ffn.gate")
                     || lname.contains("ffn_gate")
                     || lname.contains("gate.weight")
                     || lname.contains("wg.weight")
                     || lname.contains("w1.weight"))
-                    && tensor.len() == block.ffn_gate.len()
+                    && len == block.ffn_gate.len()
                 {
-                    if tensor.dims == block.ffn_gate.dims() {
-                        try_copy(tensor, &mut block.ffn_gate).expect("successful copy for ffn_gate (exact match)");
-                    } else if tensor.dims.len() == 2
-                        && block.ffn_gate.dims().len() == 2
-                        && tensor.dims[0] == block.ffn_gate.dims()[1]
-                        && tensor.dims[1] == block.ffn_gate.dims()[0]
-                    {
-                        // GGUF metadata reports dims swapped, but data is already laid out row-major in
-                        // [ff_dim, d_model]; copy directly without transposing to preserve values.
-                        let src = tensor.as_slice();
-                        let dst = block.ffn_gate.as_mut_slice();
-                        dst.copy_from_slice(src);
-                    } else {
-                        try_copy(tensor, &mut block.ffn_gate).expect("successful linear copy fallback for ffn_gate");
-                    }
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_gate)?;
                     continue;
                 }
 
-                // up_proj (for element-wise multiplication)
                 if (lname.contains("mlp.up_proj.weight")
                     || lname.contains("ffn.up")
                     || lname.contains("ffn_up")
                     || lname.contains("up.weight")
-                    || lname.contains("w3.weight"))
-                    && tensor.len() == block.ffn_up.len()
+                    || lname.contains("w3.weight")
+                    || lname.contains("fc1.weight"))
+                    && len == block.ffn_up.len()
                 {
-                    if tensor.dims == block.ffn_up.dims() {
-                        try_copy(tensor, &mut block.ffn_up).expect("successful copy for ffn_up (exact match)");
-                    } else if tensor.dims.len() == 2
-                        && block.ffn_up.dims().len() == 2
-                        && tensor.dims[0] == block.ffn_up.dims()[1]
-                        && tensor.dims[1] == block.ffn_up.dims()[0]
-                    {
-                        let src = tensor.as_slice();
-                        let dst = block.ffn_up.as_mut_slice();
-                        dst.copy_from_slice(src);
-                    } else {
-                        try_copy(tensor, &mut block.ffn_up).expect("successful linear copy fallback for ffn_up");
-                    }
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_up)?;
                     continue;
                 }
 
-                // down_proj (final projection)
                 if (lname.contains("mlp.down_proj.weight")
                     || lname.contains("ffn.down")
                     || lname.contains("ffn_down")
@@ -354,97 +307,68 @@ impl LoadableModel for super::Qwen25 {
                     || lname.contains("w2.weight")
                     || lname.contains("fc2.weight")
                     || lname.contains("wo.weight"))
-                    && tensor.len() == block.ffn_down.len()
+                    && len == block.ffn_down.len()
                 {
-                    if tensor.dims == block.ffn_down.dims() {
-                        try_copy(tensor, &mut block.ffn_down).expect("successful copy for ffn_down (exact match)");
-                    } else if tensor.dims.len() == 2
-                        && block.ffn_down.dims().len() == 2
-                        && tensor.dims[0] == block.ffn_down.dims()[1]
-                        && tensor.dims[1] == block.ffn_down.dims()[0]
-                    {
-                        let src = tensor.as_slice();
-                        let dst = block.ffn_down.as_mut_slice();
-                        dst.copy_from_slice(src);
-                        //println!("MAPPING DEBUG: FFN down loaded via direct copy with swapped dims metadata");
-                    } else {
-                        try_copy(tensor, &mut block.ffn_down).expect("successful linear copy fallback for ffn_down");
-                    }
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_down)?;
                     continue;
                 }
 
-                // FFN biases (gate/up/down) - map biases into block fields when present
-                if lname.contains("mlp.gate_proj.bias")
+                if (lname.contains("mlp.gate_proj.bias")
                     || lname.contains("ffn.gate.bias")
                     || lname.contains("ffn_gate.bias")
                     || lname.contains("gate.bias")
                     || lname.contains("w1.bias")
-                    || lname.contains("wg.bias")
+                    || lname.contains("wg.bias"))
+                    && len == block.ffn_gate_bias.len()
                 {
-                    if tensor.len() == block.ffn_gate_bias.len() {
-                        try_copy(tensor, &mut block.ffn_gate_bias).expect("successful copy of gate bias");
-                    }
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_gate_bias)?;
                     continue;
                 }
-                if lname.contains("mlp.up_proj.bias")
+
+                if (lname.contains("mlp.up_proj.bias")
                     || lname.contains("ffn.up.bias")
                     || lname.contains("ffn_up.bias")
                     || lname.contains("up.bias")
-                    || lname.contains("w3.bias")
+                    || lname.contains("w3.bias"))
+                    && len == block.ffn_up_bias.len()
                 {
-                    if tensor.len() == block.ffn_up_bias.len() {
-                        try_copy(tensor, &mut block.ffn_up_bias).expect("successful copy of up bias");
-                    }
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_up_bias)?;
                     continue;
                 }
-                if lname.contains("mlp.down_proj.bias")
+
+                if (lname.contains("mlp.down_proj.bias")
                     || lname.contains("ffn.down.bias")
                     || lname.contains("ffn_down.bias")
                     || lname.contains("down.bias")
                     || lname.contains("w2.bias")
                     || lname.contains("b2.bias")
                     || lname.contains("fc2.bias")
-                    || lname.contains("wo.bias")
+                    || lname.contains("wo.bias"))
+                    && len == block.ffn_down_bias.len()
                 {
-                    if tensor.len() == block.ffn_down_bias.len() {
-                        try_copy(tensor, &mut block.ffn_down_bias).expect("successful copy of down bias");
-                    }
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_down_bias)?;
                     continue;
                 }
 
-                // Norm gammas (RMSNorm)
                 if ((lname.contains("attn_norm") && lname.contains("gamma"))
                     || lname.contains("attn.g")
                     || lname.contains("attn_norm.weight")
                     || lname.contains("attention.layernorm.weight")
                     || lname.contains("ln_attn.weight"))
-                    && tensor.len() == block.attn_norm_gamma.len()
+                    && len == block.attn_norm_gamma.len()
                 {
-                    try_copy(tensor, &mut block.attn_norm_gamma).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.attn_norm_gamma)?;
                     continue;
                 }
 
-                // (old duplicate FFN bias handling removed)
-
-                // Norm gammas (RMSNorm)
-                if ((lname.contains("attn_norm") && lname.contains("gamma"))
-                    || lname.contains("attn.g")
-                    || lname.contains("attn_norm.weight")
-                    || lname.contains("attention.layernorm.weight")
-                    || lname.contains("ln_attn.weight"))
-                    && tensor.len() == block.attn_norm_gamma.len()
-                {
-                    try_copy(tensor, &mut block.attn_norm_gamma).expect("succesfull copy");
-                    continue;
-                }
                 if ((lname.contains("proj_norm") && lname.contains("gamma"))
                     || lname.contains("proj.g")
                     || lname.contains("ffn_norm.weight")
                     || lname.contains("ffn.layernorm.weight")
                     || lname.contains("ln_ffn.weight"))
-                    && tensor.len() == block.ffn_norm_gamma.len()
+                    && len == block.ffn_norm_gamma.len()
                 {
-                    try_copy(tensor, &mut block.ffn_norm_gamma).expect("succesfull copy");
+                    try_copy(gguf_model, tensor_info, &mut block.ffn_norm_gamma)?;
                     continue;
                 }
             }
