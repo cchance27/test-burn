@@ -1,6 +1,10 @@
 # Testing some Burn-rs
 
-I implemented a basic sdpa to try to match pytorch, but noticed benchmarks show that pytorch is a good bit faster, not sure why yet. 
+I implemented a basic sdpa to try to match pytorch, but noticed benchmarks show that pytorch is a good bit faster, not sure why yet.
+
+## Runtime error alerts
+
+Set the `TEST_BURN_ERROR_LOG` environment variable to enable timestamped error logging. When this variable is set to a file path (or to a truthy value such as `1` to use the default `test-burn-error.log`), runtime errors and warnings are appended to the log. All captured alerts also surface inside the TUI as modal dialogs that can be dismissed with <kbd>Enter</kbd>, <kbd>Esc</kbd>, or <kbd>Space</kbd>.
 
 ```bash
 cargo run --release

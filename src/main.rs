@@ -1,12 +1,24 @@
 use anyhow::Result;
+use chrono::SecondsFormat;
 use ratatui::{
     prelude::*,
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
-use std::{env, io::stdout, process, sync::mpsc, thread, time::Duration};
+use std::{
+    any::Any,
+    collections::VecDeque,
+    env,
+    io::stdout,
+    panic::{self, AssertUnwindSafe},
+    process,
+    sync::mpsc,
+    thread,
+    time::Duration,
+};
 
 use test_burn::{
-    app_event::{AppEvent, LatencyRow, MemoryRow},
+    alert,
+    app_event::{Alert, AlertLevel, AppEvent, LatencyRow, MemoryRow},
     gguf::{GGUFFile, model_loader::GGUFModelLoader},
     metallic::{
         Context, F16Element, Tokenizer,
@@ -18,6 +30,7 @@ fn main() -> Result<()> {
     // Minimal CLI:
     //   cargo run -- /path/to/model.gguf [PROMPT]
     let mut args = env::args().skip(1);
+    alert::init_error_logging();
     let gguf_path = match args.next() {
         Some(p) => p,
         None => {
@@ -31,45 +44,65 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel();
 
-    let generation_handle = thread::spawn(move || -> Result<()> {
-        tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
-        let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
+    let generation_handle = {
+        let worker_tx = tx.clone();
+        thread::spawn(move || -> Result<()> {
+            let worker = || -> Result<()> {
+                worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
+                let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
 
-        tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
-        let mut ctx = Context::<F16Element>::new()?;
+                worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
+                let mut ctx = Context::<F16Element>::new()?;
 
-        tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
-        let loader = GGUFModelLoader::new(gguf);
-        let mapped_bytes = loader.mapped_len();
-        let host_overheads = if mapped_bytes > 0 {
-            vec![("GGUF File MMAP".to_string(), mapped_bytes)]
-        } else {
-            Vec::new()
-        };
-        let gguf_model = loader.load_model()?;
+                worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
+                let loader = GGUFModelLoader::new(gguf);
+                let mapped_bytes = loader.mapped_len();
+                let host_overheads = if mapped_bytes > 0 {
+                    vec![("GGUF File MMAP".to_string(), mapped_bytes)]
+                } else {
+                    Vec::new()
+                };
+                let gguf_model = loader.load_model()?;
 
-        tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
-        let mut qwen = gguf_model.instantiate(&mut ctx)?;
+                worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
+                let mut qwen = gguf_model.instantiate(&mut ctx)?;
 
-        tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-        let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+                worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
+                let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
 
-        tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-        let tokens = tokenizer.encode(&prompt)?;
-        tx.send(AppEvent::TokenCount(tokens.len()))?;
+                worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
+                let tokens = tokenizer.encode(&prompt)?;
+                worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
 
-        let cfg = GenerationConfig {
-            max_tokens: 4096,
-            temperature: 0.7,
-            top_p: 0.95,
-            top_k: 40,
-        };
+                let cfg = GenerationConfig {
+                    max_tokens: 4096,
+                    temperature: 0.7,
+                    top_p: 0.95,
+                    top_k: 40,
+                };
 
-        tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-        let _ = generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &tx, &host_overheads);
-        tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
-        Ok(())
-    });
+                worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+                generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx, &host_overheads)?;
+                worker_tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
+                Ok(())
+            };
+
+            match panic::catch_unwind(AssertUnwindSafe(worker)) {
+                Ok(result) => {
+                    if let Err(err) = &result {
+                        let message = format!("Generation failed: {err:#}");
+                        alert::emit_error(&worker_tx, message);
+                    }
+                    result
+                }
+                Err(payload) => {
+                    let message = format!("Generation thread panicked: {}", panic_payload_message(payload));
+                    alert::emit_error(&worker_tx, message.clone());
+                    Err(anyhow::anyhow!(message))
+                }
+            }
+        })
+    };
 
     let mut terminal = setup_terminal()?;
     let mut app_state = AppState::new();
@@ -77,37 +110,52 @@ fn main() -> Result<()> {
     while !app_state.should_quit {
         if crossterm::event::poll(Duration::from_millis(50))? {
             match crossterm::event::read()? {
-                crossterm::event::Event::Key(key) => match key.code {
-                    crossterm::event::KeyCode::Char('q') => app_state.should_quit = true,
-                    crossterm::event::KeyCode::Char('m') => {
-                        app_state.metrics_view = MetricsView::Memory;
-                        app_state.reset_metrics_scroll();
-                    }
-                    crossterm::event::KeyCode::Char('l') => {
-                        app_state.metrics_view = MetricsView::Latency;
-                        app_state.reset_metrics_scroll();
-                    }
-                    crossterm::event::KeyCode::Char('c') => {
-                        app_state.toggle_collapse();
-                    }
-                    crossterm::event::KeyCode::Tab => {
-                        if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
-                            app_state.focus_prev();
-                        } else {
-                            app_state.focus_next();
+                crossterm::event::Event::Key(key) => {
+                    if app_state.has_active_alert() {
+                        match key.code {
+                            crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Esc | crossterm::event::KeyCode::Char(' ') => {
+                                app_state.dismiss_active_alert();
+                            }
+                            crossterm::event::KeyCode::Char('q') => {
+                                app_state.should_quit = true;
+                            }
+                            _ => {}
                         }
+                        continue;
                     }
-                    crossterm::event::KeyCode::BackTab => {
-                        app_state.focus_prev();
+
+                    match key.code {
+                        crossterm::event::KeyCode::Char('q') => app_state.should_quit = true,
+                        crossterm::event::KeyCode::Char('m') => {
+                            app_state.metrics_view = MetricsView::Memory;
+                            app_state.reset_metrics_scroll();
+                        }
+                        crossterm::event::KeyCode::Char('l') => {
+                            app_state.metrics_view = MetricsView::Latency;
+                            app_state.reset_metrics_scroll();
+                        }
+                        crossterm::event::KeyCode::Char('c') => {
+                            app_state.toggle_collapse();
+                        }
+                        crossterm::event::KeyCode::Tab => {
+                            if key.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+                                app_state.focus_prev();
+                            } else {
+                                app_state.focus_next();
+                            }
+                        }
+                        crossterm::event::KeyCode::BackTab => {
+                            app_state.focus_prev();
+                        }
+                        crossterm::event::KeyCode::Up => app_state.scroll_active(-1),
+                        crossterm::event::KeyCode::Down => app_state.scroll_active(1),
+                        crossterm::event::KeyCode::PageUp => app_state.scroll_active(-10),
+                        crossterm::event::KeyCode::PageDown => app_state.scroll_active(10),
+                        crossterm::event::KeyCode::Home => app_state.scroll_active_to_start(),
+                        crossterm::event::KeyCode::End => app_state.scroll_active_to_end(),
+                        _ => {}
                     }
-                    crossterm::event::KeyCode::Up => app_state.scroll_active(-1),
-                    crossterm::event::KeyCode::Down => app_state.scroll_active(1),
-                    crossterm::event::KeyCode::PageUp => app_state.scroll_active(-10),
-                    crossterm::event::KeyCode::PageDown => app_state.scroll_active(10),
-                    crossterm::event::KeyCode::Home => app_state.scroll_active_to_start(),
-                    crossterm::event::KeyCode::End => app_state.scroll_active_to_end(),
-                    _ => {}
-                },
+                }
                 crossterm::event::Event::Mouse(mouse) => {
                     if let crossterm::event::MouseEventKind::Down(_) = mouse.kind {
                         app_state.handle_click(mouse.column, mouse.row);
@@ -145,6 +193,9 @@ fn main() -> Result<()> {
                 AppEvent::LatencyUpdate(rows) => {
                     app_state.latency_rows = rows;
                 }
+                AppEvent::Alert(alert) => {
+                    app_state.push_alert(alert);
+                }
             }
         }
 
@@ -174,6 +225,8 @@ struct AppState {
     request_follow_text: bool,
     text_area: Rect,
     metrics_area: Rect,
+    alert_queue: VecDeque<Alert>,
+    active_alert: Option<Alert>,
 }
 
 impl AppState {
@@ -196,7 +249,37 @@ impl AppState {
             request_follow_text: false,
             text_area: Rect::new(0, 0, 0, 0),
             metrics_area: Rect::new(0, 0, 0, 0),
+            alert_queue: VecDeque::new(),
+            active_alert: None,
         }
+    }
+
+    fn push_alert(&mut self, alert: Alert) {
+        if self.active_alert.is_some() {
+            self.alert_queue.push_back(alert);
+        } else {
+            self.active_alert = Some(alert);
+        }
+    }
+
+    fn active_alert(&self) -> Option<&Alert> {
+        self.active_alert.as_ref()
+    }
+
+    fn has_active_alert(&self) -> bool {
+        self.active_alert.is_some()
+    }
+
+    fn dismiss_active_alert(&mut self) {
+        if let Some(next) = self.alert_queue.pop_front() {
+            self.active_alert = Some(next);
+        } else {
+            self.active_alert = None;
+        }
+    }
+
+    fn pending_alert_count(&self) -> usize {
+        self.alert_queue.len()
     }
 }
 
@@ -459,6 +542,10 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
     state.text_area = body_layout[0];
     state.metrics_area = sidebar_sections[1];
 
+    if let Some(alert) = state.active_alert() {
+        render_alert_modal(frame, alert, state.pending_alert_count());
+    }
+
     if state.request_follow_text {
         if state.text_area.height > 0 {
             let content_lines = state.generated_text.matches('\n').count() + 1;
@@ -522,4 +609,74 @@ fn border_style(active: bool) -> Style {
 
 fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
     x >= rect.x && x < rect.x.saturating_add(rect.width) && y >= rect.y && y < rect.y.saturating_add(rect.height)
+}
+
+fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&'static str>() {
+        (*message).to_string()
+    } else {
+        "unknown panic".to_string()
+    }
+}
+
+fn render_alert_modal(frame: &mut Frame, alert: &Alert, pending: usize) {
+    let area = centered_rect(60, 40, frame.area());
+    frame.render_widget(Clear, area);
+
+    let timestamp = alert.timestamp.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let mut message = format!("{}\n\nTime: {}", alert.message, timestamp);
+    if pending > 0 {
+        message.push_str(&format!("\n\n{} more alert(s) pending", pending));
+    }
+    message.push_str("\n\nPress Enter, Space, or Esc to dismiss.");
+
+    let block = Block::default()
+        .title(format!("{}", alert.level.as_str()))
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(alert_color(&alert.level)));
+
+    let paragraph = Paragraph::new(message)
+        .block(block)
+        .wrap(Wrap { trim: false })
+        .alignment(Alignment::Left)
+        .style(Style::default().fg(Color::White).bg(Color::Black));
+
+    frame.render_widget(paragraph, area);
+}
+
+fn alert_color(level: &AlertLevel) -> Color {
+    match level {
+        AlertLevel::Info => Color::LightBlue,
+        AlertLevel::Warning => Color::Yellow,
+        AlertLevel::Error => Color::Red,
+    }
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let remaining_y = 100u16.saturating_sub(percent_y);
+    let top_margin = remaining_y / 2;
+    let bottom_margin = remaining_y.saturating_sub(top_margin);
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage(top_margin),
+            Constraint::Percentage(percent_y.min(100)),
+            Constraint::Percentage(bottom_margin),
+        ])
+        .split(area);
+
+    let remaining_x = 100u16.saturating_sub(percent_x);
+    let left_margin = remaining_x / 2;
+    let right_margin = remaining_x.saturating_sub(left_margin);
+
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage(left_margin),
+            Constraint::Percentage(percent_x.min(100)),
+            Constraint::Percentage(right_margin),
+        ])
+        .split(vertical[1])[1]
 }

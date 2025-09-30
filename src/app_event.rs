@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::Duration;
@@ -28,6 +29,52 @@ pub struct MemoryRow {
     pub show_absolute: bool,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub enum AlertLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+impl AlertLevel {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warning => "WARN",
+            Self::Error => "ERROR",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct Alert {
+    pub level: AlertLevel,
+    pub message: String,
+    pub timestamp: DateTime<Utc>,
+}
+
+impl Alert {
+    pub fn new(level: AlertLevel, message: impl Into<String>) -> Self {
+        Self {
+            level,
+            message: message.into(),
+            timestamp: Utc::now(),
+        }
+    }
+
+    pub fn info(message: impl Into<String>) -> Self {
+        Self::new(AlertLevel::Info, message)
+    }
+
+    pub fn warning(message: impl Into<String>) -> Self {
+        Self::new(AlertLevel::Warning, message)
+    }
+
+    pub fn error(message: impl Into<String>) -> Self {
+        Self::new(AlertLevel::Error, message)
+    }
+}
+
 pub enum AppEvent {
     Token {
         text: Arc<str>,
@@ -39,4 +86,5 @@ pub enum AppEvent {
     StatusUpdate(String),
     MemoryUpdate(Vec<MemoryRow>),
     LatencyUpdate(Vec<LatencyRow>),
+    Alert(Alert),
 }
