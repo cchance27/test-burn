@@ -162,9 +162,54 @@ fn tensor_from_q8_bytes<T: TensorElement>(
     Ok(tensor)
 }
 
-fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
-    if name == "token_embd.weight" && dims.len() == 2 && dims[0] == 896 && dims[1] == 151936 {
-        dims.swap(0, 1);
+fn metadata_usize(metadata: &GGUFMetadata, keys: &[&str]) -> Option<usize> {
+    for key in keys {
+        if let Some(value) = metadata.entries.get(*key) {
+            match value {
+                GGUFValue::U32(v) => return Some(*v as usize),
+                GGUFValue::U64(v) => return Some(*v as usize),
+                GGUFValue::I32(v) if *v >= 0 => return Some(*v as usize),
+                GGUFValue::I64(v) if *v >= 0 => return Some(*v as usize),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn metadata_vocab_size(metadata: &GGUFMetadata) -> Option<usize> {
+    if let Some(v) = metadata_usize(metadata, &["vocab_size", "model.vocab_size"]) {
+        return Some(v);
+    }
+
+    if let Some(GGUFValue::Array(values)) = metadata.entries.get("tokenizer.ggml.tokens") {
+        return Some(values.len());
+    }
+
+    None
+}
+
+fn adjust_embedding_dims(_name: &str, dims: &mut [usize], metadata: &GGUFMetadata) {
+    if dims.len() != 2 {
+        return;
+    }
+
+    let d_model = metadata_usize(
+        metadata,
+        &[
+            "qwen2.embedding_length",
+            "qwen2.d_model",
+            "model.d_model",
+            "llama.embedding_length",
+            "llama.d_model",
+        ],
+    );
+    let vocab = metadata_vocab_size(metadata);
+
+    if let (Some(d_model), Some(vocab)) = (d_model, vocab) {
+        if dims[0] == d_model && dims[1] == vocab {
+            dims.swap(0, 1);
+        }
     }
 }
 
@@ -193,7 +238,7 @@ impl GGUFModelLoader {
 
         for tensor_info in &self.gguf_file.tensor_metadata {
             let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-            adjust_embedding_dims(&tensor_info.name, &mut dims);
+            adjust_embedding_dims(&tensor_info.name, &mut dims, &self.gguf_file.metadata);
             let expected_elements: usize = dims.iter().product();
 
             tensors.insert(
