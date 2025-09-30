@@ -3,20 +3,20 @@ use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollect
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
-use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
-use kernels::{KernelFunction, KernelInvocable, KernelManager};
+use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLSize};
+use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
@@ -241,7 +241,7 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let m = x_dims[0];
+        let _m = x_dims[0];
         let in_features = x_dims[1];
         if in_features != d_model {
             return Err(MetalError::InvalidShape(format!(
@@ -274,57 +274,16 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let linear = self.matmul(x_flat, fused_weight, false, false)?;
-        let bias = fused_bias.clone();
-        self.prepare_tensors_for_active_cmd(&[&linear, &bias])?;
+        let mut linear = self.matmul(x_flat, fused_weight, false, false)?;
+        linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, fused_bias.clone()))?;
 
-        let q_out = Tensor::new(vec![m, d_model], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
-        let k_out = Tensor::new(vec![m, kv_dim], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
-        let v_out = Tensor::new(vec![m, kv_dim], TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+        let q_range_end = d_model;
+        let k_range_end = d_model + kv_dim;
+        let v_range_end = expected_total;
 
-        self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out])?;
-
-        self.ensure_active_cmd_buffer()?;
-        let pipeline = self
-            .kernel_manager
-            .get_pipeline(KernelFunction::FusedQkvBiasSplit, T::DTYPE, &self.device)?;
-
-        let cmd_buf = self.active_command_buffer_mut()?;
-        let encoder = cmd_buf
-            .raw()
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        set_compute_pipeline_state(&encoder, &pipeline);
-        set_buffer(&encoder, 0, &linear.buf, linear.offset);
-        set_buffer(&encoder, 1, &bias.buf, bias.offset);
-        set_buffer(&encoder, 2, &q_out.buf, q_out.offset);
-        set_buffer(&encoder, 3, &k_out.buf, k_out.offset);
-        set_buffer(&encoder, 4, &v_out.buf, v_out.offset);
-
-        let rows = m as u32;
-        let q_cols = d_model as u32;
-        let kv_cols = kv_dim as u32;
-        let total_cols = q_cols + 2 * kv_cols;
-        let total_elements = rows * total_cols;
-
-        set_bytes(&encoder, 5, &rows);
-        set_bytes(&encoder, 6, &q_cols);
-        set_bytes(&encoder, 7, &kv_cols);
-
-        let threads_per_tg = MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        };
-        let groups = MTLSize {
-            width: (total_elements + 255) as usize / 256,
-            height: 1,
-            depth: 1,
-        };
-
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
+        let q_out = linear.slice_last_dim(0..q_range_end)?;
+        let k_out = linear.slice_last_dim(d_model..k_range_end)?;
+        let v_out = linear.slice_last_dim(k_range_end..v_range_end)?;
 
         self.mark_tensor_pending(&q_out);
         self.mark_tensor_pending(&k_out);
