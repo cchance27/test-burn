@@ -348,7 +348,7 @@ fn execute_swiglu_logic<T: TensorElement>(
 }
 
 fn materialize_contiguous_if_needed<T: TensorElement>(ctx: &mut Context<T>, view: Tensor<T>) -> Result<Tensor<T>, MetalError> {
-    if view.strides == Tensor::compute_strides(view.dims()) {
+    if view.strides == Tensor::<T>::compute_strides(view.dims()) {
         return Ok(view);
     }
 
