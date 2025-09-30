@@ -44,9 +44,7 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     let mut fallback_val = f32::NEG_INFINITY;
     for (i, &raw) in logits.iter().enumerate() {
         let val = T::to_f32(raw);
-        if val.is_finite()
-            && (!fallback_found || val > fallback_val || (val == fallback_val && i > fallback_idx))
-        {
+        if val.is_finite() && (!fallback_found || val > fallback_val || (val == fallback_val && i > fallback_idx)) {
             fallback_idx = i;
             fallback_val = val;
             fallback_found = true;

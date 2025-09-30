@@ -7,10 +7,10 @@ use crate::metallic::tensor::TensorInit;
 use crate::metallic::{Tensor, TensorElement};
 use crate::{
     gguf::GGUFValue,
-    metallic::{Context, Dtype, F16Element, F32Element, TensorStorage},
+    metallic::{Context, TensorStorage},
 };
-use std::cell::{Ref, RefCell};
-use std::ops::Deref;
+use half::f16;
+use std::sync::Arc;
 
 fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     if !raw.len().is_multiple_of(8) {
@@ -28,14 +28,138 @@ fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     Ok(f32_data)
 }
 
-fn tensor_from_slice<T: TensorElement>(
+fn tensor_from_f32_slice<T: TensorElement>(
     tensor_name: &str,
     dims: Vec<usize>,
-    data: &[T::Scalar],
+    data: &[f32],
     context: &Context<T>,
 ) -> Result<Tensor<T>, GGUFError> {
-    Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
-        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
+    let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+
+    {
+        let slice = tensor.as_mut_slice();
+        T::copy_from_f32_slice(data, slice);
+    }
+
+    tensor
+        .flush_host_writes()
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+    Ok(tensor)
+}
+
+fn tensor_from_f16_slice<T: TensorElement>(
+    tensor_name: &str,
+    dims: Vec<usize>,
+    data: &[f16],
+    context: &Context<T>,
+) -> Result<Tensor<T>, GGUFError> {
+    let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+
+    {
+        let slice = tensor.as_mut_slice();
+        for (dst, src) in slice.iter_mut().zip(data.iter().copied()) {
+            *dst = T::from_f32(src.to_f32());
+        }
+    }
+
+    tensor
+        .flush_host_writes()
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+    Ok(tensor)
+}
+
+fn tensor_from_q8_bytes<T: TensorElement>(
+    tensor_name: &str,
+    dims: Vec<usize>,
+    expected_elements: usize,
+    raw: &[u8],
+    data_type: GGUFDataType,
+    context: &Context<T>,
+) -> Result<Tensor<T>, GGUFError> {
+    let (block_size, delta_offset, weight_offset) = match data_type {
+        GGUFDataType::Q8_0 => (34usize, None, 2usize),
+        GGUFDataType::Q8_1 => (36usize, Some(2usize), 4usize),
+        other => {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Unsupported Q8 tensor data type: {:?}",
+                other
+            )));
+        }
+    };
+
+    if raw.len() % block_size != 0 {
+        return Err(GGUFError::InvalidTensorData(format!(
+            "Tensor '{}' data length {} is not a multiple of block size {}",
+            tensor_name,
+            raw.len(),
+            block_size
+        )));
+    }
+
+    let weights_per_block = 32usize;
+    let num_blocks = raw.len() / block_size;
+    let total_weights = num_blocks * weights_per_block;
+    if total_weights < expected_elements {
+        return Err(GGUFError::InvalidTensorData(format!(
+            "Tensor '{}' expects {} elements but Q8 blocks only contain {}",
+            tensor_name, expected_elements, total_weights
+        )));
+    }
+
+    let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+
+    {
+        let slice = tensor.as_mut_slice();
+        let mut write_index = 0usize;
+
+        for block_idx in 0..num_blocks {
+            let block_start = block_idx * block_size;
+            let block = &raw[block_start..block_start + block_size];
+
+            let scale_bits = u16::from_le_bytes([block[0], block[1]]);
+            let scale = f16::from_bits(scale_bits).to_f32();
+
+            let delta = if let Some(offset) = delta_offset {
+                let delta_bits = u16::from_le_bytes([block[offset], block[offset + 1]]);
+                f16::from_bits(delta_bits).to_f32()
+            } else {
+                0.0f32
+            };
+
+            let weights = &block[weight_offset..weight_offset + weights_per_block];
+            for &quantized in weights {
+                if write_index >= expected_elements {
+                    break;
+                }
+
+                let value = (quantized as i8) as f32 * scale + delta;
+                slice[write_index] = T::from_f32(value);
+                write_index += 1;
+            }
+
+            if write_index >= expected_elements {
+                break;
+            }
+        }
+
+        if write_index != expected_elements {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor '{}' expected {} elements but only wrote {} from Q8 data",
+                tensor_name, expected_elements, write_index
+            )));
+        }
+    }
+
+    tensor
+        .flush_host_writes()
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+    Ok(tensor)
 }
 
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
@@ -46,13 +170,15 @@ fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
 
 /// A model loader that can construct a Metallic model from GGUF tensors
 pub struct GGUFModelLoader {
-    pub(crate) gguf_file: GGUFFile,
+    pub(crate) gguf_file: Arc<GGUFFile>,
 }
 
 impl GGUFModelLoader {
     /// Create a new model loader from a GGUF file
     pub fn new(gguf_file: GGUFFile) -> Self {
-        Self { gguf_file }
+        Self {
+            gguf_file: Arc::new(gguf_file),
+        }
     }
 
     /// Return the size of the memory-mapped GGUF file in bytes so callers can
@@ -62,109 +188,90 @@ impl GGUFModelLoader {
     }
 
     /// Load a model from the GGUF file
-    pub fn load_model<T>(&self, context: &Context<T>) -> Result<GGUFModel, GGUFError>
-    where
-        T: TensorElement,
-        GGUFTensor: From<Tensor<T>>,
-    {
+    pub fn load_model(&self) -> Result<GGUFModel, GGUFError> {
         let mut tensors: FxHashMap<String, GGUFTensor> = FxHashMap::default();
 
         for tensor_info in &self.gguf_file.tensor_metadata {
-            match self.load_tensor(context, tensor_info) {
-                Ok(tensor) => {
-                    tensors.insert(tensor_info.name.clone(), tensor);
-                }
-                Err(err) => {
-                    println!(
-                        "Warning: Failed to load tensor '{}': {:?} (type={:?})",
-                        tensor_info.name, err, tensor_info.data_type
-                    );
+            let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
+            adjust_embedding_dims(&tensor_info.name, &mut dims);
+            let expected_elements: usize = dims.iter().product();
 
-                    // For fallback, we'll convert the raw data to the appropriate tensor type
-                    // and put it into the right GGUFTensor variant based on the original data type
-                    if let Ok(_tensor_as_slice) = self.gguf_file.get_tensor_data(tensor_info) {
-                        // For now, skip this fallback to avoid the error
-                        // The full implementation would involve creating a tensor of type T
-                        // and then converting it to the appropriate GGUFTensor variant
-                        unimplemented!("We don't support fallback tensor loading")
-                    }
-                }
-            }
+            tensors.insert(
+                tensor_info.name.clone(),
+                GGUFTensor {
+                    info: tensor_info.clone(),
+                    dims,
+                    expected_elements,
+                },
+            );
         }
 
         Ok(GGUFModel {
+            gguf_file: Arc::clone(&self.gguf_file),
             tensors,
             metadata: self.gguf_file.metadata.clone(),
         })
     }
+}
 
-    fn load_tensor<T>(&self, context: &Context<T>, tensor_info: &GGUTensorInfo) -> Result<GGUFTensor, GGUFError>
-    where
-        T: TensorElement,
-        GGUFTensor: From<Tensor<T>>,
-    {
-        let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
-        adjust_embedding_dims(&tensor_info.name, &mut dims);
-        let expected_elements: usize = dims.iter().product();
+/// Metadata describing a tensor stored in the GGUF file. Data is materialized on-demand.
+pub struct GGUFTensor {
+    info: GGUTensorInfo,
+    dims: Vec<usize>,
+    expected_elements: usize,
+}
 
-        let view = tensor_info.into(&self.gguf_file)?;
+impl GGUFTensor {
+    pub fn data_type(&self) -> GGUFDataType {
+        self.info.data_type
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.expected_elements == 0
+    }
+
+    pub fn len(&self) -> usize {
+        self.expected_elements
+    }
+
+    pub fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+
+    pub fn materialize<T: TensorElement>(&self, file: &GGUFFile, context: &Context<T>) -> Result<Tensor<T>, GGUFError> {
+        let view = self.info.view(file)?;
         match view {
             GGUFRawTensor::F32(values) => {
-                if values.len() != expected_elements {
+                if values.len() != self.expected_elements {
                     return Err(GGUFError::DimensionMismatch {
-                        expected: expected_elements,
+                        expected: self.expected_elements,
                         actual: values.len(),
                     });
                 }
-                // Convert F32 values to target type T
-                let converted_values: Vec<T::Scalar> = values.iter().copied().map(T::from_f32).collect();
-                let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
-                Ok(GGUFTensor::from(tensor))
+                tensor_from_f32_slice::<T>(&self.info.name, self.dims.clone(), values, context)
             }
             GGUFRawTensor::F16(values) => {
-                if values.len() != expected_elements {
+                if values.len() != self.expected_elements {
                     return Err(GGUFError::DimensionMismatch {
-                        expected: expected_elements,
+                        expected: self.expected_elements,
                         actual: values.len(),
                     });
                 }
-                // Convert F16 values to target type T via f32
-                let converted_values: Vec<T::Scalar> = values.iter().copied().map(half::f16::to_f32).map(T::from_f32).collect();
-                let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
-                Ok(GGUFTensor::from(tensor))
+                tensor_from_f16_slice::<T>(&self.info.name, self.dims.clone(), values, context)
             }
             GGUFRawTensor::Bytes(raw, data_type) => match data_type {
                 GGUFDataType::F64 => {
                     let f32_data = convert_f64_bytes(raw)?;
-                    if f32_data.len() != expected_elements {
+                    if f32_data.len() != self.expected_elements {
                         return Err(GGUFError::DimensionMismatch {
-                            expected: expected_elements,
+                            expected: self.expected_elements,
                             actual: f32_data.len(),
                         });
                     }
-                    // Convert F32 values to target type T
-                    let converted_values: Vec<T::Scalar> = f32_data.iter().copied().map(T::from_f32).collect();
-                    let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
-                    Ok(GGUFTensor::from(tensor))
+                    tensor_from_f32_slice::<T>(&self.info.name, self.dims.clone(), &f32_data, context)
                 }
                 GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
-                    #[cfg(target_arch = "aarch64")]
-                    let dequant = crate::gguf::quant::dequantize_q8_to_f32_simd(raw, data_type)
-                        .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
-                    #[cfg(not(target_arch = "aarch64"))]
-                    let dequant = crate::gguf::quant::dequantize_q8_to_f32(raw, data_type)
-                        .map_err(|err| GGUFError::DequantizationError(err.to_string()))?;
-
-                    if dequant.len() != expected_elements {
-                        return Err(GGUFError::DimensionMismatch {
-                            expected: expected_elements,
-                            actual: dequant.len(),
-                        });
-                    }
-                    // Convert F32 values to target type T
-                    let converted_values: Vec<T::Scalar> = dequant.iter().copied().map(T::from_f32).collect();
-                    let tensor = tensor_from_slice::<T>(&tensor_info.name, dims.clone(), &converted_values, context)?;
-                    Ok(GGUFTensor::from(tensor))
+                    tensor_from_q8_bytes::<T>(&self.info.name, self.dims.clone(), self.expected_elements, raw, data_type, context)
                 }
                 _ => Err(GGUFError::InvalidTensorData(format!(
                     "Unsupported tensor data type: {:?}",
@@ -175,79 +282,9 @@ impl GGUFModelLoader {
     }
 }
 
-/// Heterogeneous tensor container for GGUF weights.
-pub enum GGUFTensor {
-    F32(Tensor<F32Element>),
-    F16 {
-        tensor: Tensor<F16Element>,
-        cached_f32: RefCell<Option<Tensor<F32Element>>>,
-    },
-}
-
-impl From<Tensor<F32Element>> for GGUFTensor {
-    fn from(tensor: Tensor<F32Element>) -> Self {
-        Self::F32(tensor)
-    }
-}
-
-impl From<Tensor<F16Element>> for GGUFTensor {
-    fn from(tensor: Tensor<F16Element>) -> Self {
-        Self::F16 {
-            tensor,
-            cached_f32: RefCell::new(None),
-        }
-    }
-}
-
-/// Guard type that yields an `&Tensor<F32Element>` whether the backing storage is native f32 or lazily materialized.
-pub enum F32TensorGuard<'a> {
-    Borrowed(&'a Tensor<F32Element>),
-    Cached(Ref<'a, Tensor<F32Element>>),
-}
-
-impl<'a> Deref for F32TensorGuard<'a> {
-    type Target = Tensor<F32Element>;
-
-    fn deref(&self) -> &Self::Target {
-        match self {
-            F32TensorGuard::Borrowed(tensor) => tensor,
-            F32TensorGuard::Cached(tensor) => tensor,
-        }
-    }
-}
-
-impl GGUFTensor {
-    pub fn dtype(&self) -> Dtype {
-        match self {
-            GGUFTensor::F32(_) => Dtype::F32,
-            GGUFTensor::F16 { .. } => Dtype::F16,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        match self {
-            GGUFTensor::F32(tensor) => tensor.is_empty(),
-            GGUFTensor::F16 { tensor, .. } => tensor.is_empty(),
-        }
-    }
-
-    pub fn len(&self) -> usize {
-        match self {
-            GGUFTensor::F32(tensor) => tensor.len(),
-            GGUFTensor::F16 { tensor, .. } => tensor.len(),
-        }
-    }
-
-    pub fn dims(&self) -> &[usize] {
-        match self {
-            GGUFTensor::F32(tensor) => tensor.dims(),
-            GGUFTensor::F16 { tensor, .. } => tensor.dims(),
-        }
-    }
-}
-
 /// A model loaded from a GGUF file
 pub struct GGUFModel {
+    pub(crate) gguf_file: Arc<GGUFFile>,
     pub tensors: FxHashMap<String, GGUFTensor>,
     pub metadata: GGUFMetadata,
 }
@@ -272,6 +309,16 @@ impl GGUFModel {
     /// Get a tensor by name
     pub fn get_tensor(&self, name: &str) -> Option<&GGUFTensor> {
         self.tensors.get(name)
+    }
+
+    /// Materialize a tensor into the provided Metal context.
+    pub fn materialize_tensor<T: TensorElement>(&self, name: &str, context: &Context<T>) -> Result<Tensor<T>, GGUFError> {
+        let descriptor = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| GGUFError::InvalidTensorData(format!("Tensor '{}' not found in GGUF metadata", name)))?;
+
+        descriptor.materialize(self.gguf_file.as_ref(), context)
     }
 
     /// Get model metadata
@@ -299,7 +346,7 @@ impl GGUFModel {
 
     /// Instantiate a concrete Metallic model that implements `LoadableModel`.
     /// This allows callers to do:
-    ///   let gguf_model = GGUFModelLoader::new(...).load_model(...)?
+    ///   let gguf_model = GGUFModelLoader::new(...).load_model()?;
     ///   let qwen: Qwen25 = gguf_model.instantiate(&mut ctx)?;
     pub fn instantiate<L: crate::metallic::models::LoadableModel<T>, T: TensorElement>(
         &self,
