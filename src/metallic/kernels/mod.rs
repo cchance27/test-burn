@@ -52,6 +52,7 @@ pub enum KernelLibrary {
     RMSNorm,
     Silu,
     Softmax,
+    Swiglu,
     Tensors,
 }
 
@@ -73,6 +74,7 @@ impl KernelLibrary {
             KernelLibrary::RMSNorm => include_str!("rmsnorm/kernel.metal"),
             KernelLibrary::Silu => include_str!("silu/kernel.metal"),
             KernelLibrary::Softmax => include_str!("softmax/kernel.metal"),
+            KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
         }
     }
@@ -100,6 +102,7 @@ pub enum KernelFunction {
     RMSNorm,
     Silu,
     FusedSoftmax,
+    SwigluFusedActivation,
     Arange,
     Ones,
     RandomUniform,
@@ -125,6 +128,7 @@ impl KernelFunction {
             KernelFunction::RMSNorm => KernelLibrary::RMSNorm,
             KernelFunction::Silu => KernelLibrary::Silu,
             KernelFunction::FusedSoftmax => KernelLibrary::Softmax,
+            KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
         }
     }
@@ -169,6 +173,8 @@ impl KernelFunction {
             (KernelFunction::RMSNorm, F16) => "rmsnorm_kernel_f16",
             (KernelFunction::Silu, F32) => "silu_kernel_f32",
             (KernelFunction::Silu, F16) => "silu_kernel_f16",
+            (KernelFunction::SwigluFusedActivation, F32) => "swiglu_fused_activation_f32",
+            (KernelFunction::SwigluFusedActivation, F16) => "swiglu_fused_activation_f16",
             (KernelFunction::FusedSoftmax, F32) => "sdpa_fused_softmax_f32",
             (KernelFunction::FusedSoftmax, F16) => "sdpa_fused_softmax_f16",
             (KernelFunction::Arange, F32) => "arange_kernel_f32",

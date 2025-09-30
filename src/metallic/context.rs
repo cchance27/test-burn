@@ -1020,6 +1020,7 @@ impl<T: TensorElement> Context<T> {
     /// * `ffn_gate` - Gate projection weight [ff_dim, d_model] (row-major; transpose if source stored as [d_model, ff_dim])
     /// * `ffn_up` - Up projection weight [ff_dim, d_model] (row-major; transpose if source stored as [d_model, ff_dim])
     /// * `ffn_down` - Down projection weight [d_model, ff_dim] (row-major; transpose if source stored as [ff_dim, d_model])
+    /// * `fused_gate_up_weight` - Optional fused gate/up weight storing both projections in a single matrix
     /// * `ctx` - Metal context for operations
     ///
     /// # Returns
@@ -1035,9 +1036,19 @@ impl<T: TensorElement> Context<T> {
         ffn_up_bias: &Tensor<T>,
         ffn_down: &Tensor<T>,
         ffn_down_bias: &Tensor<T>,
+        fused_gate_up_weight: Option<&Tensor<T>>,
     ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system to call the SwiGLU operation
-        self.call::<SwiGLUOp>((x_normed_flat, ffn_gate, ffn_gate_bias, ffn_up, ffn_up_bias, ffn_down, ffn_down_bias))
+        self.call::<SwiGLUOp>((
+            x_normed_flat,
+            ffn_gate,
+            ffn_gate_bias,
+            ffn_up,
+            ffn_up_bias,
+            ffn_down,
+            ffn_down_bias,
+            fused_gate_up_weight,
+        ))
     }
 
     fn ensure_active_cmd_buffer(&mut self) -> Result<(), MetalError> {

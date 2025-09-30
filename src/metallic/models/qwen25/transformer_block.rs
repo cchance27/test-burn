@@ -9,6 +9,7 @@ pub struct TransformerBlock<T: TensorElement> {
 
     // Feedforward
     pub ffn_down: Tensor<T>,
+    pub ffn_gate_up_weight: Tensor<T>,
     pub ffn_gate: Tensor<T>,
     pub ffn_up: Tensor<T>,
     // Biases for the FFN projections
@@ -42,8 +43,9 @@ where
         // - gate/up: [d_model, ff_dim]
         // - down:    [ff_dim, d_model]
         let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
-        let ffn_gate = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
-        let ffn_up = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
+        let ffn_gate_up_weight = Tensor::zeros(vec![2 * cfg.ff_dim, cfg.d_model], ctx, false)?;
+        let ffn_gate = ffn_gate_up_weight.slice(&[0..cfg.ff_dim])?;
+        let ffn_up = ffn_gate_up_weight.slice(&[cfg.ff_dim..2 * cfg.ff_dim])?;
 
         // FFN biases
         let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx, false)?;
@@ -60,6 +62,7 @@ where
             attn_qkv_bias,
             attn_out_weight,
             ffn_down,
+            ffn_gate_up_weight,
             ffn_gate,
             ffn_up,
             ffn_gate_bias,

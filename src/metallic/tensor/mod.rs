@@ -802,6 +802,35 @@ impl<T: TensorElement> Tensor<T> {
         Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), new_offset))
     }
 
+    /// Create a view into a contiguous range along the last dimension of the tensor.
+    pub fn slice_last_dim(&self, range: std::ops::Range<usize>) -> Result<Self, MetalError> {
+        if self.dims.is_empty() {
+            return Err(MetalError::InvalidShape(
+                "Cannot slice last dimension of a scalar tensor".to_string(),
+            ));
+        }
+
+        let last_dim_index = self.dims.len() - 1;
+        let last_dim = self.dims[last_dim_index];
+
+        if range.start > range.end || range.end > last_dim {
+            return Err(MetalError::InvalidShape(format!(
+                "Invalid slice range {:?} for last dimension with size {}",
+                range, last_dim
+            )));
+        }
+
+        let mut new_dims = self.dims.clone();
+        new_dims[last_dim_index] = range.end - range.start;
+
+        let new_strides = self.strides.clone();
+        let elem_size = self.dtype.size_bytes();
+        let stride = self.strides[last_dim_index];
+        let offset_adjust = range.start * stride * elem_size;
+
+        Ok(self.build_view(new_dims, new_strides, self.offset + offset_adjust))
+    }
+
     /// Convert the tensor contents to a `Vec<f32>` using the element conversion rules.
     pub fn to_f32_vec(&self) -> Vec<f32> {
         T::to_f32_vec(self.as_slice())

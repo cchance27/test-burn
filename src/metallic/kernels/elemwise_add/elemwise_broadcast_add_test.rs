@@ -1,4 +1,4 @@
-use crate::metallic::kernels::elemwise_add::elemwise_broadcast_add::BroadcastElemwiseAddOp;
+use crate::metallic::kernels::elemwise_add::elemwise_broadcast_add::{BroadcastElemwiseAddInplaceOp, BroadcastElemwiseAddOp};
 use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 fn cpu_broadcast_add(a: &[f32], b: &[f32]) -> Vec<f32> {
@@ -23,6 +23,27 @@ fn test_broadcast_add_1d_bias() -> Result<(), MetalError> {
     let metal_output = result_tensor.as_slice();
 
     assert_eq!(metal_output, &cpu_result[..]);
+
+    Ok(())
+}
+
+#[test]
+fn test_broadcast_add_inplace_matches_out_of_place() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+
+    let a_data = vec![1.0, 2.0, 3.0, 4.0];
+    let b_data = vec![0.5, 1.5];
+
+    let a_out_of_place = Tensor::new(vec![2, 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let a_inplace = Tensor::new(vec![2, 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+
+    let expected = context.call::<BroadcastElemwiseAddOp>((a_out_of_place, b_tensor.clone()))?;
+    let inplace = context.call::<BroadcastElemwiseAddInplaceOp>((a_inplace, b_tensor))?;
+
+    context.synchronize();
+
+    assert_eq!(expected.as_slice(), inplace.as_slice());
 
     Ok(())
 }
