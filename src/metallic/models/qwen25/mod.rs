@@ -95,8 +95,8 @@ impl<T: TensorElement> Qwen25<T> {
         let m = batch * seq;
         let flat_hidden = hidden.reshape(vec![m, d_model])?;
 
-        // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
-        let logits_flat = ctx.matmul(&flat_hidden, &self.output_weight, false, true)?;
+        // Apply output projection: [batch*seq, d_model] x [d_model, vocab_size] -> [batch*seq, vocab_size]
+        let logits_flat = ctx.matmul(&flat_hidden, &self.output_weight, false, false)?;
 
         // Synchronize to ensure matmul is complete before reading values
 
@@ -140,7 +140,7 @@ impl<T: TensorElement> Qwen25<T> {
     pub fn new(config: Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         // allocate embed and output weights
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
-        let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
+        let output_weight = Tensor::zeros(vec![config.d_model, config.vocab_size], ctx, false)?;
         let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx, false)?;
 
         let mut blocks = Vec::with_capacity(config.n_layers);
@@ -294,12 +294,7 @@ impl<T: TensorElement> Qwen25<T> {
                 .reshape(vec![batch, seq, d_model])?;
 
             let attn_out = ctx
-                .matmul(
-                    &attn_out_reshaped.reshape(vec![m, d_model])?,
-                    &block.attn_out_weight,
-                    false,
-                    true, // Transpose the output weight for correct dimensions
-                )?
+                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, false)?
                 .reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
@@ -469,7 +464,7 @@ impl<T: TensorElement> Qwen25<T> {
             let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
 
             let attn_out = ctx
-                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
+                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, false)?
                 .reshape(vec![batch, seq, d_model])?;
 
             // Residual Add

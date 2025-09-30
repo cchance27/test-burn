@@ -42,10 +42,10 @@ where
         // Allocate FFN weights in the layout expected by `swiglu`:
         // - gate/up: [d_model, ff_dim]
         // - down:    [ff_dim, d_model]
-        let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
-        let ffn_gate_up_weight = Tensor::zeros(vec![2 * cfg.ff_dim, cfg.d_model], ctx, false)?;
-        let ffn_gate = ffn_gate_up_weight.slice(&[0..cfg.ff_dim])?;
-        let ffn_up = ffn_gate_up_weight.slice(&[cfg.ff_dim..2 * cfg.ff_dim])?;
+        let ffn_down = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
+        let ffn_gate_up_weight = Tensor::zeros(vec![cfg.d_model, 2 * cfg.ff_dim], ctx, false)?;
+        let ffn_gate = ffn_gate_up_weight.slice_last_dim(0..cfg.ff_dim)?;
+        let ffn_up = ffn_gate_up_weight.slice_last_dim(cfg.ff_dim..2 * cfg.ff_dim)?;
 
         // FFN biases
         let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx, false)?;

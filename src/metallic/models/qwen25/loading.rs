@@ -18,18 +18,6 @@ fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f
     }
 }
 
-fn copy_f32_into_tensor<TDst: TensorElement>(src: &[f32], dst: &mut Tensor<TDst>) -> Result<(), MetalError> {
-    if src.len() != dst.len() {
-        return Err(MetalError::DimensionMismatch {
-            expected: dst.len(),
-            actual: src.len(),
-        });
-    }
-
-    TDst::copy_from_f32_slice(src, dst.as_mut_slice());
-    Ok(())
-}
-
 fn copy_tensor_data_into_slice<TSrc: TensorElement, TDst: TensorElement>(
     src: &Tensor<TSrc>,
     dst_slice: &mut [TDst::Scalar],
@@ -87,6 +75,77 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
 
     let dst_slice = dst.as_mut_slice();
     copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
+}
+
+fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    let src_dims = src.dims();
+    let dst_dims = dst.dims();
+
+    if src_dims.len() != 2 || dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Transposed copy expects 2D tensors, got {:?} -> {:?}",
+            src_dims, dst_dims
+        )));
+    }
+
+    let src_rows = src_dims[0];
+    let src_cols = src_dims[1];
+    let dst_rows = dst_dims[0];
+    let dst_cols = dst_dims[1];
+
+    if src_rows != dst_cols || src_cols != dst_rows {
+        return Err(MetalError::InvalidShape(format!(
+            "Cannot transpose {:?} into {:?}",
+            src_dims, dst_dims
+        )));
+    }
+
+    let src_values = tensor_data_as_f32(src);
+    let src_slice = src_values.as_ref();
+    let dst_slice = dst.as_mut_slice();
+
+    for dst_row in 0..dst_rows {
+        for dst_col in 0..dst_cols {
+            let src_row = dst_col;
+            let src_col = dst_row;
+            let src_index = src_row * src_cols + src_col;
+            let dst_index = dst_row * dst_cols + dst_col;
+            dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_matrix_transpose_if_needed<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    let src_dims = src.dims();
+    let dst_dims = dst.dims();
+
+    if src_dims.len() != 2 || dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Linear weight copy expects 2D tensors, got {:?} -> {:?}",
+            src_dims, dst_dims
+        )));
+    }
+
+    if src_dims == dst_dims {
+        return copy_tensor_into(src, dst);
+    }
+
+    if src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0] {
+        return copy_tensor_transposed_into(src, dst);
+    }
+
+    Err(MetalError::InvalidShape(format!(
+        "Unexpected dims for linear weight copy: {:?} -> {:?}",
+        src_dims, dst_dims
+    )))
 }
 
 fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
@@ -154,26 +213,7 @@ fn copy_fused_gate_up_weight<TSrc: TensorElement, TDst: TensorElement>(
     src: &Tensor<TSrc>,
     dst: &mut Tensor<TDst>,
 ) -> Result<(), MetalError> {
-    if src.len() != dst.len() {
-        return Err(MetalError::DimensionMismatch {
-            expected: dst.len(),
-            actual: src.len(),
-        });
-    }
-
-    let src_dims = src.dims().to_vec();
-    let dst_dims = dst.dims().to_vec();
-
-    if src_dims == dst_dims {
-        return copy_tensor_into(src, dst);
-    }
-
-    if src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0] {
-        let src_slice = tensor_data_as_f32(src);
-        return pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), &src_dims, dst.as_mut_slice(), &dst_dims, 0);
-    }
-
-    copy_tensor_into(src, dst)
+    copy_matrix_transpose_if_needed(src, dst)
 }
 
 fn copy_bias_into_fused<TSrc: TensorElement, TDst: TensorElement>(
@@ -243,7 +283,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
     if (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
         && tensor.len() == qwen.output_weight.len()
     {
-        copy_tensor_into(tensor, &mut qwen.output_weight)?;
+        copy_matrix_transpose_if_needed(tensor, &mut qwen.output_weight)?;
         return Ok(());
     }
 
@@ -262,7 +302,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         let is_output_unset = output_slice.iter().all(|&x| T::to_f32(x) == 0.0);
 
         if is_output_unset && tensor.len() == qwen.output_weight.len() {
-            copy_tensor_into(tensor, &mut qwen.output_weight)?;
+            copy_matrix_transpose_if_needed(tensor, &mut qwen.output_weight)?;
         } else if is_output_unset {
             return Err(MetalError::InvalidOperation(format!(
                 "MAPPING -> token_embd.weight size mismatch: {} vs {}",
@@ -334,7 +374,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.output.weight"))
             && tensor.len() == block.attn_out_weight.len()
         {
-            copy_tensor_into(tensor, &mut block.attn_out_weight)?;
+            copy_matrix_transpose_if_needed(tensor, &mut block.attn_out_weight)?;
             return Ok(());
         }
 
@@ -379,18 +419,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("w1.weight"))
             && tensor.len() == block.ffn_gate.len()
         {
-            if tensor.dims() == block.ffn_gate.dims() {
-                copy_tensor_into(tensor, &mut block.ffn_gate)?;
-            } else if tensor.dims().len() == 2
-                && block.ffn_gate.dims().len() == 2
-                && tensor.dims()[0] == block.ffn_gate.dims()[1]
-                && tensor.dims()[1] == block.ffn_gate.dims()[0]
-            {
-                let src = tensor_data_as_f32(tensor);
-                copy_f32_into_tensor(src.as_ref(), &mut block.ffn_gate)?;
-            } else {
-                copy_tensor_into(tensor, &mut block.ffn_gate)?;
-            }
+            copy_matrix_transpose_if_needed(tensor, &mut block.ffn_gate)?;
             return Ok(());
         }
 
@@ -401,18 +430,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("w3.weight"))
             && tensor.len() == block.ffn_up.len()
         {
-            if tensor.dims() == block.ffn_up.dims() {
-                copy_tensor_into(tensor, &mut block.ffn_up)?;
-            } else if tensor.dims().len() == 2
-                && block.ffn_up.dims().len() == 2
-                && tensor.dims()[0] == block.ffn_up.dims()[1]
-                && tensor.dims()[1] == block.ffn_up.dims()[0]
-            {
-                let src = tensor_data_as_f32(tensor);
-                copy_f32_into_tensor(src.as_ref(), &mut block.ffn_up)?;
-            } else {
-                copy_tensor_into(tensor, &mut block.ffn_up)?;
-            }
+            copy_matrix_transpose_if_needed(tensor, &mut block.ffn_up)?;
             return Ok(());
         }
 
@@ -425,18 +443,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("wo.weight"))
             && tensor.len() == block.ffn_down.len()
         {
-            if tensor.dims() == block.ffn_down.dims() {
-                copy_tensor_into(tensor, &mut block.ffn_down)?;
-            } else if tensor.dims().len() == 2
-                && block.ffn_down.dims().len() == 2
-                && tensor.dims()[0] == block.ffn_down.dims()[1]
-                && tensor.dims()[1] == block.ffn_down.dims()[0]
-            {
-                let src = tensor_data_as_f32(tensor);
-                copy_f32_into_tensor(src.as_ref(), &mut block.ffn_down)?;
-            } else {
-                copy_tensor_into(tensor, &mut block.ffn_down)?;
-            }
+            copy_matrix_transpose_if_needed(tensor, &mut block.ffn_down)?;
             return Ok(());
         }
 
