@@ -3,17 +3,9 @@
 This checklist captures potential optimizations and hardening opportunities discovered during the review. Items are grouped by expected effort/complexity, but many can be pursued in parallel.
 
 ## ✅ Quick wins
-- [x] Record the dtype and element size in `MemoryPool::alloc_tensor` instead of assuming `f32`; this prevents over-allocation and unlocks pooled storage for `bf16`/`fp16` tensors. (Implemented via `PooledAllocation` metadata on the dedicated KV pool.)
-- [x] Expose pooled tensor allocation for KV cache setup to avoid the extra `clone()` handles that retain buffers longer than necessary. (KV initialization now requests typed pooled buffers directly.)
-- [x] Remove unnecessary `clone()` calls when dispatching operations (e.g., `Context::matmul*`); prefer borrowed tensor handles or lightweight views to cut reference counting churn. (Dispatch helpers now route borrowed tensor arguments through `KernelInvocable::Args`, only cloning when command recording requires ownership, and the kernel tests exercise the borrowed contract.)
-- [x] Replace repeated manual F16→F32 conversion paths with a single helper and skip debug prints to reduce temporary allocations during GGUF loading. 【F:src/gguf/model_loader.rs†L27-L136】
-- [x] Audit `ResourceCache::get_or_create_resource`’s dummy-device `transmute` and replace with an explicit optional device handle to avoid UB and simplify lifetime tracking. 【F:src/metallic/resource_cache.rs†L34-L73】 (Resource cache now accepts explicit device handles via `with_device` constructor and properly handles optional device parameters in `Cacheable::from_key`, eliminating the unsafe dummy-device transmute.)
 - [ ] Add debug assertions (enabled in non-release builds) that ensure borrowed tensor arguments outlive the command buffer submission boundaries now that dispatch helpers avoid cloning. 【F:src/metallic/context.rs†L60-L161】
-- [x] Plumb explicit synchronization for tensors returned from pooled allocations (e.g., mark when blit zeroing completes) so downstream code can skip redundant `clone()` handles. (KV cache entries track a zeroing-complete flag consumed by fast paths.)
 
 ## ⚙️ Medium-effort improvements
-- [x] Switch pooled and ad-hoc tensors from `StorageModeShared` to `StorageModePrivate` with blit-based staging buffers to cut host RAM footprint and improve bandwidth. 【F:src/metallic/pool.rs†L98-L107】【F:src/metallic/tensor.rs†L78-L131】
-- [x] Introduce a dedicated host staging allocator (possibly using `MTLHeap` or `MTLBuffer` recycling) to avoid allocating new shared buffers for every GGUF tensor. 【F:src/gguf/model_loader.rs†L20-L135】
 - [ ] Add lazy, demand-paged GGUF tensor loading (memory-mapped files plus per-layer uploads) instead of materializing the full model as `Vec<f32>` in RAM. 【F:src/gguf/model_loader.rs†L35-L135】
 - [ ] Expand `Tensor` to carry dtype metadata through kernels and loaders so models can stay in native precision (e.g., keep weights in `bf16/fp16` until a kernel demands `fp32`). 【F:src/metallic/tensor.rs†L19-L140】
 - [ ] Introduce fused compute passes (e.g., matmul + bias + activation) where the intermediate results can stay in threadgroup memory, reducing buffer churn and GPU↔CPU sync. 【F:src/metallic/kernels】【F:src/metallic/context.rs†L60-L169】
