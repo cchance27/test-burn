@@ -1,8 +1,8 @@
 use super::{Context, MetalError, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
-    BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
-    build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
+    BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat, ScalarStat,
+    SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::{TensorElement, Tokenizer};
@@ -163,6 +163,8 @@ pub fn generate_streaming<T: TensorElement>(
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
     host_overheads: &[(String, usize)],
+    host_memory: &mut ScalarStat,
+    process_memory_tracker: &mut Option<ProcessMemoryTracker>,
 ) -> Result<(), MetalError> {
     // Build full prompt string following Qwen2.5 chat template
     let full_prompt = format!(
@@ -208,7 +210,18 @@ pub fn generate_streaming<T: TensorElement>(
     };
 
     // Generate tokens using the new KV cache approach
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx, host_overheads)?;
+    generate_autoregressive_with_kv_cache_streaming(
+        qwen,
+        tokenizer,
+        ctx,
+        &input_ids,
+        cfg,
+        &mut token_callback,
+        tx,
+        host_overheads,
+        host_memory,
+        process_memory_tracker,
+    )?;
 
     Ok(())
 }
@@ -230,7 +243,20 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     };
 
     let (tx, _) = mpsc::channel();
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut callback, &tx, host_overheads)?;
+    let mut host_memory = ScalarStat::default();
+    let mut process_memory_tracker = ProcessMemoryTracker::new();
+    generate_autoregressive_with_kv_cache_streaming(
+        qwen,
+        tokenizer,
+        ctx,
+        input_ids,
+        cfg,
+        &mut callback,
+        &tx,
+        host_overheads,
+        &mut host_memory,
+        &mut process_memory_tracker,
+    )?;
 
     Ok(result)
 }
@@ -246,6 +272,8 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
     token_callback: &mut F,
     tx: &mpsc::Sender<AppEvent>,
     host_overheads: &[(String, usize)],
+    host_memory: &mut ScalarStat,
+    process_memory_tracker: &mut Option<ProcessMemoryTracker>,
 ) -> Result<(), MetalError>
 where
     F: FnMut(u32, Arc<str>) -> Result<bool, MetalError>,
@@ -282,18 +310,15 @@ where
     let mut memory_blocks = vec![MemoryBlockStat::default(); n_layers];
     let mut latest_forward_usage: Option<MemoryUsage> = None;
     let mut memory_ready = false;
-    let mut host_memory = ScalarStat::default();
-    let mut process_memory_tracker = ProcessMemoryTracker::new();
-    if let Some(tracker) = process_memory_tracker.as_mut()
-        && let Some(memory_mb) = tracker.sample_mb()
-    {
-        host_memory.record(memory_mb);
-    }
+    sample_process_memory(process_memory_tracker, host_memory);
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
+
+    latest_forward_usage = Some(ctx.snapshot_memory_usage());
+    sample_process_memory(process_memory_tracker, host_memory);
 
     // --- Prompt Processing Pass ---
     // Process the prompt token by token to warm up the KV cache.
@@ -351,6 +376,21 @@ where
     // --- Autoregressive Generation Loop ---
     // Now, generate tokens one by one using the KV cache.
     let mut ui_connected = true;
+
+    emit_memory_rows(
+        &model_memory_tree,
+        &host_memory,
+        &memory_embed,
+        &memory_forward,
+        latest_forward_usage,
+        &memory_blocks,
+        &memory_output,
+        host_overheads,
+        &mut metrics_loggers,
+        tx,
+        &mut ui_connected,
+        true,
+    );
     for i in 0..cfg.max_tokens - 1 {
         ctx.reset_pool();
         ctx.clear_cache();
@@ -441,11 +481,7 @@ where
             output_delta.kv_cache_bytes,
         );
 
-        if let Some(tracker) = process_memory_tracker.as_mut()
-            && let Some(memory_mb) = tracker.sample_mb()
-        {
-            host_memory.record(memory_mb);
-        }
+        sample_process_memory(process_memory_tracker, host_memory);
 
         let logits = logits_tensor.to_vec();
         let vocab_logits = logits[0..vocab_size].to_vec();
@@ -495,7 +531,7 @@ where
         }
 
         if memory_ready {
-            let rows = build_memory_rows(
+            emit_memory_rows(
                 &model_memory_tree,
                 &host_memory,
                 &memory_embed,
@@ -504,16 +540,11 @@ where
                 &memory_blocks,
                 &memory_output,
                 host_overheads,
+                &mut metrics_loggers,
+                tx,
+                &mut ui_connected,
+                false,
             );
-            if let Some(loggers) = metrics_loggers.as_mut() {
-                let log_now = Instant::now();
-                if let Err(err) = loggers.log_memory(&rows, log_now, false) {
-                    alert::emit_warning(tx, format!("Failed to log memory metrics: {err}"));
-                }
-            }
-            if ui_connected && tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
-                ui_connected = false;
-            }
         }
 
         let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
@@ -523,4 +554,42 @@ where
     }
 
     Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_memory_rows(
+    model_memory_tree: &ModelMemoryNode,
+    host_memory: &ScalarStat,
+    memory_embed: &MemoryScopeStat,
+    memory_forward: &MemoryScopeStat,
+    latest_forward_usage: Option<MemoryUsage>,
+    memory_blocks: &[MemoryBlockStat],
+    memory_output: &MemoryScopeStat,
+    host_overheads: &[(String, usize)],
+    metrics_loggers: &mut Option<MetricsLoggers>,
+    tx: &mpsc::Sender<AppEvent>,
+    ui_connected: &mut bool,
+    force: bool,
+) {
+    let rows = build_memory_rows(
+        model_memory_tree,
+        host_memory,
+        memory_embed,
+        memory_forward,
+        latest_forward_usage,
+        memory_blocks,
+        memory_output,
+        host_overheads,
+    );
+
+    if let Some(loggers) = metrics_loggers.as_mut() {
+        let log_now = Instant::now();
+        if let Err(err) = loggers.log_memory(&rows, log_now, force) {
+            alert::emit_warning(tx, format!("Failed to log memory metrics: {err}"));
+        }
+    }
+
+    if *ui_connected && tx.send(AppEvent::MemoryUpdate(rows)).is_err() {
+        *ui_connected = false;
+    }
 }
