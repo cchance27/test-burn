@@ -118,8 +118,11 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
+        let vector_width = std::cmp::max(self.vector_width as usize, 1);
+        let base_threads = 256usize;
+        let threads_per_tg_width = std::cmp::max(base_threads / vector_width, 1);
         let threads_per_tg = MTLSize {
-            width: 256,
+            width: threads_per_tg_width,
             height: 1,
             depth: 1,
         };

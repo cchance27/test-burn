@@ -17,15 +17,14 @@ kernel void swiglu_fused_activation_##SUFFIX( \
     uint gid [[thread_position_in_grid]]) { \
     const uint kVectorWidth = 4; \
     if (vector_width == kVectorWidth) { \
-        uint total_vector_threads = total_elements / kVectorWidth; \
-        uint remainder = total_elements - total_vector_threads * kVectorWidth; \
+        const uint total_vector_threads = total_elements / kVectorWidth; \
+        const uint remainder = total_elements - total_vector_threads * kVectorWidth; \
         if (gid < total_vector_threads) { \
             using ScalarVec = vec<SCALAR, kVectorWidth>; \
             using AccumVec = vec<ACCUM, kVectorWidth>; \
  \
-            uint base_idx = gid * kVectorWidth; \
-            uint bias_vec_len = bias_len / kVectorWidth; \
-            uint bias_vec_idx = (base_idx / kVectorWidth) % bias_vec_len; \
+            const uint bias_vec_len = bias_len / kVectorWidth; \
+            const uint bias_vec_idx = gid % bias_vec_len; \
  \
             device const ScalarVec* gate_vec = \
                 reinterpret_cast<device const ScalarVec*>(gate); \
@@ -36,16 +35,15 @@ kernel void swiglu_fused_activation_##SUFFIX( \
             device const ScalarVec* up_bias_vec = \
                 reinterpret_cast<device const ScalarVec*>(up_bias); \
  \
-            AccumVec gate_vals = static_cast<AccumVec>(gate_vec[gid]) + \
+            const AccumVec gate_vals = static_cast<AccumVec>(gate_vec[gid]) + \
                 static_cast<AccumVec>(gate_bias_vec[bias_vec_idx]); \
-            AccumVec up_vals = static_cast<AccumVec>(up_vec[gid]) + \
+            const AccumVec up_vals = static_cast<AccumVec>(up_vec[gid]) + \
                 static_cast<AccumVec>(up_bias_vec[bias_vec_idx]); \
  \
             const AccumVec one(static_cast<ACCUM>(1)); \
-            AccumVec sigmoid = one / (one + exp(-gate_vals)); \
-            AccumVec activated = gate_vals * sigmoid; \
-            ScalarVec result_vec = static_cast<ScalarVec>(activated * up_vals); \
-            up_vec[gid] = result_vec; \
+            const AccumVec sigmoid = one / (one + metal::fast::exp(-gate_vals)); \
+            const AccumVec activated = gate_vals * sigmoid; \
+            up_vec[gid] = static_cast<ScalarVec>(activated * up_vals); \
             return; \
         } else if (gid < total_vector_threads + remainder) { \
             uint scalar_idx = total_vector_threads * kVectorWidth + (gid - total_vector_threads); \
