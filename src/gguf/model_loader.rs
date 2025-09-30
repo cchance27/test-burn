@@ -35,24 +35,19 @@ fn tensor_from_f32_slice<T: TensorElement>(
     data: &[f32],
     context: &Context<T>,
 ) -> Result<Tensor<T>, GGUFError> {
-    if T::DTYPE == Dtype::F32 {
-        Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
-            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
-    } else {
-        let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
-            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+    let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
 
-        {
-            let slice = tensor.as_mut_slice();
-            T::copy_from_f32_slice(data, slice);
-        }
-
-        tensor
-            .flush_host_writes()
-            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
-
-        Ok(tensor)
+    {
+        let slice = tensor.as_mut_slice();
+        T::copy_from_f32_slice(data, slice);
     }
+
+    tensor
+        .flush_host_writes()
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+    Ok(tensor)
 }
 
 fn tensor_from_f16_slice<T: TensorElement>(
@@ -61,26 +56,21 @@ fn tensor_from_f16_slice<T: TensorElement>(
     data: &[f16],
     context: &Context<T>,
 ) -> Result<Tensor<T>, GGUFError> {
-    if T::DTYPE == Dtype::F16 {
-        Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
-            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to upload tensor '{}': {}", tensor_name, err)))
-    } else {
-        let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
-            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
+    let mut tensor = Tensor::<T>::new(dims, TensorStorage::Dedicated(context), TensorInit::Uninitialized)
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to allocate tensor '{}': {}", tensor_name, err)))?;
 
-        {
-            let slice = tensor.as_mut_slice();
-            for (dst, src) in slice.iter_mut().zip(data.iter().copied()) {
-                *dst = T::from_f32(src.to_f32());
-            }
+    {
+        let slice = tensor.as_mut_slice();
+        for (dst, src) in slice.iter_mut().zip(data.iter().copied()) {
+            *dst = T::from_f32(src.to_f32());
         }
-
-        tensor
-            .flush_host_writes()
-            .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
-
-        Ok(tensor)
     }
+
+    tensor
+        .flush_host_writes()
+        .map_err(|err| GGUFError::InvalidTensorData(format!("Failed to synchronize tensor '{}': {}", tensor_name, err)))?;
+
+    Ok(tensor)
 }
 
 fn adjust_embedding_dims(name: &str, dims: &mut [usize]) {
