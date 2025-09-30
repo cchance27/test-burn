@@ -1351,9 +1351,11 @@ fn test_softmax_threadgroup_execution_width() -> Result<(), MetalError> {
     let mut context = Context::<F32Element>::new()?;
 
     // Get the pipeline through the new kernel system
-    let pipeline = context
-        .kernel_manager
-        .get_pipeline(crate::metallic::kernels::KernelFunction::FusedSoftmax, &context.device)?;
+    let pipeline = context.kernel_manager.get_pipeline(
+        crate::metallic::kernels::KernelFunction::FusedSoftmax,
+        crate::metallic::Dtype::F32,
+        &context.device,
+    )?;
 
     // Check that the pipeline has a valid execution width
     let execution_width = pipeline.threadExecutionWidth();

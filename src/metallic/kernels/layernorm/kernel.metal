@@ -3,36 +3,42 @@ using namespace metal;
 
 constant float EPS = 1e-5f;
 
-kernel void layernorm_kernel(device float* input [[buffer(0)]],
-                            device float* output [[buffer(1)]],
-                            device float* gamma [[buffer(2)]],
-                            device float* beta [[buffer(3)]],
-                            constant uint& feature_dim [[buffer(4)]],
-                            constant uint& total_elements [[buffer(5)]],
-                            uint gid [[thread_position_in_grid]]) {
-    if (gid >= total_elements) return;
-
-    uint feature_idx = gid % feature_dim;
-    uint row_idx = gid / feature_dim;
-
-    // Compute mean and variance for this row
-    float sum = 0.0f;
-    float sum_sq = 0.0f;
-
-    for (uint f = 0; f < feature_dim; ++f) {
-        float val = input[row_idx * feature_dim + f];
-        sum += val;
-        sum_sq += val * val;
-    }
-
-    float mean = sum / float(feature_dim);
-    // Use numerically stable formula: var = (sum_sq - mean * sum) / n
-    float var = (sum_sq - mean * sum) / float(feature_dim);
-
-    // Normalize
-    float x = input[gid];
-    float normalized = (x - mean) / sqrt(var + EPS);
-
-    // Apply affine transformation
-    output[gid] = normalized * gamma[feature_idx] + beta[feature_idx];
+#define FOR_EACH_FLOAT_TYPE(OP) \
+    OP(float, float, f32) \
+    OP(half, float, f16) 
+    
+#define DEFINE_LAYERNORM_KERNEL(SCALAR, ACCUM, SUFFIX) \
+kernel void layernorm_kernel_##SUFFIX( \
+    device SCALAR* input [[buffer(0)]], \
+    device SCALAR* output [[buffer(1)]], \
+    device SCALAR* gamma [[buffer(2)]], \
+    device SCALAR* beta [[buffer(3)]], \
+    constant uint& feature_dim [[buffer(4)]], \
+    constant uint& total_elements [[buffer(5)]], \
+    uint gid [[thread_position_in_grid]]) { \
+    if (gid >= total_elements) { \
+        return; \
+    } \
+    uint feature_idx = gid % feature_dim; \
+    uint row_idx = gid / feature_dim; \
+    ACCUM sum = static_cast<ACCUM>(0.0f); \
+    ACCUM sum_sq = static_cast<ACCUM>(0.0f); \
+    ACCUM feature_dim_acc = static_cast<ACCUM>(feature_dim); \
+    for (uint f = 0; f < feature_dim; ++f) { \
+        ACCUM val = static_cast<ACCUM>(input[row_idx * feature_dim + f]); \
+        sum += val; \
+        sum_sq += val * val; \
+    } \
+    ACCUM mean = sum / feature_dim_acc; \
+    ACCUM var = (sum_sq - mean * sum) / feature_dim_acc; \
+    ACCUM x = static_cast<ACCUM>(input[gid]); \
+    ACCUM normalized = (x - mean) / sqrt(var + static_cast<ACCUM>(EPS)); \
+    ACCUM gamma_val = static_cast<ACCUM>(gamma[feature_idx]); \
+    ACCUM beta_val = static_cast<ACCUM>(beta[feature_idx]); \
+    output[gid] = static_cast<SCALAR>(normalized * gamma_val + beta_val); \
 }
+
+FOR_EACH_FLOAT_TYPE(DEFINE_LAYERNORM_KERNEL)
+
+#undef DEFINE_LAYERNORM_KERNEL
+#undef FOR_EACH_FLOAT_TYPE

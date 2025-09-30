@@ -1,4 +1,3 @@
-use super::*;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Context, F32Element, Tensor, TensorInit, TensorStorage};
 
@@ -162,7 +161,7 @@ fn pool_reset_invalidates_tensors() {
     let t4 = Tensor::ones(vec![50, 50], &mut ctx).unwrap();
 
     ctx.synchronize();
-    
+
     assert!(t3.as_slice().iter().all(|&x| x == 0.0));
     assert!(t4.as_slice().iter().all(|&x| x == 1.0));
 }

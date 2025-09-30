@@ -3,14 +3,13 @@ use crate::metallic::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::metallic::kernels::matmul::mps_matrix_from_buffer;
 use crate::metallic::resource_cache::ResourceCache;
 use crate::metallic::tensor::MpsMatrixBatchView;
-use crate::metallic::TensorElement;
+use crate::metallic::{Dtype, TensorElement};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::env;
-use std::mem::size_of;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
@@ -91,14 +90,16 @@ pub fn apply_softmax<T: TensorElement>(
     }
 
     let rows_total = batch * rows;
+    let dtype = attn.dtype;
 
     let preference = softmax_backend_preference();
     let start = Instant::now();
 
-    let can_use_mps = allow_mps && !causal && query_offset == 0 && !preference.forces_kernel();
+    let supports_mps_dtype = matches!(dtype, Dtype::F32 | Dtype::F16);
+    let can_use_mps = allow_mps && supports_mps_dtype && !causal && query_offset == 0 && !preference.forces_kernel();
     if can_use_mps && let Some(cache_slot) = cache.as_mut() {
         let cache_ref: &mut ResourceCache = cache_slot;
-        try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns)?;
+        try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns, dtype)?;
         ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
         return Ok(attn.clone());
     }
@@ -114,6 +115,7 @@ pub fn apply_softmax<T: TensorElement>(
     Ok(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn try_apply_mps_softmax<T: TensorElement>(
     ctx: &mut Context<T>,
     cache: &mut ResourceCache,
@@ -122,6 +124,7 @@ fn try_apply_mps_softmax<T: TensorElement>(
     batch: usize,
     rows: usize,
     columns: usize,
+    dtype: Dtype,
 ) -> Result<(), MetalError> {
     ctx.prepare_tensors_for_active_cmd(&[attn])?;
 
@@ -131,9 +134,10 @@ fn try_apply_mps_softmax<T: TensorElement>(
         row_bytes: view.row_bytes,
         matrices: view.batch,
         matrix_bytes: view.matrix_bytes,
+        dtype,
     };
     let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
-    let softmax_key = MpsSoftMaxKey { rows, columns };
+    let softmax_key = MpsSoftMaxKey { rows, columns, dtype };
     let softmax = cache.get_or_create_softmax(softmax_key, &ctx.device)?;
 
     let command_buffer = ctx.active_command_buffer_mut_without_cache()?;

@@ -2,7 +2,6 @@ use super::{cache_keys::SdpaKey, cacheable::Cacheable, error::MetalError};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 /// A cacheable SDPA (Scaled Dot Product Attention) operation.
 ///

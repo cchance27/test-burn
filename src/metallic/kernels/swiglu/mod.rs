@@ -3,10 +3,10 @@ use super::*;
 use crate::metallic::Context;
 use crate::metallic::MetalError;
 use crate::metallic::Tensor;
+use crate::metallic::TensorElement;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::elemwise_mul::ElemwiseMulOp;
 use crate::metallic::kernels::silu::SiluOp;
-use crate::metallic::TensorElement;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -17,7 +17,15 @@ pub struct SwiGLU<T: TensorElement> {
 }
 
 impl KernelInvocable for SwiGLUOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>);
+    type Args<'a, T: TensorElement> = (
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+    );
 
     fn function_id() -> Option<KernelFunction> {
         // This is a composite operation using existing kernels, so we don't need a specific kernel function
@@ -46,7 +54,12 @@ impl KernelInvocable for SwiGLUOp {
         )?;
 
         // Create a dummy operation since all work is done in this function
-        Ok((Box::new(SwiGLU { _phantom: std::marker::PhantomData::<T> }), output))
+        Ok((
+            Box::new(SwiGLU {
+                _phantom: std::marker::PhantomData::<T>,
+            }),
+            output,
+        ))
     }
 }
 

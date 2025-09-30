@@ -84,7 +84,7 @@ impl<T: TensorElement> Operation for Arange<T> {
 #[cfg(test)]
 mod arange_test {
     use crate::metallic::kernels::tensors::ArangeOp;
-    use crate::metallic::{Context, F32Element, MetalError, TensorInit, TensorStorage};
+    use crate::metallic::{Context, F32Element, MetalError};
 
     #[test]
     fn test_arange() -> Result<(), MetalError> {

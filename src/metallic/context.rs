@@ -1,13 +1,13 @@
 use super::error::MetalError;
 use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollectorHandle, MemoryEvent, MemoryUsage};
-use super::operation::{CommandBuffer, Operation};
+use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{kernels, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelFunction, KernelInvocable, KernelManager};
@@ -16,31 +16,10 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice, MTLLibrary, MTLSize};
+use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLSize};
 use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
-
-#[derive(Clone, Debug)]
-pub struct ContextConfig {
-    tensor_dtype: Dtype,
-}
-
-impl ContextConfig {
-    pub fn new(dtype: Dtype) -> Self {
-        Self { tensor_dtype: dtype }
-    }
-
-    pub fn tensor_dtype(&self) -> Dtype {
-        self.tensor_dtype
-    }
-}
-
-impl Default for ContextConfig {
-    fn default() -> Self {
-        Self::new(Dtype::F32)
-    }
-}
 
 /// The main context for Metal operations.
 pub struct Context<T: TensorElement> {
@@ -69,8 +48,7 @@ pub struct Context<T: TensorElement> {
     memory_collector: Option<MemoryCollectorHandle>,
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
-
-    config: ContextConfig,
+    //config: ContextConfig,
 }
 
 #[derive(Clone)]
@@ -108,44 +86,40 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub fn new() -> Result<Self, MetalError> {
-        Self::with_config(ContextConfig::default())
-    }
-
-    pub fn with_config(config: ContextConfig) -> Result<Self, MetalError> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
 
         Ok(Context::<T> {
-               device,
-               command_queue,
-               pool,
-               kv_cache_pool,
-               kernel_manager: KernelManager::new(),
-               pooled_bytes_allocated: 0,
-               pooled_allocations: 0,
-               pool_resets: 0,
-               rng_seed_counter: 0,
-               kv_caches: FxHashMap::default(),
-               active_cmd_buffer: None,
-               active_resource_cache: None,
-               latency_collector: None,
-               memory_collector: None,
-               softmax_samples: Vec::new(),
-               config,
-            })
+            device,
+            command_queue,
+            pool,
+            kv_cache_pool,
+            kernel_manager: KernelManager::new(),
+            pooled_bytes_allocated: 0,
+            pooled_allocations: 0,
+            pool_resets: 0,
+            rng_seed_counter: 0,
+            kv_caches: FxHashMap::default(),
+            active_cmd_buffer: None,
+            active_resource_cache: None,
+            latency_collector: None,
+            memory_collector: None,
+            softmax_samples: Vec::new(),
+            //config,
+        })
     }
 
     pub fn tensor_dtype(&self) -> Dtype {
-        self.config.tensor_dtype()
+        T::DTYPE
     }
 
     pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
         self.ensure_active_cmd_buffer()?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
-            Some(self.kernel_manager.get_pipeline(kernel_func, &self.device)?)
+            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
             None // For MPS operations that don't need a pipeline
         };
@@ -234,13 +208,7 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    pub fn matmul(
-        &mut self,
-        a: &Tensor<T>,
-        b: &Tensor<T>,
-        transpose_a: bool,
-        transpose_b: bool,
-    ) -> Result<Tensor<T>, MetalError> {
+    pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for matmul
         self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
     }
@@ -317,7 +285,9 @@ impl<T: TensorElement> Context<T> {
         self.prepare_tensors_for_active_cmd(&[&q_out, &k_out, &v_out])?;
 
         self.ensure_active_cmd_buffer()?;
-        let pipeline = self.kernel_manager.get_pipeline(KernelFunction::FusedQkvBiasSplit, &self.device)?;
+        let pipeline = self
+            .kernel_manager
+            .get_pipeline(KernelFunction::FusedQkvBiasSplit, T::DTYPE, &self.device)?;
 
         let cmd_buf = self.active_command_buffer_mut()?;
         let encoder = cmd_buf
@@ -386,7 +356,7 @@ impl<T: TensorElement> Context<T> {
         self.ensure_active_cmd_buffer_internal(false)?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
-            Some(self.kernel_manager.get_pipeline(kernel_func, &self.device)?)
+            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
             None
         };
@@ -502,13 +472,7 @@ impl<T: TensorElement> Context<T> {
     /// Write a single timestep of K and V (per-head flattened) into the per-layer cache at index `step`.
     /// - `k_step` and `v_step` must be contiguous tensors with shape [batch_heads, head_dim] or [batch_heads, 1, head_dim].
     ///   This performs a device blit copy from the source buffer into the cache at the correct offset.
-    pub fn write_kv_step(
-        &mut self,
-        layer_idx: usize,
-        step: usize,
-        k_step: &Tensor<T>,
-        v_step: &Tensor<T>,
-    ) -> Result<(), MetalError> {
+    pub fn write_kv_step(&mut self, layer_idx: usize, step: usize, k_step: &Tensor<T>, v_step: &Tensor<T>) -> Result<(), MetalError> {
         let zero_ready = self.kv_caches.get(&layer_idx).map(|entry| entry.zeroing_complete).unwrap_or(false);
 
         let k_src = k_step.clone();

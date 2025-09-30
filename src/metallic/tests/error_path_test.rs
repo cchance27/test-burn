@@ -95,8 +95,7 @@ fn test_sdpa_invalid_batch_dimensions() {
 
 #[test]
 fn test_matmul_invalid_shapes() {
-    use crate::metallic::cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey};
-    use crate::metallic::kernels::matmul::MatMulOp;
+    use crate::metallic::cache_keys::MpsGemmKey;
     use crate::metallic::resource_cache::ResourceCache;
 
     let context = Context::<F32Element>::new().unwrap();

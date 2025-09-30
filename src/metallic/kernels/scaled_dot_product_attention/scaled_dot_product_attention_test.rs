@@ -789,8 +789,6 @@ fn test_sdpa_zero_tensors() -> Result<(), MetalError> {
 
 type MyBackend = burn::backend::Metal;
 
-use super::*;
-
 /// Helper function to compare Metallic SDPA against Burn with tolerance
 #[allow(clippy::too_many_arguments)]
 fn compare_sdpa_implementations(

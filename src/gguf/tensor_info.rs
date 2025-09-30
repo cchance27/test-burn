@@ -1,5 +1,5 @@
 use bytemuck::try_cast_slice;
-use half::{bf16, f16};
+use half::f16;
 
 use crate::gguf::{GGUFDataType, GGUFError, GGUFFile};
 
@@ -7,7 +7,6 @@ use crate::gguf::{GGUFDataType, GGUFError, GGUFFile};
 pub enum GGUFRawTensor<'data> {
     F32(&'data [f32]),
     F16(&'data [f16]),
-    BF16(&'data [bf16]),
     Bytes(&'data [u8], GGUFDataType),
 }
 
@@ -34,11 +33,6 @@ impl GGUTensorInfo {
                 let casted = try_cast_slice(raw)
                     .map_err(|_| GGUFError::InvalidTensorData(format!("Tensor '{}' is not valid f16 data", self.name)))?;
                 Ok(GGUFRawTensor::F16(casted))
-            }
-            GGUFDataType::BF16 => {
-                let casted = try_cast_slice(raw)
-                    .map_err(|_| GGUFError::InvalidTensorData(format!("Tensor '{}' is not valid bf16 data", self.name)))?;
-                Ok(GGUFRawTensor::BF16(casted))
             }
             _ => Ok(GGUFRawTensor::Bytes(raw, self.data_type)),
         }

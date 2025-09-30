@@ -1,5 +1,5 @@
-use crate::metallic::{Context, MetalError, TensorElement};
 use crate::metallic::tensor::Tensor;
+use crate::metallic::{Context, MetalError, TensorElement};
 
 pub struct TransformerBlock<T: TensorElement> {
     // Attention weights (placeholders matching GGUF shapes)
@@ -23,10 +23,13 @@ pub struct TransformerBlock<T: TensorElement> {
     pub kv_dim: usize,
 }
 
-impl<T> TransformerBlock<T> where T: TensorElement {
+impl<T> TransformerBlock<T>
+where
+    T: TensorElement,
+{
     pub fn new(cfg: &super::Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         let kv_dim = cfg.d_model * cfg.n_kv_heads / cfg.n_heads;
-        
+
         // Q, K, V projections packed into a single fused matrix stored in row-major layout
         let qkv_out_dim = cfg.d_model + 2 * kv_dim;
         let attn_qkv_weight = Tensor::zeros(vec![cfg.d_model, qkv_out_dim], ctx, false)?;

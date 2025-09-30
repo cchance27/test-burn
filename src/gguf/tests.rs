@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::{
-    gguf::{tensor_info::GGUTensorInfo, GGUFFile, GGUFValue},
+    gguf::{GGUFFile, GGUFValue, tensor_info::GGUTensorInfo},
     metallic::{self, F32Element},
 };
 

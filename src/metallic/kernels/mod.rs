@@ -1,5 +1,5 @@
 use crate::metallic::{
-    Context, MetalError, Operation, Tensor,
+    Context, Dtype, MetalError, Operation, Tensor,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
 };
@@ -35,8 +35,9 @@ pub mod swiglu;
 pub mod tensors;
 
 /// Uniquely identifies a compiled Metal library.
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KernelLibrary {
+    Cast,
     ElemwiseAdd,
     ElemwiseDiv,
     ElemwiseMul,
@@ -57,6 +58,7 @@ pub enum KernelLibrary {
 impl KernelLibrary {
     fn source(&self) -> &'static str {
         match self {
+            KernelLibrary::Cast => include_str!("cast/kernel.metal"),
             KernelLibrary::ElemwiseAdd => include_str!("elemwise_add/kernel.metal"),
             KernelLibrary::ElemwiseDiv => include_str!("elemwise_div/kernel.metal"),
             KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
@@ -77,8 +79,12 @@ impl KernelLibrary {
 }
 
 /// Uniquely identifies a function within a Metal library.
-#[derive(PartialEq, Eq, Hash, Clone, Debug)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KernelFunction {
+    CastToF16,
+    CastFromF16,
+    CastToF32,
+    CastFromF32,
     ElemwiseAdd,
     ElemwiseBroadcastAdd,
     ElemwiseDiv,
@@ -102,6 +108,9 @@ pub enum KernelFunction {
 impl KernelFunction {
     fn library(&self) -> KernelLibrary {
         match self {
+            KernelFunction::CastToF16 | KernelFunction::CastFromF16 | KernelFunction::CastToF32 | KernelFunction::CastFromF32 => {
+                KernelLibrary::Cast
+            }
             KernelFunction::ElemwiseAdd | KernelFunction::ElemwiseBroadcastAdd => KernelLibrary::ElemwiseAdd,
             KernelFunction::ElemwiseDiv => KernelLibrary::ElemwiseDiv,
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
@@ -120,26 +129,56 @@ impl KernelFunction {
         }
     }
 
-    fn name(&self) -> &'static str {
-        match self {
-            KernelFunction::ElemwiseAdd => "add_kernel",
-            KernelFunction::ElemwiseBroadcastAdd => "broadcast_add_kernel",
-            KernelFunction::ElemwiseDiv => "div_kernel",
-            KernelFunction::ElemwiseMul => "mul_kernel",
-            KernelFunction::ElemwiseSub => "sub_kernel",
-            KernelFunction::FusedQkvBiasSplit => "fused_qkv_bias_split",
-            KernelFunction::Gelu => "gelu_kernel",
-            KernelFunction::KvRearrange => "kv_rearrange_kernel",
-            KernelFunction::LayerNorm => "layernorm_kernel",
-            KernelFunction::Permute => "permute_kernel",
-            KernelFunction::RepeatKvHeads => "repeat_kv_heads_kernel",
-            KernelFunction::Rope => "rope_kernel",
-            KernelFunction::RMSNorm => "rmsnorm_kernel",
-            KernelFunction::Silu => "silu_kernel",
-            KernelFunction::FusedSoftmax => "sdpa_fused_softmax",
-            KernelFunction::Arange => "arange_kernel",
-            KernelFunction::Ones => "ones_kernel",
-            KernelFunction::RandomUniform => "random_uniform",
-        }
+    fn name_for_dtype(&self, dtype: Dtype) -> Result<&'static str, MetalError> {
+        use Dtype::*;
+
+        let name = match (self, dtype) {
+            (KernelFunction::CastToF16, F32) => "cast_to_f16_kernel_f32",
+            (KernelFunction::CastToF16, F16) => "cast_to_f16_kernel_f16",
+            (KernelFunction::CastFromF16, F32) => "cast_from_f16_kernel_f32",
+            (KernelFunction::CastFromF16, F16) => "cast_from_f16_kernel_f16",
+            (KernelFunction::CastToF32, F32) => "cast_to_f32_kernel_f32",
+            (KernelFunction::CastToF32, F16) => "cast_to_f32_kernel_f16",
+            (KernelFunction::CastFromF32, F32) => "cast_from_f32_kernel_f32",
+            (KernelFunction::CastFromF32, F16) => "cast_from_f32_kernel_f16",
+            (KernelFunction::ElemwiseAdd, F32) => "add_kernel_f32",
+            (KernelFunction::ElemwiseAdd, F16) => "add_kernel_f16",
+            (KernelFunction::ElemwiseBroadcastAdd, F32) => "broadcast_add_kernel_f32",
+            (KernelFunction::ElemwiseBroadcastAdd, F16) => "broadcast_add_kernel_f16",
+            (KernelFunction::ElemwiseDiv, F32) => "div_kernel_f32",
+            (KernelFunction::ElemwiseDiv, F16) => "div_kernel_f16",
+            (KernelFunction::ElemwiseMul, F32) => "mul_kernel_f32",
+            (KernelFunction::ElemwiseMul, F16) => "mul_kernel_f16",
+            (KernelFunction::ElemwiseSub, F32) => "sub_kernel_f32",
+            (KernelFunction::ElemwiseSub, F16) => "sub_kernel_f16",
+            (KernelFunction::FusedQkvBiasSplit, F32) => "fused_qkv_bias_split_f32",
+            (KernelFunction::FusedQkvBiasSplit, F16) => "fused_qkv_bias_split_f16",
+            (KernelFunction::Gelu, F32) => "gelu_kernel_f32",
+            (KernelFunction::Gelu, F16) => "gelu_kernel_f16",
+            (KernelFunction::KvRearrange, F32) => "kv_rearrange_kernel_f32",
+            (KernelFunction::KvRearrange, F16) => "kv_rearrange_kernel_f16",
+            (KernelFunction::LayerNorm, F32) => "layernorm_kernel_f32",
+            (KernelFunction::LayerNorm, F16) => "layernorm_kernel_f16",
+            (KernelFunction::Permute, F32) => "permute_kernel_f32",
+            (KernelFunction::Permute, F16) => "permute_kernel_f16",
+            (KernelFunction::RepeatKvHeads, F32) => "repeat_kv_heads_kernel_f32",
+            (KernelFunction::RepeatKvHeads, F16) => "repeat_kv_heads_kernel_f16",
+            (KernelFunction::Rope, F32) => "rope_kernel_f32",
+            (KernelFunction::Rope, F16) => "rope_kernel_f16",
+            (KernelFunction::RMSNorm, F32) => "rmsnorm_kernel_f32",
+            (KernelFunction::RMSNorm, F16) => "rmsnorm_kernel_f16",
+            (KernelFunction::Silu, F32) => "silu_kernel_f32",
+            (KernelFunction::Silu, F16) => "silu_kernel_f16",
+            (KernelFunction::FusedSoftmax, F32) => "sdpa_fused_softmax_f32",
+            (KernelFunction::FusedSoftmax, F16) => "sdpa_fused_softmax_f16",
+            (KernelFunction::Arange, F32) => "arange_kernel_f32",
+            (KernelFunction::Arange, F16) => "arange_kernel_f16",
+            (KernelFunction::Ones, F32) => "ones_kernel_f32",
+            (KernelFunction::Ones, F16) => "ones_kernel_f16",
+            (KernelFunction::RandomUniform, F32) => "random_uniform_f32",
+            (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
+        };
+
+        Ok(name)
     }
 }

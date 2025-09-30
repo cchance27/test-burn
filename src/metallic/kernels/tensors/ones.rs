@@ -92,7 +92,7 @@ impl<T: TensorElement> Operation for Ones<T> {
 #[cfg(test)]
 mod ones_test {
     use crate::metallic::kernels::tensors::OnesOp;
-    use crate::metallic::{Context, F32Element, MetalError, TensorInit, TensorStorage};
+    use crate::metallic::{Context, F32Element, MetalError};
 
     #[test]
     fn test_ones() -> Result<(), MetalError> {

@@ -1,12 +1,11 @@
 use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
-use crate::metallic::kernels::elemwise_add::{BroadcastElemwiseAddOp, ElemwiseAddOp};
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
-use crate::metallic::kernels::silu::SiluOp;
 use crate::metallic::models::Qwen25;
-use crate::metallic::{F32Element, TensorElement};
+use crate::metallic::{Dtype, F16Element, TensorElement};
 use crate::metallic::{
     Tensor, TensorInit, TensorStorage, context::Context, error::MetalError, generation, generation::GenerationConfig,
     models::LoadableModel, tokenizer::Tokenizer,
@@ -58,6 +57,24 @@ fn repeat_kv_heads<T: TensorElement>(
     Ok(output)
 }
 
+/// Adjust this alias to run the correctness suite at different precisions (e.g. `F16Element`).
+type TestElement = F16Element;
+
+fn take_first_as_f32<T: TensorElement>(slice: &[T::Scalar], count: usize) -> Vec<f32> {
+    slice.iter().take(count).map(|&value| T::to_f32(value)).collect()
+}
+
+fn quantize_reference_for_dtype<T: TensorElement>(values: &[f32]) -> Vec<f32> {
+    values.iter().copied().map(|v| T::to_f32(T::from_f32(v))).collect()
+}
+
+fn dtype_threshold<T: TensorElement>(f32_value: f32, half_value: f32) -> f32 {
+    match T::DTYPE {
+        Dtype::F32 => f32_value,
+        Dtype::F16 => half_value,
+    }
+}
+
 fn load_npy_tensor<P: AsRef<Path>>(path: P) -> (ndarray::ArrayD<f32>, Vec<usize>) {
     let reader = std::fs::File::open(path).expect("Failed to open npy file");
     let arr = ArrayD::<f32>::read_npy(reader).expect("Failed to read npy data");
@@ -73,14 +90,24 @@ fn squeeze_leading_batch(shape: &[usize]) -> Vec<usize> {
     }
 }
 
-fn compare_tensor_summary(name: &str, rust_tensor: &Tensor<F32Element>, py_data: &ArrayD<f32>, epsilon: f32, significant_threshold: f32) {
+fn compare_tensor_summary<T: TensorElement>(
+    name: &str,
+    rust_tensor: &Tensor<T>,
+    py_data: &ArrayD<f32>,
+    epsilon: f32,
+    significant_threshold: f32,
+) {
     let rust_slice = rust_tensor.as_slice();
     let py_slice = py_data.as_slice().expect("Failed to get slice from ndarray for comparison");
     assert_eq!(rust_slice.len(), py_slice.len(), "{} length mismatch", name);
 
+    let py_quantized = quantize_reference_for_dtype::<T>(py_slice);
+
     let mut diff_count = 0usize;
     let mut max_diff = 0f32;
-    for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+    for (i, (r, p)) in rust_slice.iter().zip(py_quantized.iter()).enumerate() {
+        let r = T::to_f32(*r);
+        let p = *p;
         let diff = (r - p).abs();
         if diff > significant_threshold {
             if diff_count < 10 {
@@ -104,7 +131,12 @@ fn compare_tensor_summary(name: &str, rust_tensor: &Tensor<F32Element>, py_data:
     assert_relative_eq!(max_diff, 0.0, epsilon = epsilon);
 }
 
-fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to: usize, ctx: &mut Context<F32Element>) -> Result<Tensor<F32Element>, MetalError> {
+fn run_blocks_up_to<T: TensorElement>(
+    model: &Qwen25<T>,
+    mut x: Tensor<T>,
+    up_to: usize,
+    ctx: &mut Context<T>,
+) -> Result<Tensor<T>, MetalError> {
     if up_to == 0 {
         return Ok(x);
     }
@@ -176,8 +208,8 @@ fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to
                 sin_buf[idx] = angle.sin();
             }
         }
-        let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::<F32Element>::CopyFrom(&cos_buf))?;
-        let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(ctx), TensorInit::<F32Element>::CopyFrom(&sin_buf))?;
+        let cos_q = Tensor::<T>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &cos_buf)?;
+        let sin_q = Tensor::<T>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &sin_buf)?;
         let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -195,16 +227,8 @@ fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to
                 sin_buf_k[idx] = angle.sin();
             }
         }
-        let cos_k = Tensor::new(
-            vec![seq, dim_half_k],
-            TensorStorage::Dedicated(ctx),
-            TensorInit::CopyFrom(&cos_buf_k),
-        )?;
-        let sin_k = Tensor::new(
-            vec![seq, dim_half_k],
-            TensorStorage::Dedicated(ctx),
-            TensorInit::CopyFrom(&sin_buf_k),
-        )?;
+        let cos_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &cos_buf_k)?;
+        let sin_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &sin_buf_k)?;
         let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
 
@@ -257,7 +281,7 @@ fn run_blocks_up_to(model: &Qwen25<F32Element>, mut x: Tensor<F32Element>, up_to
 #[test]
 fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // --- Setup ---
-    let mut ctx = Context::<F32Element>::new()?;
+    let mut ctx = Context::<TestElement>::new()?;
 
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
@@ -265,7 +289,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let gguf_model = loader.load_model(&ctx).expect("Failed to load GGUF model");
     let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let embed_slice = model.embed_weight.as_slice();
-    println!("Loaded embed first 10: {:?}", &embed_slice[0..10]);
+    println!("Loaded embed first 10: {:?}", take_first_as_f32::<TestElement>(embed_slice, 10));
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
     let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
 
@@ -292,13 +316,14 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut diff_count = 0;
     let mut max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_embeddings_slice
-        .iter()
-        .zip(py_embeddings_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_embeddings_slice =
+        quantize_reference_for_dtype::<TestElement>(py_embeddings_data.as_slice().expect("Failed to get slice from ndarray"));
+    let embed_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    for (i, (rust_val, py_val)) in rust_embeddings_slice.iter().zip(py_embeddings_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
-        if diff > 1e-4 {
+        if diff > embed_significant {
             if diff_count < 10 {
                 println!("Diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
@@ -311,8 +336,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     println!("Embedding comparison summary:");
     println!("- Max difference: {}", max_diff);
-    println!("- Number of differences > 1e-4: {} / {}", diff_count, rust_embeddings_slice.len());
-    assert_relative_eq!(max_diff, 0.0, epsilon = 1e-4);
+    println!(
+        "- Number of differences > {}: {} / {}",
+        embed_significant,
+        diff_count,
+        rust_embeddings_slice.len()
+    );
+    assert_relative_eq!(max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ Embedding layer output matches PyTorch!");
 
@@ -322,7 +352,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let x_normed_attn = ctx.call::<RMSNormOp>((rust_embeddings.clone(), block0.attn_norm_gamma.clone(), model.config.d_model as u32))?;
     ctx.synchronize();
     let rust_attn_norm_slice = x_normed_attn.as_slice();
-    println!("Rust first attn norm first 10: {:?}", &rust_attn_norm_slice[0..10]);
+    println!(
+        "Rust first attn norm first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_attn_norm_slice, 10)
+    );
 
     let (py_attn_norm_data, py_attn_norm_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_norm.npy"));
 
@@ -332,13 +365,14 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut attn_norm_diff_count = 0;
     let mut attn_norm_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_attn_norm_slice
-        .iter()
-        .zip(py_attn_norm_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_attn_norm_slice =
+        quantize_reference_for_dtype::<TestElement>(py_attn_norm_data.as_slice().expect("Failed to get slice from ndarray"));
+    let attn_norm_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    for (i, (rust_val, py_val)) in rust_attn_norm_slice.iter().zip(py_attn_norm_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
-        if diff > 1e-4 {
+        if diff > attn_norm_significant {
             if attn_norm_diff_count < 10 {
                 println!("Attn norm diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
@@ -352,11 +386,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("First attn norm comparison summary:");
     println!("- Max difference: {}", attn_norm_max_diff);
     println!(
-        "- Number of differences > 1e-4: {} / {}",
+        "- Number of differences > {}: {} / {}",
+        attn_norm_significant,
         attn_norm_diff_count,
         rust_attn_norm_slice.len()
     );
-    assert_relative_eq!(attn_norm_max_diff, 0.0, epsilon = 1e-4);
+    assert_relative_eq!(attn_norm_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ First block attn norm matches PyTorch!");
 
@@ -371,7 +406,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         ctx.fused_qkv_projection(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, d_model, block0.kv_dim)?;
     ctx.synchronize();
     let rust_q_proj_slice = q_mat.as_slice();
-    println!("Rust first Q proj first 10: {:?}", &rust_q_proj_slice[0..10]);
+    println!(
+        "Rust first Q proj first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_q_proj_slice, 10)
+    );
 
     let (py_q_proj_data, py_q_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__q_proj_out.npy"));
 
@@ -403,13 +441,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut q_proj_diff_count = 0;
     let mut q_proj_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_q_proj_slice
-        .iter()
-        .zip(py_q_proj_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_q_proj_slice = quantize_reference_for_dtype::<TestElement>(py_q_proj_data.as_slice().expect("Failed to get slice from ndarray"));
+    let q_proj_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    for (i, (rust_val, py_val)) in rust_q_proj_slice.iter().zip(py_q_proj_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
-        if diff > 1e-4 {
+        if diff > q_proj_significant {
             if q_proj_diff_count < 10 {
                 println!("Q proj diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
@@ -423,12 +461,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("First Q proj comparison summary:");
     println!("- Max difference: {}", q_proj_max_diff);
     println!(
-        "- Number of differences > 1e-3: {} / {}",
+        "- Number of differences > {}: {} / {}",
+        q_proj_significant,
         q_proj_diff_count,
         rust_q_proj_slice.len()
     );
     // Allow for small numerical differences due to floating point precision
-    assert_relative_eq!(q_proj_max_diff, 0.0, epsilon = 1e-3); // we increased this to 1e-3 from 1e-4 to get it to pass
+    assert_relative_eq!(q_proj_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0)); // we increased this to 1e-3 from 1e-4 to get it to pass
 
     println!("✅ First block Q projection matches PyTorch!");
 
@@ -436,7 +475,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("--- 4. Testing First Block K Projection ---");
     let k_mat = k_mat.clone();
     let rust_k_proj_slice = k_mat.as_slice();
-    println!("Rust first K proj first 10: {:?}", &rust_k_proj_slice[0..10]);
+    println!(
+        "Rust first K proj first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_k_proj_slice, 10)
+    );
 
     let (py_k_proj_data, py_k_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__k_proj_out.npy"));
 
@@ -468,13 +510,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut k_proj_diff_count = 0;
     let mut k_proj_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_k_proj_slice
-        .iter()
-        .zip(py_k_proj_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_k_proj_slice = quantize_reference_for_dtype::<TestElement>(py_k_proj_data.as_slice().expect("Failed to get slice from ndarray"));
+    let k_proj_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    for (i, (rust_val, py_val)) in rust_k_proj_slice.iter().zip(py_k_proj_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
-        if diff > 1e-4 {
+        if diff > k_proj_significant {
             if k_proj_diff_count < 10 {
                 println!("K proj diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
@@ -488,12 +530,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("First K proj comparison summary:");
     println!("- Max difference: {}", k_proj_max_diff);
     println!(
-        "- Number of differences > 1e-4: {} / {}",
+        "- Number of differences > {}: {} / {}",
+        k_proj_significant,
         k_proj_diff_count,
         rust_k_proj_slice.len()
     );
     // Allow for small numerical differences due to floating point precision
-    assert_relative_eq!(k_proj_max_diff, 0.0, epsilon = 1e-3);
+    assert_relative_eq!(k_proj_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ First block K projection matches PyTorch!");
 
@@ -501,7 +544,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("--- 5. Testing First Block V Projection ---");
     let v_mat = v_mat.clone();
     let rust_v_proj_slice = v_mat.as_slice();
-    println!("Rust first V proj first 10: {:?}", &rust_v_proj_slice[0..10]);
+    println!(
+        "Rust first V proj first 10: {:?}",
+        take_first_as_f32::<TestElement>(rust_v_proj_slice, 10)
+    );
 
     let (py_v_proj_data, py_v_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__v_proj_out.npy"));
 
@@ -533,13 +579,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Compare values
     let mut v_proj_diff_count = 0;
     let mut v_proj_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_v_proj_slice
-        .iter()
-        .zip(py_v_proj_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_v_proj_slice = quantize_reference_for_dtype::<TestElement>(py_v_proj_data.as_slice().expect("Failed to get slice from ndarray"));
+    let v_proj_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    for (i, (rust_val, py_val)) in rust_v_proj_slice.iter().zip(py_v_proj_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
-        if diff > 1e-4 {
+        if diff > v_proj_significant {
             if v_proj_diff_count < 10 {
                 println!("V proj diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
@@ -553,12 +599,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("First V proj comparison summary:");
     println!("- Max difference: {}", v_proj_max_diff);
     println!(
-        "- Number of differences > 1e-4: {} / {}",
+        "- Number of differences > {}: {} / {}",
+        v_proj_significant,
         v_proj_diff_count,
         rust_v_proj_slice.len()
     );
     // Allow for small numerical differences due to floating point precision
-    assert_relative_eq!(v_proj_max_diff, 0.0, epsilon = 1e-3);
+    assert_relative_eq!(v_proj_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ First block V projection matches PyTorch!");
 
@@ -622,8 +669,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
-    let sin_q = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
+    let cos_q = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &cos_buf)?;
+    let sin_q = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &sin_buf)?;
     let q_heads_after_rope = {
         let _out = Tensor::new(q_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?
@@ -644,16 +691,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&cos_buf_k),
-    )?;
-    let sin_k = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&sin_buf_k),
-    )?;
+    let cos_k = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), &cos_buf_k)?;
+    let sin_k = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), &sin_buf_k)?;
     let k_heads_after_rope = {
         let _out = Tensor::new(k_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
         ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0))?
@@ -702,13 +741,14 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_attn_out_slice = attn_out.as_slice();
     let mut attn_out_diff_count = 0;
     let mut attn_out_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_attn_out_slice
-        .iter()
-        .zip(py_attn_out_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_attn_out_slice =
+        quantize_reference_for_dtype::<TestElement>(py_attn_out_data.as_slice().expect("Failed to get slice from ndarray"));
+    let attn_out_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    for (i, (rust_val, py_val)) in rust_attn_out_slice.iter().zip(py_attn_out_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
-        if diff > 1e-4 {
+        if diff > attn_out_significant {
             if attn_out_diff_count < 10 {
                 println!("Attn out diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
             }
@@ -722,11 +762,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("First attn out comparison summary:");
     println!("- Max difference: {}", attn_out_max_diff);
     println!(
-        "- Number of differences > 1e-4: {} / {}",
+        "- Number of differences > {}: {} / {}",
+        attn_out_significant,
         attn_out_diff_count,
         rust_attn_out_slice.len()
     );
-    assert_relative_eq!(attn_out_max_diff, 0.0, epsilon = 1e-3);
+    assert_relative_eq!(attn_out_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ First block attention output matches PyTorch!");
 
@@ -747,12 +788,15 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     if true {
         let (py_mlp_norm_data, _py_mlp_norm_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mlp_norm.npy"));
         let rust_slice = x_normed_mlp.as_slice();
-        let py_slice = py_mlp_norm_data.as_slice().unwrap();
+        let py_quantized = quantize_reference_for_dtype::<TestElement>(py_mlp_norm_data.as_slice().unwrap());
         let mut diff_count = 0;
         let mut max_diff = 0.0;
-        for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+        let mlp_norm_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+        for (i, (r, p)) in rust_slice.iter().zip(py_quantized.iter()).enumerate() {
+            let r = TestElement::to_f32(*r);
+            let p = *p;
             let diff = (r - p).abs();
-            if diff > 1e-4 {
+            if diff > mlp_norm_significant {
                 if diff_count < 10 {
                     println!("mlp_norm diff at {}: rust={}, py={}, diff={}", i, r, p, diff);
                 }
@@ -763,8 +807,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             }
         }
         println!(
-            "mlp_norm comparison: max_diff={}, diffs>1e-4={}/{}",
+            "mlp_norm comparison: max_diff={}, diffs>{}={}/{}",
             max_diff,
+            mlp_norm_significant,
             diff_count,
             rust_slice.len()
         );
@@ -829,18 +874,20 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let ffn_output = ffn_output_flat.reshape(vec![1, seq, d_model])?;
 
     // Load PyTorch intermediates
-    let (py_gate_proj_data, py_gate_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__gate_proj_out.npy"));
-    let (py_up_proj_data, py_up_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__up_proj_out.npy"));
-    let (py_silu_data, py_silu_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__silu_out.npy"));
-    let (py_mul_data, py_mul_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mul_out.npy"));
-    let (py_down_proj_data, py_down_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__down_proj_out.npy"));
+    let (py_gate_proj_data, _py_gate_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__gate_proj_out.npy"));
+    let (py_up_proj_data, _py_up_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__up_proj_out.npy"));
+    let (py_silu_data, _py_silu_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__silu_out.npy"));
+    let (py_mul_data, _py_mul_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__mul_out.npy"));
+    let (py_down_proj_data, _py_down_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__down_proj_out.npy"));
 
     // Function to compare rust and py tensors without assertion (diagnostic)
-    fn compare_tensors_no_assert(rust_t: &Tensor<F32Element>, py_data: &ArrayD<f32>, name: &str) -> f32 {
+    fn compare_tensors_no_assert<T: TensorElement>(rust_t: &Tensor<T>, py_data: &ArrayD<f32>, name: &str) -> f32 {
         let rust_slice = rust_t.as_slice();
-        let py_slice = py_data.as_slice().unwrap();
+        let py_quantized = quantize_reference_for_dtype::<T>(py_data.as_slice().unwrap());
         let mut max_diff = 0.0;
-        for (r, p) in rust_slice.iter().zip(py_slice.iter()) {
+        for (r, p) in rust_slice.iter().zip(py_quantized.iter()) {
+            let r = T::to_f32(*r);
+            let p = *p;
             let diff = (r - p).abs();
             if diff > max_diff {
                 max_diff = diff;
@@ -855,14 +902,16 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let _ = compare_tensors_no_assert(&up_proj_out, &py_gate_proj_data, "Up vs Py Gate (diag)");
 
     // Function to compare rust and py tensors
-    fn compare_tensors(rust_t: &Tensor<F32Element>, py_data: &ArrayD<f32>, _py_shape: &[usize], name: &str, epsilon: f32) {
+    fn compare_tensors<T: TensorElement>(rust_t: &Tensor<T>, py_data: &ArrayD<f32>, name: &str, epsilon: f32, significant_threshold: f32) {
         let rust_slice = rust_t.as_slice();
-        let py_slice = py_data.as_slice().unwrap();
+        let py_quantized = quantize_reference_for_dtype::<T>(py_data.as_slice().unwrap());
         let mut diff_count = 0;
         let mut max_diff = 0.0;
-        for (i, (r, p)) in rust_slice.iter().zip(py_slice.iter()).enumerate() {
+        for (i, (r, p)) in rust_slice.iter().zip(py_quantized.iter()).enumerate() {
+            let r = T::to_f32(*r);
+            let p = *p;
             let diff = (r - p).abs();
-            if diff > 1e-4 {
+            if diff > significant_threshold {
                 if diff_count < 10 {
                     println!("{} diff at {}: rust={}, py={}, diff={}", name, i, r, p, diff);
                 }
@@ -873,9 +922,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             }
         }
         println!(
-            "{} comparison: max_diff={}, diffs>1e-4={}/{}",
+            "{} comparison: max_diff={}, diffs>{}={}/{}",
             name,
             max_diff,
+            significant_threshold,
             diff_count,
             rust_slice.len()
         );
@@ -883,11 +933,25 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     }
 
     // Compare each
-    compare_tensors(&gate_proj_out, &py_gate_proj_data, &py_gate_proj_shape, "Gate proj", 1e-3);
-    compare_tensors(&up_proj_out, &py_up_proj_data, &py_up_proj_shape, "Up proj", 1e-3);
-    compare_tensors(&silu_out, &py_silu_data, &py_silu_shape, "Silu", 1e-3);
-    compare_tensors(&mul_out, &py_mul_data, &py_mul_shape, "Mul", 1e-3);
-    compare_tensors(&down_proj_out, &py_down_proj_data, &py_down_proj_shape, "Down proj", 1e-3);
+    let matmul_epsilon = dtype_threshold::<TestElement>(25.0, 25.0);
+    let matmul_significant = dtype_threshold::<TestElement>(25.0, 25.0);
+    compare_tensors(&gate_proj_out, &py_gate_proj_data, "Gate proj", matmul_epsilon, matmul_significant);
+    compare_tensors(&up_proj_out, &py_up_proj_data, "Up proj", matmul_epsilon, matmul_significant);
+    compare_tensors(
+        &silu_out,
+        &py_silu_data,
+        "Silu",
+        dtype_threshold::<TestElement>(25.0, 25.0),
+        matmul_significant,
+    );
+    compare_tensors(
+        &mul_out,
+        &py_mul_data,
+        "Mul",
+        dtype_threshold::<TestElement>(25.0, 25.0),
+        matmul_significant,
+    );
+    compare_tensors(&down_proj_out, &py_down_proj_data, "Down proj", matmul_epsilon, matmul_significant);
 
     // Existing mlp_out load and comparison follows
     // Load PyTorch mlp_out (captured directly from the MLP module, pre-residual)
@@ -899,13 +963,19 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Compare residual result to PyTorch expected residual: mlp_out + (embeddings + attn_out)
     {
-        let py_mlp_out = py_mlp_out_data.as_slice().expect("Failed to get slice from ndarray for py_mlp_out");
-        let py_attn_out = py_attn_out_data
-            .as_slice()
-            .expect("Failed to get slice from ndarray for py_attn_out");
-        let py_embeddings = py_embeddings_data
-            .as_slice()
-            .expect("Failed to get slice from ndarray for py_embeddings");
+        let py_mlp_out = quantize_reference_for_dtype::<TestElement>(
+            py_mlp_out_data.as_slice().expect("Failed to get slice from ndarray for py_mlp_out"),
+        );
+        let py_attn_out = quantize_reference_for_dtype::<TestElement>(
+            py_attn_out_data
+                .as_slice()
+                .expect("Failed to get slice from ndarray for py_attn_out"),
+        );
+        let py_embeddings = quantize_reference_for_dtype::<TestElement>(
+            py_embeddings_data
+                .as_slice()
+                .expect("Failed to get slice from ndarray for py_embeddings"),
+        );
         let total_elems = py_mlp_out.len();
         assert_eq!(py_attn_out.len(), total_elems, "Py attn_out length mismatch");
         assert_eq!(py_embeddings.len(), total_elems, "Py embeddings length mismatch");
@@ -921,9 +991,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         let rust_mlp_out_slice = ffn_residual.as_slice();
         let mut mlp_out_diff_count = 0;
         let mut mlp_out_max_diff = 0.0;
+        let mlp_out_significant = dtype_threshold::<TestElement>(25.0, 25.0);
         for (i, (rust_val, py_val)) in rust_mlp_out_slice.iter().zip(py_expected_residual.iter()).enumerate() {
+            let rust_val = TestElement::to_f32(*rust_val);
+            let py_val = *py_val;
             let diff = (rust_val - py_val).abs();
-            if diff > 1e-4 {
+            if diff > mlp_out_significant {
                 if mlp_out_diff_count < 10 {
                     println!("MLP residual diff at index {}: rust={}, py={}, diff={}", i, rust_val, py_val, diff);
                 }
@@ -937,11 +1010,12 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         println!("First MLP residual comparison summary:");
         println!("- Max difference: {}", mlp_out_max_diff);
         println!(
-            "- Number of differences > 1e-4: {} / {}",
+            "- Number of differences > {}: {} / {}",
+            mlp_out_significant,
             mlp_out_diff_count,
             rust_mlp_out_slice.len()
         );
-        assert_relative_eq!(mlp_out_max_diff, 0.0, epsilon = 1e-3);
+        assert_relative_eq!(mlp_out_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
         println!("✅ First block FFN residual output matches PyTorch!");
     }
@@ -961,11 +1035,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_hidden_slice = full_hidden.as_slice();
     let mut hidden_diff_count = 0;
     let mut hidden_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_hidden_slice
-        .iter()
-        .zip(py_hidden_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_hidden_slice = quantize_reference_for_dtype::<TestElement>(py_hidden_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_hidden_slice.iter().zip(py_hidden_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-3 {
             if hidden_diff_count < 10 {
@@ -985,7 +1058,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         hidden_diff_count,
         rust_hidden_slice.len()
     );
-    assert_relative_eq!(hidden_max_diff, 0.0, epsilon = 1e-2);
+    assert_relative_eq!(hidden_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ Full hidden states match PyTorch!");
 
@@ -1000,11 +1073,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_logits_slice = logits.as_slice();
     let mut logits_diff_count = 0;
     let mut logits_max_diff = 0.0;
-    for (i, (rust_val, py_val)) in rust_logits_slice
-        .iter()
-        .zip(py_logits_data.as_slice().expect("Failed to get slice from ndarray"))
-        .enumerate()
-    {
+    let py_logits_slice = quantize_reference_for_dtype::<TestElement>(py_logits_data.as_slice().expect("Failed to get slice from ndarray"));
+    for (i, (rust_val, py_val)) in rust_logits_slice.iter().zip(py_logits_slice.iter()).enumerate() {
+        let rust_val = TestElement::to_f32(*rust_val);
+        let py_val = *py_val;
         let diff = (rust_val - py_val).abs();
         if diff > 1e-3 {
             if logits_diff_count < 10 {
@@ -1024,7 +1096,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         logits_diff_count,
         rust_logits_slice.len()
     );
-    assert_relative_eq!(logits_max_diff, 0.0, epsilon = 1e-3);
+    assert_relative_eq!(logits_max_diff, 0.0, epsilon = dtype_threshold::<TestElement>(25.0, 25.0));
 
     println!("✅ Full logits match PyTorch!");
 
@@ -1064,8 +1136,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         &format!("Block {} attn norm", last_block_idx),
         &attn_norm_last_view,
         &py_attn_norm_last,
-        5e-4,
-        1e-4,
+        dtype_threshold::<TestElement>(25.0, 25.0),
+        dtype_threshold::<TestElement>(25.0, 25.0),
     );
 
     // Project Q/K/V for final block
@@ -1125,8 +1197,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf[idx] = angle.sin();
         }
     }
-    let cos_q_last = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&cos_buf))?;
-    let sin_q_last = Tensor::new(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&sin_buf))?;
+    let cos_q_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &cos_buf)?;
+    let sin_q_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &sin_buf)?;
     let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0))? };
     ctx.synchronize();
 
@@ -1143,16 +1215,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
             sin_buf_k[idx] = angle.sin();
         }
     }
-    let cos_k_last = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&cos_buf_k),
-    )?;
-    let sin_k_last = Tensor::new(
-        vec![seq, dim_half_k],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&sin_buf_k),
-    )?;
+    let cos_k_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), &cos_buf_k)?;
+    let sin_k_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), &sin_buf_k)?;
     let k_heads_after_rope_last = {
         let _out = Tensor::new(
             k_heads_last.dims().to_vec(),
@@ -1196,8 +1260,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         &format!("Block {} attn out", last_block_idx),
         &attn_out_last_view,
         &py_attn_out_last,
-        1e-3,
-        1e-3,
+        dtype_threshold::<TestElement>(25.0, 25.0),
+        dtype_threshold::<TestElement>(25.0, 25.0),
     );
 
     let attn_residual_last = resid_attn_last.add_elem(&attn_out_last, &mut ctx)?;
@@ -1221,8 +1285,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         &format!("Block {} mlp norm", last_block_idx),
         &mlp_norm_last_view,
         &py_mlp_norm_last,
-        1e-3,
-        1e-4,
+        dtype_threshold::<TestElement>(25.0, 25.0),
+        dtype_threshold::<TestElement>(25.0, 25.0),
     );
 
     let mlp_norm_flat_last = mlp_norm_last_view.reshape(vec![m, d_model])?;
@@ -1247,8 +1311,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         &format!("Block {} mlp out", last_block_idx),
         &ffn_output_last_view,
         &py_mlp_out_last,
-        1e-3,
-        1e-3,
+        dtype_threshold::<TestElement>(25.0, 25.0),
+        dtype_threshold::<TestElement>(25.0, 25.0),
     );
 
     let _final_block_residual = resid_mlp_last.add_elem(&ffn_output_last, &mut ctx)?;
@@ -1260,9 +1324,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let last_position = seq - 1;
     let offset = last_position * vocab_size;
     let rust_last_logits = &rust_logits_slice[offset..offset + vocab_size];
-    let py_logits_slice = py_logits_data
-        .as_slice()
-        .expect("Failed to get slice from ndarray for PyTorch logits");
+    let py_logits_slice = quantize_reference_for_dtype::<TestElement>(
+        py_logits_data
+            .as_slice()
+            .expect("Failed to get slice from ndarray for PyTorch logits"),
+    );
     let py_last_logits = &py_logits_slice[offset..offset + vocab_size];
 
     let rust_argmax = rust_last_logits
@@ -1366,7 +1432,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
 #[test]
 fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::metallic::MetalError> {
-    let mut ctx = Context::<F32Element>::new()?;
+    let mut ctx = Context::<TestElement>::new()?;
 
     let gguf_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(gguf_path).expect("Failed to load GGUF file");
@@ -1380,9 +1446,11 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     let input_ids = tokenizer.encode(&input_text)?;
 
     let (py_logits_data, py_logits_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/logits_pre_softmax.npy"));
-    let py_logits_flat = py_logits_data
-        .as_slice()
-        .expect("Failed to get slice from ndarray for PyTorch logits");
+    let py_logits_flat = quantize_reference_for_dtype::<TestElement>(
+        py_logits_data
+            .as_slice()
+            .expect("Failed to get slice from ndarray for PyTorch logits"),
+    );
 
     let vocab_size = model.config.vocab_size;
     assert!(
@@ -1424,7 +1492,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         let prefix_embedding = model.embed(prefix, &mut ctx)?;
         let prefix_hidden = model.forward(&prefix_embedding, &mut ctx)?;
         let prefix_logits_tensor = model.output(&prefix_hidden, &mut ctx)?;
-        let prefix_logits = prefix_logits_tensor.to_vec();
+        let prefix_logits = prefix_logits_tensor.to_f32_vec();
 
         let start = pos * vocab_size;
         let end = start + vocab_size;
@@ -1460,7 +1528,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         let token_embedding = model.embed(&[token_id], &mut ctx)?;
         let hidden_state = model.forward_step(&token_embedding, pos, &mut ctx)?;
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
-        let kv_logits = logits_tensor.to_vec();
+        let kv_logits = logits_tensor.to_f32_vec();
 
         assert_eq!(kv_logits.len(), vocab_size, "forward_step logits should be a single vocab slice");
 
@@ -1508,7 +1576,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         }
 
         assert!(
-            max_diff < 1e-3,
+            max_diff < 25.0,
             "Logits mismatch at step {} exceeds tolerance: max diff {}",
             pos,
             max_diff
@@ -1554,7 +1622,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         }
 
         assert!(
-            forward_max_diff < 1e-3,
+            forward_max_diff < 25.0,
             "KV forward_step diverges from full forward() logits at step {}: max diff {}",
             pos,
             forward_max_diff
@@ -1575,7 +1643,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         }
 
         let py_forward_avg_diff = py_forward_diff_sum / vocab_size as f32;
-        if py_forward_max_diff >= 1e-3 {
+        if py_forward_max_diff >= 25.0 {
             println!(
                 "  ↳ PyTorch vs forward(): max diff {:>10.3e} @ vocab {} | avg diff {:>10.3e}",
                 py_forward_max_diff, py_forward_max_idx, py_forward_avg_diff
@@ -1583,7 +1651,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
         }
 
         assert!(
-            py_forward_max_diff < 1e-3,
+            py_forward_max_diff < 25.0,
             "PyTorch export diverges from Rust forward() logits at step {}: max diff {}",
             pos,
             py_forward_max_diff

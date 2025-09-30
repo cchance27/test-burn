@@ -1,12 +1,12 @@
 use super::{Context, MetalError, Tensor};
 use crate::app_event::AppEvent;
-use crate::metallic::{TensorElement, Tokenizer};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::metrics::{
     BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ProcessMemoryTracker, RollingStat, ScalarStat, SoftmaxBackendStats,
     build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
 };
 use crate::metallic::models::qwen25::Qwen25;
+use crate::metallic::{TensorElement, Tokenizer};
 use rand::prelude::*;
 use std::{
     sync::{Arc, mpsc},
@@ -39,15 +39,21 @@ impl Default for GenerationConfig {
 /// - `logits` is a slice of f32 representing vocabulary logits.
 ///   Returns selected token index.
 pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, top_p: f32, temperature: f32) -> usize {
+    let mut fallback_idx = 0usize;
+    let mut fallback_found = false;
+    let mut fallback_val = f32::NEG_INFINITY;
+    for (i, &raw) in logits.iter().enumerate() {
+        let val = T::to_f32(raw);
+        if val.is_finite() && (!fallback_found || val > fallback_val) {
+            fallback_idx = i;
+            fallback_val = val;
+            fallback_found = true;
+        }
+    }
+
     // Handle deterministic (greedy) sampling when temperature is zero or non-finite.
     if temperature <= 0.0 || !temperature.is_finite() {
-        return logits
-            .iter()
-            .enumerate()
-            .map(|(i, &v)| (i, T::to_f32(v)))  // Convert to f32 for comparison
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
+        return if fallback_found { fallback_idx } else { 0 };
     }
 
     // Apply temperature scaling and convert to positive scores
@@ -57,7 +63,7 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     // Filter out any infinity/nan values first
     let finite_scaled: Vec<f32> = scaled.iter().cloned().filter(|x| x.is_finite()).collect();
     if finite_scaled.is_empty() {
-        return 0; // fallback if all logits are non-finite
+        return if fallback_found { fallback_idx } else { 0 };
     }
 
     let m = finite_scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -82,7 +88,7 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     // Normalize to probabilities
     let sum: f32 = scaled.iter().sum();
     if sum <= 0.0 || sum.is_infinite() || sum.is_nan() {
-        return 0usize; // fallback
+        return if fallback_found { fallback_idx } else { 0 };
     }
     for x in &mut scaled {
         *x /= sum;
@@ -111,7 +117,7 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     let mut shortlist_probs: Vec<f32> = shortlist.iter().map(|&i| scaled[i]).collect();
     let ssum: f32 = shortlist_probs.iter().sum();
     if ssum <= 0.0 || ssum.is_infinite() || ssum.is_nan() {
-        return shortlist[0];
+        return shortlist.first().copied().unwrap_or(if fallback_found { fallback_idx } else { 0 });
     }
     for p in &mut shortlist_probs {
         *p /= ssum;
@@ -149,7 +155,7 @@ pub fn generate<T: TensorElement>(
 }
 
 /// High-level end-to-end generation pipeline with token streaming support
-pub fn generate_streaming<T: TensorElement> (
+pub fn generate_streaming<T: TensorElement>(
     qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
     ctx: &mut Context<T>,
@@ -209,7 +215,7 @@ pub fn generate_streaming<T: TensorElement> (
 
 /// High-level autoregressive generation loop using Qwen25 with KV caches for debugging.
 /// This implementation processes the full context each time for comparison.
-pub fn generate_autoregressive_with_kv_cache<T: TensorElement> (
+pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
     ctx: &mut Context<T>,

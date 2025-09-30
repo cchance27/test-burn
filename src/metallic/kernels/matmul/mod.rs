@@ -98,6 +98,27 @@ impl KernelInvocable for MatMulOp {
         };
         let out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let result_view = out.as_mps_matrix_batch_view()?;
+        let left_dtype = left_tensor.dtype;
+        let right_dtype = right_tensor.dtype;
+        let result_dtype = out.dtype;
+
+        debug_assert_eq!(left_dtype, right_dtype);
+        debug_assert_eq!(left_dtype, result_dtype);
+
+        let matmul_left_view = left_view;
+        let matmul_right_view = right_view;
+        let matmul_result_view = result_view;
+
+        let matmul_left_buf = left_tensor.buf.clone();
+        let matmul_left_offset = left_tensor.offset;
+        let matmul_right_buf = right_tensor.buf.clone();
+        let matmul_right_offset = right_tensor.offset;
+        let matmul_result_buf = out.buf.clone();
+        let matmul_result_offset = out.offset;
+
+        let left_desc_dtype = left_dtype;
+        let right_desc_dtype = right_dtype;
+        let result_desc_dtype = result_dtype;
 
         // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
@@ -106,7 +127,7 @@ impl KernelInvocable for MatMulOp {
             result_rows: eff_left_rows,
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
-            batch_size: result_view.batch,
+            batch_size: matmul_result_view.batch,
             alpha: 1.0,
             beta: 0.0,
         };
@@ -114,47 +135,50 @@ impl KernelInvocable for MatMulOp {
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 
-        // Create MPS matrix descriptors based on original dimensions (not transposed ones)
+        // Create MPS matrix descriptors based on the buffers consumed by MPS
         let left_desc_key = MpsMatrixDescriptorKey {
-            rows: left_view.rows,
-            columns: left_view.columns,
-            row_bytes: left_view.row_bytes,
-            matrices: left_view.batch,
-            matrix_bytes: left_view.matrix_bytes,
+            rows: matmul_left_view.rows,
+            columns: matmul_left_view.columns,
+            row_bytes: matmul_left_view.row_bytes,
+            matrices: matmul_left_view.batch,
+            matrix_bytes: matmul_left_view.matrix_bytes,
+            dtype: left_desc_dtype,
         };
         let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
 
         let right_desc_key = MpsMatrixDescriptorKey {
-            rows: right_view.rows,
-            columns: right_view.columns,
-            row_bytes: right_view.row_bytes,
-            matrices: right_view.batch,
-            matrix_bytes: right_view.matrix_bytes,
+            rows: matmul_right_view.rows,
+            columns: matmul_right_view.columns,
+            row_bytes: matmul_right_view.row_bytes,
+            matrices: matmul_right_view.batch,
+            matrix_bytes: matmul_right_view.matrix_bytes,
+            dtype: right_desc_dtype,
         };
         let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
 
         let result_desc_key = MpsMatrixDescriptorKey {
             rows: eff_left_rows,
             columns: eff_right_cols,
-            row_bytes: result_view.row_bytes,
-            matrices: result_view.batch,
-            matrix_bytes: result_view.matrix_bytes,
+            row_bytes: matmul_result_view.row_bytes,
+            matrices: matmul_result_view.batch,
+            matrix_bytes: matmul_result_view.matrix_bytes,
+            dtype: result_desc_dtype,
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
         let op = MatMul {
-            left_buf: left_tensor.buf.clone(),
-            left_offset: left_tensor.offset,
-            right_buf: right_tensor.buf.clone(),
-            right_offset: right_tensor.offset,
-            result_buf: out.buf.clone(),
-            result_offset: out.offset,
+            left_buf: matmul_left_buf,
+            left_offset: matmul_left_offset,
+            right_buf: matmul_right_buf,
+            right_offset: matmul_right_offset,
+            result_buf: matmul_result_buf,
+            result_offset: matmul_result_offset,
             left_desc,
             right_desc,
             result_desc,
             gemm,
-            batch_size: result_view.batch,
+            batch_size: matmul_result_view.batch,
         };
 
         // Return the boxed operation and the output tensor.
@@ -164,7 +188,7 @@ impl KernelInvocable for MatMulOp {
 
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for MatMul{
+impl Operation for MatMul {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -181,6 +205,7 @@ impl Operation for MatMul{
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
         Ok(())
     }
 }

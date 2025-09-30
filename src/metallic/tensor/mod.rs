@@ -1,6 +1,3 @@
-#![allow(dead_code)]
-mod dtypes;
-
 use super::{Context, MetalError, operation::CommandBuffer};
 use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
@@ -11,18 +8,19 @@ use crate::metallic::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
 pub use dtypes::*;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLComputeCommandEncoder,
-    MTLComputePipelineState, MTLDevice, MTLResourceOptions, MTLSize,
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLDevice, MTLResourceOptions, MTLSize,
 };
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
-use std::ops::{Add, Deref, Div, Mul, Sub};
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 pub type RetainedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
+
+pub mod dtypes;
 
 #[derive(Clone)]
 struct ThreadSafeBuffer {
@@ -290,12 +288,6 @@ impl<T: TensorElement> Tensor<T> {
     #[inline]
     fn cpu_fill_threshold_bytes() -> usize {
         DEFAULT_CPU_FILL_THRESHOLD_MB * 1024 * 1024
-    }
-
-    /// Helper function to bind a tensor to a compute encoder with correct offset
-    #[inline]
-    fn bind_tensor(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, tensor: &Self) {
-        set_buffer(encoder, index, &tensor.buf, tensor.offset);
     }
 
     #[inline]
@@ -977,7 +969,7 @@ impl<T: TensorElement> Tensor<T> {
         // So we need to get the pipeline and encode it manually
         let pipeline = context
             .kernel_manager
-            .get_pipeline(crate::metallic::kernels::KernelFunction::Ones, &context.device)?;
+            .get_pipeline(crate::metallic::kernels::KernelFunction::Ones, T::DTYPE, &context.device)?;
 
         let encoder = command_buffer
             .raw()
@@ -1028,7 +1020,7 @@ impl<T: TensorElement> Tensor<T> {
         // Get pipeline and encode manually for batching
         let pipeline = context
             .kernel_manager
-            .get_pipeline(crate::metallic::kernels::KernelFunction::Arange, &context.device)?;
+            .get_pipeline(crate::metallic::kernels::KernelFunction::Arange, T::DTYPE, &context.device)?;
 
         let encoder = command_buffer
             .raw()
@@ -1064,9 +1056,10 @@ impl<T: TensorElement> Tensor<T> {
         let tensor = Self::new(dims, TensorStorage::Pooled(context), TensorInit::Uninitialized)?;
 
         // Get pipeline and encode manually for batching with default [0, 1) range
-        let pipeline = context
-            .kernel_manager
-            .get_pipeline(crate::metallic::kernels::KernelFunction::RandomUniform, &context.device)?;
+        let pipeline =
+            context
+                .kernel_manager
+                .get_pipeline(crate::metallic::kernels::KernelFunction::RandomUniform, T::DTYPE, &context.device)?;
 
         let encoder = command_buffer
             .raw()
@@ -1237,38 +1230,6 @@ impl<T: TensorElement> Tensor<T> {
         self.add_elem(&scalar_tensor, ctx)
     }
 
-    fn unary_elementwise<F>(a: &Self, f: F) -> Result<Self, MetalError> 
-    where 
-        F: Fn(f32) -> f32 
-    {
-        let byte_len = a.size_bytes();
-        let buf = a
-            .device
-            .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(byte_len))?;
-        let mut out = Self {
-            buf,
-            dims: a.dims.clone(),
-            strides: Self::compute_strides(&a.dims),
-            dtype: a.dtype,
-            device: a.device.clone(),
-            offset: 0,
-            host_accessible: true,
-            host_access: Arc::new(Mutex::new(HostAccessState::new(0, byte_len))),
-            command_queue: a.command_queue.clone(),
-            defining_cmd_buffer: Rc::new(RefCell::new(None)),
-            marker: PhantomData,
-        };
-        let aslice = a.as_slice();
-        let oslice = out.as_mut_slice();
-        for i in 0..a.len() {
-            let input_val = T::to_f32(aslice[i]);
-            let output_val = f(input_val);
-            oslice[i] = T::from_f32(output_val);
-        }
-        Ok(out)
-    }
-
     pub fn get_batch(&self, batch_index: usize) -> Result<Self, MetalError> {
         if self.dims.len() < 3 {
             return Err(MetalError::InvalidShape("get_batch requires at least 3 dimensions".to_string()));
@@ -1277,7 +1238,7 @@ impl<T: TensorElement> Tensor<T> {
             return Err(MetalError::InvalidShape("batch_index out of bounds".to_string()));
         }
 
-        let elem_size = std::mem::size_of::<f32>();
+        let elem_size = self.dtype.size_bytes();
         let batch_stride_elems = if self.strides.len() == self.dims.len() && !self.strides.is_empty() {
             self.strides[0]
         } else {
@@ -1300,14 +1261,18 @@ impl<T: TensorElement> Tensor<T> {
             if !T::is_finite(val) {
                 return Err(MetalError::InvalidOperation(format!(
                     "Non-finite value detected at index {}: {} in tensor with shape {:?}",
-                    i, T::to_f32(val), self.dims
+                    i,
+                    T::to_f32(val),
+                    self.dims
                 )));
             }
             // Check for extremely large values that might cause overflow in subsequent operations
             if T::to_f32(T::abs(val)) > 1e6 {
                 eprintln!(
                     "Warning: Very large value detected at index {}: {} in tensor with shape {:?}. This could cause numerical instability.",
-                    i, T::to_f32(val), self.dims
+                    i,
+                    T::to_f32(val),
+                    self.dims
                 );
             }
         }

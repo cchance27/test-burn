@@ -1,8 +1,7 @@
 use crate::gguf::{GGUFValue, model_loader::GGUFModel, model_loader::GGUFTensor};
 use crate::metallic::{
-    Context, Dtype, MetalError, Tensor, TensorElement,
+    Context, Dtype, MetalError, Tensor, TensorElement, TensorInit, TensorStorage,
     models::{LoadableModel, Qwen25, Qwen25Config},
-    TensorStorage, TensorInit,
 };
 use std::borrow::Cow;
 
@@ -31,10 +30,7 @@ fn copy_f32_into_tensor<TDst: TensorElement>(src: &[f32], dst: &mut Tensor<TDst>
     Ok(())
 }
 
-fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(
-    src: &Tensor<TSrc>,
-    dst: &mut Tensor<TDst>,
-) -> Result<(), MetalError> {
+fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>, dst: &mut Tensor<TDst>) -> Result<(), MetalError> {
     if src.len() != dst.len() {
         return Err(MetalError::DimensionMismatch {
             expected: dst.len(),
@@ -52,12 +48,7 @@ fn upload_tensor_to_context<TSrc: TensorElement, TDst: TensorElement>(
 ) -> Result<Tensor<TDst>, MetalError> {
     let dims = src.dims().to_vec();
     let src_as_f32 = tensor_data_as_f32(src);
-    let converted: Vec<TDst::Scalar> = src_as_f32
-        .as_ref()
-        .iter()
-        .copied()
-        .map(TDst::from_f32)
-        .collect();
+    let converted: Vec<TDst::Scalar> = src_as_f32.as_ref().iter().copied().map(TDst::from_f32).collect();
 
     Tensor::new(dims, TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(&converted))
 }
@@ -462,10 +453,6 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
                     let new_tensor = upload_tensor_to_context(tensor, &*ctx)?;
                     load_tensor_into_model(&lname, &new_tensor, &mut qwen)
                 }
-                GGUFTensor::BF16 { tensor, .. } => {
-                    let new_tensor = upload_tensor_to_context(tensor, &*ctx)?;
-                    load_tensor_into_model(&lname, &new_tensor, &mut qwen)
-                }
             };
 
             if let Err(err) = result {
@@ -561,8 +548,8 @@ mod tests {
         let fused_dims = vec![2, 6];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
-        let err =
-            pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).expect_err("expected invalid shape error");
+        let err = pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0)
+            .expect_err("expected invalid shape error");
 
         match err {
             MetalError::InvalidShape(_) => {}

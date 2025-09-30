@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use crate::metallic::tensor::Dtype;
+
 #[derive(Error, Debug)]
 pub enum MetalError {
     #[error("Device not found")]
@@ -34,10 +36,14 @@ pub enum MetalError {
     OperationNotSupported(String),
     #[error("Invalid operation: {0}")]
     InvalidOperation(String),
+    #[error("Unsupported dtype {dtype:?} for {operation}")]
+    UnsupportedDtype { operation: &'static str, dtype: Dtype },
     #[error("Tokenizer error: {0}")]
     TokenizerError(Box<crate::metallic::tokenizer::TokenizerError>),
     #[error("Regex Error: {0}")]
     RegexError(Box<fancy_regex::Error>),
+    #[error("Tensor dtype mismatch: expected {expected:?}, got {actual:?}")]
+    DtypeMismatch { expected: Dtype, actual: Dtype },
 }
 
 impl From<crate::metallic::tokenizer::TokenizerError> for MetalError {

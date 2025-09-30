@@ -1,9 +1,6 @@
-#![allow(unused_imports)]
-pub use context::{Context, ContextConfig};
+pub use context::Context;
 pub use error::MetalError;
-pub use tensor::{
-    BF16Element, Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage,
-};
+pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 
 pub use tokenizer::{SpecialTokens, Tokenizer, TokenizerError};
 

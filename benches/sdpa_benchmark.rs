@@ -11,13 +11,13 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use std::ffi::c_void;
 use test_burn::alternatives::sdpa_burn::scaled_dot_product_attention_burn;
 use test_burn::alternatives::sdpa_metal::scaled_dot_product_attention_metal;
-use test_burn::metallic::{Context, Tensor};
+use test_burn::metallic::{Context, F32Element, Tensor};
 
 /// Number of iterations to run within each benchmark measurement
 /// This helps reduce measurement noise for faster operations
 const ITERATIONS: usize = 1;
 
-fn sdpa_metallic(batch: usize, seq: usize, dim: usize, causal: bool, context: &mut Context) {
+fn sdpa_metallic(batch: usize, seq: usize, dim: usize, causal: bool, context: &mut Context<F32Element>) {
     let q_tensor = Tensor::random_uniform(vec![batch, seq, dim], context).unwrap();
     let k_tensor = Tensor::random_uniform(vec![batch, seq, dim], context).unwrap();
     let v_tensor = Tensor::random_uniform(vec![batch, seq, dim], context).unwrap();
@@ -63,7 +63,7 @@ fn benchmark_sdpa_small(c: &mut Criterion) {
     let seq = 128;
     let dim = 64;
 
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     let causal = false;
     group.bench_function("metallic", |b| {
@@ -84,7 +84,7 @@ fn benchmark_sdpa_medium(c: &mut Criterion) {
     let seq = 512;
     let dim = 64;
 
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     let causal = false;
     group.bench_function("metallic", |b| {
@@ -105,7 +105,7 @@ fn benchmark_sdpa_large(c: &mut Criterion) {
     let seq = 1024;
     let dim = 96;
 
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
 
     let causal = false;
     group.bench_function("metallic", |b| {
@@ -121,7 +121,7 @@ fn benchmark_sdpa_large(c: &mut Criterion) {
 fn benchmark_sdpa_metallic(c: &mut Criterion) {
     let mut group = c.benchmark_group("sdpa_metallic");
 
-    let mut context = Context::new().unwrap();
+    let mut context = Context::<F32Element>::new().unwrap();
     let causal = true;
     group.bench_function("small_non_causal", |b| {
         b.iter(|| {
