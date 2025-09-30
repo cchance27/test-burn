@@ -83,6 +83,8 @@ impl KernelLibrary {
 pub enum KernelFunction {
     CastToF16,
     CastFromF16,
+    CastToF32,
+    CastFromF32,
     ElemwiseAdd,
     ElemwiseBroadcastAdd,
     ElemwiseDiv,
@@ -106,7 +108,9 @@ pub enum KernelFunction {
 impl KernelFunction {
     fn library(&self) -> KernelLibrary {
         match self {
-            KernelFunction::CastToF16 | KernelFunction::CastFromF16 => KernelLibrary::Cast,
+            KernelFunction::CastToF16 | KernelFunction::CastFromF16 | KernelFunction::CastToF32 | KernelFunction::CastFromF32 => {
+                KernelLibrary::Cast
+            }
             KernelFunction::ElemwiseAdd | KernelFunction::ElemwiseBroadcastAdd => KernelLibrary::ElemwiseAdd,
             KernelFunction::ElemwiseDiv => KernelLibrary::ElemwiseDiv,
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
@@ -129,6 +133,8 @@ impl KernelFunction {
         match self {
             KernelFunction::CastToF16 => "cast_to_f16",
             KernelFunction::CastFromF16 => "cast_from_f16",
+            KernelFunction::CastToF32 => "cast_to_f32",
+            KernelFunction::CastFromF32 => "cast_from_f32",
             KernelFunction::ElemwiseAdd => "elemwise_add",
             KernelFunction::ElemwiseBroadcastAdd => "elemwise_broadcast_add",
             KernelFunction::ElemwiseDiv => "elemwise_div",
@@ -160,6 +166,12 @@ impl KernelFunction {
             (KernelFunction::CastFromF16, F32) => "cast_from_f16_kernel_f32",
             (KernelFunction::CastFromF16, F16) => "cast_from_f16_kernel_f16",
             (KernelFunction::CastFromF16, BF16) => "cast_from_f16_kernel_bf16",
+            (KernelFunction::CastToF32, F32) => "cast_to_f32_kernel_f32",
+            (KernelFunction::CastToF32, F16) => "cast_to_f32_kernel_f16",
+            (KernelFunction::CastToF32, BF16) => "cast_to_f32_kernel_bf16",
+            (KernelFunction::CastFromF32, F32) => "cast_from_f32_kernel_f32",
+            (KernelFunction::CastFromF32, F16) => "cast_from_f32_kernel_f16",
+            (KernelFunction::CastFromF32, BF16) => "cast_from_f32_kernel_bf16",
             (KernelFunction::ElemwiseAdd, F32) => "add_kernel_f32",
             (KernelFunction::ElemwiseAdd, F16) => "add_kernel_f16",
             (KernelFunction::ElemwiseAdd, BF16) => "add_kernel_bf16",

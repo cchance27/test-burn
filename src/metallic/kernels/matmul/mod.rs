@@ -8,7 +8,7 @@ use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixM
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::tensor::MpsMatrixBatchView;
 use crate::metallic::{
-    Context, Dtype, F16Element, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    Context, Dtype, F32Element, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
@@ -50,14 +50,14 @@ struct Bf16GemmConversion {
     right_src_offset: usize,
     result_dst_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     result_dst_offset: usize,
-    left_temp: Tensor<F16Element>,
+    left_temp: Tensor<F32Element>,
     left_view: MpsMatrixBatchView,
-    right_temp: Tensor<F16Element>,
+    right_temp: Tensor<F32Element>,
     right_view: MpsMatrixBatchView,
-    result_temp: Tensor<F16Element>,
+    result_temp: Tensor<F32Element>,
     result_view: MpsMatrixBatchView,
-    cast_to_f16: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    cast_from_f16: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    cast_to_f32: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    cast_from_f32: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     left_elements: u32,
     right_elements: u32,
     result_elements: u32,
@@ -203,9 +203,9 @@ impl KernelInvocable for MatMulOp {
             matmul_right_view = conversion.right_view();
             matmul_result_view = conversion.result_view();
 
-            left_desc_dtype = Dtype::F16;
-            right_desc_dtype = Dtype::F16;
-            result_desc_dtype = Dtype::F16;
+            left_desc_dtype = Dtype::F32;
+            right_desc_dtype = Dtype::F32;
+            result_desc_dtype = Dtype::F32;
 
             bf16_aux_struct = Some(conversion);
         }
@@ -318,24 +318,24 @@ impl Bf16GemmConversion {
         result_tensor: &Tensor<T>,
         result_view: MpsMatrixBatchView,
     ) -> Result<Self, MetalError> {
-        let left_temp = ctx.pool.alloc_tensor::<F16Element>(left_tensor.dims.clone())?.into_tensor();
-        let right_temp = ctx.pool.alloc_tensor::<F16Element>(right_tensor.dims.clone())?.into_tensor();
-        let result_temp = ctx.pool.alloc_tensor::<F16Element>(result_tensor.dims.clone())?.into_tensor();
+        let left_temp = ctx.pool.alloc_tensor::<F32Element>(left_tensor.dims.clone())?.into_tensor();
+        let right_temp = ctx.pool.alloc_tensor::<F32Element>(right_tensor.dims.clone())?.into_tensor();
+        let result_temp = ctx.pool.alloc_tensor::<F32Element>(result_tensor.dims.clone())?.into_tensor();
 
-        let left_view_f16 = left_temp.as_mps_matrix_batch_view()?;
-        let right_view_f16 = right_temp.as_mps_matrix_batch_view()?;
-        let result_view_f16 = result_temp.as_mps_matrix_batch_view()?;
+        let left_view_f32 = left_temp.as_mps_matrix_batch_view()?;
+        let right_view_f32 = right_temp.as_mps_matrix_batch_view()?;
+        let result_view_f32 = result_temp.as_mps_matrix_batch_view()?;
 
         let left_elements = usize_to_u32(left_temp.len(), "left matmul operand")?;
         let right_elements = usize_to_u32(right_temp.len(), "right matmul operand")?;
         let result_elements = usize_to_u32(result_temp.len(), "result matmul operand")?;
 
-        let cast_to_f16 = ctx
+        let cast_to_f32 = ctx
             .kernel_manager
-            .get_pipeline(KernelFunction::CastToF16, Dtype::BF16, &ctx.device)?;
-        let cast_from_f16 = ctx
+            .get_pipeline(KernelFunction::CastToF32, Dtype::BF16, &ctx.device)?;
+        let cast_from_f32 = ctx
             .kernel_manager
-            .get_pipeline(KernelFunction::CastFromF16, Dtype::BF16, &ctx.device)?;
+            .get_pipeline(KernelFunction::CastFromF32, Dtype::BF16, &ctx.device)?;
 
         Ok(Self {
             left_src_buf: left_tensor.buf.clone(),
@@ -345,13 +345,13 @@ impl Bf16GemmConversion {
             result_dst_buf: result_tensor.buf.clone(),
             result_dst_offset: result_tensor.offset,
             left_temp,
-            left_view: left_view_f16,
+            left_view: left_view_f32,
             right_temp,
-            right_view: right_view_f16,
+            right_view: right_view_f32,
             result_temp,
-            result_view: result_view_f16,
-            cast_to_f16,
-            cast_from_f16,
+            result_view: result_view_f32,
+            cast_to_f32,
+            cast_from_f32,
             left_elements,
             right_elements,
             result_elements,
@@ -362,7 +362,7 @@ impl Bf16GemmConversion {
         if self.left_elements > 0 {
             encode_cast_kernel(
                 command_buffer,
-                &self.cast_to_f16,
+                &self.cast_to_f32,
                 &self.left_src_buf,
                 self.left_src_offset,
                 &self.left_temp.buf,
@@ -374,7 +374,7 @@ impl Bf16GemmConversion {
         if self.right_elements > 0 {
             encode_cast_kernel(
                 command_buffer,
-                &self.cast_to_f16,
+                &self.cast_to_f32,
                 &self.right_src_buf,
                 self.right_src_offset,
                 &self.right_temp.buf,
@@ -393,7 +393,7 @@ impl Bf16GemmConversion {
 
         encode_cast_kernel(
             command_buffer,
-            &self.cast_to_f16,
+            &self.cast_to_f32,
             &self.result_dst_buf,
             self.result_dst_offset,
             &self.result_temp.buf,
@@ -409,7 +409,7 @@ impl Bf16GemmConversion {
 
         encode_cast_kernel(
             command_buffer,
-            &self.cast_from_f16,
+            &self.cast_from_f32,
             &self.result_temp.buf,
             self.result_temp.offset,
             &self.result_dst_buf,

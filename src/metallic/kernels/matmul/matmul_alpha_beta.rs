@@ -161,9 +161,9 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             matmul_right_view = conversion.right_view();
             matmul_result_view = conversion.result_view();
 
-            left_desc_dtype = Dtype::F16;
-            right_desc_dtype = Dtype::F16;
-            result_desc_dtype = Dtype::F16;
+            left_desc_dtype = Dtype::F32;
+            right_desc_dtype = Dtype::F32;
+            result_desc_dtype = Dtype::F32;
 
             bf16_aux_struct = Some(conversion);
         }
