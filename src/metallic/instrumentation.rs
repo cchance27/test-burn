@@ -3,11 +3,172 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
 
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::MTLCommandBuffer;
+use rustc_hash::FxHashMap;
+
+use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
+use crate::metallic::operation::CommandBuffer;
+
 /// Handle to a shared latency collector used to instrument fine-grained timing inside
 /// the Metal execution context. The collector is populated by `Context` while the
 /// inference loops execute and later inspected by higher-level orchestration code.
 pub type LatencyCollectorHandle = Rc<RefCell<StepLatencyCollector>>;
 pub type MemoryCollectorHandle = Rc<RefCell<StepMemoryCollector>>;
+
+/// Shared recorder handle that allows matmul dispatches to append timing samples
+/// once the GPU finishes executing a command buffer.
+#[derive(Clone)]
+pub struct MatMulSampleRecorder {
+    inner: Rc<dyn Fn(MatMulBackend, Duration)>,
+}
+
+impl MatMulSampleRecorder {
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(MatMulBackend, Duration) + 'static,
+    {
+        Self { inner: Rc::new(callback) }
+    }
+
+    pub fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
+        (self.inner)(backend, duration);
+    }
+}
+
+/// Tracks in-flight matmul dispatches so their GPU execution time can be
+/// recorded once the surrounding command buffer completes.
+#[derive(Clone, Default)]
+pub struct MatMulInstrumentation {
+    inner: Rc<MatMulInstrumentationInner>,
+}
+
+#[derive(Default)]
+struct MatMulInstrumentationInner {
+    pending: RefCell<FxHashMap<usize, PendingMatMul>>,
+}
+
+struct PendingMatMul {
+    recorder: MatMulSampleRecorder,
+    counts: FxHashMap<MatMulBackend, usize>,
+}
+
+impl PendingMatMul {
+    fn new(recorder: MatMulSampleRecorder) -> Self {
+        Self {
+            recorder,
+            counts: FxHashMap::default(),
+        }
+    }
+
+    fn increment(&mut self, backend: MatMulBackend) {
+        *self.counts.entry(backend).or_insert(0) += 1;
+    }
+}
+
+impl MatMulInstrumentation {
+    pub fn register(&self, command_buffer: &CommandBuffer, backend: MatMulBackend, recorder: MatMulSampleRecorder) {
+        {
+            let mut pending = self.inner.pending.borrow_mut();
+            if let Some(entry) = pending.get_mut(&Self::buffer_key(command_buffer)) {
+                entry.increment(backend);
+                return;
+            }
+        }
+
+        let key = Self::buffer_key(command_buffer);
+        self.install_completion(command_buffer, key);
+
+        let mut entry = PendingMatMul::new(recorder);
+        entry.increment(backend);
+        self.inner.pending.borrow_mut().insert(key, entry);
+    }
+
+    fn install_completion(&self, command_buffer: &CommandBuffer, key: usize) {
+        let instrumentation = self.clone();
+        command_buffer.on_completed(move |raw| instrumentation.complete(key, raw));
+    }
+
+    fn complete(&self, key: usize, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+        let Some(entry) = self.inner.pending.borrow_mut().remove(&key) else {
+            return;
+        };
+
+        // GPU timing information is reported in seconds.
+        let gpu_start = unsafe { command_buffer.GPUStartTime() };
+        let gpu_end = unsafe { command_buffer.GPUEndTime() };
+
+        if !gpu_start.is_finite() || !gpu_end.is_finite() {
+            return;
+        }
+
+        let delta = gpu_end - gpu_start;
+        if delta <= 0.0 {
+            return;
+        }
+
+        let total = Duration::from_secs_f64(delta);
+        Self::dispatch_samples(entry, total);
+    }
+
+    fn dispatch_samples(entry: PendingMatMul, total: Duration) {
+        let PendingMatMul { recorder, counts } = entry;
+        let total_secs = total.as_secs_f64();
+        if total_secs <= 0.0 {
+            return;
+        }
+
+        for (backend, count) in counts {
+            if count == 0 {
+                continue;
+            }
+
+            let slice_secs = total_secs / count as f64;
+            if !slice_secs.is_finite() || slice_secs <= 0.0 {
+                continue;
+            }
+
+            recorder.record_matmul_backend_sample(backend, Duration::from_secs_f64(slice_secs));
+        }
+    }
+
+    fn buffer_key(command_buffer: &CommandBuffer) -> usize {
+        Retained::as_ptr(command_buffer.raw()) as usize
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Duration;
+
+    #[test]
+    fn dispatch_samples_splits_duration_evenly() {
+        let samples: Rc<RefCell<Vec<MatMulSample>>> = Rc::new(RefCell::new(Vec::new()));
+        let recorder = MatMulSampleRecorder::new({
+            let samples = Rc::clone(&samples);
+            move |backend, duration| {
+                samples.borrow_mut().push(MatMulSample { backend, duration });
+            }
+        });
+
+        let mut pending = PendingMatMul::new(recorder);
+        pending.increment(MatMulBackend::Mps);
+        pending.increment(MatMulBackend::Mps);
+
+        MatMulInstrumentation::dispatch_samples(pending, Duration::from_millis(30));
+
+        let recorded = samples.borrow();
+        assert_eq!(recorded.len(), 2);
+        for sample in recorded.iter() {
+            assert_eq!(sample.backend, MatMulBackend::Mps);
+            assert!((sample.duration.as_secs_f64() - 0.015).abs() < 1e-6);
+        }
+    }
+}
 
 /// Enumeration of the latency events that can be emitted from the low-level kernels.
 #[derive(Clone, Debug)]

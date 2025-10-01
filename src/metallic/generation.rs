@@ -2,8 +2,9 @@ use super::{Context, MetalError, SamplerBuffers, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::metrics::{
-    BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat, ScalarStat,
-    SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
+    BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
+    ScalarStat, SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
+    sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::{TensorElement, Tokenizer};
@@ -461,6 +462,7 @@ where
     let mut decode_stats = RollingStat::default();
     let mut block_stats = vec![BlockStat::default(); n_layers];
     let mut softmax_backend_stats = SoftmaxBackendStats::default();
+    let mut matmul_backend_stats = MatMulBackendStats::default();
     let mut latencies_ready = false;
     let mut memory_embed = MemoryScopeStat::default();
     let mut memory_forward = MemoryScopeStat::default();
@@ -490,6 +492,9 @@ where
             let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
             for sample in ctx.take_softmax_samples() {
                 softmax_backend_stats.record(sample.backend, sample.duration);
+            }
+            for sample in ctx.take_matmul_samples() {
+                matmul_backend_stats.record(sample.backend, sample.duration);
             }
             logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
             log_cache_stats(ctx, "prompt", i + 1);
@@ -591,6 +596,9 @@ where
         for sample in ctx.take_softmax_samples() {
             softmax_backend_stats.record(sample.backend, sample.duration);
         }
+        for sample in ctx.take_matmul_samples() {
+            matmul_backend_stats.record(sample.backend, sample.duration);
+        }
 
         if let Some(usage) = memory_snapshot.forward.last {
             latest_forward_usage = Some(usage);
@@ -679,6 +687,7 @@ where
                 &forward_stats,
                 &block_stats,
                 &softmax_backend_stats,
+                &matmul_backend_stats,
                 &output_stats,
                 &sample_stats,
                 &decode_stats,

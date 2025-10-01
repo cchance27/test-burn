@@ -4,6 +4,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
+use std::time::Duration;
 
 use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
@@ -20,6 +21,17 @@ mod matmul_alpha_beta;
 #[cfg(test)]
 mod matmul_alpha_beta_test;
 pub use matmul_alpha_beta::MatMulAlphaBetaOp;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MatMulBackend {
+    Mps,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MatMulSample {
+    pub backend: MatMulBackend,
+    pub duration: Duration,
+}
 
 // Public, user-facing, zero-sized struct for the matmul operation with transpose options.
 pub struct MatMulOp;
@@ -180,6 +192,14 @@ impl KernelInvocable for MatMulOp {
             gemm,
             batch_size: matmul_result_view.batch,
         };
+
+        {
+            let command_buffer = {
+                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+                command_buffer.clone()
+            };
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps);
+        }
 
         // Return the boxed operation and the output tensor.
         Ok((Box::new(op), out))

@@ -1,5 +1,7 @@
 use super::error::MetalError;
-use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollectorHandle, MemoryEvent, MemoryUsage};
+use super::instrumentation::{
+    LatencyCollectorHandle, LatencyEvent, MatMulInstrumentation, MatMulSampleRecorder, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
+};
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
@@ -8,7 +10,7 @@ use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
-use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
+use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
@@ -18,7 +20,9 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::mem;
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Default)]
@@ -52,6 +56,11 @@ pub struct Context<T: TensorElement> {
     latency_collector: Option<LatencyCollectorHandle>,
     /// Optional memory collector used to capture detailed allocation snapshots.
     memory_collector: Option<MemoryCollectorHandle>,
+    /// Shared instrumentation used to collect matmul GPU timings.
+    matmul_instrumentation: MatMulInstrumentation,
+    /// Matmul timing samples captured since the last drain.
+    matmul_samples: Rc<RefCell<Vec<MatMulSample>>>,
+    matmul_recorder: MatMulSampleRecorder,
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
     /// Tracks the last backend that executed so instrumentation can explain cache stats.
@@ -101,6 +110,15 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
 
+        let matmul_samples = Rc::new(RefCell::new(Vec::new()));
+        let samples_for_recorder = Rc::clone(&matmul_samples);
+        let matmul_recorder = MatMulSampleRecorder::new(move |backend, duration| {
+            if duration.is_zero() {
+                return;
+            }
+            samples_for_recorder.borrow_mut().push(MatMulSample { backend, duration });
+        });
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -116,6 +134,9 @@ impl<T: TensorElement> Context<T> {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
+            matmul_instrumentation: MatMulInstrumentation::default(),
+            matmul_samples,
+            matmul_recorder,
             softmax_samples: Vec::new(),
             last_softmax_backend: None,
             sampler_buffers: SamplerBuffers::default(),
@@ -176,6 +197,16 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
+    pub(crate) fn register_matmul_dispatch(&self, command_buffer: &CommandBuffer, backend: MatMulBackend) {
+        self.matmul_instrumentation
+            .register(command_buffer, backend, self.matmul_recorder.clone());
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
+        self.matmul_recorder.record_matmul_backend_sample(backend, duration);
+    }
+
     pub(crate) fn record_softmax_backend_sample(&mut self, backend: SoftmaxBackend, duration: Duration) {
         if duration.is_zero() {
             return;
@@ -186,6 +217,10 @@ impl<T: TensorElement> Context<T> {
 
     pub fn take_softmax_samples(&mut self) -> Vec<SoftmaxSample> {
         mem::take(&mut self.softmax_samples)
+    }
+
+    pub fn take_matmul_samples(&self) -> Vec<MatMulSample> {
+        mem::take(&mut *self.matmul_samples.borrow_mut())
     }
 
     pub fn last_softmax_backend(&self) -> Option<SoftmaxBackend> {
