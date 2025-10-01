@@ -225,6 +225,7 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
+    #[inline]
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for matmul
         self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
@@ -306,6 +307,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[inline]
     pub fn matmul_alpha_beta(
         &mut self,
         a: &Tensor<T>,
@@ -962,6 +964,7 @@ impl<T: TensorElement> Context<T> {
         Ok((view, dims[1]))
     }
 
+    #[inline]
     pub fn scaled_dot_product_attention(
         &mut self,
         q: &Tensor<T>,
@@ -972,6 +975,7 @@ impl<T: TensorElement> Context<T> {
         self.scaled_dot_product_attention_with_offset(q, k, v, causal, 0)
     }
 
+    #[inline]
     pub fn scaled_dot_product_attention_with_offset(
         &mut self,
         q: &Tensor<T>,
@@ -999,6 +1003,7 @@ impl<T: TensorElement> Context<T> {
     /// Flat output [m, d_model] (reshape externally to [batch, seq, d_model])
     #[allow(clippy::too_many_arguments)]
     #[allow(non_snake_case)]
+    #[inline]
     pub fn SwiGLU(
         &mut self,
         x_normed_flat: &Tensor<T>,
