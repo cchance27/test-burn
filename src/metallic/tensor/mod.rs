@@ -1193,6 +1193,7 @@ impl<T: TensorElement> Tensor<T> {
         Self::fast_fill_slice(slice, converted_value);
     }
 
+    #[inline]
     pub fn permute(&self, permute: &[usize], ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if permute.len() != self.dims.len() {
             return Err(MetalError::InvalidShape("Permutation length must match tensor rank".to_string()));
@@ -1205,6 +1206,7 @@ impl<T: TensorElement> Tensor<T> {
     }
 
     /// Element-wise add, returns a new tensor on the same device.
+    #[inline]
     pub fn add_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
@@ -1217,6 +1219,7 @@ impl<T: TensorElement> Tensor<T> {
     }
 
     /// Element-wise sub, returns a new tensor on the same device.
+    #[inline]
     pub fn sub_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
@@ -1229,6 +1232,7 @@ impl<T: TensorElement> Tensor<T> {
     }
 
     /// Element-wise mul, returns a new tensor on the same device.
+    #[inline]
     pub fn mul_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
@@ -1240,6 +1244,7 @@ impl<T: TensorElement> Tensor<T> {
         ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))
     }
 
+    #[inline]
     pub fn div_elem(&self, other: &Self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         if self.dims != other.dims {
             return Err(MetalError::DimensionMismatch {
