@@ -748,6 +748,81 @@ impl<T: TensorElement> Tensor<T> {
         }
     }
 
+    fn coverage_len_elements(&self) -> Result<usize, MetalError> {
+        if self.len() == 0 {
+            return Ok(0);
+        }
+
+        if self.dims.len() != self.strides.len() {
+            return Err(MetalError::InvalidShape("Tensor dims/strides length mismatch".to_string()));
+        }
+
+        let mut max_index = 0usize;
+        for (dim, stride) in self.dims.iter().zip(self.strides.iter()) {
+            if *dim == 0 {
+                return Ok(0);
+            }
+            if *dim > 1 {
+                let contribution = stride
+                    .checked_mul(dim - 1)
+                    .ok_or_else(|| MetalError::InvalidShape("Tensor stride overflow".to_string()))?;
+                max_index = max_index
+                    .checked_add(contribution)
+                    .ok_or_else(|| MetalError::InvalidShape("Tensor coverage overflow".to_string()))?;
+            }
+        }
+
+        max_index
+            .checked_add(1)
+            .ok_or_else(|| MetalError::InvalidShape("Tensor coverage overflow".to_string()))
+    }
+
+    pub(crate) fn as_mut_slice_covering_strides(&mut self) -> Result<&mut [T::Scalar], MetalError> {
+        self.ensure_ready();
+
+        let required_len = self.coverage_len_elements()?;
+        if required_len == 0 {
+            return Ok(unsafe { std::slice::from_raw_parts_mut(std::ptr::NonNull::<T::Scalar>::dangling().as_ptr(), 0) });
+        }
+
+        let elem_size = std::mem::size_of::<T::Scalar>();
+        let required_bytes = required_len
+            .checked_mul(elem_size)
+            .ok_or_else(|| MetalError::InvalidShape("Tensor view coverage exceeds address space".to_string()))?;
+
+        if self.host_accessible {
+            let end = self
+                .offset
+                .checked_add(required_bytes)
+                .ok_or_else(|| MetalError::InvalidShape("Tensor view exceeds buffer bounds".to_string()))?;
+            if end > self.buf.length() {
+                return Err(MetalError::InvalidShape(
+                    "Tensor view coverage exceeds underlying buffer".to_string(),
+                ));
+            }
+            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *mut T::Scalar;
+            return Ok(unsafe { std::slice::from_raw_parts_mut(ptr, required_len) });
+        }
+
+        self.ensure_staging_for_write()?;
+
+        let ptr = {
+            let mut state = self.host_access.lock().expect("host access state mutex poisoned");
+            if required_bytes > state.region_len {
+                return Err(MetalError::InvalidShape("Tensor view coverage exceeds staging region".to_string()));
+            }
+            let staging = state.staging.as_ref().expect("staging buffer must exist for host write").clone();
+            state.host_dirty = true;
+            state.staging_valid = true;
+            let byte_offset = self.offset.saturating_sub(state.base_offset);
+            debug_assert!(byte_offset.is_multiple_of(elem_size));
+            drop(state);
+            unsafe { (staging.contents().as_ptr() as *mut u8).add(byte_offset) as *mut T::Scalar }
+        };
+
+        Ok(unsafe { std::slice::from_raw_parts_mut(ptr, required_len) })
+    }
+
     #[inline]
     pub fn dims(&self) -> &[usize] {
         &self.dims

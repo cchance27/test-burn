@@ -73,8 +73,46 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
         });
     }
 
-    let dst_slice = dst.as_mut_slice();
-    copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
+    if dst.len() == 0 {
+        return Ok(());
+    }
+
+    let dst_dims = dst.dims();
+    let dst_strides = dst.strides.clone();
+    let packed = Tensor::<TDst>::compute_strides(dst_dims);
+    let is_packed = dst_dims.len() <= 1 || dst_strides == packed;
+
+    if is_packed {
+        let dst_slice = dst.as_mut_slice();
+        return copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice);
+    }
+
+    if dst_dims.len() != 2 || dst_strides.len() != 2 {
+        return Err(MetalError::OperationNotSupported(
+            "Strided tensor copies currently support only 2D destinations".to_string(),
+        ));
+    }
+
+    let rows = dst_dims[0];
+    let cols = dst_dims[1];
+    let row_stride = dst_strides[0];
+    let col_stride = dst_strides[1];
+
+    let src_values = tensor_data_as_f32(src);
+    let src_slice = src_values.as_ref();
+    let dst_slice = dst.as_mut_slice_covering_strides()?;
+
+    for row in 0..rows {
+        let src_row_start = row * cols;
+        let dst_row_start = row * row_stride;
+        for col in 0..cols {
+            let src_index = src_row_start + col;
+            let dst_index = dst_row_start + col * col_stride;
+            dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+        }
+    }
+
+    Ok(())
 }
 
 fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
@@ -103,16 +141,47 @@ fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
         )));
     }
 
+    if dst.len() == 0 {
+        return Ok(());
+    }
+
     let src_values = tensor_data_as_f32(src);
     let src_slice = src_values.as_ref();
-    let dst_slice = dst.as_mut_slice();
+
+    let dst_strides = dst.strides.clone();
+    let packed = Tensor::<TDst>::compute_strides(dst_dims);
+    let is_packed = dst_strides == packed;
+
+    if is_packed {
+        let dst_slice = dst.as_mut_slice();
+        for dst_row in 0..dst_rows {
+            for dst_col in 0..dst_cols {
+                let src_row = dst_col;
+                let src_col = dst_row;
+                let src_index = src_row * src_cols + src_col;
+                let dst_index = dst_row * dst_cols + dst_col;
+                dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+            }
+        }
+        return Ok(());
+    }
+
+    if dst_dims.len() != 2 || dst_strides.len() != 2 {
+        return Err(MetalError::OperationNotSupported(
+            "Strided tensor copies currently support only 2D destinations".to_string(),
+        ));
+    }
+
+    let row_stride = dst_strides[0];
+    let col_stride = dst_strides[1];
+    let dst_slice = dst.as_mut_slice_covering_strides()?;
 
     for dst_row in 0..dst_rows {
         for dst_col in 0..dst_cols {
             let src_row = dst_col;
             let src_col = dst_row;
             let src_index = src_row * src_cols + src_col;
-            let dst_index = dst_row * dst_cols + dst_col;
+            let dst_index = dst_row * row_stride + dst_col * col_stride;
             dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
         }
     }
@@ -664,7 +733,12 @@ fn extract_config_from_ggufmodel(gguf_model: &GGUFModel) -> Qwen25Config {
 #[cfg(test)]
 mod tests {
     use super::pack_weight_transposed_into_fused_slice;
+    #[cfg(target_os = "macos")]
+    use crate::metallic::{Context, Tensor, TensorStorage};
     use crate::metallic::{F32Element, MetalError};
+
+    #[cfg(target_os = "macos")]
+    use super::{copy_tensor_into, copy_tensor_transposed_into};
 
     #[test]
     fn pack_weight_transposes_row_major_layouts() {
@@ -716,5 +790,55 @@ mod tests {
             MetalError::InvalidShape(_) => {}
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn copy_tensor_handles_strided_gate_views() -> Result<(), MetalError> {
+        let mut ctx = Context::<F32Element>::new()?;
+        let d_model = 4usize;
+        let ff_dim = 6usize;
+
+        let mut fused = Tensor::zeros(vec![d_model, 2 * ff_dim], &mut ctx, false)?;
+        let mut gate_view = fused.slice_last_dim(0..ff_dim)?;
+        let mut up_view = fused.slice_last_dim(ff_dim..2 * ff_dim)?;
+
+        let gate_values: Vec<f32> = (0..d_model * ff_dim).map(|idx| idx as f32).collect();
+        let gate_tensor = Tensor::from_f32_slice(vec![d_model, ff_dim], TensorStorage::Dedicated(&ctx), &gate_values)?;
+        copy_tensor_into(&gate_tensor, &mut gate_view)?;
+
+        let up_values: Vec<f32> = (0..ff_dim * d_model).map(|idx| (1000 + idx) as f32).collect();
+        let up_tensor = Tensor::from_f32_slice(vec![ff_dim, d_model], TensorStorage::Dedicated(&ctx), &up_values)?;
+        copy_tensor_transposed_into(&up_tensor, &mut up_view)?;
+
+        // Verify gate view matches the source data exactly.
+        assert_eq!(gate_view.to_f32_vec(), gate_values);
+
+        // Verify up view equals the transposed source.
+        let mut expected_up = vec![0f32; d_model * ff_dim];
+        for row in 0..d_model {
+            for col in 0..ff_dim {
+                let src_index = col * d_model + row;
+                expected_up[row * ff_dim + col] = up_values[src_index];
+            }
+        }
+        assert_eq!(up_view.to_f32_vec(), expected_up);
+
+        // Ensure fused buffer contains interleaved gate/up columns in the correct slots.
+        let mut expected_fused = vec![0f32; d_model * 2 * ff_dim];
+        for row in 0..d_model {
+            let gate_start = row * ff_dim;
+            let fused_row_start = row * 2 * ff_dim;
+            expected_fused[fused_row_start..fused_row_start + ff_dim].copy_from_slice(&gate_values[gate_start..gate_start + ff_dim]);
+
+            for col in 0..ff_dim {
+                let src_index = col * d_model + row;
+                expected_fused[fused_row_start + ff_dim + col] = up_values[src_index];
+            }
+        }
+
+        assert_eq!(fused.to_f32_vec(), expected_fused);
+
+        Ok(())
     }
 }
