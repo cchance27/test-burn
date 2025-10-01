@@ -5,3 +5,8 @@ pytorch/dumps
 debug_compare_out
 debug_dumps
 pytorch/*.json
+*.jsonl
+*.log
+*.tsv
+.DS_Store
+test.py
