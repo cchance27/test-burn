@@ -1,5 +1,6 @@
 use super::{Context, MetalError, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
+use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::metrics::{
     BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat, ScalarStat,
     SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
@@ -91,9 +92,15 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
         return;
     }
 
+    let backend = match ctx.last_softmax_backend() {
+        Some(SoftmaxBackend::Kernel) => "kernel",
+        Some(SoftmaxBackend::Mps) => "mps",
+        None => "unknown",
+    };
+
     let line = match ctx.get_cache_stats() {
         Some(stats) => format!(
-            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={}",
+            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={} softmax_backend={backend}",
             stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
         ),
         None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
