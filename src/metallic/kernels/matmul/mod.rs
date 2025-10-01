@@ -2,7 +2,10 @@ use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder, MTLComputePipelineState, MTLResource, MTLResourceUsage,
+    MTLSize,
+};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
@@ -14,7 +17,6 @@ use crate::metallic::{
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
 };
-use objc2_metal::MTLResourceUsage;
 
 #[cfg(test)]
 mod matmul_test;
@@ -472,10 +474,14 @@ impl Operation for MatMulMlx {
         let batch_strides = [self.batch_stride_a, self.batch_stride_b];
         set_bytes(&encoder, 7, &batch_strides);
 
+        let left_resource: &ProtocolObject<dyn MTLResource> = self.left_buf.as_ref().as_ref();
+        let right_resource: &ProtocolObject<dyn MTLResource> = self.right_buf.as_ref().as_ref();
+        let result_resource: &ProtocolObject<dyn MTLResource> = self.result_buf.as_ref().as_ref();
+
         unsafe {
-            encoder.useResource_usage(&self.left_buf, MTLResourceUsage::Read);
-            encoder.useResource_usage(&self.right_buf, MTLResourceUsage::Read);
-            encoder.useResource_usage(&self.result_buf, MTLResourceUsage::Write);
+            encoder.useResource_usage(left_resource, MTLResourceUsage::Read);
+            encoder.useResource_usage(right_resource, MTLResourceUsage::Read);
+            encoder.useResource_usage(result_resource, MTLResourceUsage::Write);
         }
 
         let grid = MTLSize {
