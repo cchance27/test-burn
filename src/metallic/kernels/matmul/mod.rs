@@ -2,11 +2,12 @@ use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
 use super::{KernelFunction, KernelInvocable, kernel_manager::MlxPipelineKey};
+use crate::metallic::tensor::MpsMatrixBatchView;
 use crate::metallic::{
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
@@ -478,14 +479,14 @@ impl Operation for MatMulMlx {
         }
 
         let grid = MTLSize {
-            width: self.tiles_n as u64,
-            height: self.tiles_m as u64,
-            depth: self.batch_size as u64,
+            width: self.tiles_n as NSUInteger,
+            height: self.tiles_m as NSUInteger,
+            depth: self.batch_size as NSUInteger,
         };
         let threads = MTLSize {
-            width: 32,
-            height: 2,
-            depth: 2,
+            width: 32 as NSUInteger,
+            height: 2 as NSUInteger,
+            depth: 2 as NSUInteger,
         };
         dispatch_threadgroups(&encoder, grid, threads);
         encoder.endEncoding();
