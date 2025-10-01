@@ -288,17 +288,33 @@ impl<T: TensorElement> Context<T> {
                 .blitCommandEncoder()
                 .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
 
-            for row_idx in 0..m {
-                let dst_offset = linear.offset + row_idx * row_bytes;
+            unsafe {
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &fused_bias.buf,
+                    fused_bias.offset,
+                    &linear.buf,
+                    linear.offset,
+                    row_bytes,
+                );
+            }
+
+            let mut rows_filled = 1usize;
+            while rows_filled < m {
+                let rows_to_copy = (m - rows_filled).min(rows_filled);
+                let bytes_to_copy = rows_to_copy * row_bytes;
+                let dst_offset = linear.offset + rows_filled * row_bytes;
+
                 unsafe {
                     encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &fused_bias.buf,
-                        fused_bias.offset,
+                        &linear.buf,
+                        linear.offset,
                         &linear.buf,
                         dst_offset,
-                        row_bytes,
+                        bytes_to_copy,
                     );
                 }
+
+                rows_filled += rows_to_copy;
             }
 
             encoder.endEncoding();
