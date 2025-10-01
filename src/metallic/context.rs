@@ -21,6 +21,12 @@ use rustc_hash::FxHashMap;
 use std::mem;
 use std::time::Duration;
 
+#[derive(Default)]
+pub struct SamplerBuffers {
+    pub scaled: Vec<f32>,
+    pub indices: Vec<usize>,
+}
+
 /// The main context for Metal operations.
 pub struct Context<T: TensorElement> {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -50,6 +56,8 @@ pub struct Context<T: TensorElement> {
     softmax_samples: Vec<SoftmaxSample>,
     /// Tracks the last backend that executed so instrumentation can explain cache stats.
     last_softmax_backend: Option<SoftmaxBackend>,
+    /// Workspace reused across sampling invocations to avoid per-token allocations.
+    pub sampler_buffers: SamplerBuffers,
     //config: ContextConfig,
 }
 
@@ -110,6 +118,7 @@ impl<T: TensorElement> Context<T> {
             memory_collector: None,
             softmax_samples: Vec::new(),
             last_softmax_backend: None,
+            sampler_buffers: SamplerBuffers::default(),
             //config,
         })
     }

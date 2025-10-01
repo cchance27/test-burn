@@ -1,4 +1,4 @@
-use super::{Context, MetalError, Tensor};
+use super::{Context, MetalError, SamplerBuffers, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::metrics::{
@@ -131,7 +131,13 @@ impl Default for GenerationConfig {
 /// Sample from logits using top-k and top-p (nucleus) sampling.
 /// - `logits` is a slice of f32 representing vocabulary logits.
 ///   Returns selected token index.
-pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, top_p: f32, temperature: f32) -> usize {
+pub fn sample_top_k_top_p<T: TensorElement>(
+    logits: &[T::Scalar],
+    top_k: usize,
+    top_p: f32,
+    temperature: f32,
+    buffers: &mut SamplerBuffers,
+) -> usize {
     let mut fallback_idx = 0usize;
     let mut fallback_found = false;
     let mut fallback_val = f32::NEG_INFINITY;
@@ -150,21 +156,31 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     }
 
     // Apply temperature scaling and convert to positive scores
-    let mut scaled: Vec<f32> = logits.iter().map(|&v| T::to_f32(v) / temperature).collect();
+    let scaled = &mut buffers.scaled;
+    scaled.resize(logits.len(), 0.0);
 
-    // Stabilize by subtracting max before exponentiation to prevent overflow
-    // Filter out any infinity/nan values first
-    let finite_scaled: Vec<f32> = scaled.iter().cloned().filter(|x| x.is_finite()).collect();
-    if finite_scaled.is_empty() {
+    let mut has_finite = false;
+    let mut max_val = f32::NEG_INFINITY;
+    for (slot, raw) in scaled.iter_mut().zip(logits.iter()) {
+        let val = T::to_f32(*raw);
+        let scaled_val = val / temperature;
+        *slot = scaled_val;
+        if scaled_val.is_finite() {
+            if !has_finite || scaled_val > max_val {
+                max_val = scaled_val;
+            }
+            has_finite = true;
+        }
+    }
+
+    if !has_finite {
         return if fallback_found { fallback_idx } else { 0 };
     }
 
-    let m = finite_scaled.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
     // Apply the shift and compute exponentials
-    for x in &mut scaled {
+    for x in scaled.iter_mut() {
         if x.is_finite() {
-            *x = (*x - m).exp();
+            *x = (*x - max_val).exp();
             // Clamp extremely large values to prevent overflow
             if *x > 1e10 {
                 *x = 1e10;
@@ -183,12 +199,16 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     if sum <= 0.0 || sum.is_infinite() || sum.is_nan() {
         return if fallback_found { fallback_idx } else { 0 };
     }
-    for x in &mut scaled {
+    for x in scaled.iter_mut() {
         *x /= sum;
     }
 
     // Sort indices by probability descending, but only keep the top-k entries ordered.
-    let mut idxs: Vec<usize> = (0..scaled.len()).collect();
+    let idxs = &mut buffers.indices;
+    idxs.resize(scaled.len(), 0);
+    for (i, slot) in idxs.iter_mut().enumerate() {
+        *slot = i;
+    }
     let k_cutoff = std::cmp::min(top_k, idxs.len());
     if k_cutoff == 0 {
         return if fallback_found { fallback_idx } else { 0 };
@@ -215,26 +235,25 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
     }
 
     let shortlist = &idxs[0..=cutoff];
-    let mut shortlist_probs: Vec<f32> = shortlist.iter().map(|&i| scaled[i]).collect();
-    let ssum: f32 = shortlist_probs.iter().sum();
-    if ssum <= 0.0 || ssum.is_infinite() || ssum.is_nan() {
-        return shortlist.first().copied().unwrap_or(if fallback_found { fallback_idx } else { 0 });
+    let mut shortlist_total = 0.0f32;
+    for &i in shortlist {
+        shortlist_total += scaled[i];
     }
-    for p in &mut shortlist_probs {
-        *p /= ssum;
+    if shortlist_total <= 0.0 || shortlist_total.is_infinite() || shortlist_total.is_nan() {
+        return shortlist.first().copied().unwrap_or(if fallback_found { fallback_idx } else { 0 });
     }
 
     // Sample using RNG (use simple rng.next_u32() -> float to avoid trait issues)
     let mut rng = rand::rng();
     let r = (rng.next_u32() as f32) / (u32::MAX as f32);
     let mut acc = 0.0f32;
-    for (i, &p) in shortlist_probs.iter().enumerate() {
-        acc += p;
+    for &idx in shortlist.iter() {
+        acc += scaled[idx] / shortlist_total;
         if r <= acc || acc.is_infinite() || acc.is_nan() {
-            return shortlist[i];
+            return idx;
         }
     }
-    shortlist[shortlist.len() - 1]
+    shortlist.last().copied().unwrap_or(if fallback_found { fallback_idx } else { 0 })
 }
 
 /// High-level end-to-end generation pipeline that combines tokenization, embedding,
@@ -483,7 +502,7 @@ where
 
         // Sample the first token
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
@@ -622,7 +641,7 @@ where
         let vocab_logits = &logits[..vocab_size];
 
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
 
         generated_ids.push(next_token);
 

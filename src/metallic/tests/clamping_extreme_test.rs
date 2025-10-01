@@ -1,4 +1,4 @@
-use crate::metallic::{F32Element, generation::sample_top_k_top_p};
+use crate::metallic::{F32Element, SamplerBuffers, generation::sample_top_k_top_p};
 
 #[test]
 fn test_sample_top_k_top_p_extreme_logits() {
@@ -8,7 +8,7 @@ fn test_sample_top_k_top_p_extreme_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p::<F32Element>(&extreme_logits, top_k, top_p, temperature);
+    let result = run_sampler(&extreme_logits, top_k, top_p, temperature);
 
     assert_eq!(result, 0, "Highest logit should be selected even with extreme values");
 }
@@ -21,7 +21,7 @@ fn test_sample_top_k_top_p_extreme_temperature() {
     let top_p = 0.95;
     let temperature = 1e-6f32; // Very small temperature
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 3, "Extremely low temperature should fall back to the maximum logit");
 }
@@ -34,7 +34,7 @@ fn test_sample_top_k_top_p_extreme_negative_temperature() {
     let top_p = 0.95;
     let temperature = -1.0f32; // Negative temperature
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(
         result, 3,
@@ -50,7 +50,7 @@ fn test_sample_top_k_top_p_all_same_logits() {
     let top_p = 0.95;
     let temperature = 0.0; // Greedy path should select the last max index
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 3, "Zero temperature should return the last index with the maximum logit");
 }
@@ -66,7 +66,7 @@ fn test_sample_top_k_top_p_extremely_large_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 0, "The dominant logit should be selected after clamping large values");
 }
@@ -81,9 +81,34 @@ fn test_sample_top_k_top_p_extremely_small_logits() {
     let top_p = 0.95;
     let temperature = 1.0;
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 0, "The least negative logit should be selected after clamping small values");
+}
+
+#[test]
+fn test_sample_top_k_top_p_zero_top_k_falls_back_to_max() {
+    let logits = vec![0.5f32, 1.5f32, 2.5f32];
+    let top_k = 0usize;
+    let top_p = 0.9f32;
+    let temperature = 1.0f32;
+
+    let result = run_sampler(&logits, top_k, top_p, temperature);
+
+    assert_eq!(result, 2, "Zero top-k should fall back to the maximum logit index");
+}
+
+#[test]
+fn test_sample_top_k_top_p_buffer_reuse_retains_correctness() {
+    let logits_primary = vec![0.0f32, 0.5f32, 0.2f32, 0.3f32];
+    let logits_fallback = vec![f32::NAN, f32::NEG_INFINITY, -1.0f32];
+    let mut buffers = SamplerBuffers::default();
+
+    let primary = sample_top_k_top_p::<F32Element>(&logits_primary, 3, 0.8, 1.0, &mut buffers);
+    let secondary = sample_top_k_top_p::<F32Element>(&logits_fallback, 3, 0.9, 1.0, &mut buffers);
+
+    assert_eq!(primary, 1, "Primary sampling should select the highest probability index");
+    assert_eq!(secondary, 2, "Fallback sampling should still locate the best finite logit");
 }
 
 #[test]
@@ -93,7 +118,12 @@ fn test_sample_top_k_top_p_with_nan_logits() {
     let top_p = 0.4;
     let temperature = 1.0f32;
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 3, "NaN logits should be skipped while sampling");
+}
+
+fn run_sampler(logits: &[f32], top_k: usize, top_p: f32, temperature: f32) -> usize {
+    let mut buffers = SamplerBuffers::default();
+    sample_top_k_top_p::<F32Element>(logits, top_k, top_p, temperature, &mut buffers)
 }

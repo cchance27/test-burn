@@ -1,6 +1,6 @@
 use crate::metallic::generation::{GenerationConfig, generate, sample_top_k_top_p};
 use crate::metallic::models::{Qwen25, Qwen25Config};
-use crate::metallic::{Context, F32Element, MetalError, TensorElement, Tokenizer};
+use crate::metallic::{Context, F32Element, MetalError, SamplerBuffers, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
 
 #[test]
@@ -187,7 +187,7 @@ fn test_sample_top_k_top_p_top_k_reduction_matches_reference() {
     let top_p = 0.3f32; // Ensures only the maximum-probability token remains after top-p filtering.
     let temperature = 1.0f32;
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 1, "Top-k reduction should preserve the highest-probability index");
 }
@@ -199,7 +199,7 @@ fn test_sample_top_k_top_p_zero_temperature_prefers_highest_index() {
     let top_p = 0.95f32;
     let temperature = 0.0f32;
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(
         result, 2,
@@ -214,7 +214,12 @@ fn test_sample_top_k_top_p_ignores_nan_logits_in_probabilities() {
     let top_p = 0.5f32;
     let temperature = 1.0f32;
 
-    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+    let result = run_sampler(&logits, top_k, top_p, temperature);
 
     assert_eq!(result, 3, "NaN logits should be ignored during sampling");
+}
+
+fn run_sampler(logits: &[f32], top_k: usize, top_p: f32, temperature: f32) -> usize {
+    let mut buffers = SamplerBuffers::default();
+    sample_top_k_top_p::<F32Element>(logits, top_k, top_p, temperature, &mut buffers)
 }
