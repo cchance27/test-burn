@@ -1,4 +1,4 @@
-use crate::metallic::generation::{GenerationConfig, generate};
+use crate::metallic::generation::{GenerationConfig, generate, sample_top_k_top_p};
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{Context, F32Element, MetalError, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
@@ -178,4 +178,43 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
     println!("✅ KV cache implementation passed full generation correctness test.");
 
     Ok(())
+}
+
+#[test]
+fn test_sample_top_k_top_p_top_k_reduction_matches_reference() {
+    let logits = vec![0.1f32, 0.9f32, 0.8f32, 0.7f32, 0.6f32];
+    let top_k = 2usize;
+    let top_p = 0.3f32; // Ensures only the maximum-probability token remains after top-p filtering.
+    let temperature = 1.0f32;
+
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+
+    assert_eq!(result, 1, "Top-k reduction should preserve the highest-probability index");
+}
+
+#[test]
+fn test_sample_top_k_top_p_zero_temperature_prefers_highest_index() {
+    let logits = vec![0.0f32, 5.0f32, 5.0f32, 4.0f32];
+    let top_k = 4usize;
+    let top_p = 0.95f32;
+    let temperature = 0.0f32;
+
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+
+    assert_eq!(
+        result, 2,
+        "Zero temperature should greedily select the highest logit, preferring the last index on ties"
+    );
+}
+
+#[test]
+fn test_sample_top_k_top_p_ignores_nan_logits_in_probabilities() {
+    let logits = vec![f32::NAN, 0.2f32, f32::NAN, 0.4f32];
+    let top_k = 4usize;
+    let top_p = 0.5f32;
+    let temperature = 1.0f32;
+
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+
+    assert_eq!(result, 3, "NaN logits should be ignored during sampling");
 }
