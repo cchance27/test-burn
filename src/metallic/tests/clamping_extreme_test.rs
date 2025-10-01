@@ -10,13 +10,7 @@ fn test_sample_top_k_top_p_extreme_logits() {
 
     let result = sample_top_k_top_p::<F32Element>(&extreme_logits, top_k, top_p, temperature);
 
-    // Should return a valid token index without panic
-    assert!(
-        result < extreme_logits.len(),
-        "Result index {} is out of bounds for logits length {}",
-        result,
-        extreme_logits.len()
-    );
+    assert_eq!(result, 0, "Highest logit should be selected even with extreme values");
 }
 
 #[test]
@@ -29,13 +23,7 @@ fn test_sample_top_k_top_p_extreme_temperature() {
 
     let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
-    // Should return a valid token index without panic
-    assert!(
-        result < logits.len(),
-        "Result index {} is out of bounds for logits length {}",
-        result,
-        logits.len()
-    );
+    assert_eq!(result, 3, "Extremely low temperature should fall back to the maximum logit");
 }
 
 #[test]
@@ -48,12 +36,9 @@ fn test_sample_top_k_top_p_extreme_negative_temperature() {
 
     let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
-    // Should return a valid token index without panic
-    assert!(
-        result < logits.len(),
-        "Result index {} is out of bounds for logits length {}",
-        result,
-        logits.len()
+    assert_eq!(
+        result, 3,
+        "Negative temperature should trigger greedy fallback to the maximum logit"
     );
 }
 
@@ -63,17 +48,11 @@ fn test_sample_top_k_top_p_all_same_logits() {
     let logits = vec![5.0f32, 5.0f32, 5.0f32, 5.0f32];
     let top_k = 4;
     let top_p = 0.95;
-    let temperature = 1.0;
+    let temperature = 0.0; // Greedy path should select the last max index
 
     let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
-    // Should return a valid token index without panic
-    assert!(
-        result < logits.len(),
-        "Result index {} is out of bounds for logits length {}",
-        result,
-        logits.len()
-    );
+    assert_eq!(result, 3, "Zero temperature should return the last index with the maximum logit");
 }
 
 #[test]
@@ -89,13 +68,7 @@ fn test_sample_top_k_top_p_extremely_large_logits() {
 
     let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
-    // Should return a valid token index without panic
-    assert!(
-        result < logits.len(),
-        "Result index {} is out of bounds for logits length {}",
-        result,
-        logits.len()
-    );
+    assert_eq!(result, 0, "The dominant logit should be selected after clamping large values");
 }
 
 #[test]
@@ -110,11 +83,17 @@ fn test_sample_top_k_top_p_extremely_small_logits() {
 
     let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
 
-    // Should return a valid token index without panic
-    assert!(
-        result < logits.len(),
-        "Result index {} is out of bounds for logits length {}",
-        result,
-        logits.len()
-    );
+    assert_eq!(result, 0, "The least negative logit should be selected after clamping small values");
+}
+
+#[test]
+fn test_sample_top_k_top_p_with_nan_logits() {
+    let logits = vec![f32::NAN, -2.0f32, f32::NAN, 1.0f32, 0.5f32];
+    let top_k = 5;
+    let top_p = 0.4;
+    let temperature = 1.0f32;
+
+    let result = sample_top_k_top_p::<F32Element>(&logits, top_k, top_p, temperature);
+
+    assert_eq!(result, 3, "NaN logits should be skipped while sampling");
 }

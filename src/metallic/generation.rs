@@ -187,13 +187,21 @@ pub fn sample_top_k_top_p<T: TensorElement>(logits: &[T::Scalar], top_k: usize, 
         *x /= sum;
     }
 
-    // Sort indices by probability descending
+    // Sort indices by probability descending, but only keep the top-k entries ordered.
     let mut idxs: Vec<usize> = (0..scaled.len()).collect();
-    idxs.sort_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Apply top-k filtering first
     let k_cutoff = std::cmp::min(top_k, idxs.len());
-    let idxs = &idxs[0..k_cutoff];
+    if k_cutoff == 0 {
+        return if fallback_found { fallback_idx } else { 0 };
+    }
+
+    if k_cutoff < idxs.len() {
+        let nth = k_cutoff - 1;
+        idxs.select_nth_unstable_by(nth, |&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal));
+        idxs.truncate(k_cutoff);
+    }
+
+    idxs.sort_unstable_by(|&a, &b| scaled[b].partial_cmp(&scaled[a]).unwrap_or(std::cmp::Ordering::Equal));
+    let idxs = &idxs[..k_cutoff];
 
     // Then apply top-p filtering
     let mut cum = 0.0f32;
