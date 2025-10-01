@@ -30,6 +30,7 @@ impl ResourceCache {
 
     /// Create a new resource cache that will fall back to the provided device when callers
     /// don't supply one explicitly.
+    #[inline]
     pub fn with_device(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
         Self::with_default_device(Some(device))
     }
@@ -66,6 +67,7 @@ impl ResourceCache {
     }
 
     /// Get a cached GEMM operation by key, or create it if it doesn't exist.
+    #[inline]
     pub fn get_or_create_gemm(
         &mut self,
         key: MpsGemmKey,
@@ -76,6 +78,7 @@ impl ResourceCache {
     }
 
     /// Get a cached matrix descriptor by key, or create it if it doesn't exist.
+    #[inline]
     pub fn get_or_create_descriptor(
         &mut self,
         key: MpsMatrixDescriptorKey,
@@ -87,6 +90,7 @@ impl ResourceCache {
     }
 
     /// Get or create an MPS softmax operation.
+    #[inline]
     pub fn get_or_create_softmax(
         &mut self,
         key: MpsSoftMaxKey,
@@ -97,6 +101,7 @@ impl ResourceCache {
     }
 
     /// Get or create an SDPA operation.
+    #[inline]
     pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
         let key = SdpaKey { batch, seq_q, seq_k, dim };
         // SDPA creation should never fail, so we unwrap.
@@ -106,6 +111,7 @@ impl ResourceCache {
     }
 
     /// Get statistics about the cache.
+    #[inline]
     pub fn get_stats(&self) -> CacheStats {
         CacheStats {
             gemm_cache_size: self.gemm_cache.len(),
