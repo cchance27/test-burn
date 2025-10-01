@@ -1,5 +1,6 @@
 use super::{Context, MetalError, SamplerBuffers, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
+use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::metrics::{
     BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
@@ -10,6 +11,7 @@ use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::{TensorElement, Tokenizer};
 use crate::{alert, app_event::AppEvent};
 use rand::prelude::*;
+use rustc_hash::FxHashMap;
 use std::{
     env,
     fs::OpenOptions,
@@ -86,6 +88,34 @@ fn cache_stats_logger() -> &'static CacheStatsLogger {
 
 fn cache_stats_logging_enabled() -> bool {
     cache_stats_logger().enabled()
+}
+
+fn record_matmul_samples(stats: &mut MatMulBackendStats, samples: Vec<MatMulSample>) {
+    if samples.is_empty() {
+        return;
+    }
+
+    for (backend, total) in aggregate_matmul_totals(samples) {
+        if !total.is_zero() {
+            stats.record(backend, total);
+        }
+    }
+}
+
+pub(crate) fn aggregate_matmul_totals<I>(samples: I) -> FxHashMap<MatMulBackend, Duration>
+where
+    I: IntoIterator<Item = MatMulSample>,
+{
+    let mut totals = FxHashMap::default();
+    for sample in samples {
+        if sample.duration.is_zero() {
+            continue;
+        }
+
+        *totals.entry(sample.backend).or_insert_with(Duration::default) += sample.duration;
+    }
+
+    totals
 }
 
 fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {
@@ -493,9 +523,7 @@ where
             for sample in ctx.take_softmax_samples() {
                 softmax_backend_stats.record(sample.backend, sample.duration);
             }
-            for sample in ctx.take_matmul_samples() {
-                matmul_backend_stats.record(sample.backend, sample.duration);
-            }
+            record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
             logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
             log_cache_stats(ctx, "prompt", i + 1);
         }
@@ -596,9 +624,7 @@ where
         for sample in ctx.take_softmax_samples() {
             softmax_backend_stats.record(sample.backend, sample.duration);
         }
-        for sample in ctx.take_matmul_samples() {
-            matmul_backend_stats.record(sample.backend, sample.duration);
-        }
+        record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
 
         if let Some(usage) = memory_snapshot.forward.last {
             latest_forward_usage = Some(usage);

@@ -20,9 +20,8 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
-use std::cell::RefCell;
 use std::mem;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -59,7 +58,7 @@ pub struct Context<T: TensorElement> {
     /// Shared instrumentation used to collect matmul GPU timings.
     matmul_instrumentation: MatMulInstrumentation,
     /// Matmul timing samples captured since the last drain.
-    matmul_samples: Rc<RefCell<Vec<MatMulSample>>>,
+    matmul_samples: Arc<Mutex<Vec<MatMulSample>>>,
     matmul_recorder: MatMulSampleRecorder,
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
@@ -110,13 +109,15 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
 
-        let matmul_samples = Rc::new(RefCell::new(Vec::new()));
-        let samples_for_recorder = Rc::clone(&matmul_samples);
+        let matmul_samples = Arc::new(Mutex::new(Vec::new()));
+        let samples_for_recorder = Arc::clone(&matmul_samples);
         let matmul_recorder = MatMulSampleRecorder::new(move |backend, duration| {
             if duration.is_zero() {
                 return;
             }
-            samples_for_recorder.borrow_mut().push(MatMulSample { backend, duration });
+            if let Ok(mut samples) = samples_for_recorder.lock() {
+                samples.push(MatMulSample { backend, duration });
+            }
         });
 
         Ok(Context::<T> {
@@ -220,7 +221,11 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub fn take_matmul_samples(&self) -> Vec<MatMulSample> {
-        mem::take(&mut *self.matmul_samples.borrow_mut())
+        let mut samples = match self.matmul_samples.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        samples.drain(..).collect()
     }
 
     pub fn last_softmax_backend(&self) -> Option<SoftmaxBackend> {

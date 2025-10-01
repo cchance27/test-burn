@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use objc2::rc::Retained;
@@ -16,6 +17,7 @@ use crate::metallic::operation::CommandBuffer;
 /// Handle to a shared latency collector used to instrument fine-grained timing inside
 /// the Metal execution context. The collector is populated by `Context` while the
 /// inference loops execute and later inspected by higher-level orchestration code.
+
 pub type LatencyCollectorHandle = Rc<RefCell<StepLatencyCollector>>;
 pub type MemoryCollectorHandle = Rc<RefCell<StepMemoryCollector>>;
 
@@ -23,15 +25,15 @@ pub type MemoryCollectorHandle = Rc<RefCell<StepMemoryCollector>>;
 /// once the GPU finishes executing a command buffer.
 #[derive(Clone)]
 pub struct MatMulSampleRecorder {
-    inner: Rc<dyn Fn(MatMulBackend, Duration)>,
+    inner: Arc<dyn Fn(MatMulBackend, Duration) + Send + Sync>,
 }
 
 impl MatMulSampleRecorder {
     pub fn new<F>(callback: F) -> Self
     where
-        F: Fn(MatMulBackend, Duration) + 'static,
+        F: Fn(MatMulBackend, Duration) + Send + Sync + 'static,
     {
-        Self { inner: Rc::new(callback) }
+        Self { inner: Arc::new(callback) }
     }
 
     pub fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
@@ -43,12 +45,19 @@ impl MatMulSampleRecorder {
 /// recorded once the surrounding command buffer completes.
 #[derive(Clone, Default)]
 pub struct MatMulInstrumentation {
-    inner: Rc<MatMulInstrumentationInner>,
+    inner: Arc<MatMulInstrumentationInner>,
 }
 
-#[derive(Default)]
 struct MatMulInstrumentationInner {
-    pending: RefCell<FxHashMap<usize, PendingMatMul>>,
+    pending: Mutex<FxHashMap<usize, PendingMatMul>>,
+}
+
+impl Default for MatMulInstrumentationInner {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(FxHashMap::default()),
+        }
+    }
 }
 
 struct PendingMatMul {
@@ -70,9 +79,13 @@ impl PendingMatMul {
 }
 
 impl MatMulInstrumentation {
+    fn lock_pending(&self) -> MutexGuard<'_, FxHashMap<usize, PendingMatMul>> {
+        self.inner.pending.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
     pub fn register(&self, command_buffer: &CommandBuffer, backend: MatMulBackend, recorder: MatMulSampleRecorder) {
         {
-            let mut pending = self.inner.pending.borrow_mut();
+            let mut pending = self.lock_pending();
             if let Some(entry) = pending.get_mut(&Self::buffer_key(command_buffer)) {
                 entry.increment(backend);
                 return;
@@ -84,7 +97,7 @@ impl MatMulInstrumentation {
 
         let mut entry = PendingMatMul::new(recorder);
         entry.increment(backend);
-        self.inner.pending.borrow_mut().insert(key, entry);
+        self.lock_pending().insert(key, entry);
     }
 
     fn install_completion(&self, command_buffer: &CommandBuffer, key: usize) {
@@ -93,7 +106,7 @@ impl MatMulInstrumentation {
     }
 
     fn complete(&self, key: usize, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
-        let Some(entry) = self.inner.pending.borrow_mut().remove(&key) else {
+        let Some(entry) = self.lock_pending().remove(&key) else {
             return;
         };
 
@@ -143,17 +156,18 @@ impl MatMulInstrumentation {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::cell::RefCell;
-    use std::rc::Rc;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
     #[test]
     fn dispatch_samples_splits_duration_evenly() {
-        let samples: Rc<RefCell<Vec<MatMulSample>>> = Rc::new(RefCell::new(Vec::new()));
+        let samples: Arc<Mutex<Vec<MatMulSample>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = MatMulSampleRecorder::new({
-            let samples = Rc::clone(&samples);
+            let samples = Arc::clone(&samples);
             move |backend, duration| {
-                samples.borrow_mut().push(MatMulSample { backend, duration });
+                if let Ok(mut samples) = samples.lock() {
+                    samples.push(MatMulSample { backend, duration });
+                }
             }
         });
 
@@ -163,7 +177,7 @@ mod tests {
 
         MatMulInstrumentation::dispatch_samples(pending, Duration::from_millis(30));
 
-        let recorded = samples.borrow();
+        let recorded = samples.lock().unwrap();
         assert_eq!(recorded.len(), 2);
         for sample in recorded.iter() {
             assert_eq!(sample.backend, MatMulBackend::Mps);
