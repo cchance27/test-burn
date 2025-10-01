@@ -234,6 +234,184 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
     Ok(())
 }
 
+#[test]
+fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+
+    let d_model: usize = 4;
+    let ff_dim: usize = 8;
+    let m: usize = 3;
+
+    let gate_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.05 + 0.01 * (i as f32)).collect();
+    let up_data: Vec<f32> = (0..ff_dim * d_model).map(|i| -0.02 * (i as f32) + 0.15).collect();
+    let down_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.03 * (i as f32) - 0.4).collect();
+
+    let ffn_gate = Tensor::new(
+        vec![ff_dim, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&gate_data),
+    )?;
+    let ffn_up = Tensor::new(
+        vec![ff_dim, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&up_data),
+    )?;
+    let ffn_down = Tensor::new(
+        vec![d_model, ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&down_data),
+    )?;
+
+    let fused_data: Vec<f32> = gate_data.iter().copied().chain(up_data.iter().copied()).collect();
+    let fused_gate_up = Tensor::new(
+        vec![ff_dim * 2, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&fused_data),
+    )?;
+
+    let x_data: Vec<f32> = (0..m * d_model).map(|i| ((i % d_model) as f32) * 0.25 - 0.5).collect();
+    let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&x_data))?;
+
+    let ffn_gate_bias = Tensor::new(
+        vec![ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.01f32; ff_dim]),
+    )?;
+    let ffn_up_bias = Tensor::new(
+        vec![ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.02f32; ff_dim]),
+    )?;
+    let ffn_down_bias = Tensor::new(
+        vec![d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![-0.03f32; d_model]),
+    )?;
+
+    let baseline = ctx.SwiGLU(
+        &x_normed_flat,
+        &ffn_gate,
+        &ffn_gate_bias,
+        &ffn_up,
+        &ffn_up_bias,
+        &ffn_down,
+        &ffn_down_bias,
+        None,
+    )?;
+    ctx.synchronize();
+    let baseline_vals = baseline.as_slice().to_vec();
+
+    let fused = ctx.SwiGLU(
+        &x_normed_flat,
+        &ffn_gate,
+        &ffn_gate_bias,
+        &ffn_up,
+        &ffn_up_bias,
+        &ffn_down,
+        &ffn_down_bias,
+        Some(&fused_gate_up),
+    )?;
+    ctx.synchronize();
+    let fused_vals = fused.as_slice();
+
+    assert_eq!(baseline_vals.len(), fused_vals.len());
+    for (expected, actual) in baseline_vals.iter().zip(fused_vals.iter()) {
+        let diff = (expected - actual).abs();
+        assert!(diff < 1e-4, "Mismatch between fused and unfused outputs: diff={diff}");
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+
+    let d_model: usize = 4;
+    let ff_dim: usize = 6; // Not divisible by vector width
+    let m: usize = 2;
+
+    let gate_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.07 * (i as f32) - 0.25).collect();
+    let up_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.09 - 0.03 * (i as f32)).collect();
+    let down_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.02 * (i as f32) + 0.11).collect();
+
+    let ffn_gate = Tensor::new(
+        vec![ff_dim, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&gate_data),
+    )?;
+    let ffn_up = Tensor::new(
+        vec![ff_dim, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&up_data),
+    )?;
+    let ffn_down = Tensor::new(
+        vec![d_model, ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&down_data),
+    )?;
+
+    let fused_data: Vec<f32> = gate_data.iter().copied().chain(up_data.iter().copied()).collect();
+    let fused_gate_up = Tensor::new(
+        vec![ff_dim * 2, d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&fused_data),
+    )?;
+
+    let x_data: Vec<f32> = (0..m * d_model).map(|i| (i as f32) * 0.11 - 0.6).collect();
+    let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&x_data))?;
+
+    let ffn_gate_bias = Tensor::new(
+        vec![ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.005f32; ff_dim]),
+    )?;
+    let ffn_up_bias = Tensor::new(
+        vec![ff_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![-0.01f32; ff_dim]),
+    )?;
+    let ffn_down_bias = Tensor::new(
+        vec![d_model],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&vec![0.02f32; d_model]),
+    )?;
+
+    let baseline = ctx.SwiGLU(
+        &x_normed_flat,
+        &ffn_gate,
+        &ffn_gate_bias,
+        &ffn_up,
+        &ffn_up_bias,
+        &ffn_down,
+        &ffn_down_bias,
+        None,
+    )?;
+    ctx.synchronize();
+    let baseline_vals = baseline.as_slice().to_vec();
+
+    let fused = ctx.SwiGLU(
+        &x_normed_flat,
+        &ffn_gate,
+        &ffn_gate_bias,
+        &ffn_up,
+        &ffn_up_bias,
+        &ffn_down,
+        &ffn_down_bias,
+        Some(&fused_gate_up),
+    )?;
+    ctx.synchronize();
+    let fused_vals = fused.as_slice();
+
+    assert_eq!(baseline_vals.len(), fused_vals.len());
+    for (expected, actual) in baseline_vals.iter().zip(fused_vals.iter()) {
+        let diff = (expected - actual).abs();
+        assert!(diff < 1e-4, "Scalar fused mismatch: diff={diff}");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 #[derive(Debug, Serialize, Deserialize)]
 struct TestCase {

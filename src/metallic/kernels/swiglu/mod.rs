@@ -6,6 +6,7 @@ use crate::metallic::MetalError;
 use crate::metallic::Tensor;
 use crate::metallic::TensorElement;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use std::convert::TryFrom;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -25,11 +26,13 @@ struct SwiGLUFusedActivation<T: TensorElement> {
     total_elements: u32,
     bias_len: u32,
     vector_width: u32,
+    gate_leading_stride: u32,
+    up_leading_stride: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for SwiGLUFusedActivationOp {
-    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>);
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::SwigluFusedActivation)
@@ -41,7 +44,7 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (gate, gate_bias, up, up_bias) = args;
+        let (gate, gate_bias, up, up_bias, gate_leading_stride, up_leading_stride) = args;
 
         if gate.dims() != up.dims() {
             return Err(MetalError::InvalidShape(format!(
@@ -101,6 +104,8 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
             total_elements: out.len() as u32,
             bias_len: hidden_dim as u32,
             vector_width,
+            gate_leading_stride,
+            up_leading_stride,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
@@ -148,6 +153,8 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
         set_bytes(&encoder, 4, &self.total_elements);
         set_bytes(&encoder, 5, &self.bias_len);
         set_bytes(&encoder, 6, &self.vector_width);
+        set_bytes(&encoder, 7, &self.gate_leading_stride);
+        set_bytes(&encoder, 8, &self.up_leading_stride);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();
@@ -233,7 +240,7 @@ fn execute_swiglu_logic<T: TensorElement>(
         });
     }
 
-    let (gate_temp, up_temp) = if let Some(fused_weight) = fused_gate_up {
+    let (gate_temp, gate_leading_stride, up_temp, up_leading_stride) = if let Some(fused_weight) = fused_gate_up {
         let fused_dims = fused_weight.dims();
         if fused_dims.len() != 2 {
             return Err(MetalError::InvalidShape(format!(
@@ -261,9 +268,9 @@ fn execute_swiglu_logic<T: TensorElement>(
 
         let gate_view = fused_temp.slice_last_dim(0..hidden_dim)?;
         let up_view = fused_temp.slice_last_dim(hidden_dim..expected_cols)?;
-        let gate_temp = ctx.materialize_contiguous_view(gate_view)?;
-        let up_temp = ctx.materialize_contiguous_view(up_view)?;
-        (gate_temp, up_temp)
+        let gate_stride = leading_stride_as_u32(&gate_view)?;
+        let up_stride = leading_stride_as_u32(&up_view)?;
+        (gate_view, gate_stride, up_view, up_stride)
     } else {
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;
@@ -300,16 +307,33 @@ fn execute_swiglu_logic<T: TensorElement>(
             Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_up, false, up_transpose_b, cache)?,
             None => ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?,
         };
+        let gate_stride = leading_stride_as_u32(&gate_temp)?;
+        let up_stride = leading_stride_as_u32(&up_temp)?;
 
-        (gate_temp, up_temp)
+        (gate_temp, gate_stride, up_temp, up_stride)
     };
 
     // Fuse bias additions, SiLU, and elementwise multiply
     let hidden = match cache.as_mut() {
-        Some(cache) => {
-            ctx.call_with_cache::<SwiGLUFusedActivationOp>((gate_temp, ffn_gate_bias.clone(), up_temp, ffn_up_bias.clone()), cache)?
-        }
-        None => ctx.call::<SwiGLUFusedActivationOp>((gate_temp, ffn_gate_bias.clone(), up_temp, ffn_up_bias.clone()))?,
+        Some(cache) => ctx.call_with_cache::<SwiGLUFusedActivationOp>(
+            (
+                gate_temp,
+                ffn_gate_bias.clone(),
+                up_temp,
+                ffn_up_bias.clone(),
+                gate_leading_stride,
+                up_leading_stride,
+            ),
+            cache,
+        )?,
+        None => ctx.call::<SwiGLUFusedActivationOp>((
+            gate_temp,
+            ffn_gate_bias.clone(),
+            up_temp,
+            ffn_up_bias.clone(),
+            gate_leading_stride,
+            up_leading_stride,
+        ))?,
     };
 
     // down_proj: [m, ff_dim] @ [ff_dim, d_model] -> [m, d_model]
@@ -342,6 +366,29 @@ fn execute_swiglu_logic<T: TensorElement>(
     };
 
     Ok(ffn_out)
+}
+
+fn leading_stride_as_u32<T: TensorElement>(tensor: &Tensor<T>) -> Result<u32, MetalError> {
+    if tensor.dims().is_empty() {
+        return Err(MetalError::InvalidShape(
+            "SwiGLU fused activation expects non-empty tensor".to_string(),
+        ));
+    }
+
+    let stride_index = if tensor.dims().len() >= 2 {
+        tensor.strides.len().saturating_sub(2)
+    } else {
+        tensor.strides.len().saturating_sub(1)
+    };
+
+    let stride = tensor
+        .strides
+        .get(stride_index)
+        .copied()
+        .unwrap_or_else(|| tensor.dims().last().copied().unwrap_or(1));
+
+    u32::try_from(stride)
+        .map_err(|_| MetalError::InvalidShape(format!("Leading stride {} exceeds u32::MAX for dims {:?}", stride, tensor.dims())))
 }
 
 /// Execute the SwiGLU composite with an explicitly provided cache.
