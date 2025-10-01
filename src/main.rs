@@ -293,7 +293,7 @@ struct AppState {
     prompt_processing_time: Duration,
     latency_rows: Vec<LatencyRow>,
     metrics_view: MetricsView,
-    metrics_collapsed: bool,
+    metrics_collapse_state: CollapseState,
     focus: FocusArea,
     text_scroll: u16,
     metrics_scroll: u16,
@@ -317,7 +317,7 @@ impl AppState {
             prompt_processing_time: Duration::default(),
             latency_rows: Vec::new(),
             metrics_view: MetricsView::Memory,
-            metrics_collapsed: false,
+            metrics_collapse_state: CollapseState::Uncollapsed,
             focus: FocusArea::GeneratedText,
             text_scroll: 0,
             metrics_scroll: 0,
@@ -363,6 +363,31 @@ impl AppState {
 enum MetricsView {
     Memory,
     Latency,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CollapseState {
+    Uncollapsed,
+    Collapsed,
+    VeryCollapsed,
+}
+
+impl CollapseState {
+    fn next(self) -> Self {
+        match self {
+            Self::Uncollapsed => Self::Collapsed,
+            Self::Collapsed => Self::VeryCollapsed,
+            Self::VeryCollapsed => Self::Uncollapsed,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Uncollapsed => "Uncollapsed",
+            Self::Collapsed => "Collapsed",
+            Self::VeryCollapsed => "Very Collapsed",
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -429,7 +454,7 @@ impl AppState {
     }
 
     fn toggle_collapse(&mut self) {
-        self.metrics_collapsed = !self.metrics_collapsed;
+        self.metrics_collapse_state = self.metrics_collapse_state.next();
         self.reset_metrics_scroll();
     }
 
@@ -534,83 +559,11 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
         MetricsView::Latency => "Latency",
     };
 
-    let metrics_help = "[m] Memory [l] Latency [c] Collapse";
+    let metrics_help = format!("[m] Memory [l] Latency [c] Collapse ({})", state.metrics_collapse_state.label());
 
     let metrics_text = match state.metrics_view {
-        MetricsView::Memory => {
-            if state.memory_rows.is_empty() {
-                "Collecting data...".to_string()
-            } else {
-                let collapse_depth = 1;
-                state
-                    .memory_rows
-                    .iter()
-                    .filter(|row| !state.metrics_collapsed || row.level <= collapse_depth)
-                    .map(|row| {
-                        let indent = "  ".repeat(row.level as usize);
-                        let mut line = format!(
-                            "{}{}: {}",
-                            indent,
-                            row.label,
-                            format_current_and_peak(row.current_total_mb, row.peak_total_mb)
-                        );
-
-                        let mut deltas = Vec::new();
-                        if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
-                            deltas.push(format!("pool {}", format_current_and_peak(row.current_pool_mb, row.peak_pool_mb)));
-                        }
-                        if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
-                            deltas.push(format!("kv {}", format_current_and_peak(row.current_kv_mb, row.peak_kv_mb)));
-                        }
-                        if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
-                            deltas.push(format!(
-                                "kv-cache {}",
-                                format_current_and_peak(row.current_kv_cache_mb, row.peak_kv_cache_mb)
-                            ));
-                        }
-                        if !deltas.is_empty() {
-                            line.push_str(&format!(" | {}", deltas.join(", ")));
-                        }
-
-                        if row.show_absolute {
-                            let mut absolutes = Vec::new();
-                            if row.absolute_pool_mb > 0.0 {
-                                absolutes.push(format!("pool {}", format_memory_amount(row.absolute_pool_mb)));
-                            }
-                            if row.absolute_kv_mb > 0.0 {
-                                absolutes.push(format!("kv {}", format_memory_amount(row.absolute_kv_mb)));
-                            }
-                            if row.absolute_kv_cache_mb > 0.0 {
-                                absolutes.push(format!("kv-cache {}", format_memory_amount(row.absolute_kv_cache_mb)));
-                            }
-                            if !absolutes.is_empty() {
-                                line.push_str(&format!(" | abs {}", absolutes.join(", ")));
-                            }
-                        }
-
-                        line
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        }
-        MetricsView::Latency => {
-            if state.latency_rows.is_empty() {
-                "Collecting data...".to_string()
-            } else {
-                let collapse_depth = 1;
-                state
-                    .latency_rows
-                    .iter()
-                    .filter(|row| !state.metrics_collapsed || row.level <= collapse_depth)
-                    .map(|row| {
-                        let indent = "  ".repeat(row.level as usize);
-                        format!("{}{} - {:.2}ms ({:.2} avg)", indent, row.label, row.last_ms, row.average_ms)
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-        }
+        MetricsView::Memory => render_memory_metrics(&state.memory_rows, state.metrics_collapse_state),
+        MetricsView::Latency => render_latency_metrics(&state.latency_rows, state.metrics_collapse_state),
     };
 
     let metrics_block = Block::default()
@@ -656,6 +609,166 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
         }
         state.request_follow_text = false;
     }
+}
+
+fn render_memory_metrics(rows: &[MemoryRow], collapse_state: CollapseState) -> String {
+    if rows.is_empty() {
+        return "Collecting data...".to_string();
+    }
+
+    let collapse_depth = match collapse_state {
+        CollapseState::Uncollapsed => u8::MAX,
+        CollapseState::Collapsed => 1,
+        CollapseState::VeryCollapsed => 0,
+    };
+
+    rows.iter()
+        .filter(|row| row.level <= collapse_depth)
+        .map(|row| {
+            let indent = "  ".repeat(row.level as usize);
+            let mut line = format!(
+                "{}{}: {}",
+                indent,
+                row.label,
+                format_current_and_peak(row.current_total_mb, row.peak_total_mb)
+            );
+
+            let mut deltas = Vec::new();
+            if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
+                deltas.push(format!("pool {}", format_current_and_peak(row.current_pool_mb, row.peak_pool_mb)));
+            }
+            if row.current_kv_mb > 0.0 || row.peak_kv_mb > 0.0 {
+                deltas.push(format!("kv {}", format_current_and_peak(row.current_kv_mb, row.peak_kv_mb)));
+            }
+            if row.current_kv_cache_mb > 0.0 || row.peak_kv_cache_mb > 0.0 {
+                deltas.push(format!(
+                    "kv-cache {}",
+                    format_current_and_peak(row.current_kv_cache_mb, row.peak_kv_cache_mb)
+                ));
+            }
+            if !deltas.is_empty() {
+                line.push_str(&format!(" | {}", deltas.join(", ")));
+            }
+
+            if row.show_absolute {
+                let mut absolutes = Vec::new();
+                if row.absolute_pool_mb > 0.0 {
+                    absolutes.push(format!("pool {}", format_memory_amount(row.absolute_pool_mb)));
+                }
+                if row.absolute_kv_mb > 0.0 {
+                    absolutes.push(format!("kv {}", format_memory_amount(row.absolute_kv_mb)));
+                }
+                if row.absolute_kv_cache_mb > 0.0 {
+                    absolutes.push(format!("kv-cache {}", format_memory_amount(row.absolute_kv_cache_mb)));
+                }
+                if !absolutes.is_empty() {
+                    line.push_str(&format!(" | abs {}", absolutes.join(", ")));
+                }
+            }
+
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_latency_metrics(rows: &[LatencyRow], collapse_state: CollapseState) -> String {
+    if rows.is_empty() {
+        return "Collecting data...".to_string();
+    }
+
+    match collapse_state {
+        CollapseState::Uncollapsed => render_latency_uncollapsed(rows),
+        CollapseState::Collapsed => render_latency_collapsed(rows),
+        CollapseState::VeryCollapsed => render_latency_very_collapsed(rows),
+    }
+}
+
+fn render_latency_uncollapsed(rows: &[LatencyRow]) -> String {
+    rows.iter()
+        .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_latency_very_collapsed(rows: &[LatencyRow]) -> String {
+    rows.iter()
+        .filter(|row| row.level <= 1)
+        .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn render_latency_collapsed(rows: &[LatencyRow]) -> String {
+    let Some(block_start) = rows.iter().position(|row| row.level == 1 && row.label.starts_with("Block ")) else {
+        return render_latency_uncollapsed(rows);
+    };
+
+    let mut block_end = block_start;
+    for idx in block_start..rows.len() {
+        let row = &rows[idx];
+        if idx != block_start && row.level == 0 {
+            break;
+        }
+        block_end = idx;
+    }
+
+    let mut block_total_last = 0.0;
+    let mut block_total_avg = 0.0;
+    let mut block_count = 0u32;
+    let mut phase_totals: Vec<(String, f64, f64)> = Vec::new();
+
+    for row in &rows[block_start..=block_end] {
+        match row.level {
+            1 => {
+                block_count += 1;
+                block_total_last += row.last_ms;
+                block_total_avg += row.average_ms;
+            }
+            2 => {
+                if let Some((_, total_last, total_avg)) = phase_totals.iter_mut().find(|(label, _, _)| label == &row.label) {
+                    *total_last += row.last_ms;
+                    *total_avg += row.average_ms;
+                } else {
+                    phase_totals.push((row.label.clone(), row.last_ms, row.average_ms));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    if block_count == 0 {
+        return render_latency_uncollapsed(rows);
+    }
+
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.extend(
+        rows[..block_start]
+            .iter()
+            .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms)),
+    );
+
+    lines.push(format_latency_line(0, "Blocks", block_total_last, block_total_avg));
+
+    for (label, total_last, total_avg) in phase_totals {
+        lines.push(format_latency_line(1, &label, total_last, total_avg));
+    }
+
+    if block_end + 1 < rows.len() {
+        lines.extend(
+            rows[block_end + 1..]
+                .iter()
+                .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms)),
+        );
+    }
+
+    lines.join("\n")
+}
+
+fn format_latency_line(level: u8, label: &str, last_ms: f64, avg_ms: f64) -> String {
+    let indent = "  ".repeat(level as usize);
+    format!("{}{} - {:.2}ms ({:.2} avg)", indent, label, last_ms, avg_ms)
 }
 
 fn format_current_and_peak(current_mb: f64, peak_mb: f64) -> String {
