@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLDevice, MTLSize};
 
 use crate::metallic::{
     Context, Dtype, MetalError,

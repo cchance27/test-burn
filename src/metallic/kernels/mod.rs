@@ -67,59 +67,52 @@ pub(crate) struct GemmKernel {
     pub tile: GemmTile,
 }
 
-macro_rules! gemm_tile_cases {
-    ($dtype_variant:ident, $dtype_token:literal, $tile_variant:ident, $tile_suffix:literal) => {
-        (GemmTranspose::Nn, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
-            Ok(concat!("gemm_nn_", $dtype_token, "_", $tile_suffix))
-        },
-        (GemmTranspose::Nt, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
-            Ok(concat!("gemm_nt_", $dtype_token, "_", $tile_suffix))
-        },
-        (GemmTranspose::Tn, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
-            Ok(concat!("gemm_tn_", $dtype_token, "_", $tile_suffix))
-        },
-        (GemmTranspose::Tt, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
-            Ok(concat!("gemm_tt_", $dtype_token, "_", $tile_suffix))
-        }
-    };
-}
-
-macro_rules! gemm_match_arms {
-    ($dtype_variant:ident, $dtype_token:literal, [$(($tile_variant:ident, $tile_suffix:literal)),+ $(,)?]) => {
-        $(gemm_tile_cases!($dtype_variant, $dtype_token, $tile_variant, $tile_suffix),)+
-    };
-}
-
 pub(crate) fn gemm_kernel_symbol(transpose: GemmTranspose, dtype: Dtype, tile: GemmTile) -> Result<&'static str, MetalError> {
     match (transpose, dtype, tile) {
-        gemm_match_arms!(
-            F32,
-            "f32_f32",
-            [
-                (Bm64Bn64Bk16Wm2Wn2, "64_64_16_2_2"),
-                (Bm64Bn64Bk16Wm1Wn2, "64_64_16_1_2"),
-                (Bm64Bn32Bk32Wm2Wn2, "64_32_32_2_2"),
-                (Bm32Bn64Bk16Wm1Wn2, "32_64_16_1_2"),
-                (Bm32Bn32Bk16Wm2Wn2, "32_32_16_2_2"),
-            ]
-        ),
-        gemm_match_arms!(
-            F16,
-            "f16_f16",
-            [
-                (Bm64Bn64Bk16Wm2Wn2, "64_64_16_2_2"),
-                (Bm64Bn64Bk16Wm1Wn2, "64_64_16_1_2"),
-                (Bm64Bn32Bk32Wm2Wn2, "64_32_32_2_2"),
-                (Bm32Bn64Bk16Wm1Wn2, "32_64_16_1_2"),
-                (Bm32Bn32Bk16Wm2Wn2, "32_32_16_2_2"),
-            ]
-        ),
-        (_, dtype @ (Dtype::F32 | Dtype::F16), _) => Err(MetalError::InvalidOperation(
-            format!(
-                "Unsupported MLX GEMM tile configuration: {:?} {:?} {:?}",
-                transpose, dtype, tile
-            ),
-        )),
+        (GemmTranspose::Nn, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_nn_f32_f32_64_64_16_2_2"),
+        (GemmTranspose::Nt, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_nt_f32_f32_64_64_16_2_2"),
+        (GemmTranspose::Tn, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_tn_f32_f32_64_64_16_2_2"),
+        (GemmTranspose::Tt, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_tt_f32_f32_64_64_16_2_2"),
+        (GemmTranspose::Nn, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_nn_f32_f32_64_64_16_1_2"),
+        (GemmTranspose::Nt, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_nt_f32_f32_64_64_16_1_2"),
+        (GemmTranspose::Tn, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_tn_f32_f32_64_64_16_1_2"),
+        (GemmTranspose::Tt, Dtype::F32, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_tt_f32_f32_64_64_16_1_2"),
+        (GemmTranspose::Nn, Dtype::F32, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_nn_f32_f32_64_32_32_2_2"),
+        (GemmTranspose::Nt, Dtype::F32, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_nt_f32_f32_64_32_32_2_2"),
+        (GemmTranspose::Tn, Dtype::F32, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_tn_f32_f32_64_32_32_2_2"),
+        (GemmTranspose::Tt, Dtype::F32, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_tt_f32_f32_64_32_32_2_2"),
+        (GemmTranspose::Nn, Dtype::F32, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_nn_f32_f32_32_64_16_1_2"),
+        (GemmTranspose::Nt, Dtype::F32, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_nt_f32_f32_32_64_16_1_2"),
+        (GemmTranspose::Tn, Dtype::F32, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_tn_f32_f32_32_64_16_1_2"),
+        (GemmTranspose::Tt, Dtype::F32, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_tt_f32_f32_32_64_16_1_2"),
+        (GemmTranspose::Nn, Dtype::F32, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_nn_f32_f32_32_32_16_2_2"),
+        (GemmTranspose::Nt, Dtype::F32, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_nt_f32_f32_32_32_16_2_2"),
+        (GemmTranspose::Tn, Dtype::F32, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_tn_f32_f32_32_32_16_2_2"),
+        (GemmTranspose::Tt, Dtype::F32, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_tt_f32_f32_32_32_16_2_2"),
+        (GemmTranspose::Nn, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_nn_f16_f16_64_64_16_2_2"),
+        (GemmTranspose::Nt, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_nt_f16_f16_64_64_16_2_2"),
+        (GemmTranspose::Tn, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_tn_f16_f16_64_64_16_2_2"),
+        (GemmTranspose::Tt, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm2Wn2) => Ok("gemm_tt_f16_f16_64_64_16_2_2"),
+        (GemmTranspose::Nn, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_nn_f16_f16_64_64_16_1_2"),
+        (GemmTranspose::Nt, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_nt_f16_f16_64_64_16_1_2"),
+        (GemmTranspose::Tn, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_tn_f16_f16_64_64_16_1_2"),
+        (GemmTranspose::Tt, Dtype::F16, GemmTile::Bm64Bn64Bk16Wm1Wn2) => Ok("gemm_tt_f16_f16_64_64_16_1_2"),
+        (GemmTranspose::Nn, Dtype::F16, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_nn_f16_f16_64_32_32_2_2"),
+        (GemmTranspose::Nt, Dtype::F16, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_nt_f16_f16_64_32_32_2_2"),
+        (GemmTranspose::Tn, Dtype::F16, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_tn_f16_f16_64_32_32_2_2"),
+        (GemmTranspose::Tt, Dtype::F16, GemmTile::Bm64Bn32Bk32Wm2Wn2) => Ok("gemm_tt_f16_f16_64_32_32_2_2"),
+        (GemmTranspose::Nn, Dtype::F16, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_nn_f16_f16_32_64_16_1_2"),
+        (GemmTranspose::Nt, Dtype::F16, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_nt_f16_f16_32_64_16_1_2"),
+        (GemmTranspose::Tn, Dtype::F16, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_tn_f16_f16_32_64_16_1_2"),
+        (GemmTranspose::Tt, Dtype::F16, GemmTile::Bm32Bn64Bk16Wm1Wn2) => Ok("gemm_tt_f16_f16_32_64_16_1_2"),
+        (GemmTranspose::Nn, Dtype::F16, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_nn_f16_f16_32_32_16_2_2"),
+        (GemmTranspose::Nt, Dtype::F16, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_nt_f16_f16_32_32_16_2_2"),
+        (GemmTranspose::Tn, Dtype::F16, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_tn_f16_f16_32_32_16_2_2"),
+        (GemmTranspose::Tt, Dtype::F16, GemmTile::Bm32Bn32Bk16Wm2Wn2) => Ok("gemm_tt_f16_f16_32_32_16_2_2"),
+        (_, dtype @ (Dtype::F32 | Dtype::F16), _) => Err(MetalError::InvalidOperation(format!(
+            "Unsupported MLX GEMM tile configuration: {:?} {:?} {:?}",
+            transpose, dtype, tile
+        ))),
         (_, dtype, _) => Err(MetalError::UnsupportedDtype {
             operation: "MLX GEMM",
             dtype,
