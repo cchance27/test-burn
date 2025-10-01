@@ -479,11 +479,11 @@ where
     if let Some(logits_tensor) = logits_tensor {
         // Extract logits for the very last token of the prompt
         let logits = logits_tensor.to_vec();
-        let vocab_logits = logits[0..vocab_size].to_vec();
+        let vocab_logits = &logits[..vocab_size];
 
         // Sample the first token
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
@@ -619,10 +619,10 @@ where
         sample_process_memory(process_memory_tracker, host_memory);
 
         let logits = logits_tensor.to_vec();
-        let vocab_logits = logits[0..vocab_size].to_vec();
+        let vocab_logits = &logits[..vocab_size];
 
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(&vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
+        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature) as u32;
 
         generated_ids.push(next_token);
 
