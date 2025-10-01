@@ -1,7 +1,7 @@
 use super::{Context, MetalError, SamplerBuffers, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
-use crate::metallic::kernels::softmax::SoftmaxBackend;
+use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::metrics::{
     BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
     ScalarStat, SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
@@ -90,6 +90,18 @@ fn cache_stats_logging_enabled() -> bool {
     cache_stats_logger().enabled()
 }
 
+fn record_softmax_samples(stats: &mut SoftmaxBackendStats, samples: Vec<SoftmaxSample>) {
+    if samples.is_empty() {
+        return;
+    }
+
+    for (backend, total) in aggregate_softmax_totals(samples) {
+        if !total.is_zero() {
+            stats.record(backend, total);
+        }
+    }
+}
+
 fn record_matmul_samples(stats: &mut MatMulBackendStats, samples: Vec<MatMulSample>) {
     if samples.is_empty() {
         return;
@@ -105,6 +117,22 @@ fn record_matmul_samples(stats: &mut MatMulBackendStats, samples: Vec<MatMulSamp
 pub(crate) fn aggregate_matmul_totals<I>(samples: I) -> FxHashMap<MatMulBackend, Duration>
 where
     I: IntoIterator<Item = MatMulSample>,
+{
+    let mut totals = FxHashMap::default();
+    for sample in samples {
+        if sample.duration.is_zero() {
+            continue;
+        }
+
+        *totals.entry(sample.backend).or_insert_with(Duration::default) += sample.duration;
+    }
+
+    totals
+}
+
+pub(crate) fn aggregate_softmax_totals<I>(samples: I) -> FxHashMap<SoftmaxBackend, Duration>
+where
+    I: IntoIterator<Item = SoftmaxSample>,
 {
     let mut totals = FxHashMap::default();
     for sample in samples {
@@ -520,9 +548,7 @@ where
         for (i, &token_id) in input_ids.iter().enumerate() {
             let input_tensor = qwen.embed(&[token_id], ctx)?;
             let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
-            for sample in ctx.take_softmax_samples() {
-                softmax_backend_stats.record(sample.backend, sample.duration);
-            }
+            record_softmax_samples(&mut softmax_backend_stats, ctx.take_softmax_samples());
             record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
             logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
             log_cache_stats(ctx, "prompt", i + 1);
@@ -621,9 +647,7 @@ where
         ctx.set_latency_collector(None);
         ctx.set_memory_collector(None);
 
-        for sample in ctx.take_softmax_samples() {
-            softmax_backend_stats.record(sample.backend, sample.duration);
-        }
+        record_softmax_samples(&mut softmax_backend_stats, ctx.take_softmax_samples());
         record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
 
         if let Some(usage) = memory_snapshot.forward.last {

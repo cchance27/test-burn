@@ -1,5 +1,6 @@
-use crate::metallic::generation::{GenerationConfig, aggregate_matmul_totals, generate, sample_top_k_top_p};
+use crate::metallic::generation::{GenerationConfig, aggregate_matmul_totals, aggregate_softmax_totals, generate, sample_top_k_top_p};
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
+use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{Context, F32Element, MetalError, SamplerBuffers, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
@@ -234,6 +235,39 @@ fn matmul_sample_aggregation_sums_backend_totals() {
 
     assert_eq!(total, Duration::from_millis(12));
     assert_eq!(totals.len(), 1);
+}
+
+#[test]
+fn softmax_sample_aggregation_sums_backend_totals() {
+    use std::time::Duration;
+
+    let totals = aggregate_softmax_totals(vec![
+        SoftmaxSample {
+            backend: SoftmaxBackend::Kernel,
+            duration: Duration::from_millis(9),
+        },
+        SoftmaxSample {
+            backend: SoftmaxBackend::Kernel,
+            duration: Duration::from_millis(3),
+        },
+        SoftmaxSample {
+            backend: SoftmaxBackend::Mps,
+            duration: Duration::from_millis(6),
+        },
+    ]);
+
+    let kernel_total = totals
+        .get(&SoftmaxBackend::Kernel)
+        .copied()
+        .expect("aggregated totals should include the kernel backend");
+    let mps_total = totals
+        .get(&SoftmaxBackend::Mps)
+        .copied()
+        .expect("aggregated totals should include the mps backend");
+
+    assert_eq!(kernel_total, Duration::from_millis(12));
+    assert_eq!(mps_total, Duration::from_millis(6));
+    assert_eq!(totals.len(), 2);
 }
 
 #[test]

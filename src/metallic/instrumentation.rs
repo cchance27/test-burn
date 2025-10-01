@@ -12,6 +12,9 @@ use rustc_hash::FxHashMap;
 use crate::metallic::kernels::matmul::MatMulBackend;
 #[cfg(test)]
 use crate::metallic::kernels::matmul::MatMulSample;
+use crate::metallic::kernels::softmax::SoftmaxBackend;
+#[cfg(test)]
+use crate::metallic::kernels::softmax::SoftmaxSample;
 use crate::metallic::operation::CommandBuffer;
 
 /// Handle to a shared latency collector used to instrument fine-grained timing inside
@@ -165,6 +168,149 @@ impl MatMulInstrumentation {
     }
 }
 
+/// Shared recorder handle that allows softmax dispatches to append timing samples
+/// once the GPU finishes executing a command buffer.
+#[derive(Clone)]
+pub struct SoftmaxSampleRecorder {
+    inner: Arc<dyn Fn(SoftmaxBackend, Duration) + Send + Sync>,
+}
+
+impl SoftmaxSampleRecorder {
+    pub fn new<F>(callback: F) -> Self
+    where
+        F: Fn(SoftmaxBackend, Duration) + Send + Sync + 'static,
+    {
+        Self { inner: Arc::new(callback) }
+    }
+
+    pub fn record_softmax_backend_sample(&self, backend: SoftmaxBackend, duration: Duration) {
+        (self.inner)(backend, duration);
+    }
+}
+
+/// Tracks in-flight softmax dispatches so their GPU execution time can be
+/// recorded once the surrounding command buffer completes.
+#[derive(Clone, Default)]
+pub struct SoftmaxInstrumentation {
+    inner: Arc<SoftmaxInstrumentationInner>,
+}
+
+struct SoftmaxInstrumentationInner {
+    pending: Mutex<FxHashMap<usize, PendingSoftmax>>,
+}
+
+impl Default for SoftmaxInstrumentationInner {
+    fn default() -> Self {
+        Self {
+            pending: Mutex::new(FxHashMap::default()),
+        }
+    }
+}
+
+struct PendingSoftmax {
+    recorder: SoftmaxSampleRecorder,
+    counts: FxHashMap<SoftmaxBackend, usize>,
+}
+
+impl PendingSoftmax {
+    fn new(recorder: SoftmaxSampleRecorder) -> Self {
+        Self {
+            recorder,
+            counts: FxHashMap::default(),
+        }
+    }
+
+    fn increment(&mut self, backend: SoftmaxBackend) {
+        *self.counts.entry(backend).or_insert(0) += 1;
+    }
+}
+
+impl SoftmaxInstrumentation {
+    fn lock_pending(&self) -> MutexGuard<'_, FxHashMap<usize, PendingSoftmax>> {
+        self.inner.pending.lock().unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub fn register(&self, command_buffer: &CommandBuffer, backend: SoftmaxBackend, recorder: SoftmaxSampleRecorder) {
+        {
+            let mut pending = self.lock_pending();
+            if let Some(entry) = pending.get_mut(&Self::buffer_key(command_buffer)) {
+                entry.increment(backend);
+                return;
+            }
+        }
+
+        let key = Self::buffer_key(command_buffer);
+        self.install_completion(command_buffer, key);
+
+        let mut entry = PendingSoftmax::new(recorder);
+        entry.increment(backend);
+        self.lock_pending().insert(key, entry);
+    }
+
+    fn install_completion(&self, command_buffer: &CommandBuffer, key: usize) {
+        let instrumentation = self.clone();
+        command_buffer.on_completed(move |raw| instrumentation.complete(key, raw));
+    }
+
+    fn complete(&self, key: usize, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+        let Some(entry) = self.lock_pending().remove(&key) else {
+            return;
+        };
+
+        let gpu_start = unsafe { command_buffer.GPUStartTime() };
+        let gpu_end = unsafe { command_buffer.GPUEndTime() };
+
+        if !gpu_start.is_finite() || !gpu_end.is_finite() {
+            return;
+        }
+
+        let delta = gpu_end - gpu_start;
+        if delta <= 0.0 {
+            return;
+        }
+
+        let total = Duration::from_secs_f64(delta);
+        Self::dispatch_samples(entry, total);
+    }
+
+    fn dispatch_samples(entry: PendingSoftmax, total: Duration) {
+        let PendingSoftmax { recorder, counts } = entry;
+        let total_secs = total.as_secs_f64();
+        if total_secs <= 0.0 {
+            return;
+        }
+
+        let total_dispatches: usize = counts.values().copied().sum();
+        if total_dispatches == 0 {
+            return;
+        }
+
+        let total_dispatches = total_dispatches as f64;
+
+        for (backend, count) in counts {
+            if count == 0 {
+                continue;
+            }
+
+            let share = count as f64 / total_dispatches;
+            if !share.is_finite() || share <= 0.0 {
+                continue;
+            }
+
+            let share_secs = total_secs * share;
+            if !share_secs.is_finite() || share_secs <= 0.0 {
+                continue;
+            }
+
+            recorder.record_softmax_backend_sample(backend, Duration::from_secs_f64(share_secs));
+        }
+    }
+
+    fn buffer_key(command_buffer: &CommandBuffer) -> usize {
+        Retained::as_ptr(command_buffer.raw()) as usize
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -193,6 +339,31 @@ mod tests {
         assert_eq!(recorded.len(), 1);
         let sample = &recorded[0];
         assert_eq!(sample.backend, MatMulBackend::Mps);
+        assert_eq!(sample.duration, Duration::from_millis(30));
+    }
+
+    #[test]
+    fn dispatch_samples_returns_full_duration_for_single_softmax_backend() {
+        let samples: Arc<Mutex<Vec<SoftmaxSample>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = SoftmaxSampleRecorder::new({
+            let samples = Arc::clone(&samples);
+            move |backend, duration| {
+                if let Ok(mut samples) = samples.lock() {
+                    samples.push(SoftmaxSample { backend, duration });
+                }
+            }
+        });
+
+        let mut pending = PendingSoftmax::new(recorder);
+        pending.increment(SoftmaxBackend::Kernel);
+        pending.increment(SoftmaxBackend::Kernel);
+
+        SoftmaxInstrumentation::dispatch_samples(pending, Duration::from_millis(30));
+
+        let recorded = samples.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        let sample = &recorded[0];
+        assert_eq!(sample.backend, SoftmaxBackend::Kernel);
         assert_eq!(sample.duration, Duration::from_millis(30));
     }
 }

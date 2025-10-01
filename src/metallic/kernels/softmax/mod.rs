@@ -11,7 +11,7 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::env;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 pub const METALLIC_SOFTMAX_BACKEND_ENV: &str = "METALLIC_SOFTMAX_BACKEND";
 
@@ -93,14 +93,11 @@ pub fn apply_softmax<T: TensorElement>(
     let dtype = attn.dtype;
 
     let preference = softmax_backend_preference();
-    let start = Instant::now();
-
     let supports_mps_dtype = matches!(dtype, Dtype::F32 | Dtype::F16);
     let can_use_mps = allow_mps && supports_mps_dtype && !causal && query_offset == 0 && !preference.forces_kernel();
     if can_use_mps && let Some(cache_slot) = cache.as_mut() {
         let cache_ref: &mut ResourceCache = cache_slot;
         try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns, dtype)?;
-        ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
         return Ok(attn.clone());
     }
 
@@ -111,7 +108,6 @@ pub fn apply_softmax<T: TensorElement>(
         )?,
         None => ctx.call::<SoftmaxOp>((attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset))?,
     };
-    ctx.record_softmax_backend_sample(SoftmaxBackend::Kernel, start.elapsed());
     Ok(result)
 }
 
@@ -148,6 +144,8 @@ fn try_apply_mps_softmax<T: TensorElement>(
         batch,
     };
     command_buffer.record(&op, cache)?;
+    let command_buffer = command_buffer.clone();
+    ctx.register_softmax_dispatch(&command_buffer, SoftmaxBackend::Mps);
     ctx.mark_tensor_pending(attn);
     Ok(())
 }
@@ -245,6 +243,14 @@ impl KernelInvocable for SoftmaxOp {
             query_offset,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
+
+        {
+            let command_buffer = {
+                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+                command_buffer.clone()
+            };
+            ctx.register_softmax_dispatch(&command_buffer, SoftmaxBackend::Kernel);
+        }
 
         Ok((Box::new(op), attn.clone())) // Return a shallow clone since operation is in-place
     }
