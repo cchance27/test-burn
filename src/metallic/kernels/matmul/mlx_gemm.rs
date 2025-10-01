@@ -8,18 +8,13 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, 
 use crate::metallic::{
     Context, Dtype, MetalError,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_bytes_slice, set_compute_pipeline_state},
-    kernels::KernelFunction,
+    kernels::{GemmKernel, GemmTile, GemmTranspose, KernelFunction, gemm_kernel_symbol},
     resource_cache::ResourceCache,
     tensor::MpsMatrixBatchView,
 };
 
 use super::{MatMulBackend, MatMulBackendKind, MpsMatMulBackend};
 
-const BM: i32 = 32;
-const BN: i32 = 32;
-const BK: i32 = 16;
-const WM: i32 = 2;
-const WN: i32 = 2;
 const SWIZZLE_LOG: i32 = 0;
 
 static MLX_GEMM_ENABLED: OnceLock<bool> = OnceLock::new();
@@ -89,6 +84,8 @@ pub struct MlxGemmBackend {
     alpha: f32,
     beta: f32,
     use_out_source: bool,
+    kernel: GemmKernel,
+    dtype: Dtype,
 }
 
 impl MlxGemmBackend {
@@ -159,25 +156,35 @@ impl MlxGemmBackend {
             (1.0f32, 0.0f32, false, false, None, 0, 0)
         };
 
-        let tiles_m = Self::ceil_div(m_i32, BM);
-        let tiles_n = Self::ceil_div(n_i32, BN);
-        let gemm_k_iterations_aligned = k_i32 / BK;
-
         let batch_size = result_view.batch;
         let has_batch = batch_size > 1;
         let batch_ndim = if has_batch { 1 } else { 0 };
 
-        let align_m = m_i32 % BM == 0;
-        let align_n = n_i32 % BN == 0;
-        let align_k = k_i32 % BK == 0;
+        let transpose = GemmTranspose::from_flags(transpose_left, transpose_right);
+        let tile = Self::select_tile(
+            &ctx.device,
+            left_dtype,
+            transpose_left,
+            transpose_right,
+            m_i32,
+            n_i32,
+            k_i32,
+            batch_size,
+        );
+        let (bm, bn, bk, wm, wn) = tile.dimensions();
+
+        let tiles_m = Self::ceil_div(m_i32, bm);
+        let tiles_n = Self::ceil_div(n_i32, bn);
+        let gemm_k_iterations_aligned = if bk > 0 { k_i32 / bk } else { 0 };
+
+        let align_m = m_i32 % bm == 0;
+        let align_n = n_i32 % bn == 0;
+        let align_k = if bk > 0 { k_i32 % bk == 0 } else { false };
         let do_gather = false;
 
-        let kernel_fn = match (transpose_left, transpose_right) {
-            (false, false) => KernelFunction::MlxGemmNn,
-            (false, true) => KernelFunction::MlxGemmNt,
-            (true, false) => KernelFunction::MlxGemmTn,
-            (true, true) => KernelFunction::MlxGemmTt,
-        };
+        let kernel = GemmKernel { transpose, tile };
+        gemm_kernel_symbol(transpose, left_dtype, tile)?;
+        let kernel_fn = KernelFunction::MlxGemm(kernel);
 
         let flags = [
             (10u16, has_batch),
@@ -215,6 +222,8 @@ impl MlxGemmBackend {
             alpha,
             beta,
             use_out_source,
+            kernel,
+            dtype: left_dtype,
         }))
     }
 
@@ -298,10 +307,11 @@ impl MlxGemmBackend {
         let stride_len = if self.use_out_source { 3 } else { 2 };
         set_bytes_slice(&encoder, 7, &batch_strides[..stride_len]);
 
+        let (_, _, _, wm, wn) = self.kernel.tile.dimensions();
         let threads_per_tg = MTLSize {
             width: 32,
-            height: WN as NSUInteger,
-            depth: WM as NSUInteger,
+            height: wn as NSUInteger,
+            depth: wm as NSUInteger,
         };
         let groups = MTLSize {
             width: self.tiles_n.max(1) as NSUInteger,
@@ -313,6 +323,128 @@ impl MlxGemmBackend {
         encoder.endEncoding();
 
         Ok(())
+    }
+
+    pub(crate) fn kernel(&self) -> GemmKernel {
+        self.kernel
+    }
+
+    pub(crate) fn kernel_symbol(&self) -> Result<&'static str, MetalError> {
+        gemm_kernel_symbol(self.kernel.transpose, self.dtype, self.kernel.tile)
+    }
+
+    fn architecture_suffix(device: &Retained<ProtocolObject<dyn objc2_metal::MTLDevice>>) -> Option<char> {
+        unsafe {
+            let architecture = device.architecture();
+            let name = architecture.name();
+            let suffix = name.to_string().chars().last()?;
+            Some(suffix.to_ascii_lowercase())
+        }
+    }
+
+    fn select_tile(
+        device: &Retained<ProtocolObject<dyn objc2_metal::MTLDevice>>,
+        dtype: Dtype,
+        transpose_left: bool,
+        transpose_right: bool,
+        m: i32,
+        n: i32,
+        k: i32,
+        batch_size: usize,
+    ) -> GemmTile {
+        let mut bm = 64;
+        let mut bn = 64;
+        let mut bk = 16;
+        let mut wm = 2;
+        let mut wn = 2;
+
+        let arch = Self::architecture_suffix(device);
+        let is_float = matches!(dtype, Dtype::F32);
+        let large_matmul = {
+            let batch = batch_size as u128;
+            let m = m as u128;
+            let n = n as u128;
+            batch.saturating_mul(m).saturating_mul(n) >= (1u128 << 20)
+        };
+        let reasonable_k = {
+            let max_dim = m.max(n) as u128;
+            let k_extent = k as u128;
+            max_dim.saturating_mul(2) > k_extent
+        };
+
+        match arch {
+            Some('g') | Some('p') => {
+                if !transpose_left && transpose_right {
+                    bm = 64;
+                    bn = 32;
+                    bk = 32;
+                    wm = 2;
+                    wn = 2;
+                } else if !is_float {
+                    bm = 64;
+                    bn = 64;
+                    bk = 16;
+                    wm = 1;
+                    wn = 2;
+                }
+            }
+            Some('d') => {
+                if large_matmul {
+                    if !is_float {
+                        if reasonable_k {
+                            bm = 64;
+                            bn = 64;
+                            bk = 16;
+                            wm = 1;
+                            wn = 2;
+                        } else if !transpose_left && transpose_right {
+                            bm = 64;
+                            bn = 32;
+                            bk = 32;
+                            wm = 2;
+                            wn = 2;
+                        } else {
+                            bm = 32;
+                            bn = 64;
+                            bk = 16;
+                            wm = 1;
+                            wn = 2;
+                        }
+                    }
+                } else if !is_float {
+                    if !transpose_left && transpose_right {
+                        bm = 64;
+                        bn = 32;
+                        bk = 32;
+                        wm = 2;
+                        wn = 2;
+                    } else {
+                        bm = 64;
+                        bn = 64;
+                        bk = 16;
+                        wm = 1;
+                        wn = 2;
+                    }
+                } else if !transpose_left && transpose_right {
+                    bm = 32;
+                    bn = 64;
+                    bk = 16;
+                    wm = 1;
+                    wn = 2;
+                } else {
+                    bm = 64;
+                    bn = 32;
+                    bk = 32;
+                    wm = 2;
+                    wn = 2;
+                }
+            }
+            _ => {
+                // Medium devices keep the default tile configuration
+            }
+        }
+
+        GemmTile::from_dims(bm, bn, bk, wm, wn).unwrap_or(GemmTile::Bm32Bn32Bk16Wm2Wn2)
     }
 }
 

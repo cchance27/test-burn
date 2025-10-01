@@ -10,6 +10,123 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineSt
 use objc2_metal::{MTLDevice, MTLLibrary};
 use rustc_hash::FxHashMap;
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum GemmTranspose {
+    Nn,
+    Nt,
+    Tn,
+    Tt,
+}
+
+impl GemmTranspose {
+    pub const fn from_flags(transpose_left: bool, transpose_right: bool) -> Self {
+        match (transpose_left, transpose_right) {
+            (false, false) => Self::Nn,
+            (false, true) => Self::Nt,
+            (true, false) => Self::Tn,
+            (true, true) => Self::Tt,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum GemmTile {
+    Bm64Bn64Bk16Wm2Wn2,
+    Bm64Bn64Bk16Wm1Wn2,
+    Bm64Bn32Bk32Wm2Wn2,
+    Bm32Bn64Bk16Wm1Wn2,
+    Bm32Bn32Bk16Wm2Wn2,
+}
+
+impl GemmTile {
+    pub const fn dimensions(self) -> (i32, i32, i32, i32, i32) {
+        match self {
+            GemmTile::Bm64Bn64Bk16Wm2Wn2 => (64, 64, 16, 2, 2),
+            GemmTile::Bm64Bn64Bk16Wm1Wn2 => (64, 64, 16, 1, 2),
+            GemmTile::Bm64Bn32Bk32Wm2Wn2 => (64, 32, 32, 2, 2),
+            GemmTile::Bm32Bn64Bk16Wm1Wn2 => (32, 64, 16, 1, 2),
+            GemmTile::Bm32Bn32Bk16Wm2Wn2 => (32, 32, 16, 2, 2),
+        }
+    }
+
+    pub const fn from_dims(bm: i32, bn: i32, bk: i32, wm: i32, wn: i32) -> Option<Self> {
+        match (bm, bn, bk, wm, wn) {
+            (64, 64, 16, 2, 2) => Some(GemmTile::Bm64Bn64Bk16Wm2Wn2),
+            (64, 64, 16, 1, 2) => Some(GemmTile::Bm64Bn64Bk16Wm1Wn2),
+            (64, 32, 32, 2, 2) => Some(GemmTile::Bm64Bn32Bk32Wm2Wn2),
+            (32, 64, 16, 1, 2) => Some(GemmTile::Bm32Bn64Bk16Wm1Wn2),
+            (32, 32, 16, 2, 2) => Some(GemmTile::Bm32Bn32Bk16Wm2Wn2),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct GemmKernel {
+    pub transpose: GemmTranspose,
+    pub tile: GemmTile,
+}
+
+macro_rules! gemm_tile_cases {
+    ($dtype_variant:ident, $dtype_token:literal, $tile_variant:ident, $tile_suffix:literal) => {
+        (GemmTranspose::Nn, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
+            Ok(concat!("gemm_nn_", $dtype_token, "_", $tile_suffix))
+        },
+        (GemmTranspose::Nt, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
+            Ok(concat!("gemm_nt_", $dtype_token, "_", $tile_suffix))
+        },
+        (GemmTranspose::Tn, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
+            Ok(concat!("gemm_tn_", $dtype_token, "_", $tile_suffix))
+        },
+        (GemmTranspose::Tt, Dtype::$dtype_variant, GemmTile::$tile_variant) => {
+            Ok(concat!("gemm_tt_", $dtype_token, "_", $tile_suffix))
+        }
+    };
+}
+
+macro_rules! gemm_match_arms {
+    ($dtype_variant:ident, $dtype_token:literal, [$(($tile_variant:ident, $tile_suffix:literal)),+ $(,)?]) => {
+        $(gemm_tile_cases!($dtype_variant, $dtype_token, $tile_variant, $tile_suffix),)+
+    };
+}
+
+pub(crate) fn gemm_kernel_symbol(transpose: GemmTranspose, dtype: Dtype, tile: GemmTile) -> Result<&'static str, MetalError> {
+    match (transpose, dtype, tile) {
+        gemm_match_arms!(
+            F32,
+            "f32_f32",
+            [
+                (Bm64Bn64Bk16Wm2Wn2, "64_64_16_2_2"),
+                (Bm64Bn64Bk16Wm1Wn2, "64_64_16_1_2"),
+                (Bm64Bn32Bk32Wm2Wn2, "64_32_32_2_2"),
+                (Bm32Bn64Bk16Wm1Wn2, "32_64_16_1_2"),
+                (Bm32Bn32Bk16Wm2Wn2, "32_32_16_2_2"),
+            ]
+        ),
+        gemm_match_arms!(
+            F16,
+            "f16_f16",
+            [
+                (Bm64Bn64Bk16Wm2Wn2, "64_64_16_2_2"),
+                (Bm64Bn64Bk16Wm1Wn2, "64_64_16_1_2"),
+                (Bm64Bn32Bk32Wm2Wn2, "64_32_32_2_2"),
+                (Bm32Bn64Bk16Wm1Wn2, "32_64_16_1_2"),
+                (Bm32Bn32Bk16Wm2Wn2, "32_32_16_2_2"),
+            ]
+        ),
+        (_, dtype @ (Dtype::F32 | Dtype::F16), _) => Err(MetalError::InvalidOperation(
+            format!(
+                "Unsupported MLX GEMM tile configuration: {:?} {:?} {:?}",
+                transpose, dtype, tile
+            ),
+        )),
+        (_, dtype, _) => Err(MetalError::UnsupportedDtype {
+            operation: "MLX GEMM",
+            dtype,
+        }),
+    }
+}
+
 // Rexport KernelManager and Invocable
 mod kernel_manager;
 pub use kernel_manager::{KernelInvocable, KernelManager};
@@ -104,10 +221,7 @@ pub enum KernelFunction {
     Arange,
     Ones,
     RandomUniform,
-    MlxGemmNn,
-    MlxGemmNt,
-    MlxGemmTn,
-    MlxGemmTt,
+    MlxGemm(GemmKernel),
 }
 
 impl KernelFunction {
@@ -131,9 +245,7 @@ impl KernelFunction {
             KernelFunction::FusedSoftmax => KernelLibrary::Softmax,
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
-            KernelFunction::MlxGemmNn | KernelFunction::MlxGemmNt | KernelFunction::MlxGemmTn | KernelFunction::MlxGemmTt => {
-                KernelLibrary::MlxGemm
-            }
+            KernelFunction::MlxGemm(_) => KernelLibrary::MlxGemm,
         }
     }
 
@@ -141,6 +253,13 @@ impl KernelFunction {
         use Dtype::*;
 
         let name = match (self, dtype) {
+            (KernelFunction::MlxGemm(kernel), dtype @ (F32 | F16)) => gemm_kernel_symbol(kernel.transpose, dtype, kernel.tile)?,
+            (KernelFunction::MlxGemm(_), dtype) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MLX GEMM",
+                    dtype,
+                });
+            }
             (KernelFunction::CastToF16, F32) => "cast_to_f16_kernel_f32",
             (KernelFunction::CastToF16, F16) => "cast_to_f16_kernel_f16",
             (KernelFunction::CastFromF16, F32) => "cast_from_f16_kernel_f32",
@@ -185,58 +304,6 @@ impl KernelFunction {
             (KernelFunction::Ones, F16) => "ones_kernel_f16",
             (KernelFunction::RandomUniform, F32) => "random_uniform_f32",
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
-            (KernelFunction::MlxGemmNn, dtype @ (F32 | F16)) => {
-                if dtype == F32 {
-                    "gemm_nn_f32_f32_32_32_16_2_2"
-                } else {
-                    "gemm_nn_f16_f16_32_32_16_2_2"
-                }
-            }
-            (KernelFunction::MlxGemmNn, dtype) if !matches!(dtype, F32 | F16) => {
-                return Err(MetalError::UnsupportedDtype {
-                    operation: "MLX GEMM",
-                    dtype,
-                });
-            }
-            (KernelFunction::MlxGemmNt, dtype @ (F32 | F16)) => {
-                if dtype == F32 {
-                    "gemm_nt_f32_f32_32_32_16_2_2"
-                } else {
-                    "gemm_nt_f16_f16_32_32_16_2_2"
-                }
-            }
-            (KernelFunction::MlxGemmNt, dtype) if !matches!(dtype, F32 | F16) => {
-                return Err(MetalError::UnsupportedDtype {
-                    operation: "MLX GEMM",
-                    dtype,
-                });
-            }
-            (KernelFunction::MlxGemmTn, dtype @ (F32 | F16)) => {
-                if dtype == F32 {
-                    "gemm_tn_f32_f32_32_32_16_2_2"
-                } else {
-                    "gemm_tn_f16_f16_32_32_16_2_2"
-                }
-            }
-            (KernelFunction::MlxGemmTn, dtype) if !matches!(dtype, F32 | F16) => {
-                return Err(MetalError::UnsupportedDtype {
-                    operation: "MLX GEMM",
-                    dtype,
-                });
-            }
-            (KernelFunction::MlxGemmTt, dtype @ (F32 | F16)) => {
-                if dtype == F32 {
-                    "gemm_tt_f32_f32_32_32_16_2_2"
-                } else {
-                    "gemm_tt_f16_f16_32_32_16_2_2"
-                }
-            }
-            (KernelFunction::MlxGemmTt, dtype) if !matches!(dtype, F32 | F16) => {
-                return Err(MetalError::UnsupportedDtype {
-                    operation: "MLX GEMM",
-                    dtype,
-                });
-            }
         };
 
         Ok(name)
