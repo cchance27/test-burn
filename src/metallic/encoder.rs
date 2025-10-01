@@ -41,7 +41,7 @@ pub fn set_bytes_slice<T: Sized>(encoder: &ProtocolObject<dyn MTLComputeCommandE
 
     unsafe {
         if size == 0 {
-            let ptr = std::ptr::NonNull::dangling().cast::<c_void>();
+            let ptr = std::ptr::NonNull::<T>::dangling().cast::<c_void>();
             encoder.setBytes_length_atIndex(ptr, 0, index);
             return;
         }
