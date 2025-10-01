@@ -91,7 +91,7 @@ fn tensor_from_q8_bytes<T: TensorElement>(
         }
     };
 
-    if raw.len() % block_size != 0 {
+    if !raw.len().is_multiple_of(block_size) {
         return Err(GGUFError::InvalidTensorData(format!(
             "Tensor '{}' data length {} is not a multiple of block size {}",
             tensor_name,
@@ -206,10 +206,11 @@ fn adjust_embedding_dims(_name: &str, dims: &mut [usize], metadata: &GGUFMetadat
     );
     let vocab = metadata_vocab_size(metadata);
 
-    if let (Some(d_model), Some(vocab)) = (d_model, vocab) {
-        if dims[0] == d_model && dims[1] == vocab {
-            dims.swap(0, 1);
-        }
+    if let (Some(d_model), Some(vocab)) = (d_model, vocab)
+        && dims[0] == d_model
+        && dims[1] == vocab
+    {
+        dims.swap(0, 1);
     }
 }
 

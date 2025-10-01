@@ -155,6 +155,7 @@ pub fn generate<T: TensorElement>(
 }
 
 /// High-level end-to-end generation pipeline with token streaming support
+#[allow(clippy::too_many_arguments)]
 pub fn generate_streaming<T: TensorElement>(
     qwen: &mut Qwen25<T>,
     tokenizer: &Tokenizer,
@@ -308,7 +309,6 @@ where
     let mut memory_forward = MemoryScopeStat::default();
     let mut memory_output = MemoryScopeStat::default();
     let mut memory_blocks = vec![MemoryBlockStat::default(); n_layers];
-    let mut latest_forward_usage: Option<MemoryUsage> = None;
     let mut memory_ready = false;
     sample_process_memory(process_memory_tracker, host_memory);
     let model_memory_tree = build_model_memory_tree(qwen);
@@ -317,7 +317,7 @@ where
         ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
-    latest_forward_usage = Some(ctx.snapshot_memory_usage());
+    let mut latest_forward_usage = Some(ctx.snapshot_memory_usage());
     sample_process_memory(process_memory_tracker, host_memory);
 
     // --- Prompt Processing Pass ---
@@ -379,7 +379,7 @@ where
 
     emit_memory_rows(
         &model_memory_tree,
-        &host_memory,
+        host_memory,
         &memory_embed,
         &memory_forward,
         latest_forward_usage,
@@ -533,7 +533,7 @@ where
         if memory_ready {
             emit_memory_rows(
                 &model_memory_tree,
-                &host_memory,
+                host_memory,
                 &memory_embed,
                 &memory_forward,
                 latest_forward_usage,

@@ -734,7 +734,7 @@ fn render_alert_modal(frame: &mut Frame, alert: &Alert, pending: usize) {
     message.push_str("\n\nPress Enter, Space, or Esc to dismiss.");
 
     let block = Block::default()
-        .title(format!("{}", alert.level.as_str()))
+        .title(alert.level.as_str().to_string())
         .borders(Borders::ALL)
         .border_style(Style::default().fg(alert_color(&alert.level)));
 

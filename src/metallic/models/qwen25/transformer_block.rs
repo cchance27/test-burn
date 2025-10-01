@@ -44,7 +44,9 @@ where
         // - down:    [ff_dim, d_model]
         let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
         let ffn_gate_up_weight = Tensor::zeros(vec![2 * cfg.ff_dim, cfg.d_model], ctx, false)?;
+        #[allow(clippy::single_range_in_vec_init)]
         let ffn_gate = ffn_gate_up_weight.slice(&[0..cfg.ff_dim])?;
+        #[allow(clippy::single_range_in_vec_init)]
         let ffn_up = ffn_gate_up_weight.slice(&[cfg.ff_dim..2 * cfg.ff_dim])?;
 
         // FFN biases

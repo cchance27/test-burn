@@ -135,7 +135,7 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
         };
 
         let groups = MTLSize {
-            width: ((total_threads as usize) + threads_per_tg.width - 1) / threads_per_tg.width,
+            width: (total_threads as usize).div_ceil(threads_per_tg.width),
             height: 1,
             depth: 1,
         };

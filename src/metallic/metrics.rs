@@ -421,21 +421,21 @@ impl MetricsLoggers {
     }
 
     pub fn log_memory(&mut self, rows: &[MemoryRow], now: Instant, force: bool) -> io::Result<()> {
-        if let Some(logger) = self.memory.as_mut() {
-            if let Err(err) = logger.log(rows, now, force) {
-                self.memory = None;
-                return Err(err);
-            }
+        if let Some(logger) = self.memory.as_mut()
+            && let Err(err) = logger.log(rows, now, force)
+        {
+            self.memory = None;
+            return Err(err);
         }
         Ok(())
     }
 
     pub fn log_latency(&mut self, rows: &[LatencyRow], now: Instant, force: bool) -> io::Result<()> {
-        if let Some(logger) = self.latency.as_mut() {
-            if let Err(err) = logger.log(rows, now, force) {
-                self.latency = None;
-                return Err(err);
-            }
+        if let Some(logger) = self.latency.as_mut()
+            && let Err(err) = logger.log(rows, now, force)
+        {
+            self.latency = None;
+            return Err(err);
         }
         Ok(())
     }
