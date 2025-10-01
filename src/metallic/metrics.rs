@@ -1,6 +1,7 @@
 use crate::app_event::{LatencyRow, MemoryRow};
 use crate::metallic::TensorElement;
 use crate::metallic::instrumentation::{BlockMemorySnapshot, MemoryUsage};
+use crate::metallic::kernels::matmul::MatMulBackendKind;
 use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::models::qwen25::Qwen25;
 use chrono::{SecondsFormat, Utc};
@@ -101,6 +102,29 @@ impl SoftmaxBackendStats {
 
     pub fn kernel(&self) -> &RollingStat {
         &self.kernel
+    }
+
+    pub fn mps(&self) -> &RollingStat {
+        &self.mps
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct MatMulBackendStats {
+    mlx: RollingStat,
+    mps: RollingStat,
+}
+
+impl MatMulBackendStats {
+    pub fn record(&mut self, backend: MatMulBackendKind, duration: Duration) {
+        match backend {
+            MatMulBackendKind::Mlx => self.mlx.record(duration),
+            MatMulBackendKind::Mps => self.mps.record(duration),
+        }
+    }
+
+    pub fn mlx(&self) -> &RollingStat {
+        &self.mlx
     }
 
     pub fn mps(&self) -> &RollingStat {
@@ -503,6 +527,7 @@ pub fn build_latency_rows(
     embed: &RollingStat,
     forward: &RollingStat,
     blocks: &[BlockStat],
+    matmul: &MatMulBackendStats,
     softmax: &SoftmaxBackendStats,
     output: &RollingStat,
     sample: &RollingStat,
@@ -523,6 +548,24 @@ pub fn build_latency_rows(
         average_ms: forward.average_ms(),
         level: 0,
     });
+
+    if matmul.mlx().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (MLX)".to_string(),
+            last_ms: matmul.mlx().last_ms(),
+            average_ms: matmul.mlx().average_ms(),
+            level: 0,
+        });
+    }
+
+    if matmul.mps().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (MPS)".to_string(),
+            last_ms: matmul.mps().last_ms(),
+            average_ms: matmul.mps().average_ms(),
+            level: 0,
+        });
+    }
 
     if softmax.kernel().has_samples() {
         rows.push(LatencyRow {

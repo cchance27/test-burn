@@ -8,7 +8,7 @@ use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
-use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
+use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackendKind, MatMulOp, MatMulSample};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
@@ -19,7 +19,7 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::mem;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Default)]
 pub struct SamplerBuffers {
@@ -56,6 +56,10 @@ pub struct Context<T: TensorElement> {
     softmax_samples: Vec<SoftmaxSample>,
     /// Tracks the last backend that executed so instrumentation can explain cache stats.
     last_softmax_backend: Option<SoftmaxBackend>,
+    /// Pending matmul backend samples collected since the last drain.
+    matmul_samples: Vec<MatMulSample>,
+    /// Tracks which matmul backend produced the most recent dispatch.
+    last_matmul_backend: Option<MatMulBackendKind>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     //config: ContextConfig,
@@ -118,6 +122,8 @@ impl<T: TensorElement> Context<T> {
             memory_collector: None,
             softmax_samples: Vec::new(),
             last_softmax_backend: None,
+            matmul_samples: Vec::new(),
+            last_matmul_backend: None,
             sampler_buffers: SamplerBuffers::default(),
             //config,
         })
@@ -192,6 +198,22 @@ impl<T: TensorElement> Context<T> {
         self.last_softmax_backend
     }
 
+    pub(crate) fn note_matmul_backend(&mut self, backend: MatMulBackendKind) {
+        self.last_matmul_backend = Some(backend);
+    }
+
+    pub(crate) fn record_matmul_backend_sample(&mut self, duration: Duration) {
+        if let Some(backend) = self.last_matmul_backend.take() {
+            if !duration.is_zero() {
+                self.matmul_samples.push(MatMulSample { backend, duration });
+            }
+        }
+    }
+
+    pub fn take_matmul_samples(&mut self) -> Vec<MatMulSample> {
+        mem::take(&mut self.matmul_samples)
+    }
+
     /// Registers a memory collector handle for the upcoming operations. Passing `None`
     /// disables memory instrumentation.
     pub fn set_memory_collector(&mut self, collector: Option<MemoryCollectorHandle>) {
@@ -227,8 +249,10 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
-        // Use the kernel system for matmul
-        self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+        let start = Instant::now();
+        let tensor = self.call::<MatMulOp>((a, b, transpose_a, transpose_b))?;
+        self.record_matmul_backend_sample(start.elapsed());
+        Ok(tensor)
     }
 
     pub(crate) fn matmul_with_cache(
@@ -239,7 +263,10 @@ impl<T: TensorElement> Context<T> {
         transpose_b: bool,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
-        self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
+        let start = Instant::now();
+        let tensor = self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)?;
+        self.record_matmul_backend_sample(start.elapsed());
+        Ok(tensor)
     }
 
     #[allow(clippy::type_complexity)]
@@ -318,8 +345,10 @@ impl<T: TensorElement> Context<T> {
         alpha: f32,
         beta: f32,
     ) -> Result<Tensor<T>, MetalError> {
-        // Use the kernel system for matmul with alpha/beta scaling
-        self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
+        let start = Instant::now();
+        let tensor = self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))?;
+        self.record_matmul_backend_sample(start.elapsed());
+        Ok(tensor)
     }
 
     pub(crate) fn call_with_cache<K: KernelInvocable>(
@@ -356,7 +385,10 @@ impl<T: TensorElement> Context<T> {
         beta: f32,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
-        self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
+        let start = Instant::now();
+        let tensor = self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)?;
+        self.record_matmul_backend_sample(start.elapsed());
+        Ok(tensor)
     }
 
     pub fn get_cache_stats(&self) -> Option<CacheStats> {

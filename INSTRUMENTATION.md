@@ -76,6 +76,23 @@ The benchmark reports separate `kernel` and `mps` measurements using identical
 tensor shapes so you can determine which backend is faster on a given piece of
 hardware.
 
+### MatMul backend benchmarking
+
+Matrix multiplication now exposes a similar instrumentation surface so the new
+MLX GEMM kernel can be compared directly against the legacy MPS path. Set the
+`METALLIC_GEMM_BACKEND` environment variable to `mps`, `cpu`, or `0` to force the
+fallback implementation when collecting baselines. With the default value the
+inference stack selects the MLX kernel whenever it supports the current tensor
+layout and dtype.
+
+Every matmul dispatch records its backend and scheduling latency. The metrics
+layer aggregates the samples into two new latency rows, **MatMul (MLX)** and
+**MatMul (MPS)**, which appear alongside the existing forward-step timings in
+the Ratatui dashboard and JSONL logs. Use the rows to validate that the MLX
+kernel outperforms the fallback for your sequence shapes, or to confirm the
+fallback remains active when the MLX kernel is disabled through the
+environment flag.
+
 ## Memory tracking
 
 The memory collector captures pool usage, KV cache growth, and per-phase deltas.

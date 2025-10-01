@@ -52,6 +52,7 @@ pub enum KernelLibrary {
     Softmax,
     Swiglu,
     Tensors,
+    MlxGemm,
 }
 
 impl KernelLibrary {
@@ -73,6 +74,7 @@ impl KernelLibrary {
             KernelLibrary::Softmax => include_str!("softmax/kernel.metal"),
             KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
+            KernelLibrary::MlxGemm => include_str!("../../../experimental/mlx_gemm.metal"),
         }
     }
 }
@@ -102,6 +104,10 @@ pub enum KernelFunction {
     Arange,
     Ones,
     RandomUniform,
+    MlxGemmNn,
+    MlxGemmNt,
+    MlxGemmTn,
+    MlxGemmTt,
 }
 
 impl KernelFunction {
@@ -125,6 +131,9 @@ impl KernelFunction {
             KernelFunction::FusedSoftmax => KernelLibrary::Softmax,
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
+            KernelFunction::MlxGemmNn | KernelFunction::MlxGemmNt | KernelFunction::MlxGemmTn | KernelFunction::MlxGemmTt => {
+                KernelLibrary::MlxGemm
+            }
         }
     }
 
@@ -176,6 +185,23 @@ impl KernelFunction {
             (KernelFunction::Ones, F16) => "ones_kernel_f16",
             (KernelFunction::RandomUniform, F32) => "random_uniform_f32",
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
+            (KernelFunction::MlxGemmNn, F32) => "gemm_nn_f32_f32_32_32_16_2_2",
+            (KernelFunction::MlxGemmNn, F16) => "gemm_nn_f16_f16_32_32_16_2_2",
+            (KernelFunction::MlxGemmNt, F32) => "gemm_nt_f32_f32_32_32_16_2_2",
+            (KernelFunction::MlxGemmNt, F16) => "gemm_nt_f16_f16_32_32_16_2_2",
+            (KernelFunction::MlxGemmTn, F32) => "gemm_tn_f32_f32_32_32_16_2_2",
+            (KernelFunction::MlxGemmTn, F16) => "gemm_tn_f16_f16_32_32_16_2_2",
+            (KernelFunction::MlxGemmTt, F32) => "gemm_tt_f32_f32_32_32_16_2_2",
+            (KernelFunction::MlxGemmTt, F16) => "gemm_tt_f16_f16_32_32_16_2_2",
+            (KernelFunction::MlxGemmNn, dtype)
+            | (KernelFunction::MlxGemmNt, dtype)
+            | (KernelFunction::MlxGemmTn, dtype)
+            | (KernelFunction::MlxGemmTt, dtype) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MLX GEMM",
+                    dtype,
+                });
+            }
         };
 
         Ok(name)

@@ -1,33 +1,22 @@
-use super::*;
+use super::{KernelFunction, KernelInvocable, MatMulBackend, mlx_gemm};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
-use super::{KernelFunction, KernelInvocable};
-use crate::metallic::{
-    Context, MetalError, Operation, Tensor, TensorElement,
-    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
-    resource_cache::ResourceCache,
-};
+use crate::metallic::{Context, MetalError, Operation, Tensor, TensorElement, resource_cache::ResourceCache};
 
 // Public struct for matmul with alpha/beta scaling
 pub struct MatMulAlphaBetaOp;
 
 // Internal struct that holds data for the alpha/beta `Operation` trait.
 struct MatMulAlphaBeta {
-    pub left_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
-    pub left_offset: usize,
-    pub right_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
-    pub right_offset: usize,
-    pub result_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
-    pub result_offset: usize,
-    pub left_desc: Retained<MPSMatrixDescriptor>,
-    pub right_desc: Retained<MPSMatrixDescriptor>,
-    pub result_desc: Retained<MPSMatrixDescriptor>,
-    pub gemm: Retained<MPSMatrixMultiplication>,
-    pub batch_size: usize,
+    left_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    left_offset: usize,
+    right_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    right_offset: usize,
+    result_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    result_offset: usize,
+    backend: MatMulBackend,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -94,83 +83,30 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let right_dtype = right_tensor.dtype;
         let result_dtype = result.dtype;
 
-        let matmul_left_view = left_view;
-        let matmul_right_view = right_view;
-        let matmul_result_view = result_view;
-
-        let matmul_left_buf = left_tensor.buf.clone();
-        let matmul_left_offset = left_tensor.offset;
-        let matmul_right_buf = right_tensor.buf.clone();
-        let matmul_right_offset = right_tensor.offset;
-        let matmul_result_buf = result.buf.clone();
-        let matmul_result_offset = result.offset;
-
-        let left_desc_dtype = left_dtype;
-        let right_desc_dtype = right_dtype;
-        let result_desc_dtype = result_dtype;
-
-        // Get or create MPSMatrixMultiplication operation from cache
-        let gemm_key = MpsGemmKey {
+        let backend = mlx_gemm::try_create_backend(
+            ctx,
+            cache,
             transpose_left,
             transpose_right,
-            result_rows: eff_left_rows,
-            result_columns: eff_right_cols,
-            interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
-            batch_size: matmul_result_view.batch,
-            alpha,
-            beta,
-        };
+            &left_view,
+            &right_view,
+            &result_view,
+            left_dtype,
+            right_dtype,
+            result_dtype,
+            Some((alpha, beta)),
+        )?;
 
-        let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
-        let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
-
-        // Create MPS matrix descriptors based on the buffers consumed by MPS
-        let left_desc_key = MpsMatrixDescriptorKey {
-            rows: matmul_left_view.rows,
-            columns: matmul_left_view.columns,
-            row_bytes: matmul_left_view.row_bytes,
-            matrices: matmul_left_view.batch,
-            matrix_bytes: matmul_left_view.matrix_bytes,
-            dtype: left_desc_dtype,
-        };
-        let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
-
-        let right_desc_key = MpsMatrixDescriptorKey {
-            rows: matmul_right_view.rows,
-            columns: matmul_right_view.columns,
-            row_bytes: matmul_right_view.row_bytes,
-            matrices: matmul_right_view.batch,
-            matrix_bytes: matmul_right_view.matrix_bytes,
-            dtype: right_desc_dtype,
-        };
-        let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
-
-        let result_desc_key = MpsMatrixDescriptorKey {
-            rows: eff_left_rows,
-            columns: eff_right_cols,
-            row_bytes: matmul_result_view.row_bytes,
-            matrices: matmul_result_view.batch,
-            matrix_bytes: matmul_result_view.matrix_bytes,
-            dtype: result_desc_dtype,
-        };
-        let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
-
-        // Create the internal operation struct.
         let op = MatMulAlphaBeta {
-            left_buf: matmul_left_buf,
-            left_offset: matmul_left_offset,
-            right_buf: matmul_right_buf,
-            right_offset: matmul_right_offset,
-            result_buf: matmul_result_buf,
-            result_offset: matmul_result_offset,
-            left_desc,
-            right_desc,
-            result_desc,
-            gemm,
-            batch_size: matmul_result_view.batch,
+            left_buf: left_tensor.buf.clone(),
+            left_offset: left_tensor.offset,
+            right_buf: right_tensor.buf.clone(),
+            right_offset: right_tensor.offset,
+            result_buf: result.buf.clone(),
+            result_offset: result.offset,
+            backend,
         };
 
-        // Return the boxed operation and the result tensor (already provided)
         Ok((Box::new(op), result.clone()))
     }
 }
@@ -183,17 +119,26 @@ impl Operation for MatMulAlphaBeta {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
-        // Wrap buffers into MPSMatrix views
-        let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
-        let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
-        let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
-
-        // Encode the MPS matrix multiplication
-        unsafe {
-            self.gemm.setBatchStart(0 as NSUInteger);
-            self.gemm.setBatchSize(self.batch_size as NSUInteger);
+        match &self.backend {
+            MatMulBackend::Mps(backend) => backend.encode(
+                command_buffer,
+                &self.left_buf,
+                self.left_offset,
+                &self.right_buf,
+                self.right_offset,
+                &self.result_buf,
+                self.result_offset,
+            ),
+            MatMulBackend::Mlx(backend) => backend.encode(
+                command_buffer,
+                &self.left_buf,
+                self.left_offset,
+                &self.right_buf,
+                self.right_offset,
+                &self.result_buf,
+                self.result_offset,
+                _cache,
+            ),
         }
-        encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
-        Ok(())
     }
 }
