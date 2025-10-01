@@ -115,10 +115,10 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
             let seq_len = generated.len();
             let start_idx = (seq_len - 1) * vocab_size;
             let end_idx = start_idx + vocab_size;
-            let vocab_logits = &logits[start_idx..end_idx];
+            let vocab_slice = &logits[start_idx..end_idx];
 
             // Greedy sampling (argmax)
-            let next_token = vocab_logits
+            let next_token = vocab_slice
                 .iter()
                 .enumerate()
                 .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
@@ -129,7 +129,7 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
                 "[Ref] Step {}: token={}, logits={:?}",
                 generated.len() - input_ids.len(),
                 next_token,
-                &vocab_logits[..10]
+                &vocab_slice[..10]
             );
 
             generated.push(next_token);
