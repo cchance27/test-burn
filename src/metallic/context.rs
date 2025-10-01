@@ -234,10 +234,6 @@ impl<T: TensorElement> Context<T> {
         self.matmul_instrumentation.note_backend(backend);
     }
 
-    pub(crate) fn record_matmul_backend_sample(instrumentation: &MatMulInstrumentation, backend: MatMulBackendKind, duration: Duration) {
-        instrumentation.record(backend, duration);
-    }
-
     pub fn take_matmul_samples(&mut self) -> Vec<MatMulSample> {
         self.matmul_instrumentation.take_samples()
     }

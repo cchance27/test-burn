@@ -264,7 +264,7 @@ impl Operation for MatMul {
         let instrumentation = Arc::clone(&self.instrumentation);
         let backend = self.backend_kind;
         command_buffer.observe_completion(move |duration| {
-            Context::<f32>::record_matmul_backend_sample(&instrumentation, backend, duration);
+            instrumentation.record(backend, duration);
         });
         Ok(())
     }

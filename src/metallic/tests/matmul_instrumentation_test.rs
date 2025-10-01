@@ -10,7 +10,7 @@ fn matmul_samples_populate_backend_stats() {
 
     // Simulate the command buffer completion handler invoking the context sampler.
     let duration = Duration::from_micros(42);
-    crate::metallic::Context::<f32>::record_matmul_backend_sample(&instrumentation, MatMulBackendKind::Mlx, duration);
+    instrumentation.record(MatMulBackendKind::Mlx, duration);
 
     let samples = instrumentation.take_samples();
     assert_eq!(samples.len(), 1, "expected a single recorded sample");
