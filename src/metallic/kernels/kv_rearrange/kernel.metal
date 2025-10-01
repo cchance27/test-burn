@@ -10,12 +10,13 @@ kernel void kv_rearrange_kernel_##SUFFIX( \
     device const SCALAR* input [[buffer(0)]], \
     device SCALAR* output [[buffer(1)]], \
     constant uint& kv_dim [[buffer(2)]], \
-    constant uint& kv_head_dim [[buffer(3)]], \
-    constant uint& n_heads [[buffer(4)]], \
-    constant uint& n_kv_heads [[buffer(5)]], \
-    constant uint& head_dim [[buffer(6)]], \
-    constant uint& seq [[buffer(7)]], \
-    constant uint& total_elements [[buffer(8)]], \
+    constant uint& row_stride [[buffer(3)]], \
+    constant uint& kv_head_dim [[buffer(4)]], \
+    constant uint& n_heads [[buffer(5)]], \
+    constant uint& n_kv_heads [[buffer(6)]], \
+    constant uint& head_dim [[buffer(7)]], \
+    constant uint& seq [[buffer(8)]], \
+    constant uint& total_elements [[buffer(9)]], \
     uint gid [[thread_position_in_grid]]) { \
     if (gid >= total_elements) { \
         return; \
@@ -28,8 +29,12 @@ kernel void kv_rearrange_kernel_##SUFFIX( \
     uint h = out_batch % n_heads; \
     uint group_size = n_heads / n_kv_heads; \
     uint kv_h = h / group_size; \
+    uint base_offset = kv_h * kv_head_dim + hd; \
+    if (base_offset >= kv_dim) { \
+        return; \
+    } \
     uint src_row = b * seq + s; \
-    uint src_idx = src_row * kv_dim + kv_h * kv_head_dim + hd; \
+    uint src_idx = src_row * row_stride + base_offset; \
     output[gid] = input[src_idx]; \
 }
 
