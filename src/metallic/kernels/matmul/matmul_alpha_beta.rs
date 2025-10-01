@@ -1,11 +1,13 @@
 use crate::metallic::kernels::KernelFunction;
 
-use super::{KernelInvocable, MatMulBackend, mlx_gemm};
+use super::{KernelInvocable, MatMulBackend, MatMulBackendKind, mlx_gemm};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use std::sync::Arc;
 
-use crate::metallic::{Context, MetalError, Operation, Tensor, TensorElement, resource_cache::ResourceCache};
+use crate::metallic::context::MatMulInstrumentation;
+use crate::metallic::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, resource_cache::ResourceCache};
 
 // Public struct for matmul with alpha/beta scaling
 pub struct MatMulAlphaBetaOp;
@@ -19,6 +21,8 @@ struct MatMulAlphaBeta {
     result_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     result_offset: usize,
     backend: MatMulBackend,
+    backend_kind: MatMulBackendKind,
+    instrumentation: Arc<MatMulInstrumentation>,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -99,6 +103,9 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             Some((alpha, beta)),
         )?;
 
+        let instrumentation = ctx.matmul_instrumentation_handle();
+        let backend_kind = backend.kind();
+
         let op = MatMulAlphaBeta {
             left_buf: left_tensor.buf.clone(),
             left_offset: left_tensor.offset,
@@ -107,6 +114,8 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             result_buf: result.buf.clone(),
             result_offset: result.offset,
             backend,
+            backend_kind,
+            instrumentation,
         };
 
         Ok((Box::new(op), result.clone()))
@@ -116,6 +125,15 @@ impl KernelInvocable for MatMulAlphaBetaOp {
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl Operation for MatMulAlphaBeta {
+    fn register_completion(&self, command_buffer: &CommandBuffer) -> Result<(), MetalError> {
+        let instrumentation = Arc::clone(&self.instrumentation);
+        let backend = self.backend_kind;
+        command_buffer.observe_completion(move |duration| {
+            Context::<f32>::record_matmul_backend_sample(&instrumentation, backend, duration);
+        });
+        Ok(())
+    }
+
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,

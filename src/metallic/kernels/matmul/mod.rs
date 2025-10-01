@@ -4,11 +4,13 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::KernelInvocable;
+use crate::metallic::context::MatMulInstrumentation;
 use crate::metallic::{
-    Context, Dtype, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    CommandBuffer, Context, Dtype, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     resource_cache::ResourceCache,
     tensor::MpsMatrixBatchView,
@@ -38,6 +40,15 @@ pub struct MatMulSample {
 pub enum MatMulBackend {
     Mps(MpsMatMulBackend),
     Mlx(mlx_gemm::MlxGemmBackend),
+}
+
+impl MatMulBackend {
+    fn kind(&self) -> MatMulBackendKind {
+        match self {
+            MatMulBackend::Mps(_) => MatMulBackendKind::Mps,
+            MatMulBackend::Mlx(_) => MatMulBackendKind::Mlx,
+        }
+    }
 }
 
 pub struct MpsMatMulBackend {
@@ -152,6 +163,8 @@ struct MatMul {
     result_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     result_offset: usize,
     backend: MatMulBackend,
+    backend_kind: MatMulBackendKind,
+    instrumentation: Arc<MatMulInstrumentation>,
 }
 
 impl KernelInvocable for MatMulOp {
@@ -227,6 +240,9 @@ impl KernelInvocable for MatMulOp {
             None,
         )?;
 
+        let instrumentation = ctx.matmul_instrumentation_handle();
+        let backend_kind = backend.kind();
+
         let op = MatMul {
             left_buf: left_tensor.buf.clone(),
             left_offset: left_tensor.offset,
@@ -235,6 +251,8 @@ impl KernelInvocable for MatMulOp {
             result_buf: out.buf.clone(),
             result_offset: out.offset,
             backend,
+            backend_kind,
+            instrumentation,
         };
 
         Ok((Box::new(op), out))
@@ -242,6 +260,15 @@ impl KernelInvocable for MatMulOp {
 }
 
 impl Operation for MatMul {
+    fn register_completion(&self, command_buffer: &CommandBuffer) -> Result<(), MetalError> {
+        let instrumentation = Arc::clone(&self.instrumentation);
+        let backend = self.backend_kind;
+        command_buffer.observe_completion(move |duration| {
+            Context::<f32>::record_matmul_backend_sample(&instrumentation, backend, duration);
+        });
+        Ok(())
+    }
+
     fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError> {
         match &self.backend {
             MatMulBackend::Mps(backend) => backend.encode(

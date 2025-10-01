@@ -19,12 +19,47 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::mem;
-use std::time::{Duration, Instant};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Default)]
 pub struct SamplerBuffers {
     pub scaled: Vec<f32>,
     pub indices: Vec<usize>,
+}
+
+#[derive(Default)]
+pub(crate) struct MatMulInstrumentation {
+    samples: Mutex<Vec<MatMulSample>>,
+    last_backend: Mutex<Option<MatMulBackendKind>>,
+}
+
+impl MatMulInstrumentation {
+    pub(crate) fn note_backend(&self, backend: MatMulBackendKind) {
+        *self.last_backend.lock().expect("matmul backend lock poisoned") = Some(backend);
+    }
+
+    pub(crate) fn record(&self, backend: MatMulBackendKind, duration: Duration) {
+        if duration.is_zero() {
+            return;
+        }
+
+        {
+            let mut samples = self.samples.lock().expect("matmul samples lock poisoned");
+            samples.push(MatMulSample { backend, duration });
+        }
+
+        *self.last_backend.lock().expect("matmul backend lock poisoned") = Some(backend);
+    }
+
+    pub(crate) fn take_samples(&self) -> Vec<MatMulSample> {
+        let mut samples = self.samples.lock().expect("matmul samples lock poisoned");
+        samples.drain(..).collect()
+    }
+
+    pub(crate) fn last_backend(&self) -> Option<MatMulBackendKind> {
+        *self.last_backend.lock().expect("matmul backend lock poisoned")
+    }
 }
 
 /// The main context for Metal operations.
@@ -56,10 +91,8 @@ pub struct Context<T: TensorElement> {
     softmax_samples: Vec<SoftmaxSample>,
     /// Tracks the last backend that executed so instrumentation can explain cache stats.
     last_softmax_backend: Option<SoftmaxBackend>,
-    /// Pending matmul backend samples collected since the last drain.
-    matmul_samples: Vec<MatMulSample>,
-    /// Tracks which matmul backend produced the most recent dispatch.
-    last_matmul_backend: Option<MatMulBackendKind>,
+    /// Pending matmul backend samples and execution metadata.
+    matmul_instrumentation: Arc<MatMulInstrumentation>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     //config: ContextConfig,
@@ -122,8 +155,7 @@ impl<T: TensorElement> Context<T> {
             memory_collector: None,
             softmax_samples: Vec::new(),
             last_softmax_backend: None,
-            matmul_samples: Vec::new(),
-            last_matmul_backend: None,
+            matmul_instrumentation: Arc::new(MatMulInstrumentation::default()),
             sampler_buffers: SamplerBuffers::default(),
             //config,
         })
@@ -198,18 +230,24 @@ impl<T: TensorElement> Context<T> {
         self.last_softmax_backend
     }
 
-    pub(crate) fn note_matmul_backend(&mut self, backend: MatMulBackendKind) {
-        self.last_matmul_backend = Some(backend);
+    pub(crate) fn note_matmul_backend(&self, backend: MatMulBackendKind) {
+        self.matmul_instrumentation.note_backend(backend);
     }
 
-    pub(crate) fn record_matmul_backend_sample(&mut self, duration: Duration) {
-        if let Some(backend) = self.last_matmul_backend.take() {
-            self.matmul_samples.push(MatMulSample { backend, duration });
-        }
+    pub(crate) fn record_matmul_backend_sample(instrumentation: &MatMulInstrumentation, backend: MatMulBackendKind, duration: Duration) {
+        instrumentation.record(backend, duration);
     }
 
     pub fn take_matmul_samples(&mut self) -> Vec<MatMulSample> {
-        mem::take(&mut self.matmul_samples)
+        self.matmul_instrumentation.take_samples()
+    }
+
+    pub(crate) fn matmul_instrumentation_handle(&self) -> Arc<MatMulInstrumentation> {
+        Arc::clone(&self.matmul_instrumentation)
+    }
+
+    pub fn last_matmul_backend(&self) -> Option<MatMulBackendKind> {
+        self.matmul_instrumentation.last_backend()
     }
 
     /// Registers a memory collector handle for the upcoming operations. Passing `None`
@@ -247,10 +285,7 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
-        let start = Instant::now();
-        let tensor = self.call::<MatMulOp>((a, b, transpose_a, transpose_b))?;
-        self.record_matmul_backend_sample(start.elapsed());
-        Ok(tensor)
+        self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
     }
 
     pub(crate) fn matmul_with_cache(
@@ -261,10 +296,7 @@ impl<T: TensorElement> Context<T> {
         transpose_b: bool,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
-        let start = Instant::now();
-        let tensor = self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)?;
-        self.record_matmul_backend_sample(start.elapsed());
-        Ok(tensor)
+        self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
     }
 
     #[allow(clippy::type_complexity)]
@@ -343,10 +375,7 @@ impl<T: TensorElement> Context<T> {
         alpha: f32,
         beta: f32,
     ) -> Result<Tensor<T>, MetalError> {
-        let start = Instant::now();
-        let tensor = self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))?;
-        self.record_matmul_backend_sample(start.elapsed());
-        Ok(tensor)
+        self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
     }
 
     pub(crate) fn call_with_cache<K: KernelInvocable>(
@@ -383,10 +412,7 @@ impl<T: TensorElement> Context<T> {
         beta: f32,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
-        let start = Instant::now();
-        let tensor = self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)?;
-        self.record_matmul_backend_sample(start.elapsed());
-        Ok(tensor)
+        self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
     }
 
     pub fn get_cache_stats(&self) -> Option<CacheStats> {

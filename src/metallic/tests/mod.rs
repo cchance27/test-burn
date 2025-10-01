@@ -12,4 +12,5 @@ mod determinism_test;
 mod error_path_test;
 mod forward_pass_correctness_test;
 mod generation_test;
+mod matmul_instrumentation_test;
 mod tensor_test;

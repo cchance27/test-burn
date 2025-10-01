@@ -4,18 +4,31 @@ use crate::metallic::{
     TensorElement,
     encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
 };
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState, MTLSize};
 use std::{
+    cell::RefCell,
+    ptr::NonNull,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
 pub trait Operation {
     /// Encode this operation into the provided command buffer.
     fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError>;
+
+    /// Allow operations to register completion callbacks on the wrapping command buffer
+    /// prior to encoding. The default implementation performs no work.
+    fn register_completion(&self, _command_buffer: &CommandBuffer) -> Result<(), MetalError> {
+        Ok(())
+    }
 }
 
 //TODO: Aren't these operations supposed to be in kernels?
@@ -154,6 +167,7 @@ struct CommandBufferInner {
     buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     committed: AtomicBool,
     completed: AtomicBool,
+    completion_handlers: RefCell<Vec<RcBlock<dyn Fn(NonNull<ProtocolObject<dyn MTLCommandBuffer>>) + 'static>>>,
 }
 
 impl CommandBuffer {
@@ -165,6 +179,7 @@ impl CommandBuffer {
                 buffer,
                 committed: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
+                completion_handlers: RefCell::new(Vec::new()),
             }),
         })
     }
@@ -176,7 +191,45 @@ impl CommandBuffer {
                 "Attempted to record on a committed command buffer".to_string(),
             ));
         }
+        operation.register_completion(self)?;
         operation.encode(&self.inner.buffer, cache)
+    }
+
+    /// Register a completion handler that fires once this command buffer finishes execution.
+    /// The callback receives the measured GPU duration when available, or falls back to wall-clock timing.
+    pub fn observe_completion<F>(&self, callback: F)
+    where
+        F: FnOnce(Duration) + Send + 'static,
+    {
+        let start = Instant::now();
+        let callback = Mutex::new(Some(callback));
+        let inner = Rc::clone(&self.inner);
+
+        let block = RcBlock::new(move |command_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            let gpu_duration = unsafe {
+                let command_buffer = command_buffer.as_ref();
+                let start_time = command_buffer.GPUStartTime();
+                let end_time = command_buffer.GPUEndTime();
+
+                if start_time.is_finite() && end_time.is_finite() && end_time >= start_time && start_time > 0.0 {
+                    Some(Duration::from_secs_f64(end_time - start_time))
+                } else {
+                    None
+                }
+            };
+
+            let duration = gpu_duration.unwrap_or_else(|| start.elapsed());
+
+            if let Some(callback) = callback.lock().expect("command buffer completion poisoned").take() {
+                callback(duration);
+            }
+
+            inner.completed.store(true, Ordering::Release);
+        });
+
+        let block_ptr = RcBlock::as_ptr(&block);
+        unsafe { self.inner.buffer.addCompletedHandler(block_ptr) };
+        self.inner.completion_handlers.borrow_mut().push(block);
     }
 
     /// Commit the command buffer for execution.
