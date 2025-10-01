@@ -333,9 +333,15 @@ fn verify_mlx_backend_for_transpose(transpose_left: bool, transpose_right: bool)
     let actual = mlx_result.to_vec();
     let mlx_samples = context.take_matmul_samples();
     assert!(!mlx_samples.is_empty(), "expected MLX dispatches to produce backend samples");
+    let expected_backend = if transpose_left || transpose_right {
+        MatMulBackend::MlxTransposed
+    } else {
+        MatMulBackend::Mlx
+    };
     assert!(
-        mlx_samples.iter().all(|sample| sample.backend == MatMulBackend::Mlx),
-        "expected MLX backend but observed {:?}",
+        mlx_samples.iter().all(|sample| sample.backend == expected_backend),
+        "expected MLX backend {:?} but observed {:?}",
+        expected_backend,
         mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
     );
 

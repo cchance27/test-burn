@@ -89,6 +89,7 @@ impl RollingStat {
 pub struct MatMulBackendStats {
     mps: RollingStat,
     mlx: RollingStat,
+    mlx_transposed: RollingStat,
 }
 
 impl MatMulBackendStats {
@@ -96,6 +97,7 @@ impl MatMulBackendStats {
         match backend {
             MatMulBackend::Mps => self.mps.record(duration),
             MatMulBackend::Mlx => self.mlx.record(duration),
+            MatMulBackend::MlxTransposed => self.mlx_transposed.record(duration),
         }
     }
 
@@ -105,6 +107,10 @@ impl MatMulBackendStats {
 
     pub fn mlx(&self) -> &RollingStat {
         &self.mlx
+    }
+
+    pub fn mlx_transposed(&self) -> &RollingStat {
+        &self.mlx_transposed
     }
 }
 
@@ -538,6 +544,15 @@ pub fn build_latency_rows(
             label: "MatMul (MLX)".to_string(),
             last_ms: matmul.mlx().last_ms(),
             average_ms: matmul.mlx().average_ms(),
+            level: 0,
+        });
+    }
+
+    if matmul.mlx_transposed().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (MLX, transposed)".to_string(),
+            last_ms: matmul.mlx_transposed().last_ms(),
+            average_ms: matmul.mlx_transposed().average_ms(),
             level: 0,
         });
     }

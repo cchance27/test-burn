@@ -31,6 +31,7 @@ pub use matmul_alpha_beta::MatMulAlphaBetaOp;
 pub enum MatMulBackend {
     Mps,
     Mlx,
+    MlxTransposed,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -388,7 +389,11 @@ impl KernelInvocable for MatMulOp {
                 transpose_right,
             ) {
                 Ok(mlx_op) => {
-                    selected_backend = MatMulBackend::Mlx;
+                    selected_backend = if transpose_left || transpose_right {
+                        MatMulBackend::MlxTransposed
+                    } else {
+                        MatMulBackend::Mlx
+                    };
                     implementation = Some(MatMulImplementation::Mlx(mlx_op));
                 }
                 Err(err) => {
