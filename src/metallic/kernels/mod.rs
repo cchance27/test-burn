@@ -192,7 +192,7 @@ impl KernelFunction {
                     "gemm_nn_f16_f16_32_32_16_2_2"
                 }
             }
-            (KernelFunction::MlxGemmNn, dtype) => {
+            (KernelFunction::MlxGemmNn, dtype) if !matches!(dtype, F32 | F16) => {
                 return Err(MetalError::UnsupportedDtype {
                     operation: "MLX GEMM",
                     dtype,
@@ -205,7 +205,7 @@ impl KernelFunction {
                     "gemm_nt_f16_f16_32_32_16_2_2"
                 }
             }
-            (KernelFunction::MlxGemmNt, dtype) => {
+            (KernelFunction::MlxGemmNt, dtype) if !matches!(dtype, F32 | F16) => {
                 return Err(MetalError::UnsupportedDtype {
                     operation: "MLX GEMM",
                     dtype,
@@ -218,7 +218,7 @@ impl KernelFunction {
                     "gemm_tn_f16_f16_32_32_16_2_2"
                 }
             }
-            (KernelFunction::MlxGemmTn, dtype) => {
+            (KernelFunction::MlxGemmTn, dtype) if !matches!(dtype, F32 | F16) => {
                 return Err(MetalError::UnsupportedDtype {
                     operation: "MLX GEMM",
                     dtype,
@@ -231,7 +231,7 @@ impl KernelFunction {
                     "gemm_tt_f16_f16_32_32_16_2_2"
                 }
             }
-            (KernelFunction::MlxGemmTt, dtype) => {
+            (KernelFunction::MlxGemmTt, dtype) if !matches!(dtype, F32 | F16) => {
                 return Err(MetalError::UnsupportedDtype {
                     operation: "MLX GEMM",
                     dtype,

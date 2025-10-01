@@ -204,9 +204,7 @@ impl<T: TensorElement> Context<T> {
 
     pub(crate) fn record_matmul_backend_sample(&mut self, duration: Duration) {
         if let Some(backend) = self.last_matmul_backend.take() {
-            if !duration.is_zero() {
-                self.matmul_samples.push(MatMulSample { backend, duration });
-            }
+            self.matmul_samples.push(MatMulSample { backend, duration });
         }
     }
 

@@ -89,7 +89,6 @@ pub struct MlxGemmBackend {
     alpha: f32,
     beta: f32,
     use_out_source: bool,
-    do_axpby: bool,
 }
 
 impl MlxGemmBackend {
@@ -216,7 +215,6 @@ impl MlxGemmBackend {
             alpha,
             beta,
             use_out_source,
-            do_axpby,
         }))
     }
 
