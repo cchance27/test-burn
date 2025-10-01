@@ -134,17 +134,29 @@ impl MatMulInstrumentation {
             return;
         }
 
+        let total_dispatches: usize = counts.values().copied().sum();
+        if total_dispatches == 0 {
+            return;
+        }
+
+        let total_dispatches = total_dispatches as f64;
+
         for (backend, count) in counts {
             if count == 0 {
                 continue;
             }
 
-            let slice_secs = total_secs / count as f64;
-            if !slice_secs.is_finite() || slice_secs <= 0.0 {
+            let share = count as f64 / total_dispatches;
+            if !share.is_finite() || share <= 0.0 {
                 continue;
             }
 
-            recorder.record_matmul_backend_sample(backend, Duration::from_secs_f64(slice_secs));
+            let share_secs = total_secs * share;
+            if !share_secs.is_finite() || share_secs <= 0.0 {
+                continue;
+            }
+
+            recorder.record_matmul_backend_sample(backend, Duration::from_secs_f64(share_secs));
         }
     }
 
@@ -160,7 +172,7 @@ mod tests {
     use std::time::Duration;
 
     #[test]
-    fn dispatch_samples_splits_duration_evenly() {
+    fn dispatch_samples_returns_full_duration_for_single_backend() {
         let samples: Arc<Mutex<Vec<MatMulSample>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = MatMulSampleRecorder::new({
             let samples = Arc::clone(&samples);
@@ -178,11 +190,10 @@ mod tests {
         MatMulInstrumentation::dispatch_samples(pending, Duration::from_millis(30));
 
         let recorded = samples.lock().unwrap();
-        assert_eq!(recorded.len(), 2);
-        for sample in recorded.iter() {
-            assert_eq!(sample.backend, MatMulBackend::Mps);
-            assert!((sample.duration.as_secs_f64() - 0.015).abs() < 1e-6);
-        }
+        assert_eq!(recorded.len(), 1);
+        let sample = &recorded[0];
+        assert_eq!(sample.backend, MatMulBackend::Mps);
+        assert_eq!(sample.duration, Duration::from_millis(30));
     }
 }
 
