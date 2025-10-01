@@ -1,14 +1,15 @@
 use super::error::MetalError;
-use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollectorHandle, MemoryEvent, MemoryUsage};
+use super::instrumentation::{
+    LatencyCollectorHandle, LatencyEvent, MatMulInstrumentation, MatMulSampleRecorder, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
+};
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
-use kernels::matmul::{MatMulAlphaBetaOp, MatMulOp};
+use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
@@ -18,7 +19,7 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
-use std::mem;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Default)]
@@ -52,10 +53,11 @@ pub struct Context<T: TensorElement> {
     latency_collector: Option<LatencyCollectorHandle>,
     /// Optional memory collector used to capture detailed allocation snapshots.
     memory_collector: Option<MemoryCollectorHandle>,
-    /// Softmax backend samples collected since the last drain.
-    softmax_samples: Vec<SoftmaxSample>,
-    /// Tracks the last backend that executed so instrumentation can explain cache stats.
-    last_softmax_backend: Option<SoftmaxBackend>,
+    /// Shared instrumentation used to collect matmul GPU timings.
+    matmul_instrumentation: MatMulInstrumentation,
+    /// Matmul timing samples captured since the last drain.
+    matmul_samples: Arc<Mutex<Vec<MatMulSample>>>,
+    matmul_recorder: MatMulSampleRecorder,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     //config: ContextConfig,
@@ -101,6 +103,17 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
 
+        let matmul_samples = Arc::new(Mutex::new(Vec::new()));
+        let samples_for_recorder = Arc::clone(&matmul_samples);
+        let matmul_recorder = MatMulSampleRecorder::new(move |backend, duration| {
+            if duration.is_zero() {
+                return;
+            }
+            if let Ok(mut samples) = samples_for_recorder.lock() {
+                samples.push(MatMulSample { backend, duration });
+            }
+        });
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -116,8 +129,9 @@ impl<T: TensorElement> Context<T> {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
-            softmax_samples: Vec::new(),
-            last_softmax_backend: None,
+            matmul_instrumentation: MatMulInstrumentation::default(),
+            matmul_samples,
+            matmul_recorder,
             sampler_buffers: SamplerBuffers::default(),
             //config,
         })
@@ -176,20 +190,22 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    pub(crate) fn record_softmax_backend_sample(&mut self, backend: SoftmaxBackend, duration: Duration) {
-        if duration.is_zero() {
-            return;
-        }
-        self.last_softmax_backend = Some(backend);
-        self.softmax_samples.push(SoftmaxSample { backend, duration });
+    pub(crate) fn register_matmul_dispatch(&self, command_buffer: &CommandBuffer, backend: MatMulBackend) {
+        self.matmul_instrumentation
+            .register(command_buffer, backend, self.matmul_recorder.clone());
     }
 
-    pub fn take_softmax_samples(&mut self) -> Vec<SoftmaxSample> {
-        mem::take(&mut self.softmax_samples)
+    #[allow(dead_code)]
+    pub(crate) fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
+        self.matmul_recorder.record_matmul_backend_sample(backend, duration);
     }
 
-    pub fn last_softmax_backend(&self) -> Option<SoftmaxBackend> {
-        self.last_softmax_backend
+    pub fn take_matmul_samples(&self) -> Vec<MatMulSample> {
+        let mut samples = match self.matmul_samples.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        samples.drain(..).collect()
     }
 
     /// Registers a memory collector handle for the upcoming operations. Passing `None`

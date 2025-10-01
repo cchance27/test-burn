@@ -5,7 +5,7 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
-use super::{KernelFunction, KernelInvocable};
+use super::{KernelFunction, KernelInvocable, MatMulBackend};
 use crate::metallic::{
     Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
@@ -169,6 +169,14 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             gemm,
             batch_size: matmul_result_view.batch,
         };
+
+        {
+            let command_buffer = {
+                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+                command_buffer.clone()
+            };
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps);
+        }
 
         // Return the boxed operation and the result tensor (already provided)
         Ok((Box::new(op), result.clone()))

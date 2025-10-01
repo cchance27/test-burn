@@ -1,7 +1,7 @@
 use crate::app_event::{LatencyRow, MemoryRow};
 use crate::metallic::TensorElement;
 use crate::metallic::instrumentation::{BlockMemorySnapshot, MemoryUsage};
-use crate::metallic::kernels::softmax::SoftmaxBackend;
+use crate::metallic::kernels::matmul::MatMulBackend;
 use crate::metallic::models::qwen25::Qwen25;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -86,21 +86,15 @@ impl RollingStat {
 }
 
 #[derive(Clone, Default)]
-pub struct SoftmaxBackendStats {
-    kernel: RollingStat,
+pub struct MatMulBackendStats {
     mps: RollingStat,
 }
 
-impl SoftmaxBackendStats {
-    pub fn record(&mut self, backend: SoftmaxBackend, duration: Duration) {
+impl MatMulBackendStats {
+    pub fn record(&mut self, backend: MatMulBackend, duration: Duration) {
         match backend {
-            SoftmaxBackend::Kernel => self.kernel.record(duration),
-            SoftmaxBackend::Mps => self.mps.record(duration),
+            MatMulBackend::Mps => self.mps.record(duration),
         }
-    }
-
-    pub fn kernel(&self) -> &RollingStat {
-        &self.kernel
     }
 
     pub fn mps(&self) -> &RollingStat {
@@ -503,7 +497,7 @@ pub fn build_latency_rows(
     embed: &RollingStat,
     forward: &RollingStat,
     blocks: &[BlockStat],
-    softmax: &SoftmaxBackendStats,
+    matmul: &MatMulBackendStats,
     output: &RollingStat,
     sample: &RollingStat,
     decode: &RollingStat,
@@ -524,20 +518,11 @@ pub fn build_latency_rows(
         level: 0,
     });
 
-    if softmax.kernel().has_samples() {
+    if matmul.mps().has_samples() {
         rows.push(LatencyRow {
-            label: "Softmax (Kernel)".to_string(),
-            last_ms: softmax.kernel().last_ms(),
-            average_ms: softmax.kernel().average_ms(),
-            level: 0,
-        });
-    }
-
-    if softmax.mps().has_samples() {
-        rows.push(LatencyRow {
-            label: "Softmax (MPS)".to_string(),
-            last_ms: softmax.mps().last_ms(),
-            average_ms: softmax.mps().average_ms(),
+            label: "MatMul (MPS)".to_string(),
+            last_ms: matmul.mps().last_ms(),
+            average_ms: matmul.mps().average_ms(),
             level: 0,
         });
     }

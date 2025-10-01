@@ -4,10 +4,12 @@ use crate::metallic::{
     TensorElement,
     encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
 };
+use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState, MTLSize};
 use std::{
+    ptr::NonNull,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
 };
@@ -195,6 +197,27 @@ impl CommandBuffer {
         self.commit();
         if !self.inner.completed.swap(true, Ordering::AcqRel) {
             unsafe { self.inner.buffer.waitUntilCompleted() };
+        }
+    }
+
+    /// Register a callback that fires when the command buffer completes on the GPU.
+    pub fn on_completed<F>(&self, callback: F)
+    where
+        F: Fn(&ProtocolObject<dyn MTLCommandBuffer>) + 'static,
+    {
+        let block = RcBlock::new(move |command_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            let command_buffer = unsafe { command_buffer.as_ref() };
+            callback(command_buffer);
+        });
+
+        // Hand ownership of the block over to Metal. The command buffer
+        // retains the handler until completion and will release it once the
+        // callback has been invoked. We intentionally leak our strong
+        // reference so the block stays alive for Metal to manage.
+        let raw_block = RcBlock::into_raw(block);
+
+        unsafe {
+            self.inner.buffer.addCompletedHandler(raw_block.cast());
         }
     }
 

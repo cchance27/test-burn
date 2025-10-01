@@ -1,4 +1,5 @@
-use crate::metallic::generation::{GenerationConfig, generate, sample_top_k_top_p};
+use crate::metallic::generation::{GenerationConfig, aggregate_matmul_totals, generate, sample_top_k_top_p};
+use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{Context, F32Element, MetalError, SamplerBuffers, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
@@ -205,6 +206,34 @@ fn test_sample_top_k_top_p_zero_temperature_prefers_highest_index() {
         result, 2,
         "Zero temperature should greedily select the highest logit, preferring the last index on ties"
     );
+}
+
+#[test]
+fn matmul_sample_aggregation_sums_backend_totals() {
+    use std::time::Duration;
+
+    let totals = aggregate_matmul_totals(vec![
+        MatMulSample {
+            backend: MatMulBackend::Mps,
+            duration: Duration::from_millis(8),
+        },
+        MatMulSample {
+            backend: MatMulBackend::Mps,
+            duration: Duration::from_millis(4),
+        },
+        MatMulSample {
+            backend: MatMulBackend::Mps,
+            duration: Duration::from_millis(0),
+        },
+    ]);
+
+    let total = totals
+        .get(&MatMulBackend::Mps)
+        .copied()
+        .expect("aggregated totals should include the MPS backend");
+
+    assert_eq!(total, Duration::from_millis(12));
+    assert_eq!(totals.len(), 1);
 }
 
 #[test]
