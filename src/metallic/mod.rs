@@ -1,4 +1,4 @@
-pub use context::Context;
+pub use context::{Context, SamplerBuffers};
 pub use error::MetalError;
 pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 
