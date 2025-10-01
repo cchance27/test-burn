@@ -29,6 +29,7 @@ pub use matmul_alpha_beta::MatMulAlphaBetaOp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MatMulBackend {
+    Total,
     Mps,
     Mlx,
     MlxTransposed,

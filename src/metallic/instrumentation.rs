@@ -134,6 +134,8 @@ impl MatMulInstrumentation {
             return;
         }
 
+        recorder.record_matmul_backend_sample(MatMulBackend::Total, total);
+
         let total_dispatches: usize = counts.values().copied().sum();
         if total_dispatches == 0 {
             return;
@@ -190,10 +192,17 @@ mod tests {
         MatMulInstrumentation::dispatch_samples(pending, Duration::from_millis(30));
 
         let recorded = samples.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        let sample = &recorded[0];
-        assert_eq!(sample.backend, MatMulBackend::Mps);
-        assert_eq!(sample.duration, Duration::from_millis(30));
+        assert_eq!(recorded.len(), 2);
+
+        let mut iter = recorded.iter();
+
+        let total_sample = iter.next().expect("total sample should be recorded");
+        assert_eq!(total_sample.backend, MatMulBackend::Total);
+        assert_eq!(total_sample.duration, Duration::from_millis(30));
+
+        let backend_sample = iter.next().expect("backend sample should be recorded");
+        assert_eq!(backend_sample.backend, MatMulBackend::Mps);
+        assert_eq!(backend_sample.duration, Duration::from_millis(30));
     }
 }
 

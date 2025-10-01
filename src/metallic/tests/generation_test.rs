@@ -214,6 +214,10 @@ fn matmul_sample_aggregation_sums_backend_totals() {
 
     let totals = aggregate_matmul_totals(vec![
         MatMulSample {
+            backend: MatMulBackend::Total,
+            duration: Duration::from_millis(24),
+        },
+        MatMulSample {
             backend: MatMulBackend::Mps,
             duration: Duration::from_millis(8),
         },
@@ -235,12 +239,19 @@ fn matmul_sample_aggregation_sums_backend_totals() {
         },
     ]);
 
-    let total = totals
+    let total_bucket = totals
+        .get(&MatMulBackend::Total)
+        .copied()
+        .expect("aggregated totals should include the total bucket");
+
+    assert_eq!(total_bucket, Duration::from_millis(24));
+
+    let mps_total = totals
         .get(&MatMulBackend::Mps)
         .copied()
         .expect("aggregated totals should include the MPS backend");
 
-    assert_eq!(total, Duration::from_millis(12));
+    assert_eq!(mps_total, Duration::from_millis(12));
     let mlx_total = totals
         .get(&MatMulBackend::Mlx)
         .copied()
@@ -251,7 +262,12 @@ fn matmul_sample_aggregation_sums_backend_totals() {
         .copied()
         .expect("aggregated totals should include the MLX transposed backend");
     assert_eq!(mlx_transposed_total, Duration::from_millis(7));
-    assert_eq!(totals.len(), 3);
+    assert_eq!(totals.len(), 4);
+
+    let summed_backends = mps_total + mlx_total + mlx_transposed_total;
+
+    assert_eq!(summed_backends, Duration::from_millis(24));
+    assert_eq!(total_bucket, summed_backends);
 }
 
 #[test]

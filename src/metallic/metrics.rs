@@ -87,6 +87,7 @@ impl RollingStat {
 
 #[derive(Clone, Default)]
 pub struct MatMulBackendStats {
+    total: RollingStat,
     mps: RollingStat,
     mlx: RollingStat,
     mlx_transposed: RollingStat,
@@ -95,10 +96,15 @@ pub struct MatMulBackendStats {
 impl MatMulBackendStats {
     pub fn record(&mut self, backend: MatMulBackend, duration: Duration) {
         match backend {
+            MatMulBackend::Total => self.total.record(duration),
             MatMulBackend::Mps => self.mps.record(duration),
             MatMulBackend::Mlx => self.mlx.record(duration),
             MatMulBackend::MlxTransposed => self.mlx_transposed.record(duration),
         }
+    }
+
+    pub fn total(&self) -> &RollingStat {
+        &self.total
     }
 
     pub fn mps(&self) -> &RollingStat {
@@ -529,6 +535,15 @@ pub fn build_latency_rows(
         average_ms: forward.average_ms(),
         level: 0,
     });
+
+    if matmul.total().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (total)".to_string(),
+            last_ms: matmul.total().last_ms(),
+            average_ms: matmul.total().average_ms(),
+            level: 0,
+        });
+    }
 
     if matmul.mps().has_samples() {
         rows.push(LatencyRow {
