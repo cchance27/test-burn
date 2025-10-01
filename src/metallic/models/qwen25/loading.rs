@@ -154,6 +154,7 @@ fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
     dst_slice: &mut [TDst::Scalar],
     dst_dims: &[usize],
     dst_col_offset: usize,
+    prefer_transpose_when_ambiguous: bool,
 ) -> Result<(), MetalError> {
     if src_dims.len() != 2 {
         return Err(MetalError::InvalidShape(format!("Expected 2D weight tensor, got {:?}", src_dims)));
@@ -166,15 +167,25 @@ fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
     let fused_rows = dst_dims[0];
     let fused_cols = dst_dims[1];
 
-    let (in_features, out_features, needs_transpose) = if src_dims[0] == fused_rows {
-        (src_dims[0], src_dims[1], false)
-    } else if src_dims[1] == fused_rows {
-        (src_dims[1], src_dims[0], true)
-    } else {
-        return Err(MetalError::InvalidShape(format!(
-            "Unable to map weight {:?} into fused layout with {} rows",
-            src_dims, fused_rows
-        )));
+    let matches_runtime_layout = src_dims[0] == fused_rows;
+    let matches_legacy_layout = src_dims[1] == fused_rows;
+
+    let (needs_transpose, in_features, out_features) = match (matches_runtime_layout, matches_legacy_layout) {
+        (true, false) => (false, src_dims[0], src_dims[1]),
+        (false, true) => (true, src_dims[1], src_dims[0]),
+        (true, true) => {
+            if prefer_transpose_when_ambiguous {
+                (true, src_dims[1], src_dims[0])
+            } else {
+                (false, src_dims[0], src_dims[1])
+            }
+        }
+        (false, false) => {
+            return Err(MetalError::InvalidShape(format!(
+                "Unable to map weight {:?} into fused layout with {} rows",
+                src_dims, fused_rows
+            )));
+        }
     };
 
     if dst_col_offset + out_features > fused_cols {
@@ -200,8 +211,9 @@ fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
     } else {
         // Source already matches the runtime layout [in_features, out_features].
         for in_idx in 0..in_features {
+            let row_offset = in_idx * out_features;
             for out_idx in 0..out_features {
-                let src_index = in_idx * out_features + out_idx;
+                let src_index = row_offset + out_idx;
                 let dst_row = in_idx;
                 let dst_col = dst_col_offset + out_idx;
                 let dst_index = dst_row * fused_cols + dst_col;
@@ -217,10 +229,18 @@ fn copy_weight_transposed_into_fused<TSrc: TensorElement, TDst: TensorElement>(
     src: &Tensor<TSrc>,
     dst: &mut Tensor<TDst>,
     dst_col_offset: usize,
+    prefer_transpose_when_ambiguous: bool,
 ) -> Result<(), MetalError> {
     let dst_dims = dst.dims().to_vec();
     let src_slice = tensor_data_as_f32(src);
-    pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), src.dims(), dst.as_mut_slice(), &dst_dims, dst_col_offset)
+    pack_weight_transposed_into_fused_slice::<TDst>(
+        src_slice.as_ref(),
+        src.dims(),
+        dst.as_mut_slice(),
+        &dst_dims,
+        dst_col_offset,
+        prefer_transpose_when_ambiguous,
+    )
 }
 
 fn copy_fused_gate_up_weight<TSrc: TensorElement, TDst: TensorElement>(
@@ -349,7 +369,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.query.weight"))
             && tensor.len() == d_model_layer * d_model_layer
         {
-            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, q_offset)?;
+            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, q_offset, true)?;
             return Ok(());
         }
 
@@ -362,7 +382,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.key.weight"))
             && tensor.len() == kv_dim * d_model_layer
         {
-            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, k_offset)?;
+            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, k_offset, false)?;
             return Ok(());
         }
 
@@ -375,7 +395,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.value.weight"))
             && tensor.len() == kv_dim * d_model_layer
         {
-            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, v_offset)?;
+            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, v_offset, false)?;
             return Ok(());
         }
 
@@ -653,7 +673,7 @@ mod tests {
         let fused_dims = vec![2, 3];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
-        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
+        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0, true).unwrap();
 
         assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
     }
@@ -665,7 +685,7 @@ mod tests {
         let fused_dims = vec![2, 3];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
-        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
+        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0, false).unwrap();
 
         assert_eq!(fused, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
@@ -677,7 +697,7 @@ mod tests {
         let fused_dims = vec![2, 4];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
-        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 1).unwrap();
+        pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 1, false).unwrap();
 
         assert_eq!(fused, vec![0.0, 1.0, 2.0, 0.0, 0.0, 3.0, 4.0, 0.0]);
     }
@@ -689,7 +709,7 @@ mod tests {
         let fused_dims = vec![2, 6];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
-        let err = pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0)
+        let err = pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0, false)
             .expect_err("expected invalid shape error");
 
         match err {

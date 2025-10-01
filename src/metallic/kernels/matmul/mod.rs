@@ -225,10 +225,10 @@ pub fn mps_matrix_from_buffer(
     let rows = unsafe { descriptor.rows() };
     let row_bytes = unsafe { descriptor.rowBytes() };
     let matrices = unsafe { descriptor.matrices() };
+    let matrix_bytes = unsafe { descriptor.matrixBytes() };
     let total_bytes = if matrices <= 1 {
-        row_bytes * rows
+        matrix_bytes
     } else {
-        let matrix_bytes = unsafe { descriptor.matrixBytes() };
         (matrices - 1) * matrix_bytes + rows * row_bytes
     };
     let size = total_bytes;
