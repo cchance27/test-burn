@@ -476,9 +476,9 @@ impl Operation for MatMulMlx {
         let batch_strides = [self.batch_stride_a, self.batch_stride_b];
         set_bytes(&encoder, 7, &batch_strides);
 
-        let left_resource = ProtocolObject::<dyn MTLResource>::from_ref(self.left_buf.as_ref());
-        let right_resource = ProtocolObject::<dyn MTLResource>::from_ref(self.right_buf.as_ref());
-        let result_resource = ProtocolObject::<dyn MTLResource>::from_ref(self.result_buf.as_ref());
+        let left_resource = buffer_as_resource(&self.left_buf);
+        let right_resource = buffer_as_resource(&self.right_buf);
+        let result_resource = buffer_as_resource(&self.result_buf);
 
         unsafe {
             encoder.useResource_usage(left_resource, MTLResourceUsage::Read);
@@ -501,6 +501,10 @@ impl Operation for MatMulMlx {
 
         Ok(())
     }
+}
+
+fn buffer_as_resource(buffer: &Retained<ProtocolObject<dyn MTLBuffer>>) -> &ProtocolObject<dyn MTLResource> {
+    ProtocolObject::<dyn MTLResource>::from_ref::<ProtocolObject<dyn MTLBuffer>>(&**buffer)
 }
 
 /// Create an `MPSMatrix` view into an existing `MTLBuffer`.
