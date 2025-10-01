@@ -10,7 +10,10 @@ use crate::{alert, app_event::AppEvent};
 use rand::prelude::*;
 use std::{
     env,
-    sync::{Arc, OnceLock, mpsc},
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 
@@ -18,14 +21,69 @@ const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
 
 const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
+const METALLIC_LOG_CACHE_STATS_DEFAULT_FILE: &str = "metal-cache-stats.log";
+
+struct CacheStatsLogger {
+    file: Option<Mutex<std::fs::File>>,
+}
+
+impl CacheStatsLogger {
+    fn from_env() -> Self {
+        let path = env::var(METALLIC_LOG_CACHE_STATS_ENV).ok().and_then(resolve_cache_log_path);
+
+        let file = path.and_then(|path| match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => Some(Mutex::new(file)),
+            Err(err) => {
+                eprintln!("Failed to open cache stats log at {:?}: {}", path, err);
+                None
+            }
+        });
+
+        Self { file }
+    }
+
+    fn enabled(&self) -> bool {
+        self.file.is_some()
+    }
+
+    fn log_line(&self, line: &str) {
+        let Some(file) = &self.file else {
+            return;
+        };
+
+        if let Ok(mut file) = file.lock() {
+            if let Err(err) = writeln!(file, "{line}") {
+                eprintln!("Failed to write cache stats log: {err}");
+            }
+        }
+    }
+}
+
+fn resolve_cache_log_path(value: String) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "0" | "false" | "no" | "off") {
+        return None;
+    }
+
+    if matches!(lowered.as_str(), "1" | "true" | "yes" | "on") {
+        return Some(PathBuf::from(METALLIC_LOG_CACHE_STATS_DEFAULT_FILE));
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+fn cache_stats_logger() -> &'static CacheStatsLogger {
+    static LOGGER: OnceLock<CacheStatsLogger> = OnceLock::new();
+    LOGGER.get_or_init(CacheStatsLogger::from_env)
+}
 
 fn cache_stats_logging_enabled() -> bool {
-    static FLAG: OnceLock<bool> = OnceLock::new();
-    *FLAG.get_or_init(|| {
-        env::var(METALLIC_LOG_CACHE_STATS_ENV)
-            .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-            .unwrap_or(false)
-    })
+    cache_stats_logger().enabled()
 }
 
 fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {
@@ -33,15 +91,15 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
         return;
     }
 
-    match ctx.get_cache_stats() {
-        Some(stats) => {
-            println!(
-                "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={}",
-                stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
-            );
-        }
-        None => println!("[metal-cache] {phase}#{step}: cache-uninitialized"),
-    }
+    let line = match ctx.get_cache_stats() {
+        Some(stats) => format!(
+            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={}",
+            stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
+        ),
+        None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
+    };
+
+    cache_stats_logger().log_line(&line);
 }
 
 /// Generation configuration (defaults chosen by user)
