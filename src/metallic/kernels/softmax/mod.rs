@@ -11,7 +11,6 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::env;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 
 pub const METALLIC_SOFTMAX_BACKEND_ENV: &str = "METALLIC_SOFTMAX_BACKEND";
 
@@ -26,18 +25,6 @@ impl SoftmaxBackendPreference {
     fn forces_kernel(self) -> bool {
         matches!(self, Self::KernelOnly)
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SoftmaxBackend {
-    Kernel,
-    Mps,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct SoftmaxSample {
-    pub backend: SoftmaxBackend,
-    pub duration: Duration,
 }
 
 static BACKEND_PREFERENCE: OnceLock<SoftmaxBackendPreference> = OnceLock::new();
@@ -93,14 +80,11 @@ pub fn apply_softmax<T: TensorElement>(
     let dtype = attn.dtype;
 
     let preference = softmax_backend_preference();
-    let start = Instant::now();
-
     let supports_mps_dtype = matches!(dtype, Dtype::F32 | Dtype::F16);
     let can_use_mps = allow_mps && supports_mps_dtype && !causal && query_offset == 0 && !preference.forces_kernel();
     if can_use_mps && let Some(cache_slot) = cache.as_mut() {
         let cache_ref: &mut ResourceCache = cache_slot;
         try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns, dtype)?;
-        ctx.record_softmax_backend_sample(SoftmaxBackend::Mps, start.elapsed());
         return Ok(attn.clone());
     }
 
@@ -111,7 +95,6 @@ pub fn apply_softmax<T: TensorElement>(
         )?,
         None => ctx.call::<SoftmaxOp>((attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset))?,
     };
-    ctx.record_softmax_backend_sample(SoftmaxBackend::Kernel, start.elapsed());
     Ok(result)
 }
 

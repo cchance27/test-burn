@@ -1,11 +1,9 @@
 use super::{Context, MetalError, SamplerBuffers, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
-use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::metrics::{
     BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
-    ScalarStat, SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
-    sample_process_memory,
+    ScalarStat, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::{TensorElement, Tokenizer};
@@ -123,15 +121,9 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
         return;
     }
 
-    let backend = match ctx.last_softmax_backend() {
-        Some(SoftmaxBackend::Kernel) => "kernel",
-        Some(SoftmaxBackend::Mps) => "mps",
-        None => "unknown",
-    };
-
     let line = match ctx.get_cache_stats() {
         Some(stats) => format!(
-            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={} softmax_backend={backend}",
+            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={}",
             stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
         ),
         None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
@@ -491,7 +483,6 @@ where
     let mut sample_stats = RollingStat::default();
     let mut decode_stats = RollingStat::default();
     let mut block_stats = vec![BlockStat::default(); n_layers];
-    let mut softmax_backend_stats = SoftmaxBackendStats::default();
     let mut matmul_backend_stats = MatMulBackendStats::default();
     let mut latencies_ready = false;
     let mut memory_embed = MemoryScopeStat::default();
@@ -520,9 +511,6 @@ where
         for (i, &token_id) in input_ids.iter().enumerate() {
             let input_tensor = qwen.embed(&[token_id], ctx)?;
             let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
-            for sample in ctx.take_softmax_samples() {
-                softmax_backend_stats.record(sample.backend, sample.duration);
-            }
             record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
             logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
             log_cache_stats(ctx, "prompt", i + 1);
@@ -621,9 +609,6 @@ where
         ctx.set_latency_collector(None);
         ctx.set_memory_collector(None);
 
-        for sample in ctx.take_softmax_samples() {
-            softmax_backend_stats.record(sample.backend, sample.duration);
-        }
         record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
 
         if let Some(usage) = memory_snapshot.forward.last {
@@ -712,7 +697,6 @@ where
                 &embed_stats,
                 &forward_stats,
                 &block_stats,
-                &softmax_backend_stats,
                 &matmul_backend_stats,
                 &output_stats,
                 &sample_stats,

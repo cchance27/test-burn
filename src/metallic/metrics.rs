@@ -2,7 +2,6 @@ use crate::app_event::{LatencyRow, MemoryRow};
 use crate::metallic::TensorElement;
 use crate::metallic::instrumentation::{BlockMemorySnapshot, MemoryUsage};
 use crate::metallic::kernels::matmul::MatMulBackend;
-use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::models::qwen25::Qwen25;
 use chrono::{SecondsFormat, Utc};
 use serde::Serialize;
@@ -83,29 +82,6 @@ impl RollingStat {
 
     pub fn has_samples(&self) -> bool {
         self.count > 0
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct SoftmaxBackendStats {
-    kernel: RollingStat,
-    mps: RollingStat,
-}
-
-impl SoftmaxBackendStats {
-    pub fn record(&mut self, backend: SoftmaxBackend, duration: Duration) {
-        match backend {
-            SoftmaxBackend::Kernel => self.kernel.record(duration),
-            SoftmaxBackend::Mps => self.mps.record(duration),
-        }
-    }
-
-    pub fn kernel(&self) -> &RollingStat {
-        &self.kernel
-    }
-
-    pub fn mps(&self) -> &RollingStat {
-        &self.mps
     }
 }
 
@@ -521,7 +497,6 @@ pub fn build_latency_rows(
     embed: &RollingStat,
     forward: &RollingStat,
     blocks: &[BlockStat],
-    softmax: &SoftmaxBackendStats,
     matmul: &MatMulBackendStats,
     output: &RollingStat,
     sample: &RollingStat,
@@ -542,24 +517,6 @@ pub fn build_latency_rows(
         average_ms: forward.average_ms(),
         level: 0,
     });
-
-    if softmax.kernel().has_samples() {
-        rows.push(LatencyRow {
-            label: "Softmax (Kernel)".to_string(),
-            last_ms: softmax.kernel().last_ms(),
-            average_ms: softmax.kernel().average_ms(),
-            level: 0,
-        });
-    }
-
-    if softmax.mps().has_samples() {
-        rows.push(LatencyRow {
-            label: "Softmax (MPS)".to_string(),
-            last_ms: softmax.mps().last_ms(),
-            average_ms: softmax.mps().average_ms(),
-            level: 0,
-        });
-    }
 
     if matmul.mps().has_samples() {
         rows.push(LatencyRow {
