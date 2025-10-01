@@ -199,6 +199,8 @@ impl MatMulMlx {
         let n = eff_right_cols;
         let k = eff_left_cols;
 
+        debug_assert_eq!(left_view.batch, right_view.batch);
+
         let align_m = m % 32 == 0;
         let align_n = n % 32 == 0;
         let align_k = k % 16 == 0;
@@ -474,9 +476,9 @@ impl Operation for MatMulMlx {
         let batch_strides = [self.batch_stride_a, self.batch_stride_b];
         set_bytes(&encoder, 7, &batch_strides);
 
-        let left_resource: &ProtocolObject<dyn MTLResource> = self.left_buf.as_ref().as_ref();
-        let right_resource: &ProtocolObject<dyn MTLResource> = self.right_buf.as_ref().as_ref();
-        let result_resource: &ProtocolObject<dyn MTLResource> = self.result_buf.as_ref().as_ref();
+        let left_resource = ProtocolObject::<dyn MTLResource>::from_ref(self.left_buf.as_ref());
+        let right_resource = ProtocolObject::<dyn MTLResource>::from_ref(self.right_buf.as_ref());
+        let result_resource = ProtocolObject::<dyn MTLResource>::from_ref(self.result_buf.as_ref());
 
         unsafe {
             encoder.useResource_usage(left_resource, MTLResourceUsage::Read);
