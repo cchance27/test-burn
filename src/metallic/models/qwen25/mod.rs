@@ -293,17 +293,13 @@ impl<T: TensorElement> Qwen25<T> {
                 .permute(&[0, 2, 1, 3], ctx)?
                 .reshape(vec![batch, seq, d_model])?;
 
-            let attn_out = ctx
-                .matmul(
-                    &attn_out_reshaped.reshape(vec![m, d_model])?,
-                    &block.attn_out_weight,
-                    false,
-                    true, // Transpose the output weight for correct dimensions
-                )?
+            let resid_attn_flat = resid_attn.reshape(vec![m, d_model])?;
+            let attn_out_flat = attn_out_reshaped.reshape(vec![m, d_model])?;
+            let fused_residual = ctx
+                .matmul_alpha_beta(&attn_out_flat, &block.attn_out_weight, &resid_attn_flat, false, true, 1.0, 1.0)?
                 .reshape(vec![batch, seq, d_model])?;
 
-            // Residual Add
-            x = resid_attn.add_elem(&attn_out, ctx)?;
+            x = fused_residual;
 
             // --- MLP Block ---
             let resid_mlp = x.clone();
@@ -468,12 +464,12 @@ impl<T: TensorElement> Qwen25<T> {
             let attn_out_permuted = attn_out_reshaped_1.permute(&[0, 2, 1, 3], ctx)?;
             let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
 
-            let attn_out = ctx
-                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
+            let resid_attn_flat = resid_attn.reshape(vec![m, d_model])?;
+            let attn_out_flat = attn_out_reshaped.reshape(vec![m, d_model])?;
+            let fused_residual = ctx
+                .matmul_alpha_beta(&attn_out_flat, &block.attn_out_weight, &resid_attn_flat, false, true, 1.0, 1.0)?
                 .reshape(vec![batch, seq, d_model])?;
-
-            // Residual Add
-            x = resid_attn.add_elem(&attn_out, ctx)?;
+            x = fused_residual;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_output"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_output"));
 

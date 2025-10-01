@@ -244,12 +244,12 @@ fn run_blocks_up_to<T: TensorElement>(
             .permute(&[0, 2, 1, 3], ctx)?
             .reshape(vec![batch, seq, d_model])?;
 
-        let attn_out = ctx
-            .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
-            .reshape(vec![batch, seq, d_model])?;
+        let resid_attn_flat = resid_attn.reshape(vec![m, d_model])?;
+        let attn_out_flat = attn_out_reshaped.reshape(vec![m, d_model])?;
+        let fused_residual = ctx.matmul_alpha_beta(&attn_out_flat, &block.attn_out_weight, &resid_attn_flat, false, true, 1.0, 1.0)?;
         ctx.synchronize();
 
-        x = resid_attn.add_elem(&attn_out, ctx)?;
+        x = fused_residual.reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
 
         // MLP block
@@ -776,7 +776,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("✅ First block attention output matches PyTorch!");
 
     // Compute residual for subsequent steps
-    let attn_residual = resid_attn.add_elem(&attn_out, &mut ctx)?;
+    let resid_attn_flat = resid_attn.reshape(vec![seq, d_model])?;
+    let fused_residual = ctx.matmul_alpha_beta(&attn_out_flat, &block0.attn_out_weight, &resid_attn_flat, false, true, 1.0, 1.0)?;
+    let attn_residual = fused_residual.reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
 
     // --- 7. Test First Block FFN (MLP) Output ---
