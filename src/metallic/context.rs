@@ -3,6 +3,7 @@ use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollect
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
+use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
@@ -273,55 +274,8 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let output_dims = vec![m, expected_total];
-        let mut linear = Tensor::new(output_dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
-
-        if m > 0 && expected_total > 0 {
-            self.prepare_tensors_for_active_cmd(&[&linear, fused_bias])?;
-
-            let elem_size = linear.dtype.size_bytes();
-            let row_bytes = expected_total * elem_size;
-
-            let command_buffer = self.active_command_buffer_mut_without_cache()?;
-            let encoder = command_buffer
-                .raw()
-                .blitCommandEncoder()
-                .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
-
-            unsafe {
-                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    &fused_bias.buf,
-                    fused_bias.offset,
-                    &linear.buf,
-                    linear.offset,
-                    row_bytes,
-                );
-            }
-
-            let mut rows_filled = 1usize;
-            while rows_filled < m {
-                let rows_to_copy = (m - rows_filled).min(rows_filled);
-                let bytes_to_copy = rows_to_copy * row_bytes;
-                let dst_offset = linear.offset + rows_filled * row_bytes;
-
-                unsafe {
-                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &linear.buf,
-                        linear.offset,
-                        &linear.buf,
-                        dst_offset,
-                        bytes_to_copy,
-                    );
-                }
-
-                rows_filled += rows_to_copy;
-            }
-
-            encoder.endEncoding();
-            self.mark_tensor_pending(&linear);
-        }
-
-        let linear = self.matmul_alpha_beta(x_flat, fused_weight, &linear, false, false, 1.0, 1.0)?;
+        let linear = self.matmul(x_flat, fused_weight, false, false)?;
+        let linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, fused_bias.clone()))?;
 
         let q_range_end = d_model;
         let k_range_end = d_model + kv_dim;
