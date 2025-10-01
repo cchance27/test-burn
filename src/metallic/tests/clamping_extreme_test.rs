@@ -104,7 +104,9 @@ fn test_sample_top_k_top_p_buffer_reuse_retains_correctness() {
     let logits_fallback = vec![f32::NAN, f32::NEG_INFINITY, -1.0f32];
     let mut buffers = SamplerBuffers::default();
 
-    let primary = sample_top_k_top_p::<F32Element>(&logits_primary, 3, 0.8, 1.0, &mut buffers);
+    // Clamp the shortlist to the single highest-probability candidate to avoid
+    // relying on RNG output for the primary assertion.
+    let primary = sample_top_k_top_p::<F32Element>(&logits_primary, 3, 0.0, 1.0, &mut buffers);
     let secondary = sample_top_k_top_p::<F32Element>(&logits_fallback, 3, 0.9, 1.0, &mut buffers);
 
     assert_eq!(primary, 1, "Primary sampling should select the highest probability index");
