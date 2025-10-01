@@ -8,7 +8,9 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLCommandBuffer;
 use rustc_hash::FxHashMap;
 
-use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
+use crate::metallic::kernels::matmul::MatMulBackend;
+#[cfg(test)]
+use crate::metallic::kernels::matmul::MatMulSample;
 use crate::metallic::operation::CommandBuffer;
 
 /// Handle to a shared latency collector used to instrument fine-grained timing inside
