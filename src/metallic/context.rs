@@ -48,6 +48,8 @@ pub struct Context<T: TensorElement> {
     memory_collector: Option<MemoryCollectorHandle>,
     /// Softmax backend samples collected since the last drain.
     softmax_samples: Vec<SoftmaxSample>,
+    /// Tracks the last backend that executed so instrumentation can explain cache stats.
+    last_softmax_backend: Option<SoftmaxBackend>,
     //config: ContextConfig,
 }
 
@@ -107,6 +109,7 @@ impl<T: TensorElement> Context<T> {
             latency_collector: None,
             memory_collector: None,
             softmax_samples: Vec::new(),
+            last_softmax_backend: None,
             //config,
         })
     }
@@ -168,11 +171,16 @@ impl<T: TensorElement> Context<T> {
         if duration.is_zero() {
             return;
         }
+        self.last_softmax_backend = Some(backend);
         self.softmax_samples.push(SoftmaxSample { backend, duration });
     }
 
     pub fn take_softmax_samples(&mut self) -> Vec<SoftmaxSample> {
         mem::take(&mut self.softmax_samples)
+    }
+
+    pub fn last_softmax_backend(&self) -> Option<SoftmaxBackend> {
+        self.last_softmax_backend
     }
 
     /// Registers a memory collector handle for the upcoming operations. Passing `None`
@@ -1026,7 +1034,6 @@ impl<T: TensorElement> Context<T> {
 
         if should_refresh {
             self.active_cmd_buffer = None;
-            self.active_resource_cache = None;
         }
 
         if self.active_cmd_buffer.is_none() {

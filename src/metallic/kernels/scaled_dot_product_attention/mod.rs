@@ -123,8 +123,12 @@ fn create_sdpa_operation<T: TensorElement>(
         });
     }
 
-    // Calculate scale factor
-    let scale = 1.0 / (d as f32).sqrt();
+    // Calculate scale factor, reusing the cached SDPA descriptor when available.
+    let scale = if let Some(cache_ref) = cache.as_mut() {
+        cache_ref.get_or_create_sdpa(b, s_q, s_k, d).scale
+    } else {
+        compute_sdpa_scale(d)
+    };
 
     // Create output tensor
     let out = Tensor::new(vec![b, s_q, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
@@ -192,6 +196,17 @@ fn create_sdpa_operation<T: TensorElement>(
         }),
         out,
     ))
+}
+
+fn compute_sdpa_scale(dim: usize) -> f32 {
+    let dim_f32 = dim as f32;
+    let scale = 1.0 / dim_f32.sqrt();
+
+    if scale.is_infinite() || scale.is_nan() {
+        1.0
+    } else {
+        scale.clamp(1e-6, 1e6)
+    }
 }
 
 // Implement `KernelInvocable` for the public struct.

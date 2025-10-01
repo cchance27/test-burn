@@ -1,5 +1,6 @@
 use super::{Context, MetalError, Tensor};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
+use crate::metallic::kernels::softmax::SoftmaxBackend;
 use crate::metallic::metrics::{
     BlockStat, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat, ScalarStat,
     SoftmaxBackendStats, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
@@ -9,12 +10,104 @@ use crate::metallic::{TensorElement, Tokenizer};
 use crate::{alert, app_event::AppEvent};
 use rand::prelude::*;
 use std::{
-    sync::{Arc, mpsc},
+    env,
+    fs::OpenOptions,
+    io::Write,
+    path::PathBuf,
+    sync::{Arc, Mutex, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
+
+const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
+const METALLIC_LOG_CACHE_STATS_DEFAULT_FILE: &str = "metal-cache-stats.log";
+
+struct CacheStatsLogger {
+    file: Option<Mutex<std::fs::File>>,
+}
+
+impl CacheStatsLogger {
+    fn from_env() -> Self {
+        let path = env::var(METALLIC_LOG_CACHE_STATS_ENV).ok().and_then(resolve_cache_log_path);
+
+        let file = path.and_then(|path| match OpenOptions::new().create(true).append(true).open(&path) {
+            Ok(file) => Some(Mutex::new(file)),
+            Err(err) => {
+                eprintln!("Failed to open cache stats log at {:?}: {}", path, err);
+                None
+            }
+        });
+
+        Self { file }
+    }
+
+    fn enabled(&self) -> bool {
+        self.file.is_some()
+    }
+
+    fn log_line(&self, line: &str) {
+        let Some(file) = &self.file else {
+            return;
+        };
+
+        if let Ok(mut file) = file.lock() {
+            if let Err(err) = writeln!(file, "{line}") {
+                eprintln!("Failed to write cache stats log: {err}");
+            }
+        }
+    }
+}
+
+fn resolve_cache_log_path(value: String) -> Option<PathBuf> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lowered = trimmed.to_ascii_lowercase();
+    if matches!(lowered.as_str(), "0" | "false" | "no" | "off") {
+        return None;
+    }
+
+    if matches!(lowered.as_str(), "1" | "true" | "yes" | "on") {
+        return Some(PathBuf::from(METALLIC_LOG_CACHE_STATS_DEFAULT_FILE));
+    }
+
+    Some(PathBuf::from(trimmed))
+}
+
+fn cache_stats_logger() -> &'static CacheStatsLogger {
+    static LOGGER: OnceLock<CacheStatsLogger> = OnceLock::new();
+    LOGGER.get_or_init(CacheStatsLogger::from_env)
+}
+
+fn cache_stats_logging_enabled() -> bool {
+    cache_stats_logger().enabled()
+}
+
+fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {
+    if !cache_stats_logging_enabled() {
+        return;
+    }
+
+    let backend = match ctx.last_softmax_backend() {
+        Some(SoftmaxBackend::Kernel) => "kernel",
+        Some(SoftmaxBackend::Mps) => "mps",
+        None => "unknown",
+    };
+
+    let line = match ctx.get_cache_stats() {
+        Some(stats) => format!(
+            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={} softmax_backend={backend}",
+            stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
+        ),
+        None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
+    };
+
+    cache_stats_logger().log_line(&line);
+}
 
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
@@ -279,10 +372,6 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
 where
     F: FnMut(u32, Arc<str>) -> Result<bool, MetalError>,
 {
-    // Ensure KV caches start from a clean slate between generations.
-    ctx.kv_caches.clear();
-    ctx.kv_cache_pool.reset();
-
     // Pre-allocate KV cache for all layers
     let n_layers = qwen.config.n_layers;
     let seq_len = qwen.config.seq_len;
@@ -293,6 +382,39 @@ where
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1; // Assuming batch size of 1 for now
     let kv_capacity = (input_ids.len().max(1) + cfg.max_tokens).min(seq_len);
+
+    // Determine whether existing cache-backed descriptors must be invalidated because
+    // their shapes changed (e.g. when generating with a longer context than before).
+    let canonical_batch_heads = batch_size * n_kv_heads;
+    let repeated_batch_heads = batch_size * n_heads;
+    let mut cache_shapes_changed = false;
+    if !ctx.kv_caches.is_empty() {
+        for layer_idx in 0..n_layers {
+            match ctx.kv_caches.get(&layer_idx) {
+                Some(entry) => {
+                    let k_dims = entry.k.dims();
+                    let repeated_k_dims = entry.repeated_k.dims();
+                    if entry.capacity != kv_capacity
+                        || k_dims[0] != canonical_batch_heads
+                        || k_dims[2] != kv_head_dim
+                        || repeated_k_dims[0] != repeated_batch_heads
+                        || repeated_k_dims[2] != kv_head_dim
+                    {
+                        cache_shapes_changed = true;
+                        break;
+                    }
+                }
+                None => {
+                    cache_shapes_changed = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Ensure KV caches start from a clean slate between generations.
+    ctx.kv_caches.clear();
+    ctx.kv_cache_pool.reset();
 
     let log_interval = log_interval_from_env();
     let mut metrics_loggers = MetricsLoggers::from_env(log_interval);
@@ -317,6 +439,10 @@ where
         ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
     }
 
+    if cache_shapes_changed {
+        ctx.clear_cache();
+    }
+
     let mut latest_forward_usage = Some(ctx.snapshot_memory_usage());
     sample_process_memory(process_memory_tracker, host_memory);
 
@@ -324,7 +450,6 @@ where
     // Process the prompt token by token to warm up the KV cache.
     let mut logits_tensor: Option<Tensor<T>> = None;
     if !input_ids.is_empty() {
-        ctx.clear_cache(); // It's okay to clear the resource cache
         for (i, &token_id) in input_ids.iter().enumerate() {
             let input_tensor = qwen.embed(&[token_id], ctx)?;
             let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
@@ -332,6 +457,7 @@ where
                 softmax_backend_stats.record(sample.backend, sample.duration);
             }
             logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
+            log_cache_stats(ctx, "prompt", i + 1);
         }
     }
 
@@ -367,6 +493,8 @@ where
         decode_stats.record(decode_duration);
     }
 
+    log_cache_stats(ctx, "generate", generated_ids.len());
+
     if let Some(piece) = decoded_piece
         && !token_callback(next_token, piece)?
     {
@@ -393,7 +521,6 @@ where
     );
     for i in 0..cfg.max_tokens - 1 {
         ctx.reset_pool();
-        ctx.clear_cache();
 
         let embed_usage_before = ctx.snapshot_memory_usage();
         let embed_start = Instant::now();
@@ -502,6 +629,8 @@ where
         if !decode_duration.is_zero() {
             decode_stats.record(decode_duration);
         }
+
+        log_cache_stats(ctx, "generate", generated_ids.len());
 
         if let Some(piece) = decoded_piece
             && !token_callback(next_token, piece)?
