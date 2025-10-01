@@ -7,7 +7,6 @@ This checklist captures potential optimizations and hardening opportunities disc
 
 ## ⚙️ Medium-effort improvements
 - [ ] Add lazy, demand-paged GGUF tensor loading (memory-mapped files plus per-layer uploads) instead of materializing the full model as `Vec<f32>` in RAM. 【F:src/gguf/model_loader.rs†L35-L135】
-- [ ] Expand `Tensor` to carry dtype metadata through kernels and loaders so models can stay in native precision (e.g., keep weights in `bf16/fp16` until a kernel demands `fp32`). 【F:src/metallic/tensor.rs†L19-L140】
 - [ ] Introduce fused compute passes (e.g., matmul + bias + activation) where the intermediate results can stay in threadgroup memory, reducing buffer churn and GPU↔CPU sync. 【F:src/metallic/kernels】【F:src/metallic/context.rs†L60-L169】
 - [ ] Track pool utilization metrics (peak/average) and expose them for regression detection; wire into `Context` metrics to spot leaks. 【F:src/metallic/context.rs†L18-L57】【F:src/metallic/pool.rs†L12-L110】
 - [ ] Reuse KV cache allocations between runs by resetting ranges instead of dropping and reallocating buffers, and expose statistics to monitor growth. 【F:src/metallic/context.rs†L117-L169】
