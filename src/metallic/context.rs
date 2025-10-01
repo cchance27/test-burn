@@ -3,7 +3,6 @@ use super::instrumentation::{LatencyCollectorHandle, LatencyEvent, MemoryCollect
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
-use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
@@ -241,7 +240,7 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let _m = x_dims[0];
+        let m = x_dims[0];
         let in_features = x_dims[1];
         if in_features != d_model {
             return Err(MetalError::InvalidShape(format!(
@@ -274,8 +273,39 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let mut linear = self.matmul(x_flat, fused_weight, false, false)?;
-        linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, fused_bias.clone()))?;
+        let output_dims = vec![m, expected_total];
+        let mut linear = Tensor::new(output_dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+
+        if m > 0 && expected_total > 0 {
+            self.prepare_tensors_for_active_cmd(&[&linear, fused_bias])?;
+
+            let elem_size = linear.dtype.size_bytes();
+            let row_bytes = expected_total * elem_size;
+
+            let command_buffer = self.active_command_buffer_mut_without_cache()?;
+            let encoder = command_buffer
+                .raw()
+                .blitCommandEncoder()
+                .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+
+            for row_idx in 0..m {
+                let dst_offset = linear.offset + row_idx * row_bytes;
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &fused_bias.buf,
+                        fused_bias.offset,
+                        &linear.buf,
+                        dst_offset,
+                        row_bytes,
+                    );
+                }
+            }
+
+            encoder.endEncoding();
+            self.mark_tensor_pending(&linear);
+        }
+
+        let linear = self.matmul_alpha_beta(x_flat, fused_weight, &linear, false, false, 1.0, 1.0)?;
 
         let q_range_end = d_model;
         let k_range_end = d_model + kv_dim;
