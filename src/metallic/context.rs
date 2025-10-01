@@ -1026,7 +1026,6 @@ impl<T: TensorElement> Context<T> {
 
         if should_refresh {
             self.active_cmd_buffer = None;
-            self.active_resource_cache = None;
         }
 
         if self.active_cmd_buffer.is_none() {

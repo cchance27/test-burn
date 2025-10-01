@@ -9,12 +9,40 @@ use crate::metallic::{TensorElement, Tokenizer};
 use crate::{alert, app_event::AppEvent};
 use rand::prelude::*;
 use std::{
-    sync::{Arc, mpsc},
+    env,
+    sync::{Arc, OnceLock, mpsc},
     time::{Duration, Instant},
 };
 
 const IM_START: &str = "<|im_start|>";
 const IM_END: &str = "<|im_end|>";
+
+const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
+
+fn cache_stats_logging_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        env::var(METALLIC_LOG_CACHE_STATS_ENV)
+            .map(|value| matches!(value.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false)
+    })
+}
+
+fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {
+    if !cache_stats_logging_enabled() {
+        return;
+    }
+
+    match ctx.get_cache_stats() {
+        Some(stats) => {
+            println!(
+                "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={}",
+                stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
+            );
+        }
+        None => println!("[metal-cache] {phase}#{step}: cache-uninitialized"),
+    }
+}
 
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
@@ -364,6 +392,7 @@ where
                 softmax_backend_stats.record(sample.backend, sample.duration);
             }
             logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
+            log_cache_stats(ctx, "prompt", i + 1);
         }
     }
 
@@ -398,6 +427,8 @@ where
     if !decode_duration.is_zero() {
         decode_stats.record(decode_duration);
     }
+
+    log_cache_stats(ctx, "generate", generated_ids.len());
 
     if let Some(piece) = decoded_piece
         && !token_callback(next_token, piece)?
@@ -533,6 +564,8 @@ where
         if !decode_duration.is_zero() {
             decode_stats.record(decode_duration);
         }
+
+        log_cache_stats(ctx, "generate", generated_ids.len());
 
         if let Some(piece) = decoded_piece
             && !token_callback(next_token, piece)?
