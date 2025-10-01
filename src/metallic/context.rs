@@ -299,9 +299,9 @@ impl<T: TensorElement> Context<T> {
         let k_range_end = d_model + kv_dim;
         let v_range_end = expected_total;
 
-        let q_out = self.materialize_contiguous_view(linear.slice_last_dim(0..q_range_end)?)?;
-        let k_out = self.materialize_contiguous_view(linear.slice_last_dim(d_model..k_range_end)?)?;
-        let v_out = self.materialize_contiguous_view(linear.slice_last_dim(k_range_end..v_range_end)?)?;
+        let q_out = linear.slice_last_dim(0..q_range_end)?;
+        let k_out = linear.slice_last_dim(d_model..k_range_end)?;
+        let v_out = linear.slice_last_dim(k_range_end..v_range_end)?;
 
         Ok((q_out, k_out, v_out))
     }
