@@ -185,46 +185,58 @@ impl KernelFunction {
             (KernelFunction::Ones, F16) => "ones_kernel_f16",
             (KernelFunction::RandomUniform, F32) => "random_uniform_f32",
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
-            (KernelFunction::MlxGemmNn, dtype) => match dtype {
-                F32 => "gemm_nn_f32_f32_32_32_16_2_2",
-                F16 => "gemm_nn_f16_f16_32_32_16_2_2",
-                other => {
-                    return Err(MetalError::UnsupportedDtype {
-                        operation: "MLX GEMM",
-                        dtype: other,
-                    });
+            (KernelFunction::MlxGemmNn, dtype @ (F32 | F16)) => {
+                if dtype == F32 {
+                    "gemm_nn_f32_f32_32_32_16_2_2"
+                } else {
+                    "gemm_nn_f16_f16_32_32_16_2_2"
                 }
-            },
-            (KernelFunction::MlxGemmNt, dtype) => match dtype {
-                F32 => "gemm_nt_f32_f32_32_32_16_2_2",
-                F16 => "gemm_nt_f16_f16_32_32_16_2_2",
-                other => {
-                    return Err(MetalError::UnsupportedDtype {
-                        operation: "MLX GEMM",
-                        dtype: other,
-                    });
+            }
+            (KernelFunction::MlxGemmNn, dtype) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MLX GEMM",
+                    dtype,
+                });
+            }
+            (KernelFunction::MlxGemmNt, dtype @ (F32 | F16)) => {
+                if dtype == F32 {
+                    "gemm_nt_f32_f32_32_32_16_2_2"
+                } else {
+                    "gemm_nt_f16_f16_32_32_16_2_2"
                 }
-            },
-            (KernelFunction::MlxGemmTn, dtype) => match dtype {
-                F32 => "gemm_tn_f32_f32_32_32_16_2_2",
-                F16 => "gemm_tn_f16_f16_32_32_16_2_2",
-                other => {
-                    return Err(MetalError::UnsupportedDtype {
-                        operation: "MLX GEMM",
-                        dtype: other,
-                    });
+            }
+            (KernelFunction::MlxGemmNt, dtype) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MLX GEMM",
+                    dtype,
+                });
+            }
+            (KernelFunction::MlxGemmTn, dtype @ (F32 | F16)) => {
+                if dtype == F32 {
+                    "gemm_tn_f32_f32_32_32_16_2_2"
+                } else {
+                    "gemm_tn_f16_f16_32_32_16_2_2"
                 }
-            },
-            (KernelFunction::MlxGemmTt, dtype) => match dtype {
-                F32 => "gemm_tt_f32_f32_32_32_16_2_2",
-                F16 => "gemm_tt_f16_f16_32_32_16_2_2",
-                other => {
-                    return Err(MetalError::UnsupportedDtype {
-                        operation: "MLX GEMM",
-                        dtype: other,
-                    });
+            }
+            (KernelFunction::MlxGemmTn, dtype) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MLX GEMM",
+                    dtype,
+                });
+            }
+            (KernelFunction::MlxGemmTt, dtype @ (F32 | F16)) => {
+                if dtype == F32 {
+                    "gemm_tt_f32_f32_32_32_16_2_2"
+                } else {
+                    "gemm_tt_f16_f16_32_32_16_2_2"
                 }
-            },
+            }
+            (KernelFunction::MlxGemmTt, dtype) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MLX GEMM",
+                    dtype,
+                });
+            }
         };
 
         Ok(name)

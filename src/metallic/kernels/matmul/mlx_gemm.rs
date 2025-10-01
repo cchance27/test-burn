@@ -81,6 +81,7 @@ pub struct MlxGemmBackend {
     tiles_m: i32,
     gemm_k_iterations_aligned: i32,
     batch_size: usize,
+    batch_ndim: i32,
     batch_stride_a: u64,
     batch_stride_b: u64,
     batch_stride_c: Option<u64>,
@@ -164,6 +165,13 @@ impl MlxGemmBackend {
         let gemm_k_iterations_aligned = k_i32 / BK;
 
         let batch_size = result_view.batch;
+        let has_batch = batch_size > 1;
+        let batch_ndim = if has_batch { 1 } else { 0 };
+
+        let align_m = m_i32 % BM == 0;
+        let align_n = n_i32 % BN == 0;
+        let align_k = k_i32 % BK == 0;
+        let do_gather = false;
 
         let kernel_fn = match (transpose_left, transpose_right) {
             (false, false) => KernelFunction::MlxGemmNn,
@@ -172,19 +180,19 @@ impl MlxGemmBackend {
             (true, true) => KernelFunction::MlxGemmTt,
         };
 
-        let pipeline = if use_out_source || do_axpby {
-            let mut flags = Vec::with_capacity(2);
-            if use_out_source {
-                flags.push((100u16, true));
-            }
-            if do_axpby {
-                flags.push((110u16, true));
-            }
-            ctx.kernel_manager
-                .get_pipeline_with_constants(kernel_fn, left_dtype, &ctx.device, Some(&flags))?
-        } else {
-            ctx.kernel_manager.get_pipeline(kernel_fn, left_dtype, &ctx.device)?
-        };
+        let flags = [
+            (10u16, has_batch),
+            (100u16, use_out_source),
+            (110u16, do_axpby),
+            (200u16, align_m),
+            (201u16, align_n),
+            (202u16, align_k),
+            (300u16, do_gather),
+        ];
+
+        let pipeline = ctx
+            .kernel_manager
+            .get_pipeline_with_constants(kernel_fn, left_dtype, &ctx.device, Some(&flags))?;
 
         Ok(Some(Self {
             pipeline,
@@ -200,6 +208,7 @@ impl MlxGemmBackend {
             tiles_m,
             gemm_k_iterations_aligned,
             batch_size,
+            batch_ndim,
             batch_stride_a,
             batch_stride_b,
             batch_stride_c,
@@ -266,7 +275,7 @@ impl MlxGemmBackend {
             batch_stride_d: self.batch_stride_d,
             swizzle_log: SWIZZLE_LOG,
             gemm_k_iterations_aligned: self.gemm_k_iterations_aligned,
-            batch_ndim: 1,
+            batch_ndim: self.batch_ndim,
         };
         set_bytes(&encoder, 4, &params);
 
