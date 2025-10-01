@@ -1,13 +1,11 @@
 use super::error::MetalError;
 use super::instrumentation::{
     LatencyCollectorHandle, LatencyEvent, MatMulInstrumentation, MatMulSampleRecorder, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
-    SoftmaxInstrumentation, SoftmaxSampleRecorder,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use crate::metallic::kernels::softmax::{SoftmaxBackend, SoftmaxSample};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
@@ -60,13 +58,6 @@ pub struct Context<T: TensorElement> {
     /// Matmul timing samples captured since the last drain.
     matmul_samples: Arc<Mutex<Vec<MatMulSample>>>,
     matmul_recorder: MatMulSampleRecorder,
-    /// Shared instrumentation used to collect softmax GPU timings.
-    softmax_instrumentation: SoftmaxInstrumentation,
-    /// Softmax timing samples captured since the last drain.
-    softmax_samples: Arc<Mutex<Vec<SoftmaxSample>>>,
-    softmax_recorder: SoftmaxSampleRecorder,
-    /// Tracks the last backend that executed so instrumentation can explain cache stats.
-    last_softmax_backend: Arc<Mutex<Option<SoftmaxBackend>>>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     //config: ContextConfig,
@@ -123,22 +114,6 @@ impl<T: TensorElement> Context<T> {
             }
         });
 
-        let softmax_samples = Arc::new(Mutex::new(Vec::new()));
-        let last_softmax_backend = Arc::new(Mutex::new(None));
-        let softmax_samples_for_recorder = Arc::clone(&softmax_samples);
-        let last_softmax_backend_for_recorder = Arc::clone(&last_softmax_backend);
-        let softmax_recorder = SoftmaxSampleRecorder::new(move |backend, duration| {
-            if duration.is_zero() {
-                return;
-            }
-            if let Ok(mut samples) = softmax_samples_for_recorder.lock() {
-                samples.push(SoftmaxSample { backend, duration });
-            }
-            if let Ok(mut slot) = last_softmax_backend_for_recorder.lock() {
-                *slot = Some(backend);
-            }
-        });
-
         Ok(Context::<T> {
             device,
             command_queue,
@@ -157,10 +132,6 @@ impl<T: TensorElement> Context<T> {
             matmul_instrumentation: MatMulInstrumentation::default(),
             matmul_samples,
             matmul_recorder,
-            softmax_instrumentation: SoftmaxInstrumentation::default(),
-            softmax_samples,
-            softmax_recorder,
-            last_softmax_backend,
             sampler_buffers: SamplerBuffers::default(),
             //config,
         })
@@ -224,27 +195,9 @@ impl<T: TensorElement> Context<T> {
             .register(command_buffer, backend, self.matmul_recorder.clone());
     }
 
-    pub(crate) fn register_softmax_dispatch(&self, command_buffer: &CommandBuffer, backend: SoftmaxBackend) {
-        self.softmax_instrumentation
-            .register(command_buffer, backend, self.softmax_recorder.clone());
-    }
-
     #[allow(dead_code)]
     pub(crate) fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
         self.matmul_recorder.record_matmul_backend_sample(backend, duration);
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn record_softmax_backend_sample(&self, backend: SoftmaxBackend, duration: Duration) {
-        self.softmax_recorder.record_softmax_backend_sample(backend, duration);
-    }
-
-    pub fn take_softmax_samples(&mut self) -> Vec<SoftmaxSample> {
-        let mut samples = match self.softmax_samples.lock() {
-            Ok(guard) => guard,
-            Err(err) => err.into_inner(),
-        };
-        samples.drain(..).collect()
     }
 
     pub fn take_matmul_samples(&self) -> Vec<MatMulSample> {
@@ -253,13 +206,6 @@ impl<T: TensorElement> Context<T> {
             Err(err) => err.into_inner(),
         };
         samples.drain(..).collect()
-    }
-
-    pub fn last_softmax_backend(&self) -> Option<SoftmaxBackend> {
-        match self.last_softmax_backend.lock() {
-            Ok(guard) => *guard,
-            Err(err) => *err.into_inner(),
-        }
     }
 
     /// Registers a memory collector handle for the upcoming operations. Passing `None`

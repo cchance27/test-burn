@@ -11,7 +11,6 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::env;
 use std::sync::OnceLock;
-use std::time::Duration;
 
 pub const METALLIC_SOFTMAX_BACKEND_ENV: &str = "METALLIC_SOFTMAX_BACKEND";
 
@@ -26,18 +25,6 @@ impl SoftmaxBackendPreference {
     fn forces_kernel(self) -> bool {
         matches!(self, Self::KernelOnly)
     }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum SoftmaxBackend {
-    Kernel,
-    Mps,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct SoftmaxSample {
-    pub backend: SoftmaxBackend,
-    pub duration: Duration,
 }
 
 static BACKEND_PREFERENCE: OnceLock<SoftmaxBackendPreference> = OnceLock::new();
@@ -144,8 +131,6 @@ fn try_apply_mps_softmax<T: TensorElement>(
         batch,
     };
     command_buffer.record(&op, cache)?;
-    let command_buffer = command_buffer.clone();
-    ctx.register_softmax_dispatch(&command_buffer, SoftmaxBackend::Mps);
     ctx.mark_tensor_pending(attn);
     Ok(())
 }
@@ -243,14 +228,6 @@ impl KernelInvocable for SoftmaxOp {
             query_offset,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
-
-        {
-            let command_buffer = {
-                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-                command_buffer.clone()
-            };
-            ctx.register_softmax_dispatch(&command_buffer, SoftmaxBackend::Kernel);
-        }
 
         Ok((Box::new(op), attn.clone())) // Return a shallow clone since operation is in-place
     }
