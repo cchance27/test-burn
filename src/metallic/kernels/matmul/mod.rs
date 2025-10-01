@@ -29,8 +29,10 @@ pub use matmul_alpha_beta::MatMulAlphaBetaOp;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MatMulBackend {
+    Total,
     Mps,
     Mlx,
+    MlxTransposed,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -189,6 +191,7 @@ impl MatMulMlx {
         result: &Tensor<T>,
         left_view: MpsMatrixBatchView,
         right_view: MpsMatrixBatchView,
+        result_view: MpsMatrixBatchView,
         eff_left_rows: usize,
         eff_left_cols: usize,
         eff_right_cols: usize,
@@ -200,6 +203,7 @@ impl MatMulMlx {
         let k = eff_left_cols;
 
         debug_assert_eq!(left_view.batch, right_view.batch);
+        debug_assert_eq!(left_view.batch, result_view.batch);
 
         let align_m = m % 32 == 0;
         let align_n = n % 32 == 0;
@@ -223,9 +227,23 @@ impl MatMulMlx {
         let k_i32 =
             i32::try_from(k).map_err(|_| MetalError::InvalidOperation("matmul interior dimension exceeds i32 range".to_string()))?;
 
-        let lda = i32::try_from(k).map_err(|_| MetalError::InvalidOperation("lda exceeds i32 range".to_string()))?;
-        let ldb = i32::try_from(n).map_err(|_| MetalError::InvalidOperation("ldb exceeds i32 range".to_string()))?;
-        let ldd = ldb;
+        let left_elem_size = left_tensor.dtype.size_bytes();
+        let right_elem_size = right_tensor.dtype.size_bytes();
+        let result_elem_size = result.dtype.size_bytes();
+
+        debug_assert_eq!(left_elem_size, right_elem_size);
+        debug_assert_eq!(left_elem_size, result_elem_size);
+
+        let (left_row_stride, left_matrix_stride) = matrix_strides_from_view(&left_view, left_elem_size)
+            .ok_or_else(|| MetalError::InvalidOperation("MatMul MLX backend requires contiguous left operand".to_string()))?;
+        let (right_row_stride, right_matrix_stride) = matrix_strides_from_view(&right_view, right_elem_size)
+            .ok_or_else(|| MetalError::InvalidOperation("MatMul MLX backend requires contiguous right operand".to_string()))?;
+        let (result_row_stride, result_matrix_stride) = matrix_strides_from_view(&result_view, result_elem_size)
+            .ok_or_else(|| MetalError::InvalidOperation("MatMul MLX backend requires contiguous result tensor".to_string()))?;
+
+        let lda = i32::try_from(left_row_stride).map_err(|_| MetalError::InvalidOperation("lda exceeds i32 range".to_string()))?;
+        let ldb = i32::try_from(right_row_stride).map_err(|_| MetalError::InvalidOperation("ldb exceeds i32 range".to_string()))?;
+        let ldd = i32::try_from(result_row_stride).map_err(|_| MetalError::InvalidOperation("ldd exceeds i32 range".to_string()))?;
 
         let bm = 32usize;
         let bn = 32usize;
@@ -235,20 +253,9 @@ impl MatMulMlx {
         let tiles_n = n.div_ceil(bn) * tile;
         let tiles_m = m.div_ceil(bm).div_ceil(tile);
 
-        let batch_stride_a_elems = if left_tensor.dims.len() > 2 {
-            left_tensor.strides[left_tensor.strides.len() - 3]
-        } else {
-            m * k
-        };
-        let batch_stride_b_elems = if right_tensor.dims.len() > 2 {
-            right_tensor.strides[right_tensor.strides.len() - 3]
-        } else {
-            n * k
-        };
-
-        let batch_stride_a = batch_stride_a_elems;
-        let batch_stride_b = batch_stride_b_elems;
-        let batch_stride_d = m * n;
+        let batch_stride_a = left_matrix_stride;
+        let batch_stride_b = right_matrix_stride;
+        let batch_stride_d = result_matrix_stride;
 
         let params = GemmParams {
             m: m_i32,
@@ -367,7 +374,7 @@ impl KernelInvocable for MatMulOp {
         let mut selected_backend = MatMulBackend::Mps;
         let mut implementation: Option<MatMulImplementation> = None;
 
-        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_tensor, &right_tensor, transpose_left, transpose_right) {
+        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_tensor, &left_view, &right_tensor, &right_view) {
             match MatMulMlx::new(
                 ctx,
                 &left_tensor,
@@ -375,6 +382,7 @@ impl KernelInvocable for MatMulOp {
                 &out,
                 left_view,
                 right_view,
+                result_view,
                 eff_left_rows,
                 eff_left_cols,
                 eff_right_cols,
@@ -382,7 +390,11 @@ impl KernelInvocable for MatMulOp {
                 transpose_right,
             ) {
                 Ok(mlx_op) => {
-                    selected_backend = MatMulBackend::Mlx;
+                    selected_backend = if transpose_left || transpose_right {
+                        MatMulBackend::MlxTransposed
+                    } else {
+                        MatMulBackend::Mlx
+                    };
                     implementation = Some(MatMulImplementation::Mlx(mlx_op));
                 }
                 Err(err) => {
@@ -393,7 +405,7 @@ impl KernelInvocable for MatMulOp {
             }
         } else if preference == MatMulBackendPreference::ForceMlx {
             return Err(MetalError::OperationNotSupported(
-                "MatMul MLX backend requires contiguous non-transposed inputs".to_string(),
+                "MatMul MLX backend requires contiguous inputs".to_string(),
             ));
         }
 
@@ -554,11 +566,12 @@ pub fn encode_mps_matrix_multiplication(
 
 /// Returns true when the MLX kernel can service the requested matmul without
 /// additional data movement.
-fn supports_mlx<T: TensorElement>(left: &Tensor<T>, right: &Tensor<T>, transpose_left: bool, transpose_right: bool) -> bool {
-    if transpose_left || transpose_right {
-        return false;
-    }
-
+fn supports_mlx<T: TensorElement>(
+    left: &Tensor<T>,
+    left_view: &MpsMatrixBatchView,
+    right: &Tensor<T>,
+    right_view: &MpsMatrixBatchView,
+) -> bool {
     if left.dtype != right.dtype {
         return false;
     }
@@ -566,14 +579,52 @@ fn supports_mlx<T: TensorElement>(left: &Tensor<T>, right: &Tensor<T>, transpose
     matches!(
         left.dtype,
         crate::metallic::tensor::Dtype::F16 | crate::metallic::tensor::Dtype::F32
-    ) && is_row_major(left)
-        && is_row_major(right)
+    ) && mlx_operand_is_contiguous(left, left_view)
+        && mlx_operand_is_contiguous(right, right_view)
 }
 
-fn is_row_major<T: TensorElement>(tensor: &Tensor<T>) -> bool {
+fn mlx_operand_is_contiguous<T: TensorElement>(tensor: &Tensor<T>, view: &MpsMatrixBatchView) -> bool {
     if tensor.dims().len() < 2 {
         return false;
     }
 
-    tensor.strides == Tensor::<T>::compute_strides(tensor.dims())
+    let elem_size = tensor.dtype.size_bytes();
+    let Some((row_stride, matrix_stride)) = matrix_strides_from_view(view, elem_size) else {
+        return false;
+    };
+
+    if row_stride != view.columns {
+        return false;
+    }
+
+    let Some(expected_matrix_stride) = view.rows.checked_mul(row_stride) else {
+        return false;
+    };
+    if matrix_stride != expected_matrix_stride {
+        return false;
+    }
+
+    matches!(tensor.strides.last(), Some(1))
+}
+
+fn matrix_strides_from_view(view: &MpsMatrixBatchView, elem_size: usize) -> Option<(usize, usize)> {
+    if elem_size == 0 {
+        return None;
+    }
+
+    if view.row_bytes % elem_size != 0 {
+        return None;
+    }
+
+    let row_stride = view.row_bytes / elem_size;
+
+    if view.matrix_bytes == 0 {
+        let matrix_stride = view.rows.checked_mul(row_stride)?;
+        Some((row_stride, matrix_stride))
+    } else {
+        if view.matrix_bytes % elem_size != 0 {
+            return None;
+        }
+        Some((row_stride, view.matrix_bytes / elem_size))
+    }
 }

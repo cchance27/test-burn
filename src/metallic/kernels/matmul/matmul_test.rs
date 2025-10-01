@@ -1,4 +1,4 @@
-use crate::metallic::kernels::matmul::{MatMulAlphaBetaOp, MatMulOp, mps_matrix_from_buffer};
+use crate::metallic::kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulBackendPreference, MatMulOp, mps_matrix_from_buffer};
 use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // Helpers
@@ -291,6 +291,91 @@ fn test_matmul_transpose_left() -> Result<(), MetalError> {
         );
     }
 
+    Ok(())
+}
+
+fn verify_mlx_backend_for_transpose(transpose_left: bool, transpose_right: bool) -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let m = 4;
+    let k = 5;
+    let n = 3;
+
+    let (left_rows, left_cols) = if transpose_left { (k, m) } else { (m, k) };
+    let (right_rows, right_cols) = if transpose_right { (n, k) } else { (k, n) };
+
+    let left_data: Vec<f32> = (0..(left_rows * left_cols)).map(|i| (i as f32) * 0.03125 + 0.25).collect();
+    let right_data: Vec<f32> = (0..(right_rows * right_cols)).map(|i| 1.0 - (i as f32) * 0.0175).collect();
+
+    let left_tensor = Tensor::new(
+        vec![left_rows, left_cols],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&left_data),
+    )?;
+    let right_tensor = Tensor::new(
+        vec![right_rows, right_cols],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&right_data),
+    )?;
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
+    let mps_result = context.call::<MatMulOp>((&left_tensor, &right_tensor, transpose_left, transpose_right))?;
+    context.synchronize();
+    let expected = mps_result.to_vec();
+    let mps_samples = context.take_matmul_samples();
+    assert!(
+        mps_samples.iter().all(|sample| sample.backend == MatMulBackend::Mps),
+        "expected ForceMps dispatches to use the MPS backend"
+    );
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let mlx_result = context.call::<MatMulOp>((&left_tensor, &right_tensor, transpose_left, transpose_right))?;
+    context.synchronize();
+    let actual = mlx_result.to_vec();
+    let mlx_samples = context.take_matmul_samples();
+    assert!(!mlx_samples.is_empty(), "expected MLX dispatches to produce backend samples");
+    let expected_backend = if transpose_left || transpose_right {
+        MatMulBackend::MlxTransposed
+    } else {
+        MatMulBackend::Mlx
+    };
+    assert!(
+        mlx_samples.iter().all(|sample| sample.backend == expected_backend),
+        "expected MLX backend {:?} but observed {:?}",
+        expected_backend,
+        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    assert_eq!(expected.len(), actual.len());
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&expected_val, &actual_val)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (expected_val - actual_val).abs();
+        let rel = if expected_val.abs() > 1e-6 {
+            diff / expected_val.abs()
+        } else {
+            diff
+        };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} for transpose_left={}, transpose_right={} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            transpose_left,
+            transpose_right,
+            expected_val,
+            actual_val,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_mlx_backend_handles_transposed_inputs() -> Result<(), MetalError> {
+    for &(transpose_left, transpose_right) in &[(true, false), (false, true), (true, true)] {
+        verify_mlx_backend_for_transpose(transpose_left, transpose_right)?;
+    }
     Ok(())
 }
 
