@@ -88,17 +88,23 @@ impl RollingStat {
 #[derive(Clone, Default)]
 pub struct MatMulBackendStats {
     mps: RollingStat,
+    mlx: RollingStat,
 }
 
 impl MatMulBackendStats {
     pub fn record(&mut self, backend: MatMulBackend, duration: Duration) {
         match backend {
             MatMulBackend::Mps => self.mps.record(duration),
+            MatMulBackend::Mlx => self.mlx.record(duration),
         }
     }
 
     pub fn mps(&self) -> &RollingStat {
         &self.mps
+    }
+
+    pub fn mlx(&self) -> &RollingStat {
+        &self.mlx
     }
 }
 
@@ -523,6 +529,15 @@ pub fn build_latency_rows(
             label: "MatMul (MPS)".to_string(),
             last_ms: matmul.mps().last_ms(),
             average_ms: matmul.mps().average_ms(),
+            level: 0,
+        });
+    }
+
+    if matmul.mlx().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (MLX)".to_string(),
+            last_ms: matmul.mlx().last_ms(),
+            average_ms: matmul.mlx().average_ms(),
             level: 0,
         });
     }

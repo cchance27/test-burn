@@ -2,16 +2,18 @@ use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLSize};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
-use super::{KernelFunction, KernelInvocable};
+use super::{KernelFunction, KernelInvocable, kernel_manager::MlxPipelineKey};
 use crate::metallic::{
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
 };
+use objc2_metal::MTLResourceUsage;
 
 #[cfg(test)]
 mod matmul_test;
@@ -25,6 +27,7 @@ pub use matmul_alpha_beta::MatMulAlphaBetaOp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MatMulBackend {
     Mps,
+    Mlx,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -33,11 +36,18 @@ pub struct MatMulSample {
     pub duration: Duration,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatMulBackendPreference {
+    Auto,
+    ForceMps,
+    ForceMlx,
+}
+
 // Public, user-facing, zero-sized struct for the matmul operation with transpose options.
 pub struct MatMulOp;
 
 // Internal struct that holds data for the regular `Operation` trait.
-struct MatMul {
+struct MatMulMps {
     pub left_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub left_offset: usize,
     pub right_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -49,6 +59,244 @@ struct MatMul {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct GemmParams {
+    m: i32,
+    n: i32,
+    k: i32,
+    lda: i32,
+    ldb: i32,
+    ldd: i32,
+    tiles_n: i32,
+    tiles_m: i32,
+    batch_stride_a: usize,
+    batch_stride_b: usize,
+    batch_stride_d: usize,
+    swizzle_log: i32,
+    gemm_k_iterations_aligned: i32,
+    batch_ndim: i32,
+}
+
+impl MatMulMps {
+    fn new<T: TensorElement>(
+        ctx: &Context<T>,
+        cache: &mut ResourceCache,
+        left_tensor: &Tensor<T>,
+        right_tensor: &Tensor<T>,
+        result: &Tensor<T>,
+        left_view: MpsMatrixBatchView,
+        right_view: MpsMatrixBatchView,
+        result_view: MpsMatrixBatchView,
+        eff_left_rows: usize,
+        eff_left_cols: usize,
+        eff_right_cols: usize,
+        transpose_left: bool,
+        transpose_right: bool,
+    ) -> Result<Self, MetalError> {
+        let left_dtype = left_tensor.dtype;
+        let right_dtype = right_tensor.dtype;
+        let result_dtype = result.dtype;
+
+        debug_assert_eq!(left_dtype, right_dtype);
+        debug_assert_eq!(left_dtype, result_dtype);
+
+        let gemm_key = MpsGemmKey {
+            transpose_left,
+            transpose_right,
+            result_rows: eff_left_rows,
+            result_columns: eff_right_cols,
+            interior_columns: eff_left_cols,
+            batch_size: result_view.batch,
+            alpha: 1.0,
+            beta: 0.0,
+        };
+
+        let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
+
+        let left_desc_key = MpsMatrixDescriptorKey {
+            rows: left_view.rows,
+            columns: left_view.columns,
+            row_bytes: left_view.row_bytes,
+            matrices: left_view.batch,
+            matrix_bytes: left_view.matrix_bytes,
+            dtype: left_dtype,
+        };
+        let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
+
+        let right_desc_key = MpsMatrixDescriptorKey {
+            rows: right_view.rows,
+            columns: right_view.columns,
+            row_bytes: right_view.row_bytes,
+            matrices: right_view.batch,
+            matrix_bytes: right_view.matrix_bytes,
+            dtype: right_dtype,
+        };
+        let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
+
+        let result_desc_key = MpsMatrixDescriptorKey {
+            rows: eff_left_rows,
+            columns: eff_right_cols,
+            row_bytes: result_view.row_bytes,
+            matrices: result_view.batch,
+            matrix_bytes: result_view.matrix_bytes,
+            dtype: result_dtype,
+        };
+        let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
+
+        Ok(Self {
+            left_buf: left_tensor.buf.clone(),
+            left_offset: left_tensor.offset,
+            right_buf: right_tensor.buf.clone(),
+            right_offset: right_tensor.offset,
+            result_buf: result.buf.clone(),
+            result_offset: result.offset,
+            left_desc,
+            right_desc,
+            result_desc,
+            gemm,
+            batch_size: result_view.batch,
+        })
+    }
+}
+
+struct MatMulMlx {
+    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    left_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    left_offset: usize,
+    right_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    right_offset: usize,
+    result_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    result_offset: usize,
+    params: GemmParams,
+    batch_size: usize,
+    batch_stride_a: usize,
+    batch_stride_b: usize,
+    tiles_n: usize,
+    tiles_m: usize,
+}
+
+impl MatMulMlx {
+    fn new<T: TensorElement>(
+        ctx: &mut Context<T>,
+        left_tensor: &Tensor<T>,
+        right_tensor: &Tensor<T>,
+        result: &Tensor<T>,
+        left_view: MpsMatrixBatchView,
+        right_view: MpsMatrixBatchView,
+        eff_left_rows: usize,
+        eff_left_cols: usize,
+        eff_right_cols: usize,
+        transpose_left: bool,
+        transpose_right: bool,
+    ) -> Result<Self, MetalError> {
+        let m = eff_left_rows;
+        let n = eff_right_cols;
+        let k = eff_left_cols;
+
+        let align_m = m % 32 == 0;
+        let align_n = n % 32 == 0;
+        let align_k = k % 16 == 0;
+        let has_batch = left_view.batch > 1;
+
+        let pipeline_key = MlxPipelineKey {
+            dtype: result.dtype,
+            transpose_left,
+            transpose_right,
+            has_batch,
+            align_m,
+            align_n,
+            align_k,
+        };
+
+        let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;
+
+        let m_i32 = i32::try_from(m).map_err(|_| MetalError::InvalidOperation("matmul rows exceed i32 range".to_string()))?;
+        let n_i32 = i32::try_from(n).map_err(|_| MetalError::InvalidOperation("matmul columns exceed i32 range".to_string()))?;
+        let k_i32 =
+            i32::try_from(k).map_err(|_| MetalError::InvalidOperation("matmul interior dimension exceeds i32 range".to_string()))?;
+
+        let lda = i32::try_from(k).map_err(|_| MetalError::InvalidOperation("lda exceeds i32 range".to_string()))?;
+        let ldb = i32::try_from(n).map_err(|_| MetalError::InvalidOperation("ldb exceeds i32 range".to_string()))?;
+        let ldd = ldb;
+
+        let bm = 32usize;
+        let bn = 32usize;
+        let bk = 16usize;
+        let swizzle_log = 0i32;
+        let tile = 1usize << swizzle_log;
+        let tiles_n = n.div_ceil(bn) * tile;
+        let tiles_m = m.div_ceil(bm).div_ceil(tile);
+
+        let batch_stride_a_elems = if left_tensor.dims.len() > 2 {
+            left_tensor.strides[left_tensor.strides.len() - 3]
+        } else {
+            m * k
+        };
+        let batch_stride_b_elems = if right_tensor.dims.len() > 2 {
+            right_tensor.strides[right_tensor.strides.len() - 3]
+        } else {
+            n * k
+        };
+
+        let batch_stride_a = batch_stride_a_elems;
+        let batch_stride_b = batch_stride_b_elems;
+        let batch_stride_d = m * n;
+
+        let params = GemmParams {
+            m: m_i32,
+            n: n_i32,
+            k: k_i32,
+            lda,
+            ldb,
+            ldd,
+            tiles_n: i32::try_from(tiles_n).map_err(|_| MetalError::InvalidOperation("tiles_n exceeds i32 range".to_string()))?,
+            tiles_m: i32::try_from(tiles_m).map_err(|_| MetalError::InvalidOperation("tiles_m exceeds i32 range".to_string()))?,
+            batch_stride_a,
+            batch_stride_b,
+            batch_stride_d,
+            swizzle_log,
+            gemm_k_iterations_aligned: i32::try_from(k / bk.max(1))
+                .map_err(|_| MetalError::InvalidOperation("gemm k iterations exceed i32 range".to_string()))?,
+            batch_ndim: if has_batch { 1 } else { 0 },
+        };
+
+        Ok(Self {
+            pipeline,
+            left_buf: left_tensor.buf.clone(),
+            left_offset: left_tensor.offset,
+            right_buf: right_tensor.buf.clone(),
+            right_offset: right_tensor.offset,
+            result_buf: result.buf.clone(),
+            result_offset: result.offset,
+            params,
+            batch_size: left_view.batch,
+            batch_stride_a,
+            batch_stride_b,
+            tiles_n,
+            tiles_m,
+        })
+    }
+}
+
+enum MatMulImplementation {
+    Mps(MatMulMps),
+    Mlx(MatMulMlx),
+}
+
+struct MatMul {
+    implementation: MatMulImplementation,
+}
+
+impl Operation for MatMul {
+    fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError> {
+        match &self.implementation {
+            MatMulImplementation::Mps(op) => op.encode(command_buffer, cache),
+            MatMulImplementation::Mlx(op) => op.encode(command_buffer, cache),
+        }
+    }
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -110,105 +358,75 @@ impl KernelInvocable for MatMulOp {
         };
         let out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let result_view = out.as_mps_matrix_batch_view()?;
-        let left_dtype = left_tensor.dtype;
-        let right_dtype = right_tensor.dtype;
-        let result_dtype = out.dtype;
+        let preference = ctx.matmul_backend_preference();
+        let mut selected_backend = MatMulBackend::Mps;
+        let mut implementation: Option<MatMulImplementation> = None;
 
-        debug_assert_eq!(left_dtype, right_dtype);
-        debug_assert_eq!(left_dtype, result_dtype);
-
-        let matmul_left_view = left_view;
-        let matmul_right_view = right_view;
-        let matmul_result_view = result_view;
-
-        let matmul_left_buf = left_tensor.buf.clone();
-        let matmul_left_offset = left_tensor.offset;
-        let matmul_right_buf = right_tensor.buf.clone();
-        let matmul_right_offset = right_tensor.offset;
-        let matmul_result_buf = out.buf.clone();
-        let matmul_result_offset = out.offset;
-
-        let left_desc_dtype = left_dtype;
-        let right_desc_dtype = right_dtype;
-        let result_desc_dtype = result_dtype;
-
-        // Get or create MPSMatrixMultiplication operation from cache
-        let gemm_key = MpsGemmKey {
-            transpose_left,
-            transpose_right,
-            result_rows: eff_left_rows,
-            result_columns: eff_right_cols,
-            interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
-            batch_size: matmul_result_view.batch,
-            alpha: 1.0,
-            beta: 0.0,
-        };
-
-        let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
-        let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
-
-        // Create MPS matrix descriptors based on the buffers consumed by MPS
-        let left_desc_key = MpsMatrixDescriptorKey {
-            rows: matmul_left_view.rows,
-            columns: matmul_left_view.columns,
-            row_bytes: matmul_left_view.row_bytes,
-            matrices: matmul_left_view.batch,
-            matrix_bytes: matmul_left_view.matrix_bytes,
-            dtype: left_desc_dtype,
-        };
-        let left_desc = cache.get_or_create_descriptor(left_desc_key, &ctx.device)?;
-
-        let right_desc_key = MpsMatrixDescriptorKey {
-            rows: matmul_right_view.rows,
-            columns: matmul_right_view.columns,
-            row_bytes: matmul_right_view.row_bytes,
-            matrices: matmul_right_view.batch,
-            matrix_bytes: matmul_right_view.matrix_bytes,
-            dtype: right_desc_dtype,
-        };
-        let right_desc = cache.get_or_create_descriptor(right_desc_key, &ctx.device)?;
-
-        let result_desc_key = MpsMatrixDescriptorKey {
-            rows: eff_left_rows,
-            columns: eff_right_cols,
-            row_bytes: matmul_result_view.row_bytes,
-            matrices: matmul_result_view.batch,
-            matrix_bytes: matmul_result_view.matrix_bytes,
-            dtype: result_desc_dtype,
-        };
-        let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
-
-        // Create the internal operation struct.
-        let op = MatMul {
-            left_buf: matmul_left_buf,
-            left_offset: matmul_left_offset,
-            right_buf: matmul_right_buf,
-            right_offset: matmul_right_offset,
-            result_buf: matmul_result_buf,
-            result_offset: matmul_result_offset,
-            left_desc,
-            right_desc,
-            result_desc,
-            gemm,
-            batch_size: matmul_result_view.batch,
-        };
-
-        {
-            let command_buffer = {
-                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-                command_buffer.clone()
-            };
-            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps);
+        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_tensor, &right_tensor, transpose_left, transpose_right) {
+            match MatMulMlx::new(
+                ctx,
+                &left_tensor,
+                &right_tensor,
+                &out,
+                left_view,
+                right_view,
+                eff_left_rows,
+                eff_left_cols,
+                eff_right_cols,
+                transpose_left,
+                transpose_right,
+            ) {
+                Ok(mlx_op) => {
+                    selected_backend = MatMulBackend::Mlx;
+                    implementation = Some(MatMulImplementation::Mlx(mlx_op));
+                }
+                Err(err) => {
+                    if preference == MatMulBackendPreference::ForceMlx {
+                        return Err(err);
+                    }
+                }
+            }
+        } else if preference == MatMulBackendPreference::ForceMlx {
+            return Err(MetalError::OperationNotSupported(
+                "MatMul MLX backend requires contiguous non-transposed inputs".to_string(),
+            ));
         }
 
-        // Return the boxed operation and the output tensor.
-        Ok((Box::new(op), out))
+        let implementation = if let Some(impl_) = implementation {
+            impl_
+        } else {
+            let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
+            let mps_op = MatMulMps::new(
+                ctx,
+                cache,
+                &left_tensor,
+                &right_tensor,
+                &out,
+                left_view,
+                right_view,
+                result_view,
+                eff_left_rows,
+                eff_left_cols,
+                eff_right_cols,
+                transpose_left,
+                transpose_right,
+            )?;
+            MatMulImplementation::Mps(mps_op)
+        };
+
+        let command_buffer = {
+            let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+            command_buffer.clone()
+        };
+        ctx.register_matmul_dispatch(&command_buffer, selected_backend);
+
+        Ok((Box::new(MatMul { implementation }), out))
     }
 }
 
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for MatMul {
+impl Operation for MatMulMps {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -225,6 +443,52 @@ impl Operation for MatMul {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
+        Ok(())
+    }
+}
+
+impl Operation for MatMulMlx {
+    fn encode(
+        &self,
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        _cache: &mut ResourceCache,
+    ) -> Result<(), MetalError> {
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        set_compute_pipeline_state(&encoder, &self.pipeline);
+        set_buffer(&encoder, 0, &self.left_buf, self.left_offset);
+        set_buffer(&encoder, 1, &self.right_buf, self.right_offset);
+        set_buffer(&encoder, 3, &self.result_buf, self.result_offset);
+        set_bytes(&encoder, 4, &self.params);
+
+        let batch_size_i32 =
+            i32::try_from(self.batch_size).map_err(|_| MetalError::InvalidOperation("matmul batch size exceeds i32 range".to_string()))?;
+        set_bytes(&encoder, 6, &batch_size_i32);
+
+        let batch_strides = [self.batch_stride_a, self.batch_stride_b];
+        set_bytes(&encoder, 7, &batch_strides);
+
+        unsafe {
+            encoder.useResource_usage(&self.left_buf, MTLResourceUsage::Read);
+            encoder.useResource_usage(&self.right_buf, MTLResourceUsage::Read);
+            encoder.useResource_usage(&self.result_buf, MTLResourceUsage::Write);
+        }
+
+        let grid = MTLSize {
+            width: self.tiles_n as u64,
+            height: self.tiles_m as u64,
+            depth: self.batch_size as u64,
+        };
+        let threads = MTLSize {
+            width: 32,
+            height: 2,
+            depth: 2,
+        };
+        dispatch_threadgroups(&encoder, grid, threads);
+        encoder.endEncoding();
 
         Ok(())
     }
@@ -273,4 +537,30 @@ pub fn encode_mps_matrix_multiplication(
     result: &Retained<MPSMatrix>,
 ) {
     unsafe { op.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(command_buffer, left, right, result) }
+}
+
+/// Returns true when the MLX kernel can service the requested matmul without
+/// additional data movement.
+fn supports_mlx<T: TensorElement>(left: &Tensor<T>, right: &Tensor<T>, transpose_left: bool, transpose_right: bool) -> bool {
+    if transpose_left || transpose_right {
+        return false;
+    }
+
+    if left.dtype != right.dtype {
+        return false;
+    }
+
+    matches!(
+        left.dtype,
+        crate::metallic::tensor::Dtype::F16 | crate::metallic::tensor::Dtype::F32
+    ) && is_row_major(left)
+        && is_row_major(right)
+}
+
+fn is_row_major<T: TensorElement>(tensor: &Tensor<T>) -> bool {
+    if tensor.dims().len() < 2 {
+        return false;
+    }
+
+    tensor.strides == Tensor::<T>::compute_strides(tensor.dims())
 }

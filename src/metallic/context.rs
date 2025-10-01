@@ -9,7 +9,7 @@ use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
-use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
+use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulBackendPreference, MatMulOp, MatMulSample};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
@@ -61,6 +61,7 @@ pub struct Context<T: TensorElement> {
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     //config: ContextConfig,
+    matmul_backend_preference: MatMulBackendPreference,
 }
 
 #[derive(Clone)]
@@ -134,6 +135,7 @@ impl<T: TensorElement> Context<T> {
             matmul_recorder,
             sampler_buffers: SamplerBuffers::default(),
             //config,
+            matmul_backend_preference: MatMulBackendPreference::Auto,
         })
     }
 
@@ -245,6 +247,14 @@ impl<T: TensorElement> Context<T> {
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for matmul
         self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+    }
+
+    pub fn set_matmul_backend_preference(&mut self, preference: MatMulBackendPreference) {
+        self.matmul_backend_preference = preference;
+    }
+
+    pub fn matmul_backend_preference(&self) -> MatMulBackendPreference {
+        self.matmul_backend_preference
     }
 
     pub(crate) fn matmul_with_cache(

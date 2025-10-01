@@ -225,6 +225,10 @@ fn matmul_sample_aggregation_sums_backend_totals() {
             backend: MatMulBackend::Mps,
             duration: Duration::from_millis(0),
         },
+        MatMulSample {
+            backend: MatMulBackend::Mlx,
+            duration: Duration::from_millis(5),
+        },
     ]);
 
     let total = totals
@@ -233,7 +237,12 @@ fn matmul_sample_aggregation_sums_backend_totals() {
         .expect("aggregated totals should include the MPS backend");
 
     assert_eq!(total, Duration::from_millis(12));
-    assert_eq!(totals.len(), 1);
+    let mlx_total = totals
+        .get(&MatMulBackend::Mlx)
+        .copied()
+        .expect("aggregated totals should include the MLX backend");
+    assert_eq!(mlx_total, Duration::from_millis(5));
+    assert_eq!(totals.len(), 2);
 }
 
 #[test]
