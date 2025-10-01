@@ -3,16 +3,17 @@ use std::sync::OnceLock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::metallic::{
     Context, Dtype, MetalError,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_bytes_slice, set_compute_pipeline_state},
+    kernels::KernelFunction,
     resource_cache::ResourceCache,
     tensor::MpsMatrixBatchView,
 };
 
-use super::{KernelFunction, MatMulBackend, MatMulBackendKind, MpsMatMulBackend};
+use super::{MatMulBackend, MatMulBackendKind, MpsMatMulBackend};
 
 const BM: i32 = 32;
 const BN: i32 = 32;

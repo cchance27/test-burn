@@ -34,6 +34,23 @@ pub fn set_bytes<T: Sized>(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder
     }
 }
 
+/// Sets a slice of data for a compute kernel.
+#[inline]
+pub fn set_bytes_slice<T: Sized>(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, data: &[T]) {
+    let size = std::mem::size_of::<T>() * data.len();
+
+    unsafe {
+        if size == 0 {
+            let ptr = std::ptr::NonNull::dangling().cast::<c_void>();
+            encoder.setBytes_length_atIndex(ptr, 0, index);
+            return;
+        }
+
+        let ptr = std::ptr::NonNull::from(&data[0]).cast::<c_void>();
+        encoder.setBytes_length_atIndex(ptr, size, index);
+    }
+}
+
 /// Dispatches a compute kernel.
 #[inline]
 pub fn dispatch_threadgroups(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, groups: MTLSize, threads_per_tg: MTLSize) {

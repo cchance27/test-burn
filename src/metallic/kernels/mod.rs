@@ -196,7 +196,9 @@ impl KernelFunction {
             (KernelFunction::MlxGemmNn, dtype)
             | (KernelFunction::MlxGemmNt, dtype)
             | (KernelFunction::MlxGemmTn, dtype)
-            | (KernelFunction::MlxGemmTt, dtype) => {
+            | (KernelFunction::MlxGemmTt, dtype)
+                if !matches!(dtype, F32 | F16) =>
+            {
                 return Err(MetalError::UnsupportedDtype {
                     operation: "MLX GEMM",
                     dtype,

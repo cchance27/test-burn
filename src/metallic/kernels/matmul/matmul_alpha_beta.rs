@@ -1,4 +1,6 @@
-use super::{KernelFunction, KernelInvocable, MatMulBackend, mlx_gemm};
+use crate::metallic::kernels::KernelFunction;
+
+use super::{KernelInvocable, MatMulBackend, mlx_gemm};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
