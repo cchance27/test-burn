@@ -219,8 +219,8 @@ impl<T: TensorElement> Tensor<T> {
                 let rows = self.dims[0];
                 let cols = self.dims[1];
                 let row_stride = if self.strides.len() == 2 { self.strides[0] } else { cols };
-                let matrix_stride = rows * row_stride;
-                (1, rows, cols, row_stride, matrix_stride)
+                let matrix_coverage = rows.saturating_sub(1).saturating_mul(row_stride).saturating_add(cols);
+                (1, rows, cols, row_stride, matrix_coverage)
             }
             3 => {
                 let batch = self.dims[0];
@@ -256,11 +256,18 @@ impl<T: TensorElement> Tensor<T> {
         };
 
         let row_bytes = row_stride_elems * elem_size;
+        let minimal_matrix_coverage = rows.saturating_sub(1).saturating_mul(row_stride_elems).saturating_add(cols) * elem_size;
         let matrix_bytes = matrix_stride_elems * elem_size;
 
-        if matrix_bytes < rows * row_bytes {
+        if row_bytes < cols * elem_size {
             return Err(MetalError::InvalidShape(
                 "Tensor strides are too small for requested matrix view".to_string(),
+            ));
+        }
+
+        if matrix_bytes < minimal_matrix_coverage {
+            return Err(MetalError::InvalidShape(
+                "Tensor matrix stride is too small for requested matrix view".to_string(),
             ));
         }
 
