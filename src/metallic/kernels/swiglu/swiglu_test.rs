@@ -3,6 +3,30 @@ use std::fs;
 
 use serde::{Deserialize, Serialize};
 
+fn transpose(rows: usize, cols: usize, data: &[f32]) -> Vec<f32> {
+    assert_eq!(data.len(), rows * cols);
+    let mut out = vec![0.0; data.len()];
+    for r in 0..rows {
+        for c in 0..cols {
+            out[c * rows + r] = data[r * cols + c];
+        }
+    }
+    out
+}
+
+fn fuse_gate_up_rows(gate: &[f32], up: &[f32], d_model: usize, ff_dim: usize) -> Vec<f32> {
+    assert_eq!(gate.len(), d_model * ff_dim);
+    assert_eq!(up.len(), d_model * ff_dim);
+    let mut fused = Vec::with_capacity(d_model * ff_dim * 2);
+    for row in 0..d_model {
+        let gate_row = &gate[row * ff_dim..(row + 1) * ff_dim];
+        let up_row = &up[row * ff_dim..(row + 1) * ff_dim];
+        fused.extend_from_slice(gate_row);
+        fused.extend_from_slice(up_row);
+    }
+    fused
+}
+
 #[test]
 fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     let mut ctx = Context::<F32Element>::new()?;
@@ -13,26 +37,26 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     let m: usize = 1;
 
     // Create uniform weights matching PyTorch small example
-    // gate_weight all 0.1, shape [ff_dim, d_model]
-    let gate_data: Vec<f32> = vec![0.1; ff_dim * d_model];
+    // gate_weight all 0.1, shape [d_model, ff_dim]
+    let gate_data: Vec<f32> = vec![0.1; d_model * ff_dim];
     let ffn_gate = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
 
     // up_weight all 0.2
-    let up_data: Vec<f32> = vec![0.2; ff_dim * d_model];
+    let up_data: Vec<f32> = vec![0.2; d_model * ff_dim];
     let ffn_up = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&up_data),
     )?;
 
-    // down_weight all 0.3, shape [d_model, ff_dim]
+    // down_weight all 0.3, shape [ff_dim, d_model]
     let down_data: Vec<f32> = vec![0.3; d_model * ff_dim];
     let ffn_down = Tensor::new(
-        vec![d_model, ff_dim],
+        vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&down_data),
     )?;
@@ -96,23 +120,23 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     let m: usize = 1;
 
     // Dummy zero weights
-    let gate_data: Vec<f32> = vec![0.0; ff_dim * d_model];
+    let gate_data: Vec<f32> = vec![0.0; d_model * ff_dim];
     let ffn_gate = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
 
-    let up_data: Vec<f32> = vec![0.0; ff_dim * d_model];
+    let up_data: Vec<f32> = vec![0.0; d_model * ff_dim];
     let ffn_up = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&up_data),
     )?;
 
     let down_data: Vec<f32> = vec![0.0; d_model * ff_dim];
     let ffn_down = Tensor::new(
-        vec![d_model, ff_dim],
+        vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&down_data),
     )?;
@@ -165,23 +189,23 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
     let ff_dim: usize = 6; // Not divisible by the vector width
     let m: usize = 1;
 
-    let gate_data: Vec<f32> = vec![0.1; ff_dim * d_model];
+    let gate_data: Vec<f32> = vec![0.1; d_model * ff_dim];
     let ffn_gate = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
 
-    let up_data: Vec<f32> = vec![0.2; ff_dim * d_model];
+    let up_data: Vec<f32> = vec![0.2; d_model * ff_dim];
     let ffn_up = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&up_data),
     )?;
 
     let down_data: Vec<f32> = vec![0.3; d_model * ff_dim];
     let ffn_down = Tensor::new(
-        vec![d_model, ff_dim],
+        vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&down_data),
     )?;
@@ -242,29 +266,29 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
     let ff_dim: usize = 8;
     let m: usize = 3;
 
-    let gate_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.05 + 0.01 * (i as f32)).collect();
-    let up_data: Vec<f32> = (0..ff_dim * d_model).map(|i| -0.02 * (i as f32) + 0.15).collect();
+    let gate_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.05 + 0.01 * (i as f32)).collect();
+    let up_data: Vec<f32> = (0..d_model * ff_dim).map(|i| -0.02 * (i as f32) + 0.15).collect();
     let down_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.03 * (i as f32) - 0.4).collect();
 
     let ffn_gate = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
     let ffn_up = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&up_data),
     )?;
     let ffn_down = Tensor::new(
-        vec![d_model, ff_dim],
+        vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&down_data),
     )?;
 
-    let fused_data: Vec<f32> = gate_data.iter().copied().chain(up_data.iter().copied()).collect();
+    let fused_data: Vec<f32> = fuse_gate_up_rows(&gate_data, &up_data, d_model, ff_dim);
     let fused_gate_up = Tensor::new(
-        vec![ff_dim * 2, d_model],
+        vec![d_model, ff_dim * 2],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&fused_data),
     )?;
@@ -331,29 +355,29 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
     let ff_dim: usize = 6; // Not divisible by vector width
     let m: usize = 2;
 
-    let gate_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.07 * (i as f32) - 0.25).collect();
-    let up_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.09 - 0.03 * (i as f32)).collect();
+    let gate_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.07 * (i as f32) - 0.25).collect();
+    let up_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.09 - 0.03 * (i as f32)).collect();
     let down_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.02 * (i as f32) + 0.11).collect();
 
     let ffn_gate = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
     let ffn_up = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&up_data),
     )?;
     let ffn_down = Tensor::new(
-        vec![d_model, ff_dim],
+        vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&down_data),
     )?;
 
-    let fused_data: Vec<f32> = gate_data.iter().copied().chain(up_data.iter().copied()).collect();
+    let fused_data: Vec<f32> = fuse_gate_up_rows(&gate_data, &up_data, d_model, ff_dim);
     let fused_gate_up = Tensor::new(
-        vec![ff_dim * 2, d_model],
+        vec![d_model, ff_dim * 2],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&fused_data),
     )?;
@@ -455,24 +479,24 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
     let up_weight_py = weights.up_weight;
     let down_weight_py = weights.down_weight;
 
-    let gate_weight_rust = gate_weight_py; // already [ff_dim, d_model]
-    let up_weight_rust = up_weight_py; // already [ff_dim, d_model]
-    let down_weight_rust = down_weight_py; // already [d_model, ff_dim]
+    let gate_weight_rust = transpose(ff_dim, d_model, &gate_weight_py);
+    let up_weight_rust = transpose(ff_dim, d_model, &up_weight_py);
+    let down_weight_rust = down_weight_py; // already [ff_dim, d_model]
 
     // Create weight Tensors
     let mut ctx = Context::<F32Element>::new()?;
     let ffn_gate = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_weight_rust),
     )?;
     let ffn_up = Tensor::new(
-        vec![ff_dim, d_model],
+        vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&up_weight_rust),
     )?;
     let ffn_down = Tensor::new(
-        vec![d_model, ff_dim],
+        vec![ff_dim, d_model],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&down_weight_rust),
     )?;
