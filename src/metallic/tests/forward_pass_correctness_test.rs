@@ -291,7 +291,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let gguf_model = loader.load_model().expect("Failed to load GGUF model");
     let mut model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let embed_slice = model.embed_weight.as_slice();
-    println!("Loaded embed first 10: {:?}", take_first_as_f32::<TestElement>(embed_slice, 10));
+    println!(
+        "Loaded embed first 10: {:?}",
+        take_first_as_f32::<TestElement>(embed_slice.as_slice(), 10)
+    );
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
     let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
 
@@ -356,7 +359,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_attn_norm_slice = x_normed_attn.as_slice();
     println!(
         "Rust first attn norm first 10: {:?}",
-        take_first_as_f32::<TestElement>(rust_attn_norm_slice, 10)
+        take_first_as_f32::<TestElement>(rust_attn_norm_slice.as_slice(), 10)
     );
 
     let (py_attn_norm_data, py_attn_norm_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__attn_norm.npy"));
@@ -411,7 +414,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_q_proj_slice = q_mat_host.as_slice();
     println!(
         "Rust first Q proj first 10: {:?}",
-        take_first_as_f32::<TestElement>(rust_q_proj_slice, 10)
+        take_first_as_f32::<TestElement>(rust_q_proj_slice.as_slice(), 10)
     );
 
     let (py_q_proj_data, py_q_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__q_proj_out.npy"));
@@ -481,7 +484,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_k_proj_slice = k_mat_host.as_slice();
     println!(
         "Rust first K proj first 10: {:?}",
-        take_first_as_f32::<TestElement>(rust_k_proj_slice, 10)
+        take_first_as_f32::<TestElement>(rust_k_proj_slice.as_slice(), 10)
     );
 
     let (py_k_proj_data, py_k_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__k_proj_out.npy"));
@@ -551,7 +554,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let rust_v_proj_slice = v_mat_host.as_slice();
     println!(
         "Rust first V proj first 10: {:?}",
-        take_first_as_f32::<TestElement>(rust_v_proj_slice, 10)
+        take_first_as_f32::<TestElement>(rust_v_proj_slice.as_slice(), 10)
     );
 
     let (py_v_proj_data, py_v_proj_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/layer_0__v_proj_out.npy"));

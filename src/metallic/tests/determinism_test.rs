@@ -40,7 +40,7 @@ fn test_sdpa_determinism_non_causal() -> Result<(), MetalError> {
         )?;
 
         let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?;
-        results.push(result.as_slice().to_vec());
+        results.push(result.to_vec());
 
         // Reinitialize context for each run to ensure clean state
         if i < 4 {
@@ -109,7 +109,7 @@ fn test_sdpa_determinism_causal() -> Result<(), MetalError> {
         )?;
 
         let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true)?;
-        results.push(result.as_slice().to_vec());
+        results.push(result.to_vec());
 
         // Reinitialize context for each run to ensure clean state
         if i < 4 {
@@ -168,7 +168,7 @@ fn test_matmul_determinism() -> Result<(), MetalError> {
         let result = context.matmul(&a_tensor, &b_tensor, false, false)?;
         context.synchronize();
 
-        results.push(result.as_slice().to_vec());
+        results.push(result.to_vec());
     }
 
     // All results should be identical
@@ -223,7 +223,7 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
         let result = context.call::<SoftmaxOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0))?;
         context.synchronize();
 
-        results.push(result.as_slice().to_vec());
+        results.push(result.to_vec());
     }
 
     // All results should be identical

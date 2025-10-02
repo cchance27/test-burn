@@ -131,9 +131,10 @@ fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
+    let metal_slice = metal_output.as_ref();
 
     // Check that the output values are finite (not NaN or infinity)
-    for &val in metal_output {
+    for &val in metal_slice {
         assert!(val.is_finite(), "RMSNorm output contains non-finite value: {}", val);
     }
 
@@ -144,7 +145,7 @@ fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
     let atol = 1e-6f64;
 
     for i in 0..input_data.len() {
-        let metal_val = metal_output[i] as f64;
+        let metal_val = metal_slice[i] as f64;
         let cpu_val = cpu_output[i] as f64;
         let diff = (metal_val - cpu_val).abs();
         let rel_err = if cpu_val.abs() > 1e-8 { diff / cpu_val.abs() } else { diff };

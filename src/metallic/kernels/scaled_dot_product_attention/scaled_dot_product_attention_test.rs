@@ -126,7 +126,8 @@ fn arange_sdpa_ours_vs_pytorch_causal() {
 
     let output = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true).unwrap();
     assert_eq!(output.dims(), DIMENSIONS);
-    assert_eq!(output.as_slice(), &pytorch_arange_causal);
+    let output_slice = output.as_slice();
+    assert_eq!(output_slice.as_ref(), &pytorch_arange_causal);
 }
 
 #[test]
@@ -167,7 +168,8 @@ fn arange_sdpa_ours_vs_pytorch_noncausal() {
         .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)
         .unwrap();
     assert_eq!(output.dims(), DIMENSIONS);
-    assert_eq!(output.as_slice(), &PYTORCH_ARANGE_NONCAUSAL);
+    let output_slice = output.as_slice();
+    assert_eq!(output_slice.as_ref(), &PYTORCH_ARANGE_NONCAUSAL);
 }
 
 #[test]
@@ -487,13 +489,13 @@ fn sdpa_causality_correctness() {
     let metal_out_base = ctx
         .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor_base, true)
         .unwrap();
-    let metal_slice_base = metal_out_base.as_slice().to_vec();
+    let metal_slice_base = metal_out_base.to_vec();
 
     // Run SDPA with causal=True and modified V
     let metal_out_modified = ctx
         .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor_modified, true)
         .unwrap();
-    let metal_slice_modified = metal_out_modified.as_slice().to_vec();
+    let metal_slice_modified = metal_out_modified.to_vec();
 
     // For causal attention:
     // Query 0 should only attend to Key/Value 0 (positions 1,2 are masked)
@@ -587,9 +589,10 @@ fn test_sdpa_extreme_values() -> Result<(), MetalError> {
 
     let output = result.as_slice();
     println!("Large values output: {:?}", output);
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
-    for &val in output {
+    for &val in output_slice {
         assert!(val.is_finite(), "Output contains non-finite value: {}", val);
     }
 
@@ -631,9 +634,10 @@ fn test_sdpa_extreme_negative_values() -> Result<(), MetalError> {
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?; // causal = false
 
     let output = result.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
-    for &val in output {
+    for &val in output_slice {
         assert!(val.is_finite(), "Output contains non-finite value: {}", val);
     }
 
@@ -678,9 +682,10 @@ fn test_sdpa_mixed_extreme_values() -> Result<(), MetalError> {
     context.synchronize();
 
     let output = result.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
-    for &val in output {
+    for &val in output_slice {
         assert!(val.is_finite(), "Output contains non-finite value: {}", val);
     }
 
@@ -726,9 +731,10 @@ fn test_sdpa_causal_extreme_values() -> Result<(), MetalError> {
     context.synchronize();
 
     let output = result.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
-    for &val in output {
+    for &val in output_slice {
         assert!(val.is_finite(), "Output contains non-finite value: {}", val);
     }
 
@@ -773,9 +779,10 @@ fn test_sdpa_zero_tensors() -> Result<(), MetalError> {
     context.synchronize();
 
     let output = result.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
-    for &val in output {
+    for &val in output_slice {
         assert!(val.is_finite(), "Output contains non-finite value: {}", val);
     }
 
@@ -1020,12 +1027,13 @@ fn check_row_stochastic_property(batch: usize, seq_q: usize, seq_k: usize, dim: 
     // Check that each row sums to approximately 1.0
     let _rtol = 1e-4f64;
     let _atol = 1e-6f64;
+    let metal_data = metal_slice.as_ref();
 
     for b in 0..batch {
         for i in 0..seq_q {
             let row_start = b * seq_q * dim + i * dim;
             let row_end = row_start + dim;
-            let row_slice = &metal_slice[row_start..row_end];
+            let row_slice = &metal_data[row_start..row_end];
 
             // For the row-stochastic property, we need to check that the attention weights
             // (before being applied to V) sum to 1.0. However, we only have access to the
@@ -1197,7 +1205,7 @@ fn sdpa_determinism_check() {
         .unwrap();
 
         let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
-        results.push(metal_out.as_slice().to_vec());
+        results.push(metal_out.to_vec());
     }
 
     // All results should be identical

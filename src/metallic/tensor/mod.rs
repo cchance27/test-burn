@@ -13,6 +13,7 @@ use objc2_metal::{
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::fmt;
 use std::marker::PhantomData;
 use std::ops::Deref;
 use std::rc::Rc;
@@ -192,6 +193,75 @@ pub struct Tensor<T: TensorElement> {
     /// None indicates the tensor is already synchronized with the CPU.
     pub(crate) defining_cmd_buffer: Rc<RefCell<Option<CommandBuffer>>>,
     marker: PhantomData<T>,
+}
+
+/// Represents a host-accessible slice of tensor data. Borrowed variants hold
+/// references into the underlying allocation, while owned variants materialize
+/// a temporary row-major copy for strided views.
+pub enum TensorHostSlice<'a, S> {
+    Borrowed(&'a [S]),
+    Owned(Vec<S>),
+}
+
+impl<'a, S> Deref for TensorHostSlice<'a, S> {
+    type Target = [S];
+
+    fn deref(&self) -> &[S] {
+        match self {
+            TensorHostSlice::Borrowed(slice) => slice,
+            TensorHostSlice::Owned(vec) => vec.as_slice(),
+        }
+    }
+}
+
+impl<'a, S> AsRef<[S]> for TensorHostSlice<'a, S> {
+    fn as_ref(&self) -> &[S] {
+        self.deref()
+    }
+}
+
+impl<'a, S: Clone> TensorHostSlice<'a, S> {
+    pub fn to_vec(&self) -> Vec<S> {
+        self.deref().to_vec()
+    }
+}
+
+impl<'a, S: fmt::Debug> fmt::Debug for TensorHostSlice<'a, S> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.deref().fmt(f)
+    }
+}
+
+impl<'a, S: PartialEq> PartialEq for TensorHostSlice<'a, S> {
+    fn eq(&self, other: &Self) -> bool {
+        self.deref() == other.deref()
+    }
+}
+
+impl<'a, S: Eq> Eq for TensorHostSlice<'a, S> {}
+
+impl<'a, S: PartialEq> PartialEq<[S]> for TensorHostSlice<'a, S> {
+    fn eq(&self, other: &[S]) -> bool {
+        self.deref() == other
+    }
+}
+
+impl<'a, 'b, S: PartialEq> PartialEq<&'b [S]> for TensorHostSlice<'a, S> {
+    fn eq(&self, other: &&'b [S]) -> bool {
+        self.deref() == *other
+    }
+}
+
+impl<'a, S: PartialEq> PartialEq<Vec<S>> for TensorHostSlice<'a, S> {
+    fn eq(&self, other: &Vec<S>) -> bool {
+        self.deref() == other.as_slice()
+    }
+}
+
+impl<'a, S> TensorHostSlice<'a, S> {
+    pub fn as_slice(&self) -> &[S] {
+        self.deref()
+    }
 }
 
 impl<T: TensorElement> Tensor<T> {
@@ -740,30 +810,57 @@ impl<T: TensorElement> Tensor<T> {
 
     /// Immutable host view of the buffer. Ensure GPU work has completed before reading.
     #[inline]
-    pub fn as_slice(&self) -> &[T::Scalar] {
+    pub fn as_slice(&self) -> TensorHostSlice<'_, T::Scalar> {
         self.ensure_ready();
-        if self.host_accessible {
-            let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const T::Scalar;
-            unsafe { std::slice::from_raw_parts(ptr, self.len()) }
-        } else {
+
+        let len = self.len();
+        if len == 0 {
+            return TensorHostSlice::Borrowed(&[]);
+        }
+
+        let contiguous_strides = Self::compute_strides(&self.dims);
+        let is_contiguous = self.strides == contiguous_strides;
+
+        if is_contiguous {
+            if self.host_accessible {
+                let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const T::Scalar;
+                return TensorHostSlice::Borrowed(unsafe { std::slice::from_raw_parts(ptr, len) });
+            }
+
             self.ensure_staging_for_read()
                 .expect("failed to populate staging buffer for tensor read");
 
-            let len = self.len();
-            if len == 0 {
-                return &[];
-            }
-
             let ptr = {
                 let state = self.host_access.lock().expect("host access state mutex poisoned");
-                let staging = state.staging.as_ref().expect("staging buffer must exist for host read");
+                let staging = state.staging.as_ref().expect("staging buffer must exist for tensor read");
                 let byte_offset = self.offset.saturating_sub(state.base_offset);
                 debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<T::Scalar>()));
                 unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const T::Scalar }
             };
 
-            unsafe { std::slice::from_raw_parts(ptr, len) }
+            return TensorHostSlice::Borrowed(unsafe { std::slice::from_raw_parts(ptr, len) });
         }
+
+        let base_ptr: *const T::Scalar = if self.host_accessible {
+            unsafe { self.buf.contents().as_ptr().add(self.offset) as *const T::Scalar }
+        } else {
+            self.ensure_staging_for_read()
+                .expect("failed to populate staging buffer for tensor read");
+
+            let state = self.host_access.lock().expect("host access state mutex poisoned");
+            let staging = state.staging.as_ref().expect("staging buffer must exist for tensor read").clone();
+            let byte_offset = self.offset.saturating_sub(state.base_offset);
+            debug_assert!(byte_offset.is_multiple_of(std::mem::size_of::<T::Scalar>()));
+            drop(state);
+            unsafe { (staging.contents().as_ptr() as *const u8).add(byte_offset) as *const T::Scalar }
+        };
+
+        let mut owned = Vec::with_capacity(len);
+        unsafe {
+            Self::gather_strided_elements(base_ptr, &self.dims, &self.strides, 0, 0, &mut owned);
+        }
+
+        TensorHostSlice::Owned(owned)
     }
 
     /// Copy the tensor contents to a host Vec.
@@ -901,7 +998,53 @@ impl<T: TensorElement> Tensor<T> {
 
     /// Convert the tensor contents to a `Vec<f32>` using the element conversion rules.
     pub fn to_f32_vec(&self) -> Vec<f32> {
-        T::to_f32_vec(self.as_slice())
+        let view = self.as_slice();
+        T::to_f32_vec(view.deref())
+    }
+
+    unsafe fn gather_strided_elements(
+        base_ptr: *const T::Scalar,
+        dims: &[usize],
+        strides: &[usize],
+        dim_idx: usize,
+        offset: usize,
+        out: &mut Vec<T::Scalar>,
+    ) {
+        if dim_idx == dims.len() {
+            // SAFETY: `base_ptr` points into the tensor's backing allocation and `offset`
+            // is computed using element strides, so the resulting pointer remains within
+            // bounds for the logical slice we are materializing.
+            unsafe {
+                out.push(*base_ptr.add(offset));
+            }
+            return;
+        }
+
+        let dim = dims[dim_idx];
+        if dim == 0 {
+            return;
+        }
+
+        let stride = strides[dim_idx];
+        if dim_idx == dims.len() - 1 && stride == 1 {
+            // SAFETY: the contiguous fast-path only triggers when the innermost stride
+            // equals 1, so iterating `dim` elements from the computed source pointer
+            // covers exactly the target row without stepping outside the allocation.
+            unsafe {
+                let src = base_ptr.add(offset);
+                for idx in 0..dim {
+                    out.push(*src.add(idx));
+                }
+            }
+            return;
+        }
+
+        for idx in 0..dim {
+            let child_offset = offset + idx * stride;
+            unsafe {
+                Self::gather_strided_elements(base_ptr, dims, strides, dim_idx + 1, child_offset, out);
+            }
+        }
     }
 
     /// Create a tensor initialized from an `f32` slice by converting into the element type.
