@@ -4,6 +4,14 @@ use super::matmul_alpha_beta;
 use super::matmul_test::cpu_matmul_scaled;
 use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
+fn observed_backends(samples: &[MatMulSample]) -> Vec<MatMulBackend> {
+    samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect()
+}
+
 #[test]
 fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
     let mut context = Context::<F32Element>::new()?;
@@ -271,14 +279,9 @@ fn verify_alpha_beta_backend(transpose_left: bool, transpose_right: bool) -> Res
     )?;
     context.synchronize();
     let expected = mps_result.to_vec();
-    let mps_samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = mps_samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let mps_backends = observed_backends(&context.take_matmul_samples());
     assert!(
-        non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
+        !mps_backends.is_empty() && mps_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
         "expected ForceMps dispatches to use the MPS backend"
     );
 
@@ -295,17 +298,17 @@ fn verify_alpha_beta_backend(transpose_left: bool, transpose_right: bool) -> Res
     )?;
     context.synchronize();
     let actual = mlx_result.to_vec();
-    let mlx_samples = context.take_matmul_samples();
     let expected_backend = if transpose_left || transpose_right {
         MatMulBackend::MlxTransposed
     } else {
         MatMulBackend::Mlx
     };
+    let observed = observed_backends(&context.take_matmul_samples());
     assert!(
-        mlx_samples.iter().all(|sample| sample.backend == expected_backend),
+        !observed.is_empty() && observed.iter().all(|backend| *backend == expected_backend),
         "expected MLX backend {:?} but observed {:?}",
         expected_backend,
-        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        observed
     );
 
     assert_eq!(expected.len(), actual.len());
@@ -362,14 +365,9 @@ fn test_matmul_alpha_beta_batched_mlx_matches_mps() -> Result<(), MetalError> {
     let mps_result = context.matmul_alpha_beta(&a_tensor, &b_tensor, &result_tensor_mps, false, false, alpha, beta)?;
     context.synchronize();
     let expected = mps_result.to_vec();
-    let mps_samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = mps_samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let mps_backends = observed_backends(&context.take_matmul_samples());
     assert!(
-        non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
+        !mps_backends.is_empty() && mps_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
         "expected ForceMps dispatches to use the MPS backend"
     );
 
@@ -378,9 +376,9 @@ fn test_matmul_alpha_beta_batched_mlx_matches_mps() -> Result<(), MetalError> {
     let mlx_result = context.matmul_alpha_beta(&a_tensor, &b_tensor, &result_tensor_mlx, false, false, alpha, beta)?;
     context.synchronize();
     let actual = mlx_result.to_vec();
-    let mlx_samples = context.take_matmul_samples();
+    let observed = observed_backends(&context.take_matmul_samples());
     assert!(
-        !mlx_samples.is_empty() && mlx_samples.iter().all(|sample| sample.backend == MatMulBackend::Mlx),
+        !observed.is_empty() && observed.iter().all(|backend| *backend == MatMulBackend::Mlx),
         "expected batched MLX dispatches to report the MLX backend"
     );
 
@@ -433,16 +431,11 @@ fn test_matmul_alpha_beta_scale_only_avoids_output_reads() -> Result<(), MetalEr
     let actual_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor_mlx, false, false, alpha, beta)?;
     context.synchronize();
     let actual = actual_tensor.to_vec();
-    let mlx_samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = mlx_samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let observed = observed_backends(&context.take_matmul_samples());
     assert!(
-        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        !observed.is_empty() && observed.iter().all(|backend| *backend == MatMulBackend::Mlx),
         "expected MLX backend but observed {:?}",
-        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        observed
     );
 
     let flags = matmul_alpha_beta::take_last_mlx_alpha_beta_flags().expect("expected MLX alpha/beta flags to be recorded");
@@ -506,16 +499,11 @@ fn test_matmul_alpha_beta_batched_addmm_reads_output() -> Result<(), MetalError>
     let actual_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor_mlx, false, false, alpha, beta)?;
     context.synchronize();
     let actual = actual_tensor.to_vec();
-    let mlx_samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = mlx_samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let observed = observed_backends(&context.take_matmul_samples());
     assert!(
-        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        !observed.is_empty() && observed.iter().all(|backend| *backend == MatMulBackend::Mlx),
         "expected MLX backend but observed {:?}",
-        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        observed
     );
 
     let flags = matmul_alpha_beta::take_last_mlx_alpha_beta_flags().expect("expected MLX alpha/beta flags to be recorded");
@@ -595,16 +583,11 @@ fn test_matmul_alpha_beta_accepts_strided_kv_view() -> Result<(), MetalError> {
     let actual_tensor = context.matmul_alpha_beta(&left_tensor, &value_history_view, &result_tensor_mlx, false, false, alpha, beta)?;
     context.synchronize();
     let actual = actual_tensor.to_vec();
-    let mlx_samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = mlx_samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let observed = observed_backends(&context.take_matmul_samples());
     assert!(
-        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        !observed.is_empty() && observed.iter().all(|backend| *backend == MatMulBackend::Mlx),
         "expected MLX backend but observed {:?}",
-        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        observed
     );
 
     let flags = matmul_alpha_beta::take_last_mlx_alpha_beta_flags().expect("expected MLX alpha/beta flags to be recorded");
@@ -877,16 +860,11 @@ fn test_matmul_alpha_beta_strided_kv_skinny_tile() -> Result<(), MetalError> {
     context.synchronize();
     let actual = actual_tensor.to_vec();
 
-    let samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let samples = observed_backends(&context.take_matmul_samples());
     assert!(
-        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        !samples.is_empty() && samples.iter().all(|backend| *backend == MatMulBackend::Mlx),
         "expected MLX backend but observed {:?}",
-        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        samples
     );
 
     let keys = context.kernel_manager.mlx_pipeline_keys();

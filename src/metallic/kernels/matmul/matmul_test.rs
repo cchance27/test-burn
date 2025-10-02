@@ -1,8 +1,18 @@
 use crate::metallic::kernels::kernel_manager::MlxTileShape;
-use crate::metallic::kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulBackendPreference, MatMulOp, mps_matrix_from_buffer};
+use crate::metallic::kernels::matmul::{
+    MatMulAlphaBetaOp, MatMulBackend, MatMulBackendPreference, MatMulOp, MatMulSample, mps_matrix_from_buffer,
+};
 use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // Helpers
+
+fn observed_backends(samples: &[MatMulSample]) -> Vec<MatMulBackend> {
+    samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect()
+}
 
 // CPU-based matrix multiplication for golden testing
 #[allow(clippy::too_many_arguments)]
@@ -322,14 +332,9 @@ fn verify_mlx_backend_for_transpose(transpose_left: bool, transpose_right: bool)
     let mps_result = context.call::<MatMulOp>((&left_tensor, &right_tensor, transpose_left, transpose_right))?;
     context.synchronize();
     let expected = mps_result.to_vec();
-    let mps_samples = context.take_matmul_samples();
-    let non_total_backends: Vec<MatMulBackend> = mps_samples
-        .iter()
-        .map(|sample| sample.backend)
-        .filter(|backend| *backend != MatMulBackend::Total)
-        .collect();
+    let mps_backends = observed_backends(&context.take_matmul_samples());
     assert!(
-        non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
+        !mps_backends.is_empty() && mps_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
         "expected ForceMps dispatches to use the MPS backend"
     );
 
@@ -337,18 +342,18 @@ fn verify_mlx_backend_for_transpose(transpose_left: bool, transpose_right: bool)
     let mlx_result = context.call::<MatMulOp>((&left_tensor, &right_tensor, transpose_left, transpose_right))?;
     context.synchronize();
     let actual = mlx_result.to_vec();
-    let mlx_samples = context.take_matmul_samples();
-    assert!(!mlx_samples.is_empty(), "expected MLX dispatches to produce backend samples");
+    let observed = observed_backends(&context.take_matmul_samples());
+    assert!(!observed.is_empty(), "expected MLX dispatches to produce backend samples");
     let expected_backend = if transpose_left || transpose_right {
         MatMulBackend::MlxTransposed
     } else {
         MatMulBackend::Mlx
     };
     assert!(
-        mlx_samples.iter().all(|sample| sample.backend == expected_backend),
+        observed.iter().all(|backend| *backend == expected_backend),
         "expected MLX backend {:?} but observed {:?}",
         expected_backend,
-        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        observed
     );
 
     assert_eq!(expected.len(), actual.len());
@@ -1061,11 +1066,11 @@ fn test_matmul_mlx_selects_skinny_tile_for_single_row() -> Result<(), MetalError
     context.synchronize();
     let actual = result_tensor.to_vec();
 
-    let samples = context.take_matmul_samples();
+    let samples = observed_backends(&context.take_matmul_samples());
     assert!(
-        samples.iter().any(|sample| matches!(sample.backend, MatMulBackend::Mlx)),
+        samples.iter().any(|backend| matches!(backend, MatMulBackend::Mlx)),
         "expected MLX backend samples but observed {:?}",
-        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        samples
     );
 
     let keys = context.kernel_manager.mlx_pipeline_keys();
@@ -1116,11 +1121,11 @@ fn test_matmul_mlx_selects_skinny_tile_for_single_column() -> Result<(), MetalEr
     context.synchronize();
     let actual = result_tensor.to_vec();
 
-    let samples = context.take_matmul_samples();
+    let samples = observed_backends(&context.take_matmul_samples());
     assert!(
-        samples.iter().any(|sample| matches!(sample.backend, MatMulBackend::Mlx)),
+        samples.iter().any(|backend| matches!(backend, MatMulBackend::Mlx)),
         "expected MLX backend samples but observed {:?}",
-        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        samples
     );
 
     let keys = context.kernel_manager.mlx_pipeline_keys();
@@ -1171,11 +1176,11 @@ fn test_matmul_mlx_selects_skinny_tile_for_four_rows() -> Result<(), MetalError>
     context.synchronize();
     let actual = result_tensor.to_vec();
 
-    let samples = context.take_matmul_samples();
+    let samples = observed_backends(&context.take_matmul_samples());
     assert!(
-        samples.iter().any(|sample| matches!(sample.backend, MatMulBackend::Mlx)),
+        samples.iter().any(|backend| matches!(backend, MatMulBackend::Mlx)),
         "expected MLX backend samples but observed {:?}",
-        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+        samples
     );
 
     let keys = context.kernel_manager.mlx_pipeline_keys();
