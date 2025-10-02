@@ -528,11 +528,9 @@ impl Operation for MatMulMlx {
         let right_resource = buffer_as_resource(&self.right_buf);
         let result_resource = buffer_as_resource(&self.result_buf);
 
-        unsafe {
-            encoder.useResource_usage(left_resource, MTLResourceUsage::Read);
-            encoder.useResource_usage(right_resource, MTLResourceUsage::Read);
-            encoder.useResource_usage(result_resource, MTLResourceUsage::Write);
-        }
+        encoder.useResource_usage(left_resource, MTLResourceUsage::Read);
+        encoder.useResource_usage(right_resource, MTLResourceUsage::Read);
+        encoder.useResource_usage(result_resource, MTLResourceUsage::Write);
 
         let grid = MTLSize {
             width: self.tiles_n as NSUInteger,

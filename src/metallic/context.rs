@@ -116,6 +116,8 @@ impl<T: TensorElement> Context<T> {
             }
         });
 
+        let matmul_instrumentation = MatMulInstrumentation::new(&device);
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -131,7 +133,7 @@ impl<T: TensorElement> Context<T> {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
-            matmul_instrumentation: MatMulInstrumentation::new(&device),
+            matmul_instrumentation,
             matmul_samples,
             matmul_recorder,
             sampler_buffers: SamplerBuffers::default(),

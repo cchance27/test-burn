@@ -10,10 +10,10 @@ use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSArray, NSData, NSRange, NSString, NSUInteger};
+use objc2_foundation::{NSRange, NSUInteger};
 use objc2_metal::{
-    MTLCommandBuffer, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder, MTLCounterResultTimestamp, MTLCounterSampleBuffer,
-    MTLCounterSampleBufferDescriptor, MTLCounterSet, MTLDevice, MTLStorageMode,
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder,
+    MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSet, MTLDevice, MTLStorageMode,
 };
 use rustc_hash::FxHashMap;
 
@@ -95,13 +95,13 @@ impl MatMulInstrumentationInner {
 
     fn create_sample_buffer(&self) -> Option<Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>> {
         let counter_set = self.counter_set.as_ref()?;
-        let descriptor = MTLCounterSampleBufferDescriptor::new();
+        let descriptor = unsafe { MTLCounterSampleBufferDescriptor::new() };
         unsafe {
             descriptor.setCounterSet(Some(counter_set));
             descriptor.setSampleCount(COUNTER_SAMPLE_CAPACITY as NSUInteger);
             descriptor.setStorageMode(MTLStorageMode::Shared);
+            self.device.newCounterSampleBufferWithDescriptor_error(&descriptor).ok()
         }
-        unsafe { self.device.newCounterSampleBufferWithDescriptor_error(&descriptor).ok() }
     }
 
     fn create_entry(&self, recorder: MatMulSampleRecorder) -> CommandBufferInstrumentation {
@@ -261,7 +261,7 @@ impl CommandBufferInstrumentation {
 
     fn register_dispatch(&mut self, backend: MatMulBackend) -> DispatchAllocation {
         let (start_index, end_index) = if let Some(buffer) = &self.sample_buffer {
-            let capacity = buffer.sampleCount() as usize;
+            let capacity = unsafe { buffer.sampleCount() as usize };
             if self.used_samples + 1 < capacity {
                 let start = self.used_samples;
                 let end = self.used_samples + 1;
@@ -411,7 +411,7 @@ struct MachTimebaseInfo {
 }
 
 #[cfg(target_os = "macos")]
-extern "C" {
+unsafe extern "C" {
     fn mach_timebase_info(info: *mut MachTimebaseInfo) -> i32;
 }
 
