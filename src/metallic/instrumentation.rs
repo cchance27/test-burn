@@ -13,7 +13,8 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::{NSRange, NSUInteger};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder,
-    MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSet, MTLDevice, MTLStorageMode,
+    MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
+    MTLStorageMode,
 };
 use rustc_hash::FxHashMap;
 
@@ -56,10 +57,53 @@ pub struct MatMulInstrumentation {
     inner: Arc<MatMulInstrumentationInner>,
 }
 
+#[derive(Clone, Copy)]
+struct CounterSamplingSupport {
+    compute_dispatch: bool,
+    blit_boundary: bool,
+}
+
+impl CounterSamplingSupport {
+    const fn disabled() -> Self {
+        Self {
+            compute_dispatch: false,
+            blit_boundary: false,
+        }
+    }
+
+    fn supports_backend(self, backend: MatMulBackend) -> bool {
+        match backend {
+            MatMulBackend::Mps => self.blit_boundary,
+            MatMulBackend::Mlx | MatMulBackend::MlxTransposed => self.compute_dispatch,
+            MatMulBackend::Total => false,
+        }
+    }
+
+    const fn requires_counter_buffer(self) -> bool {
+        self.compute_dispatch || self.blit_boundary
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn query_counter_sampling_support(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> CounterSamplingSupport {
+    unsafe {
+        CounterSamplingSupport {
+            compute_dispatch: device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
+            blit_boundary: device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn query_counter_sampling_support(_device: &Retained<ProtocolObject<dyn MTLDevice>>) -> CounterSamplingSupport {
+    CounterSamplingSupport::disabled()
+}
+
 struct MatMulInstrumentationInner {
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     counter_set: Option<Retained<ProtocolObject<dyn MTLCounterSet>>>,
     gpu_timestamp_period: Option<f64>,
+    sampling_support: CounterSamplingSupport,
     pending: Mutex<FxHashMap<usize, CommandBufferInstrumentation>>,
 }
 
@@ -67,11 +111,13 @@ impl MatMulInstrumentationInner {
     fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
         let counter_set = Self::resolve_timestamp_counter_set(device);
         let gpu_timestamp_period = compute_gpu_timestamp_period(device);
+        let sampling_support = query_counter_sampling_support(device);
 
         Self {
             device: device.clone(),
             counter_set,
             gpu_timestamp_period,
+            sampling_support,
             pending: Mutex::new(FxHashMap::default()),
         }
     }
@@ -94,6 +140,10 @@ impl MatMulInstrumentationInner {
     }
 
     fn create_sample_buffer(&self) -> Option<Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>> {
+        if !self.sampling_support.requires_counter_buffer() {
+            return None;
+        }
+
         let counter_set = self.counter_set.as_ref()?;
         let descriptor = unsafe { MTLCounterSampleBufferDescriptor::new() };
         unsafe {
@@ -106,7 +156,7 @@ impl MatMulInstrumentationInner {
 
     fn create_entry(&self, recorder: MatMulSampleRecorder) -> CommandBufferInstrumentation {
         let sample_buffer = self.create_sample_buffer();
-        CommandBufferInstrumentation::new(recorder, sample_buffer, self.gpu_timestamp_period)
+        CommandBufferInstrumentation::new(recorder, sample_buffer, self.gpu_timestamp_period, self.sampling_support)
     }
 
     fn sample_buffer_for_key(&self, key: usize) -> Option<Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>> {
@@ -157,6 +207,10 @@ impl MatMulInstrumentation {
     }
 
     fn sample_compute(&self, key: usize, encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize) {
+        if !self.inner.sampling_support.compute_dispatch {
+            return;
+        }
+
         if let Some(sample_buffer) = self.inner.sample_buffer_for_key(key) {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(&sample_buffer, index as NSUInteger, true);
@@ -165,6 +219,10 @@ impl MatMulInstrumentation {
     }
 
     fn sample_blit(&self, key: usize, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, index: usize) {
+        if !self.inner.sampling_support.blit_boundary {
+            return;
+        }
+
         let Some(sample_buffer) = self.inner.sample_buffer_for_key(key) else {
             return;
         };
@@ -242,6 +300,7 @@ struct CommandBufferInstrumentation {
     dispatches: Vec<DispatchTiming>,
     used_samples: usize,
     gpu_timestamp_period: Option<f64>,
+    sampling_support: CounterSamplingSupport,
 }
 
 impl CommandBufferInstrumentation {
@@ -249,6 +308,7 @@ impl CommandBufferInstrumentation {
         recorder: MatMulSampleRecorder,
         sample_buffer: Option<Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>>,
         gpu_timestamp_period: Option<f64>,
+        sampling_support: CounterSamplingSupport,
     ) -> Self {
         Self {
             recorder,
@@ -256,17 +316,22 @@ impl CommandBufferInstrumentation {
             dispatches: Vec::new(),
             used_samples: 0,
             gpu_timestamp_period,
+            sampling_support,
         }
     }
 
     fn register_dispatch(&mut self, backend: MatMulBackend) -> DispatchAllocation {
-        let (start_index, end_index) = if let Some(buffer) = &self.sample_buffer {
-            let capacity = unsafe { buffer.sampleCount() as usize };
-            if self.used_samples + 1 < capacity {
-                let start = self.used_samples;
-                let end = self.used_samples + 1;
-                self.used_samples += 2;
-                (Some(start), Some(end))
+        let (start_index, end_index) = if self.sampling_support.supports_backend(backend) {
+            if let Some(buffer) = &self.sample_buffer {
+                let capacity = unsafe { buffer.sampleCount() as usize };
+                if self.used_samples + 1 < capacity {
+                    let start = self.used_samples;
+                    let end = self.used_samples + 1;
+                    self.used_samples += 2;
+                    (Some(start), Some(end))
+                } else {
+                    (None, None)
+                }
             } else {
                 (None, None)
             }
