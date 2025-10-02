@@ -299,7 +299,7 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
         None,
     )?;
     ctx.synchronize();
-    let baseline_vals = baseline.as_slice().to_vec();
+    let baseline_vals = baseline.to_vec();
 
     let fused = ctx.SwiGLU(
         &x_normed_flat,
@@ -388,7 +388,7 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
         None,
     )?;
     ctx.synchronize();
-    let baseline_vals = baseline.as_slice().to_vec();
+    let baseline_vals = baseline.to_vec();
 
     let fused = ctx.SwiGLU(
         &x_normed_flat,
@@ -518,7 +518,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
             None,
         )?;
         ctx.synchronize(); // Sync to ensure GPU ops complete before CPU read
-        let rust_output_flat = rust_output.as_slice().to_vec();
+        let rust_output_flat = rust_output.to_vec();
 
         // Compare to PyTorch expected
         assert_eq!(

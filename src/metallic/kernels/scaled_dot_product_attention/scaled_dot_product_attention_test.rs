@@ -487,13 +487,13 @@ fn sdpa_causality_correctness() {
     let metal_out_base = ctx
         .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor_base, true)
         .unwrap();
-    let metal_slice_base = metal_out_base.as_slice().to_vec();
+    let metal_slice_base = metal_out_base.to_vec();
 
     // Run SDPA with causal=True and modified V
     let metal_out_modified = ctx
         .scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor_modified, true)
         .unwrap();
-    let metal_slice_modified = metal_out_modified.as_slice().to_vec();
+    let metal_slice_modified = metal_out_modified.to_vec();
 
     // For causal attention:
     // Query 0 should only attend to Key/Value 0 (positions 1,2 are masked)
@@ -1197,7 +1197,7 @@ fn sdpa_determinism_check() {
         .unwrap();
 
         let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
-        results.push(metal_out.as_slice().to_vec());
+        results.push(metal_out.to_vec());
     }
 
     // All results should be identical
