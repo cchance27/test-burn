@@ -287,6 +287,7 @@ pub fn call_mlx_gemm(
         swizzle_log: i32,
         gemm_k_iterations_aligned: i32,
         batch_ndim: i32,
+        alpha_scale: f32,
     }
     assert!(rhs_stride.len() >= 2);
     assert!(lhs_stride.len() >= 2);
@@ -361,6 +362,7 @@ pub fn call_mlx_gemm(
         batch_stride_d: (m * n) as isize,
         batch_ndim: 1i32,
         gemm_k_iterations_aligned: (k / bk) as i32,
+        alpha_scale: 1.0,
     };
     let batch_strides = [gemm_params.batch_stride_a, gemm_params.batch_stride_b];
 

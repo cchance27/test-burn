@@ -86,11 +86,9 @@ impl CounterSamplingSupport {
 
 #[cfg(target_os = "macos")]
 fn query_counter_sampling_support(device: &Retained<ProtocolObject<dyn MTLDevice>>) -> CounterSamplingSupport {
-    unsafe {
-        CounterSamplingSupport {
-            compute_dispatch: device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
-            blit_boundary: device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
-        }
+    CounterSamplingSupport {
+        compute_dispatch: device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary),
+        blit_boundary: device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary),
     }
 }
 

@@ -273,6 +273,74 @@ impl<T: TensorElement> Tensor<T> {
         })
     }
 
+    /// Produce a matrix batch view suitable for MLX kernels without forcing padded batches
+    /// to be compacted when the inner rows are already contiguous.
+    pub fn as_mlx_matrix_batch_view(&self, ctx: &mut Context<T>) -> Result<(Self, MpsMatrixBatchView), MetalError> {
+        let view = self.as_mps_matrix_batch_view()?;
+
+        let elem_size = self.dtype.size_bytes();
+        if elem_size == 0 {
+            return Err(MetalError::InvalidOperation(
+                "Element size must be non-zero for matrix views".to_string(),
+            ));
+        }
+
+        if view.columns == 0 || view.rows == 0 || view.batch == 0 {
+            return Ok((self.clone(), view));
+        }
+
+        if view.row_bytes % elem_size != 0 {
+            return Err(MetalError::InvalidShape("Row stride is not aligned to element size".to_string()));
+        }
+
+        let row_stride = view.row_bytes / elem_size;
+        if row_stride == view.columns {
+            return Ok((self.clone(), view));
+        }
+
+        let mut compact = Self::new(self.dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        ctx.prepare_tensors_for_active_cmd(&[self])?;
+
+        let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer
+            .raw()
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+
+        let copy_row_bytes = view.columns * elem_size;
+        let src_matrix_bytes = if view.matrix_bytes == 0 {
+            view.rows * view.row_bytes
+        } else {
+            view.matrix_bytes
+        };
+        let dst_matrix_bytes = view.rows * copy_row_bytes;
+
+        for batch_idx in 0..view.batch {
+            for row_idx in 0..view.rows {
+                let src_offset = self.offset + batch_idx * src_matrix_bytes + row_idx * view.row_bytes;
+                let dst_offset = compact.offset + batch_idx * dst_matrix_bytes + row_idx * copy_row_bytes;
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &self.buf,
+                        src_offset,
+                        &compact.buf,
+                        dst_offset,
+                        copy_row_bytes,
+                    );
+                }
+            }
+        }
+        encoder.endEncoding();
+
+        ctx.mark_tensor_pending(&compact);
+
+        let compact_view = compact.as_mps_matrix_batch_view()?;
+        debug_assert_eq!(compact_view.row_bytes, copy_row_bytes);
+
+        Ok((compact, compact_view))
+    }
+
     /// Compute strides for contiguous tensor layout
     pub fn compute_strides(dims: &[usize]) -> Vec<usize> {
         let mut strides = vec![0; dims.len()];

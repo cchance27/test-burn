@@ -9,7 +9,10 @@ use objc2_metal::{
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
-use super::{KernelFunction, KernelInvocable, kernel_manager::MlxPipelineKey};
+use super::{
+    KernelFunction, KernelInvocable,
+    kernel_manager::{MlxPipelineKey, MlxTileShape},
+};
 use crate::metallic::instrumentation::MatMulDispatchHandle;
 use crate::metallic::tensor::MpsMatrixBatchView;
 use crate::metallic::{
@@ -40,6 +43,17 @@ pub enum MatMulBackend {
 pub struct MatMulSample {
     pub backend: MatMulBackend,
     pub duration: Duration,
+}
+
+pub(super) fn select_mlx_tile_shape(m: usize, n: usize) -> MlxTileShape {
+    let slender = m.min(n);
+    if slender >= MlxTileShape::Tile32x32.bm() {
+        MlxTileShape::Tile32x32
+    } else if slender >= MlxTileShape::Tile16x32.bm() {
+        MlxTileShape::Tile16x32
+    } else {
+        MlxTileShape::Tile8x32
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +99,7 @@ struct GemmParams {
     swizzle_log: i32,
     gemm_k_iterations_aligned: i32,
     batch_ndim: i32,
+    alpha_scale: f32,
 }
 
 impl MatMulMps {
@@ -191,6 +206,7 @@ struct MatMulMlx {
     batch_stride_b: usize,
     tiles_n: usize,
     tiles_m: usize,
+    threads_per_threadgroup: (usize, usize, usize),
     profiler: Option<MatMulDispatchHandle>,
 }
 
@@ -216,9 +232,13 @@ impl MatMulMlx {
         debug_assert_eq!(left_view.batch, right_view.batch);
         debug_assert_eq!(left_view.batch, result_view.batch);
 
-        let align_m = m % 32 == 0;
-        let align_n = n % 32 == 0;
-        let align_k = k % 16 == 0;
+        let tile_shape = select_mlx_tile_shape(m, n);
+        let bm = tile_shape.bm();
+        let bn = tile_shape.bn();
+        let bk = tile_shape.bk();
+        let align_m = m % bm == 0;
+        let align_n = n % bn == 0;
+        let align_k = k % bk == 0;
         let has_batch = left_view.batch > 1;
 
         let pipeline_key = MlxPipelineKey {
@@ -229,6 +249,10 @@ impl MatMulMlx {
             align_m,
             align_n,
             align_k,
+            use_out_source: false,
+            do_axpby: false,
+            scale_only: false,
+            tile_shape,
         };
 
         let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;
@@ -256,9 +280,6 @@ impl MatMulMlx {
         let ldb = i32::try_from(right_row_stride).map_err(|_| MetalError::InvalidOperation("ldb exceeds i32 range".to_string()))?;
         let ldd = i32::try_from(result_row_stride).map_err(|_| MetalError::InvalidOperation("ldd exceeds i32 range".to_string()))?;
 
-        let bm = 32usize;
-        let bn = 32usize;
-        let bk = 16usize;
         let swizzle_log = 0i32;
         let tile = 1usize << swizzle_log;
         let tiles_n = n.div_ceil(bn) * tile;
@@ -284,6 +305,7 @@ impl MatMulMlx {
             gemm_k_iterations_aligned: i32::try_from(k / bk.max(1))
                 .map_err(|_| MetalError::InvalidOperation("gemm k iterations exceed i32 range".to_string()))?,
             batch_ndim: if has_batch { 1 } else { 0 },
+            alpha_scale: 1.0,
         };
 
         Ok(Self {
@@ -300,6 +322,7 @@ impl MatMulMlx {
             batch_stride_b,
             tiles_n,
             tiles_m,
+            threads_per_threadgroup: tile_shape.threadgroup_size(),
             profiler: None,
         })
     }
@@ -351,10 +374,8 @@ impl KernelInvocable for MatMulOp {
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (left, right, transpose_left, transpose_right) = args;
 
-        let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
-        let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
-
-        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor])?;
+        let (left_mlx_tensor, left_view) = left.as_mlx_matrix_batch_view(ctx)?;
+        let (right_mlx_tensor, right_view) = right.as_mlx_matrix_batch_view(ctx)?;
 
         // Calculate effective dimensions based on transpose
         let (eff_left_rows, eff_left_cols) = if transpose_left {
@@ -393,11 +414,12 @@ impl KernelInvocable for MatMulOp {
         let mut selected_backend = MatMulBackend::Mps;
         let mut implementation: Option<MatMulImplementation> = None;
 
-        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_tensor, &left_view, &right_tensor, &right_view) {
+        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_mlx_tensor, &left_view, &right_mlx_tensor, &right_view) {
+            ctx.prepare_tensors_for_active_cmd(&[&left_mlx_tensor, &right_mlx_tensor])?;
             match MatMulMlx::new(
                 ctx,
-                &left_tensor,
-                &right_tensor,
+                &left_mlx_tensor,
+                &right_mlx_tensor,
                 &out,
                 left_view,
                 right_view,
@@ -431,6 +453,11 @@ impl KernelInvocable for MatMulOp {
         let implementation = if let Some(impl_) = implementation {
             impl_
         } else {
+            let (left_tensor, left_mps_view) = left.ensure_mps_contiguous_batch(ctx)?;
+            let (right_tensor, right_mps_view) = right.ensure_mps_contiguous_batch(ctx)?;
+
+            ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor])?;
+
             let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
             let mps_op = MatMulMps::new(
                 ctx,
@@ -438,8 +465,8 @@ impl KernelInvocable for MatMulOp {
                 &left_tensor,
                 &right_tensor,
                 &out,
-                left_view,
-                right_view,
+                left_mps_view,
+                right_mps_view,
                 result_view,
                 eff_left_rows,
                 eff_left_cols,
@@ -538,9 +565,9 @@ impl Operation for MatMulMlx {
             depth: self.batch_size as NSUInteger,
         };
         let threads = MTLSize {
-            width: 32 as NSUInteger,
-            height: 2 as NSUInteger,
-            depth: 2 as NSUInteger,
+            width: self.threads_per_threadgroup.0 as NSUInteger,
+            height: self.threads_per_threadgroup.1 as NSUInteger,
+            depth: self.threads_per_threadgroup.2 as NSUInteger,
         };
         dispatch_threadgroups(&encoder, grid, threads);
 
@@ -639,7 +666,11 @@ fn mlx_operand_is_contiguous<T: TensorElement>(tensor: &Tensor<T>, view: &MpsMat
     let Some(expected_matrix_stride) = view.rows.checked_mul(row_stride) else {
         return false;
     };
-    if matrix_stride != expected_matrix_stride {
+    if matrix_stride < expected_matrix_stride {
+        return false;
+    }
+
+    if matrix_stride % row_stride != 0 {
         return false;
     }
 
