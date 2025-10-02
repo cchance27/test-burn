@@ -28,7 +28,7 @@ kernel void fused_rmsnorm_qkv_projection_f32(
     float inv_rms = rsqrt(sum_sq / static_cast<float>(feature_dim) + EPS);
 
     for (uint out_idx = 0; out_idx < total_out_dim; ++out_idx) {
-        float acc = bias[out_idx];
+        float acc = 0.0f;
         uint weight_offset = out_idx;
         for (uint i = 0; i < feature_dim; ++i) {
             float x = input[feature_offset + i];
@@ -37,7 +37,7 @@ kernel void fused_rmsnorm_qkv_projection_f32(
             float w = weight[i * total_out_dim + weight_offset];
             acc += normed * w;
         }
-        output[row_idx * total_out_dim + out_idx] = acc;
+        output[row_idx * total_out_dim + out_idx] = acc + bias[out_idx];
     }
 }
 
@@ -66,15 +66,24 @@ kernel void fused_rmsnorm_qkv_projection_f16(
     float inv_rms = rsqrt(sum_sq / static_cast<float>(feature_dim) + EPS);
 
     for (uint out_idx = 0; out_idx < total_out_dim; ++out_idx) {
-        float acc = static_cast<float>(bias[out_idx]);
+        float acc = 0.0f;
         uint weight_offset = out_idx;
         for (uint i = 0; i < feature_dim; ++i) {
             float x = static_cast<float>(input[feature_offset + i]);
             float gamma_val = static_cast<float>(gamma[i]);
-            float normed = x * inv_rms * gamma_val;
+            float scaled = x * inv_rms * gamma_val;
+            // Match the standalone RMSNorm kernel by quantizing the scaled value to half
+            // precision before it feeds the projection matmuls. This mirrors the previous
+            // two-kernel pipeline where the normalized activations were materialized as
+            // F16 tensors prior to the fused QKV matmul, keeping test parity.
+            half scaled_half = static_cast<half>(scaled);
+            float normed = static_cast<float>(scaled_half);
             float w = static_cast<float>(weight[i * total_out_dim + weight_offset]);
             acc += normed * w;
         }
-        output[row_idx * total_out_dim + out_idx] = static_cast<half>(acc);
+        half matmul_half = static_cast<half>(acc);
+        float matmul_val = static_cast<float>(matmul_half);
+        float biased = matmul_val + static_cast<float>(bias[out_idx]);
+        output[row_idx * total_out_dim + out_idx] = static_cast<half>(biased);
     }
 }
