@@ -568,7 +568,8 @@ fn test_matmul_alpha_beta_accepts_strided_kv_view() -> Result<(), MetalError> {
 
     let result_dims = [batch_heads, query_len, head_dim];
     let result_data = vec![0.0f32; result_dims.iter().product()];
-    let alpha = 1.0f32;
+    // Use a non-unit alpha to ensure the MLX path exercises the scale-only fast path
+    let alpha = 0.5f32;
     let beta = 0.0f32;
 
     context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
