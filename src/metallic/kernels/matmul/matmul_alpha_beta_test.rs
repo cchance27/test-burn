@@ -624,3 +624,217 @@ fn test_matmul_alpha_beta_accepts_strided_kv_view() -> Result<(), MetalError> {
 
     Ok(())
 }
+
+#[test]
+fn test_matmul_alpha_beta_skinny_tile_single_row() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let m = 1usize;
+    let k = 64usize;
+    let n = 128usize;
+
+    let left_data: Vec<f32> = (0..(m * k)).map(|i| (i as f32) * 0.025 + 0.2).collect();
+    let right_data: Vec<f32> = (0..(k * n)).map(|i| 1.0 - (i as f32) * 0.013).collect();
+    let alpha = 0.75f32;
+    let beta = 0.0f32;
+
+    let left_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&left_data))?;
+    let right_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&right_data))?;
+    let result_data = vec![0.0f32; m * n];
+
+    let expected = cpu_matmul_scaled(&left_data, m, k, &right_data, k, n, alpha, beta, None, false, false);
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor = make_result_tensor(&context, &result_data, &[m, n])?;
+    let actual_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = actual_tensor.to_vec();
+
+    let samples = context.take_matmul_samples();
+    assert!(
+        samples.iter().any(|sample| matches!(sample.backend, MatMulBackend::Mlx)),
+        "expected MLX backend samples but observed {:?}",
+        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    let keys = context.kernel_manager.mlx_pipeline_keys();
+    assert!(
+        keys.iter().any(|key| {
+            key.tile_shape == MlxTileShape::Tile8x32
+                && !key.transpose_left
+                && !key.transpose_right
+                && !key.use_out_source
+                && !key.do_axpby
+                && !key.has_batch
+        }),
+        "expected skinny MLX tile in pipeline cache, found {:?}",
+        keys
+    );
+
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - got).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            got,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_matmul_alpha_beta_skinny_tile_single_column() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let m = 128usize;
+    let k = 64usize;
+    let n = 1usize;
+
+    let left_data: Vec<f32> = (0..(m * k)).map(|i| (i as f32) * 0.019 + 0.35).collect();
+    let right_data: Vec<f32> = (0..(k * n)).map(|i| 0.5 - (i as f32) * 0.009).collect();
+    let alpha = 0.5f32;
+    let beta = 0.0f32;
+
+    let left_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&left_data))?;
+    let right_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&right_data))?;
+    let result_data = vec![0.0f32; m * n];
+
+    let expected = cpu_matmul_scaled(&left_data, m, k, &right_data, k, n, alpha, beta, None, false, false);
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor = make_result_tensor(&context, &result_data, &[m, n])?;
+    let actual_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = actual_tensor.to_vec();
+
+    let samples = context.take_matmul_samples();
+    assert!(
+        samples.iter().any(|sample| matches!(sample.backend, MatMulBackend::Mlx)),
+        "expected MLX backend samples but observed {:?}",
+        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    let keys = context.kernel_manager.mlx_pipeline_keys();
+    assert!(
+        keys.iter().any(|key| {
+            key.tile_shape == MlxTileShape::Tile8x32
+                && !key.transpose_left
+                && !key.transpose_right
+                && !key.use_out_source
+                && !key.do_axpby
+                && !key.has_batch
+        }),
+        "expected skinny MLX tile in pipeline cache, found {:?}",
+        keys
+    );
+
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - got).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            got,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_matmul_alpha_beta_strided_kv_skinny_tile() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let batch_heads = 1usize;
+    let cache_capacity = 8usize;
+    let active_steps = 6usize;
+    let query_len = 1usize;
+    let head_dim = 128usize;
+
+    let left_data: Vec<f32> = (0..(batch_heads * query_len * active_steps))
+        .map(|i| (i as f32) * 0.0275 - 0.35)
+        .collect();
+    let cache_data: Vec<f32> = (0..(batch_heads * cache_capacity * head_dim))
+        .map(|i| 0.65 - (i as f32) * 0.011)
+        .collect();
+
+    let left_tensor = Tensor::new(
+        vec![batch_heads, query_len, active_steps],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&left_data),
+    )?;
+    let cache_tensor = Tensor::new(
+        vec![batch_heads, cache_capacity, head_dim],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&cache_data),
+    )?;
+
+    let (history_view, _) = context.kv_cache_history_view(&cache_tensor, active_steps)?;
+    let result_dims = [batch_heads, query_len, head_dim];
+    let result_data = vec![0.0f32; result_dims.iter().product()];
+    let alpha = 0.5f32;
+    let beta = 0.0f32;
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
+    let result_tensor_mps = make_result_tensor(&context, &result_data, &result_dims)?;
+    let expected_tensor = context.matmul_alpha_beta(&left_tensor, &history_view, &result_tensor_mps, false, false, alpha, beta)?;
+    context.synchronize();
+    let expected = expected_tensor.to_vec();
+    context.take_matmul_samples();
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor_mlx = make_result_tensor(&context, &result_data, &result_dims)?;
+    let actual_tensor = context.matmul_alpha_beta(&left_tensor, &history_view, &result_tensor_mlx, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = actual_tensor.to_vec();
+
+    let samples = context.take_matmul_samples();
+    let non_total_backends: Vec<MatMulBackend> = samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect();
+    assert!(
+        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        "expected MLX backend but observed {:?}",
+        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    let keys = context.kernel_manager.mlx_pipeline_keys();
+    assert!(
+        keys.iter().any(|key| {
+            key.tile_shape == MlxTileShape::Tile8x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
+        }),
+        "expected skinny MLX tile in pipeline cache, found {:?}",
+        keys
+    );
+
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - got).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            got,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}

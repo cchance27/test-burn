@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::kernels::kernel_manager::MlxPipelineKey;
+use crate::metallic::kernels::kernel_manager::{MlxPipelineKey, MlxTileShape};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -90,6 +90,7 @@ struct MatMulAlphaBetaMlx {
     tiles_n: usize,
     tiles_m: usize,
     use_out_source: bool,
+    threads_per_threadgroup: (usize, usize, usize),
     profiler: Option<MatMulDispatchHandle>,
 }
 
@@ -378,9 +379,6 @@ impl MatMulAlphaBetaMlx {
         let k = eff_left_cols;
 
         let has_batch = left_view.batch > 1;
-        let align_m = m % 32 == 0;
-        let align_n = n % 32 == 0;
-        let align_k = k % 16 == 0;
 
         let alpha_one = (alpha - 1.0).abs() <= f32::EPSILON;
         let beta_zero = beta.abs() <= f32::EPSILON;
@@ -393,17 +391,23 @@ impl MatMulAlphaBetaMlx {
         #[cfg(test)]
         record_mlx_alpha_beta_flags(use_out_source, scale_only);
 
+        let tile_shape = super::select_mlx_tile_shape(m, n);
+        let bm = tile_shape.bm();
+        let bn = tile_shape.bn();
+        let bk = tile_shape.bk();
+
         let pipeline_key = MlxPipelineKey {
             dtype: result.dtype,
             transpose_left,
             transpose_right,
             has_batch,
-            align_m,
-            align_n,
-            align_k,
+            align_m: m % bm == 0,
+            align_n: n % bn == 0,
+            align_k: k % bk == 0,
             use_out_source,
             do_axpby,
             scale_only,
+            tile_shape,
         };
 
         let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;
@@ -428,9 +432,6 @@ impl MatMulAlphaBetaMlx {
         let ldb = i32::try_from(right_row_stride).map_err(|_| MetalError::InvalidOperation("ldb exceeds i32 range".to_string()))?;
         let ldd = i32::try_from(result_row_stride).map_err(|_| MetalError::InvalidOperation("ldd exceeds i32 range".to_string()))?;
 
-        let bm = 32usize;
-        let bn = 32usize;
-        let bk = 16usize;
         let swizzle_log = 0i32;
         let tile = 1usize << swizzle_log;
         let tiles_n = n.div_ceil(bn) * tile;
@@ -485,6 +486,7 @@ impl MatMulAlphaBetaMlx {
             tiles_n,
             tiles_m,
             use_out_source,
+            threads_per_threadgroup: tile_shape.threadgroup_size(),
             profiler: None,
         })
     }
@@ -546,9 +548,9 @@ impl MatMulAlphaBetaMlx {
             depth: self.batch_size as NSUInteger,
         };
         let threads = objc2_metal::MTLSize {
-            width: 32 as NSUInteger,
-            height: 2 as NSUInteger,
-            depth: 2 as NSUInteger,
+            width: self.threads_per_threadgroup.0 as NSUInteger,
+            height: self.threads_per_threadgroup.1 as NSUInteger,
+            depth: self.threads_per_threadgroup.2 as NSUInteger,
         };
         super::dispatch_threadgroups(&encoder, grid, threads);
 

@@ -29,6 +29,46 @@ struct KernelPipelineKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum MlxTileShape {
+    Tile32x32,
+    Tile16x32,
+    Tile8x32,
+}
+
+impl MlxTileShape {
+    pub const fn bm(self) -> usize {
+        match self {
+            Self::Tile32x32 => 32,
+            Self::Tile16x32 => 16,
+            Self::Tile8x32 => 8,
+        }
+    }
+
+    pub const fn bn(self) -> usize {
+        32
+    }
+
+    pub const fn bk(self) -> usize {
+        16
+    }
+
+    pub const fn wm(self) -> usize {
+        match self {
+            Self::Tile32x32 | Self::Tile16x32 => 2,
+            Self::Tile8x32 => 1,
+        }
+    }
+
+    pub const fn wn(self) -> usize {
+        2
+    }
+
+    pub const fn threadgroup_size(self) -> (usize, usize, usize) {
+        (32, self.wm(), self.wn())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct MlxPipelineKey {
     pub dtype: Dtype,
     pub transpose_left: bool,
@@ -40,6 +80,7 @@ pub struct MlxPipelineKey {
     pub use_out_source: bool,
     pub do_axpby: bool,
     pub scale_only: bool,
+    pub tile_shape: MlxTileShape,
 }
 
 #[derive(Default)]
@@ -108,8 +149,8 @@ impl KernelManager {
         }
 
         let library = self.get_library(KernelLibrary::MatMulMlx, device)?;
-        let function_name = mlx_function_name(key.dtype, key.transpose_left, key.transpose_right)?;
-        let fn_name = NSString::from_str(function_name);
+        let function_name = mlx_function_name(key.dtype, key.transpose_left, key.transpose_right, key.tile_shape)?;
+        let fn_name = NSString::from_str(&function_name);
 
         let constants = build_mlx_function_constants(key);
         let metal_fn = library
@@ -125,21 +166,34 @@ impl KernelManager {
     }
 }
 
-fn mlx_function_name(dtype: Dtype, transpose_left: bool, transpose_right: bool) -> Result<&'static str, MetalError> {
+#[cfg(test)]
+impl KernelManager {
+    pub(crate) fn mlx_pipeline_keys(&self) -> Vec<MlxPipelineKey> {
+        self.mlx_pipelines.keys().copied().collect()
+    }
+}
+
+fn mlx_function_name(dtype: Dtype, transpose_left: bool, transpose_right: bool, tile_shape: MlxTileShape) -> Result<String, MetalError> {
     use Dtype::*;
 
-    let name = match (dtype, transpose_left, transpose_right) {
-        (F32, false, false) => "gemm_nn_f32_f32_32_32_16_2_2",
-        (F32, true, false) => "gemm_tn_f32_f32_32_32_16_2_2",
-        (F32, false, true) => "gemm_nt_f32_f32_32_32_16_2_2",
-        (F32, true, true) => "gemm_tt_f32_f32_32_32_16_2_2",
-        (F16, false, false) => "gemm_nn_f16_f16_32_32_16_2_2",
-        (F16, true, false) => "gemm_tn_f16_f16_32_32_16_2_2",
-        (F16, false, true) => "gemm_nt_f16_f16_32_32_16_2_2",
-        (F16, true, true) => "gemm_tt_f16_f16_32_32_16_2_2",
+    let suffix = match tile_shape {
+        MlxTileShape::Tile32x32 => "32_32_16_2_2",
+        MlxTileShape::Tile16x32 => "16_32_16_2_2",
+        MlxTileShape::Tile8x32 => "8_32_16_1_2",
     };
 
-    Ok(name)
+    let prefix = match (dtype, transpose_left, transpose_right) {
+        (F32, false, false) => "gemm_nn_f32_f32",
+        (F32, true, false) => "gemm_tn_f32_f32",
+        (F32, false, true) => "gemm_nt_f32_f32",
+        (F32, true, true) => "gemm_tt_f32_f32",
+        (F16, false, false) => "gemm_nn_f16_f16",
+        (F16, true, false) => "gemm_tn_f16_f16",
+        (F16, false, true) => "gemm_nt_f16_f16",
+        (F16, true, true) => "gemm_tt_f16_f16",
+    };
+
+    Ok(format!("{}_{}", prefix, suffix))
 }
 
 fn build_mlx_function_constants(key: MlxPipelineKey) -> Retained<MTLFunctionConstantValues> {

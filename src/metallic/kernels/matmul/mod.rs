@@ -9,7 +9,10 @@ use objc2_metal::{
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
-use super::{KernelFunction, KernelInvocable, kernel_manager::MlxPipelineKey};
+use super::{
+    KernelFunction, KernelInvocable,
+    kernel_manager::{MlxPipelineKey, MlxTileShape},
+};
 use crate::metallic::instrumentation::MatMulDispatchHandle;
 use crate::metallic::tensor::MpsMatrixBatchView;
 use crate::metallic::{
@@ -40,6 +43,17 @@ pub enum MatMulBackend {
 pub struct MatMulSample {
     pub backend: MatMulBackend,
     pub duration: Duration,
+}
+
+pub(super) fn select_mlx_tile_shape(m: usize, n: usize) -> MlxTileShape {
+    let slender = m.min(n);
+    if slender >= MlxTileShape::Tile32x32.bm() {
+        MlxTileShape::Tile32x32
+    } else if slender >= MlxTileShape::Tile16x32.bm() {
+        MlxTileShape::Tile16x32
+    } else {
+        MlxTileShape::Tile8x32
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -192,6 +206,7 @@ struct MatMulMlx {
     batch_stride_b: usize,
     tiles_n: usize,
     tiles_m: usize,
+    threads_per_threadgroup: (usize, usize, usize),
     profiler: Option<MatMulDispatchHandle>,
 }
 
@@ -217,9 +232,13 @@ impl MatMulMlx {
         debug_assert_eq!(left_view.batch, right_view.batch);
         debug_assert_eq!(left_view.batch, result_view.batch);
 
-        let align_m = m % 32 == 0;
-        let align_n = n % 32 == 0;
-        let align_k = k % 16 == 0;
+        let tile_shape = select_mlx_tile_shape(m, n);
+        let bm = tile_shape.bm();
+        let bn = tile_shape.bn();
+        let bk = tile_shape.bk();
+        let align_m = m % bm == 0;
+        let align_n = n % bn == 0;
+        let align_k = k % bk == 0;
         let has_batch = left_view.batch > 1;
 
         let pipeline_key = MlxPipelineKey {
@@ -233,6 +252,7 @@ impl MatMulMlx {
             use_out_source: false,
             do_axpby: false,
             scale_only: false,
+            tile_shape,
         };
 
         let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;
@@ -260,9 +280,6 @@ impl MatMulMlx {
         let ldb = i32::try_from(right_row_stride).map_err(|_| MetalError::InvalidOperation("ldb exceeds i32 range".to_string()))?;
         let ldd = i32::try_from(result_row_stride).map_err(|_| MetalError::InvalidOperation("ldd exceeds i32 range".to_string()))?;
 
-        let bm = 32usize;
-        let bn = 32usize;
-        let bk = 16usize;
         let swizzle_log = 0i32;
         let tile = 1usize << swizzle_log;
         let tiles_n = n.div_ceil(bn) * tile;
@@ -305,6 +322,7 @@ impl MatMulMlx {
             batch_stride_b,
             tiles_n,
             tiles_m,
+            threads_per_threadgroup: tile_shape.threadgroup_size(),
             profiler: None,
         })
     }
@@ -547,9 +565,9 @@ impl Operation for MatMulMlx {
             depth: self.batch_size as NSUInteger,
         };
         let threads = MTLSize {
-            width: 32 as NSUInteger,
-            height: 2 as NSUInteger,
-            depth: 2 as NSUInteger,
+            width: self.threads_per_threadgroup.0 as NSUInteger,
+            height: self.threads_per_threadgroup.1 as NSUInteger,
+            depth: self.threads_per_threadgroup.2 as NSUInteger,
         };
         dispatch_threadgroups(&encoder, grid, threads);
 
