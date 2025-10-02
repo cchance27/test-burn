@@ -245,7 +245,7 @@ fn run_blocks_up_to<T: TensorElement>(
             .reshape(vec![batch, seq, d_model])?;
 
         let attn_out = ctx
-            .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
+            .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, false)?
             .reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
 
@@ -733,7 +733,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Attn out projection (use transpose on weight to match PyTorch Linear semantics)
     let attn_out_flat = attn_out_reshaped.reshape(vec![seq, d_model])?;
-    let attn_out_proj = ctx.matmul(&attn_out_flat, &block0.attn_out_weight, false, true)?;
+    let attn_out_proj = ctx.matmul(&attn_out_flat, &block0.attn_out_weight, false, false)?;
     ctx.synchronize();
     let attn_out = attn_out_proj.reshape(vec![1, seq, d_model])?;
 
@@ -826,29 +826,21 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("FFN up weight dims: {:?}", block0.ffn_up.dims());
     println!("FFN down weight dims: {:?}", block0.ffn_down.dims());
     let gate_dims = block0.ffn_gate.dims();
-    let gate_transpose_b = if gate_dims[0] == d_model {
-        false
-    } else if gate_dims[1] == d_model {
-        true
-    } else {
-        panic!("Unexpected FFN gate dims {:?} for d_model={}", gate_dims, d_model);
-    };
-    println!("Using transpose_b={} for gate matmul", gate_transpose_b);
+    assert_eq!(gate_dims.len(), 2, "FFN gate weight must be 2D");
+    assert_eq!(gate_dims[0], d_model, "FFN gate weight leading dim must match d_model");
+    assert_eq!(gate_dims[1], model.config.ff_dim, "FFN gate weight trailing dim must match ff_dim");
+    println!("Using transpose_b=false for gate matmul");
     // Gate projection
-    let gate_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_gate, false, gate_transpose_b)?;
+    let gate_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_gate, false, false)?;
     let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()))?;
 
     // Up projection
     let up_dims = block0.ffn_up.dims();
-    let up_transpose_b = if up_dims[0] == d_model {
-        false
-    } else if up_dims[1] == d_model {
-        true
-    } else {
-        panic!("Unexpected FFN up dims {:?} for d_model={}", up_dims, d_model);
-    };
-    println!("Using transpose_b={} for up matmul", up_transpose_b);
-    let up_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_up, false, up_transpose_b)?;
+    assert_eq!(up_dims.len(), 2, "FFN up weight must be 2D");
+    assert_eq!(up_dims[0], d_model, "FFN up weight leading dim must match d_model");
+    assert_eq!(up_dims[1], model.config.ff_dim, "FFN up weight trailing dim must match ff_dim");
+    println!("Using transpose_b=false for up matmul");
+    let up_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_up, false, false)?;
     let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()))?;
 
     // Silu
@@ -860,15 +852,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // Down projection
     let ff_dim = model.config.ff_dim;
     let down_dims = block0.ffn_down.dims();
-    let down_transpose_b = if down_dims[0] == ff_dim {
-        false
-    } else if down_dims[1] == ff_dim {
-        true
-    } else {
-        panic!("Unexpected FFN down dims {:?} for ff_dim={}", down_dims, ff_dim);
-    };
-    println!("Using transpose_b={} for down matmul", down_transpose_b);
-    let down_proj = ctx.matmul(&mul_out, &block0.ffn_down, false, down_transpose_b)?;
+    assert_eq!(down_dims.len(), 2, "FFN down weight must be 2D");
+    assert_eq!(down_dims[0], ff_dim, "FFN down weight leading dim must match ff_dim");
+    assert_eq!(down_dims[1], d_model, "FFN down weight trailing dim must match d_model");
+    println!("Using transpose_b=false for down matmul");
+    let down_proj = ctx.matmul(&mul_out, &block0.ffn_down, false, false)?;
     let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()))?;
 
     let ffn_output_flat = down_proj_out.clone();
@@ -1252,7 +1240,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         .permute(&[0, 2, 1, 3], &mut ctx)?
         .reshape(vec![1, seq, d_model])?;
     let attn_out_last = ctx
-        .matmul(&attn_out_last.reshape(vec![m, d_model])?, &block_last.attn_out_weight, false, true)?
+        .matmul(&attn_out_last.reshape(vec![m, d_model])?, &block_last.attn_out_weight, false, false)?
         .reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
 
