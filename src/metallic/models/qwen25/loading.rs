@@ -164,7 +164,11 @@ fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
     }
 
     let src_slice = tensor_data_as_f32(src);
-    copy_transposed_f32_into_slice::<TDst>(src_slice.as_ref(), src.dims(), dst.as_mut_slice(), dst.dims())
+    let src_dims = src.dims().to_vec();
+    let dst_dims = dst.dims().to_vec();
+    let dst_slice = dst.as_mut_slice();
+
+    copy_transposed_f32_into_slice::<TDst>(src_slice.as_ref(), &src_dims, dst_slice, &dst_dims)
 }
 
 fn copy_tensor_with_optional_transpose<TSrc: TensorElement, TDst: TensorElement>(
