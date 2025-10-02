@@ -127,10 +127,25 @@ fn fused_rmsnorm_matches_separate_ops() -> Result<(), MetalError> {
 
     ctx.synchronize();
 
+    let q_expected_slice = q_expected.as_slice();
+    let k_expected_slice = k_expected.as_slice();
+    let v_expected_slice = v_expected.as_slice();
+
     let mut total_flat_expected = Vec::with_capacity(rows * total_out_dim);
-    total_flat_expected.extend_from_slice(q_expected.as_slice());
-    total_flat_expected.extend_from_slice(k_expected.as_slice());
-    total_flat_expected.extend_from_slice(v_expected.as_slice());
+    // The fused kernel stores each row's Q, K, and V segments back-to-back, so
+    // rebuild the expected buffer with the same per-row interleaving before
+    // comparing against the combined output tensor.
+    for row in 0..rows {
+        let q_start = row * feature_dim;
+        let k_start = row * kv_dim;
+        let q_row = &q_expected_slice[q_start..q_start + feature_dim];
+        let k_row = &k_expected_slice[k_start..k_start + kv_dim];
+        let v_row = &v_expected_slice[k_start..k_start + kv_dim];
+
+        total_flat_expected.extend_from_slice(q_row);
+        total_flat_expected.extend_from_slice(k_row);
+        total_flat_expected.extend_from_slice(v_row);
+    }
 
     for (idx, (fused, expected)) in combined_direct.as_slice().iter().zip(total_flat_expected.iter()).enumerate() {
         let diff = (fused - expected).abs();
