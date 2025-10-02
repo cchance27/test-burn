@@ -229,6 +229,8 @@ impl MatMulMlx {
             align_m,
             align_n,
             align_k,
+            use_out_source: false,
+            do_axpby: false,
         };
 
         let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;

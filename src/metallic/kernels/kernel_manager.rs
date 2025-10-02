@@ -37,6 +37,8 @@ pub struct MlxPipelineKey {
     pub align_m: bool,
     pub align_n: bool,
     pub align_k: bool,
+    pub use_out_source: bool,
+    pub do_axpby: bool,
 }
 
 #[derive(Default)]
@@ -143,8 +145,8 @@ fn build_mlx_function_constants(key: MlxPipelineKey) -> Retained<MTLFunctionCons
     let constants = MTLFunctionConstantValues::new();
 
     set_bool_constant(&constants, 10, key.has_batch);
-    set_bool_constant(&constants, 100, false);
-    set_bool_constant(&constants, 110, false);
+    set_bool_constant(&constants, 100, key.use_out_source);
+    set_bool_constant(&constants, 110, key.do_axpby);
     set_bool_constant(&constants, 200, key.align_m);
     set_bool_constant(&constants, 201, key.align_n);
     set_bool_constant(&constants, 202, key.align_k);

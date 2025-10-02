@@ -223,3 +223,170 @@ fn test_matmul_alpha_one_beta_zero() -> Result<(), MetalError> {
 
     Ok(())
 }
+
+fn make_result_tensor(context: &Context<F32Element>, data: &[f32], dims: &[usize]) -> Result<Tensor<F32Element>, MetalError> {
+    Tensor::new(dims.to_vec(), TensorStorage::Dedicated(context), TensorInit::CopyFrom(data))
+}
+
+fn verify_alpha_beta_backend(transpose_left: bool, transpose_right: bool) -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let m = 4;
+    let k = 3;
+    let n = 5;
+
+    let (left_rows, left_cols) = if transpose_left { (k, m) } else { (m, k) };
+    let (right_rows, right_cols) = if transpose_right { (n, k) } else { (k, n) };
+
+    let left_data: Vec<f32> = (0..(left_rows * left_cols)).map(|i| (i as f32) * 0.03125 + 0.125).collect();
+    let right_data: Vec<f32> = (0..(right_rows * right_cols)).map(|i| 1.0 - (i as f32) * 0.0175).collect();
+    let result_data: Vec<f32> = (0..(m * n)).map(|i| (i as f32).sin() * 0.25).collect();
+
+    let left_tensor = Tensor::new(
+        vec![left_rows, left_cols],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&left_data),
+    )?;
+    let right_tensor = Tensor::new(
+        vec![right_rows, right_cols],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&right_data),
+    )?;
+
+    let alpha = 0.75f32;
+    let beta = 0.5f32;
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
+    let result_tensor_mps = make_result_tensor(&context, &result_data, &[m, n])?;
+    let mps_result = context.matmul_alpha_beta(
+        &left_tensor,
+        &right_tensor,
+        &result_tensor_mps,
+        transpose_left,
+        transpose_right,
+        alpha,
+        beta,
+    )?;
+    context.synchronize();
+    let expected = mps_result.to_vec();
+    let mps_samples = context.take_matmul_samples();
+    assert!(
+        mps_samples.iter().all(|sample| sample.backend == MatMulBackend::Mps),
+        "expected ForceMps dispatches to use the MPS backend"
+    );
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor_mlx = make_result_tensor(&context, &result_data, &[m, n])?;
+    let mlx_result = context.matmul_alpha_beta(
+        &left_tensor,
+        &right_tensor,
+        &result_tensor_mlx,
+        transpose_left,
+        transpose_right,
+        alpha,
+        beta,
+    )?;
+    context.synchronize();
+    let actual = mlx_result.to_vec();
+    let mlx_samples = context.take_matmul_samples();
+    let expected_backend = if transpose_left || transpose_right {
+        MatMulBackend::MlxTransposed
+    } else {
+        MatMulBackend::Mlx
+    };
+    assert!(
+        mlx_samples.iter().all(|sample| sample.backend == expected_backend),
+        "expected MLX backend {:?} but observed {:?}",
+        expected_backend,
+        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    assert_eq!(expected.len(), actual.len());
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &act)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - act).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} for transpose_left={}, transpose_right={} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            transpose_left,
+            transpose_right,
+            exp,
+            act,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_matmul_alpha_beta_selects_mlx_backend() -> Result<(), MetalError> {
+    verify_alpha_beta_backend(false, false)?;
+    verify_alpha_beta_backend(true, false)?;
+    verify_alpha_beta_backend(false, true)?;
+    verify_alpha_beta_backend(true, true)?;
+    Ok(())
+}
+
+#[test]
+fn test_matmul_alpha_beta_batched_mlx_matches_mps() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let batch = 2;
+    let m = 3;
+    let k = 4;
+    let n = 3;
+
+    let a_data: Vec<f32> = (0..(batch * m * k)).map(|i| (i as f32) * 0.0125 + 0.1).collect();
+    let b_data: Vec<f32> = (0..(batch * k * n)).map(|i| 0.9 - (i as f32) * 0.015).collect();
+    let c_data: Vec<f32> = (0..(batch * m * n)).map(|i| (i as f32).cos() * 0.2).collect();
+
+    let a_tensor = Tensor::new(vec![batch, m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
+    let b_tensor = Tensor::new(vec![batch, k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
+
+    let alpha = 1.25f32;
+    let beta = -0.4f32;
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
+    let result_tensor_mps = make_result_tensor(&context, &c_data, &[batch, m, n])?;
+    let mps_result = context.matmul_alpha_beta(&a_tensor, &b_tensor, &result_tensor_mps, false, false, alpha, beta)?;
+    context.synchronize();
+    let expected = mps_result.to_vec();
+    let mps_samples = context.take_matmul_samples();
+    assert!(
+        mps_samples.iter().all(|sample| sample.backend == MatMulBackend::Mps),
+        "expected ForceMps dispatches to use the MPS backend"
+    );
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor_mlx = make_result_tensor(&context, &c_data, &[batch, m, n])?;
+    let mlx_result = context.matmul_alpha_beta(&a_tensor, &b_tensor, &result_tensor_mlx, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = mlx_result.to_vec();
+    let mlx_samples = context.take_matmul_samples();
+    assert!(
+        !mlx_samples.is_empty() && mlx_samples.iter().all(|sample| sample.backend == MatMulBackend::Mlx),
+        "expected batched MLX dispatches to report the MLX backend"
+    );
+
+    assert_eq!(expected.len(), actual.len());
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &act)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - act).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} in batched comparison (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            act,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
