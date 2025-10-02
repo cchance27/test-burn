@@ -3,22 +3,26 @@ use std::fs;
 
 use serde::{Deserialize, Serialize};
 
-fn transpose_weights(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut transposed = vec![0.0f32; rows * cols];
+fn transpose(rows: usize, cols: usize, data: &[f32]) -> Vec<f32> {
+    assert_eq!(data.len(), rows * cols);
+    let mut out = vec![0.0; data.len()];
     for r in 0..rows {
         for c in 0..cols {
-            transposed[c * rows + r] = data[r * cols + c];
+            out[c * rows + r] = data[r * cols + c];
         }
     }
-    transposed
+    out
 }
 
-fn fuse_gate_up(gate: &[f32], up: &[f32], d_model: usize, ff_dim: usize) -> Vec<f32> {
+fn fuse_gate_up_rows(gate: &[f32], up: &[f32], d_model: usize, ff_dim: usize) -> Vec<f32> {
+    assert_eq!(gate.len(), d_model * ff_dim);
+    assert_eq!(up.len(), d_model * ff_dim);
     let mut fused = Vec::with_capacity(d_model * ff_dim * 2);
     for row in 0..d_model {
-        let row_start = row * ff_dim;
-        fused.extend_from_slice(&gate[row_start..row_start + ff_dim]);
-        fused.extend_from_slice(&up[row_start..row_start + ff_dim]);
+        let gate_row = &gate[row * ff_dim..(row + 1) * ff_dim];
+        let up_row = &up[row * ff_dim..(row + 1) * ff_dim];
+        fused.extend_from_slice(gate_row);
+        fused.extend_from_slice(up_row);
     }
     fused
 }
@@ -34,7 +38,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
 
     // Create uniform weights matching PyTorch small example
     // gate_weight all 0.1, shape [d_model, ff_dim]
-    let gate_data: Vec<f32> = vec![0.1; ff_dim * d_model];
+    let gate_data: Vec<f32> = vec![0.1; d_model * ff_dim];
     let ffn_gate = Tensor::new(
         vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
@@ -42,7 +46,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     )?;
 
     // up_weight all 0.2
-    let up_data: Vec<f32> = vec![0.2; ff_dim * d_model];
+    let up_data: Vec<f32> = vec![0.2; d_model * ff_dim];
     let ffn_up = Tensor::new(
         vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
@@ -93,8 +97,9 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     let expected = 2.1196_f32;
     let tol = 1e-3_f32; // Tolerant for Metal FP precision
     let output_slice = output.as_slice();
-    assert_eq!(output_slice.len(), m * d_model);
-    for &val in output_slice {
+    let output_data = output_slice.as_ref();
+    assert_eq!(output_data.len(), m * d_model);
+    for &val in output_data {
         assert!(
             (val - expected).abs() < tol,
             "Expected ≈{:.4}, got {:.4} (diff {:.6})",
@@ -116,14 +121,14 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     let m: usize = 1;
 
     // Dummy zero weights
-    let gate_data: Vec<f32> = vec![0.0; ff_dim * d_model];
+    let gate_data: Vec<f32> = vec![0.0; d_model * ff_dim];
     let ffn_gate = Tensor::new(
         vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
 
-    let up_data: Vec<f32> = vec![0.0; ff_dim * d_model];
+    let up_data: Vec<f32> = vec![0.0; d_model * ff_dim];
     let ffn_up = Tensor::new(
         vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
@@ -170,7 +175,8 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     )?;
 
     let output_slice = output.as_slice();
-    for &val in output_slice {
+    let output_data = output_slice.as_ref();
+    for &val in output_data {
         assert!((val - 0.0).abs() < 1e-6);
     }
 
@@ -185,14 +191,14 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
     let ff_dim: usize = 6; // Not divisible by the vector width
     let m: usize = 1;
 
-    let gate_data: Vec<f32> = vec![0.1; ff_dim * d_model];
+    let gate_data: Vec<f32> = vec![0.1; d_model * ff_dim];
     let ffn_gate = Tensor::new(
         vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&gate_data),
     )?;
 
-    let up_data: Vec<f32> = vec![0.2; ff_dim * d_model];
+    let up_data: Vec<f32> = vec![0.2; d_model * ff_dim];
     let ffn_up = Tensor::new(
         vec![d_model, ff_dim],
         TensorStorage::Dedicated(&ctx),
@@ -240,8 +246,9 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
     let expected = 1.5897012_f32;
     let tol = 1e-3_f32;
     let output_slice = output.as_slice();
-    assert_eq!(output_slice.len(), m * d_model);
-    for &val in output_slice {
+    let output_data = output_slice.as_ref();
+    assert_eq!(output_data.len(), m * d_model);
+    for &val in output_data {
         assert!(
             (val - expected).abs() < tol,
             "Expected ≈{:.4}, got {:.4} (diff {:.6})",
@@ -262,8 +269,8 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
     let ff_dim: usize = 8;
     let m: usize = 3;
 
-    let gate_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.05 + 0.01 * (i as f32)).collect();
-    let up_data: Vec<f32> = (0..ff_dim * d_model).map(|i| -0.02 * (i as f32) + 0.15).collect();
+    let gate_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.05 + 0.01 * (i as f32)).collect();
+    let up_data: Vec<f32> = (0..d_model * ff_dim).map(|i| -0.02 * (i as f32) + 0.15).collect();
     let down_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.03 * (i as f32) - 0.4).collect();
 
     let ffn_gate = Tensor::new(
@@ -282,7 +289,7 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&down_data),
     )?;
 
-    let fused_data = fuse_gate_up(&gate_data, &up_data, d_model, ff_dim);
+    let fused_data: Vec<f32> = fuse_gate_up_rows(&gate_data, &up_data, d_model, ff_dim);
     let fused_gate_up = Tensor::new(
         vec![d_model, ff_dim * 2],
         TensorStorage::Dedicated(&ctx),
@@ -319,7 +326,7 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
         None,
     )?;
     ctx.synchronize();
-    let baseline_vals = baseline.as_slice().to_vec();
+    let baseline_vals = baseline.to_vec();
 
     let fused = ctx.SwiGLU(
         &x_normed_flat,
@@ -351,8 +358,8 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
     let ff_dim: usize = 6; // Not divisible by vector width
     let m: usize = 2;
 
-    let gate_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.07 * (i as f32) - 0.25).collect();
-    let up_data: Vec<f32> = (0..ff_dim * d_model).map(|i| 0.09 - 0.03 * (i as f32)).collect();
+    let gate_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.07 * (i as f32) - 0.25).collect();
+    let up_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.09 - 0.03 * (i as f32)).collect();
     let down_data: Vec<f32> = (0..d_model * ff_dim).map(|i| 0.02 * (i as f32) + 0.11).collect();
 
     let ffn_gate = Tensor::new(
@@ -371,7 +378,7 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&down_data),
     )?;
 
-    let fused_data = fuse_gate_up(&gate_data, &up_data, d_model, ff_dim);
+    let fused_data: Vec<f32> = fuse_gate_up_rows(&gate_data, &up_data, d_model, ff_dim);
     let fused_gate_up = Tensor::new(
         vec![d_model, ff_dim * 2],
         TensorStorage::Dedicated(&ctx),
@@ -408,7 +415,7 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
         None,
     )?;
     ctx.synchronize();
-    let baseline_vals = baseline.as_slice().to_vec();
+    let baseline_vals = baseline.to_vec();
 
     let fused = ctx.SwiGLU(
         &x_normed_flat,
@@ -475,9 +482,9 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
     let up_weight_py = weights.up_weight;
     let down_weight_py = weights.down_weight;
 
-    let gate_weight_rust = transpose_weights(&gate_weight_py, ff_dim, d_model);
-    let up_weight_rust = transpose_weights(&up_weight_py, ff_dim, d_model);
-    let down_weight_rust = transpose_weights(&down_weight_py, d_model, ff_dim);
+    let gate_weight_rust = transpose(ff_dim, d_model, &gate_weight_py);
+    let up_weight_rust = transpose(ff_dim, d_model, &up_weight_py);
+    let down_weight_rust = transpose(d_model, ff_dim, &down_weight_py);
 
     // Create weight Tensors
     let mut ctx = Context::<F32Element>::new()?;
@@ -538,7 +545,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
             None,
         )?;
         ctx.synchronize(); // Sync to ensure GPU ops complete before CPU read
-        let rust_output_flat = rust_output.as_slice().to_vec();
+        let rust_output_flat = rust_output.to_vec();
 
         // Compare to PyTorch expected
         assert_eq!(
