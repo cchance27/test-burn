@@ -89,8 +89,29 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
     copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
 }
 
+fn normalize_matrix_dims(mut dims: &[usize]) -> Option<(usize, usize)> {
+    while let Some((&last, rest)) = dims.split_last() {
+        if last == 1 && !rest.is_empty() {
+            dims = rest;
+        } else {
+            break;
+        }
+    }
+
+    match dims.len() {
+        0 => Some((1, 1)),
+        1 => Some((dims[0], 1)),
+        2 => Some((dims[0], dims[1])),
+        _ => None,
+    }
+}
+
 fn dims_are_transposed(src_dims: &[usize], dst_dims: &[usize]) -> bool {
-    src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0]
+    if let (Some((src_rows, src_cols)), Some((dst_rows, dst_cols))) = (normalize_matrix_dims(src_dims), normalize_matrix_dims(dst_dims)) {
+        src_rows == dst_cols && src_cols == dst_rows
+    } else {
+        false
+    }
 }
 
 fn copy_transposed_f32_into_slice<TDst: TensorElement>(
@@ -177,12 +198,22 @@ fn copy_tensor_with_optional_transpose<TSrc: TensorElement, TDst: TensorElement>
 ) -> Result<(), MetalError> {
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
+
     if src_dims == dst_dims {
-        copy_tensor_into(src, dst)
-    } else if dims_are_transposed(&src_dims, &dst_dims) {
-        copy_tensor_transposed_into(src, dst)
-    } else {
-        copy_tensor_into(src, dst)
+        return copy_tensor_into(src, dst);
+    }
+
+    if dims_are_transposed(&src_dims, &dst_dims) {
+        return copy_tensor_transposed_into(src, dst);
+    }
+
+    match (normalize_matrix_dims(&src_dims), normalize_matrix_dims(&dst_dims)) {
+        (Some(src_norm), Some(dst_norm)) if src_norm == dst_norm => copy_tensor_into(src, dst),
+        (Some(src_norm), Some(dst_norm)) if src_norm.0 == dst_norm.1 && src_norm.1 == dst_norm.0 => copy_tensor_transposed_into(src, dst),
+        _ => Err(MetalError::InvalidShape(format!(
+            "Unable to map source dims {:?} into destination dims {:?}",
+            src_dims, dst_dims
+        ))),
     }
 }
 
@@ -261,18 +292,25 @@ fn copy_fused_gate_up_weight<TSrc: TensorElement, TDst: TensorElement>(
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
 
-    if dst_dims.len() != 2 {
+    let Some((src_rows, src_cols)) = normalize_matrix_dims(&src_dims) else {
         return Err(MetalError::InvalidShape(format!(
-            "Fused gate/up weight must be 2D, got {:?}",
+            "Unable to interpret fused gate/up source dims {:?} as a matrix",
+            src_dims
+        )));
+    };
+
+    let Some((dst_rows, dst_cols)) = normalize_matrix_dims(&dst_dims) else {
+        return Err(MetalError::InvalidShape(format!(
+            "Unable to interpret fused gate/up destination dims {:?} as a matrix",
             dst_dims
         )));
-    }
+    };
 
-    if src_dims == dst_dims {
+    if src_rows == dst_rows && src_cols == dst_cols {
         return copy_tensor_into(src, dst);
     }
 
-    if dims_are_transposed(&src_dims, &dst_dims) {
+    if src_rows == dst_cols && src_cols == dst_rows {
         let src_slice = tensor_data_as_f32(src);
         return pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), &src_dims, dst.as_mut_slice(), &dst_dims, 0);
     }
