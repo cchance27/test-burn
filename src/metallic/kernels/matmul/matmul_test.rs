@@ -6,7 +6,7 @@ use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, Tenso
 
 // CPU-based matrix multiplication for golden testing
 #[allow(clippy::too_many_arguments)]
-fn cpu_matmul(
+pub(crate) fn cpu_matmul(
     a: &[f32],
     a_original_rows: usize,
     a_original_cols: usize,
@@ -56,7 +56,7 @@ fn cpu_matmul(
 
 // CPU-based matrix multiplication for golden testing with alpha/beta scaling
 #[allow(clippy::too_many_arguments)]
-fn cpu_matmul_scaled(
+pub(crate) fn cpu_matmul_scaled(
     a: &[f32],
     a_original_rows: usize,
     a_original_cols: usize,

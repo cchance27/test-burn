@@ -1,6 +1,7 @@
 use super::*;
 
 use super::matmul_alpha_beta;
+use super::matmul_test::cpu_matmul_scaled;
 use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
 #[test]
