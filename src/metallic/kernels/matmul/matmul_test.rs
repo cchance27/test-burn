@@ -1066,7 +1066,7 @@ fn test_matmul_mlx_selects_skinny_tile_for_single_row() -> Result<(), MetalError
     let keys = context.kernel_manager.mlx_pipeline_keys();
     assert!(
         keys.iter().any(|key| {
-            key.tile_shape == MlxTileShape::Tile1x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
+            key.tile_shape == MlxTileShape::Tile8x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
         }),
         "expected skinny MLX tile in pipeline cache, found {:?}",
         keys
@@ -1121,7 +1121,7 @@ fn test_matmul_mlx_selects_skinny_tile_for_single_column() -> Result<(), MetalEr
     let keys = context.kernel_manager.mlx_pipeline_keys();
     assert!(
         keys.iter().any(|key| {
-            key.tile_shape == MlxTileShape::Tile1x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
+            key.tile_shape == MlxTileShape::Tile8x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
         }),
         "expected skinny MLX tile in pipeline cache, found {:?}",
         keys
@@ -1147,7 +1147,7 @@ fn test_matmul_mlx_selects_skinny_tile_for_single_column() -> Result<(), MetalEr
 }
 
 #[test]
-fn test_matmul_mlx_selects_tile4_for_four_rows() -> Result<(), MetalError> {
+fn test_matmul_mlx_selects_skinny_tile_for_four_rows() -> Result<(), MetalError> {
     let mut context = Context::<F32Element>::new()?;
     let m = 4usize;
     let k = 64usize;
@@ -1176,9 +1176,9 @@ fn test_matmul_mlx_selects_tile4_for_four_rows() -> Result<(), MetalError> {
     let keys = context.kernel_manager.mlx_pipeline_keys();
     assert!(
         keys.iter().any(|key| {
-            key.tile_shape == MlxTileShape::Tile4x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
+            key.tile_shape == MlxTileShape::Tile8x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
         }),
-        "expected Tile4x32 MLX tile in pipeline cache, found {:?}",
+        "expected skinny MLX tile in pipeline cache, found {:?}",
         keys
     );
 

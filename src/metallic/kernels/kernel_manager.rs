@@ -33,8 +33,6 @@ pub enum MlxTileShape {
     Tile32x32,
     Tile16x32,
     Tile8x32,
-    Tile4x32,
-    Tile1x32,
 }
 
 impl MlxTileShape {
@@ -43,8 +41,6 @@ impl MlxTileShape {
             Self::Tile32x32 => 32,
             Self::Tile16x32 => 16,
             Self::Tile8x32 => 8,
-            Self::Tile4x32 => 4,
-            Self::Tile1x32 => 1,
         }
     }
 
@@ -59,15 +55,12 @@ impl MlxTileShape {
     pub const fn wm(self) -> usize {
         match self {
             Self::Tile32x32 | Self::Tile16x32 => 2,
-            Self::Tile8x32 | Self::Tile4x32 | Self::Tile1x32 => 1,
+            Self::Tile8x32 => 1,
         }
     }
 
     pub const fn wn(self) -> usize {
-        match self {
-            Self::Tile1x32 => 1,
-            _ => 2,
-        }
+        2
     }
 
     pub const fn threadgroup_size(self) -> (usize, usize, usize) {
@@ -187,8 +180,6 @@ fn mlx_function_name(dtype: Dtype, transpose_left: bool, transpose_right: bool, 
         MlxTileShape::Tile32x32 => "32_32_16_2_2",
         MlxTileShape::Tile16x32 => "16_32_16_2_2",
         MlxTileShape::Tile8x32 => "8_32_16_1_2",
-        MlxTileShape::Tile4x32 => "4_32_16_1_2",
-        MlxTileShape::Tile1x32 => "1_32_16_1_1",
     };
 
     let prefix = match (dtype, transpose_left, transpose_right) {
