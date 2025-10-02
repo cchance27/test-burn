@@ -474,8 +474,8 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
     let weights_json = fs::read_to_string("pytorch/swiglu_qwen25_weights_full.json").expect("Failed to read weights JSON");
     let weights: SwiGluWeights = serde_json::from_str(&weights_json).expect("Failed to parse weights JSON");
 
-    let d_model = weights.shapes.gate_weight[1]; // 896
-    let ff_dim = weights.shapes.gate_weight[0]; // 4864
+    let ff_dim = weights.shapes.gate_weight[0]; // 4864 in PyTorch layout
+    let d_model = weights.shapes.gate_weight[1]; // 896 in PyTorch layout
 
     // Transpose PyTorch weights to Rust format [d_model, ff_dim] for gate/up, [ff_dim, d_model] for down
     let gate_weight_py = weights.gate_weight;

@@ -88,12 +88,198 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
         });
     }
 
+    if let Some(layout) = tensor_matrix_layout_if_strided(dst) {
+        let base_ptr = {
+            let slice = dst.as_mut_slice();
+            slice.as_mut_ptr()
+        };
+
+        let required = strided_required_len(layout.rows, layout.cols, layout.row_stride, layout.col_stride).ok_or_else(|| {
+            MetalError::InvalidShape(format!(
+                "Stride {}x{} with dims [{}x{}] overflows address space",
+                layout.row_stride, layout.col_stride, layout.rows, layout.cols
+            ))
+        })?;
+
+        let dst_slice = unsafe { std::slice::from_raw_parts_mut(base_ptr, required) };
+        let src_f32 = tensor_data_as_f32(src);
+        return copy_f32_into_strided_slice::<TDst>(
+            layout.rows,
+            layout.cols,
+            layout.row_stride,
+            layout.col_stride,
+            src_f32.as_ref(),
+            dst_slice,
+        );
+    }
+
     let dst_slice = dst.as_mut_slice();
     copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
 }
 
+fn normalize_matrix_dims(mut dims: &[usize]) -> Option<(usize, usize)> {
+    while let Some((&last, rest)) = dims.split_last() {
+        if last == 1 && !rest.is_empty() {
+            dims = rest;
+        } else {
+            break;
+        }
+    }
+
+    match dims.len() {
+        0 => Some((1, 1)),
+        1 => Some((dims[0], 1)),
+        2 => Some((dims[0], dims[1])),
+        _ => None,
+    }
+}
+
 fn dims_are_transposed(src_dims: &[usize], dst_dims: &[usize]) -> bool {
-    src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0]
+    if let (Some((src_rows, src_cols)), Some((dst_rows, dst_cols))) = (normalize_matrix_dims(src_dims), normalize_matrix_dims(dst_dims)) {
+        src_rows == dst_cols && src_cols == dst_rows
+    } else {
+        false
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MatrixLayout {
+    rows: usize,
+    cols: usize,
+    row_stride: usize,
+    col_stride: usize,
+}
+
+fn tensor_matrix_layout_if_strided<T: TensorElement>(tensor: &Tensor<T>) -> Option<MatrixLayout> {
+    let dims = tensor.dims();
+    if dims.len() < 2 || tensor.strides.len() != dims.len() {
+        return None;
+    }
+
+    let rows = dims[dims.len() - 2];
+    let cols = *dims.last().unwrap_or(&1);
+    let row_stride = tensor.strides[tensor.strides.len() - 2];
+    let col_stride = *tensor.strides.last().unwrap_or(&1);
+
+    let expected_row_stride = if cols == 0 { 0 } else { col_stride.saturating_mul(cols) };
+
+    if row_stride == expected_row_stride {
+        None
+    } else {
+        Some(MatrixLayout {
+            rows,
+            cols,
+            row_stride,
+            col_stride,
+        })
+    }
+}
+
+fn strided_required_len(rows: usize, cols: usize, row_stride: usize, col_stride: usize) -> Option<usize> {
+    if rows == 0 || cols == 0 {
+        return Some(0);
+    }
+
+    let row_extent = row_stride.checked_mul(rows - 1)?;
+    let col_extent = col_stride.checked_mul(cols - 1)?;
+    row_extent.checked_add(col_extent)?.checked_add(1)
+}
+
+fn copy_f32_into_strided_slice<TDst: TensorElement>(
+    rows: usize,
+    cols: usize,
+    row_stride: usize,
+    col_stride: usize,
+    src: &[f32],
+    dst: &mut [TDst::Scalar],
+) -> Result<(), MetalError> {
+    if src.len() != rows.saturating_mul(cols) {
+        return Err(MetalError::DimensionMismatch {
+            expected: rows.saturating_mul(cols),
+            actual: src.len(),
+        });
+    }
+
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+
+    let required = strided_required_len(rows, cols, row_stride, col_stride).ok_or_else(|| {
+        MetalError::InvalidShape(format!(
+            "Stride {}x{} with dims [{}x{}] overflows address space",
+            row_stride, col_stride, rows, cols
+        ))
+    })?;
+
+    if dst.len() < required {
+        return Err(MetalError::DimensionMismatch {
+            expected: required,
+            actual: dst.len(),
+        });
+    }
+
+    for row in 0..rows {
+        let src_row_offset = row * cols;
+        let dst_row_offset = row * row_stride;
+        for col in 0..cols {
+            let dst_index = dst_row_offset + col * col_stride;
+            dst[dst_index] = TDst::from_f32(src[src_row_offset + col]);
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_transposed_f32_into_strided_slice<TDst: TensorElement>(
+    src: &[f32],
+    src_rows: usize,
+    src_cols: usize,
+    dst: &mut [TDst::Scalar],
+    layout: MatrixLayout,
+) -> Result<(), MetalError> {
+    if src.len() != src_rows.saturating_mul(src_cols) {
+        return Err(MetalError::DimensionMismatch {
+            expected: src_rows.saturating_mul(src_cols),
+            actual: src.len(),
+        });
+    }
+
+    if layout.rows != src_cols || layout.cols != src_rows {
+        return Err(MetalError::InvalidShape(format!(
+            "Destination layout {:?} is not the transpose of source dims [{}, {}]",
+            layout, src_rows, src_cols
+        )));
+    }
+
+    if layout.rows == 0 || layout.cols == 0 {
+        return Ok(());
+    }
+
+    let required = strided_required_len(layout.rows, layout.cols, layout.row_stride, layout.col_stride).ok_or_else(|| {
+        MetalError::InvalidShape(format!(
+            "Stride {}x{} with dims [{}x{}] overflows address space",
+            layout.row_stride, layout.col_stride, layout.rows, layout.cols
+        ))
+    })?;
+
+    if dst.len() < required {
+        return Err(MetalError::DimensionMismatch {
+            expected: required,
+            actual: dst.len(),
+        });
+    }
+
+    for src_row in 0..src_rows {
+        let src_row_offset = src_row * src_cols;
+        for src_col in 0..src_cols {
+            let dst_row = src_col;
+            let dst_col = src_row;
+            let dst_index = dst_row * layout.row_stride + dst_col * layout.col_stride;
+            dst[dst_index] = TDst::from_f32(src[src_row_offset + src_col]);
+        }
+    }
+
+    Ok(())
 }
 
 fn matrix_strides<T: TensorElement>(tensor: &Tensor<T>) -> Option<(usize, usize)> {
@@ -305,6 +491,47 @@ fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
         });
     }
 
+    if let Some(layout) = tensor_matrix_layout_if_strided(dst) {
+        let base_ptr = {
+            let slice = dst.as_mut_slice();
+            slice.as_mut_ptr()
+        };
+
+        let dst_dims = dst.dims().to_vec();
+        let Some((dst_rows, dst_cols)) = normalize_matrix_dims(&dst_dims) else {
+            return Err(MetalError::InvalidShape(format!(
+                "Unable to interpret destination dims {:?} as a matrix",
+                dst_dims
+            )));
+        };
+
+        if dst_rows != layout.rows || dst_cols != layout.cols {
+            return Err(MetalError::InvalidShape(format!(
+                "Layout {:?} does not match destination dims {:?}",
+                layout, dst_dims
+            )));
+        }
+
+        let required = strided_required_len(layout.rows, layout.cols, layout.row_stride, layout.col_stride).ok_or_else(|| {
+            MetalError::InvalidShape(format!(
+                "Stride {}x{} with dims [{}x{}] overflows address space",
+                layout.row_stride, layout.col_stride, layout.rows, layout.cols
+            ))
+        })?;
+
+        let dst_slice = unsafe { std::slice::from_raw_parts_mut(base_ptr, required) };
+        let src_dims = src.dims().to_vec();
+        let Some((src_rows, src_cols)) = normalize_matrix_dims(&src_dims) else {
+            return Err(MetalError::InvalidShape(format!(
+                "Unable to interpret source dims {:?} as a matrix",
+                src_dims
+            )));
+        };
+
+        let src_slice = tensor_data_as_f32(src);
+        return copy_transposed_f32_into_strided_slice::<TDst>(src_slice.as_ref(), src_rows, src_cols, dst_slice, layout);
+    }
+
     let src_slice = tensor_data_as_f32(src);
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
@@ -448,18 +675,25 @@ fn copy_fused_gate_up_weight<TSrc: TensorElement, TDst: TensorElement>(
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
 
-    if dst_dims.len() != 2 {
+    let Some((src_rows, src_cols)) = normalize_matrix_dims(&src_dims) else {
         return Err(MetalError::InvalidShape(format!(
-            "Fused gate/up weight must be 2D, got {:?}",
+            "Unable to interpret fused gate/up source dims {:?} as a matrix",
+            src_dims
+        )));
+    };
+
+    let Some((dst_rows, dst_cols)) = normalize_matrix_dims(&dst_dims) else {
+        return Err(MetalError::InvalidShape(format!(
+            "Unable to interpret fused gate/up destination dims {:?} as a matrix",
             dst_dims
         )));
-    }
+    };
 
-    if src_dims == dst_dims {
+    if src_rows == dst_rows && src_cols == dst_cols {
         return copy_tensor_into(src, dst);
     }
 
-    if dims_are_transposed(&src_dims, &dst_dims) {
+    if src_rows == dst_cols && src_cols == dst_rows {
         let src_slice = tensor_data_as_f32(src);
         return pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), &src_dims, dst.as_mut_slice(), &dst_dims, 0);
     }
