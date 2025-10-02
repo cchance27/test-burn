@@ -30,20 +30,24 @@ impl KernelInvocable for FusedRmsNormQkvProjectionOp {
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, gamma, weight, bias, feature_dim, total_out_dim) = args;
 
-        let input_dims = input.dims();
-        if input_dims.len() != 2 {
-            return Err(MetalError::InvalidShape(format!(
-                "Fused RMSNorm+QKV expects 2D input [rows, feature_dim], got {:?}",
-                input_dims
-            )));
-        }
+        let rows = {
+            let input_dims = input.dims();
+            if input_dims.len() != 2 {
+                return Err(MetalError::InvalidShape(format!(
+                    "Fused RMSNorm+QKV expects 2D input [rows, feature_dim], got {:?}",
+                    input_dims
+                )));
+            }
 
-        if input_dims[1] != feature_dim as usize {
-            return Err(MetalError::InvalidShape(format!(
-                "Input feature dim {} does not match provided feature_dim {}",
-                input_dims[1], feature_dim
-            )));
-        }
+            if input_dims[1] != feature_dim as usize {
+                return Err(MetalError::InvalidShape(format!(
+                    "Input feature dim {} does not match provided feature_dim {}",
+                    input_dims[1], feature_dim
+                )));
+            }
+
+            input_dims[0]
+        };
 
         if gamma.dims() != [feature_dim as usize] {
             return Err(MetalError::InvalidShape(format!(
@@ -71,7 +75,7 @@ impl KernelInvocable for FusedRmsNormQkvProjectionOp {
 
         ctx.prepare_tensors_for_active_cmd(&[&input, &gamma, &weight, &bias])?;
 
-        let output_dims = vec![input_dims[0], total_out_dim as usize];
+        let output_dims = vec![rows, total_out_dim as usize];
         let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
         let op = FusedRmsNormQkvProjection {
@@ -82,7 +86,7 @@ impl KernelInvocable for FusedRmsNormQkvProjectionOp {
             output: output.clone(),
             feature_dim,
             total_out_dim,
-            rows: input_dims[0] as u32,
+            rows: rows as u32,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
