@@ -660,11 +660,12 @@ fn test_matmul_alpha_beta_skinny_tile_single_row() -> Result<(), MetalError> {
     let keys = context.kernel_manager.mlx_pipeline_keys();
     assert!(
         keys.iter().any(|key| {
-            key.tile_shape == MlxTileShape::Tile8x32
+            key.tile_shape == MlxTileShape::Tile1x32
                 && !key.transpose_left
                 && !key.transpose_right
                 && !key.use_out_source
                 && !key.do_axpby
+                && key.scale_only
                 && !key.has_batch
         }),
         "expected skinny MLX tile in pipeline cache, found {:?}",
@@ -724,14 +725,80 @@ fn test_matmul_alpha_beta_skinny_tile_single_column() -> Result<(), MetalError> 
     let keys = context.kernel_manager.mlx_pipeline_keys();
     assert!(
         keys.iter().any(|key| {
-            key.tile_shape == MlxTileShape::Tile8x32
+            key.tile_shape == MlxTileShape::Tile1x32
                 && !key.transpose_left
                 && !key.transpose_right
                 && !key.use_out_source
                 && !key.do_axpby
+                && key.scale_only
                 && !key.has_batch
         }),
         "expected skinny MLX tile in pipeline cache, found {:?}",
+        keys
+    );
+
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - got).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            got,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_matmul_alpha_beta_tile4_four_rows() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let m = 4usize;
+    let k = 64usize;
+    let n = 128usize;
+    let alpha = 0.75f32;
+    let beta = 0.0f32;
+
+    let left_data: Vec<f32> = (0..(m * k)).map(|i| (i as f32) * 0.021 - 0.2).collect();
+    let right_data: Vec<f32> = (0..(k * n)).map(|i| 0.55 - (i as f32) * 0.013).collect();
+
+    let left_tensor = Tensor::new(vec![m, k], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&left_data))?;
+    let right_tensor = Tensor::new(vec![k, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&right_data))?;
+    let result_data = vec![0.0f32; m * n];
+
+    let expected = cpu_matmul_scaled(&left_data, m, k, &right_data, k, n, alpha, beta, None, false, false);
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor = make_result_tensor(&context, &result_data, &[m, n])?;
+    let actual_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = actual_tensor.to_vec();
+
+    let samples = context.take_matmul_samples();
+    assert!(
+        samples.iter().any(|sample| matches!(sample.backend, MatMulBackend::Mlx)),
+        "expected MLX backend samples but observed {:?}",
+        samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    let keys = context.kernel_manager.mlx_pipeline_keys();
+    assert!(
+        keys.iter().any(|key| {
+            key.tile_shape == MlxTileShape::Tile4x32
+                && !key.transpose_left
+                && !key.transpose_right
+                && !key.use_out_source
+                && !key.do_axpby
+                && key.scale_only
+                && !key.has_batch
+        }),
+        "expected Tile4x32 MLX tile in pipeline cache, found {:?}",
         keys
     );
 
@@ -815,7 +882,12 @@ fn test_matmul_alpha_beta_strided_kv_skinny_tile() -> Result<(), MetalError> {
     let keys = context.kernel_manager.mlx_pipeline_keys();
     assert!(
         keys.iter().any(|key| {
-            key.tile_shape == MlxTileShape::Tile8x32 && !key.transpose_left && !key.transpose_right && !key.use_out_source && !key.do_axpby
+            key.tile_shape == MlxTileShape::Tile1x32
+                && !key.transpose_left
+                && !key.transpose_right
+                && !key.use_out_source
+                && !key.do_axpby
+                && key.scale_only
         }),
         "expected skinny MLX tile in pipeline cache, found {:?}",
         keys

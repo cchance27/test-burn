@@ -51,8 +51,12 @@ pub(super) fn select_mlx_tile_shape(m: usize, n: usize) -> MlxTileShape {
         MlxTileShape::Tile32x32
     } else if slender >= MlxTileShape::Tile16x32.bm() {
         MlxTileShape::Tile16x32
-    } else {
+    } else if slender >= MlxTileShape::Tile8x32.bm() {
         MlxTileShape::Tile8x32
+    } else if slender >= MlxTileShape::Tile4x32.bm() {
+        MlxTileShape::Tile4x32
+    } else {
+        MlxTileShape::Tile1x32
     }
 }
 
