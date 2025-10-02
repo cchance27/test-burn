@@ -1011,7 +1011,12 @@ impl<T: TensorElement> Tensor<T> {
         out: &mut Vec<T::Scalar>,
     ) {
         if dim_idx == dims.len() {
-            out.push(*base_ptr.add(offset));
+            // SAFETY: `base_ptr` points into the tensor's backing allocation and `offset`
+            // is computed using element strides, so the resulting pointer remains within
+            // bounds for the logical slice we are materializing.
+            unsafe {
+                out.push(*base_ptr.add(offset));
+            }
             return;
         }
 
@@ -1022,16 +1027,23 @@ impl<T: TensorElement> Tensor<T> {
 
         let stride = strides[dim_idx];
         if dim_idx == dims.len() - 1 && stride == 1 {
-            let src = base_ptr.add(offset);
-            for idx in 0..dim {
-                out.push(*src.add(idx));
+            // SAFETY: the contiguous fast-path only triggers when the innermost stride
+            // equals 1, so iterating `dim` elements from the computed source pointer
+            // covers exactly the target row without stepping outside the allocation.
+            unsafe {
+                let src = base_ptr.add(offset);
+                for idx in 0..dim {
+                    out.push(*src.add(idx));
+                }
             }
             return;
         }
 
         for idx in 0..dim {
             let child_offset = offset + idx * stride;
-            Self::gather_strided_elements(base_ptr, dims, strides, dim_idx + 1, child_offset, out);
+            unsafe {
+                Self::gather_strided_elements(base_ptr, dims, strides, dim_idx + 1, child_offset, out);
+            }
         }
     }
 

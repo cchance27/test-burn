@@ -14,7 +14,7 @@ fn test_permute_2d_transpose() -> Result<(), crate::metallic::MetalError> {
 
     // Expected result: [1, 4, 2, 5, 3, 6] (row-major order after transpose)
     let result = result_tensor.as_slice();
-    assert_eq!(result, &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    assert_eq!(result.as_slice(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
     Ok(())
 }
 
@@ -46,7 +46,7 @@ fn test_permute_identity() -> Result<(), crate::metallic::MetalError> {
     let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
 
     let result = result_tensor.as_slice();
-    assert_eq!(result, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(result.as_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     Ok(())
 }
 

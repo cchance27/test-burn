@@ -97,8 +97,9 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     let expected = 2.1196_f32;
     let tol = 1e-3_f32; // Tolerant for Metal FP precision
     let output_slice = output.as_slice();
-    assert_eq!(output_slice.len(), m * d_model);
-    for &val in output_slice {
+    let output_data = output_slice.as_slice();
+    assert_eq!(output_data.len(), m * d_model);
+    for &val in output_data {
         assert!(
             (val - expected).abs() < tol,
             "Expected ≈{:.4}, got {:.4} (diff {:.6})",
@@ -174,7 +175,8 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     )?;
 
     let output_slice = output.as_slice();
-    for &val in output_slice {
+    let output_data = output_slice.as_slice();
+    for &val in output_data {
         assert!((val - 0.0).abs() < 1e-6);
     }
 
@@ -244,8 +246,9 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
     let expected = 1.5897012_f32;
     let tol = 1e-3_f32;
     let output_slice = output.as_slice();
-    assert_eq!(output_slice.len(), m * d_model);
-    for &val in output_slice {
+    let output_data = output_slice.as_slice();
+    assert_eq!(output_data.len(), m * d_model);
+    for &val in output_data {
         assert!(
             (val - expected).abs() < tol,
             "Expected ≈{:.4}, got {:.4} (diff {:.6})",

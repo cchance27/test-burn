@@ -90,8 +90,9 @@ mod arange_test {
     fn test_arange() -> Result<(), MetalError> {
         let mut ctx = Context::<F32Element>::new()?;
         let result = ctx.call::<ArangeOp>(5)?;
+        let host = result.as_slice();
 
-        assert_eq!(result.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0]);
+        assert_eq!(host.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0]);
         Ok(())
     }
 }
