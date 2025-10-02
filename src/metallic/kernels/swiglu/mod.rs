@@ -230,7 +230,14 @@ fn execute_swiglu_logic<T: TensorElement>(
     if let Some(fused) = fused_gate_up {
         ctx.prepare_tensors_for_active_cmd(&[fused])?;
     }
-    let d_model = x_normed_flat.dims()[1];
+    let x_dims = x_normed_flat.dims();
+    if x_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "SwiGLU expects flattened input of shape [m, d_model], got {:?}",
+            x_dims
+        )));
+    }
+    let d_model = x_dims[1];
     let hidden_dim = ffn_gate_bias.len();
 
     if hidden_dim != ffn_up_bias.len() {
@@ -250,20 +257,16 @@ fn execute_swiglu_logic<T: TensorElement>(
         }
 
         let expected_cols = hidden_dim * 2;
-        let fused_transpose_b = if fused_dims[0] == d_model && fused_dims[1] == expected_cols {
-            false
-        } else if fused_dims[0] == expected_cols && fused_dims[1] == d_model {
-            true
-        } else {
+        if fused_dims[0] != d_model || fused_dims[1] != expected_cols {
             return Err(MetalError::InvalidShape(format!(
                 "Fused gate/up weight dims {:?} incompatible with d_model {} and ff_dim {}",
                 fused_dims, d_model, hidden_dim
             )));
-        };
+        }
 
         let fused_temp = match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(x_normed_flat, fused_weight, false, fused_transpose_b, cache)?,
-            None => ctx.matmul(x_normed_flat, fused_weight, false, fused_transpose_b)?,
+            Some(cache) => ctx.matmul_with_cache(x_normed_flat, fused_weight, false, false, cache)?,
+            None => ctx.matmul(x_normed_flat, fused_weight, false, false)?,
         };
 
         let gate_view = fused_temp.slice_last_dim(0..hidden_dim)?;
@@ -275,37 +278,29 @@ fn execute_swiglu_logic<T: TensorElement>(
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;
         let gate_dims = ffn_gate.dims();
-        let gate_transpose_b = if gate_dims[0] == d_model {
-            false
-        } else if gate_dims[1] == d_model {
-            true
-        } else {
-            return Err(MetalError::DimensionMismatch {
-                expected: d_model,
-                actual: gate_dims[0],
-            });
-        };
+        if gate_dims.len() != 2 || gate_dims[0] != d_model || gate_dims[1] != hidden_dim {
+            return Err(MetalError::InvalidShape(format!(
+                "FFN gate weight must be [d_model, ff_dim], got {:?} for d_model {} and ff_dim {}",
+                gate_dims, d_model, hidden_dim
+            )));
+        }
         let gate_temp = match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_gate, false, gate_transpose_b, cache)?,
-            None => ctx.matmul(x_normed_flat, ffn_gate, false, gate_transpose_b)?,
+            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_gate, false, false, cache)?,
+            None => ctx.matmul(x_normed_flat, ffn_gate, false, false)?,
         };
 
         // up_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_up])?;
         let up_dims = ffn_up.dims();
-        let up_transpose_b = if up_dims[0] == d_model {
-            false
-        } else if up_dims[1] == d_model {
-            true
-        } else {
-            return Err(MetalError::DimensionMismatch {
-                expected: d_model,
-                actual: up_dims[0],
-            });
-        };
+        if up_dims.len() != 2 || up_dims[0] != d_model || up_dims[1] != hidden_dim {
+            return Err(MetalError::InvalidShape(format!(
+                "FFN up weight must be [d_model, ff_dim], got {:?} for d_model {} and ff_dim {}",
+                up_dims, d_model, hidden_dim
+            )));
+        }
         let up_temp = match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_up, false, up_transpose_b, cache)?,
-            None => ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?,
+            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_up, false, false, cache)?,
+            None => ctx.matmul(x_normed_flat, ffn_up, false, false)?,
         };
         let gate_stride = leading_stride_as_u32(&gate_temp)?;
         let up_stride = leading_stride_as_u32(&up_temp)?;
@@ -337,26 +332,24 @@ fn execute_swiglu_logic<T: TensorElement>(
     };
 
     // down_proj: [m, ff_dim] @ [ff_dim, d_model] -> [m, d_model]
-    let hidden_cols = hidden.dims()[1];
-    let ffn_down_rows = ffn_down.dims()[0];
-    let ffn_down_cols = ffn_down.dims()[1];
-    let ffn_temp = if hidden_cols == ffn_down_rows {
-        // Hidden [m, ff_dim] @ ffn_down [ff_dim, d_model] -> [m, d_model]
-        match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(&hidden, ffn_down, false, false, cache)?,
-            None => ctx.matmul(&hidden, ffn_down, false, false)?,
-        }
-    } else if hidden_cols == ffn_down_cols {
-        // Hidden [m, ff_dim] @ ffn_down^T [ff_dim, d_model] where stored as [d_model, ff_dim]
-        match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(&hidden, ffn_down, false, true, cache)?,
-            None => ctx.matmul(&hidden, ffn_down, false, true)?,
-        }
-    } else {
-        return Err(MetalError::DimensionMismatch {
-            expected: hidden_cols,
-            actual: ffn_down_rows,
-        });
+    let hidden_dims = hidden.dims();
+    if hidden_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "SwiGLU activation output must be 2D [m, ff_dim], got {:?}",
+            hidden_dims
+        )));
+    }
+    let hidden_cols = hidden_dims[1];
+    let ffn_down_dims = ffn_down.dims();
+    if ffn_down_dims.len() != 2 || ffn_down_dims[0] != hidden_cols || ffn_down_dims[1] != d_model {
+        return Err(MetalError::InvalidShape(format!(
+            "FFN down weight must be [ff_dim, d_model], got {:?} for ff_dim {} and d_model {}",
+            ffn_down_dims, hidden_cols, d_model
+        )));
+    }
+    let ffn_temp = match cache.as_mut() {
+        Some(cache) => ctx.matmul_with_cache(&hidden, ffn_down, false, false, cache)?,
+        None => ctx.matmul(&hidden, ffn_down, false, false)?,
     };
 
     // Add down bias to final projection output

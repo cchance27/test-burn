@@ -295,12 +295,7 @@ impl<T: TensorElement> Qwen25<T> {
                 .reshape(vec![batch, seq, d_model])?;
 
             let attn_out = ctx
-                .matmul(
-                    &attn_out_reshaped.reshape(vec![m, d_model])?,
-                    &block.attn_out_weight,
-                    false,
-                    true, // Transpose the output weight for correct dimensions
-                )?
+                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, false)?
                 .reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
@@ -470,7 +465,7 @@ impl<T: TensorElement> Qwen25<T> {
             let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
 
             let attn_out = ctx
-                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
+                .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, false)?
                 .reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
