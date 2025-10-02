@@ -56,7 +56,7 @@ fn test_silu_numerical_stability() -> Result<(), MetalError> {
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
-    let metal_slice = metal_output.as_slice();
+    let metal_slice = metal_output.as_ref();
 
     // Check that the output values are finite (not NaN or infinity)
     for &val in metal_slice {
@@ -120,7 +120,7 @@ fn test_silu_extreme_positive_values() -> Result<(), MetalError> {
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
-    let metal_slice = metal_output.as_slice();
+    let metal_slice = metal_output.as_ref();
 
     let rtol = 1e-4f64;
     let atol = 1e-6f64;

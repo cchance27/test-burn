@@ -97,7 +97,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
     let expected = 2.1196_f32;
     let tol = 1e-3_f32; // Tolerant for Metal FP precision
     let output_slice = output.as_slice();
-    let output_data = output_slice.as_slice();
+    let output_data = output_slice.as_ref();
     assert_eq!(output_data.len(), m * d_model);
     for &val in output_data {
         assert!(
@@ -175,7 +175,7 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     )?;
 
     let output_slice = output.as_slice();
-    let output_data = output_slice.as_slice();
+    let output_data = output_slice.as_ref();
     for &val in output_data {
         assert!((val - 0.0).abs() < 1e-6);
     }
@@ -246,7 +246,7 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
     let expected = 1.5897012_f32;
     let tol = 1e-3_f32;
     let output_slice = output.as_slice();
-    let output_data = output_slice.as_slice();
+    let output_data = output_slice.as_ref();
     assert_eq!(output_data.len(), m * d_model);
     for &val in output_data {
         assert!(
@@ -484,7 +484,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
 
     let gate_weight_rust = transpose(ff_dim, d_model, &gate_weight_py);
     let up_weight_rust = transpose(ff_dim, d_model, &up_weight_py);
-    let down_weight_rust = down_weight_py; // already [ff_dim, d_model]
+    let down_weight_rust = transpose(d_model, ff_dim, &down_weight_py);
 
     // Create weight Tensors
     let mut ctx = Context::<F32Element>::new()?;

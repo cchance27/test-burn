@@ -118,7 +118,7 @@ mod random_uniform_test {
         let result = ctx.call::<RandomUniformOp>((vec![5], 0.0, 1.0, Some(42)))?;
 
         let values = result.as_slice();
-        let values_slice = values.as_slice();
+        let values_slice = values.as_ref();
         assert_eq!(values_slice.len(), 5);
         for &val in values_slice {
             assert!((0.0..=1.0).contains(&val));

@@ -131,7 +131,7 @@ fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
-    let metal_slice = metal_output.as_slice();
+    let metal_slice = metal_output.as_ref();
 
     // Check that the output values are finite (not NaN or infinity)
     for &val in metal_slice {

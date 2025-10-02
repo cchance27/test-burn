@@ -44,13 +44,13 @@ fn elementwise_ops_and_fill() {
     .unwrap();
     let c = a.add_elem(&b, &mut ctx).unwrap();
     let c_slice = c.as_slice();
-    assert_eq!(c_slice.as_slice(), &[6.0, 8.0, 10.0, 12.0]);
+    assert_eq!(c_slice.as_ref(), &[6.0, 8.0, 10.0, 12.0]);
     let d = a.mul_elem(&b, &mut ctx).unwrap();
     let d_slice = d.as_slice();
-    assert_eq!(d_slice.as_slice(), &[5.0, 12.0, 21.0, 32.0]);
+    assert_eq!(d_slice.as_ref(), &[5.0, 12.0, 21.0, 32.0]);
     let mut e = a.add_scalar(10.0, &mut ctx).unwrap();
     let e_slice = e.as_slice();
-    assert_eq!(e_slice.as_slice(), &[11.0, 12.0, 13.0, 14.0]);
+    assert_eq!(e_slice.as_ref(), &[11.0, 12.0, 13.0, 14.0]);
     e.fill(2.5);
     assert!(e.as_slice().iter().all(|&x| (x - 2.5).abs() < 1e-12));
 }
@@ -92,7 +92,7 @@ fn arange_helper() {
     ctx.synchronize();
     assert_eq!(t.dims(), &[2, 3]);
     let t_slice = t.as_slice();
-    assert_eq!(t_slice.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
+    assert_eq!(t_slice.as_ref(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0]);
 }
 
 #[test]
@@ -266,7 +266,7 @@ fn batched_operations_correctness() {
     assert!(t1.as_slice().iter().all(|&x| x == 0.0));
     assert!(t2.as_slice().iter().all(|&x| x == 1.0));
     let t3_slice = t3.as_slice();
-    assert_eq!(t3_slice.as_slice(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
+    assert_eq!(t3_slice.as_ref(), &[0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]);
 }
 
 #[test]
@@ -328,7 +328,7 @@ fn borrow_host_buffer() {
 
     assert_eq!(t.dims(), &[2, 3]);
     let t_slice = t.as_slice();
-    assert_eq!(t_slice.as_slice(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    assert_eq!(t_slice.as_ref(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
 
     // Note: in real usage, the caller must ensure `data` outlives the tensor
     // This is just a basic functionality test

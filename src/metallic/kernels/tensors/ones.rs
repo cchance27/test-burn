@@ -100,7 +100,7 @@ mod ones_test {
         let result = ctx.call::<OnesOp>(vec![5])?;
         let host = result.as_slice();
 
-        assert_eq!(host.as_slice(), &[1.0, 1.0, 1.0, 1.0, 1.0]);
+        assert_eq!(host.as_ref(), &[1.0, 1.0, 1.0, 1.0, 1.0]);
         Ok(())
     }
 }

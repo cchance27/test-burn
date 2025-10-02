@@ -127,7 +127,7 @@ fn arange_sdpa_ours_vs_pytorch_causal() {
     let output = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, true).unwrap();
     assert_eq!(output.dims(), DIMENSIONS);
     let output_slice = output.as_slice();
-    assert_eq!(output_slice.as_slice(), &pytorch_arange_causal);
+    assert_eq!(output_slice.as_ref(), &pytorch_arange_causal);
 }
 
 #[test]
@@ -169,7 +169,7 @@ fn arange_sdpa_ours_vs_pytorch_noncausal() {
         .unwrap();
     assert_eq!(output.dims(), DIMENSIONS);
     let output_slice = output.as_slice();
-    assert_eq!(output_slice.as_slice(), &PYTORCH_ARANGE_NONCAUSAL);
+    assert_eq!(output_slice.as_ref(), &PYTORCH_ARANGE_NONCAUSAL);
 }
 
 #[test]
@@ -589,7 +589,7 @@ fn test_sdpa_extreme_values() -> Result<(), MetalError> {
 
     let output = result.as_slice();
     println!("Large values output: {:?}", output);
-    let output_slice = output.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
     for &val in output_slice {
@@ -634,7 +634,7 @@ fn test_sdpa_extreme_negative_values() -> Result<(), MetalError> {
     let result = context.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?; // causal = false
 
     let output = result.as_slice();
-    let output_slice = output.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
     for &val in output_slice {
@@ -682,7 +682,7 @@ fn test_sdpa_mixed_extreme_values() -> Result<(), MetalError> {
     context.synchronize();
 
     let output = result.as_slice();
-    let output_slice = output.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
     for &val in output_slice {
@@ -731,7 +731,7 @@ fn test_sdpa_causal_extreme_values() -> Result<(), MetalError> {
     context.synchronize();
 
     let output = result.as_slice();
-    let output_slice = output.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
     for &val in output_slice {
@@ -779,7 +779,7 @@ fn test_sdpa_zero_tensors() -> Result<(), MetalError> {
     context.synchronize();
 
     let output = result.as_slice();
-    let output_slice = output.as_slice();
+    let output_slice = output.as_ref();
 
     // Verify output does not contain infinities or NaNs
     for &val in output_slice {
@@ -1027,7 +1027,7 @@ fn check_row_stochastic_property(batch: usize, seq_q: usize, seq_k: usize, dim: 
     // Check that each row sums to approximately 1.0
     let _rtol = 1e-4f64;
     let _atol = 1e-6f64;
-    let metal_data = metal_slice.as_slice();
+    let metal_data = metal_slice.as_ref();
 
     for b in 0..batch {
         for i in 0..seq_q {

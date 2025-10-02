@@ -353,7 +353,7 @@ fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
         for bh in 0..batch_heads {
             let batch_view = history.tensor.get_batch(bh)?;
             let host_slice = batch_view.as_slice();
-            gpu_values.extend_from_slice(host_slice.as_slice());
+            gpu_values.extend_from_slice(host_slice.as_ref());
         }
         let mut expected = Vec::with_capacity(steps * batch_heads * head_dim);
         for bh in 0..batch_heads {
