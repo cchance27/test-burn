@@ -7,7 +7,9 @@ pub struct TransformerBlock<T: TensorElement> {
     pub attn_qkv_bias: Tensor<T>,
     pub attn_out_weight: Tensor<T>,
 
-    // Feedforward
+    // Feedforward matrices use row-major layout.
+    // - ffn_gate_up_weight: [d_model, 2 * ff_dim] fused buffer with contiguous gate/up columns.
+    // - ffn_down:           [ff_dim, d_model] projection back to the model dimension.
     pub ffn_down: Tensor<T>,
     pub ffn_gate_up_weight: Tensor<T>,
     pub ffn_gate: Tensor<T>,
@@ -40,14 +42,13 @@ where
 
         // FFN (SwiGLU)
         // Allocate FFN weights in the layout expected by `swiglu`:
-        // - gate/up: [d_model, ff_dim]
-        // - down:    [ff_dim, d_model]
-        let ffn_down = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
-        let ffn_gate_up_weight = Tensor::zeros(vec![2 * cfg.ff_dim, cfg.d_model], ctx, false)?;
-        #[allow(clippy::single_range_in_vec_init)]
-        let ffn_gate = ffn_gate_up_weight.slice(&[0..cfg.ff_dim])?;
-        #[allow(clippy::single_range_in_vec_init)]
-        let ffn_up = ffn_gate_up_weight.slice(&[cfg.ff_dim..2 * cfg.ff_dim])?;
+        // - gate/up (fused buffer): [d_model, 2 * ff_dim]
+        //   with gate = [..., 0..ff_dim) and up = [..., ff_dim..2*ff_dim)
+        // - down:                  [ff_dim, d_model]
+        let ffn_down = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
+        let ffn_gate_up_weight = Tensor::zeros(vec![cfg.d_model, 2 * cfg.ff_dim], ctx, false)?;
+        let ffn_gate = ffn_gate_up_weight.slice_last_dim(0..cfg.ff_dim)?;
+        let ffn_up = ffn_gate_up_weight.slice_last_dim(cfg.ff_dim..2 * cfg.ff_dim)?;
 
         // FFN biases
         let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx, false)?;

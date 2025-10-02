@@ -31,6 +31,7 @@ pub struct Qwen25<T: TensorElement> {
     pub config: Qwen25Config,
     pub blocks: Vec<TransformerBlock<T>>,
     pub embed_weight: Tensor<T>,
+    /// Output projection stored as [d_model, vocab_size] to match matmul layout.
     pub output_weight: Tensor<T>,
     pub final_norm_gamma: Tensor<T>,
     pub rope_cos_cache: Tensor<T>,
@@ -95,8 +96,8 @@ impl<T: TensorElement> Qwen25<T> {
         let m = batch * seq;
         let flat_hidden = hidden.reshape(vec![m, d_model])?;
 
-        // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
-        let logits_flat = ctx.matmul(&flat_hidden, &self.output_weight, false, true)?;
+        // Apply output projection: [batch*seq, d_model] x [d_model, vocab_size] -> [batch*seq, vocab_size]
+        let logits_flat = ctx.matmul(&flat_hidden, &self.output_weight, false, false)?;
 
         // Synchronize to ensure matmul is complete before reading values
 
@@ -140,7 +141,7 @@ impl<T: TensorElement> Qwen25<T> {
     pub fn new(config: Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         // allocate embed and output weights
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
-        let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
+        let output_weight = Tensor::zeros(vec![config.d_model, config.vocab_size], ctx, false)?;
         let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx, false)?;
 
         let mut blocks = Vec::with_capacity(config.n_layers);
