@@ -10,6 +10,7 @@ use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixM
 use std::time::Duration;
 
 use super::{KernelFunction, KernelInvocable, kernel_manager::MlxPipelineKey};
+use crate::metallic::instrumentation::MatMulDispatchHandle;
 use crate::metallic::tensor::MpsMatrixBatchView;
 use crate::metallic::{
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
@@ -64,6 +65,7 @@ struct MatMulMps {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+    profiler: Option<MatMulDispatchHandle>,
 }
 
 #[repr(C)]
@@ -163,7 +165,15 @@ impl MatMulMps {
             result_desc,
             gemm,
             batch_size: result_view.batch,
+            profiler: None,
         })
+    }
+}
+
+impl MatMulMps {
+    fn with_profiler(mut self, profiler: MatMulDispatchHandle) -> Self {
+        self.profiler = Some(profiler);
+        self
     }
 }
 
@@ -181,6 +191,7 @@ struct MatMulMlx {
     batch_stride_b: usize,
     tiles_n: usize,
     tiles_m: usize,
+    profiler: Option<MatMulDispatchHandle>,
 }
 
 impl MatMulMlx {
@@ -289,7 +300,15 @@ impl MatMulMlx {
             batch_stride_b,
             tiles_n,
             tiles_m,
+            profiler: None,
         })
+    }
+}
+
+impl MatMulMlx {
+    fn with_profiler(mut self, profiler: MatMulDispatchHandle) -> Self {
+        self.profiler = Some(profiler);
+        self
     }
 }
 
@@ -435,7 +454,12 @@ impl KernelInvocable for MatMulOp {
             let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
             command_buffer.clone()
         };
-        ctx.register_matmul_dispatch(&command_buffer, selected_backend);
+        let profiler = ctx.register_matmul_dispatch(&command_buffer, selected_backend);
+
+        let implementation = match implementation {
+            MatMulImplementation::Mps(op) => MatMulImplementation::Mps(op.with_profiler(profiler)),
+            MatMulImplementation::Mlx(op) => MatMulImplementation::Mlx(op.with_profiler(profiler)),
+        };
 
         Ok((Box::new(MatMul { implementation }), out))
     }
@@ -449,6 +473,10 @@ impl Operation for MatMulMps {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        if let Some(profiler) = &self.profiler {
+            profiler.sample_start_blit(command_buffer);
+        }
+
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -460,6 +488,10 @@ impl Operation for MatMulMps {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
+        if let Some(profiler) = &self.profiler {
+            profiler.sample_end_blit(command_buffer);
+        }
 
         Ok(())
     }
@@ -474,6 +506,10 @@ impl Operation for MatMulMlx {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        if let Some(profiler) = &self.profiler {
+            profiler.sample_start_compute(&encoder);
+        }
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.left_buf, self.left_offset);
@@ -509,6 +545,11 @@ impl Operation for MatMulMlx {
             depth: 2 as NSUInteger,
         };
         dispatch_threadgroups(&encoder, grid, threads);
+
+        if let Some(profiler) = &self.profiler {
+            profiler.sample_end_compute(&encoder);
+        }
+
         encoder.endEncoding();
 
         Ok(())

@@ -9,6 +9,7 @@ use super::{KernelFunction, KernelInvocable, MatMulBackend};
 use crate::metallic::{
     Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    instrumentation::MatMulDispatchHandle,
     resource_cache::ResourceCache,
 };
 
@@ -28,6 +29,7 @@ struct MatMulAlphaBeta {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+    profiler: Option<MatMulDispatchHandle>,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -168,18 +170,26 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             result_desc,
             gemm,
             batch_size: matmul_result_view.batch,
+            profiler: None,
         };
-
-        {
+        let op = {
             let command_buffer = {
                 let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
                 command_buffer.clone()
             };
-            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps);
-        }
+            let profiler = ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps);
+            op.with_profiler(profiler)
+        };
 
         // Return the boxed operation and the result tensor (already provided)
         Ok((Box::new(op), result.clone()))
+    }
+}
+
+impl MatMulAlphaBeta {
+    fn with_profiler(mut self, profiler: MatMulDispatchHandle) -> Self {
+        self.profiler = Some(profiler);
+        self
     }
 }
 
@@ -191,6 +201,10 @@ impl Operation for MatMulAlphaBeta {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        if let Some(profiler) = &self.profiler {
+            profiler.sample_start_blit(command_buffer);
+        }
+
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -202,6 +216,11 @@ impl Operation for MatMulAlphaBeta {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
+        if let Some(profiler) = &self.profiler {
+            profiler.sample_end_blit(command_buffer);
+        }
+
         Ok(())
     }
 }
