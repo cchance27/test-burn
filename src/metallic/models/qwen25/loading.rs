@@ -89,6 +89,103 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
     copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
 }
 
+fn dims_are_transposed(src_dims: &[usize], dst_dims: &[usize]) -> bool {
+    src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0]
+}
+
+fn copy_transposed_f32_into_slice<TDst: TensorElement>(
+    src_slice: &[f32],
+    src_dims: &[usize],
+    dst_slice: &mut [TDst::Scalar],
+    dst_dims: &[usize],
+) -> Result<(), MetalError> {
+    if src_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Expected 2D source tensor for transpose, got {:?}",
+            src_dims
+        )));
+    }
+
+    if dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Expected 2D destination tensor for transpose, got {:?}",
+            dst_dims
+        )));
+    }
+
+    let src_rows = src_dims[0];
+    let src_cols = src_dims[1];
+
+    if dst_dims[0] != src_cols || dst_dims[1] != src_rows {
+        return Err(MetalError::InvalidShape(format!(
+            "Destination dims {:?} are not the transpose of source dims {:?}",
+            dst_dims, src_dims
+        )));
+    }
+
+    if src_slice.len() != src_rows * src_cols {
+        return Err(MetalError::DimensionMismatch {
+            expected: src_rows * src_cols,
+            actual: src_slice.len(),
+        });
+    }
+
+    if dst_slice.len() != src_slice.len() {
+        return Err(MetalError::DimensionMismatch {
+            expected: src_slice.len(),
+            actual: dst_slice.len(),
+        });
+    }
+
+    let dst_cols = dst_dims[1];
+
+    for row in 0..src_rows {
+        for col in 0..src_cols {
+            let src_index = row * src_cols + col;
+            let dst_row = col;
+            let dst_col = row;
+            let dst_index = dst_row * dst_cols + dst_col;
+            dst_slice[dst_index] = TDst::from_f32(src_slice[src_index]);
+        }
+    }
+
+    Ok(())
+}
+
+fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    if src.len() != dst.len() {
+        return Err(MetalError::DimensionMismatch {
+            expected: dst.len(),
+            actual: src.len(),
+        });
+    }
+
+    let src_slice = tensor_data_as_f32(src);
+    let src_dims = src.dims().to_vec();
+    let dst_dims = dst.dims().to_vec();
+    let dst_slice = dst.as_mut_slice();
+
+    copy_transposed_f32_into_slice::<TDst>(src_slice.as_ref(), &src_dims, dst_slice, &dst_dims)
+}
+
+fn copy_tensor_with_optional_transpose<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    let src_dims = src.dims().to_vec();
+    let dst_dims = dst.dims().to_vec();
+    if src_dims == dst_dims {
+        copy_tensor_into(src, dst)
+    } else if dims_are_transposed(&src_dims, &dst_dims) {
+        copy_tensor_transposed_into(src, dst)
+    } else {
+        copy_tensor_into(src, dst)
+    }
+}
+
 fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
     src_slice: &[f32],
     src_dims: &[usize],
@@ -164,16 +261,26 @@ fn copy_fused_gate_up_weight<TSrc: TensorElement, TDst: TensorElement>(
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
 
+    if dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Fused gate/up weight must be 2D, got {:?}",
+            dst_dims
+        )));
+    }
+
     if src_dims == dst_dims {
         return copy_tensor_into(src, dst);
     }
 
-    if src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0] {
+    if dims_are_transposed(&src_dims, &dst_dims) {
         let src_slice = tensor_data_as_f32(src);
         return pack_weight_transposed_into_fused_slice::<TDst>(src_slice.as_ref(), &src_dims, dst.as_mut_slice(), &dst_dims, 0);
     }
 
-    copy_tensor_into(src, dst)
+    Err(MetalError::InvalidShape(format!(
+        "Unable to map fused gate/up weight with source dims {:?} into destination dims {:?}",
+        src_dims, dst_dims
+    )))
 }
 
 fn copy_bias_into_fused<TSrc: TensorElement, TDst: TensorElement>(
@@ -243,7 +350,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
     if (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
         && tensor.len() == qwen.output_weight.len()
     {
-        copy_tensor_into(tensor, &mut qwen.output_weight)?;
+        copy_tensor_with_optional_transpose(tensor, &mut qwen.output_weight)?;
         return Ok(());
     }
 
@@ -262,7 +369,18 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         let is_output_unset = output_slice.iter().all(|&x| T::to_f32(x) == 0.0);
 
         if is_output_unset && tensor.len() == qwen.output_weight.len() {
-            copy_tensor_into(tensor, &mut qwen.output_weight)?;
+            let src_dims = tensor.dims().to_vec();
+            let dst_dims = qwen.output_weight.dims().to_vec();
+            if src_dims == dst_dims {
+                copy_tensor_into(tensor, &mut qwen.output_weight)?;
+            } else if dims_are_transposed(&src_dims, &dst_dims) {
+                copy_tensor_transposed_into(tensor, &mut qwen.output_weight)?;
+            } else {
+                return Err(MetalError::InvalidOperation(format!(
+                    "MAPPING -> token_embd.weight shape mismatch: {:?} vs {:?}",
+                    src_dims, dst_dims
+                )));
+            }
         } else if is_output_unset {
             return Err(MetalError::InvalidOperation(format!(
                 "MAPPING -> token_embd.weight size mismatch: {} vs {}",
@@ -379,18 +497,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("w1.weight"))
             && tensor.len() == block.ffn_gate.len()
         {
-            if tensor.dims() == block.ffn_gate.dims() {
-                copy_tensor_into(tensor, &mut block.ffn_gate)?;
-            } else if tensor.dims().len() == 2
-                && block.ffn_gate.dims().len() == 2
-                && tensor.dims()[0] == block.ffn_gate.dims()[1]
-                && tensor.dims()[1] == block.ffn_gate.dims()[0]
-            {
-                let src = tensor_data_as_f32(tensor);
-                copy_f32_into_tensor(src.as_ref(), &mut block.ffn_gate)?;
-            } else {
-                copy_tensor_into(tensor, &mut block.ffn_gate)?;
-            }
+            copy_tensor_with_optional_transpose(tensor, &mut block.ffn_gate)?;
             return Ok(());
         }
 
@@ -401,18 +508,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("w3.weight"))
             && tensor.len() == block.ffn_up.len()
         {
-            if tensor.dims() == block.ffn_up.dims() {
-                copy_tensor_into(tensor, &mut block.ffn_up)?;
-            } else if tensor.dims().len() == 2
-                && block.ffn_up.dims().len() == 2
-                && tensor.dims()[0] == block.ffn_up.dims()[1]
-                && tensor.dims()[1] == block.ffn_up.dims()[0]
-            {
-                let src = tensor_data_as_f32(tensor);
-                copy_f32_into_tensor(src.as_ref(), &mut block.ffn_up)?;
-            } else {
-                copy_tensor_into(tensor, &mut block.ffn_up)?;
-            }
+            copy_tensor_with_optional_transpose(tensor, &mut block.ffn_up)?;
             return Ok(());
         }
 
@@ -425,18 +521,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("wo.weight"))
             && tensor.len() == block.ffn_down.len()
         {
-            if tensor.dims() == block.ffn_down.dims() {
-                copy_tensor_into(tensor, &mut block.ffn_down)?;
-            } else if tensor.dims().len() == 2
-                && block.ffn_down.dims().len() == 2
-                && tensor.dims()[0] == block.ffn_down.dims()[1]
-                && tensor.dims()[1] == block.ffn_down.dims()[0]
-            {
-                let src = tensor_data_as_f32(tensor);
-                copy_f32_into_tensor(src.as_ref(), &mut block.ffn_down)?;
-            } else {
-                copy_tensor_into(tensor, &mut block.ffn_down)?;
-            }
+            copy_tensor_with_optional_transpose(tensor, &mut block.ffn_down)?;
             return Ok(());
         }
 
@@ -622,38 +707,86 @@ fn extract_config_from_ggufmodel(gguf_model: &GGUFModel) -> Qwen25Config {
 
 #[cfg(test)]
 mod tests {
-    use super::pack_weight_transposed_into_fused_slice;
+    use super::{copy_transposed_f32_into_slice, pack_weight_transposed_into_fused_slice};
     use crate::metallic::{F32Element, MetalError};
 
     #[test]
+    fn copy_transposed_helper_handles_row_major_export() {
+        let src_dims = vec![6, 4];
+        let dst_dims = vec![4, 6];
+        let src: Vec<f32> = (1..=24).map(|v| v as f32).collect();
+        let mut dst = vec![0.0f32; dst_dims[0] * dst_dims[1]];
+
+        copy_transposed_f32_into_slice::<F32Element>(&src, &src_dims, &mut dst, &dst_dims).unwrap();
+
+        assert_eq!(
+            dst,
+            vec![
+                1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 2.0, 6.0, 10.0, 14.0, 18.0, 22.0, 3.0, 7.0, 11.0, 15.0, 19.0, 23.0, 4.0, 8.0, 12.0, 16.0,
+                20.0, 24.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn copy_transposed_helper_handles_column_major_export() {
+        let src_dims = vec![4, 6];
+        let dst_dims = vec![6, 4];
+        let src: Vec<f32> = (1..=24).map(|v| v as f32).collect();
+        let mut dst = vec![0.0f32; dst_dims[0] * dst_dims[1]];
+
+        copy_transposed_f32_into_slice::<F32Element>(&src, &src_dims, &mut dst, &dst_dims).unwrap();
+
+        assert_eq!(
+            dst,
+            vec![
+                1.0, 7.0, 13.0, 19.0, 2.0, 8.0, 14.0, 20.0, 3.0, 9.0, 15.0, 21.0, 4.0, 10.0, 16.0, 22.0, 5.0, 11.0, 17.0, 23.0, 6.0, 12.0,
+                18.0, 24.0,
+            ],
+        );
+    }
+
+    #[test]
     fn pack_weight_transposes_row_major_layouts() {
-        let src_dims = vec![3, 2];
-        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let fused_dims = vec![2, 3];
+        let src_dims = vec![6, 4];
+        let src: Vec<f32> = (1..=24).map(|v| v as f32).collect();
+        let fused_dims = vec![4, 6];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
         pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
 
-        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+        assert_eq!(
+            fused,
+            vec![
+                1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 2.0, 6.0, 10.0, 14.0, 18.0, 22.0, 3.0, 7.0, 11.0, 15.0, 19.0, 23.0, 4.0, 8.0, 12.0, 16.0,
+                20.0, 24.0,
+            ],
+        );
     }
 
     #[test]
     fn pack_weight_transposes_column_major_exports() {
-        let src_dims = vec![2, 3];
-        let src = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
-        let fused_dims = vec![2, 3];
+        let src_dims = vec![4, 6];
+        let src: Vec<f32> = (1..=24).map(|v| v as f32).collect();
+        let fused_dims = vec![4, 6];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
         pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0).unwrap();
 
-        assert_eq!(fused, vec![1.0, 3.0, 5.0, 2.0, 4.0, 6.0]);
+        assert_eq!(
+            fused,
+            vec![
+                1.0, 5.0, 9.0, 13.0, 17.0, 21.0, 2.0, 6.0, 10.0, 14.0, 18.0, 22.0, 3.0, 7.0, 11.0, 15.0, 19.0, 23.0, 4.0, 8.0, 12.0, 16.0,
+                20.0, 24.0,
+            ],
+        );
     }
 
     #[test]
     fn pack_weight_errors_when_rows_mismatch_fused_input() {
-        let src_dims = vec![4, 3];
-        let src = vec![0.0; 12];
-        let fused_dims = vec![2, 6];
+        let src_dims = vec![5, 5];
+        let src = vec![0.0; src_dims[0] * src_dims[1]];
+        let fused_dims = vec![4, 6];
         let mut fused = vec![0.0; fused_dims[0] * fused_dims[1]];
 
         let err = pack_weight_transposed_into_fused_slice::<F32Element>(&src, &src_dims, &mut fused, &fused_dims, 0)
