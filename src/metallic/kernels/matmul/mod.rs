@@ -85,6 +85,7 @@ struct GemmParams {
     swizzle_log: i32,
     gemm_k_iterations_aligned: i32,
     batch_ndim: i32,
+    alpha_scale: f32,
 }
 
 impl MatMulMps {
@@ -231,6 +232,7 @@ impl MatMulMlx {
             align_k,
             use_out_source: false,
             do_axpby: false,
+            scale_only: false,
         };
 
         let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;
@@ -286,6 +288,7 @@ impl MatMulMlx {
             gemm_k_iterations_aligned: i32::try_from(k / bk.max(1))
                 .map_err(|_| MetalError::InvalidOperation("gemm k iterations exceed i32 range".to_string()))?,
             batch_ndim: if has_batch { 1 } else { 0 },
+            alpha_scale: 1.0,
         };
 
         Ok(Self {

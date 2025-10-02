@@ -39,6 +39,7 @@ pub struct MlxPipelineKey {
     pub align_k: bool,
     pub use_out_source: bool,
     pub do_axpby: bool,
+    pub scale_only: bool,
 }
 
 #[derive(Default)]
@@ -151,6 +152,7 @@ fn build_mlx_function_constants(key: MlxPipelineKey) -> Retained<MTLFunctionCons
     set_bool_constant(&constants, 201, key.align_n);
     set_bool_constant(&constants, 202, key.align_k);
     set_bool_constant(&constants, 300, false);
+    set_bool_constant(&constants, 310, key.scale_only);
 
     constants
 }

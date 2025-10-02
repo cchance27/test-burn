@@ -5,6 +5,8 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLResource, MTLResourceUsage};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
+#[cfg(test)]
+use std::cell::Cell;
 
 use super::{
     KernelFunction, KernelInvocable, MatMulBackend, MatMulBackendPreference, matrix_strides_from_view, mps_matrix_from_buffer, supports_mlx,
@@ -41,6 +43,25 @@ struct MatMulAlphaBetaMps {
     gemm: Retained<MPSMatrixMultiplication>,
     batch_size: usize,
     profiler: Option<MatMulDispatchHandle>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static LAST_MLX_ALPHA_BETA_FLAGS: Cell<Option<(bool, bool)>> = Cell::new(None);
+}
+
+#[cfg(test)]
+fn record_mlx_alpha_beta_flags(use_out_source: bool, scale_only: bool) {
+    LAST_MLX_ALPHA_BETA_FLAGS.with(|cell| cell.set(Some((use_out_source, scale_only))));
+}
+
+#[cfg(test)]
+pub(crate) fn take_last_mlx_alpha_beta_flags() -> Option<(bool, bool)> {
+    LAST_MLX_ALPHA_BETA_FLAGS.with(|cell| {
+        let value = cell.get();
+        cell.set(None);
+        value
+    })
 }
 
 #[repr(C)]
@@ -357,8 +378,12 @@ impl MatMulAlphaBetaMlx {
         let align_n = n % 32 == 0;
         let align_k = k % 16 == 0;
 
-        let use_out_source = alpha != 1.0 || beta != 0.0;
+        let scale_only = alpha != 1.0 && beta == 0.0;
+        let use_out_source = if scale_only { false } else { alpha != 1.0 || beta != 0.0 };
         let do_axpby = use_out_source && (alpha != 1.0 || beta != 1.0);
+
+        #[cfg(test)]
+        record_mlx_alpha_beta_flags(use_out_source, scale_only);
 
         let pipeline_key = MlxPipelineKey {
             dtype: result.dtype,
@@ -370,6 +395,7 @@ impl MatMulAlphaBetaMlx {
             align_k,
             use_out_source,
             do_axpby,
+            scale_only,
         };
 
         let pipeline = ctx.kernel_manager.get_mlx_pipeline(pipeline_key, &ctx.device)?;
@@ -421,6 +447,7 @@ impl MatMulAlphaBetaMlx {
             gemm_k_iterations_aligned: i32::try_from(k / bk.max(1))
                 .map_err(|_| MetalError::InvalidOperation("gemm k iterations exceed i32 range".to_string()))?,
             batch_ndim: if has_batch { 1 } else { 0 },
+            alpha_scale: if scale_only { alpha } else { 1.0 },
         };
 
         let ldc = i32::try_from(result_row_stride).map_err(|_| MetalError::InvalidOperation("ldc exceeds i32 range".to_string()))?;

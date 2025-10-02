@@ -36,6 +36,7 @@ struct GEMMParams {
   const int gemm_k_iterations_aligned;
 
   const int batch_ndim;
+  const float alpha_scale;
 };
 
 struct GEMMSpiltKParams {
@@ -454,6 +455,24 @@ struct BlockMMA {
         // Apply epilogue
         accum[0] = epilogue_op.apply(accum[0]);
         accum[1] = epilogue_op.apply(accum[1]);
+      }
+    }
+  }
+
+  METAL_FUNC void scale_results(float alpha) {
+    if (alpha == 1.0f) {
+      return;
+    }
+
+    const AccumType scale = static_cast<AccumType>(alpha);
+
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < TM; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < TN; j++) {
+        thread auto& accum = results[i * TN + j].thread_elements();
+        accum[0] = accum[0] * scale;
+        accum[1] = accum[1] * scale;
       }
     }
   }
@@ -1001,6 +1020,7 @@ constant bool has_batch [[function_constant(10)]];
 
 constant bool use_out_source [[function_constant(100)]];
 constant bool do_axpby [[function_constant(110)]];
+constant bool scale_only [[function_constant(310)]];
 
 constant bool align_M [[function_constant(200)]];
 constant bool align_N [[function_constant(201)]];
@@ -1222,11 +1242,6 @@ template <
     loader_b.src -= k_jump_b;
   }
 
-  const TransformAdd<AccumType, AccumType> epilogue_op_add(
-      addmm_params->alpha, addmm_params->beta);
-  const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
-      addmm_params->alpha, addmm_params->beta);
-
   ///////////////////////////////////////////////////////////////////////////////
   // MNK aligned loop
   if (align_M && align_N) {
@@ -1249,12 +1264,17 @@ template <
 
     threadgroup_barrier(mem_flags::mem_none);
 
-    // Do epilogue
-    if (use_out_source) {
+    if (scale_only) {
+      mma_op.scale_results(params->alpha_scale);
+    } else if (use_out_source) {
       if (do_axpby) {
+        const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
+            addmm_params->alpha, addmm_params->beta);
         mma_op.apply_epilogue(
             C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
       } else {
+        const TransformAdd<AccumType, AccumType> epilogue_op_add(
+            addmm_params->alpha, addmm_params->beta);
         mma_op.apply_epilogue(
             C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
       }
@@ -1283,12 +1303,17 @@ template <
           leftover_bk,
           LoopAlignment<true, true, true>{});
 
-      // Do epilogue
-      if (use_out_source) {
+      if (scale_only) {
+        mma_op.scale_results(params->alpha_scale);
+      } else if (use_out_source) {
         if (do_axpby) {
+          const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue(
               C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
         } else {
+          const TransformAdd<AccumType, AccumType> epilogue_op_add(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue(
               C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
         }
@@ -1310,21 +1335,27 @@ template <
           leftover_bk,
           LoopAlignment<false, true, true>{});
 
-      // Do epilogue
-      if (use_out_source) {
+      if (scale_only) {
+        mma_op.scale_results(params->alpha_scale);
+      } else if (use_out_source) {
+        const short2 dst_dims = short2(tgp_bn, tgp_bm);
         if (do_axpby) {
+          const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue_safe(
               C,
               addmm_params->ldc,
               addmm_params->fdc,
-              short2(tgp_bn, tgp_bm),
+              dst_dims,
               epilogue_op_axpby);
         } else {
+          const TransformAdd<AccumType, AccumType> epilogue_op_add(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue_safe(
               C,
               addmm_params->ldc,
               addmm_params->fdc,
-              short2(tgp_bn, tgp_bm),
+              dst_dims,
               epilogue_op_add);
         }
       }
@@ -1345,21 +1376,27 @@ template <
           leftover_bk,
           LoopAlignment<true, false, true>{});
 
-      // Do epilogue
-      if (use_out_source) {
+      if (scale_only) {
+        mma_op.scale_results(params->alpha_scale);
+      } else if (use_out_source) {
+        const short2 dst_dims = short2(tgp_bn, tgp_bm);
         if (do_axpby) {
+          const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue_safe(
               C,
               addmm_params->ldc,
               addmm_params->fdc,
-              short2(tgp_bn, tgp_bm),
+              dst_dims,
               epilogue_op_axpby);
         } else {
+          const TransformAdd<AccumType, AccumType> epilogue_op_add(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue_safe(
               C,
               addmm_params->ldc,
               addmm_params->fdc,
-              short2(tgp_bn, tgp_bm),
+              dst_dims,
               epilogue_op_add);
         }
       }
@@ -1380,21 +1417,27 @@ template <
           leftover_bk,
           LoopAlignment<false, false, true>{});
 
-      // Do epilogue
-      if (use_out_source) {
+      if (scale_only) {
+        mma_op.scale_results(params->alpha_scale);
+      } else if (use_out_source) {
+        const short2 dst_dims = short2(tgp_bn, tgp_bm);
         if (do_axpby) {
+          const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue_safe(
               C,
               addmm_params->ldc,
               addmm_params->fdc,
-              short2(tgp_bn, tgp_bm),
+              dst_dims,
               epilogue_op_axpby);
         } else {
+          const TransformAdd<AccumType, AccumType> epilogue_op_add(
+              addmm_params->alpha, addmm_params->beta);
           mma_op.apply_epilogue_safe(
               C,
               addmm_params->ldc,
               addmm_params->fdc,
-              short2(tgp_bn, tgp_bm),
+              dst_dims,
               epilogue_op_add);
         }
       }
