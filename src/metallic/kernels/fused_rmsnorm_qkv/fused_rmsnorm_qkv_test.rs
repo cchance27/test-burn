@@ -127,38 +127,35 @@ fn fused_rmsnorm_matches_separate_ops() -> Result<(), MetalError> {
 
     ctx.synchronize();
 
-    let q_expected_slice = q_expected.as_slice();
-    let k_expected_slice = k_expected.as_slice();
-    let v_expected_slice = v_expected.as_slice();
+    // Materialize contiguous buffers for the unfused tensors before comparing. The views
+    // returned by `fused_qkv_projection` retain the combined QKV stride (total_out_dim) so
+    // reading them directly as slices would interleave rows with K/V segments. By
+    // re-materializing we get row-major [rows, dim] buffers that match the logical layout
+    // of the fused kernel's output.
+    let q_expected_host = ctx.materialize_contiguous_view(q_expected.clone())?;
+    let k_expected_host = ctx.materialize_contiguous_view(k_expected.clone())?;
+    let v_expected_host = ctx.materialize_contiguous_view(v_expected.clone())?;
+
+    println!(
+        "expected strides (Q/K/V): {:?} / {:?} / {:?}",
+        q_fused.strides, k_fused.strides, v_fused.strides
+    );
+
+    let q_expected_slice = q_expected_host.as_slice();
+    let k_expected_slice = k_expected_host.as_slice();
+    let v_expected_slice = v_expected_host.as_slice();
 
     let mut total_flat_expected = Vec::with_capacity(rows * total_out_dim);
-    // The `as_slice` view on a strided tensor exposes the underlying buffer
-    // starting at the slice offset, so subsequent rows remain `stride[0]`
-    // elements apart. Use those strides instead of assuming the data is tightly
-    // packed so we read the correct row segments when rebuilding the
-    // interleaved layout.
-    let q_row_stride = q_expected.strides[0];
-    let q_col_stride = *q_expected.strides.get(1).unwrap_or(&1);
-    let k_row_stride = k_expected.strides[0];
-    let k_col_stride = *k_expected.strides.get(1).unwrap_or(&1);
-    let v_row_stride = v_expected.strides[0];
-    let v_col_stride = *v_expected.strides.get(1).unwrap_or(&1);
 
     for row in 0..rows {
-        let q_base = row * q_row_stride;
-        for col in 0..feature_dim {
-            total_flat_expected.push(q_expected_slice[q_base + col * q_col_stride]);
-        }
+        let q_base = row * feature_dim;
+        total_flat_expected.extend_from_slice(&q_expected_slice[q_base..q_base + feature_dim]);
 
-        let k_base = row * k_row_stride;
-        for col in 0..kv_dim {
-            total_flat_expected.push(k_expected_slice[k_base + col * k_col_stride]);
-        }
+        let k_base = row * kv_dim;
+        total_flat_expected.extend_from_slice(&k_expected_slice[k_base..k_base + kv_dim]);
 
-        let v_base = row * v_row_stride;
-        for col in 0..kv_dim {
-            total_flat_expected.push(v_expected_slice[v_base + col * v_col_stride]);
-        }
+        let v_base = row * kv_dim;
+        total_flat_expected.extend_from_slice(&v_expected_slice[v_base..v_base + kv_dim]);
     }
 
     for (idx, (fused, expected)) in combined_direct.as_slice().iter().zip(total_flat_expected.iter()).enumerate() {
