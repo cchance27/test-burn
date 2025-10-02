@@ -272,8 +272,13 @@ fn verify_alpha_beta_backend(transpose_left: bool, transpose_right: bool) -> Res
     context.synchronize();
     let expected = mps_result.to_vec();
     let mps_samples = context.take_matmul_samples();
+    let non_total_backends: Vec<MatMulBackend> = mps_samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect();
     assert!(
-        mps_samples.iter().all(|sample| sample.backend == MatMulBackend::Mps),
+        non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
         "expected ForceMps dispatches to use the MPS backend"
     );
 
@@ -358,8 +363,13 @@ fn test_matmul_alpha_beta_batched_mlx_matches_mps() -> Result<(), MetalError> {
     context.synchronize();
     let expected = mps_result.to_vec();
     let mps_samples = context.take_matmul_samples();
+    let non_total_backends: Vec<MatMulBackend> = mps_samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect();
     assert!(
-        mps_samples.iter().all(|sample| sample.backend == MatMulBackend::Mps),
+        non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mps),
         "expected ForceMps dispatches to use the MPS backend"
     );
 
