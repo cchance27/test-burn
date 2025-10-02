@@ -26,3 +26,4 @@ The following are design goals and rules for our Agents and Developers for the p
 23. Unit tests should have strict tollerances and we should avoid adjusting tests to work around issues, and instead fix issues if the tests are valid.
 24. Please remember to context.synchronize() as needed to make sure that tensors are settled in the gpu memory when created or used.
 25. If updating code that has comments that reference it make sure the comments are updated to match the new changes.
+26. Qwen-family FFN weights are expected to be stored pre-transposed with gate/up matrices shaped `[d_model, ff_dim]` and down matrices shaped `[ff_dim, d_model]`. Weight loaders must honor this layout so runtime matmuls can execute without transpose flags.

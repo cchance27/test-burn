@@ -2,6 +2,7 @@ use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
+use crate::metallic::kernels::matmul::MatMulBackend;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::models::Qwen25;
@@ -822,16 +823,40 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let x_normed_mlp_flat = x_normed_mlp.reshape(vec![seq, d_model])?;
 
     // Step-by-step SwiGLU FFN for debugging
-    println!("FFN gate weight dims: {:?}", block0.ffn_gate.dims());
-    println!("FFN up weight dims: {:?}", block0.ffn_up.dims());
-    println!("FFN down weight dims: {:?}", block0.ffn_down.dims());
+    println!(
+        "FFN gate weight dims {:?} (expected [d_model, ff_dim] = [{}, {}])",
+        block0.ffn_gate.dims(),
+        d_model,
+        model.config.ff_dim
+    );
+    println!(
+        "FFN up weight dims {:?} (expected [d_model, ff_dim] = [{}, {}])",
+        block0.ffn_up.dims(),
+        d_model,
+        model.config.ff_dim
+    );
+    println!(
+        "FFN down weight dims {:?} (expected [ff_dim, d_model] = [{}, {}])",
+        block0.ffn_down.dims(),
+        model.config.ff_dim,
+        d_model
+    );
     let gate_dims = block0.ffn_gate.dims();
     assert_eq!(gate_dims.len(), 2, "FFN gate weight must be 2D");
     assert_eq!(gate_dims[0], d_model, "FFN gate weight leading dim must match d_model");
     assert_eq!(gate_dims[1], model.config.ff_dim, "FFN gate weight trailing dim must match ff_dim");
-    println!("Using transpose_b=false for gate matmul");
+    let gate_transpose_a = false;
+    let gate_transpose_b = false;
+    assert!(
+        !gate_transpose_a && !gate_transpose_b,
+        "FFN gate projection should use weights stored as [d_model, ff_dim] without transposes"
+    );
+    println!(
+        "Using transpose_a={} transpose_b={} for gate matmul (weights stored as [d_model, ff_dim])",
+        gate_transpose_a, gate_transpose_b
+    );
     // Gate projection
-    let gate_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_gate, false, false)?;
+    let gate_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_gate, gate_transpose_a, gate_transpose_b)?;
     let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()))?;
 
     // Up projection
@@ -839,8 +864,17 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     assert_eq!(up_dims.len(), 2, "FFN up weight must be 2D");
     assert_eq!(up_dims[0], d_model, "FFN up weight leading dim must match d_model");
     assert_eq!(up_dims[1], model.config.ff_dim, "FFN up weight trailing dim must match ff_dim");
-    println!("Using transpose_b=false for up matmul");
-    let up_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_up, false, false)?;
+    let up_transpose_a = false;
+    let up_transpose_b = false;
+    assert!(
+        !up_transpose_a && !up_transpose_b,
+        "FFN up projection should use weights stored as [d_model, ff_dim] without transposes"
+    );
+    println!(
+        "Using transpose_a={} transpose_b={} for up matmul (weights stored as [d_model, ff_dim])",
+        up_transpose_a, up_transpose_b
+    );
+    let up_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_up, up_transpose_a, up_transpose_b)?;
     let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()))?;
 
     // Silu
@@ -855,8 +889,17 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     assert_eq!(down_dims.len(), 2, "FFN down weight must be 2D");
     assert_eq!(down_dims[0], ff_dim, "FFN down weight leading dim must match ff_dim");
     assert_eq!(down_dims[1], d_model, "FFN down weight trailing dim must match d_model");
-    println!("Using transpose_b=false for down matmul");
-    let down_proj = ctx.matmul(&mul_out, &block0.ffn_down, false, false)?;
+    let down_transpose_a = false;
+    let down_transpose_b = false;
+    assert!(
+        !down_transpose_a && !down_transpose_b,
+        "FFN down projection should use weights stored as [ff_dim, d_model] without transposes"
+    );
+    println!(
+        "Using transpose_a={} transpose_b={} for down matmul (weights stored as [ff_dim, d_model])",
+        down_transpose_a, down_transpose_b
+    );
+    let down_proj = ctx.matmul(&mul_out, &block0.ffn_down, down_transpose_a, down_transpose_b)?;
     let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()))?;
 
     let ffn_output_flat = down_proj_out.clone();
@@ -1015,9 +1058,23 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     // --- 8. Test Full Forward Pass ---
     println!("--- 8. Testing Full Forward Pass ---");
 
+    // Clear existing matmul samples to isolate the forward pass instrumentation
+    ctx.take_matmul_samples();
+
     // Run full forward
     let full_hidden = model.forward(&rust_embeddings, &mut ctx)?;
     ctx.synchronize();
+
+    let forward_samples = ctx.take_matmul_samples();
+    let transposed_samples: Vec<_> = forward_samples
+        .iter()
+        .filter(|sample| sample.backend == MatMulBackend::MlxTransposed)
+        .collect();
+    assert!(
+        transposed_samples.is_empty(),
+        "Qwen forward pass should not dispatch MatMulBackend::MlxTransposed kernels: {:?}",
+        transposed_samples
+    );
 
     // Compare hidden states after final norm
     let (py_hidden_data, py_hidden_shape) = load_npy_tensor(Path::new(npy_dump_path).join("arrays/hidden_states_last.npy"));
