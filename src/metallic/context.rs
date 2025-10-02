@@ -402,14 +402,11 @@ impl<T: TensorElement> Context<T> {
         let k_out = combined.slice_last_dim(d_model..k_range_end)?;
         let v_out = combined.slice_last_dim(k_range_end..v_range_end)?;
 
-        // The fused kernel outputs [rows, total] so reshaping to [rows, d_model] style
-        // slices already shares the same underlying storage. Reshape back to [rows, feature]
-        // to mirror the existing API guarantees.
-        let q = q_out.reshape(vec![rows, d_model])?;
-        let k = k_out.reshape(vec![rows, kv_dim])?;
-        let v = v_out.reshape(vec![rows, kv_dim])?;
-
-        Ok((q, k, v))
+        // Each row of the fused output stores Q, K, and V segments back-to-back, so the
+        // leading stride must remain `total_out_dim`. Consumers like `KvRearrangeOp`
+        // depend on that stride to skip over the interleaved sections without forcing a
+        // materialized copy.
+        Ok((q_out, k_out, v_out))
     }
 
     #[allow(clippy::too_many_arguments)]
