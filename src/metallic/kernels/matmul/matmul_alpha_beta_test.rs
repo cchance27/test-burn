@@ -529,3 +529,97 @@ fn test_matmul_alpha_beta_batched_addmm_reads_output() -> Result<(), MetalError>
 
     Ok(())
 }
+
+#[test]
+fn test_matmul_alpha_beta_accepts_strided_kv_view() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let batch_heads = 2;
+    let cache_capacity = 6;
+    let active_steps = 4;
+    let query_len = 3;
+    let head_dim = 5;
+
+    let left_data: Vec<f32> = (0..(batch_heads * query_len * active_steps))
+        .map(|i| (i as f32) * 0.0375 - 0.2)
+        .collect();
+    let cache_data: Vec<f32> = (0..(batch_heads * cache_capacity * head_dim))
+        .map(|i| (i as f32) * 0.013 + 0.45)
+        .collect();
+
+    let left_tensor = Tensor::new(
+        vec![batch_heads, query_len, active_steps],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&left_data),
+    )?;
+    let cache_tensor = Tensor::new(
+        vec![batch_heads, cache_capacity, head_dim],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&cache_data),
+    )?;
+
+    let (value_history_view, returned_capacity) = context.kv_cache_history_view(&cache_tensor, active_steps)?;
+    assert_eq!(returned_capacity, cache_capacity);
+
+    let padded_view = value_history_view.as_mps_matrix_batch_view()?;
+    assert!(
+        padded_view.matrix_bytes > padded_view.rows * padded_view.row_bytes,
+        "expected KV cache view to report padded batch stride"
+    );
+
+    let result_dims = [batch_heads, query_len, head_dim];
+    let result_data = vec![0.0f32; result_dims.iter().product()];
+    let alpha = 1.0f32;
+    let beta = 0.0f32;
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
+    let result_tensor_mps = make_result_tensor(&context, &result_data, &result_dims)?;
+    let expected_tensor = context.matmul_alpha_beta(&left_tensor, &value_history_view, &result_tensor_mps, false, false, alpha, beta)?;
+    context.synchronize();
+    let expected = expected_tensor.to_vec();
+    context.take_matmul_samples();
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor_mlx = make_result_tensor(&context, &result_data, &result_dims)?;
+    let actual_tensor = context.matmul_alpha_beta(&left_tensor, &value_history_view, &result_tensor_mlx, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = actual_tensor.to_vec();
+    let mlx_samples = context.take_matmul_samples();
+    let non_total_backends: Vec<MatMulBackend> = mlx_samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect();
+    assert!(
+        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        "expected MLX backend but observed {:?}",
+        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    let flags = matmul_alpha_beta::take_last_mlx_alpha_beta_flags().expect("expected MLX alpha/beta flags to be recorded");
+    assert_eq!(flags, (false, true), "expected write-only destination in scale-only mode");
+
+    assert_eq!(expected.len(), actual.len());
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &act)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - act).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            act,
+            diff,
+            rel
+        );
+    }
+
+    let padded_view_after = value_history_view.as_mps_matrix_batch_view()?;
+    assert!(
+        padded_view_after.matrix_bytes > padded_view_after.rows * padded_view_after.row_bytes,
+        "expected MLX path to consume padded batch without compacting"
+    );
+
+    Ok(())
+}

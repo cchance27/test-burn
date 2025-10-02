@@ -356,10 +356,8 @@ impl KernelInvocable for MatMulOp {
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (left, right, transpose_left, transpose_right) = args;
 
-        let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
-        let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
-
-        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor])?;
+        let (left_mlx_tensor, left_view) = left.as_mlx_matrix_batch_view(ctx)?;
+        let (right_mlx_tensor, right_view) = right.as_mlx_matrix_batch_view(ctx)?;
 
         // Calculate effective dimensions based on transpose
         let (eff_left_rows, eff_left_cols) = if transpose_left {
@@ -398,11 +396,12 @@ impl KernelInvocable for MatMulOp {
         let mut selected_backend = MatMulBackend::Mps;
         let mut implementation: Option<MatMulImplementation> = None;
 
-        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_tensor, &left_view, &right_tensor, &right_view) {
+        if preference != MatMulBackendPreference::ForceMps && supports_mlx(&left_mlx_tensor, &left_view, &right_mlx_tensor, &right_view) {
+            ctx.prepare_tensors_for_active_cmd(&[&left_mlx_tensor, &right_mlx_tensor])?;
             match MatMulMlx::new(
                 ctx,
-                &left_tensor,
-                &right_tensor,
+                &left_mlx_tensor,
+                &right_mlx_tensor,
                 &out,
                 left_view,
                 right_view,
@@ -436,6 +435,11 @@ impl KernelInvocable for MatMulOp {
         let implementation = if let Some(impl_) = implementation {
             impl_
         } else {
+            let (left_tensor, left_mps_view) = left.ensure_mps_contiguous_batch(ctx)?;
+            let (right_tensor, right_mps_view) = right.ensure_mps_contiguous_batch(ctx)?;
+
+            ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor])?;
+
             let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
             let mps_op = MatMulMps::new(
                 ctx,
@@ -443,8 +447,8 @@ impl KernelInvocable for MatMulOp {
                 &left_tensor,
                 &right_tensor,
                 &out,
-                left_view,
-                right_view,
+                left_mps_view,
+                right_mps_view,
                 result_view,
                 eff_left_rows,
                 eff_left_cols,
@@ -644,7 +648,11 @@ fn mlx_operand_is_contiguous<T: TensorElement>(tensor: &Tensor<T>, view: &MpsMat
     let Some(expected_matrix_stride) = view.rows.checked_mul(row_stride) else {
         return false;
     };
-    if matrix_stride != expected_matrix_stride {
+    if matrix_stride < expected_matrix_stride {
+        return false;
+    }
+
+    if matrix_stride % row_stride != 0 {
         return false;
     }
 

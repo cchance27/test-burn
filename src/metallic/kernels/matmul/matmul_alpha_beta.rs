@@ -108,11 +108,9 @@ impl KernelInvocable for MatMulAlphaBetaOp {
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (left, right, result, transpose_left, transpose_right, alpha, beta) = args;
 
-        let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
-        let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
+        let (left_mlx_tensor, left_view) = left.as_mlx_matrix_batch_view(ctx)?;
+        let (right_mlx_tensor, right_view) = right.as_mlx_matrix_batch_view(ctx)?;
         let result_view = result.as_mps_matrix_batch_view()?;
-
-        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor, result])?;
 
         let (eff_left_rows, eff_left_cols) = if transpose_left {
             (left_view.columns, left_view.rows)
@@ -150,13 +148,14 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let mut implementation: Option<MatMulAlphaBetaImplementation> = None;
 
         if preference != MatMulBackendPreference::ForceMps
-            && supports_mlx(&left_tensor, &left_view, &right_tensor, &right_view)
+            && supports_mlx(&left_mlx_tensor, &left_view, &right_mlx_tensor, &right_view)
             && super::mlx_operand_is_contiguous(result, &result_view)
         {
+            ctx.prepare_tensors_for_active_cmd(&[&left_mlx_tensor, &right_mlx_tensor, result])?;
             match MatMulAlphaBetaMlx::new(
                 ctx,
-                &left_tensor,
-                &right_tensor,
+                &left_mlx_tensor,
+                &right_mlx_tensor,
                 result,
                 left_view,
                 right_view,
@@ -192,6 +191,11 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let implementation = if let Some(impl_) = implementation {
             impl_
         } else {
+            let (left_tensor, left_mps_view) = left.ensure_mps_contiguous_batch(ctx)?;
+            let (right_tensor, right_mps_view) = right.ensure_mps_contiguous_batch(ctx)?;
+
+            ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor, result])?;
+
             let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
             let mps_op = MatMulAlphaBetaMps::new(
                 ctx,
@@ -199,8 +203,8 @@ impl KernelInvocable for MatMulAlphaBetaOp {
                 &left_tensor,
                 &right_tensor,
                 result,
-                left_view,
-                right_view,
+                left_mps_view,
+                right_mps_view,
                 result_view,
                 eff_left_rows,
                 eff_left_cols,
