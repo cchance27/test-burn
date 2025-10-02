@@ -132,19 +132,33 @@ fn fused_rmsnorm_matches_separate_ops() -> Result<(), MetalError> {
     let v_expected_slice = v_expected.as_slice();
 
     let mut total_flat_expected = Vec::with_capacity(rows * total_out_dim);
-    // The fused kernel stores each row's Q, K, and V segments back-to-back, so
-    // rebuild the expected buffer with the same per-row interleaving before
-    // comparing against the combined output tensor.
-    for row in 0..rows {
-        let q_start = row * feature_dim;
-        let k_start = row * kv_dim;
-        let q_row = &q_expected_slice[q_start..q_start + feature_dim];
-        let k_row = &k_expected_slice[k_start..k_start + kv_dim];
-        let v_row = &v_expected_slice[k_start..k_start + kv_dim];
+    // The `as_slice` view on a strided tensor exposes the underlying buffer
+    // starting at the slice offset, so subsequent rows remain `stride[0]`
+    // elements apart. Use those strides instead of assuming the data is tightly
+    // packed so we read the correct row segments when rebuilding the
+    // interleaved layout.
+    let q_row_stride = q_expected.strides[0];
+    let q_col_stride = *q_expected.strides.get(1).unwrap_or(&1);
+    let k_row_stride = k_expected.strides[0];
+    let k_col_stride = *k_expected.strides.get(1).unwrap_or(&1);
+    let v_row_stride = v_expected.strides[0];
+    let v_col_stride = *v_expected.strides.get(1).unwrap_or(&1);
 
-        total_flat_expected.extend_from_slice(q_row);
-        total_flat_expected.extend_from_slice(k_row);
-        total_flat_expected.extend_from_slice(v_row);
+    for row in 0..rows {
+        let q_base = row * q_row_stride;
+        for col in 0..feature_dim {
+            total_flat_expected.push(q_expected_slice[q_base + col * q_col_stride]);
+        }
+
+        let k_base = row * k_row_stride;
+        for col in 0..kv_dim {
+            total_flat_expected.push(k_expected_slice[k_base + col * k_col_stride]);
+        }
+
+        let v_base = row * v_row_stride;
+        for col in 0..kv_dim {
+            total_flat_expected.push(v_expected_slice[v_base + col * v_col_stride]);
+        }
     }
 
     for (idx, (fused, expected)) in combined_direct.as_slice().iter().zip(total_flat_expected.iter()).enumerate() {
