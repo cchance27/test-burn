@@ -273,16 +273,22 @@ fn copy_transposed_f32_into_strided_slice<TDst: TensorElement>(
         }
     }
 
-    let mut row_buffer = vec![0.0f32; dst_cols];
+    let mut transposed = vec![0.0f32; dst_rows * dst_cols];
+    for src_row in 0..src_rows {
+        for src_col in 0..src_cols {
+            let src_index = src_row * src_cols + src_col;
+            let dst_row = src_col;
+            let dst_col = src_row;
+            let dst_index = dst_row * dst_cols + dst_col;
+            transposed[dst_index] = src_slice[src_index];
+        }
+    }
 
     for row in 0..dst_rows {
-        for col in 0..dst_cols {
-            let src_index = col * src_cols + row;
-            row_buffer[col] = src_slice[src_index];
-        }
-
+        let start = row * dst_cols;
+        let end = start + dst_cols;
         let mut dst_row = dst.slice(&[row..row + 1])?;
-        TDst::copy_from_f32_slice(&row_buffer, dst_row.as_mut_slice());
+        TDst::copy_from_f32_slice(&transposed[start..end], dst_row.as_mut_slice());
     }
 
     Ok(())
