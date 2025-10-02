@@ -93,6 +93,69 @@ fn dims_are_transposed(src_dims: &[usize], dst_dims: &[usize]) -> bool {
     src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0]
 }
 
+fn matrix_strides<T: TensorElement>(tensor: &Tensor<T>) -> Option<(usize, usize)> {
+    if tensor.dims().len() != 2 {
+        return None;
+    }
+
+    if tensor.strides.len() >= 2 {
+        Some((tensor.strides[0], tensor.strides[1]))
+    } else {
+        let cols = tensor.dims()[1];
+        Some((cols, 1))
+    }
+}
+
+fn is_strided_matrix<T: TensorElement>(tensor: &Tensor<T>) -> bool {
+    if let Some((row_stride, col_stride)) = matrix_strides(tensor) {
+        if tensor.dims().len() != 2 {
+            return false;
+        }
+        let cols = tensor.dims()[1];
+        row_stride != cols || col_stride != 1
+    } else {
+        false
+    }
+}
+
+fn copy_tensor_into_strided_matrix<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    let dst_dims = dst.dims().to_vec();
+    if dst_dims.len() != 2 {
+        return copy_tensor_into(src, dst);
+    }
+
+    if src.dims() != dst_dims.as_slice() {
+        return Err(MetalError::InvalidShape(format!(
+            "Source dims {:?} do not match destination dims {:?} for strided copy",
+            src.dims(),
+            dst_dims
+        )));
+    }
+
+    let rows = dst_dims[0];
+    let cols = dst_dims[1];
+    let src_slice = tensor_data_as_f32(src);
+
+    if src_slice.len() != rows * cols {
+        return Err(MetalError::DimensionMismatch {
+            expected: rows * cols,
+            actual: src_slice.len(),
+        });
+    }
+
+    for row in 0..rows {
+        let start = row * cols;
+        let end = start + cols;
+        let mut dst_row = dst.slice(&[row..row + 1])?;
+        TDst::copy_from_f32_slice(&src_slice[start..end], dst_row.as_mut_slice());
+    }
+
+    Ok(())
+}
+
 fn copy_transposed_f32_into_slice<TDst: TensorElement>(
     src_slice: &[f32],
     src_dims: &[usize],
@@ -152,6 +215,73 @@ fn copy_transposed_f32_into_slice<TDst: TensorElement>(
     Ok(())
 }
 
+fn copy_transposed_f32_into_strided_slice<TDst: TensorElement>(
+    src_slice: &[f32],
+    src_dims: &[usize],
+    dst: &mut Tensor<TDst>,
+    dst_dims: &[usize],
+) -> Result<(), MetalError> {
+    if src_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Expected 2D source tensor for transpose, got {:?}",
+            src_dims
+        )));
+    }
+
+    if dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Expected 2D destination tensor for transpose, got {:?}",
+            dst_dims
+        )));
+    }
+
+    let src_rows = src_dims[0];
+    let src_cols = src_dims[1];
+    let dst_rows = dst_dims[0];
+    let dst_cols = dst_dims[1];
+
+    if dst_rows != src_cols || dst_cols != src_rows {
+        return Err(MetalError::InvalidShape(format!(
+            "Destination dims {:?} are not the transpose of source dims {:?}",
+            dst_dims, src_dims
+        )));
+    }
+
+    if src_slice.len() != src_rows * src_cols {
+        return Err(MetalError::DimensionMismatch {
+            expected: src_rows * src_cols,
+            actual: src_slice.len(),
+        });
+    }
+
+    #[cfg(debug_assertions)]
+    {
+        let strides = matrix_strides(dst);
+        if let Some((row_stride, col_stride)) = strides {
+            eprintln!(
+                "[qwen25::loading] copy_transposed_f32_into_strided_slice src_dims={:?} dst_dims={:?} row_stride={} col_stride={}",
+                src_dims, dst_dims, row_stride, col_stride
+            );
+        } else {
+            eprintln!(
+                "[qwen25::loading] copy_transposed_f32_into_strided_slice src_dims={:?} dst_dims={:?}",
+                src_dims, dst_dims
+            );
+        }
+    }
+
+    for row in 0..dst_rows {
+        let mut dst_row = dst.slice(&[row..row + 1])?;
+        let dst_row_slice = dst_row.as_mut_slice();
+        for col in 0..dst_cols {
+            let src_index = col * src_cols + row;
+            dst_row_slice[col] = TDst::from_f32(src_slice[src_index]);
+        }
+    }
+
+    Ok(())
+}
+
 fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
     src: &Tensor<TSrc>,
     dst: &mut Tensor<TDst>,
@@ -166,9 +296,30 @@ fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
     let src_slice = tensor_data_as_f32(src);
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
-    let dst_slice = dst.as_mut_slice();
+    let dst_is_strided = is_strided_matrix(dst);
 
-    copy_transposed_f32_into_slice::<TDst>(src_slice.as_ref(), &src_dims, dst_slice, &dst_dims)
+    #[cfg(debug_assertions)]
+    {
+        let strides = matrix_strides(dst);
+        if let Some((row_stride, col_stride)) = strides {
+            eprintln!(
+                "[qwen25::loading] copy_tensor_transposed_into src_dims={:?} dst_dims={:?} row_stride={} col_stride={} strided={}",
+                src_dims, dst_dims, row_stride, col_stride, dst_is_strided
+            );
+        } else {
+            eprintln!(
+                "[qwen25::loading] copy_tensor_transposed_into src_dims={:?} dst_dims={:?} strided={}",
+                src_dims, dst_dims, dst_is_strided
+            );
+        }
+    }
+
+    if dst_is_strided {
+        copy_transposed_f32_into_strided_slice::<TDst>(src_slice.as_ref(), &src_dims, dst, &dst_dims)
+    } else {
+        let dst_slice = dst.as_mut_slice();
+        copy_transposed_f32_into_slice::<TDst>(src_slice.as_ref(), &src_dims, dst_slice, &dst_dims)
+    }
 }
 
 fn copy_tensor_with_optional_transpose<TSrc: TensorElement, TDst: TensorElement>(
@@ -177,12 +328,36 @@ fn copy_tensor_with_optional_transpose<TSrc: TensorElement, TDst: TensorElement>
 ) -> Result<(), MetalError> {
     let src_dims = src.dims().to_vec();
     let dst_dims = dst.dims().to_vec();
+    let dst_is_strided = is_strided_matrix(dst);
+    #[cfg(debug_assertions)]
+    {
+        let strides = matrix_strides(dst);
+        if let Some((row_stride, col_stride)) = strides {
+            eprintln!(
+                "[qwen25::loading] copy_tensor_with_optional_transpose src_dims={:?} dst_dims={:?} row_stride={} col_stride={} strided={}",
+                src_dims, dst_dims, row_stride, col_stride, dst_is_strided
+            );
+        } else {
+            eprintln!(
+                "[qwen25::loading] copy_tensor_with_optional_transpose src_dims={:?} dst_dims={:?}",
+                src_dims, dst_dims
+            );
+        }
+    }
     if src_dims == dst_dims {
-        copy_tensor_into(src, dst)
+        if dst_is_strided {
+            copy_tensor_into_strided_matrix(src, dst)
+        } else {
+            copy_tensor_into(src, dst)
+        }
     } else if dims_are_transposed(&src_dims, &dst_dims) {
         copy_tensor_transposed_into(src, dst)
     } else {
-        copy_tensor_into(src, dst)
+        if dst_is_strided {
+            copy_tensor_into_strided_matrix(src, dst)
+        } else {
+            copy_tensor_into(src, dst)
+        }
     }
 }
 
@@ -707,8 +882,11 @@ fn extract_config_from_ggufmodel(gguf_model: &GGUFModel) -> Qwen25Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{copy_transposed_f32_into_slice, pack_weight_transposed_into_fused_slice};
-    use crate::metallic::{F32Element, MetalError};
+    use super::super::Qwen25Config;
+    use super::super::transformer_block::TransformerBlock;
+    use super::{copy_tensor_with_optional_transpose, copy_transposed_f32_into_slice, pack_weight_transposed_into_fused_slice};
+    use crate::metallic::tensor::TensorStorage;
+    use crate::metallic::{Context, F32Element, MetalError, Tensor};
 
     #[test]
     fn copy_transposed_helper_handles_row_major_export() {
@@ -796,5 +974,70 @@ mod tests {
             MetalError::InvalidShape(_) => {}
             other => panic!("unexpected error: {:?}", other),
         }
+    }
+
+    fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+        let mut out = vec![0.0; rows * cols];
+        for r in 0..rows {
+            for c in 0..cols {
+                out[c * rows + r] = data[r * cols + c];
+            }
+        }
+        out
+    }
+
+    fn build_test_config() -> Qwen25Config {
+        Qwen25Config {
+            n_layers: 1,
+            d_model: 6,
+            ff_dim: 4,
+            n_heads: 2,
+            n_kv_heads: 1,
+            seq_len: 8,
+            vocab_size: 32,
+            rope_freq_base: 10000.0,
+            rms_eps: 1e-5,
+        }
+    }
+
+    #[test]
+    fn fused_gate_up_views_preserve_independent_halves() -> Result<(), MetalError> {
+        let mut ctx = Context::<F32Element>::new()?;
+        let cfg = build_test_config();
+
+        let gate_data: Vec<f32> = (0..cfg.ff_dim * cfg.d_model).map(|idx| idx as f32 + 0.5).collect();
+        let up_data: Vec<f32> = (0..cfg.ff_dim * cfg.d_model).map(|idx| idx as f32 + 1000.0).collect();
+
+        let gate_tensor = Tensor::<F32Element>::from_f32_slice(vec![cfg.ff_dim, cfg.d_model], TensorStorage::Dedicated(&ctx), &gate_data)?;
+        let up_tensor = Tensor::<F32Element>::from_f32_slice(vec![cfg.ff_dim, cfg.d_model], TensorStorage::Dedicated(&ctx), &up_data)?;
+
+        let mut block = TransformerBlock::new(&cfg, &mut ctx)?;
+
+        copy_tensor_with_optional_transpose(&gate_tensor, &mut block.ffn_gate)?;
+        let expected_gate = transpose(&gate_data, cfg.ff_dim, cfg.d_model);
+        assert_eq!(block.ffn_gate.to_f32_vec(), expected_gate);
+
+        let up_before = block.ffn_up.to_f32_vec();
+        assert!(up_before.iter().all(|&v| v == 0.0));
+
+        copy_tensor_with_optional_transpose(&up_tensor, &mut block.ffn_up)?;
+        let expected_up = transpose(&up_data, cfg.ff_dim, cfg.d_model);
+        assert_eq!(block.ffn_up.to_f32_vec(), expected_up);
+
+        // Ensure the gate view remains intact after populating the up view.
+        assert_eq!(block.ffn_gate.to_f32_vec(), expected_gate);
+
+        // Validate that the fused storage reflects the independent halves.
+        let fused = block.ffn_gate_up_weight.to_f32_vec();
+        let mut fused_gate = Vec::with_capacity(cfg.d_model * cfg.ff_dim);
+        let mut fused_up = Vec::with_capacity(cfg.d_model * cfg.ff_dim);
+        for row in fused.chunks(2 * cfg.ff_dim) {
+            fused_gate.extend_from_slice(&row[..cfg.ff_dim]);
+            fused_up.extend_from_slice(&row[cfg.ff_dim..]);
+        }
+        assert_eq!(fused_gate, expected_gate);
+        assert_eq!(fused_up, expected_up);
+
+        Ok(())
     }
 }
