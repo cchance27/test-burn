@@ -211,14 +211,18 @@ impl<T: TensorElement> Qwen25<T> {
         for block in self.blocks.iter() {
             let resid_attn = x.clone();
 
-            // RMSNorm before Attention
-            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
-
-            // QKV GEMMs
+            // Fused RMSNorm + QKV GEMMs
             let m = batch * seq;
             let kv_dim = block.kv_dim;
-            let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
-            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
+            let x_flat = x.reshape(vec![m, d_model])?;
+            let (q_mat, k_mat, v_mat) = ctx.fused_rmsnorm_qkv_projection(
+                &x_flat,
+                &block.attn_norm_gamma,
+                &block.attn_qkv_weight,
+                &block.attn_qkv_bias,
+                d_model,
+                kv_dim,
+            )?;
 
             // Defer RoPE until after head rearrangement
             let (q_after, k_after) = (q_mat.clone(), k_mat.clone());
@@ -358,21 +362,22 @@ impl<T: TensorElement> Qwen25<T> {
 
             ctx.record_memory_event(MemoryEvent::BlockStart { index: layer_idx });
 
-            // RMSNorm before Attention
-            let mut phase_start = Instant::now();
-            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_norm"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_norm"));
-
-            // QKV GEMMs for the single token
+            // Fused RMSNorm + QKV projection for the single token
             let m = batch * seq; // m is always 1 for a single token
             let kv_dim = block.kv_dim;
-            let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
+            let x_flat = x.reshape(vec![m, d_model])?;
 
-            phase_start = Instant::now();
-            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_qkv_proj"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_qkv_proj"));
+            let mut phase_start = Instant::now();
+            let (q_mat, k_mat, v_mat) = ctx.fused_rmsnorm_qkv_projection(
+                &x_flat,
+                &block.attn_norm_gamma,
+                &block.attn_qkv_weight,
+                &block.attn_qkv_bias,
+                d_model,
+                kv_dim,
+            )?;
+            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_norm_qkv_proj"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_norm_qkv_proj"));
 
             // KV Head Rearrangement
             let n_heads = self.config.n_heads;

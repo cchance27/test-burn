@@ -6,6 +6,7 @@ use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use crate::metallic::kernels::fused_rmsnorm_qkv::FusedRmsNormQkvProjectionOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
@@ -320,6 +321,95 @@ impl<T: TensorElement> Context<T> {
         let v_out = linear.slice_last_dim(k_range_end..v_range_end)?;
 
         Ok((q_out, k_out, v_out))
+    }
+
+    #[allow(clippy::type_complexity)]
+    pub fn fused_rmsnorm_qkv_projection(
+        &mut self,
+        x_flat: &Tensor<T>,
+        gamma: &Tensor<T>,
+        fused_weight: &Tensor<T>,
+        fused_bias: &Tensor<T>,
+        d_model: usize,
+        kv_dim: usize,
+    ) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>), MetalError> {
+        let x_dims = x_flat.dims();
+        if x_dims.len() != 2 {
+            return Err(MetalError::InvalidShape(format!(
+                "fused_rmsnorm_qkv_projection expects a 2D input [m, d_model], got {:?}",
+                x_dims
+            )));
+        }
+
+        let rows = x_dims[0];
+        let in_features = x_dims[1];
+        if in_features != d_model {
+            return Err(MetalError::InvalidShape(format!(
+                "Input feature size {} does not match d_model {}",
+                in_features, d_model
+            )));
+        }
+
+        if gamma.dims() != [d_model] {
+            return Err(MetalError::InvalidShape(format!(
+                "Gamma dims {:?} incompatible with d_model {}",
+                gamma.dims(),
+                d_model
+            )));
+        }
+
+        let weight_dims = fused_weight.dims();
+        if weight_dims.len() != 2 {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused weight must be 2D [d_model, qkv], got {:?}",
+                weight_dims
+            )));
+        }
+
+        let expected_total = d_model + 2 * kv_dim;
+        if weight_dims[0] != d_model || weight_dims[1] != expected_total {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused weight dims {:?} incompatible with d_model {} and kv_dim {}",
+                weight_dims, d_model, kv_dim
+            )));
+        }
+
+        if fused_bias.dims() != [expected_total] {
+            return Err(MetalError::InvalidShape(format!(
+                "Fused bias dims {:?} incompatible with expected total {}",
+                fused_bias.dims(),
+                expected_total
+            )));
+        }
+
+        let total_out_dim = expected_total as u32;
+        let feature_dim = d_model as u32;
+
+        let combined = self.call::<FusedRmsNormQkvProjectionOp>((
+            x_flat.clone(),
+            gamma.clone(),
+            fused_weight.clone(),
+            fused_bias.clone(),
+            feature_dim,
+            total_out_dim,
+        ))?;
+
+        let q_range_end = d_model;
+        let k_range_end = d_model + kv_dim;
+        let v_range_end = expected_total;
+
+        let q_out = combined.slice_last_dim(0..q_range_end)?;
+        let k_out = combined.slice_last_dim(d_model..k_range_end)?;
+        let v_out = combined.slice_last_dim(k_range_end..v_range_end)?;
+
+        // The fused kernel outputs [rows, total] so reshaping to [rows, d_model] style
+        // slices already shares the same underlying storage. Reshape back to [rows, feature]
+        // to mirror the existing API guarantees.
+        let q = q_out.reshape(vec![rows, d_model])?;
+        let k = k_out.reshape(vec![rows, kv_dim])?;
+        let v = v_out.reshape(vec![rows, kv_dim])?;
+
+        Ok((q, k, v))
     }
 
     #[allow(clippy::too_many_arguments)]

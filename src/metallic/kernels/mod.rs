@@ -19,6 +19,7 @@ pub mod elemwise_add;
 pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
+pub mod fused_rmsnorm_qkv;
 pub mod gelu;
 pub mod kv_rearrange;
 pub mod layernorm;
@@ -41,6 +42,7 @@ pub enum KernelLibrary {
     ElemwiseDiv,
     ElemwiseMul,
     ElemwiseSub,
+    FusedRmsNormQkv,
     Gelu,
     KvRearrange,
     LayerNorm,
@@ -62,6 +64,7 @@ impl KernelLibrary {
             KernelLibrary::ElemwiseDiv => include_str!("elemwise_div/kernel.metal"),
             KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
             KernelLibrary::ElemwiseSub => include_str!("elemwise_sub/kernel.metal"),
+            KernelLibrary::FusedRmsNormQkv => include_str!("fused_rmsnorm_qkv/kernel.metal"),
             KernelLibrary::Gelu => include_str!("gelu/kernel.metal"),
             KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
             KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
@@ -96,6 +99,7 @@ pub enum KernelFunction {
     RepeatKvHeads,
     Rope,
     RMSNorm,
+    FusedRmsNormQkvProjection,
     Silu,
     FusedSoftmax,
     SwigluFusedActivation,
@@ -114,6 +118,7 @@ impl KernelFunction {
             KernelFunction::ElemwiseDiv => KernelLibrary::ElemwiseDiv,
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
             KernelFunction::ElemwiseSub => KernelLibrary::ElemwiseSub,
+            KernelFunction::FusedRmsNormQkvProjection => KernelLibrary::FusedRmsNormQkv,
             KernelFunction::Gelu => KernelLibrary::Gelu,
             KernelFunction::KvRearrange => KernelLibrary::KvRearrange,
             KernelFunction::LayerNorm => KernelLibrary::LayerNorm,
@@ -164,6 +169,8 @@ impl KernelFunction {
             (KernelFunction::Rope, F16) => "rope_kernel_f16",
             (KernelFunction::RMSNorm, F32) => "rmsnorm_kernel_f32",
             (KernelFunction::RMSNorm, F16) => "rmsnorm_kernel_f16",
+            (KernelFunction::FusedRmsNormQkvProjection, F32) => "fused_rmsnorm_qkv_projection_f32",
+            (KernelFunction::FusedRmsNormQkvProjection, F16) => "fused_rmsnorm_qkv_projection_f16",
             (KernelFunction::Silu, F32) => "silu_kernel_f32",
             (KernelFunction::Silu, F16) => "silu_kernel_f16",
             (KernelFunction::SwigluFusedActivation, F32) => "swiglu_fused_activation_f32",
