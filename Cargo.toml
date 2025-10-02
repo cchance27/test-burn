@@ -9,8 +9,8 @@ bench = false
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
 objc2 = "0.6.2"
-objc2-foundation = "0.3.1"
-objc2-metal = { version = "0.3.1", features = ["block2", "MTLArgument", "MTLFunctionConstantValues"] }
+objc2-foundation = { version = "0.3.1", features = ["NSData", "NSArray", "NSString"] }
+objc2-metal = { version = "0.3.1", features = ["block2", "MTLArgument", "MTLFunctionConstantValues", "MTLCounters", "MTLResource"] }
 objc2-metal-performance-shaders = "0.3.1"
 block2 = "0.6.1"
 rand = "0.9.2"

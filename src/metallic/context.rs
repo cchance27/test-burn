@@ -1,6 +1,7 @@
 use super::error::MetalError;
 use super::instrumentation::{
-    LatencyCollectorHandle, LatencyEvent, MatMulInstrumentation, MatMulSampleRecorder, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
+    LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulInstrumentation, MatMulSampleRecorder, MemoryCollectorHandle,
+    MemoryEvent, MemoryUsage,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
@@ -115,6 +116,8 @@ impl<T: TensorElement> Context<T> {
             }
         });
 
+        let matmul_instrumentation = MatMulInstrumentation::new(&device);
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -130,7 +133,7 @@ impl<T: TensorElement> Context<T> {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
-            matmul_instrumentation: MatMulInstrumentation::default(),
+            matmul_instrumentation,
             matmul_samples,
             matmul_recorder,
             sampler_buffers: SamplerBuffers::default(),
@@ -192,9 +195,9 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    pub(crate) fn register_matmul_dispatch(&self, command_buffer: &CommandBuffer, backend: MatMulBackend) {
+    pub(crate) fn register_matmul_dispatch(&self, command_buffer: &CommandBuffer, backend: MatMulBackend) -> MatMulDispatchHandle {
         self.matmul_instrumentation
-            .register(command_buffer, backend, self.matmul_recorder.clone());
+            .register(command_buffer, backend, self.matmul_recorder.clone())
     }
 
     #[allow(dead_code)]
