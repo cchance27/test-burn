@@ -378,7 +378,6 @@ fn run_sdpa_test(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: b
     .unwrap();
     let metal_out = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
     let metal_slice = metal_out.as_slice();
-    let metal_data = metal_slice.as_slice();
 
     assert_eq!(metal_out.dims(), &[batch, seq_q, dim], "Output shape mismatch");
 
@@ -1028,6 +1027,7 @@ fn check_row_stochastic_property(batch: usize, seq_q: usize, seq_k: usize, dim: 
     // Check that each row sums to approximately 1.0
     let _rtol = 1e-4f64;
     let _atol = 1e-6f64;
+    let metal_data = metal_slice.as_slice();
 
     for b in 0..batch {
         for i in 0..seq_q {
