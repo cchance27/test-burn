@@ -423,8 +423,13 @@ fn test_matmul_alpha_beta_scale_only_avoids_output_reads() -> Result<(), MetalEr
     context.synchronize();
     let actual = actual_tensor.to_vec();
     let mlx_samples = context.take_matmul_samples();
+    let non_total_backends: Vec<MatMulBackend> = mlx_samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect();
     assert!(
-        mlx_samples.iter().all(|sample| sample.backend == MatMulBackend::Mlx),
+        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
         "expected MLX backend but observed {:?}",
         mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
     );

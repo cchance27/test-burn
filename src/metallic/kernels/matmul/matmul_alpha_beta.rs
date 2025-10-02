@@ -378,9 +378,13 @@ impl MatMulAlphaBetaMlx {
         let align_n = n % 32 == 0;
         let align_k = k % 16 == 0;
 
-        let scale_only = alpha != 1.0 && beta == 0.0;
-        let use_out_source = if scale_only { false } else { alpha != 1.0 || beta != 0.0 };
-        let do_axpby = use_out_source && (alpha != 1.0 || beta != 1.0);
+        let alpha_one = (alpha - 1.0).abs() <= f32::EPSILON;
+        let beta_zero = beta.abs() <= f32::EPSILON;
+        let beta_one = (beta - 1.0).abs() <= f32::EPSILON;
+
+        let scale_only = beta_zero && !alpha_one;
+        let use_out_source = !beta_zero;
+        let do_axpby = use_out_source && (!alpha_one || !beta_one);
 
         #[cfg(test)]
         record_mlx_alpha_beta_flags(use_out_source, scale_only);
