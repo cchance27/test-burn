@@ -362,58 +362,107 @@ impl CommandBufferInstrumentation {
         }
 
         let total = Duration::from_secs_f64(delta);
-        self.recorder.record_matmul_backend_sample(MatMulBackend::Total, total);
+        let CommandBufferInstrumentation {
+            recorder,
+            sample_buffer,
+            dispatches,
+            used_samples,
+            gpu_timestamp_period,
+            ..
+        } = self;
 
-        if self.dispatches.is_empty() {
+        recorder.record_matmul_backend_sample(MatMulBackend::Total, total);
+
+        if dispatches.is_empty() {
             return;
         }
 
-        let (Some(sample_buffer), Some(period)) = (self.sample_buffer, self.gpu_timestamp_period) else {
-            return;
-        };
+        if let (Some(sample_buffer), Some(period)) = (sample_buffer, gpu_timestamp_period) {
+            if used_samples == 0 {
+                return;
+            }
 
-        if self.used_samples == 0 {
-            return;
-        }
-
-        let Some(resolved) = (unsafe { sample_buffer.resolveCounterRange(NSRange::new(0, self.used_samples)) }) else {
-            return;
-        };
-
-        let bytes = unsafe { resolved.as_bytes_unchecked() };
-        let expected = self.used_samples * std::mem::size_of::<MTLCounterResultTimestamp>();
-        if bytes.len() < expected {
-            return;
-        }
-
-        let timestamps = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const MTLCounterResultTimestamp, self.used_samples) };
-
-        let mut totals: FxHashMap<MatMulBackend, Duration> = FxHashMap::default();
-
-        for dispatch in self.dispatches {
-            let (Some(start), Some(end)) = (dispatch.start_index, dispatch.end_index) else {
-                continue;
+            let Some(resolved) = (unsafe { sample_buffer.resolveCounterRange(NSRange::new(0, used_samples)) }) else {
+                return;
             };
-            if end >= timestamps.len() || start >= timestamps.len() {
-                continue;
-            }
-            let start_tick = timestamps[start].timestamp;
-            let end_tick = timestamps[end].timestamp;
-            if end_tick <= start_tick {
-                continue;
+
+            let bytes = unsafe { resolved.as_bytes_unchecked() };
+            let expected = used_samples * std::mem::size_of::<MTLCounterResultTimestamp>();
+            if bytes.len() < expected {
+                return;
             }
 
-            let duration_secs = (end_tick - start_tick) as f64 * period;
-            if !duration_secs.is_finite() || duration_secs <= 0.0 {
+            let timestamps = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const MTLCounterResultTimestamp, used_samples) };
+
+            let mut totals: FxHashMap<MatMulBackend, Duration> = FxHashMap::default();
+
+            for dispatch in dispatches {
+                let (Some(start), Some(end)) = (dispatch.start_index, dispatch.end_index) else {
+                    continue;
+                };
+                if end >= timestamps.len() || start >= timestamps.len() {
+                    continue;
+                }
+                let start_tick = timestamps[start].timestamp;
+                let end_tick = timestamps[end].timestamp;
+                if end_tick <= start_tick {
+                    continue;
+                }
+
+                let duration_secs = (end_tick - start_tick) as f64 * period;
+                if !duration_secs.is_finite() || duration_secs <= 0.0 {
+                    continue;
+                }
+
+                let duration = Duration::from_secs_f64(duration_secs);
+                totals.entry(dispatch.backend).and_modify(|d| *d += duration).or_insert(duration);
+            }
+
+            for (backend, duration) in totals {
+                recorder.record_matmul_backend_sample(backend, duration);
+            }
+
+            return;
+        }
+
+        Self::record_fallback_backend_totals(&recorder, &dispatches, total);
+    }
+}
+
+impl CommandBufferInstrumentation {
+    fn record_fallback_backend_totals(recorder: &MatMulSampleRecorder, dispatches: &[DispatchTiming], total: Duration) {
+        let mut backend_counts: FxHashMap<MatMulBackend, usize> = FxHashMap::default();
+        for dispatch in dispatches {
+            *backend_counts.entry(dispatch.backend).or_insert(0) += 1;
+        }
+
+        let total_dispatches: usize = backend_counts.values().sum();
+        if total_dispatches == 0 {
+            return;
+        }
+
+        let total_secs = total.as_secs_f64();
+        if !total_secs.is_finite() || total_secs <= 0.0 {
+            return;
+        }
+
+        let per_dispatch = total_secs / total_dispatches as f64;
+        if !per_dispatch.is_finite() || per_dispatch <= 0.0 {
+            return;
+        }
+
+        for (backend, count) in backend_counts {
+            let duration_secs = per_dispatch * count as f64;
+            if duration_secs <= 0.0 || !duration_secs.is_finite() {
                 continue;
             }
 
             let duration = Duration::from_secs_f64(duration_secs);
-            totals.entry(dispatch.backend).and_modify(|d| *d += duration).or_insert(duration);
-        }
+            if duration.is_zero() {
+                continue;
+            }
 
-        for (backend, duration) in totals {
-            self.recorder.record_matmul_backend_sample(backend, duration);
+            recorder.record_matmul_backend_sample(backend, duration);
         }
     }
 }
