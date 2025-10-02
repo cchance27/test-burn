@@ -1,4 +1,5 @@
 use crate::gguf::{GGUFValue, model_loader::GGUFModel};
+use crate::metallic::tensor::TensorHostSlice;
 use crate::metallic::{
     Context, Dtype, MetalError, Tensor, TensorElement,
     models::{LoadableModel, Qwen25, Qwen25Config},
@@ -6,15 +7,17 @@ use crate::metallic::{
 use std::{any::TypeId, borrow::Cow};
 
 fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f32]> {
-    if T::DTYPE == Dtype::F32 {
-        debug_assert_eq!(std::mem::size_of::<T::Scalar>(), std::mem::size_of::<f32>());
-        let slice = tensor.as_slice();
-        let ptr = slice.as_ptr();
-        let len = slice.len();
-        let f32_slice = unsafe { std::slice::from_raw_parts(ptr as *const f32, len) };
-        Cow::Borrowed(f32_slice)
-    } else {
-        Cow::Owned(tensor.as_slice().iter().copied().map(T::to_f32).collect())
+    match tensor.as_slice() {
+        TensorHostSlice::Borrowed(raw) => {
+            if T::DTYPE == Dtype::F32 {
+                debug_assert_eq!(std::mem::size_of::<T::Scalar>(), std::mem::size_of::<f32>());
+                let f32_slice = unsafe { std::slice::from_raw_parts(raw.as_ptr() as *const f32, raw.len()) };
+                Cow::Borrowed(f32_slice)
+            } else {
+                Cow::Owned(raw.iter().copied().map(T::to_f32).collect())
+            }
+        }
+        TensorHostSlice::Owned(owned) => Cow::Owned(owned.into_iter().map(T::to_f32).collect()),
     }
 }
 
