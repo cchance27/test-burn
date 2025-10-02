@@ -110,7 +110,7 @@ impl<T: TensorElement> Operation for FusedRmsNormQkvProjection<T> {
             depth: 1,
         };
         let groups = MTLSize {
-            width: (self.rows as usize).div_ceil(threads_per_tg.width),
+            width: self.rows as usize,
             height: 1,
             depth: 1,
         };

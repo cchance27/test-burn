@@ -2,6 +2,7 @@
 using namespace metal;
 
 constant float EPS = 1e-6f;
+constant uint THREADGROUP_SIZE = 256;
 
 kernel void fused_rmsnorm_qkv_projection_f32(
     device const float* input [[buffer(0)]],
@@ -12,32 +13,53 @@ kernel void fused_rmsnorm_qkv_projection_f32(
     constant uint& feature_dim [[buffer(5)]],
     constant uint& total_out_dim [[buffer(6)]],
     constant uint& rows [[buffer(7)]],
-    uint gid [[thread_position_in_grid]]) {
-    if (gid >= rows) {
+    uint tid [[thread_position_in_threadgroup]],
+    uint3 tg_pos [[threadgroup_position_in_grid]],
+    uint3 tg_dim [[threads_per_threadgroup]]) {
+    uint row_idx = tg_pos.x;
+    if (row_idx >= rows) {
         return;
     }
 
-    uint row_idx = gid;
+    uint threadgroup_size = tg_dim.x;
     uint feature_offset = row_idx * feature_dim;
+    uint output_offset = row_idx * total_out_dim;
+
+    threadgroup float partial_sums[THREADGROUP_SIZE];
+    threadgroup float shared_inv_rms;
+
     float sum_sq = 0.0f;
-    for (uint i = 0; i < feature_dim; ++i) {
+    for (uint i = tid; i < feature_dim; i += threadgroup_size) {
         float v = input[feature_offset + i];
         sum_sq += v * v;
     }
 
-    float inv_rms = rsqrt(sum_sq / static_cast<float>(feature_dim) + EPS);
+    partial_sums[tid] = sum_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint out_idx = 0; out_idx < total_out_dim; ++out_idx) {
+    for (uint stride = threadgroup_size / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            partial_sums[tid] += partial_sums[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        float mean_sq = partial_sums[0] / static_cast<float>(feature_dim);
+        shared_inv_rms = rsqrt(mean_sq + EPS);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = shared_inv_rms;
+
+    for (uint out_idx = tid; out_idx < total_out_dim; out_idx += threadgroup_size) {
         float acc = 0.0f;
-        uint weight_offset = out_idx;
         for (uint i = 0; i < feature_dim; ++i) {
-            float x = input[feature_offset + i];
-            float gamma_val = gamma[i];
-            float normed = x * inv_rms * gamma_val;
-            float w = weight[i * total_out_dim + weight_offset];
+            float normed = input[feature_offset + i] * inv_rms * gamma[i];
+            float w = weight[i * total_out_dim + out_idx];
             acc += normed * w;
         }
-        output[row_idx * total_out_dim + out_idx] = acc + bias[out_idx];
+        output[output_offset + out_idx] = acc + bias[out_idx];
     }
 }
 
@@ -50,40 +72,59 @@ kernel void fused_rmsnorm_qkv_projection_f16(
     constant uint& feature_dim [[buffer(5)]],
     constant uint& total_out_dim [[buffer(6)]],
     constant uint& rows [[buffer(7)]],
-    uint gid [[thread_position_in_grid]]) {
-    if (gid >= rows) {
+    uint tid [[thread_position_in_threadgroup]],
+    uint3 tg_pos [[threadgroup_position_in_grid]],
+    uint3 tg_dim [[threads_per_threadgroup]]) {
+    uint row_idx = tg_pos.x;
+    if (row_idx >= rows) {
         return;
     }
 
-    uint row_idx = gid;
+    uint threadgroup_size = tg_dim.x;
     uint feature_offset = row_idx * feature_dim;
+    uint output_offset = row_idx * total_out_dim;
+
+    threadgroup float partial_sums[THREADGROUP_SIZE];
+    threadgroup float shared_inv_rms;
+
     float sum_sq = 0.0f;
-    for (uint i = 0; i < feature_dim; ++i) {
+    for (uint i = tid; i < feature_dim; i += threadgroup_size) {
         float v = static_cast<float>(input[feature_offset + i]);
         sum_sq += v * v;
     }
 
-    float inv_rms = rsqrt(sum_sq / static_cast<float>(feature_dim) + EPS);
+    partial_sums[tid] = sum_sq;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    for (uint out_idx = 0; out_idx < total_out_dim; ++out_idx) {
+    for (uint stride = threadgroup_size / 2; stride > 0; stride /= 2) {
+        if (tid < stride) {
+            partial_sums[tid] += partial_sums[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+
+    if (tid == 0) {
+        float mean_sq = partial_sums[0] / static_cast<float>(feature_dim);
+        shared_inv_rms = rsqrt(mean_sq + EPS);
+    }
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    float inv_rms = shared_inv_rms;
+
+    for (uint out_idx = tid; out_idx < total_out_dim; out_idx += threadgroup_size) {
         float acc = 0.0f;
-        uint weight_offset = out_idx;
         for (uint i = 0; i < feature_dim; ++i) {
             float x = static_cast<float>(input[feature_offset + i]);
             float gamma_val = static_cast<float>(gamma[i]);
             float scaled = x * inv_rms * gamma_val;
-            // Match the standalone RMSNorm kernel by quantizing the scaled value to half
-            // precision before it feeds the projection matmuls. This mirrors the previous
-            // two-kernel pipeline where the normalized activations were materialized as
-            // F16 tensors prior to the fused QKV matmul, keeping test parity.
             half scaled_half = static_cast<half>(scaled);
             float normed = static_cast<float>(scaled_half);
-            float w = static_cast<float>(weight[i * total_out_dim + weight_offset]);
+            float w = static_cast<float>(weight[i * total_out_dim + out_idx]);
             acc += normed * w;
         }
         half matmul_half = static_cast<half>(acc);
         float matmul_val = static_cast<float>(matmul_half);
         float biased = matmul_val + static_cast<float>(bias[out_idx]);
-        output[row_idx * total_out_dim + out_idx] = static_cast<half>(biased);
+        output[output_offset + out_idx] = static_cast<half>(biased);
     }
 }
