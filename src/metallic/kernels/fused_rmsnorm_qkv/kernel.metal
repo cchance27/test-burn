@@ -13,10 +13,11 @@ kernel void fused_rmsnorm_qkv_projection_f32(
     constant uint& feature_dim [[buffer(5)]],
     constant uint& total_out_dim [[buffer(6)]],
     constant uint& rows [[buffer(7)]],
-    uint tid [[thread_position_in_threadgroup]],
+    uint3 thread_pos [[thread_position_in_threadgroup]],
     uint3 tg_pos [[threadgroup_position_in_grid]],
     uint3 tg_dim [[threads_per_threadgroup]]) {
     uint row_idx = tg_pos.x;
+    uint tid = thread_pos.x;
     if (row_idx >= rows) {
         return;
     }
@@ -72,10 +73,11 @@ kernel void fused_rmsnorm_qkv_projection_f16(
     constant uint& feature_dim [[buffer(5)]],
     constant uint& total_out_dim [[buffer(6)]],
     constant uint& rows [[buffer(7)]],
-    uint tid [[thread_position_in_threadgroup]],
+    uint3 thread_pos [[thread_position_in_threadgroup]],
     uint3 tg_pos [[threadgroup_position_in_grid]],
     uint3 tg_dim [[threads_per_threadgroup]]) {
     uint row_idx = tg_pos.x;
+    uint tid = thread_pos.x;
     if (row_idx >= rows) {
         return;
     }
