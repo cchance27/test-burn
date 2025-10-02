@@ -515,8 +515,13 @@ impl MatMulAlphaBetaMlx {
             i32::try_from(self.batch_size).map_err(|_| MetalError::InvalidOperation("matmul batch size exceeds i32 range".to_string()))?;
         super::set_bytes(&encoder, 6, &batch_size_i32);
 
-        let batch_strides = [self.batch_stride_a, self.batch_stride_b];
-        super::set_bytes(&encoder, 7, &batch_strides);
+        if self.use_out_source {
+            let batch_strides = [self.batch_stride_a, self.batch_stride_b, self.addmm_params.batch_stride_c];
+            super::set_bytes(&encoder, 7, &batch_strides);
+        } else {
+            let batch_strides = [self.batch_stride_a, self.batch_stride_b];
+            super::set_bytes(&encoder, 7, &batch_strides);
+        }
 
         let left_resource = buffer_as_resource(&self.left_buf);
         let right_resource = buffer_as_resource(&self.right_buf);

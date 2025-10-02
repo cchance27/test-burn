@@ -456,3 +456,76 @@ fn test_matmul_alpha_beta_scale_only_avoids_output_reads() -> Result<(), MetalEr
 
     Ok(())
 }
+
+#[test]
+fn test_matmul_alpha_beta_batched_addmm_reads_output() -> Result<(), MetalError> {
+    let mut context = Context::<F32Element>::new()?;
+    let batch = 3;
+    let m = 2;
+    let k = 4;
+    let n = 3;
+
+    let left_data: Vec<f32> = (0..(batch * m * k)).map(|i| (i as f32) * 0.021 + 0.35).collect();
+    let right_data: Vec<f32> = (0..(batch * k * n)).map(|i| 1.1 - (i as f32) * 0.017).collect();
+    let result_data: Vec<f32> = (0..(batch * m * n)).map(|i| ((i as f32) * 0.045).cos() * 0.3).collect();
+
+    let left_tensor = Tensor::new(
+        vec![batch, m, k],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&left_data),
+    )?;
+    let right_tensor = Tensor::new(
+        vec![batch, k, n],
+        TensorStorage::Dedicated(&context),
+        TensorInit::CopyFrom(&right_data),
+    )?;
+
+    let alpha = 0.85f32;
+    let beta = 0.25f32;
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMps);
+    let result_tensor_mps = make_result_tensor(&context, &result_data, &[batch, m, n])?;
+    let expected_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor_mps, false, false, alpha, beta)?;
+    context.synchronize();
+    let expected = expected_tensor.to_vec();
+    context.take_matmul_samples();
+
+    context.set_matmul_backend_preference(MatMulBackendPreference::ForceMlx);
+    let result_tensor_mlx = make_result_tensor(&context, &result_data, &[batch, m, n])?;
+    let actual_tensor = context.matmul_alpha_beta(&left_tensor, &right_tensor, &result_tensor_mlx, false, false, alpha, beta)?;
+    context.synchronize();
+    let actual = actual_tensor.to_vec();
+    let mlx_samples = context.take_matmul_samples();
+    let non_total_backends: Vec<MatMulBackend> = mlx_samples
+        .iter()
+        .map(|sample| sample.backend)
+        .filter(|backend| *backend != MatMulBackend::Total)
+        .collect();
+    assert!(
+        !non_total_backends.is_empty() && non_total_backends.iter().all(|backend| *backend == MatMulBackend::Mlx),
+        "expected MLX backend but observed {:?}",
+        mlx_samples.iter().map(|sample| sample.backend).collect::<Vec<_>>()
+    );
+
+    let flags = matmul_alpha_beta::take_last_mlx_alpha_beta_flags().expect("expected MLX alpha/beta flags to be recorded");
+    assert_eq!(flags, (true, false), "expected output reads when beta is non-zero");
+
+    assert_eq!(expected.len(), actual.len());
+    let rtol = 1e-4f32;
+    let atol = 1e-6f32;
+    for (idx, (&exp, &act)) in expected.iter().zip(actual.iter()).enumerate() {
+        let diff = (exp - act).abs();
+        let rel = if exp.abs() > 1e-6 { diff / exp.abs() } else { diff };
+        assert!(
+            diff <= atol || rel <= rtol,
+            "Mismatch at index {} in batched addmm comparison (expected {}, got {}, diff {}, rel {})",
+            idx,
+            exp,
+            act,
+            diff,
+            rel
+        );
+    }
+
+    Ok(())
+}
