@@ -1,5 +1,5 @@
-use super::kernel_manager::MlxPipelineKey;
 use super::*;
+use crate::metallic::kernels::kernel_manager::MlxPipelineKey;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
