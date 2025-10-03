@@ -19,7 +19,6 @@ use std::ptr::NonNull;
 use crate::metallic::kernels::matmul::MatMulBackend;
 use crate::metallic::resource_cache::ResourceCache;
 
-
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 struct GemmParams {
@@ -122,6 +121,7 @@ struct MlxConstants {
     has_batch: bool,
     use_out_source: bool,
     do_axpby: bool,
+    do_bias_add: bool,
     align_m: bool,
     align_n: bool,
     align_k: bool,
@@ -134,6 +134,7 @@ impl MlxConstants {
         set_bool_constant(&constants, 10, self.has_batch);
         set_bool_constant(&constants, 100, self.use_out_source);
         set_bool_constant(&constants, 110, self.do_axpby);
+        set_bool_constant(&constants, 120, self.do_bias_add);
         set_bool_constant(&constants, 200, self.align_m);
         set_bool_constant(&constants, 201, self.align_n);
         set_bool_constant(&constants, 202, self.align_k);
@@ -156,6 +157,7 @@ pub struct MatMulMlxOp;
 struct MatMulMlx<T: TensorElement> {
     left: Tensor<T>,
     right: Tensor<T>,
+    bias: Option<Tensor<T>>,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     params: GemmParams,
@@ -168,7 +170,16 @@ struct MatMulMlx<T: TensorElement> {
 }
 
 impl KernelInvocable for MatMulMlxOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, Option<&'a Tensor<T>>, bool, bool, f32, f32);
+    type Args<'a, T: TensorElement> = (
+        &'a Tensor<T>,
+        &'a Tensor<T>,
+        Option<&'a Tensor<T>>,
+        Option<&'a Tensor<T>>,
+        bool,
+        bool,
+        f32,
+        f32,
+    );
 
     fn function_id() -> Option<KernelFunction> {
         None
@@ -180,7 +191,7 @@ impl KernelInvocable for MatMulMlxOp {
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (left, right, existing_out, transpose_left, transpose_right, alpha, beta) = args;
+        let (left, right, bias, existing_out, transpose_left, transpose_right, alpha, beta) = args;
         if beta != 0.0 && existing_out.is_none() {
             return Err(MetalError::InvalidOperation("beta requires an existing output tensor".to_string()));
         }
@@ -236,7 +247,7 @@ impl KernelInvocable for MatMulMlxOp {
         let effective_b_trans = layout_b_transposed ^ transpose_right;
 
         let dtype = T::DTYPE;
-        let function_name = gemm_function_name(dtype, effective_a_trans, effective_b_trans, m, n)?;
+        let function_name = gemm_function_name(dtype, effective_a_trans, effective_b_trans, m, n, bias.is_some())?;
 
         let has_batch = batch > 1;
         let align_m = m % tile_bm == 0;
@@ -244,10 +255,12 @@ impl KernelInvocable for MatMulMlxOp {
         let align_k = k % tile_bk == 0;
         let requires_epilogue = alpha != 1.0 || beta != 0.0;
         let use_out_source = requires_epilogue;
+        let do_bias_add = bias.is_some();
         let constants = MlxConstants {
             has_batch,
             use_out_source,
             do_axpby: requires_epilogue,
+            do_bias_add,
             align_m,
             align_n,
             align_k,
@@ -280,11 +293,14 @@ impl KernelInvocable for MatMulMlxOp {
             }
         }
 
+        let mut tensors_to_prepare = vec![&left_tensor, &right_tensor];
         if use_out_source {
-            ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor, &out])?;
-        } else {
-            ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor])?;
+            tensors_to_prepare.push(&out);
         }
+        if let Some(bias_tensor) = bias {
+            tensors_to_prepare.push(bias_tensor);
+        }
+        ctx.prepare_tensors_for_active_cmd(&tensors_to_prepare)?;
 
         let out_view = out.as_mps_matrix_batch_view()?;
         let ldd = determine_leading_dimension(&out, m, n)?;
@@ -379,6 +395,7 @@ impl KernelInvocable for MatMulMlxOp {
         let op = MatMulMlx {
             left: left_tensor,
             right: right_tensor,
+            bias: bias.cloned(),
             out: out.clone(),
             pipeline,
             params,
@@ -411,16 +428,31 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
             set_buffer(&encoder, 2, &self.out.buf, self.out.offset);
         }
         set_buffer(&encoder, 3, &self.out.buf, self.out.offset);
-        set_bytes(&encoder, 4, &self.params);
-        if let Some(addmm) = &self.addmm {
-            set_bytes(&encoder, 5, addmm);
+
+        if let Some(bias) = &self.bias {
+            set_buffer(&encoder, 4, &bias.buf, bias.offset);
+            set_bytes(&encoder, 5, &self.params);
+            if let Some(addmm) = &self.addmm {
+                set_bytes(&encoder, 6, addmm);
+            }
+            let batch_shape: i32 = self
+                .batch_size
+                .try_into()
+                .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))?;
+            set_bytes(&encoder, 7, &batch_shape);
+            set_bytes(&encoder, 8, &self.batch_strides);
+        } else {
+            set_bytes(&encoder, 4, &self.params);
+            if let Some(addmm) = &self.addmm {
+                set_bytes(&encoder, 5, addmm);
+            }
+            let batch_shape: i32 = self
+                .batch_size
+                .try_into()
+                .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))?;
+            set_bytes(&encoder, 6, &batch_shape);
+            set_bytes(&encoder, 7, &self.batch_strides);
         }
-        let batch_shape: i32 = self
-            .batch_size
-            .try_into()
-            .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))?;
-        set_bytes(&encoder, 6, &batch_shape);
-        set_bytes(&encoder, 7, &self.batch_strides);
 
         dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
         encoder.endEncoding();
@@ -497,7 +529,7 @@ fn select_tile(m: usize, n: usize) -> (usize, usize, usize, usize, usize) {
     }
 }
 
-fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool, m: usize, n: usize) -> Result<String, MetalError> {
+fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool, m: usize, n: usize, with_bias: bool) -> Result<String, MetalError> {
     let dtype_str = match dtype {
         Dtype::F32 => "f32",
         Dtype::F16 => "f16",
@@ -507,8 +539,10 @@ fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool, m: usize, n: u
     let b_tag = if b_trans { "t" } else { "n" };
 
     let (bm, bn, bk, wm, wn) = select_tile(m, n);
+    let kernel_name = if with_bias { "gemm_bias" } else { "gemm" };
     Ok(format!(
-        "gemm_{}{}_{dtype}_{dtype}_{bm}_{bn}_{bk}_{wm}_{wn}",
+        "{}_{}{}_{dtype}_{dtype}_{bm}_{bn}_{bk}_{wm}_{wn}",
+        kernel_name,
         a_tag,
         b_tag,
         dtype = dtype_str,

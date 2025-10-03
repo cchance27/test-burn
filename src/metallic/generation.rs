@@ -53,9 +53,10 @@ impl CacheStatsLogger {
             return;
         };
 
-        if let Ok(mut file) = file.lock() 
-            && let Err(err) = writeln!(file, "{line}") {
-                eprintln!("Failed to write cache stats log: {err}");
+        if let Ok(mut file) = file.lock()
+            && let Err(err) = writeln!(file, "{line}")
+        {
+            eprintln!("Failed to write cache stats log: {err}");
         }
     }
 }

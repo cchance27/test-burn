@@ -72,7 +72,7 @@ struct GEMMAddMMParams {
 // Loading helper
 ///////////////////////////////////////////////////////////////////////////////
 
-template <
+template < 
     typename T,
     short BROWS,
     short BCOLS,
@@ -499,7 +499,6 @@ struct BlockMMA {
     if (dst_tile_dims.x <= 0 || dst_tile_dims.y <= 0)
       return;
 
-    // Loop over all simdgroup tiles
     STEEL_PRAGMA_UNROLL
     for (short i = 0; i < TM; i++) {
       STEEL_PRAGMA_UNROLL
@@ -593,6 +592,53 @@ struct BlockMMA {
           if (j * TN_stride + 1 < dst_tile_dims.x) {
             D[offset_d + 1] = epilogue_op.apply(accum[1], C[offset_c + fdc]);
           }
+        }
+      }
+    }
+  }
+
+  METAL_FUNC void apply_bias(
+      const device T* bias,
+      const int c_col) {
+    // Loop over all simdgroup tiles
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < TM; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < TN; j++) {
+        thread auto& accum = results[i * TN + j].thread_elements();
+        int offset = j * TN_stride;
+
+        T bias0 = bias[c_col + tn + sn + offset];
+        T bias1 = bias[c_col + tn + sn + offset + 1];
+
+        accum[0] += static_cast<AccumType>(bias0);
+        accum[1] += static_cast<AccumType>(bias1);
+      }
+    }
+  }
+
+  METAL_FUNC void apply_bias_safe(
+      const device T* bias,
+      const int c_col,
+      short2 dst_tile_dims) {
+    const int max_cols = dst_tile_dims.x;
+
+    if (max_cols <= 0)
+      return;
+
+    STEEL_PRAGMA_UNROLL
+    for (short i = 0; i < TM; i++) {
+      STEEL_PRAGMA_UNROLL
+      for (short j = 0; j < TN; j++) {
+        thread auto& accum = results[i * TN + j].thread_elements();
+        int offset = j * TN_stride;
+        int col_offset = tn + sn + offset;
+
+        if (col_offset < max_cols) {
+          accum[0] += static_cast<AccumType>(bias[c_col + col_offset]);
+        }
+        if (col_offset + 1 < max_cols) {
+          accum[1] += static_cast<AccumType>(bias[c_col + col_offset + 1]);
         }
       }
     }
@@ -1001,6 +1047,7 @@ constant bool has_batch [[function_constant(10)]];
 
 constant bool use_out_source [[function_constant(100)]];
 constant bool do_axpby [[function_constant(110)]];
+constant bool do_bias_add [[function_constant(120)]];
 
 constant bool align_M [[function_constant(200)]];
 constant bool align_N [[function_constant(201)]];
@@ -1445,4 +1492,461 @@ instantiate_gemm_transpose_helper(f16, half, f16, half, 64, 16, 16, 4, 1)
 instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 32, 32, 16, 2, 2)
 instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 16, 64, 16, 1, 4)
 instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 64, 16, 16, 4, 1)
+#endif
+
+// clang-format off
+template <
+    typename T,
+    int BM,
+    int BN,
+    int BK,
+    int WM,
+    int WN,
+    bool transpose_a,
+    bool transpose_b,
+    typename AccumType = float>
+[[kernel, max_total_threads_per_threadgroup(WM* WN * 32)]] void gemm_bias(
+    const device T* A [[buffer(0)]],
+    const device T* B [[buffer(1)]],
+    const device T* C [[buffer(2), function_constant(use_out_source)]],
+    device T* D [[buffer(3)]],
+    const device T* bias [[buffer(4), function_constant(do_bias_add)]],
+    const constant GEMMParams* params [[buffer(5)]],
+    const constant GEMMAddMMParams* addmm_params [[buffer(6), function_constant(use_out_source)]],
+    const constant int* batch_shape [[buffer(7)]],
+    const constant size_t* batch_strides [[buffer(8)]],
+    const constant uint32_t* lhs_indices [[buffer(10), function_constant(do_gather)]],
+    const constant uint32_t* rhs_indices [[buffer(11), function_constant(do_gather)]],
+    const constant uint32_t* C_indices [[buffer(12), function_constant(gather_bias)]],
+    const constant int* operand_shape [[buffer(13), function_constant(do_gather)]],
+    const constant size_t* operand_strides [[buffer(14), function_constant(do_gather)]],
+    const constant packed_int3& operand_batch_ndim [[buffer(15), function_constant(do_gather)]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]],
+    uint3 tid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) { // clang-format on
+  // Pacifying compiler
+  (void)lid;
+
+  using gemm_kernel = GEMMKernel<
+      T,
+      T,
+      BM,
+      BN,
+      BK,
+      WM,
+      WN,
+      transpose_a,
+      transpose_b,
+      true,
+      true,
+      AccumType>;
+
+  using loader_a_t = typename gemm_kernel::loader_a_t;
+  using loader_b_t = typename gemm_kernel::loader_b_t;
+  using mma_t = typename gemm_kernel::mma_t;
+
+  // Find block
+  const int tid_y = ((tid.y) << params->swizzle_log) +
+      ((tid.x) & ((1 << params->swizzle_log) - 1));
+  const int tid_x = (tid.x) >> params->swizzle_log;
+
+  // Exit early if out of bounds
+  if (params->tiles_n <= tid_x || params->tiles_m <= tid_y) {
+    return;
+  }
+
+  // Adjust for batch
+
+  // Handle gather
+  if (do_gather) {
+    // Read indices
+    uint32_t indx_A, indx_B, indx_C;
+
+    if (has_batch) {
+      const constant size_t* indx_A_bstrides = batch_strides;
+      const constant size_t* indx_B_bstrides =
+          batch_strides + params->batch_ndim;
+
+      ulong2 indx_offsets = elem_to_loc_broadcast(
+          tid.z,
+          batch_shape,
+          indx_A_bstrides,
+          indx_B_bstrides,
+          params->batch_ndim);
+      indx_A = lhs_indices[indx_offsets.x];
+      indx_B = rhs_indices[indx_offsets.y];
+
+      if (use_out_source) {
+        const constant size_t* indx_C_bstrides =
+            indx_B_bstrides + params->batch_ndim;
+        auto indx_offset_C = elem_to_loc(
+            tid.z, batch_shape, indx_C_bstrides, params->batch_ndim);
+        indx_C = C_indices[indx_offset_C];
+      }
+    } else {
+      indx_A = lhs_indices[params->batch_stride_a * tid.z];
+      indx_B = rhs_indices[params->batch_stride_b * tid.z];
+
+      if (use_out_source) {
+        indx_C = C_indices[addmm_params->batch_stride_c * tid.z];
+      }
+    }
+
+    // Translate indices to offsets
+    int batch_ndim_A = operand_batch_ndim.x;
+    const constant int* batch_shape_A = operand_shape;
+    const constant size_t* batch_strides_A = operand_strides;
+    A += elem_to_loc(indx_A, batch_shape_A, batch_strides_A, batch_ndim_A);
+
+    int batch_ndim_B = operand_batch_ndim.y;
+    const constant int* batch_shape_B = batch_shape_A + batch_ndim_A;
+    const constant size_t* batch_strides_B = batch_strides_A + batch_ndim_A;
+    B += elem_to_loc(indx_B, batch_shape_B, batch_strides_B, batch_ndim_B);
+
+    if (use_out_source) {
+      int batch_ndim_C = operand_batch_ndim.z;
+      const constant int* batch_shape_C = batch_shape_B + batch_ndim_B;
+      const constant size_t* batch_strides_C = batch_strides_B + batch_ndim_B;
+      C += elem_to_loc(indx_C, batch_shape_C, batch_strides_C, batch_ndim_C);
+    }
+
+  }
+
+  // Handle regular batch
+  else {
+    if (has_batch) {
+      const constant size_t* A_bstrides = batch_strides;
+      const constant size_t* B_bstrides = batch_strides + params->batch_ndim;
+
+      ulong2 batch_offsets = elem_to_loc_broadcast(
+          tid.z, batch_shape, A_bstrides, B_bstrides, params->batch_ndim);
+
+      A += batch_offsets.x;
+      B += batch_offsets.y;
+
+      if (use_out_source) {
+        const constant size_t* C_bstrides = B_bstrides + params->batch_ndim;
+        C += elem_to_loc(tid.z, batch_shape, C_bstrides, params->batch_ndim);
+      }
+    } else {
+      A += params->batch_stride_a * tid.z;
+      B += params->batch_stride_b * tid.z;
+
+      if (use_out_source) {
+        C += addmm_params->batch_stride_c * tid.z;
+      }
+    }
+  }
+
+  D += params->batch_stride_d * tid.z;
+
+  // Prepare threadgroup memory
+  threadgroup T As[gemm_kernel::tgp_mem_size_a];
+  threadgroup T Bs[gemm_kernel::tgp_mem_size_b];
+
+  threadgroup_barrier(mem_flags::mem_none);
+
+  // Find block in A, B, C
+  const int c_row = tid_y * BM;
+  const int c_col = tid_x * BN;
+  const size_t c_row_long = size_t(c_row);
+  const size_t c_col_long = size_t(c_col);
+
+  A += transpose_a ? c_row_long : c_row_long * params->lda;
+  B += transpose_b ? c_col_long * params->ldb : c_col_long;
+  D += c_row_long * params->ldd + c_col_long;
+
+  if (use_out_source) {
+    C += c_row_long * addmm_params->ldc + c_col_long * addmm_params->fdc;
+  }
+
+  // Prepare threadgroup mma operation
+  thread mma_t mma_op(simd_group_id, simd_lane_id);
+
+  // Prepare threadgroup loading operations
+  thread loader_a_t loader_a(A, params->lda, As, simd_group_id, simd_lane_id);
+  thread loader_b_t loader_b(B, params->ldb, Bs, simd_group_id, simd_lane_id);
+
+  // Prepare threadgroup bounds
+  const short tgp_bm = align_M ? BM : short(min(BM, params->M - c_row));
+  const short tgp_bn = align_N ? BN : short(min(BN, params->N - c_col));
+
+  // Prepare iterations
+  int gemm_k_iterations = params->gemm_k_iterations_aligned;
+
+  // Do unaligned K iterations first
+  if (!align_K) {
+    const int k_last = params->gemm_k_iterations_aligned * BK;
+    const int k_remain = params->K - k_last;
+    const size_t k_jump_a =
+        transpose_a ? params->lda * size_t(k_last) : size_t(k_last);
+    const size_t k_jump_b =
+        transpose_b ? size_t(k_last) : params->ldb * size_t(k_last);
+
+    // Move loader source ahead to end
+    loader_a.src += k_jump_a;
+    loader_b.src += k_jump_b;
+
+    // Load tile
+    const short2 tile_dims_A =
+        transpose_a ? short2(tgp_bm, k_remain) : short2(k_remain, tgp_bm);
+    const short2 tile_dims_B =
+        transpose_b ? short2(k_remain, tgp_bn) : short2(tgp_bn, k_remain);
+
+    loader_a.load_safe(tile_dims_A);
+    loader_b.load_safe(tile_dims_B);
+
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Do matmul
+    mma_op.mma(As, Bs);
+
+    // Reset source back to start
+    loader_a.src -= k_jump_a;
+    loader_b.src -= k_jump_b;
+  }
+
+  const TransformAdd<AccumType, AccumType> epilogue_op_add(
+      addmm_params->alpha, addmm_params->beta);
+  const TransformAxpby<AccumType, AccumType> epilogue_op_axpby(
+      addmm_params->alpha, addmm_params->beta);
+
+  ///////////////////////////////////////////////////////////////////////////////
+  // MNK aligned loop
+  if (align_M && align_N) {
+    // Do gemm
+    for (int k = 0; k < gemm_k_iterations; k++) {
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      // Load elements into threadgroup
+      loader_a.load_unsafe();
+      loader_b.load_unsafe();
+
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+
+      // Multiply and accumulate threadgroup elements
+      mma_op.mma(As, Bs);
+
+      // Prepare for next iteration
+      loader_a.next();
+      loader_b.next();
+    }
+
+    threadgroup_barrier(mem_flags::mem_none);
+
+    // Do epilogue
+    if (use_out_source) {
+      if (do_axpby) {
+        mma_op.apply_epilogue(
+            C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
+      } else {
+        mma_op.apply_epilogue(
+            C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
+      }
+    }
+
+    if (do_bias_add) {
+      mma_op.apply_bias(bias, c_col);
+    }
+
+    // Store results to device memory
+    return mma_op.store_result(D, params->ldd);
+
+  }
+  ///////////////////////////////////////////////////////////////////////////////
+  // MN unaligned loop
+  else { // Loop over K - unaligned case
+    const int leftover_bk = 0;
+
+    if ((align_M || tgp_bm == BM) && (align_N || tgp_bn == BN)) {
+      // Do gemm
+      gemm_kernel::gemm_loop(
+          As,
+          Bs,
+          gemm_k_iterations,
+          loader_a,
+          loader_b,
+          mma_op,
+          tgp_bm,
+          tgp_bn,
+          leftover_bk,
+          LoopAlignment<true, true, true>{});
+
+      // Do epilogue
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue(
+              C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue(
+              C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
+        }
+      }
+
+      if (do_bias_add) {
+        mma_op.apply_bias(bias, c_col);
+      }
+
+      // Store results to device memory
+      return mma_op.store_result(D, params->ldd);
+
+    } else if (align_N || tgp_bn == BN) {
+      gemm_kernel::gemm_loop(
+          As,
+          Bs,
+          gemm_k_iterations,
+          loader_a,
+          loader_b,
+          mma_op,
+          tgp_bm,
+          tgp_bn,
+          leftover_bk,
+          LoopAlignment<false, true, true>{});
+
+      // Do epilogue
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue_safe(
+              C,
+              addmm_params->ldc,
+              addmm_params->fdc,
+              short2(tgp_bn, tgp_bm),
+              epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue_safe(
+              C,
+              addmm_params->ldc,
+              addmm_params->fdc,
+              short2(tgp_bn, tgp_bm),
+              epilogue_op_add);
+        }
+      }
+
+      if (do_bias_add) {
+        mma_op.apply_bias_safe(bias, c_col, short2(tgp_bn, tgp_bm));
+      }
+
+      // Store results to device memory
+      return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
+
+    } else if (align_M || tgp_bm == BM) {
+      gemm_kernel::gemm_loop(
+          As,
+          Bs,
+          gemm_k_iterations,
+          loader_a,
+          loader_b,
+          mma_op,
+          tgp_bm,
+          tgp_bn,
+          leftover_bk,
+          LoopAlignment<true, false, true>{});
+
+      // Do epilogue
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue_safe(
+              C,
+              addmm_params->ldc,
+              addmm_params->fdc,
+              short2(tgp_bn, tgp_bm),
+              epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue_safe(
+              C,
+              addmm_params->ldc,
+              addmm_params->fdc,
+              short2(tgp_bn, tgp_bm),
+              epilogue_op_add);
+        }
+      }
+
+      if (do_bias_add) {
+        mma_op.apply_bias_safe(bias, c_col, short2(tgp_bn, tgp_bm));
+      }
+
+      // Store results to device memory
+      return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
+
+    } else {
+      gemm_kernel::gemm_loop(
+          As,
+          Bs,
+          gemm_k_iterations,
+          loader_a,
+          loader_b,
+          mma_op,
+          tgp_bm,
+          tgp_bn,
+          leftover_bk,
+          LoopAlignment<false, false, true>{});
+
+      // Do epilogue
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue_safe(
+              C,
+              addmm_params->ldc,
+              addmm_params->fdc,
+              short2(tgp_bn, tgp_bm),
+              epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue_safe(
+              C,
+              addmm_params->ldc,
+              addmm_params->fdc,
+              short2(tgp_bn, tgp_bm),
+              epilogue_op_add);
+        }
+      }
+
+      if (do_bias_add) {
+        mma_op.apply_bias_safe(bias, c_col, short2(tgp_bn, tgp_bm));
+      }
+
+      // Store results to device memory
+      return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
+    }
+  }
+}
+
+#define instantiate_gemm_bias(tname, trans_a, trans_b, iname, itype, oname, otype, bm, bn, bk, wm, wn) \
+  template [[host_name("gemm_bias_" #tname "_"  #iname "_" #oname "_" #bm "_" #bn "_" #bk "_" #wm "_" #wn)]] \
+  [[kernel]] void gemm_bias<itype, bm, bn, bk, wm, wn, trans_a, trans_b, float>( \
+      const device itype *A [[buffer(0)]], \
+      const device itype *B [[buffer(1)]], \
+      const device itype *C [[buffer(2), function_constant(use_out_source)]], \
+      device itype *D [[buffer(3)]], \
+      const device itype *bias [[buffer(4), function_constant(do_bias_add)]], \
+      const constant GEMMParams* params [[buffer(5)]], \
+      const constant GEMMAddMMParams* addmm_params [[buffer(6), function_constant(use_out_source)]], \
+      const constant int* batch_shape [[buffer(7)]], \
+      const constant size_t* batch_strides [[buffer(8)]], \
+      const constant uint32_t* lhs_indices [[buffer(10), function_constant(do_gather)]], \
+      const constant uint32_t* rhs_indices [[buffer(11), function_constant(do_gather)]], \
+      const constant uint32_t* C_indices [[buffer(12), function_constant(gather_bias)]], \
+      const constant int* operand_shape [[buffer(13), function_constant(do_gather)]], \
+      const constant size_t* operand_strides [[buffer(14), function_constant(do_gather)]], \
+      const constant packed_int3& operand_batch_ndim [[buffer(15), function_constant(do_gather)]], \
+      uint simd_lane_id [[thread_index_in_simdgroup]], \
+      uint simd_group_id [[simdgroup_index_in_threadgroup]], \
+      uint3 tid [[threadgroup_position_in_grid]], \
+      uint3 lid [[thread_position_in_threadgroup]]);
+
+#define instantiate_gemm_bias_transpose_helper(iname, itype, oname, otype, bm, bn, bk, wm, wn) \
+    instantiate_gemm_bias(nn, false, false, iname, itype, oname, otype, bm, bn, bk, wm, wn) \
+    instantiate_gemm_bias(nt, false, true , iname, itype, oname, otype, bm, bn, bk, wm, wn) \
+    instantiate_gemm_bias(tn, true , false, iname, itype, oname, otype, bm, bn, bk, wm, wn) \
+    instantiate_gemm_bias(tt, true , true , iname, itype, oname, otype, bm, bn, bk, wm, wn)
+
+instantiate_gemm_bias_transpose_helper(f32, float, f32, float, 32, 32, 16, 2, 2)
+instantiate_gemm_bias_transpose_helper(f16, half, f16, half, 32, 32, 16, 2, 2)
+instantiate_gemm_bias_transpose_helper(f32, float, f32, float, 16, 64, 16, 1, 4)
+instantiate_gemm_bias_transpose_helper(f16, half, f16, half, 16, 64, 16, 1, 4)
+instantiate_gemm_bias_transpose_helper(f32, float, f32, float, 64, 16, 16, 4, 1)
+instantiate_gemm_bias_transpose_helper(f16, half, f16, half, 64, 16, 16, 4, 1)
+#if defined(__HAVE_BFLOAT__)
+instantiate_gemm_bias_transpose_helper(bf16, bfloat, bf16, bfloat, 32, 32, 16, 2, 2)
+instantiate_gemm_bias_transpose_helper(bf16, bfloat, bf16, bfloat, 16, 64, 16, 1, 4)
+instantiate_gemm_bias_transpose_helper(bf16, bfloat, bf16, bfloat, 64, 16, 16, 4, 1)
 #endif

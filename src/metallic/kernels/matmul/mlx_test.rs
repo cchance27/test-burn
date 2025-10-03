@@ -240,3 +240,39 @@ fn test_mlx_kernel_matches_mps_batched_matmul() -> Result<(), MetalError> {
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, "batched matmul");
     Ok(())
 }
+
+#[test]
+fn test_mlx_fused_bias_add_matches_mps() -> Result<(), MetalError> {
+    use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+
+    let mut ctx_mps = new_context_for_backend("mps")?;
+    let mut ctx_mlx = new_context_for_backend("mlx")?;
+
+    let m = 5;
+    let k = 7;
+    let n = 3;
+
+    let a_data: Vec<f32> = (0..(m * k)).map(|i| (i as f32) * 0.031 + 0.5).collect();
+    let b_data: Vec<f32> = (0..(k * n)).map(|i| (i as f32) * -0.017 + 0.25).collect();
+    let bias_data: Vec<f32> = (0..n).map(|i| (i as f32) * 0.1 - 0.05).collect();
+
+    let a_mps = tensor_from_data(&ctx_mps, vec![m, k], &a_data)?;
+    let b_mps = tensor_from_data(&ctx_mps, vec![k, n], &b_data)?;
+    let bias_mps = tensor_from_data(&ctx_mps, vec![n], &bias_data)?;
+
+    let a_mlx = tensor_from_data(&ctx_mlx, vec![m, k], &a_data)?;
+    let b_mlx = tensor_from_data(&ctx_mlx, vec![k, n], &b_data)?;
+    let bias_mlx = tensor_from_data(&ctx_mlx, vec![n], &bias_data)?;
+
+    // MPS path: matmul + add
+    let out_mps_matmul = ctx_mps.matmul(&a_mps, &b_mps, false, false)?;
+    let out_mps = ctx_mps.call::<BroadcastElemwiseAddInplaceOp>((out_mps_matmul, bias_mps))?;
+    ctx_mps.synchronize();
+
+    // MLX path: fused matmul_bias_add
+    let out_mlx = ctx_mlx.matmul_bias_add(&a_mlx, &b_mlx, &bias_mlx, false, false)?;
+    ctx_mlx.synchronize();
+
+    assert_tensors_close(&out_mps, &out_mlx, 1e-4, "fused bias-add matmul");
+    Ok(())
+}
