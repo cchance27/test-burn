@@ -23,6 +23,7 @@ pub mod gelu;
 pub mod kv_rearrange;
 pub mod layernorm;
 pub mod matmul;
+pub mod mlxmatmul;
 pub mod permute;
 pub mod repeat_kv_heads;
 pub mod rmsnorm;

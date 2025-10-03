@@ -10,6 +10,7 @@ use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
+use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
@@ -19,8 +20,30 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
+use std::env;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
+
+fn detect_forced_matmul_backend() -> Option<MatMulBackend> {
+    match env::var(FORCE_MATMUL_BACKEND_ENV) {
+        Ok(value) => {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                match trimmed.to_ascii_lowercase().as_str() {
+                    "mlx" => Some(MatMulBackend::Mlx),
+                    "mps" => Some(MatMulBackend::Mps),
+                    _ => None,
+                }
+            }
+        }
+        Err(env::VarError::NotPresent) => None,
+        Err(env::VarError::NotUnicode(_)) => None,
+    }
+}
 
 #[derive(Default)]
 pub struct SamplerBuffers {
@@ -60,6 +83,10 @@ pub struct Context<T: TensorElement> {
     matmul_recorder: MatMulSampleRecorder,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
+    /// Optional override for the matmul backend chosen by this context.
+    forced_matmul_backend: Option<MatMulBackend>,
+    /// Cache of MLX compute pipelines keyed by kernel configuration.
+    pub(crate) mlx_kernel_cache: MlxKernelCache,
     //config: ContextConfig,
 }
 
@@ -133,6 +160,8 @@ impl<T: TensorElement> Context<T> {
             matmul_samples,
             matmul_recorder,
             sampler_buffers: SamplerBuffers::default(),
+            forced_matmul_backend: detect_forced_matmul_backend(),
+            mlx_kernel_cache: MlxKernelCache::default(),
             //config,
         })
     }
@@ -208,6 +237,10 @@ impl<T: TensorElement> Context<T> {
         samples.drain(..).collect()
     }
 
+    fn resolved_matmul_backend(&self) -> MatMulBackend {
+        self.forced_matmul_backend.unwrap_or(MatMulBackend::Mps)
+    }
+
     /// Registers a memory collector handle for the upcoming operations. Passing `None`
     /// disables memory instrumentation.
     pub fn set_memory_collector(&mut self, collector: Option<MemoryCollectorHandle>) {
@@ -243,8 +276,11 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
-        // Use the kernel system for matmul
-        self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+        if matches!(self.resolved_matmul_backend(), MatMulBackend::Mlx) {
+            self.call::<MatMulMlxOp>((a, b, None, transpose_a, transpose_b, 1.0, 0.0))
+        } else {
+            self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+        }
     }
 
     pub(crate) fn matmul_with_cache(
@@ -255,7 +291,11 @@ impl<T: TensorElement> Context<T> {
         transpose_b: bool,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
-        self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
+        if matches!(self.resolved_matmul_backend(), MatMulBackend::Mlx) {
+            self.call::<MatMulMlxOp>((a, b, None, transpose_a, transpose_b, 1.0, 0.0))
+        } else {
+            Self::call_with_cache::<MatMulOp>(self, (a, b, transpose_a, transpose_b), cache)
+        }
     }
 
     #[allow(clippy::type_complexity)]
@@ -334,8 +374,11 @@ impl<T: TensorElement> Context<T> {
         alpha: f32,
         beta: f32,
     ) -> Result<Tensor<T>, MetalError> {
-        // Use the kernel system for matmul with alpha/beta scaling
-        self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
+        if matches!(self.resolved_matmul_backend(), MatMulBackend::Mlx) {
+            self.call::<MatMulMlxOp>((a, b, Some(result), transpose_a, transpose_b, alpha, beta))
+        } else {
+            self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
+        }
     }
 
     pub(crate) fn call_with_cache<K: KernelInvocable>(
@@ -372,7 +415,11 @@ impl<T: TensorElement> Context<T> {
         beta: f32,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
-        self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
+        if matches!(self.resolved_matmul_backend(), MatMulBackend::Mlx) {
+            self.call::<MatMulMlxOp>((a, b, Some(result), transpose_a, transpose_b, alpha, beta))
+        } else {
+            Self::call_with_cache::<MatMulAlphaBetaOp>(self, (a, b, result, transpose_a, transpose_b, alpha, beta), cache)
+        }
     }
 
     pub fn get_cache_stats(&self) -> Option<CacheStats> {
