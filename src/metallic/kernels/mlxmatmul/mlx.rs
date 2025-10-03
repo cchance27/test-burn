@@ -198,8 +198,11 @@ impl KernelInvocable for MatMulMlxOp {
             return Err(MetalError::InvalidOperation("beta requires an existing output tensor".to_string()));
         }
 
-        let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
-        let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
+        // Avoid MPS-specific batch compaction: MLX GEMM supports arbitrary batch strides directly.
+        let left_tensor = left.clone();
+        let right_tensor = right.clone();
+        let left_view = left.as_mps_matrix_batch_view()?;
+        let right_view = right.as_mps_matrix_batch_view()?;
 
         let batch = left_view.batch;
         if right_view.batch != batch {

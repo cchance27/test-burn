@@ -42,6 +42,13 @@ kernel can perform the fused `C = αAB + βC` update.
 
 ## Testing coverage
 
+### Performance note: zero-copy batching
+
+- Unlike MPS, MLX GEMM supports arbitrary batch strides (batch_stride_a/b/d) and non-compact row/column leading dimensions (lda/ldb/ldd) directly.
+- We therefore do not compact batched inputs prior to encoding MLX GEMM. Any padding between matrices in a batch is handled by the kernel via the batch stride parameters.
+- Avoiding MPS-style compaction prevents an extra blit/copy and aligns the integration with the experimental benchmark setup, restoring the expected performance advantage of the MLX kernel.
+
+
 * `src/metallic/kernels/matmul/mlx_test.rs` compares MLX vs. MPS for
   * baseline matmul without transpositions,
   * left/right/both transposed operands,
