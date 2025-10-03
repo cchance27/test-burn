@@ -10,7 +10,7 @@ bench = false
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
 objc2 = "0.6.2"
 objc2-foundation = "0.3.1"
-objc2-metal = { version = "0.3.1", features = ["block2"] }
+objc2-metal = { version = "0.3.1", features = ["block2", "MTLArgument", "MTLFunctionConstantValues"] }
 objc2-metal-performance-shaders = "0.3.1"
 block2 = "0.6.1"
 rand = "0.9.2"
@@ -66,4 +66,8 @@ harness = false
 
 [[bench]]
 name = "softmax_backend_benchmark"
+harness = false
+
+[[bench]]
+name = "mlx_vs_mps_matmul_benchmark"
 harness = false

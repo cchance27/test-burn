@@ -15,6 +15,8 @@ use crate::metallic::{
 
 #[cfg(test)]
 mod matmul_test;
+#[cfg(test)]
+mod mlx_test;
 
 // Include additional mps kernels
 mod matmul_alpha_beta;
@@ -25,6 +27,7 @@ pub use matmul_alpha_beta::MatMulAlphaBetaOp;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MatMulBackend {
     Mps,
+    Mlx,
 }
 
 #[derive(Clone, Copy, Debug)]

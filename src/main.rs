@@ -705,6 +705,7 @@ fn render_latency_collapsed(rows: &[LatencyRow]) -> String {
     };
 
     let mut block_end = block_start;
+    #[allow(clippy::needless_range_loop)]
     for idx in block_start..rows.len() {
         let row = &rows[idx];
         if idx != block_start && row.level == 0 {
