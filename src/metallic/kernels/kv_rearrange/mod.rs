@@ -38,7 +38,7 @@ impl KernelInvocable for KvRearrangeOp {
             return Err(MetalError::InvalidShape("KV rearrange expects at least 2D input".to_string()));
         }
 
-        let row_stride_elems = input.strides.get(0).copied().unwrap_or_else(|| input.dims()[1]);
+        let row_stride_elems = input.strides.first().copied().unwrap_or_else(|| input.dims()[1]);
         if row_stride_elems == 0 {
             return Err(MetalError::InvalidShape(
                 "Row stride for KV rearrange must be greater than zero".to_string(),
@@ -112,6 +112,38 @@ impl<T: TensorElement> Operation for KvRearrange<T> {
         encoder.endEncoding();
         Ok(())
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+#[cfg(test)]
+fn cpu_reference_rearrange(
+    fused: &[f32],
+    row_stride: usize,
+    batch: usize,
+    seq: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    head_dim: usize,
+    kv_head_dim: usize,
+    column_offset: usize,
+) -> Vec<f32> {
+    let mut output = vec![0.0f32; batch * n_heads * seq * head_dim];
+    let group_size = n_heads / n_kv_heads;
+    for b in 0..batch {
+        for h in 0..n_heads {
+            let kv_h = h / group_size;
+            for s in 0..seq {
+                let src_row = b * seq + s;
+                for d in 0..head_dim {
+                    let base_offset = kv_h * kv_head_dim + d;
+                    let src_index = src_row * row_stride + column_offset + base_offset;
+                    let dst_index = ((b * n_heads + h) * seq + s) * head_dim + d;
+                    output[dst_index] = fused[src_index];
+                }
+            }
+        }
+    }
+    output
 }
 
 #[cfg(test)]
@@ -213,35 +245,4 @@ mod kv_rearrange_test {
 
         Ok(())
     }
-}
-
-#[cfg(test)]
-fn cpu_reference_rearrange(
-    fused: &[f32],
-    row_stride: usize,
-    batch: usize,
-    seq: usize,
-    n_heads: usize,
-    n_kv_heads: usize,
-    head_dim: usize,
-    kv_head_dim: usize,
-    column_offset: usize,
-) -> Vec<f32> {
-    let mut output = vec![0.0f32; batch * n_heads * seq * head_dim];
-    let group_size = n_heads / n_kv_heads;
-    for b in 0..batch {
-        for h in 0..n_heads {
-            let kv_h = h / group_size;
-            for s in 0..seq {
-                let src_row = b * seq + s;
-                for d in 0..head_dim {
-                    let base_offset = kv_h * kv_head_dim + d;
-                    let src_index = src_row * row_stride + column_offset + base_offset;
-                    let dst_index = ((b * n_heads + h) * seq + s) * head_dim + d;
-                    output[dst_index] = fused[src_index];
-                }
-            }
-        }
-    }
-    output
 }

@@ -19,11 +19,6 @@ use std::ptr::NonNull;
 use crate::metallic::kernels::matmul::MatMulBackend;
 use crate::metallic::resource_cache::ResourceCache;
 
-const BM: usize = 32;
-const BN: usize = 32;
-const BK: usize = 16;
-const WN: usize = 2;
-const WM: usize = 2;
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
@@ -65,23 +60,15 @@ struct PipelineKey {
     align_k: bool,
 }
 
+#[derive(Default)]
 pub(crate) struct MlxKernelCache {
     library: Option<Retained<ProtocolObject<dyn MTLLibrary>>>,
     pipelines: FxHashMap<PipelineKey, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
-impl Default for MlxKernelCache {
-    fn default() -> Self {
-        Self {
-            library: None,
-            pipelines: FxHashMap::default(),
-        }
-    }
-}
-
 impl MlxKernelCache {
-    fn library<'a>(
-        &'a mut self,
+    fn library(
+        &mut self,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<ProtocolObject<dyn MTLLibrary>>, MetalError> {
         if let Some(library) = &self.library {
@@ -240,6 +227,8 @@ impl KernelInvocable for MatMulMlxOp {
             return Err(MetalError::InvalidOperation("MatMul dimensions must be non-zero".to_string()));
         }
 
+        let (tile_bm, tile_bn, tile_bk, wm_sel, wn_sel) = select_tile(m, n);
+
         let (lda, layout_a_transposed) = determine_layout(&left_tensor, a_rows_base, a_cols_base)?;
         let (ldb, layout_b_transposed) = determine_layout(&right_tensor, b_rows_base, b_cols_base)?;
 
@@ -247,12 +236,12 @@ impl KernelInvocable for MatMulMlxOp {
         let effective_b_trans = layout_b_transposed ^ transpose_right;
 
         let dtype = T::DTYPE;
-        let function_name = gemm_function_name(dtype, effective_a_trans, effective_b_trans)?;
+        let function_name = gemm_function_name(dtype, effective_a_trans, effective_b_trans, m, n)?;
 
         let has_batch = batch > 1;
-        let align_m = m % BM == 0;
-        let align_n = n % BN == 0;
-        let align_k = k % BK == 0;
+        let align_m = m % tile_bm == 0;
+        let align_n = n % tile_bn == 0;
+        let align_k = k % tile_bk == 0;
         let requires_epilogue = alpha != 1.0 || beta != 0.0;
         let use_out_source = requires_epilogue;
         let constants = MlxConstants {
@@ -303,10 +292,15 @@ impl KernelInvocable for MatMulMlxOp {
         let batch_stride_d = isize::try_from(out_view.matrix_bytes / elem_size)
             .map_err(|_| MetalError::InvalidOperation("batch stride for output exceeds isize".to_string()))?;
 
-        let swizzle_log = 0;
+        // Heuristic swizzle: enables tid.x/ tid.y swizzling to improve cache behavior on larger tile grids.
+        // Keep disabled for very small grids to avoid overhead.
+        // Compute tile counts before deciding swizzle using default tile sizes
+        let tn_base = div_ceil(n, tile_bn);
+        let tm_base = div_ceil(m, tile_bm);
+        let swizzle_log = if tm_base >= 8 && tn_base >= 8 { 1 } else { 0 };
         let tile = 1usize << swizzle_log;
-        let tn = div_ceil(n, BN) * tile;
-        let mut tm = div_ceil(m, BM);
+        let tn = tn_base * tile;
+        let mut tm = tm_base;
         tm = div_ceil(tm, tile);
 
         let tiles_n = i32::try_from(tn).map_err(|_| MetalError::InvalidOperation("tiles_n exceeds i32".to_string()))?;
@@ -328,7 +322,7 @@ impl KernelInvocable for MatMulMlxOp {
             batch_stride_b,
             batch_stride_d,
             swizzle_log,
-            gemm_k_iterations_aligned: (k / BK) as i32,
+            gemm_k_iterations_aligned: (k / tile_bk) as i32,
             batch_ndim: if has_batch { 1 } else { 0 },
         };
 
@@ -370,8 +364,8 @@ impl KernelInvocable for MatMulMlxOp {
         };
         let threads_per_tg = MTLSize {
             width: 32,
-            height: WN,
-            depth: WM,
+            height: wn_sel,
+            depth: wm_sel,
         };
 
         {
@@ -456,7 +450,7 @@ fn determine_layout<T: TensorElement>(tensor: &Tensor<T>, rows: usize, cols: usi
         let lda_usize = if cols <= 1 { rows } else { stride_minor };
         let lda = i32::try_from(lda_usize)
             .map_err(|_| MetalError::InvalidOperation(format!("Leading dimension for column-major layout exceeds i32: {}", lda_usize)))?;
-        return Ok((lda, true));
+        Ok((lda, true))
     } else {
         Err(MetalError::InvalidOperation(format!(
             "Matrix is not contiguous in a supported layout: strides={:?}",
@@ -490,7 +484,20 @@ fn determine_minor_stride<T: TensorElement>(tensor: &Tensor<T>) -> Result<i32, M
     Ok(tensor.strides[tensor.strides.len() - 1] as i32)
 }
 
-fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool) -> Result<String, MetalError> {
+fn select_tile(m: usize, n: usize) -> (usize, usize, usize, usize, usize) {
+    // Default (32,32,16,2,2)
+    // Prefer skinny M when M << N
+    if m <= 16 && n >= 64 {
+        (16, 64, 16, 1, 4)
+    } else if n <= 16 && m >= 64 {
+        // Skinny N when N << M
+        (64, 16, 16, 4, 1)
+    } else {
+        (32, 32, 16, 2, 2)
+    }
+}
+
+fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool, m: usize, n: usize) -> Result<String, MetalError> {
     let dtype_str = match dtype {
         Dtype::F32 => "f32",
         Dtype::F16 => "f16",
@@ -499,16 +506,17 @@ fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool) -> Result<Stri
     let a_tag = if a_trans { "t" } else { "n" };
     let b_tag = if b_trans { "t" } else { "n" };
 
+    let (bm, bn, bk, wm, wn) = select_tile(m, n);
     Ok(format!(
-        "gemm_{}{}_{dtype}_{dtype}_{BM}_{BN}_{BK}_{WM}_{WN}",
+        "gemm_{}{}_{dtype}_{dtype}_{bm}_{bn}_{bk}_{wm}_{wn}",
         a_tag,
         b_tag,
         dtype = dtype_str,
-        BM = BM,
-        BN = BN,
-        BK = BK,
-        WM = WM,
-        WN = WN,
+        bm = bm,
+        bn = bn,
+        bk = bk,
+        wm = wm,
+        wn = wn,
     ))
 }
 
@@ -517,5 +525,5 @@ fn output_dims(batch: usize, rows: usize, cols: usize) -> Vec<usize> {
 }
 
 fn div_ceil(value: usize, divisor: usize) -> usize {
-    (value + divisor - 1) / divisor
+    value.div_ceil(divisor)
 }

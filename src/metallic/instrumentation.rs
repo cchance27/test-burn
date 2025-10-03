@@ -17,7 +17,6 @@ use crate::metallic::operation::CommandBuffer;
 /// Handle to a shared latency collector used to instrument fine-grained timing inside
 /// the Metal execution context. The collector is populated by `Context` while the
 /// inference loops execute and later inspected by higher-level orchestration code.
-
 pub type LatencyCollectorHandle = Rc<RefCell<StepLatencyCollector>>;
 pub type MemoryCollectorHandle = Rc<RefCell<StepMemoryCollector>>;
 

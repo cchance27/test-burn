@@ -1435,6 +1435,14 @@ template <
 
 instantiate_gemm_transpose_helper(f32, float, f32, float, 32, 32, 16, 2, 2)
 instantiate_gemm_transpose_helper(f16, half, f16, half, 32, 32, 16, 2, 2)
+// Skinny-M variants: small M, large N
+instantiate_gemm_transpose_helper(f32, float, f32, float, 16, 64, 16, 1, 4)
+instantiate_gemm_transpose_helper(f16, half, f16, half, 16, 64, 16, 1, 4)
+// Skinny-N variants: large M, small N
+instantiate_gemm_transpose_helper(f32, float, f32, float, 64, 16, 16, 4, 1)
+instantiate_gemm_transpose_helper(f16, half, f16, half, 64, 16, 16, 4, 1)
 #if defined(__HAVE_BFLOAT__)
 instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 32, 32, 16, 2, 2)
+instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 16, 64, 16, 1, 4)
+instantiate_gemm_transpose_helper(bf16, bfloat, bf16, bfloat, 64, 16, 16, 4, 1)
 #endif

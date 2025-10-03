@@ -533,6 +533,15 @@ pub fn build_latency_rows(
         });
     }
 
+    if matmul.mlx().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (MLX)".to_string(),
+            last_ms: matmul.mlx().last_ms(),
+            average_ms: matmul.mlx().average_ms(),
+            level: 0,
+        });
+    }
+
     for (idx, stat) in blocks.iter().enumerate() {
         rows.push(LatencyRow {
             label: format!("Block {}", idx + 1),

@@ -8,7 +8,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, kernels};
+use crate::metallic::{Tensor, TensorElement, kernels};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
@@ -1135,7 +1135,10 @@ impl<T: TensorElement> Context<T> {
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
     }
 
+    #[cfg(test)]
     pub(crate) fn materialize_contiguous_view(&mut self, view: Tensor<T>) -> Result<Tensor<T>, MetalError> {
+        use crate::metallic::{TensorInit, TensorStorage};
+
         if view.strides == Tensor::<T>::compute_strides(view.dims()) {
             return Ok(view);
         }

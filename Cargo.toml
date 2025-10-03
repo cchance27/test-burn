@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "softmax_backend_benchmark"
 harness = false
+
+[[bench]]
+name = "mlx_vs_mps_matmul_benchmark"
+harness = false
