@@ -66,10 +66,7 @@ fn env_flag_enabled(value: Result<String, env::VarError>) -> bool {
             if trimmed.is_empty() {
                 false
             } else {
-                match trimmed.to_ascii_lowercase().as_str() {
-                    "0" | "false" | "off" | "no" => false,
-                    _ => true,
-                }
+                !matches!(trimmed.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no")
             }
         }
         Err(env::VarError::NotPresent) => false,
@@ -488,9 +485,7 @@ impl<T: TensorElement> Context<T> {
 
             // Re-establish an active command buffer/resource cache for subsequent calls since
             // `synchronize` clears them.
-            if let Err(err) = self.ensure_active_cmd_buffer() {
-                return Err(err);
-            }
+            self.ensure_active_cmd_buffer()?;
 
             self.log_matmul_event(op, backend, dims.as_ref(), elapsed, note, gpu_duration);
             result
@@ -499,6 +494,8 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn matmul_bias_add_mlx_path(
         &mut self,
         a: &Tensor<T>,
@@ -514,6 +511,8 @@ impl<T: TensorElement> Context<T> {
         })
     }
 
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn matmul_bias_add_mps_path(
         &mut self,
         a: &Tensor<T>,
@@ -533,12 +532,14 @@ impl<T: TensorElement> Context<T> {
 
     /// Registers a memory collector handle for the upcoming operations. Passing `None`
     /// disables memory instrumentation.
+    #[inline]
     pub fn set_memory_collector(&mut self, collector: Option<MemoryCollectorHandle>) {
         self.memory_collector = collector;
     }
 
     /// Emit a memory event to the currently installed collector, capturing the latest
     /// allocation snapshot inside the callback.
+    #[inline]
     pub fn record_memory_event(&mut self, event: MemoryEvent<'_>) {
         if let Some(collector) = self.memory_collector.as_ref() {
             let usage = self.snapshot_memory_usage();
@@ -548,6 +549,7 @@ impl<T: TensorElement> Context<T> {
 
     /// Capture a snapshot of the current memory usage for both the transient tensor pool
     /// and the persistent KV cache pool.
+    #[inline]
     pub fn snapshot_memory_usage(&self) -> MemoryUsage {
         let kv_cache_bytes = self
             .kv_caches
@@ -610,6 +612,7 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
+    #[inline]
     pub(crate) fn matmul_with_cache(
         &mut self,
         a: &Tensor<T>,

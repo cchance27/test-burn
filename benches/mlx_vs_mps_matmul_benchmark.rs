@@ -81,13 +81,13 @@ fn bench_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                 let bias: Tensor<T> = Tensor::new(vec![n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
 
                 // Warmup
-                let mut warmup_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).expect("warmup");
-                warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((warmup_out, bias.clone())).unwrap();
+                let mut _warmup_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).expect("warmup");
+                _warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_warmup_out, bias.clone())).unwrap();
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let mut iter_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).unwrap();
-                    iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((iter_out, bias.clone())).unwrap();
+                    let mut _iter_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).unwrap();
+                    _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                     ctx.synchronize();
                 });
 
@@ -118,13 +118,13 @@ fn bench_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                 let bias: Tensor<T> = Tensor::new(vec![n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
 
                 // Warmup
-                let mut warmup_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).expect("warmup");
-                warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((warmup_out, bias.clone())).unwrap();
+                let mut _warmup_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).expect("warmup");
+                _warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_warmup_out, bias.clone())).unwrap();
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let mut iter_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).unwrap();
-                    iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((iter_out, bias.clone())).unwrap();
+                    let mut _iter_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).unwrap();
+                    _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                     ctx.synchronize();
                 });
 
@@ -282,11 +282,7 @@ fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::Benchma
     ];
 
     fn dims(batch: usize, rows: usize, cols: usize) -> Vec<usize> {
-        if batch > 1 {
-            vec![batch, rows, cols]
-        } else {
-            vec![rows, cols]
-        }
+        if batch > 1 { vec![batch, rows, cols] } else { vec![rows, cols] }
     }
 
     for case in CASES {
@@ -295,7 +291,7 @@ fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::Benchma
 
         let bench_id = |backend: &str| BenchmarkId::new(backend, case.name);
 
-        let run_case = |backend: &str, bencher: &mut criterion::Bencher<'_, '_>| {
+        let run_case = |backend: &str, bencher: &mut criterion::Bencher<'_>| {
             let _guard = env_lock().lock().unwrap();
             let prev = std::env::var("FORCE_MATMUL_BACKEND").ok();
             unsafe {
@@ -304,8 +300,18 @@ fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::Benchma
             drop(_guard);
 
             let mut ctx = Context::<T>::new().expect("ctx setup");
-            let a: Tensor<T> = Tensor::new(dims(case.batch, case.m, case.k), TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("A");
-            let b: Tensor<T> = Tensor::new(dims(case.batch, case.k, case.n), TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("B");
+            let a: Tensor<T> = Tensor::new(
+                dims(case.batch, case.m, case.k),
+                TensorStorage::Dedicated(&ctx),
+                TensorInit::Uninitialized,
+            )
+            .expect("A");
+            let b: Tensor<T> = Tensor::new(
+                dims(case.batch, case.k, case.n),
+                TensorStorage::Dedicated(&ctx),
+                TensorInit::Uninitialized,
+            )
+            .expect("B");
 
             match case.kind {
                 CaseKind::Matmul => {
@@ -318,7 +324,8 @@ fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::Benchma
                     });
                 }
                 CaseKind::MatmulBias => {
-                    let bias: Tensor<T> = Tensor::new(vec![case.n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
+                    let bias: Tensor<T> =
+                        Tensor::new(vec![case.n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
                     let _warmup = ctx.matmul_bias_add(&a, &b, &bias, false, false).expect("warmup bias");
                     ctx.synchronize();
 
