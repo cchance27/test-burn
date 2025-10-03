@@ -11,12 +11,12 @@ fn env_lock() -> &'static Mutex<()> {
 
 fn bytes_for_shape<T: TensorElement>(m: usize, k: usize, n: usize) -> usize {
     let es = T::DTYPE.size_bytes();
-    // A: m x k, B: k x n, C: m x n
-    m * k * es + k * n * es + m * n * es
+    // A: m x k, B: k x n, C: m x n, bias: n - accounting for all tensors created in benchmarks
+    m * k * es + k * n * es + m * n * es + n * es
 }
 
-fn bench_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
-    let mut group = c.benchmark_group(format!("mlx_vs_mps_matmul_{dtype_name}"));
+fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
+    let mut group = c.benchmark_group(format!("mlx_vs_mps_matmul_generic_{dtype_name}"));
 
     // Keep memory budget conservative for 16GB VRAM; stay under ~2GB per shape.
     const MAX_BYTES_PER_SHAPE: usize = 2 * 1024 * 1024 * 1024; // 2GB
@@ -207,13 +207,12 @@ fn bench_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
         });
     }
 
-    // Explicit benchmark for the decode-time projection that still falls back to MPS.
-    bench_troublesome_qwen_shape::<T>(&mut group);
-
     group.finish();
 }
 
-fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>) {
+fn bench_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
+    let mut group = c.benchmark_group(format!("mlx_vs_mps_matmul_qwen_{dtype_name}"));
+
     #[derive(Clone, Copy)]
     enum CaseKind {
         Matmul,
@@ -285,8 +284,39 @@ fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::Benchma
         if batch > 1 { vec![batch, rows, cols] } else { vec![rows, cols] }
     }
 
+    const MAX_BYTES_PER_CASE: usize = 2 * 1024 * 1024 * 1024; // 2GB cap per configuration
+
+    let bytes_for_case = |case: &TroubleCase| -> usize {
+        let elem_size = T::DTYPE.size_bytes();
+        let batch = case.batch;
+        // A: batch x m x k, B: batch x k x n, C: batch x m x n, bias: n (only if MatmulBias)
+        let a_elems = batch * case.m * case.k;
+        let b_elems = batch * case.k * case.n;
+        let c_elems = batch * case.m * case.n;
+        let bias_elems = match case.kind {
+            CaseKind::MatmulBias => case.n,
+            CaseKind::Matmul => 0,
+        };
+
+        let total_elems = a_elems
+            .saturating_add(b_elems)
+            .saturating_add(c_elems)
+            .saturating_add(bias_elems);
+
+        total_elems.saturating_mul(elem_size)
+    };
+
     for case in CASES {
-        let throughput = (case.batch.max(1) * case.m * case.n * case.k * 2) as u64;
+        if bytes_for_case(case) > MAX_BYTES_PER_CASE {
+            continue;
+        }
+
+        let flops = (case.batch as u128)
+            .saturating_mul(case.m as u128)
+            .saturating_mul(case.n as u128)
+            .saturating_mul(case.k as u128)
+            .saturating_mul(2);
+        let throughput = flops.min(u128::from(u64::MAX)) as u64;
         group.throughput(Throughput::Elements(throughput));
 
         let bench_id = |backend: &str| BenchmarkId::new(backend, case.name);
@@ -349,11 +379,18 @@ fn bench_troublesome_qwen_shape<T: TensorElement>(group: &mut criterion::Benchma
         group.bench_function(bench_id("MPS"), |bencher| run_case("mps", bencher));
         group.bench_function(bench_id("MLX"), |bencher| run_case("mlx", bencher));
     }
+
+    group.finish();
 }
 
 fn criterion_benchmark(c: &mut Criterion) {
-    bench_shapes::<F16Element>(c, "f16");
-    bench_shapes::<F32Element>(c, "f32");
+    // Run generic shape benchmarks
+    //bench_generic_shapes::<F16Element>(c, "f16");
+    //bench_generic_shapes::<F32Element>(c, "f32");
+    
+    // Run Qwen-specific shape benchmarks
+    bench_qwen_shapes::<F16Element>(c, "f16");
+    //bench_qwen_shapes::<F32Element>(c, "f32");
 }
 
 criterion_group!(benches, criterion_benchmark);
