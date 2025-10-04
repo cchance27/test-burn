@@ -108,6 +108,7 @@ fn parse_functions(input: &ParseBuffer) -> Result<Vec<FunctionSpec>> {
     let mut functions = Vec::new();
     while !input.is_empty() {
         let ident: Ident = input.parse()?;
+        input.parse::<Token![=>]>()?;
         let block;
         braced!(block in input);
         let mappings = parse_dtype_mappings(&block)?;
