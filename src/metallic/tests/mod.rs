@@ -13,4 +13,5 @@ mod error_path_test;
 mod forward_pass_correctness_test;
 mod generation_test;
 mod matmul;
+mod resource_cache_persistence_test;
 mod tensor_test;

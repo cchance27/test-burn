@@ -197,7 +197,6 @@ impl<T: TensorElement> Context<T> {
         if let Some(cmd_buf) = self.active_cmd_buffer.take() {
             cmd_buf.commit();
             cmd_buf.wait();
-            self.active_resource_cache = None;
             return;
         }
 
@@ -205,8 +204,6 @@ impl<T: TensorElement> Context<T> {
             cb.commit();
             unsafe { cb.waitUntilCompleted() };
         }
-
-        self.active_resource_cache = None;
     }
 
     pub fn new() -> Result<Self, MetalError> {
