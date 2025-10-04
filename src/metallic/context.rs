@@ -725,7 +725,7 @@ impl<T: TensorElement> Context<T> {
     /// allocation snapshot inside the callback.
     #[inline]
     pub fn record_memory_event(&mut self, event: MemoryEvent<'_>) {
-        if let Some(sender) = self.memory_sample_tx.as_ref() {
+        if let Some(sender) = self.memory_sample_tx.as_ref().cloned() {
             let usage = self.refresh_memory_usage();
             let sample = MemorySample {
                 event: event.into_owned(),
