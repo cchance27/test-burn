@@ -232,7 +232,7 @@ impl<T: TensorElement> Context<T> {
             }
         });
 
-        Ok(Context::<T> {
+        let mut context = Context::<T> {
             device,
             command_queue,
             pool,
@@ -255,7 +255,13 @@ impl<T: TensorElement> Context<T> {
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),
             //config,
-        })
+        };
+
+        // Prime the command buffer and resource cache so the very first kernel dispatch
+        // can encode immediately after context creation.
+        context.ensure_active_cmd_buffer()?;
+
+        Ok(context)
     }
 
     pub fn tensor_dtype(&self) -> Dtype {
