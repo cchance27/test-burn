@@ -200,16 +200,17 @@ impl MatMulInstrumentation {
             } = dispatch;
 
             if let Some(timing) = timing.as_ref()
-                && let Some(duration) = self.inner.resolve_duration(timing) {
-                    recorder.record(MatMulSample {
-                        backend,
-                        duration,
-                        dims,
-                        handle: Some(handle),
-                    });
-                    resolved_total += duration;
-                    continue;
-                }
+                && let Some(duration) = self.inner.resolve_duration(timing)
+            {
+                recorder.record(MatMulSample {
+                    backend,
+                    duration,
+                    dims,
+                    handle: Some(handle),
+                });
+                resolved_total += duration;
+                continue;
+            }
 
             fallback.push(PendingDispatch {
                 handle,
@@ -715,13 +716,11 @@ impl BlockLatencySnapshot {
     }
 }
 
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct BlockPhaseSnapshot {
     pub label: String,
     pub duration: Duration,
 }
-
 
 /// Helper to create a new collector handle for the desired number of transformer blocks.
 pub fn new_latency_collector(block_count: usize) -> LatencyCollectorHandle {
@@ -1086,8 +1085,7 @@ impl BlockMemorySnapshot {
     }
 }
 
-#[derive(Clone, Debug)]
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 pub struct MemoryPhaseSnapshot {
     pub label: String,
     pub current_pool_delta: usize,
@@ -1097,7 +1095,6 @@ pub struct MemoryPhaseSnapshot {
     pub peak_kv_delta: usize,
     pub peak_kv_cache_delta: usize,
 }
-
 
 #[derive(Clone, Debug, Default)]
 pub struct StepMemorySnapshot {

@@ -1,5 +1,6 @@
-pub use context::{Context, KvCacheDispatchStats, SamplerBuffers};
+pub use context::{Context, KvCacheDispatchStats};
 pub use error::MetalError;
+pub use sampling::SamplerBuffers;
 pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 
 pub use tokenizer::{SpecialTokens, Tokenizer, TokenizerError};
@@ -16,6 +17,7 @@ pub mod metrics;
 pub mod operation;
 pub mod pool;
 pub mod resource_cache;
+pub mod sampling;
 pub mod tensor;
 pub mod tokenizer;
 pub use operation::{CommandBuffer, Operation};

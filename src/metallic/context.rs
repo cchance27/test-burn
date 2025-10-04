@@ -6,8 +6,11 @@ use super::instrumentation::{
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
+use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use crate::metallic::kernels::sampling::{MAX_TOP_K, SamplingParams};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
+use crate::metallic::sampling::{SamplerBuffers, effective_top_k, sample_top_k_top_p_with_random_value};
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, kernels};
 use kernels::gemv::GemvOp;
@@ -21,7 +24,9 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions, MTLSize};
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::env;
@@ -109,12 +114,6 @@ fn matmul_shape_logger() -> Option<&'static MatmulShapeLogger> {
             })
         })
         .as_ref()
-}
-
-#[derive(Default)]
-pub struct SamplerBuffers {
-    pub scaled: Vec<f32>,
-    pub indices: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -243,6 +242,8 @@ pub struct Context<T: TensorElement> {
     matmul_logging_session: RefCell<Option<Vec<MatMulDispatchHandle>>>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
+    sampler_rng: StdRng,
+    sampling_result_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
     /// Optional override for the matmul backend chosen by this context.
     forced_matmul_backend: MatMulBackendOverride,
     /// Whether to emit shape/timing logs for matmul calls.
@@ -338,6 +339,8 @@ impl<T: TensorElement> Context<T> {
             matmul_recorder,
             matmul_logging_session: RefCell::new(None),
             sampler_buffers: SamplerBuffers::default(),
+            sampler_rng: StdRng::from_entropy(),
+            sampling_result_buffer: None,
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),
@@ -349,6 +352,124 @@ impl<T: TensorElement> Context<T> {
 
     pub fn tensor_dtype(&self) -> Dtype {
         T::DTYPE
+    }
+
+    /// Reseed the sampler RNG used for device and host sampling paths.
+    pub fn reseed_sampler(&mut self, seed: u64) {
+        self.sampler_rng = StdRng::seed_from_u64(seed);
+    }
+
+    #[inline]
+    pub(crate) fn next_sampler_random(&mut self) -> u32 {
+        self.sampler_rng.next_u32()
+    }
+
+    pub(crate) fn sample_top_k_top_p_host(
+        &mut self,
+        logits_tensor: &Tensor<T>,
+        vocab_size: usize,
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+        random_u32: u32,
+    ) -> Result<u32, MetalError> {
+        let logits = logits_tensor.to_vec();
+        if vocab_size > logits.len() {
+            return Err(MetalError::InvalidShape(format!(
+                "vocab slice {} exceeds logits length {}",
+                vocab_size,
+                logits.len()
+            )));
+        }
+
+        let vocab_logits = &logits[..vocab_size];
+        let idx = sample_top_k_top_p_with_random_value::<T>(vocab_logits, top_k, top_p, temperature, random_u32, &mut self.sampler_buffers);
+        Ok(idx as u32)
+    }
+
+    pub(crate) fn sample_top_k_top_p_device(
+        &mut self,
+        logits: &Tensor<T>,
+        vocab_size: usize,
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+        random_u32: u32,
+    ) -> Result<Option<u32>, MetalError> {
+        if T::DTYPE != Dtype::F32 {
+            return Ok(None);
+        }
+
+        if vocab_size == 0 {
+            return Ok(Some(0));
+        }
+
+        let effective_top_k = effective_top_k(top_k, vocab_size);
+        if effective_top_k > MAX_TOP_K {
+            return Ok(None);
+        }
+
+        self.prepare_tensors_for_active_cmd(&[logits])?;
+
+        let pipeline = self
+            .kernel_manager
+            .get_pipeline(kernels::KernelFunction::SampleTopKTopP, T::DTYPE, &self.device)?;
+
+        if self.sampling_result_buffer.is_none() {
+            let byte_len = std::mem::size_of::<u32>();
+            let buffer = self
+                .device
+                .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
+                .ok_or(MetalError::BufferCreationFailed(byte_len))?;
+            self.sampling_result_buffer = Some(buffer);
+        }
+
+        let result_buffer = self
+            .sampling_result_buffer
+            .as_ref()
+            .expect("sampling result buffer must be initialized")
+            .clone();
+
+        let params = SamplingParams {
+            vocab_size: vocab_size as u32,
+            top_k: top_k as u32,
+            top_p,
+            temperature,
+            random_u32,
+            _padding: 0,
+        };
+
+        let command_buffer = self.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer
+            .raw()
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        set_compute_pipeline_state(&encoder, &pipeline);
+        set_buffer(&encoder, 0, &logits.buf, logits.offset);
+        set_buffer(&encoder, 1, &result_buffer, 0);
+        set_bytes(&encoder, 2, &params);
+
+        let grid_size = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroup_size = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threads(&encoder, grid_size, threadgroup_size);
+        encoder.endEncoding();
+
+        command_buffer.commit();
+        command_buffer.wait();
+
+        let ptr = unsafe { result_buffer.contents().as_ptr().cast::<u32>() };
+        let token = unsafe { ptr.read_unaligned() };
+        Ok(Some(token))
     }
 
     pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
@@ -460,9 +581,10 @@ impl<T: TensorElement> Context<T> {
         let mut matches = Vec::new();
         for sample in guard.iter() {
             if let Some(handle) = sample.handle
-                && handles.contains(&handle) {
-                    matches.push(*sample);
-                }
+                && handles.contains(&handle)
+            {
+                matches.push(*sample);
+            }
         }
 
         matches

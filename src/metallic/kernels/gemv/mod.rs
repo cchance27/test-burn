@@ -43,17 +43,18 @@ impl<T: TensorElement> Operation for Gemv<T> {
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
         if let Some(timing) = &self.dispatch_timing
-            && matches!(timing.kind(), MatMulDispatchKind::Compute) {
-                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
-                unsafe {
-                    let _: () = msg_send![
-                        &*encoder,
-                        sampleCountersInBuffer: sample_buffer,
-                        atSampleIndex: timing.start_index(),
-                        withBarrier: Bool::YES
-                    ];
-                }
+            && matches!(timing.kind(), MatMulDispatchKind::Compute)
+        {
+            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+            unsafe {
+                let _: () = msg_send![
+                    &*encoder,
+                    sampleCountersInBuffer: sample_buffer,
+                    atSampleIndex: timing.start_index(),
+                    withBarrier: Bool::YES
+                ];
             }
+        }
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
@@ -64,17 +65,18 @@ impl<T: TensorElement> Operation for Gemv<T> {
         dispatch_threadgroups(&encoder, self.grid_size, self.threadgroup_size);
 
         if let Some(timing) = &self.dispatch_timing
-            && matches!(timing.kind(), MatMulDispatchKind::Compute) {
-                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
-                unsafe {
-                    let _: () = msg_send![
-                        &*encoder,
-                        sampleCountersInBuffer: sample_buffer,
-                        atSampleIndex: timing.end_index(),
-                        withBarrier: Bool::NO
-                    ];
-                }
+            && matches!(timing.kind(), MatMulDispatchKind::Compute)
+        {
+            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+            unsafe {
+                let _: () = msg_send![
+                    &*encoder,
+                    sampleCountersInBuffer: sample_buffer,
+                    atSampleIndex: timing.end_index(),
+                    withBarrier: Bool::NO
+                ];
             }
+        }
 
         encoder.endEncoding();
         Ok(())

@@ -211,18 +211,19 @@ impl Operation for MatMulAlphaBeta {
 
         if let Some(timing) = &self.dispatch_timing
             && matches!(timing.kind(), MatMulDispatchKind::Blit)
-                && let Some(encoder) = command_buffer.blitCommandEncoder() {
-                    let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
-                    unsafe {
-                        let _: () = msg_send![
-                            &*encoder,
-                            sampleCountersInBuffer: sample_buffer,
-                            atSampleIndex: timing.start_index(),
-                            withBarrier: Bool::YES
-                        ];
-                    }
-                    encoder.endEncoding();
-                }
+            && let Some(encoder) = command_buffer.blitCommandEncoder()
+        {
+            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+            unsafe {
+                let _: () = msg_send![
+                    &*encoder,
+                    sampleCountersInBuffer: sample_buffer,
+                    atSampleIndex: timing.start_index(),
+                    withBarrier: Bool::YES
+                ];
+            }
+            encoder.endEncoding();
+        }
 
         // Encode the MPS matrix multiplication
         unsafe {
@@ -233,18 +234,19 @@ impl Operation for MatMulAlphaBeta {
 
         if let Some(timing) = &self.dispatch_timing
             && matches!(timing.kind(), MatMulDispatchKind::Blit)
-                && let Some(encoder) = command_buffer.blitCommandEncoder() {
-                    let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
-                    unsafe {
-                        let _: () = msg_send![
-                            &*encoder,
-                            sampleCountersInBuffer: sample_buffer,
-                            atSampleIndex: timing.end_index(),
-                            withBarrier: Bool::NO
-                        ];
-                    }
-                    encoder.endEncoding();
-                }
+            && let Some(encoder) = command_buffer.blitCommandEncoder()
+        {
+            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+            unsafe {
+                let _: () = msg_send![
+                    &*encoder,
+                    sampleCountersInBuffer: sample_buffer,
+                    atSampleIndex: timing.end_index(),
+                    withBarrier: Bool::NO
+                ];
+            }
+            encoder.endEncoding();
+        }
 
         Ok(())
     }

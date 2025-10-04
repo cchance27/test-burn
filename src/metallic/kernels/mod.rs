@@ -30,6 +30,7 @@ pub mod permute;
 pub mod repeat_kv_heads;
 pub mod rmsnorm;
 pub mod rope;
+pub mod sampling;
 pub mod scaled_dot_product_attention;
 pub mod silu;
 pub mod softmax;
@@ -57,6 +58,7 @@ pub enum KernelLibrary {
     Swiglu,
     Tensors,
     Gemv,
+    Sampling,
 }
 
 impl KernelLibrary {
@@ -80,6 +82,7 @@ impl KernelLibrary {
             KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
             KernelLibrary::Gemv => include_str!("gemv/kernel.metal"),
+            KernelLibrary::Sampling => include_str!("sampling/kernel.metal"),
         }
     }
 }
@@ -111,6 +114,7 @@ pub enum KernelFunction {
     Ones,
     RandomUniform,
     Gemv,
+    SampleTopKTopP,
 }
 
 impl KernelFunction {
@@ -136,6 +140,7 @@ impl KernelFunction {
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::Gemv => KernelLibrary::Gemv,
+            KernelFunction::SampleTopKTopP => KernelLibrary::Sampling,
         }
     }
 
@@ -191,6 +196,12 @@ impl KernelFunction {
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
             (KernelFunction::Gemv, F32) => "gemv_f32",
             (KernelFunction::Gemv, F16) => "gemv_f16",
+            (KernelFunction::SampleTopKTopP, F32) => "sample_top_k_top_p_f32",
+            (KernelFunction::SampleTopKTopP, F16) => {
+                return Err(MetalError::OperationNotSupported(
+                    "top-k/top-p sampling kernel does not support f16 logits".to_string(),
+                ));
+            }
         };
 
         Ok(name)
