@@ -158,24 +158,27 @@ fn describe_cache_metrics(name: &str, metrics: &CacheMetrics) -> String {
 }
 
 fn describe_kv_cache_metrics(stats: &KvCacheDispatchStats) -> String {
-    let canonical_total = stats.canonical_dispatches + stats.canonical_fallback_blits;
-    let combined_total = stats.combined_dispatches + stats.combined_fallback_blits;
+    let single_total = stats.single_layout.total();
+    let fused_total = stats.fused_layout.total();
 
-    let canonical_hit_rate = if canonical_total > 0 {
-        (stats.canonical_dispatches as f64 / canonical_total as f64) * 100.0
+    let single_hit_rate = if single_total > 0 {
+        (stats.single_layout.kernel_dispatches as f64 / single_total as f64) * 100.0
     } else {
         0.0
     };
 
-    let combined_hit_rate = if combined_total > 0 {
-        (stats.combined_dispatches as f64 / combined_total as f64) * 100.0
+    let fused_hit_rate = if fused_total > 0 {
+        (stats.fused_layout.kernel_dispatches as f64 / fused_total as f64) * 100.0
     } else {
         0.0
     };
 
     format!(
-        "kv_cache(canonical_dispatches={} canonical_fallback_blits={} canonical_hit_rate={canonical_hit_rate:.1}% combined_dispatches={} combined_fallback_blits={} combined_hit_rate={combined_hit_rate:.1}%)",
-        stats.canonical_dispatches, stats.canonical_fallback_blits, stats.combined_dispatches, stats.combined_fallback_blits,
+        "kv_cache(single_layout_dispatches={} single_layout_fallback_blits={} single_layout_hit_rate={single_hit_rate:.1}% fused_dispatches={} fused_fallback_blits={} fused_hit_rate={fused_hit_rate:.1}%)",
+        stats.single_layout.kernel_dispatches,
+        stats.single_layout.fallback_blits,
+        stats.fused_layout.kernel_dispatches,
+        stats.fused_layout.fallback_blits,
     )
 }
 

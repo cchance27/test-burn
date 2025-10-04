@@ -116,11 +116,21 @@ pub struct SamplerBuffers {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct KvCacheWritePathStats {
+    pub kernel_dispatches: usize,
+    pub fallback_blits: usize,
+}
+
+impl KvCacheWritePathStats {
+    pub fn total(&self) -> usize {
+        self.kernel_dispatches + self.fallback_blits
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct KvCacheDispatchStats {
-    pub canonical_dispatches: usize,
-    pub combined_dispatches: usize,
-    pub canonical_fallback_blits: usize,
-    pub combined_fallback_blits: usize,
+    pub single_layout: KvCacheWritePathStats,
+    pub fused_layout: KvCacheWritePathStats,
 }
 
 struct KvWritePlan<T: TensorElement> {
@@ -1525,9 +1535,9 @@ impl<T: TensorElement> Context<T> {
         )) {
             Ok(_) => {
                 if repeated_buffers.is_some() {
-                    self.kv_cache_dispatch_stats.combined_dispatches += 1;
+                    self.kv_cache_dispatch_stats.fused_layout.kernel_dispatches += 1;
                 } else {
-                    self.kv_cache_dispatch_stats.canonical_dispatches += 1;
+                    self.kv_cache_dispatch_stats.single_layout.kernel_dispatches += 1;
                 }
 
                 self.mark_tensor_pending(&k_cache);
@@ -1546,9 +1556,9 @@ impl<T: TensorElement> Context<T> {
             }
             Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
                 if repeated_buffers.is_some() {
-                    self.kv_cache_dispatch_stats.combined_fallback_blits += 1;
+                    self.kv_cache_dispatch_stats.fused_layout.fallback_blits += 1;
                 } else {
-                    self.kv_cache_dispatch_stats.canonical_fallback_blits += 1;
+                    self.kv_cache_dispatch_stats.single_layout.fallback_blits += 1;
                 }
 
                 self.blit_write_kv_step(
