@@ -214,6 +214,9 @@ impl<T: TensorElement> Context<T> {
         let forced_backend = detect_forced_matmul_backend();
         let log_matmul_shapes = env_flag_enabled(env::var(MATMUL_TRACE_ENV));
 
+        let mut kernel_manager = KernelManager::new();
+        kernel_manager.prewarm_all(&device)?;
+
         if log_matmul_shapes {
             let _ = matmul_shape_logger();
         }
@@ -234,7 +237,7 @@ impl<T: TensorElement> Context<T> {
             command_queue,
             pool,
             kv_cache_pool,
-            kernel_manager: KernelManager::new(),
+            kernel_manager,
             pooled_bytes_allocated: 0,
             pooled_allocations: 0,
             pool_resets: 0,

@@ -35,6 +35,25 @@ impl KernelManager {
         Self::default()
     }
 
+    pub fn prewarm_all(&mut self, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<(), MetalError> {
+        for &function in ALL_KERNEL_FUNCTIONS {
+            for &dtype in &[Dtype::F16, Dtype::F32] {
+                let _ = self.get_pipeline(function, dtype, device)?;
+            }
+        }
+
+        #[cfg(test)]
+        {
+            assert_eq!(
+                self.pipelines.len(),
+                ALL_KERNEL_FUNCTIONS.len() * 2,
+                "prewarm must cover every kernel/dtype combination",
+            );
+        }
+
+        Ok(())
+    }
+
     pub fn get_pipeline(
         &mut self,
         func: KernelFunction,

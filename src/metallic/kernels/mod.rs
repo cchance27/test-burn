@@ -109,6 +109,32 @@ pub enum KernelFunction {
     Gemv,
 }
 
+pub(crate) const ALL_KERNEL_FUNCTIONS: &[KernelFunction] = &[
+    KernelFunction::CastToF16,
+    KernelFunction::CastFromF16,
+    KernelFunction::CastToF32,
+    KernelFunction::CastFromF32,
+    KernelFunction::ElemwiseAdd,
+    KernelFunction::ElemwiseBroadcastAdd,
+    KernelFunction::ElemwiseDiv,
+    KernelFunction::ElemwiseMul,
+    KernelFunction::ElemwiseSub,
+    KernelFunction::Gelu,
+    KernelFunction::KvRearrange,
+    KernelFunction::LayerNorm,
+    KernelFunction::Permute,
+    KernelFunction::RepeatKvHeads,
+    KernelFunction::Rope,
+    KernelFunction::RMSNorm,
+    KernelFunction::Silu,
+    KernelFunction::FusedSoftmax,
+    KernelFunction::SwigluFusedActivation,
+    KernelFunction::Arange,
+    KernelFunction::Ones,
+    KernelFunction::RandomUniform,
+    KernelFunction::Gemv,
+];
+
 impl KernelFunction {
     fn library(&self) -> KernelLibrary {
         match self {
