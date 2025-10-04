@@ -1,10 +1,11 @@
 use crate::metallic::kernels::{KernelFunction, KernelInvocable};
 use crate::metallic::{
-    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
+    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     tensor::Dtype,
 };
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
@@ -398,14 +399,9 @@ impl KernelInvocable for MatMulMlxOp {
                 let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
                 command_buffer.clone()
             };
-            ctx.register_matmul_dispatch(
-                &command_buffer,
-                MatMulBackend::Mlx,
-                Some(dims),
-                MatMulDispatchKind::Compute,
-            )
-            .timing()
-            .cloned()
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mlx, Some(dims), MatMulDispatchKind::Compute)
+                .timing()
+                .cloned()
         };
 
         let op = MatMulMlx {
@@ -441,11 +437,12 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 unsafe {
-                    encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                        timing.sample_buffer(),
-                        timing.start_index(),
-                        true,
-                    );
+                    let _: () = msg_send![
+                        &*encoder,
+                        sampleCountersInBuffer: timing.sample_buffer().as_ref()
+                        atSampleIndex: timing.start_index()
+                        withBarrier: true
+                    ];
                 }
             }
         }
@@ -487,11 +484,12 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 unsafe {
-                    encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                        timing.sample_buffer(),
-                        timing.end_index(),
-                        false,
-                    );
+                    let _: () = msg_send![
+                        &*encoder,
+                        sampleCountersInBuffer: timing.sample_buffer().as_ref()
+                        atSampleIndex: timing.end_index()
+                        withBarrier: false
+                    ];
                 }
             }
         }

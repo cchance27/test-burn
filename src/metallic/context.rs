@@ -1,8 +1,7 @@
 use super::error::MetalError;
 use super::instrumentation::{
-    LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchRegistration,
-    MatMulInstrumentation, MatMulSampleRecorder, MatmulDims,
-    MemoryCollectorHandle, MemoryEvent, MemoryUsage,
+    LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchRegistration, MatMulInstrumentation,
+    MatMulSampleRecorder, MatmulDims, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
@@ -276,6 +275,7 @@ impl<T: TensorElement> Context<T> {
                 samples.push(sample);
             }
         });
+        let matmul_instrumentation = MatMulInstrumentation::new(Some(&device));
 
         Ok(Context::<T> {
             device,
@@ -292,7 +292,7 @@ impl<T: TensorElement> Context<T> {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
-            matmul_instrumentation: MatMulInstrumentation::new(Some(&device)),
+            matmul_instrumentation,
             matmul_samples,
             matmul_recorder,
             matmul_logging_session: RefCell::new(None),
@@ -365,13 +365,9 @@ impl<T: TensorElement> Context<T> {
         dims: Option<MatmulDims>,
         kind: MatMulDispatchKind,
     ) -> MatMulDispatchRegistration {
-        let registration = self.matmul_instrumentation.register(
-            command_buffer,
-            backend,
-            dims,
-            kind,
-            self.matmul_recorder.clone(),
-        );
+        let registration = self
+            .matmul_instrumentation
+            .register(command_buffer, backend, dims, kind, self.matmul_recorder.clone());
         self.track_matmul_dispatch(registration.handle());
         registration
     }
@@ -388,11 +384,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     fn finish_matmul_logging_session(&self) -> Vec<MatMulDispatchHandle> {
-        self
-            .matmul_logging_session
-            .borrow_mut()
-            .take()
-            .unwrap_or_default()
+        self.matmul_logging_session.borrow_mut().take().unwrap_or_default()
     }
 
     #[allow(dead_code)]
@@ -413,10 +405,7 @@ impl<T: TensorElement> Context<T> {
         samples.drain(..).collect()
     }
 
-    fn matched_matmul_samples(
-        &self,
-        handles: &[MatMulDispatchHandle],
-    ) -> Vec<MatMulSample> {
+    fn matched_matmul_samples(&self, handles: &[MatMulDispatchHandle]) -> Vec<MatMulSample> {
         if handles.is_empty() {
             return Vec::new();
         }

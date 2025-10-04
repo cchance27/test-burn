@@ -1,4 +1,5 @@
 use super::*;
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -7,9 +8,9 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::{KernelFunction, KernelInvocable, MatMulBackend};
 use crate::metallic::{
-    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     resource_cache::ResourceCache,
 };
 
@@ -169,14 +170,9 @@ impl KernelInvocable for MatMulAlphaBetaOp {
                 let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
                 command_buffer.clone()
             };
-            ctx.register_matmul_dispatch(
-                &command_buffer,
-                MatMulBackend::Mps,
-                Some(dims),
-                MatMulDispatchKind::Blit,
-            )
-            .timing()
-            .cloned()
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps, Some(dims), MatMulDispatchKind::Blit)
+                .timing()
+                .cloned()
         };
 
         // Create the internal operation struct.
@@ -217,13 +213,14 @@ impl Operation for MatMulAlphaBeta {
             if matches!(timing.kind(), MatMulDispatchKind::Blit) {
                 if let Some(encoder) = command_buffer.blitCommandEncoder() {
                     unsafe {
-                        encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                            timing.sample_buffer(),
-                            timing.start_index(),
-                            true,
-                        );
+                        let _: () = msg_send![
+                            &*encoder,
+                            sampleCountersInBuffer: timing.sample_buffer().as_ref()
+                            atSampleIndex: timing.start_index()
+                            withBarrier: true
+                        ];
+                        let _: () = msg_send![&*encoder, endEncoding];
                     }
-                    encoder.endEncoding();
                 }
             }
         }
@@ -239,13 +236,14 @@ impl Operation for MatMulAlphaBeta {
             if matches!(timing.kind(), MatMulDispatchKind::Blit) {
                 if let Some(encoder) = command_buffer.blitCommandEncoder() {
                     unsafe {
-                        encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                            timing.sample_buffer(),
-                            timing.end_index(),
-                            false,
-                        );
+                        let _: () = msg_send![
+                            &*encoder,
+                            sampleCountersInBuffer: timing.sample_buffer().as_ref()
+                            atSampleIndex: timing.end_index()
+                            withBarrier: false
+                        ];
+                        let _: () = msg_send![&*encoder, endEncoding];
                     }
-                    encoder.endEncoding();
                 }
             }
         }

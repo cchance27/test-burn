@@ -1,10 +1,11 @@
 use super::*;
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::{
-    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     TensorElement, TensorInit, TensorStorage,
+    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     kernels::{KernelFunction, KernelInvocable, matmul::MatMulBackend},
 };
+use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
 
@@ -43,11 +44,12 @@ impl<T: TensorElement> Operation for Gemv<T> {
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 unsafe {
-                    encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                        timing.sample_buffer(),
-                        timing.start_index(),
-                        true,
-                    );
+                    let _: () = msg_send![
+                        &*encoder,
+                        sampleCountersInBuffer: timing.sample_buffer().as_ref()
+                        atSampleIndex: timing.start_index()
+                        withBarrier: true
+                    ];
                 }
             }
         }
@@ -63,11 +65,12 @@ impl<T: TensorElement> Operation for Gemv<T> {
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 unsafe {
-                    encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                        timing.sample_buffer(),
-                        timing.end_index(),
-                        false,
-                    );
+                    let _: () = msg_send![
+                        &*encoder,
+                        sampleCountersInBuffer: timing.sample_buffer().as_ref()
+                        atSampleIndex: timing.end_index()
+                        withBarrier: false
+                    ];
                 }
             }
         }
@@ -132,26 +135,16 @@ impl KernelInvocable for GemvOp {
             depth: 1,
         };
 
-        let dims = MatmulDims {
-            batch: 1,
-            m: 1,
-            n,
-            k,
-        };
+        let dims = MatmulDims { batch: 1, m: 1, n, k };
 
         let dispatch_timing = {
             let command_buffer = {
                 let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
                 command_buffer.clone()
             };
-            ctx.register_matmul_dispatch(
-                &command_buffer,
-                MatMulBackend::Gemv,
-                Some(dims),
-                MatMulDispatchKind::Compute,
-            )
-            .timing()
-            .cloned()
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Gemv, Some(dims), MatMulDispatchKind::Compute)
+                .timing()
+                .cloned()
         };
 
         let op = Gemv {

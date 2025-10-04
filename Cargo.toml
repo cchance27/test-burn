@@ -36,6 +36,7 @@ chrono = { version = "0.4", features = ["clock", "serde"] }
 half = { version = "2.6.0", features = ["zerocopy", "bytemuck", "num-traits", "use-intrinsics"] }
 num-traits = "0.2.19"
 libc = { version = "0.2", optional = false }
+mach2 = "0.4"
 
 [dev-dependencies]
 approx = "0.5.1"
