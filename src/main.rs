@@ -245,16 +245,15 @@ fn main() -> Result<()> {
             match event {
                 AppEvent::Token {
                     text,
-                    tokens_per_second,
                     prompt_processing,
-                    generation,
+                    iteration,
                 } => {
                     let was_following = app_state.text_follow_bottom;
                     app_state.generated_text.push_str(&text);
                     if was_following {
                         app_state.request_follow_text = true;
                     }
-                    app_state.update_generation_metrics(tokens_per_second, generation);
+                    app_state.update_generation_metrics(iteration);
                     app_state.prompt_processing_time = prompt_processing;
                 }
                 AppEvent::TokenCount(count) => {
@@ -338,9 +337,7 @@ impl RunningAverage {
 
 struct AppState {
     generated_text: String,
-    token_throughput: RunningAverage,
     iteration_latency: RunningAverage,
-    last_generation_elapsed_ms: Option<f64>,
     prompt_token_count: usize,
     should_quit: bool,
     status: String,
@@ -364,9 +361,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             generated_text: String::new(),
-            token_throughput: RunningAverage::default(),
             iteration_latency: RunningAverage::default(),
-            last_generation_elapsed_ms: None,
             prompt_token_count: 0,
             should_quit: false,
             status: "Initializing...".to_string(),
@@ -387,33 +382,27 @@ impl AppState {
         }
     }
 
-    fn update_generation_metrics(&mut self, tokens_per_second: f64, generation: Duration) {
-        self.token_throughput.record(tokens_per_second);
+    fn update_generation_metrics(&mut self, iteration: Duration) {
+        if iteration.is_zero() {
+            return;
+        }
 
-        let current_ms = generation.as_secs_f64() * 1000.0;
-        let iteration_ms = if let Some(last) = self.last_generation_elapsed_ms {
-            if current_ms >= last { current_ms - last } else { current_ms }
-        } else {
-            current_ms
-        };
-
-        self.last_generation_elapsed_ms = Some(current_ms);
-        self.iteration_latency.record(iteration_ms);
+        self.iteration_latency.record(iteration.as_secs_f64() * 1000.0);
     }
 
     fn reset_generation_metrics(&mut self) {
-        self.token_throughput.reset();
         self.iteration_latency.reset();
-        self.last_generation_elapsed_ms = None;
     }
 
     fn throughput_display(&self) -> String {
-        if self.token_throughput.has_samples() && self.iteration_latency.has_samples() {
-            format!(
-                "{:.1} tok/s ({:.1}ms)",
-                self.token_throughput.average(),
-                self.iteration_latency.average()
-            )
+        if self.iteration_latency.has_samples() {
+            let average_ms = self.iteration_latency.average();
+            if average_ms > 0.0 {
+                let tokens_per_second = 1000.0 / average_ms;
+                format!("{:.1} tok/s ({:.1}ms)", tokens_per_second, average_ms)
+            } else {
+                "-- tok/s (--ms)".to_string()
+            }
         } else {
             "-- tok/s (--ms)".to_string()
         }

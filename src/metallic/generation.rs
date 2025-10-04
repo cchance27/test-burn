@@ -328,31 +328,28 @@ pub fn generate_streaming<T: TensorElement>(
     // Encode the full prompt
     let input_ids = tokenizer.encode(&full_prompt)?;
 
-    let mut token_count = 0usize;
     let mut prompt_processing_duration: Option<Duration> = None;
     let mut generation_start: Option<Instant> = None;
 
-    let mut token_callback = |_token_id, decoded_token: Arc<str>| -> Result<bool, MetalError> {
-        token_count += 1;
+    let mut token_callback = |_token_id, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
         let now = Instant::now();
 
         let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
 
         let gen_start = generation_start.get_or_insert(now);
         let generation_elapsed = now.duration_since(*gen_start);
-        let elapsed_secs = generation_elapsed.as_secs_f64();
-        let tokens_per_second = if elapsed_secs > 0.0 {
-            token_count as f64 / elapsed_secs
+
+        let iteration = if !iteration_duration.is_zero() {
+            iteration_duration
         } else {
-            0.0
+            generation_elapsed
         };
 
         if tx
             .send(AppEvent::Token {
                 text: decoded_token,
-                tokens_per_second,
                 prompt_processing: prompt_duration,
-                generation: generation_elapsed,
+                iteration,
             })
             .is_err()
         {
@@ -389,7 +386,7 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     host_overheads: &[(String, usize)],
 ) -> Result<Vec<u32>, MetalError> {
     let mut result = Vec::new();
-    let mut callback = |token_id, _decoded_token: Arc<str>| -> Result<bool, MetalError> {
+    let mut callback = |token_id, _decoded_token: Arc<str>, _iteration: Duration| -> Result<bool, MetalError> {
         result.push(token_id);
         Ok(true)
     };
@@ -428,7 +425,7 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
     process_memory_tracker: &mut Option<ProcessMemoryTracker>,
 ) -> Result<(), MetalError>
 where
-    F: FnMut(u32, Arc<str>) -> Result<bool, MetalError>,
+    F: FnMut(u32, Arc<str>, Duration) -> Result<bool, MetalError>,
 {
     // Pre-allocate KV cache for all layers
     let n_layers = qwen.config.n_layers;
@@ -553,7 +550,7 @@ where
     log_cache_stats(ctx, "generate", generated_ids.len());
 
     if let Some(piece) = decoded_piece
-        && !token_callback(next_token, piece)?
+        && !token_callback(next_token, piece, Duration::ZERO)?
     {
         return Ok(());
     }
@@ -695,7 +692,7 @@ where
         log_cache_stats(ctx, "generate", generated_ids.len());
 
         if let Some(piece) = decoded_piece
-            && !token_callback(next_token, piece)?
+            && !token_callback(next_token, piece, iteration_duration)?
         {
             break;
         }
