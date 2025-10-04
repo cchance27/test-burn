@@ -11,6 +11,8 @@ use objc2_metal::MTLDevice;
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
+use crate::metallic::tensor::dtypes::Dtype;
+
 /// A generic resource cache that uses FxHashMap for high-performance in-memory key-value storage.
 ///
 /// This cache is designed to store and retrieve cacheable resources efficiently.
@@ -108,6 +110,45 @@ impl ResourceCache {
         Self::get_or_create_resource(&mut self.sdpa_cache, key, None, self.default_device.as_ref())
             .unwrap()
             .clone()
+    }
+
+    /// Prewarm the minimal set of MPS matmul resources so the first dispatched matmul
+    /// doesn't have to pay the cost of instantiating `MPSMatrixMultiplication` objects
+    /// and matrix descriptors.
+    pub fn prewarm_matmul_resources(&mut self, device: &Retained<ProtocolObject<dyn MTLDevice>>) -> Result<(), MetalError> {
+        const PREWARM_BATCH: usize = 1;
+        const PREWARM_DIM: usize = 1;
+        const PREWARM_ALPHA: f32 = 1.0;
+        const PREWARM_BETAS: &[f32] = &[0.0, 1.0];
+
+        for &beta in PREWARM_BETAS {
+            let key = MpsGemmKey {
+                transpose_left: false,
+                transpose_right: false,
+                result_rows: PREWARM_DIM,
+                result_columns: PREWARM_DIM,
+                interior_columns: PREWARM_DIM,
+                batch_size: PREWARM_BATCH,
+                alpha: PREWARM_ALPHA,
+                beta,
+            };
+            let _ = self.get_or_create_gemm(key, device)?;
+        }
+
+        for &dtype in &[Dtype::F16, Dtype::F32] {
+            let elem_size = dtype.size_bytes();
+            let key = MpsMatrixDescriptorKey {
+                rows: PREWARM_DIM,
+                columns: PREWARM_DIM,
+                row_bytes: elem_size,
+                matrices: PREWARM_BATCH,
+                matrix_bytes: elem_size,
+                dtype,
+            };
+            let _ = self.get_or_create_descriptor(key, device)?;
+        }
+
+        Ok(())
     }
 
     /// Get statistics about the cache.

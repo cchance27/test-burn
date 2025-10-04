@@ -260,6 +260,9 @@ impl<T: TensorElement> Context<T> {
         // Prime the command buffer and resource cache so the very first kernel dispatch
         // can encode immediately after context creation.
         context.ensure_active_cmd_buffer()?;
+        if let Some(cache) = context.active_resource_cache.as_mut() {
+            cache.prewarm_matmul_resources(&context.device)?;
+        }
 
         Ok(context)
     }
