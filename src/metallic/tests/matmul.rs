@@ -1,3 +1,4 @@
+use crate::metallic::kernels::matmul::MatMulBackend;
 use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 use std::sync::{Mutex, OnceLock};
 
@@ -127,6 +128,55 @@ fn run_alpha_beta_case(index: usize, alpha: f32, beta: f32) -> Result<(), MetalE
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, 1e-6, &format!("alpha={} beta={}", alpha, beta));
+    Ok(())
+}
+
+#[test]
+fn test_strided_kv_history_prefers_mlx_backend() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+
+    let batch_heads = 2;
+    let seq_len = 64;
+    let active_steps = 16;
+    let head_dim = 8;
+
+    let cache_elems = batch_heads * seq_len * head_dim;
+    let cache_data: Vec<f32> = (0..cache_elems).map(|i| (i as f32) * 0.01).collect();
+    let cache = Tensor::new(
+        vec![batch_heads, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&cache_data),
+    )?;
+
+    let (history_view, _) = ctx.kv_cache_history_view(&cache, active_steps)?;
+    let history_view_info = history_view.as_mps_matrix_batch_view()?;
+    assert!(history_view_info.batch > 1);
+    assert!(history_view_info.matrix_bytes > history_view_info.rows * history_view_info.row_bytes);
+
+    let query_elems = batch_heads * head_dim;
+    let query_data: Vec<f32> = (0..query_elems).map(|i| (i as f32) * -0.02).collect();
+    let queries = Tensor::new(
+        vec![batch_heads, 1, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&query_data),
+    )?;
+
+    let result = ctx.matmul(&queries, &history_view, false, true)?;
+    ctx.synchronize();
+
+    let samples = ctx.take_matmul_samples();
+    assert!(
+        !samples.is_empty(),
+        "expected matmul instrumentation samples for strided history view"
+    );
+    assert!(
+        samples.iter().all(|sample| sample.backend == MatMulBackend::Mlx),
+        "expected MLX backend for strided view, got {:?}",
+        samples.iter().map(|s| s.backend).collect::<Vec<_>>()
+    );
+
+    assert_eq!(result.dims(), &[batch_heads, 1, active_steps]);
+
     Ok(())
 }
 

@@ -386,19 +386,30 @@ impl<T: TensorElement> Context<T> {
         false
     }
 
-    fn should_use_mlx_dense(&self, dims: &MatmulDims) -> bool {
-        if dims.n <= 32 {
+    fn has_strided_mps_batch(&self, tensors: &[&Tensor<T>]) -> bool {
+        tensors.iter().any(|tensor| {
+            tensor
+                .as_mps_matrix_batch_view()
+                .map(|view| view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes)
+                .unwrap_or(false)
+        })
+    }
+
+    fn should_use_mlx_dense(&self, dims: &MatmulDims, has_strided_batch: bool) -> bool {
+        if dims.n <= 32 && !has_strided_batch {
             return false;
         }
 
         if dims.batch == 1 && dims.m <= 4 {
-            if dims.n <= 128 && dims.k >= dims.n * 2 {
+            if !has_strided_batch && dims.n <= 128 && dims.k >= dims.n * 2 {
                 return false;
             }
-            let four_k = dims.k.saturating_mul(4);
-            let four_n = dims.n.saturating_mul(4);
-            if dims.n >= four_k || dims.k >= four_n {
-                return false;
+            if !has_strided_batch {
+                let four_k = dims.k.saturating_mul(4);
+                let four_n = dims.n.saturating_mul(4);
+                if dims.n >= four_k || dims.k >= four_n {
+                    return false;
+                }
             }
         }
 
@@ -651,7 +662,8 @@ impl<T: TensorElement> Context<T> {
                             });
                         }
 
-                        let use_mlx = self.should_use_mlx_dense(&dimensions);
+                        let has_strided_batch = self.has_strided_mps_batch(&[a, b]);
+                        let use_mlx = self.should_use_mlx_dense(&dimensions, has_strided_batch);
                         let dims = Some(dimensions);
 
                         if use_mlx {
@@ -745,7 +757,8 @@ impl<T: TensorElement> Context<T> {
                             );
                         }
 
-                        let use_mlx = self.should_use_mlx_dense(&dimensions);
+                        let has_strided_batch = self.has_strided_mps_batch(&[a, b]);
+                        let use_mlx = self.should_use_mlx_dense(&dimensions, has_strided_batch);
                         let dims = Some(dimensions);
 
                         if use_mlx {
@@ -882,8 +895,9 @@ impl<T: TensorElement> Context<T> {
                         //    return self.matmul_bias_add_gemv_path(a, b, bias, Some(dimensions), "mode=auto-gemv");
                         //}
 
-                        // DEBT: For now, gemv should take over above, but its disabled currently, disable MLX since MLX heuristics are getting selected without gemv, but MPS is faster than MLX for this.
-                        let use_mlx = false; //self.should_use_mlx_bias(&dimensions);
+                        // We've seen MPS and MLX both perform well at times here, since we're putting in more MLX improvements 
+                        //we might as well use it and try for better MLX improvements since they are so close right now
+                        let use_mlx = self.should_use_mlx_bias(&dimensions);
                         let dims = Some(dimensions);
 
                         if use_mlx {
@@ -947,7 +961,8 @@ impl<T: TensorElement> Context<T> {
                 let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
                 let (dims, use_mlx) = match dims_result {
                     Ok(dimensions) => {
-                        let use_mlx = self.should_use_mlx_dense(&dimensions);
+                        let has_strided_batch = self.has_strided_mps_batch(&[a, b, result]);
+                        let use_mlx = self.should_use_mlx_dense(&dimensions, has_strided_batch);
                         (Some(dimensions), use_mlx)
                     }
                     Err(_) => (None, true),
@@ -1041,7 +1056,8 @@ impl<T: TensorElement> Context<T> {
                 let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
                 let (dims, use_mlx) = match dims_result {
                     Ok(dimensions) => {
-                        let use_mlx = self.should_use_mlx_dense(&dimensions);
+                        let has_strided_batch = self.has_strided_mps_batch(&[a, b, result]);
+                        let use_mlx = self.should_use_mlx_dense(&dimensions, has_strided_batch);
                         (Some(dimensions), use_mlx)
                     }
                     Err(_) => (None, true),
