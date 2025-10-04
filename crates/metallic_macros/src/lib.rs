@@ -265,7 +265,7 @@ fn expand_kernel(input: KernelMacroInput) -> Result<TokenStream2> {
     let library_ident = input.library_ident;
     let source_expr = input.source;
 
-    let library_descriptor_ident = format_ident!("{}Descriptor", library_ident);
+    let library_descriptor_ident = format_ident!("{}LibraryDescriptor", library_ident);
 
     let function_defs: Vec<TokenStream2> = input
         .functions
@@ -291,7 +291,7 @@ fn expand_kernel(input: KernelMacroInput) -> Result<TokenStream2> {
 
 fn expand_function_spec(library_descriptor_ident: &Ident, spec: &FunctionSpec) -> Result<TokenStream2> {
     let helper_fn_ident = format_ident!("__{}_name_for_dtype", spec.ident);
-    let descriptor_ident = format_ident!("{}Descriptor", spec.ident);
+    let function_descriptor_ident = format_ident!("{}FunctionDescriptor", spec.ident);
     let function_ident = &spec.ident;
 
     let mut match_arms = Vec::new();
@@ -314,7 +314,7 @@ fn expand_function_spec(library_descriptor_ident: &Ident, spec: &FunctionSpec) -
         }
 
         #[allow(non_upper_case_globals)]
-        pub static #descriptor_ident: crate::metallic::kernels::KernelFunctionDescriptor = crate::metallic::kernels::KernelFunctionDescriptor {
+        pub static #function_descriptor_ident: crate::metallic::kernels::KernelFunctionDescriptor = crate::metallic::kernels::KernelFunctionDescriptor {
             id: stringify!(#function_ident),
             library: &#library_descriptor_ident,
             name_for_dtype: #helper_fn_ident,

@@ -28,9 +28,10 @@ metal_kernel! {
 }
 ```
 
-The macro emits `KernelDescriptor`/`KernelFunctionDescriptor` statics that mirror the existing
-`KernelLibrary`/`KernelFunction` enums so that the kernel manager can load pipelines using the
-new descriptor flow.
+The macro emits `KernelDescriptor`/`KernelFunctionDescriptor` statics (named
+`<LibraryName>LibraryDescriptor` and `<FunctionName>FunctionDescriptor`) that mirror the existing
+`KernelLibrary`/`KernelFunction` enums so that the kernel manager can load pipelines using the new
+descriptor flow.
 
 ## Defining operations
 
