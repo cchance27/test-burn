@@ -6,9 +6,8 @@ use super::instrumentation::{
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
-use crate::metallic::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use crate::metallic::kernels::sampling::{MAX_TOP_K, SamplingParams};
+use crate::metallic::kernels::sampling::{MAX_TOP_K, SampleTopKTopPOp, SamplingParams};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::sampling::{SamplerBuffers, effective_top_k, sample_top_k_top_p_with_random_value};
 use crate::metallic::tensor::Dtype;
@@ -24,7 +23,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions, MTLSize};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rand::rngs::StdRng;
 use rand::{RngCore, SeedableRng};
 use rustc_hash::FxHashMap;
@@ -412,12 +411,6 @@ impl<T: TensorElement> Context<T> {
             return Ok(None);
         }
 
-        self.prepare_tensors_for_active_cmd(&[logits])?;
-
-        let pipeline = self
-            .kernel_manager
-            .get_pipeline(kernels::KernelFunction::SampleTopKTopP, T::DTYPE, &self.device)?;
-
         if self.sampling_result_buffer.is_none() {
             let byte_len = std::mem::size_of::<u32>();
             let buffer = self
@@ -442,33 +435,10 @@ impl<T: TensorElement> Context<T> {
             _padding: 0,
         };
 
-        let command_buffer = self.active_command_buffer_mut_without_cache()?;
-        let encoder = command_buffer
-            .raw()
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+        let logits_view = logits.clone();
+        let _ = self.call::<SampleTopKTopPOp>((logits_view, params, result_buffer.clone()))?;
 
-        set_compute_pipeline_state(&encoder, &pipeline);
-        set_buffer(&encoder, 0, &logits.buf, logits.offset);
-        set_buffer(&encoder, 1, &result_buffer, 0);
-        set_bytes(&encoder, 2, &params);
-
-        let grid_size = MTLSize {
-            width: 1,
-            height: 1,
-            depth: 1,
-        };
-        let threadgroup_size = MTLSize {
-            width: 1,
-            height: 1,
-            depth: 1,
-        };
-
-        dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
-
-        command_buffer.commit();
-        command_buffer.wait();
+        self.synchronize();
 
         let ptr = result_buffer.contents().as_ptr().cast::<u32>();
         let token = unsafe { ptr.read_unaligned() };
