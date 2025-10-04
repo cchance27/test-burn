@@ -1,4 +1,4 @@
-use super::{Context, MetalError, SamplerBuffers, Tensor};
+use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::metrics::{
@@ -122,14 +122,38 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
     }
 
     let line = match ctx.get_cache_stats() {
-        Some(stats) => format!(
-            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={}",
-            stats.gemm_cache_size, stats.descriptor_cache_size, stats.softmax_cache_size, stats.sdpa_cache_size
-        ),
+        Some(stats) => {
+            let segments = [
+                describe_cache_metrics("gemm", &stats.gemm),
+                describe_cache_metrics("descriptor", &stats.descriptor),
+                describe_cache_metrics("softmax", &stats.softmax),
+                describe_cache_metrics("sdpa", &stats.sdpa),
+            ];
+            format!("[metal-cache] {phase}#{step}: {}", segments.join(" "))
+        }
         None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
     };
 
     cache_stats_logger().log_line(&line);
+}
+
+fn describe_cache_metrics(name: &str, metrics: &CacheMetrics) -> String {
+    let last = metrics
+        .last_event
+        .as_ref()
+        .map(|event| event.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let requests = metrics.hits + metrics.misses;
+    let hit_rate = if requests > 0 {
+        (metrics.hits as f64 / requests as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    format!(
+        "{name}(size={} hits={} misses={} requests={} hit_rate={hit_rate:.1}% last={last})",
+        metrics.size, metrics.hits, metrics.misses, requests
+    )
 }
 
 /// Generation configuration (defaults chosen by user)
