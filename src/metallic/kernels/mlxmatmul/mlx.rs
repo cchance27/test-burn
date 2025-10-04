@@ -1,5 +1,6 @@
 use crate::metallic::kernels::{KernelFunction, KernelInvocable};
 use crate::metallic::{
+    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     tensor::Dtype,
@@ -167,6 +168,7 @@ struct MatMulMlx<T: TensorElement> {
     threadgroups: MTLSize,
     threads_per_tg: MTLSize,
     use_out_source: bool,
+    dispatch_timing: Option<MatMulDispatchTiming>,
 }
 
 impl KernelInvocable for MatMulMlxOp {
@@ -384,13 +386,27 @@ impl KernelInvocable for MatMulMlxOp {
             depth: wm_sel,
         };
 
-        {
+        let dims = MatmulDims {
+            batch,
+            m: a_rows,
+            n: b_cols,
+            k: a_cols,
+        };
+
+        let dispatch_timing = {
             let command_buffer = {
                 let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
                 command_buffer.clone()
             };
-            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mlx);
-        }
+            ctx.register_matmul_dispatch(
+                &command_buffer,
+                MatMulBackend::Mlx,
+                Some(dims),
+                MatMulDispatchKind::Compute,
+            )
+            .timing()
+            .cloned()
+        };
 
         let op = MatMulMlx {
             left: left_tensor,
@@ -405,6 +421,7 @@ impl KernelInvocable for MatMulMlxOp {
             threadgroups,
             threads_per_tg,
             use_out_source,
+            dispatch_timing,
         };
 
         Ok((Box::new(op), out))
@@ -420,6 +437,18 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        if let Some(timing) = &self.dispatch_timing {
+            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                unsafe {
+                    encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
+                        timing.sample_buffer(),
+                        timing.start_index(),
+                        true,
+                    );
+                }
+            }
+        }
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.left.buf, self.left.offset);
@@ -455,6 +484,17 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         }
 
         dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
+        if let Some(timing) = &self.dispatch_timing {
+            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                unsafe {
+                    encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
+                        timing.sample_buffer(),
+                        timing.end_index(),
+                        false,
+                    );
+                }
+            }
+        }
         encoder.endEncoding();
         Ok(())
     }

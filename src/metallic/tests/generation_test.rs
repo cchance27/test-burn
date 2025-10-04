@@ -216,14 +216,20 @@ fn matmul_sample_aggregation_sums_backend_totals() {
         MatMulSample {
             backend: MatMulBackend::Mps,
             duration: Duration::from_millis(8),
+            dims: None,
+            handle: None,
         },
         MatMulSample {
             backend: MatMulBackend::Mps,
             duration: Duration::from_millis(4),
+            dims: None,
+            handle: None,
         },
         MatMulSample {
             backend: MatMulBackend::Mps,
             duration: Duration::from_millis(0),
+            dims: None,
+            handle: None,
         },
     ]);
 

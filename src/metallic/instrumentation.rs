@@ -6,13 +6,27 @@ use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::MTLCommandBuffer;
+use objc2_foundation::{NSData, NSRange, NSArray, NSString, NSUInteger};
+use objc2_metal::{
+    MTLCommandBuffer,
+    MTLCommonCounterSetTimestamp,
+    MTLCounterErrorValue,
+    MTLCounterSampleBuffer,
+    MTLCounterSampleBufferDescriptor,
+    MTLCounterSamplingPoint,
+    MTLDevice,
+    MTLCounterSet,
+    MTLCounterResultTimestamp,
+};
 use rustc_hash::FxHashMap;
 
-use crate::metallic::kernels::matmul::MatMulBackend;
-#[cfg(test)]
-use crate::metallic::kernels::matmul::MatMulSample;
+use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::operation::CommandBuffer;
+
+#[cfg(target_os = "macos")]
+use libc::{mach_timebase_info, mach_timebase_info_data_t};
+#[cfg(target_os = "macos")]
+use std::{ptr::NonNull, thread};
 
 /// Handle to a shared latency collector used to instrument fine-grained timing inside
 /// the Metal execution context. The collector is populated by `Context` while the
@@ -20,83 +34,161 @@ use crate::metallic::operation::CommandBuffer;
 pub type LatencyCollectorHandle = Rc<RefCell<StepLatencyCollector>>;
 pub type MemoryCollectorHandle = Rc<RefCell<StepMemoryCollector>>;
 
+/// Structured description of the matrix dimensions used in a matmul dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MatmulDims {
+    pub batch: usize,
+    pub m: usize,
+    pub n: usize,
+    pub k: usize,
+}
+
 /// Shared recorder handle that allows matmul dispatches to append timing samples
 /// once the GPU finishes executing a command buffer.
 #[derive(Clone)]
 pub struct MatMulSampleRecorder {
-    inner: Arc<dyn Fn(MatMulBackend, Duration) + Send + Sync>,
+    inner: Arc<dyn Fn(MatMulSample) + Send + Sync>,
 }
 
 impl MatMulSampleRecorder {
     pub fn new<F>(callback: F) -> Self
     where
-        F: Fn(MatMulBackend, Duration) + Send + Sync + 'static,
+        F: Fn(MatMulSample) + Send + Sync + 'static,
     {
         Self { inner: Arc::new(callback) }
     }
 
-    pub fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
-        (self.inner)(backend, duration);
+    pub fn record(&self, sample: MatMulSample) {
+        (self.inner)(sample);
+    }
+}
+
+/// Enumerates the sampling strategy required to surround a matmul dispatch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatMulDispatchKind {
+    Compute,
+    Blit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MatMulDispatchHandle {
+    key: usize,
+    index: usize,
+}
+
+#[derive(Clone)]
+pub struct MatMulDispatchTiming {
+    sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    start_index: NSUInteger,
+    end_index: NSUInteger,
+    kind: MatMulDispatchKind,
+}
+
+impl MatMulDispatchTiming {
+    pub fn sample_buffer(&self) -> &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>> {
+        &self.sample_buffer
+    }
+
+    pub fn start_index(&self) -> NSUInteger {
+        self.start_index
+    }
+
+    pub fn end_index(&self) -> NSUInteger {
+        self.end_index
+    }
+
+    pub fn kind(&self) -> MatMulDispatchKind {
+        self.kind
+    }
+}
+
+pub struct MatMulDispatchRegistration {
+    handle: MatMulDispatchHandle,
+    timing: Option<MatMulDispatchTiming>,
+}
+
+impl MatMulDispatchRegistration {
+    pub fn handle(&self) -> MatMulDispatchHandle {
+        self.handle
+    }
+
+    pub fn timing(&self) -> Option<&MatMulDispatchTiming> {
+        self.timing.as_ref()
     }
 }
 
 /// Tracks in-flight matmul dispatches so their GPU execution time can be
 /// recorded once the surrounding command buffer completes.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct MatMulInstrumentation {
     inner: Arc<MatMulInstrumentationInner>,
 }
 
 struct MatMulInstrumentationInner {
     pending: Mutex<FxHashMap<usize, PendingMatMul>>,
-}
-
-impl Default for MatMulInstrumentationInner {
-    fn default() -> Self {
-        Self {
-            pending: Mutex::new(FxHashMap::default()),
-        }
-    }
-}
-
-struct PendingMatMul {
-    recorder: MatMulSampleRecorder,
-    counts: FxHashMap<MatMulBackend, usize>,
-}
-
-impl PendingMatMul {
-    fn new(recorder: MatMulSampleRecorder) -> Self {
-        Self {
-            recorder,
-            counts: FxHashMap::default(),
-        }
-    }
-
-    fn increment(&mut self, backend: MatMulBackend) {
-        *self.counts.entry(backend).or_insert(0) += 1;
-    }
+    #[cfg(target_os = "macos")]
+    counter: CounterResources,
 }
 
 impl MatMulInstrumentation {
-    fn lock_pending(&self) -> MutexGuard<'_, FxHashMap<usize, PendingMatMul>> {
-        self.inner.pending.lock().unwrap_or_else(|err| err.into_inner())
+    pub fn new(device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
+        Self {
+            inner: Arc::new(MatMulInstrumentationInner {
+                pending: Mutex::new(FxHashMap::default()),
+                #[cfg(target_os = "macos")]
+                counter: CounterResources::new(device),
+            }),
+        }
     }
 
-    pub fn register(&self, command_buffer: &CommandBuffer, backend: MatMulBackend, recorder: MatMulSampleRecorder) {
+    fn lock_pending(&self) -> MutexGuard<'_, FxHashMap<usize, PendingMatMul>> {
+        self.inner
+            .pending
+            .lock()
+            .unwrap_or_else(|err| err.into_inner())
+    }
+
+    pub fn register(
+        &self,
+        command_buffer: &CommandBuffer,
+        backend: MatMulBackend,
+        dims: Option<MatmulDims>,
+        kind: MatMulDispatchKind,
+        recorder: MatMulSampleRecorder,
+    ) -> MatMulDispatchRegistration {
+        let key = Self::buffer_key(command_buffer);
+
         {
             let mut pending = self.lock_pending();
-            if let Some(entry) = pending.get_mut(&Self::buffer_key(command_buffer)) {
-                entry.increment(backend);
-                return;
+            if let Some(entry) = pending.get_mut(&key) {
+                let index = entry.next_index();
+                let handle = MatMulDispatchHandle { key, index };
+                let timing = entry.push_dispatch(
+                    handle,
+                    backend,
+                    dims,
+                    self.inner.allocate_timing(command_buffer, kind),
+                );
+                return MatMulDispatchRegistration { handle, timing };
             }
         }
 
-        let key = Self::buffer_key(command_buffer);
         self.install_completion(command_buffer, key);
 
         let mut entry = PendingMatMul::new(recorder);
-        entry.increment(backend);
+        let handle = MatMulDispatchHandle {
+            key,
+            index: entry.next_index(),
+        };
+        let timing = entry.push_dispatch(
+            handle,
+            backend,
+            dims,
+            self.inner.allocate_timing(command_buffer, kind),
+        );
         self.lock_pending().insert(key, entry);
+
+        MatMulDispatchRegistration { handle, timing }
     }
 
     fn install_completion(&self, command_buffer: &CommandBuffer, key: usize) {
@@ -109,53 +201,80 @@ impl MatMulInstrumentation {
             return;
         };
 
-        // GPU timing information is reported in seconds.
+        let PendingMatMul { recorder, dispatches } = entry;
+        let mut resolved_total = Duration::default();
+        let mut fallback = Vec::new();
+
+        for dispatch in dispatches {
+            if let Some(timing) = dispatch.timing {
+                if let Some(duration) = self.inner.resolve_duration(&timing) {
+                    recorder.record(MatMulSample {
+                        backend: dispatch.backend,
+                        duration,
+                        dims: dispatch.dims,
+                        handle: Some(dispatch.handle),
+                    });
+                    resolved_total += duration;
+                    continue;
+                }
+            }
+
+            fallback.push(dispatch);
+        }
+
+        if fallback.is_empty() {
+            return;
+        }
+
+        let remaining = Self::command_buffer_gpu_duration(command_buffer)
+            .map(|total| total.saturating_sub(resolved_total));
+        Self::dispatch_fallback(&recorder, fallback, remaining);
+    }
+
+    fn command_buffer_gpu_duration(
+        command_buffer: &ProtocolObject<dyn MTLCommandBuffer>,
+    ) -> Option<Duration> {
         let gpu_start = unsafe { command_buffer.GPUStartTime() };
         let gpu_end = unsafe { command_buffer.GPUEndTime() };
 
         if !gpu_start.is_finite() || !gpu_end.is_finite() {
-            return;
+            return None;
         }
 
         let delta = gpu_end - gpu_start;
         if delta <= 0.0 {
-            return;
+            return None;
         }
 
-        let total = Duration::from_secs_f64(delta);
-        Self::dispatch_samples(entry, total);
+        Some(Duration::from_secs_f64(delta))
     }
 
-    fn dispatch_samples(entry: PendingMatMul, total: Duration) {
-        let PendingMatMul { recorder, counts } = entry;
-        let total_secs = total.as_secs_f64();
-        if total_secs <= 0.0 {
+    fn dispatch_fallback(
+        recorder: &MatMulSampleRecorder,
+        dispatches: Vec<PendingDispatch>,
+        remaining: Option<Duration>,
+    ) {
+        let Some(total) = remaining else {
+            return;
+        };
+
+        if total.is_zero() || dispatches.is_empty() {
             return;
         }
 
-        let total_dispatches: usize = counts.values().copied().sum();
-        if total_dispatches == 0 {
+        let per_dispatch = total.as_secs_f64() / dispatches.len() as f64;
+        if !per_dispatch.is_finite() || per_dispatch <= 0.0 {
             return;
         }
 
-        let total_dispatches = total_dispatches as f64;
-
-        for (backend, count) in counts {
-            if count == 0 {
-                continue;
-            }
-
-            let share = count as f64 / total_dispatches;
-            if !share.is_finite() || share <= 0.0 {
-                continue;
-            }
-
-            let share_secs = total_secs * share;
-            if !share_secs.is_finite() || share_secs <= 0.0 {
-                continue;
-            }
-
-            recorder.record_matmul_backend_sample(backend, Duration::from_secs_f64(share_secs));
+        let duration = Duration::from_secs_f64(per_dispatch);
+        for dispatch in dispatches {
+            recorder.record(MatMulSample {
+                backend: dispatch.backend,
+                duration,
+                dims: dispatch.dims,
+                handle: Some(dispatch.handle),
+            });
         }
     }
 
@@ -164,38 +283,316 @@ impl MatMulInstrumentation {
     }
 }
 
+impl Default for MatMulInstrumentation {
+    fn default() -> Self {
+        Self::new(None)
+    }
+}
+
+struct PendingMatMul {
+    recorder: MatMulSampleRecorder,
+    dispatches: Vec<PendingDispatch>,
+}
+
+impl PendingMatMul {
+    fn new(recorder: MatMulSampleRecorder) -> Self {
+        Self {
+            recorder,
+            dispatches: Vec::new(),
+        }
+    }
+
+    fn next_index(&self) -> usize {
+        self.dispatches.len()
+    }
+
+    fn push_dispatch(
+        &mut self,
+        handle: MatMulDispatchHandle,
+        backend: MatMulBackend,
+        dims: Option<MatmulDims>,
+        timing: Option<PendingDispatchTiming>,
+    ) -> Option<MatMulDispatchTiming> {
+        let timing_for_handle = timing.as_ref().map(PendingDispatchTiming::to_public);
+        self.dispatches.push(PendingDispatch {
+            handle,
+            backend,
+            dims,
+            timing,
+        });
+        timing_for_handle
+    }
+}
+
+struct PendingDispatch {
+    handle: MatMulDispatchHandle,
+    backend: MatMulBackend,
+    dims: Option<MatmulDims>,
+    timing: Option<PendingDispatchTiming>,
+}
+
+struct PendingDispatchTiming {
+    sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    start_index: NSUInteger,
+    end_index: NSUInteger,
+    kind: MatMulDispatchKind,
+}
+
+impl PendingDispatchTiming {
+    fn to_public(&self) -> MatMulDispatchTiming {
+        MatMulDispatchTiming {
+            sample_buffer: self.sample_buffer.clone(),
+            start_index: self.start_index,
+            end_index: self.end_index,
+            kind: self.kind,
+        }
+    }
+}
+
+impl MatMulInstrumentationInner {
+    fn allocate_timing(
+        &self,
+        command_buffer: &CommandBuffer,
+        kind: MatMulDispatchKind,
+    ) -> Option<PendingDispatchTiming> {
+        #[cfg(target_os = "macos")]
+        {
+            self.counter.allocate_timing(command_buffer, kind)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = (command_buffer, kind);
+            None
+        }
+    }
+
+    fn resolve_duration(&self, timing: &PendingDispatchTiming) -> Option<Duration> {
+        #[cfg(target_os = "macos")]
+        {
+            self.counter.resolve_duration(timing)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = timing;
+            None
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct CounterResources {
+    timestamp_counter_set: Option<Retained<ProtocolObject<dyn MTLCounterSet>>>,
+    timestamp_period: Option<f64>,
+    supports_dispatch_sampling: bool,
+    supports_blit_sampling: bool,
+}
+
+#[cfg(target_os = "macos")]
+impl CounterResources {
+    fn new(device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
+        let Some(device) = device else {
+            return Self {
+                timestamp_counter_set: None,
+                timestamp_period: None,
+                supports_dispatch_sampling: false,
+                supports_blit_sampling: false,
+            };
+        };
+
+        let counter_set = unsafe { Self::find_timestamp_counter_set(device) };
+        let period = Self::gpu_timestamp_period(device);
+        let supports_dispatch_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary);
+        let supports_blit_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary);
+
+        Self {
+            timestamp_counter_set: counter_set,
+            timestamp_period: period,
+            supports_dispatch_sampling,
+            supports_blit_sampling,
+        }
+    }
+
+    fn allocate_timing(
+        &self,
+        command_buffer: &CommandBuffer,
+        kind: MatMulDispatchKind,
+    ) -> Option<PendingDispatchTiming> {
+        let counter_set = self.timestamp_counter_set.as_ref()?;
+        match kind {
+            MatMulDispatchKind::Compute if !self.supports_dispatch_sampling => return None,
+            MatMulDispatchKind::Blit if !self.supports_blit_sampling => return None,
+            _ => {}
+        }
+
+        let descriptor = unsafe { MTLCounterSampleBufferDescriptor::new() };
+        unsafe {
+            descriptor.setCounterSet(Some(counter_set.as_ref()));
+            descriptor.setSampleCount(2);
+        }
+
+        let device = command_buffer.raw().device();
+        let sample_buffer = unsafe {
+            match device.newCounterSampleBufferWithDescriptor_error(&descriptor) {
+                Ok(buffer) => buffer,
+                Err(_) => return None,
+            }
+        };
+
+        Some(PendingDispatchTiming {
+            sample_buffer,
+            start_index: 0,
+            end_index: 1,
+            kind,
+        })
+    }
+
+    fn resolve_duration(&self, timing: &PendingDispatchTiming) -> Option<Duration> {
+        let period = self.timestamp_period?;
+        let length = timing.end_index - timing.start_index + 1;
+        let data = unsafe {
+            timing
+                .sample_buffer
+                .resolveCounterRange(NSRange::new(timing.start_index, length))?
+        };
+        let bytes = unsafe { data.as_bytes_unchecked() };
+        let stride = core::mem::size_of::<MTLCounterResultTimestamp>();
+        if bytes.len() < stride * 2 {
+            return None;
+        }
+
+        let samples = unsafe {
+            core::slice::from_raw_parts(
+                bytes.as_ptr() as *const MTLCounterResultTimestamp,
+                bytes.len() / stride,
+            )
+        };
+
+        let start = samples.get(timing.start_index as usize)?.timestamp;
+        let end = samples.get(timing.end_index as usize)?.timestamp;
+        if start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start {
+            return None;
+        }
+
+        let delta = (end - start) as f64 * period;
+        if delta <= 0.0 {
+            return None;
+        }
+
+        Some(Duration::from_secs_f64(delta))
+    }
+
+    unsafe fn find_timestamp_counter_set(
+        device: &ProtocolObject<dyn MTLDevice>,
+    ) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+        let sets = device.counterSets()?;
+        let desired: &NSString = MTLCommonCounterSetTimestamp;
+        let count = sets.count() as usize;
+        for idx in 0..count {
+            let set = sets.objectAtIndex(idx as NSUInteger);
+            let name = set.name();
+            if name.isEqualToString(desired) {
+                return Some(set);
+            }
+        }
+        None
+    }
+
+    fn gpu_timestamp_period(device: &ProtocolObject<dyn MTLDevice>) -> Option<f64> {
+        let mut cpu_start: u64 = 0;
+        let mut gpu_start: u64 = 0;
+        unsafe {
+            device.sampleTimestamps_gpuTimestamp(
+                NonNull::from(&mut cpu_start),
+                NonNull::from(&mut gpu_start),
+            );
+        }
+
+        thread::sleep(Duration::from_micros(200));
+
+        let mut cpu_end: u64 = 0;
+        let mut gpu_end: u64 = 0;
+        unsafe {
+            device.sampleTimestamps_gpuTimestamp(
+                NonNull::from(&mut cpu_end),
+                NonNull::from(&mut gpu_end),
+            );
+        }
+
+        let cpu_delta = cpu_end.saturating_sub(cpu_start);
+        let gpu_delta = gpu_end.saturating_sub(gpu_start);
+        if cpu_delta == 0 || gpu_delta == 0 {
+            return None;
+        }
+
+        let mut info = mach_timebase_info_data_t { numer: 0, denom: 0 };
+        let status = unsafe { mach_timebase_info(&mut info) };
+        if status != 0 || info.denom == 0 {
+            return None;
+        }
+
+        let cpu_delta_ns = (cpu_delta as u128 * info.numer as u128) / info.denom as u128;
+        Some(cpu_delta_ns as f64 / 1e9 / gpu_delta as f64)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+struct CounterResources;
+
+#[cfg(not(target_os = "macos"))]
+impl CounterResources {
+    fn new(_device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
+        Self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
-    use std::time::Duration;
 
     #[test]
-    fn dispatch_samples_returns_full_duration_for_single_backend() {
+    fn fallback_splits_remaining_time_evenly() {
         let samples: Arc<Mutex<Vec<MatMulSample>>> = Arc::new(Mutex::new(Vec::new()));
         let recorder = MatMulSampleRecorder::new({
             let samples = Arc::clone(&samples);
-            move |backend, duration| {
-                if let Ok(mut samples) = samples.lock() {
-                    samples.push(MatMulSample { backend, duration });
+            move |sample| {
+                if let Ok(mut guard) = samples.lock() {
+                    guard.push(sample);
                 }
             }
         });
 
-        let mut pending = PendingMatMul::new(recorder);
-        pending.increment(MatMulBackend::Mps);
-        pending.increment(MatMulBackend::Mps);
+        let dispatches = vec![
+            PendingDispatch {
+                handle: MatMulDispatchHandle { key: 0, index: 0 },
+                backend: MatMulBackend::Mps,
+                dims: None,
+                timing: None,
+            },
+            PendingDispatch {
+                handle: MatMulDispatchHandle { key: 0, index: 1 },
+                backend: MatMulBackend::Mps,
+                dims: None,
+                timing: None,
+            },
+        ];
 
-        MatMulInstrumentation::dispatch_samples(pending, Duration::from_millis(30));
+        MatMulInstrumentation::dispatch_fallback(
+            &recorder,
+            dispatches,
+            Some(Duration::from_millis(30)),
+        );
 
         let recorded = samples.lock().unwrap();
-        assert_eq!(recorded.len(), 1);
-        let sample = &recorded[0];
-        assert_eq!(sample.backend, MatMulBackend::Mps);
-        assert_eq!(sample.duration, Duration::from_millis(30));
+        assert_eq!(recorded.len(), 2);
+        for sample in recorded.iter() {
+            assert_eq!(sample.backend, MatMulBackend::Mps);
+            assert_eq!(sample.duration, Duration::from_millis(15));
+            assert!(sample.dims.is_none());
+            assert!(sample.handle.is_some());
+        }
     }
 }
-
 /// Enumeration of the latency events that can be emitted from the low-level kernels.
 #[derive(Clone, Debug)]
 pub enum LatencyEvent<'a> {
