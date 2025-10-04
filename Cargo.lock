@@ -3192,6 +3192,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mach2"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d640282b302c0bb0a2a8e0233ead9035e3bed871f0b7e81fe4a1ec829765db44"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "malloc_buf"
 version = "0.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5086,6 +5095,8 @@ dependencies = [
  "crossterm 0.29.0",
  "fancy-regex",
  "half",
+ "libc",
+ "mach2",
  "memmap2",
  "ndarray",
  "ndarray-npy",

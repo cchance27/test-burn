@@ -1,6 +1,7 @@
 use super::error::MetalError;
 use super::instrumentation::{
-    LatencyCollectorHandle, LatencyEvent, MatMulInstrumentation, MatMulSampleRecorder, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
+    LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchRegistration, MatMulInstrumentation,
+    MatMulSampleRecorder, MatmulDims, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
@@ -22,6 +23,7 @@ use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
+use std::cell::RefCell;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -164,14 +166,6 @@ struct RepeatedWritePlan<T: TensorElement> {
     dst_seq_stride: u32,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct MatmulDims {
-    batch: usize,
-    m: usize,
-    n: usize,
-    k: usize,
-}
-
 struct MatmulShapeLogger {
     file: Mutex<std::fs::File>,
 }
@@ -214,6 +208,7 @@ pub struct Context<T: TensorElement> {
     /// Matmul timing samples captured since the last drain.
     matmul_samples: Arc<Mutex<Vec<MatMulSample>>>,
     matmul_recorder: MatMulSampleRecorder,
+    matmul_logging_session: RefCell<Option<Vec<MatMulDispatchHandle>>>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     /// Optional override for the matmul backend chosen by this context.
@@ -272,14 +267,15 @@ impl<T: TensorElement> Context<T> {
 
         let matmul_samples = Arc::new(Mutex::new(Vec::new()));
         let samples_for_recorder = Arc::clone(&matmul_samples);
-        let matmul_recorder = MatMulSampleRecorder::new(move |backend, duration| {
-            if duration.is_zero() {
+        let matmul_recorder = MatMulSampleRecorder::new(move |sample| {
+            if sample.duration.is_zero() {
                 return;
             }
             if let Ok(mut samples) = samples_for_recorder.lock() {
-                samples.push(MatMulSample { backend, duration });
+                samples.push(sample);
             }
         });
+        let matmul_instrumentation = MatMulInstrumentation::new(Some(&device));
 
         Ok(Context::<T> {
             device,
@@ -296,9 +292,10 @@ impl<T: TensorElement> Context<T> {
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
-            matmul_instrumentation: MatMulInstrumentation::default(),
+            matmul_instrumentation,
             matmul_samples,
             matmul_recorder,
+            matmul_logging_session: RefCell::new(None),
             sampler_buffers: SamplerBuffers::default(),
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
@@ -361,14 +358,43 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    pub(crate) fn register_matmul_dispatch(&self, command_buffer: &CommandBuffer, backend: MatMulBackend) {
-        self.matmul_instrumentation
-            .register(command_buffer, backend, self.matmul_recorder.clone());
+    pub(crate) fn register_matmul_dispatch(
+        &self,
+        command_buffer: &CommandBuffer,
+        backend: MatMulBackend,
+        dims: Option<MatmulDims>,
+        kind: MatMulDispatchKind,
+    ) -> MatMulDispatchRegistration {
+        let registration = self
+            .matmul_instrumentation
+            .register(command_buffer, backend, dims, kind, self.matmul_recorder.clone());
+        self.track_matmul_dispatch(registration.handle());
+        registration
+    }
+
+    fn track_matmul_dispatch(&self, handle: MatMulDispatchHandle) {
+        let mut guard = self.matmul_logging_session.borrow_mut();
+        if let Some(session) = guard.as_mut() {
+            session.push(handle);
+        }
+    }
+
+    fn begin_matmul_logging_session(&self) {
+        *self.matmul_logging_session.borrow_mut() = Some(Vec::new());
+    }
+
+    fn finish_matmul_logging_session(&self) -> Vec<MatMulDispatchHandle> {
+        self.matmul_logging_session.borrow_mut().take().unwrap_or_default()
     }
 
     #[allow(dead_code)]
     pub(crate) fn record_matmul_backend_sample(&self, backend: MatMulBackend, duration: Duration) {
-        self.matmul_recorder.record_matmul_backend_sample(backend, duration);
+        self.matmul_recorder.record(MatMulSample {
+            backend,
+            duration,
+            dims: None,
+            handle: None,
+        });
     }
 
     pub fn take_matmul_samples(&self) -> Vec<MatMulSample> {
@@ -377,6 +403,28 @@ impl<T: TensorElement> Context<T> {
             Err(err) => err.into_inner(),
         };
         samples.drain(..).collect()
+    }
+
+    fn matched_matmul_samples(&self, handles: &[MatMulDispatchHandle]) -> Vec<MatMulSample> {
+        if handles.is_empty() {
+            return Vec::new();
+        }
+
+        let guard = match self.matmul_samples.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+
+        let mut matches = Vec::new();
+        for sample in guard.iter() {
+            if let Some(handle) = sample.handle {
+                if handles.contains(&handle) {
+                    matches.push(*sample);
+                }
+            }
+        }
+
+        matches
     }
 
     pub fn kv_cache_dispatch_stats(&self) -> KvCacheDispatchStats {
@@ -543,20 +591,15 @@ impl<T: TensorElement> Context<T> {
         F: FnOnce(&mut Self) -> Result<Tensor<T>, MetalError>,
     {
         if self.log_matmul_shapes {
-            // Drop any lingering samples from previous dispatches so we only record
-            // timings for this invocation when the command buffer completes.
-            let _ = self.take_matmul_samples();
+            self.begin_matmul_logging_session();
 
             let start = Instant::now();
             let result = f(self);
             let elapsed = start.elapsed();
 
+            let handles = self.finish_matmul_logging_session();
             let gpu_duration = if result.is_ok() {
-                // Ensure the encoded work is flushed so the instrumentation callback fires
-                // and the timing samples become available.
-                self.synchronize();
-
-                let samples = self.take_matmul_samples();
+                let samples = self.matched_matmul_samples(&handles);
                 let total: Duration = samples
                     .iter()
                     .filter(|sample| sample.backend == backend)
@@ -566,10 +609,6 @@ impl<T: TensorElement> Context<T> {
             } else {
                 None
             };
-
-            // Re-establish an active command buffer/resource cache for subsequent calls since
-            // `synchronize` clears them.
-            self.ensure_active_cmd_buffer()?;
 
             self.log_matmul_event(op, backend, dims.as_ref(), elapsed, note, gpu_duration);
             result

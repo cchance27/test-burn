@@ -1,8 +1,9 @@
 use objc2::AnyThread;
+use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
@@ -10,6 +11,7 @@ use super::{KernelFunction, KernelInvocable};
 use crate::metallic::{
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    instrumentation::{MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     resource_cache::ResourceCache,
 };
 
@@ -35,6 +37,8 @@ pub enum MatMulBackend {
 pub struct MatMulSample {
     pub backend: MatMulBackend,
     pub duration: Duration,
+    pub dims: Option<MatmulDims>,
+    pub handle: Option<MatMulDispatchHandle>,
 }
 
 // Public, user-facing, zero-sized struct for the matmul operation with transpose options.
@@ -53,6 +57,7 @@ struct MatMul {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
+    pub dispatch_timing: Option<MatMulDispatchTiming>,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -183,6 +188,23 @@ impl KernelInvocable for MatMulOp {
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
+        let dims = MatmulDims {
+            batch: matmul_result_view.batch,
+            m: eff_left_rows,
+            n: eff_right_cols,
+            k: eff_left_cols,
+        };
+
+        let dispatch_timing = {
+            let command_buffer = {
+                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+                command_buffer.clone()
+            };
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps, Some(dims), MatMulDispatchKind::Blit)
+                .timing()
+                .cloned()
+        };
+
         let op = MatMul {
             left_buf: matmul_left_buf,
             left_offset: matmul_left_offset,
@@ -195,15 +217,8 @@ impl KernelInvocable for MatMulOp {
             result_desc,
             gemm,
             batch_size: matmul_result_view.batch,
+            dispatch_timing,
         };
-
-        {
-            let command_buffer = {
-                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-                command_buffer.clone()
-            };
-            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Mps);
-        }
 
         // Return the boxed operation and the output tensor.
         Ok((Box::new(op), out))
@@ -223,12 +238,46 @@ impl Operation for MatMul {
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
         let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
 
+        if let Some(timing) = &self.dispatch_timing {
+            if matches!(timing.kind(), MatMulDispatchKind::Blit) {
+                if let Some(encoder) = command_buffer.blitCommandEncoder() {
+                    let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+                    unsafe {
+                        let _: () = msg_send![
+                            &*encoder,
+                            sampleCountersInBuffer: sample_buffer,
+                            atSampleIndex: timing.start_index(),
+                            withBarrier: Bool::YES
+                        ];
+                    }
+                    encoder.endEncoding();
+                }
+            }
+        }
+
         // Encode the MPS matrix multiplication
         unsafe {
             self.gemm.setBatchStart(0 as NSUInteger);
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
+        if let Some(timing) = &self.dispatch_timing {
+            if matches!(timing.kind(), MatMulDispatchKind::Blit) {
+                if let Some(encoder) = command_buffer.blitCommandEncoder() {
+                    let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+                    unsafe {
+                        let _: () = msg_send![
+                            &*encoder,
+                            sampleCountersInBuffer: sample_buffer,
+                            atSampleIndex: timing.end_index(),
+                            withBarrier: Bool::NO
+                        ];
+                    }
+                    encoder.endEncoding();
+                }
+            }
+        }
 
         Ok(())
     }

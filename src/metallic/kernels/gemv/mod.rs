@@ -2,10 +2,13 @@ use super::*;
 use crate::metallic::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::metallic::{
     TensorElement, TensorInit, TensorStorage,
+    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
     kernels::{KernelFunction, KernelInvocable, matmul::MatMulBackend},
 };
+use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
+use objc2::runtime::{Bool, ProtocolObject};
+use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer, MTLSize};
 
 #[repr(C)]
 struct GemvParams {
@@ -26,6 +29,7 @@ struct Gemv<T: TensorElement> {
     params: GemvParams,
     grid_size: MTLSize,
     threadgroup_size: MTLSize,
+    dispatch_timing: Option<MatMulDispatchTiming>,
 }
 
 impl<T: TensorElement> Operation for Gemv<T> {
@@ -38,6 +42,20 @@ impl<T: TensorElement> Operation for Gemv<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
+        if let Some(timing) = &self.dispatch_timing {
+            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+                unsafe {
+                    let _: () = msg_send![
+                        &*encoder,
+                        sampleCountersInBuffer: sample_buffer,
+                        atSampleIndex: timing.start_index(),
+                        withBarrier: Bool::YES
+                    ];
+                }
+            }
+        }
+
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(&encoder, 1, &self.x.buf, self.x.offset);
@@ -45,6 +63,21 @@ impl<T: TensorElement> Operation for Gemv<T> {
         set_bytes(&encoder, 3, &self.params);
 
         dispatch_threadgroups(&encoder, self.grid_size, self.threadgroup_size);
+
+        if let Some(timing) = &self.dispatch_timing {
+            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+                unsafe {
+                    let _: () = msg_send![
+                        &*encoder,
+                        sampleCountersInBuffer: sample_buffer,
+                        atSampleIndex: timing.end_index(),
+                        withBarrier: Bool::NO
+                    ];
+                }
+            }
+        }
+
         encoder.endEncoding();
         Ok(())
     }
@@ -105,13 +138,17 @@ impl KernelInvocable for GemvOp {
             depth: 1,
         };
 
-        {
+        let dims = MatmulDims { batch: 1, m: 1, n, k };
+
+        let dispatch_timing = {
             let command_buffer = {
                 let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
                 command_buffer.clone()
             };
-            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Gemv);
-        }
+            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Gemv, Some(dims), MatMulDispatchKind::Compute)
+                .timing()
+                .cloned()
+        };
 
         let op = Gemv {
             pipeline,
@@ -121,6 +158,7 @@ impl KernelInvocable for GemvOp {
             params,
             grid_size,
             threadgroup_size,
+            dispatch_timing,
         };
 
         Ok((Box::new(op), y))
