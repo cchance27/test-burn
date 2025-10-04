@@ -1,4 +1,4 @@
-use crate::metallic::kernels::elemwise_add::elemwise_add::ElemwiseAddOp;
+use crate::metallic::kernels::elemwise_add::ElemwiseAddOp;
 use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 fn cpu_elemwise_add(a: &[f32], b: &[f32]) -> Vec<f32> {

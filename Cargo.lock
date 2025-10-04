@@ -3267,6 +3267,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "metallic_macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5087,6 +5096,7 @@ dependencies = [
  "fancy-regex",
  "half",
  "memmap2",
+ "metallic_macros",
  "ndarray",
  "ndarray-npy",
  "num-traits",

@@ -6,6 +6,10 @@ edition = "2024"
 [lib]
 bench = false
 
+[workspace]
+members = ["crates/metallic_macros"]
+resolver = "2"
+
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
 objc2 = "0.6.2"
@@ -31,6 +35,7 @@ fancy-regex = "0.16.2"
 ratatui = { version = "0.29.0", features = ["crossterm"] }
 crossterm = "0.29.0"
 anyhow = "1.0.100"
+metallic_macros = { path = "crates/metallic_macros" }
 sysinfo = "0.37.1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
 half = { version = "2.6.0", features = ["zerocopy", "bytemuck", "num-traits", "use-intrinsics"] }

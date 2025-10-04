@@ -10,8 +10,11 @@ use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineSt
 use objc2_metal::{MTLDevice, MTLLibrary};
 use rustc_hash::FxHashMap;
 
+mod descriptors;
+
 // Rexport KernelManager and Invocable
 mod kernel_manager;
+pub use descriptors::{KernelDescriptor, KernelFunctionDescriptor};
 pub use kernel_manager::{KernelInvocable, KernelManager};
 
 // Export our kernels
