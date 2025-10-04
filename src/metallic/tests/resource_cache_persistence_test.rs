@@ -63,6 +63,14 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
         stats_before.permute_inline_bytes, stats_after.permute_inline_bytes,
         "Permute inline byte counter should survive a command buffer flush",
     );
+    assert_eq!(
+        stats_before.permute_inline_max_bytes, stats_after.permute_inline_max_bytes,
+        "Permute inline max byte counter should survive a command buffer flush",
+    );
+    assert_eq!(
+        stats_before.permute_cached_max_bytes, stats_after.permute_cached_max_bytes,
+        "Permute cached max byte counter should survive a command buffer flush",
+    );
 
     Ok(())
 }

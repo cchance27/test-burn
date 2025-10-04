@@ -13,6 +13,7 @@ fn permute_large_rank_reuses_constant_buffers() -> Result<(), MetalError> {
     let inline_elements = PERMUTE_INLINE_BYTE_LIMIT / std::mem::size_of::<u32>();
     let rank = inline_elements + 1; // Ensure the constant payload exceeds Metal's inline threshold.
     let tensor = build_high_rank_tensor(&ctx, rank)?;
+    let expected_payload_bytes = rank * std::mem::size_of::<u32>();
     let permutation: Vec<usize> = (0..rank).rev().collect();
 
     // First dispatch populates the cache via misses.
@@ -25,6 +26,8 @@ fn permute_large_rank_reuses_constant_buffers() -> Result<(), MetalError> {
     assert_eq!(stats_after_first.permute_constant_cache_misses, 4);
     assert_eq!(stats_after_first.permute_inline_uploads, 0);
     assert_eq!(stats_after_first.permute_inline_bytes, 0);
+    assert_eq!(stats_after_first.permute_inline_max_bytes, 0);
+    assert_eq!(stats_after_first.permute_cached_max_bytes, expected_payload_bytes);
 
     // Subsequent dispatches should reuse the cached buffers.
     for _ in 0..3 {
@@ -42,6 +45,8 @@ fn permute_large_rank_reuses_constant_buffers() -> Result<(), MetalError> {
     );
     assert_eq!(stats_after_reuse.permute_inline_uploads, 0);
     assert_eq!(stats_after_reuse.permute_inline_bytes, 0);
+    assert_eq!(stats_after_reuse.permute_inline_max_bytes, 0);
+    assert_eq!(stats_after_reuse.permute_cached_max_bytes, expected_payload_bytes);
 
     Ok(())
 }

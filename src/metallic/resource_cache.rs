@@ -25,6 +25,8 @@ pub struct ResourceCache {
     permute_constant_cache_misses: usize,
     permute_inline_uploads: usize,
     permute_inline_bytes: usize,
+    permute_inline_max_bytes: usize,
+    permute_cached_max_bytes: usize,
 }
 
 impl ResourceCache {
@@ -52,6 +54,8 @@ impl ResourceCache {
             permute_constant_cache_misses: 0,
             permute_inline_uploads: 0,
             permute_inline_bytes: 0,
+            permute_inline_max_bytes: 0,
+            permute_cached_max_bytes: 0,
         }
     }
 
@@ -133,6 +137,7 @@ impl ResourceCache {
         if length <= PERMUTE_INLINE_BYTE_LIMIT {
             self.permute_inline_uploads += 1;
             self.permute_inline_bytes += length;
+            self.permute_inline_max_bytes = self.permute_inline_max_bytes.max(length);
             return Ok(None);
         }
 
@@ -140,6 +145,7 @@ impl ResourceCache {
 
         if let Some(entry) = cache.get(data) {
             self.permute_constant_cache_hits += 1;
+            self.permute_cached_max_bytes = self.permute_cached_max_bytes.max(entry.length);
             return Ok(Some(entry.buffer.clone()));
         }
 
@@ -155,6 +161,7 @@ impl ResourceCache {
         }
 
         self.permute_constant_cache_misses += 1;
+        self.permute_cached_max_bytes = self.permute_cached_max_bytes.max(length);
 
         let buffer_clone = buffer.clone();
         cache.insert(data.to_vec(), CacheableConstantBuffer { buffer, length });
@@ -175,6 +182,8 @@ impl ResourceCache {
             permute_constant_cache_misses: self.permute_constant_cache_misses,
             permute_inline_uploads: self.permute_inline_uploads,
             permute_inline_bytes: self.permute_inline_bytes,
+            permute_inline_max_bytes: self.permute_inline_max_bytes,
+            permute_cached_max_bytes: self.permute_cached_max_bytes,
         }
     }
 
@@ -194,6 +203,8 @@ impl ResourceCache {
         self.permute_constant_cache_misses = 0;
         self.permute_inline_uploads = 0;
         self.permute_inline_bytes = 0;
+        self.permute_inline_max_bytes = 0;
+        self.permute_cached_max_bytes = 0;
     }
 }
 
@@ -209,6 +220,8 @@ pub struct CacheStats {
     pub permute_constant_cache_misses: usize,
     pub permute_inline_uploads: usize,
     pub permute_inline_bytes: usize,
+    pub permute_inline_max_bytes: usize,
+    pub permute_cached_max_bytes: usize,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]

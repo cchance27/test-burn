@@ -123,7 +123,7 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
 
     let line = match ctx.get_cache_stats() {
         Some(stats) => format!(
-            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={} permute_constant_cache_size={} permute_constant_cache_hits={} permute_constant_cache_misses={} permute_inline_uploads={} permute_inline_bytes={}",
+            "[metal-cache] {phase}#{step}: gemm_cache_size={} descriptor_cache_size={} softmax_cache_size={} sdpa_cache_size={} permute_constant_cache_size={} permute_constant_cache_hits={} permute_constant_cache_misses={} permute_inline_uploads={} permute_inline_bytes={} permute_inline_max_bytes={} permute_cached_max_bytes={}",
             stats.gemm_cache_size,
             stats.descriptor_cache_size,
             stats.softmax_cache_size,
@@ -132,7 +132,9 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
             stats.permute_constant_cache_hits,
             stats.permute_constant_cache_misses,
             stats.permute_inline_uploads,
-            stats.permute_inline_bytes
+            stats.permute_inline_bytes,
+            stats.permute_inline_max_bytes,
+            stats.permute_cached_max_bytes
         ),
         None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
     };
