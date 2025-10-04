@@ -1767,8 +1767,8 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
     ctx.synchronize();
 
     let stats = ctx.kv_cache_dispatch_stats();
-    assert_eq!(stats.repeated_dispatches, 1);
-    assert_eq!(stats.repeated_fallback_blits, 0);
+    assert_eq!(stats.combined_dispatches, 1);
+    assert_eq!(stats.combined_fallback_blits, 0);
 
     let entry = ctx
         .kv_caches

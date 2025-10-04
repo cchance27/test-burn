@@ -159,7 +159,7 @@ fn describe_cache_metrics(name: &str, metrics: &CacheMetrics) -> String {
 
 fn describe_kv_cache_metrics(stats: &KvCacheDispatchStats) -> String {
     let canonical_total = stats.canonical_dispatches + stats.canonical_fallback_blits;
-    let repeated_total = stats.repeated_dispatches + stats.repeated_fallback_blits;
+    let combined_total = stats.combined_dispatches + stats.combined_fallback_blits;
 
     let canonical_hit_rate = if canonical_total > 0 {
         (stats.canonical_dispatches as f64 / canonical_total as f64) * 100.0
@@ -167,15 +167,15 @@ fn describe_kv_cache_metrics(stats: &KvCacheDispatchStats) -> String {
         0.0
     };
 
-    let repeated_hit_rate = if repeated_total > 0 {
-        (stats.repeated_dispatches as f64 / repeated_total as f64) * 100.0
+    let combined_hit_rate = if combined_total > 0 {
+        (stats.combined_dispatches as f64 / combined_total as f64) * 100.0
     } else {
         0.0
     };
 
     format!(
-        "kv_cache(canonical_dispatches={} canonical_fallback_blits={} canonical_hit_rate={canonical_hit_rate:.1}% repeated_dispatches={} repeated_fallback_blits={} repeated_hit_rate={repeated_hit_rate:.1}%)",
-        stats.canonical_dispatches, stats.canonical_fallback_blits, stats.repeated_dispatches, stats.repeated_fallback_blits,
+        "kv_cache(canonical_dispatches={} canonical_fallback_blits={} canonical_hit_rate={canonical_hit_rate:.1}% combined_dispatches={} combined_fallback_blits={} combined_hit_rate={combined_hit_rate:.1}%)",
+        stats.canonical_dispatches, stats.canonical_fallback_blits, stats.combined_dispatches, stats.combined_fallback_blits,
     )
 }
 
