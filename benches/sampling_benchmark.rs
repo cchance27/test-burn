@@ -49,6 +49,17 @@ fn sampling_benchmarks(c: &mut Criterion) {
     let mut context = Context::<F32Element>::new().expect("metal context");
     let logits_tensor = prepare_logits_tensor(&context);
 
+    // Warm up the GPU path so the benchmark excludes initial pipeline compilation.
+    {
+        let mut warmup_rng = StdRng::seed_from_u64(RNG_SEED);
+        let random = warmup_rng.next_u32();
+        context
+            .sample_top_k_top_p_device(&logits_tensor, VOCAB_SIZE, TOP_K, TOP_P, TEMPERATURE, random)
+            .expect("device sampling should not fail")
+            .expect("kernel must return a token");
+        context.pool.reset();
+    }
+
     group.bench_function("cpu_host_sampling", |b| {
         b.iter(|| {
             context.pool.reset();

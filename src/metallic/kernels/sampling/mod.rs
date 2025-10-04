@@ -1,6 +1,11 @@
 use super::*;
 
 use crate::metallic::{TensorElement, tensor::RetainedBuffer};
+use objc2_foundation::NSUInteger;
+
+/// Number of threads launched for the sampling reduction kernel. This must match
+/// `THREADGROUP_SIZE` in `kernel.metal`.
+const THREADGROUP_SIZE: usize = 8;
 
 /// Maximum supported top-k for the GPU sampling kernel. Larger requests fall
 /// back to the CPU implementation to avoid excessive per-thread stack usage.
@@ -76,12 +81,12 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
         set_bytes(&encoder, 2, &self.params);
 
         let grid_size = MTLSize {
-            width: 1,
+            width: THREADGROUP_SIZE as NSUInteger,
             height: 1,
             depth: 1,
         };
         let threadgroup_size = MTLSize {
-            width: 1,
+            width: THREADGROUP_SIZE as NSUInteger,
             height: 1,
             depth: 1,
         };

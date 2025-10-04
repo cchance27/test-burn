@@ -463,6 +463,7 @@ where
 
         if use_device {
             ctx.synchronize();
+            record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
         }
 
         let sample_start = Instant::now();
@@ -476,6 +477,7 @@ where
             random,
             use_device,
         )?;
+        record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
@@ -623,6 +625,7 @@ where
 
         if use_device {
             ctx.synchronize();
+            record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
         }
 
         let random = ctx.next_sampler_random();
@@ -637,6 +640,7 @@ where
             random,
             use_device,
         )?;
+        record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
 
         generated_ids.push(next_token);
 
