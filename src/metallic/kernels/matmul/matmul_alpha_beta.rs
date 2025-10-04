@@ -1,9 +1,9 @@
 use super::*;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable, MatMulBackend};
@@ -215,12 +215,12 @@ impl Operation for MatMulAlphaBeta {
                     unsafe {
                         let _: () = msg_send![
                             &*encoder,
-                            sampleCountersInBuffer: timing.sample_buffer().as_ref()
-                            atSampleIndex: timing.start_index()
-                            withBarrier: true
+                            sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                            atSampleIndex: timing.start_index(),
+                            withBarrier: Bool::YES
                         ];
-                        let _: () = msg_send![&*encoder, endEncoding];
                     }
+                    encoder.endEncoding();
                 }
             }
         }
@@ -238,12 +238,12 @@ impl Operation for MatMulAlphaBeta {
                     unsafe {
                         let _: () = msg_send![
                             &*encoder,
-                            sampleCountersInBuffer: timing.sample_buffer().as_ref()
-                            atSampleIndex: timing.end_index()
-                            withBarrier: false
+                            sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                            atSampleIndex: timing.end_index(),
+                            withBarrier: Bool::NO
                         ];
-                        let _: () = msg_send![&*encoder, endEncoding];
                     }
+                    encoder.endEncoding();
                 }
             }
         }

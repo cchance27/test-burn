@@ -189,20 +189,32 @@ impl MatMulInstrumentation {
         let mut fallback = Vec::new();
 
         for dispatch in dispatches {
-            if let Some(timing) = dispatch.timing {
-                if let Some(duration) = self.inner.resolve_duration(&timing) {
+            let PendingDispatch {
+                handle,
+                backend,
+                dims,
+                timing,
+            } = dispatch;
+
+            if let Some(timing) = timing.as_ref() {
+                if let Some(duration) = self.inner.resolve_duration(timing) {
                     recorder.record(MatMulSample {
-                        backend: dispatch.backend,
+                        backend,
                         duration,
-                        dims: dispatch.dims,
-                        handle: Some(dispatch.handle),
+                        dims,
+                        handle: Some(handle),
                     });
                     resolved_total += duration;
                     continue;
                 }
             }
 
-            fallback.push(dispatch);
+            fallback.push(PendingDispatch {
+                handle,
+                backend,
+                dims,
+                timing,
+            });
         }
 
         if fallback.is_empty() {
@@ -417,7 +429,7 @@ impl CounterResources {
     fn resolve_duration(&self, timing: &PendingDispatchTiming) -> Option<Duration> {
         let period = self.timestamp_period?;
         let length = timing.end_index - timing.start_index + 1;
-        let data = unsafe { timing.sample_buffer.resolveCounterRange(NSRange::new(timing.start_index, length))? };
+        let data: Retained<NSData> = unsafe { timing.sample_buffer.resolveCounterRange(NSRange::new(timing.start_index, length))? };
         let bytes = unsafe { data.as_bytes_unchecked() };
         let stride = core::mem::size_of::<MTLCounterResultTimestamp>();
         if bytes.len() < stride * 2 {
@@ -442,7 +454,7 @@ impl CounterResources {
 
     unsafe fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
         let sets = unsafe { device.counterSets()? };
-        let desired: &NSString = MTLCommonCounterSetTimestamp;
+        let desired: &NSString = unsafe { MTLCommonCounterSetTimestamp };
         let count = sets.count() as usize;
         for idx in 0..count {
             let set = sets.objectAtIndex(idx as NSUInteger);

@@ -1,9 +1,9 @@
 use objc2::AnyThread;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
@@ -244,9 +244,9 @@ impl Operation for MatMul {
                     unsafe {
                         let _: () = msg_send![
                             &*encoder,
-                            sampleCountersInBuffer: timing.sample_buffer().as_ref()
-                            atSampleIndex: timing.start_index()
-                            withBarrier: true
+                            sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                            atSampleIndex: timing.start_index(),
+                            withBarrier: Bool::YES
                         ];
                     }
                     encoder.endEncoding();
@@ -267,9 +267,9 @@ impl Operation for MatMul {
                     unsafe {
                         let _: () = msg_send![
                             &*encoder,
-                            sampleCountersInBuffer: timing.sample_buffer().as_ref()
-                            atSampleIndex: timing.end_index()
-                            withBarrier: false
+                            sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                            atSampleIndex: timing.end_index(),
+                            withBarrier: Bool::NO
                         ];
                     }
                     encoder.endEncoding();

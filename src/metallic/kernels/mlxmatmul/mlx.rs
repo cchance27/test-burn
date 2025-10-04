@@ -7,7 +7,7 @@ use crate::metallic::{
 };
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary,
@@ -439,9 +439,9 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
                 unsafe {
                     let _: () = msg_send![
                         &*encoder,
-                        sampleCountersInBuffer: timing.sample_buffer().as_ref()
-                        atSampleIndex: timing.start_index()
-                        withBarrier: true
+                        sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                        atSampleIndex: timing.start_index(),
+                        withBarrier: Bool::YES
                     ];
                 }
             }
@@ -486,9 +486,9 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
                 unsafe {
                     let _: () = msg_send![
                         &*encoder,
-                        sampleCountersInBuffer: timing.sample_buffer().as_ref()
-                        atSampleIndex: timing.end_index()
-                        withBarrier: false
+                        sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                        atSampleIndex: timing.end_index(),
+                        withBarrier: Bool::NO
                     ];
                 }
             }
