@@ -895,8 +895,9 @@ impl<T: TensorElement> Context<T> {
                         //    return self.matmul_bias_add_gemv_path(a, b, bias, Some(dimensions), "mode=auto-gemv");
                         //}
 
-                        // DEBT: For now, gemv should take over above, but its disabled currently, disable MLX since MLX heuristics are getting selected without gemv, but MPS is faster than MLX for this.
-                        let use_mlx = false; //self.should_use_mlx_bias(&dimensions);
+                        // We've seen MPS and MLX both perform well at times here, since we're putting in more MLX improvements 
+                        //we might as well use it and try for better MLX improvements since they are so close right now
+                        let use_mlx = self.should_use_mlx_bias(&dimensions);
                         let dims = Some(dimensions);
 
                         if use_mlx {
