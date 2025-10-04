@@ -91,37 +91,24 @@ impl<T: TensorElement> Operation for Permute<T> {
         let dst_strides: Vec<u32> = self.dst.strides.iter().map(|&x| x as u32).collect();
         let dims: Vec<u32> = self.src.dims.iter().map(|&x| x as u32).collect();
 
-        let src_strides_len = src_strides.len() * std::mem::size_of::<u32>();
-        let dst_strides_len = dst_strides.len() * std::mem::size_of::<u32>();
-        let dims_len = dims.len() * std::mem::size_of::<u32>();
-        let permute_len = self.permute.len() * std::mem::size_of::<u32>();
-
-        const INLINE_LIMIT: usize = 4 * 1024;
         let device = &self.src.device;
         let mut retained_buffers: Vec<Retained<ProtocolObject<dyn MTLBuffer>>> = Vec::new();
 
-        let mut bind_slice = |index: usize, data: &[u32], length: usize, kind: PermuteConstantKind| -> Result<(), MetalError> {
-            if length <= INLINE_LIMIT {
-                set_bytes_slice(&encoder, index, data);
-                Ok(())
-            } else {
-                let buffer = cache.get_or_create_permute_constant_buffer(device, kind, length)?;
-                if length > 0 {
-                    unsafe {
-                        let dst = buffer.contents().as_ptr().cast::<u8>();
-                        std::ptr::copy_nonoverlapping(data.as_ptr().cast::<u8>(), dst, length);
-                    }
+        let mut bind_slice = |index: usize, data: &[u32], kind: PermuteConstantKind| -> Result<(), MetalError> {
+            match cache.get_or_create_permute_constant_buffer(device, kind, data)? {
+                Some(buffer) => {
+                    set_buffer(&encoder, index, &buffer, 0);
+                    retained_buffers.push(buffer);
                 }
-                set_buffer(&encoder, index, &buffer, 0);
-                retained_buffers.push(buffer);
-                Ok(())
+                None => set_bytes_slice(&encoder, index, data),
             }
+            Ok(())
         };
 
-        bind_slice(2, &src_strides, src_strides_len, PermuteConstantKind::SrcStrides)?;
-        bind_slice(3, &dst_strides, dst_strides_len, PermuteConstantKind::DstStrides)?;
-        bind_slice(4, &dims, dims_len, PermuteConstantKind::Dims)?;
-        bind_slice(5, &self.permute, permute_len, PermuteConstantKind::Permutation)?;
+        bind_slice(2, &src_strides, PermuteConstantKind::SrcStrides)?;
+        bind_slice(3, &dst_strides, PermuteConstantKind::DstStrides)?;
+        bind_slice(4, &dims, PermuteConstantKind::Dims)?;
+        bind_slice(5, &self.permute, PermuteConstantKind::Permutation)?;
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.src.buf, self.src.offset);

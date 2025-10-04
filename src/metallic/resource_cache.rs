@@ -8,8 +8,9 @@ use super::{
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
-use rustc_hash::FxHashMap;
-use std::collections::hash_map::Entry;
+use rustc_hash::{FxHashMap, FxHasher};
+use std::collections::hash_map::{Entry, RawEntryMut};
+use std::hash::{Hash, Hasher};
 
 /// A generic resource cache that uses FxHashMap for high-performance in-memory key-value storage.
 ///
@@ -23,6 +24,8 @@ pub struct ResourceCache {
     permute_constant_cache: FxHashMap<PermuteConstantKey, CacheableConstantBuffer>,
     permute_constant_cache_hits: usize,
     permute_constant_cache_misses: usize,
+    permute_inline_uploads: usize,
+    permute_inline_bytes: usize,
 }
 
 impl ResourceCache {
@@ -48,6 +51,8 @@ impl ResourceCache {
             permute_constant_cache: FxHashMap::default(),
             permute_constant_cache_hits: 0,
             permute_constant_cache_misses: 0,
+            permute_inline_uploads: 0,
+            permute_inline_bytes: 0,
         }
     }
 
@@ -122,27 +127,46 @@ impl ResourceCache {
         &mut self,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         kind: PermuteConstantKind,
-        length: usize,
-    ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
-        let key = PermuteConstantKey { kind, length };
-        match self.permute_constant_cache.entry(key) {
-            Entry::Occupied(entry) => {
-                debug_assert_eq!(entry.get().length, length);
+        data: &[u32],
+    ) -> Result<Option<Retained<ProtocolObject<dyn MTLBuffer>>>, MetalError> {
+        let length = data.len() * std::mem::size_of::<u32>();
+
+        if length <= PERMUTE_INLINE_BYTE_LIMIT {
+            self.permute_inline_uploads += 1;
+            self.permute_inline_bytes += length;
+            return Ok(None);
+        }
+
+        let hash = PermuteConstantKey::hash_slice(kind, data);
+
+        match self
+            .permute_constant_cache
+            .raw_entry_mut()
+            .from_hash(hash, |key| key.kind == kind && key.data.as_ref() == data)
+        {
+            RawEntryMut::Occupied(entry) => {
                 self.permute_constant_cache_hits += 1;
-                Ok(entry.get().buffer.clone())
+                Ok(Some(entry.get().buffer.clone()))
             }
-            Entry::Vacant(entry) => {
+            RawEntryMut::Vacant(entry) => {
                 let buffer = device
                     .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
                     .ok_or(MetalError::BufferCreationFailed(length))?;
+
+                if length > 0 {
+                    unsafe {
+                        let dst = buffer.contents().as_ptr().cast::<u8>();
+                        std::ptr::copy_nonoverlapping(data.as_ptr().cast::<u8>(), dst, length);
+                    }
+                }
+
                 self.permute_constant_cache_misses += 1;
-                Ok(entry
-                    .insert(CacheableConstantBuffer {
-                        buffer: buffer.clone(),
-                        length,
-                    })
-                    .buffer
-                    .clone())
+
+                let key = PermuteConstantKey::owned(kind, data);
+                let buffer_clone = buffer.clone();
+                entry.insert(hash, key, CacheableConstantBuffer { buffer, length });
+
+                Ok(Some(buffer_clone))
             }
         }
     }
@@ -158,6 +182,8 @@ impl ResourceCache {
             permute_constant_cache_size: self.permute_constant_cache.len(),
             permute_constant_cache_hits: self.permute_constant_cache_hits,
             permute_constant_cache_misses: self.permute_constant_cache_misses,
+            permute_inline_uploads: self.permute_inline_uploads,
+            permute_inline_bytes: self.permute_inline_bytes,
         }
     }
 
@@ -170,6 +196,8 @@ impl ResourceCache {
         self.permute_constant_cache.clear();
         self.permute_constant_cache_hits = 0;
         self.permute_constant_cache_misses = 0;
+        self.permute_inline_uploads = 0;
+        self.permute_inline_bytes = 0;
     }
 }
 
@@ -183,6 +211,8 @@ pub struct CacheStats {
     pub permute_constant_cache_size: usize,
     pub permute_constant_cache_hits: usize,
     pub permute_constant_cache_misses: usize,
+    pub permute_inline_uploads: usize,
+    pub permute_inline_bytes: usize,
 }
 
 #[derive(Hash, Eq, PartialEq, Clone, Copy)]
@@ -196,8 +226,26 @@ pub enum PermuteConstantKind {
 #[derive(Hash, Eq, PartialEq)]
 pub struct PermuteConstantKey {
     kind: PermuteConstantKind,
-    length: usize,
+    data: Box<[u32]>,
 }
+
+impl PermuteConstantKey {
+    fn owned(kind: PermuteConstantKind, data: &[u32]) -> Self {
+        Self {
+            kind,
+            data: data.to_vec().into_boxed_slice(),
+        }
+    }
+
+    fn hash_slice(kind: PermuteConstantKind, data: &[u32]) -> u64 {
+        let mut hasher = FxHasher::default();
+        kind.hash(&mut hasher);
+        data.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+
+pub const PERMUTE_INLINE_BYTE_LIMIT: usize = 4 * 1024;
 
 #[derive(Clone)]
 pub struct CacheableConstantBuffer {

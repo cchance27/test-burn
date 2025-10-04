@@ -55,6 +55,14 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
         stats_before.permute_constant_cache_misses, stats_after.permute_constant_cache_misses,
         "Permute constant cache misses should survive a command buffer flush",
     );
+    assert_eq!(
+        stats_before.permute_inline_uploads, stats_after.permute_inline_uploads,
+        "Permute inline upload count should survive a command buffer flush",
+    );
+    assert_eq!(
+        stats_before.permute_inline_bytes, stats_after.permute_inline_bytes,
+        "Permute inline byte counter should survive a command buffer flush",
+    );
 
     Ok(())
 }
