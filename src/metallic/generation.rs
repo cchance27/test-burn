@@ -127,14 +127,12 @@ fn sample_next_token_from_logits<T: TensorElement>(
     top_k: usize,
     top_p: f32,
     temperature: f32,
+    random: u32,
+    use_device: bool,
 ) -> Result<u32, MetalError> {
     if vocab_size == 0 {
         return Ok(0);
     }
-
-    let random = ctx.next_sampler_random();
-    let effective = effective_top_k(top_k, vocab_size);
-    let use_device = T::DTYPE == Dtype::F32 && effective <= MAX_TOP_K;
 
     if use_device {
         if let Some(token) = ctx.sample_top_k_top_p_device(logits_tensor, vocab_size, top_k, top_p, temperature, random)? {
@@ -143,6 +141,11 @@ fn sample_next_token_from_logits<T: TensorElement>(
     }
 
     ctx.sample_top_k_top_p_host(logits_tensor, vocab_size, top_k, top_p, temperature, random)
+}
+
+#[inline]
+fn should_use_device_sampling<T: TensorElement>(vocab_size: usize, top_k: usize) -> bool {
+    vocab_size > 0 && T::DTYPE == Dtype::F32 && effective_top_k(top_k, vocab_size) <= MAX_TOP_K
 }
 
 fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {
@@ -455,8 +458,24 @@ where
     let mut decode_scratch = Vec::new();
 
     if let Some(logits_tensor) = logits_tensor {
+        let use_device = should_use_device_sampling::<T>(vocab_size, cfg.top_k);
+        let random = ctx.next_sampler_random();
+
+        if use_device {
+            ctx.synchronize();
+        }
+
         let sample_start = Instant::now();
-        next_token = sample_next_token_from_logits(ctx, &logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature)?;
+        next_token = sample_next_token_from_logits(
+            ctx,
+            &logits_tensor,
+            vocab_size,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.temperature,
+            random,
+            use_device,
+        )?;
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
@@ -600,8 +619,24 @@ where
 
         sample_process_memory(process_memory_tracker, host_memory);
 
+        let use_device = should_use_device_sampling::<T>(vocab_size, cfg.top_k);
+
+        if use_device {
+            ctx.synchronize();
+        }
+
+        let random = ctx.next_sampler_random();
         let sample_start = Instant::now();
-        next_token = sample_next_token_from_logits(ctx, &logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature)?;
+        next_token = sample_next_token_from_logits(
+            ctx,
+            &logits_tensor,
+            vocab_size,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.temperature,
+            random,
+            use_device,
+        )?;
 
         generated_ids.push(next_token);
 
