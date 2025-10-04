@@ -54,18 +54,40 @@ impl ModelMemoryNode {
     }
 }
 
-#[derive(Clone, Copy, Default)]
+const ROLLING_WINDOW: usize = 10;
+
+#[derive(Clone, Copy)]
 pub struct RollingStat {
     last: Duration,
-    total: Duration,
-    count: u64,
+    window_ms: [f64; ROLLING_WINDOW],
+    next_index: usize,
+    initialized: bool,
+}
+
+impl Default for RollingStat {
+    fn default() -> Self {
+        Self {
+            last: Duration::default(),
+            window_ms: [0.0; ROLLING_WINDOW],
+            next_index: 0,
+            initialized: false,
+        }
+    }
 }
 
 impl RollingStat {
     pub fn record(&mut self, duration: Duration) {
         self.last = duration;
-        self.total += duration;
-        self.count += 1;
+        let sample_ms = duration.as_secs_f64() * 1000.0;
+
+        if !self.initialized {
+            self.window_ms = [sample_ms; ROLLING_WINDOW];
+            self.initialized = true;
+            self.next_index = 1 % ROLLING_WINDOW;
+        } else {
+            self.window_ms[self.next_index] = sample_ms;
+            self.next_index = (self.next_index + 1) % ROLLING_WINDOW;
+        }
     }
 
     pub fn last_ms(&self) -> f64 {
@@ -73,15 +95,15 @@ impl RollingStat {
     }
 
     pub fn average_ms(&self) -> f64 {
-        if self.count == 0 {
+        if !self.initialized {
             0.0
         } else {
-            (self.total.as_secs_f64() * 1000.0) / self.count as f64
+            self.window_ms.iter().sum::<f64>() / ROLLING_WINDOW as f64
         }
     }
 
     pub fn has_samples(&self) -> bool {
-        self.count > 0
+        self.initialized
     }
 }
 
@@ -506,6 +528,7 @@ fn logging_enabled() -> bool {
 }
 
 pub fn build_latency_rows(
+    iteration: &RollingStat,
     embed: &RollingStat,
     forward: &RollingStat,
     blocks: &[BlockStat],
@@ -515,6 +538,15 @@ pub fn build_latency_rows(
     decode: &RollingStat,
 ) -> Vec<LatencyRow> {
     let mut rows = Vec::new();
+
+    if iteration.has_samples() {
+        rows.push(LatencyRow {
+            label: "Generation Loop".to_string(),
+            last_ms: iteration.last_ms(),
+            average_ms: iteration.average_ms(),
+            level: 0,
+        });
+    }
 
     rows.push(LatencyRow {
         label: "Embedding".to_string(),

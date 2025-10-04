@@ -477,6 +477,7 @@ where
     let log_interval = log_interval_from_env();
     let mut metrics_loggers = MetricsLoggers::from_env(log_interval);
 
+    let mut iteration_stats = RollingStat::default();
     let mut embed_stats = RollingStat::default();
     let mut forward_stats = RollingStat::default();
     let mut output_stats = RollingStat::default();
@@ -576,6 +577,7 @@ where
         true,
     );
     for i in 0..cfg.max_tokens - 1 {
+        let iteration_start = Instant::now();
         ctx.reset_pool();
 
         let embed_usage_before = ctx.snapshot_memory_usage();
@@ -684,6 +686,12 @@ where
             decode_stats.record(decode_duration);
         }
 
+        let iteration_duration = iteration_start.elapsed();
+        if !iteration_duration.is_zero() {
+            iteration_stats.record(iteration_duration);
+            latencies_ready = true;
+        }
+
         log_cache_stats(ctx, "generate", generated_ids.len());
 
         if let Some(piece) = decoded_piece
@@ -694,6 +702,7 @@ where
 
         if latencies_ready {
             let rows = build_latency_rows(
+                &iteration_stats,
                 &embed_stats,
                 &forward_stats,
                 &block_stats,
