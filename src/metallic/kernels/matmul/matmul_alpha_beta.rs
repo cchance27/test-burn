@@ -3,7 +3,7 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{KernelFunction, KernelInvocable, MatMulBackend};
@@ -209,9 +209,9 @@ impl Operation for MatMulAlphaBeta {
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
         let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
 
-        if let Some(timing) = &self.dispatch_timing {
-            if matches!(timing.kind(), MatMulDispatchKind::Blit) {
-                if let Some(encoder) = command_buffer.blitCommandEncoder() {
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), MatMulDispatchKind::Blit)
+                && let Some(encoder) = command_buffer.blitCommandEncoder() {
                     let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                     unsafe {
                         let _: () = msg_send![
@@ -223,8 +223,6 @@ impl Operation for MatMulAlphaBeta {
                     }
                     encoder.endEncoding();
                 }
-            }
-        }
 
         // Encode the MPS matrix multiplication
         unsafe {
@@ -233,9 +231,9 @@ impl Operation for MatMulAlphaBeta {
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
 
-        if let Some(timing) = &self.dispatch_timing {
-            if matches!(timing.kind(), MatMulDispatchKind::Blit) {
-                if let Some(encoder) = command_buffer.blitCommandEncoder() {
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), MatMulDispatchKind::Blit)
+                && let Some(encoder) = command_buffer.blitCommandEncoder() {
                     let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                     unsafe {
                         let _: () = msg_send![
@@ -247,8 +245,6 @@ impl Operation for MatMulAlphaBeta {
                     }
                     encoder.endEncoding();
                 }
-            }
-        }
 
         Ok(())
     }

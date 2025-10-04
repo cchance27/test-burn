@@ -459,11 +459,10 @@ impl<T: TensorElement> Context<T> {
 
         let mut matches = Vec::new();
         for sample in guard.iter() {
-            if let Some(handle) = sample.handle {
-                if handles.contains(&handle) {
+            if let Some(handle) = sample.handle
+                && handles.contains(&handle) {
                     matches.push(*sample);
                 }
-            }
         }
 
         matches
@@ -774,7 +773,7 @@ impl<T: TensorElement> Context<T> {
                 }
                 MatMulBackend::Gemv => {
                     let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
-                    return match dims_result {
+                    match dims_result {
                         Ok(dimensions) => {
                             let dims = if self.log_matmul_shapes { Some(dimensions) } else { None };
                             if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
@@ -790,7 +789,7 @@ impl<T: TensorElement> Context<T> {
                         Err(_) => self.with_matmul_logging("matmul", MatMulBackend::Mlx, None, "mode=forced-gemv-fallback", |ctx| {
                             ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                         }),
-                    };
+                    }
                 }
             },
             MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
@@ -859,7 +858,7 @@ impl<T: TensorElement> Context<T> {
                 }
                 MatMulBackend::Gemv => {
                     let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
-                    return match dims_result {
+                    match dims_result {
                         Ok(dimensions) => {
                             let dims = if self.log_matmul_shapes { Some(dimensions) } else { None };
                             if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
@@ -881,7 +880,7 @@ impl<T: TensorElement> Context<T> {
                                 ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                             })
                         }
-                    };
+                    }
                 }
             },
             MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
@@ -1013,7 +1012,7 @@ impl<T: TensorElement> Context<T> {
                 }
                 MatMulBackend::Gemv => {
                     let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
-                    return match dims_result {
+                    match dims_result {
                         Ok(dimensions) => {
                             let dims = if self.log_matmul_shapes { Some(dimensions) } else { None };
                             if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
@@ -1023,7 +1022,7 @@ impl<T: TensorElement> Context<T> {
                             }
                         }
                         Err(_) => self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, None, "mode=forced-gemv-fallback"),
-                    };
+                    }
                 }
             },
             MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
@@ -1429,7 +1428,7 @@ impl<T: TensorElement> Context<T> {
         }
 
         if k_src.strides.len() != v_src.strides.len()
-            || k_src.strides.get(0) != v_src.strides.get(0)
+            || k_src.strides.first() != v_src.strides.first()
             || (k_src.strides.len() > 1 && k_src.strides[1] != v_src.strides[1])
         {
             return Err(MetalError::InvalidShape(
@@ -1453,8 +1452,8 @@ impl<T: TensorElement> Context<T> {
         let dst_seq_stride =
             u32::try_from(k_cache.strides[1]).map_err(|_| MetalError::InvalidShape("cache sequence stride exceeds u32::MAX".into()))?;
 
-        if k_src.offset % element_size != 0
-            || v_src.offset % element_size != 0
+        if !k_src.offset.is_multiple_of(element_size)
+            || !v_src.offset.is_multiple_of(element_size)
             || k_cache.offset % element_size != 0
             || v_cache.offset % element_size != 0
         {

@@ -434,8 +434,8 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
-        if let Some(timing) = &self.dispatch_timing {
-            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
@@ -446,7 +446,6 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
                     ];
                 }
             }
-        }
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.left.buf, self.left.offset);
@@ -482,8 +481,8 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         }
 
         dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
-        if let Some(timing) = &self.dispatch_timing {
-            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
@@ -494,7 +493,6 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
                     ];
                 }
             }
-        }
         encoder.endEncoding();
         Ok(())
     }

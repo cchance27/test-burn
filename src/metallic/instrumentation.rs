@@ -85,7 +85,7 @@ pub struct MatMulDispatchTiming {
 
 impl MatMulDispatchTiming {
     pub fn sample_buffer(&self) -> &ProtocolObject<dyn MTLCounterSampleBuffer> {
-        &*self.sample_buffer
+        &self.sample_buffer
     }
 
     pub fn start_index(&self) -> NSUInteger {
@@ -199,8 +199,8 @@ impl MatMulInstrumentation {
                 timing,
             } = dispatch;
 
-            if let Some(timing) = timing.as_ref() {
-                if let Some(duration) = self.inner.resolve_duration(timing) {
+            if let Some(timing) = timing.as_ref()
+                && let Some(duration) = self.inner.resolve_duration(timing) {
                     recorder.record(MatMulSample {
                         backend,
                         duration,
@@ -210,7 +210,6 @@ impl MatMulInstrumentation {
                     resolved_total += duration;
                     continue;
                 }
-            }
 
             fallback.push(PendingDispatch {
                 handle,
@@ -441,8 +440,8 @@ impl CounterResources {
 
         let samples = unsafe { core::slice::from_raw_parts(bytes.as_ptr() as *const MTLCounterResultTimestamp, bytes.len() / stride) };
 
-        let start = samples.get(timing.start_index as usize)?.timestamp;
-        let end = samples.get(timing.end_index as usize)?.timestamp;
+        let start = samples.get(timing.start_index)?.timestamp;
+        let end = samples.get(timing.end_index)?.timestamp;
         if start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start {
             return None;
         }
@@ -458,7 +457,7 @@ impl CounterResources {
     unsafe fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
         let sets = unsafe { device.counterSets()? };
         let desired: &NSString = unsafe { MTLCommonCounterSetTimestamp };
-        let count = sets.count() as usize;
+        let count = sets.count();
         for idx in 0..count {
             let set = sets.objectAtIndex(idx as NSUInteger);
             let name = unsafe { set.name() };
@@ -717,19 +716,12 @@ impl BlockLatencySnapshot {
 }
 
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct BlockPhaseSnapshot {
     pub label: String,
     pub duration: Duration,
 }
 
-impl Default for BlockPhaseSnapshot {
-    fn default() -> Self {
-        Self {
-            label: String::new(),
-            duration: Duration::default(),
-        }
-    }
-}
 
 /// Helper to create a new collector handle for the desired number of transformer blocks.
 pub fn new_latency_collector(block_count: usize) -> LatencyCollectorHandle {
@@ -847,7 +839,7 @@ impl StepMemoryCollector {
         for block in &mut self.blocks {
             block.reset();
         }
-        while let Ok(_) = self.sample_rx.try_recv() {}
+        while self.sample_rx.try_recv().is_ok() {}
     }
 
     pub fn drain_pending(&mut self) {
@@ -1095,6 +1087,7 @@ impl BlockMemorySnapshot {
 }
 
 #[derive(Clone, Debug)]
+#[derive(Default)]
 pub struct MemoryPhaseSnapshot {
     pub label: String,
     pub current_pool_delta: usize,
@@ -1105,19 +1098,6 @@ pub struct MemoryPhaseSnapshot {
     pub peak_kv_cache_delta: usize,
 }
 
-impl Default for MemoryPhaseSnapshot {
-    fn default() -> Self {
-        Self {
-            label: String::new(),
-            current_pool_delta: 0,
-            current_kv_delta: 0,
-            current_kv_cache_delta: 0,
-            peak_pool_delta: 0,
-            peak_kv_delta: 0,
-            peak_kv_cache_delta: 0,
-        }
-    }
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct StepMemorySnapshot {

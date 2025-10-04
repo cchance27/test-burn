@@ -42,8 +42,8 @@ impl<T: TensorElement> Operation for Gemv<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
-        if let Some(timing) = &self.dispatch_timing {
-            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
@@ -54,7 +54,6 @@ impl<T: TensorElement> Operation for Gemv<T> {
                     ];
                 }
             }
-        }
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
@@ -64,8 +63,8 @@ impl<T: TensorElement> Operation for Gemv<T> {
 
         dispatch_threadgroups(&encoder, self.grid_size, self.threadgroup_size);
 
-        if let Some(timing) = &self.dispatch_timing {
-            if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), MatMulDispatchKind::Compute) {
                 let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
@@ -76,7 +75,6 @@ impl<T: TensorElement> Operation for Gemv<T> {
                     ];
                 }
             }
-        }
 
         encoder.endEncoding();
         Ok(())
@@ -133,7 +131,7 @@ impl KernelInvocable for GemvOp {
         };
 
         let grid_size = MTLSize {
-            width: ((n + TILE_N - 1) / TILE_N),
+            width: n.div_ceil(TILE_N),
             height: 1,
             depth: 1,
         };
