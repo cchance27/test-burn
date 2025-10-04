@@ -20,11 +20,7 @@ kernel void kv_cache_write_kernel_##SUFFIX( \
     constant uint& src_seq_stride [[buffer(10)]], \
     constant uint& dst_head_stride [[buffer(11)]], \
     constant uint& dst_seq_stride [[buffer(12)]], \
-    constant uint& k_src_offset [[buffer(13)]], \
-    constant uint& v_src_offset [[buffer(14)]], \
-    constant uint& k_dst_offset [[buffer(15)]], \
-    constant uint& v_dst_offset [[buffer(16)]], \
-    constant uint& total_threads [[buffer(17)]], \
+    constant uint& total_threads [[buffer(13)]], \
     uint gid [[thread_position_in_grid]]) { \
     if (gid >= total_threads) { \
         return; \
@@ -35,15 +31,15 @@ kernel void kv_cache_write_kernel_##SUFFIX( \
     } \
     uint dim_idx = gid % head_dim; \
     for (uint seq_idx = 0; seq_idx < seq_len; ++seq_idx) { \
-        uint k_src_index = k_src_offset + head_idx * src_head_stride + seq_idx * src_seq_stride + dim_idx; \
-        uint v_src_index = v_src_offset + head_idx * src_head_stride + seq_idx * src_seq_stride + dim_idx; \
+        uint k_src_index = head_idx * src_head_stride + seq_idx * src_seq_stride + dim_idx; \
+        uint v_src_index = head_idx * src_head_stride + seq_idx * src_seq_stride + dim_idx; \
         SCALAR k_value = k_src[k_src_index]; \
         SCALAR v_value = v_src[v_src_index]; \
         uint cache_step = step + seq_idx; \
         for (uint group = 0; group < group_size; ++group) { \
             uint dst_head = head_idx * group_size + group; \
-            uint k_dst_index = k_dst_offset + dst_head * dst_head_stride + cache_step * dst_seq_stride + dim_idx; \
-            uint v_dst_index = v_dst_offset + dst_head * dst_head_stride + cache_step * dst_seq_stride + dim_idx; \
+            uint k_dst_index = dst_head * dst_head_stride + cache_step * dst_seq_stride + dim_idx; \
+            uint v_dst_index = dst_head * dst_head_stride + cache_step * dst_seq_stride + dim_idx; \
             k_dst[k_dst_index] = k_value; \
             v_dst[v_dst_index] = v_value; \
         } \

@@ -14,10 +14,6 @@ pub struct KvCacheWriteConfig {
     pub src_seq_stride: u32,
     pub dst_head_stride: u32,
     pub dst_seq_stride: u32,
-    pub k_src_offset: u32,
-    pub v_src_offset: u32,
-    pub k_dst_offset: u32,
-    pub v_dst_offset: u32,
     pub total_threads: u32,
 }
 
@@ -117,11 +113,7 @@ impl<T: TensorElement> Operation for KvCacheWrite<T> {
         set_bytes(&encoder, 10, &self.params.src_seq_stride);
         set_bytes(&encoder, 11, &self.params.dst_head_stride);
         set_bytes(&encoder, 12, &self.params.dst_seq_stride);
-        set_bytes(&encoder, 13, &self.params.k_src_offset);
-        set_bytes(&encoder, 14, &self.params.v_src_offset);
-        set_bytes(&encoder, 15, &self.params.k_dst_offset);
-        set_bytes(&encoder, 16, &self.params.v_dst_offset);
-        set_bytes(&encoder, 17, &self.params.total_threads);
+        set_bytes(&encoder, 13, &self.params.total_threads);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();

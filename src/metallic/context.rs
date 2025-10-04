@@ -1300,15 +1300,6 @@ impl<T: TensorElement> Context<T> {
             return Err(MetalError::InvalidOperation("KV tensors must be element-aligned".into()));
         }
 
-        let k_src_offset =
-            u32::try_from(k_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
-        let v_src_offset =
-            u32::try_from(v_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
-        let k_dst_offset =
-            u32::try_from(k_cache.offset / element_size).map_err(|_| MetalError::InvalidShape("cache offset exceeds u32::MAX".into()))?;
-        let v_dst_offset =
-            u32::try_from(v_cache.offset / element_size).map_err(|_| MetalError::InvalidShape("cache offset exceeds u32::MAX".into()))?;
-
         let total_threads = heads_u32
             .checked_mul(head_dim_u32)
             .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
@@ -1325,10 +1316,6 @@ impl<T: TensorElement> Context<T> {
             src_seq_stride,
             dst_head_stride: dst_head_stride_u32,
             dst_seq_stride: dst_seq_stride_u32,
-            k_src_offset,
-            v_src_offset,
-            k_dst_offset,
-            v_dst_offset,
             total_threads,
         };
 
@@ -1503,15 +1490,6 @@ impl<T: TensorElement> Context<T> {
             return Err(MetalError::InvalidOperation("KV tensors must be element-aligned".into()));
         }
 
-        let k_src_offset =
-            u32::try_from(k_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
-        let v_src_offset =
-            u32::try_from(v_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
-        let k_dst_offset = u32::try_from(repeated_k.offset / element_size)
-            .map_err(|_| MetalError::InvalidShape("repeated cache offset exceeds u32::MAX".into()))?;
-        let v_dst_offset = u32::try_from(repeated_v.offset / element_size)
-            .map_err(|_| MetalError::InvalidShape("repeated cache offset exceeds u32::MAX".into()))?;
-
         let total_threads = canonical_heads_u32
             .checked_mul(head_dim_u32)
             .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
@@ -1528,10 +1506,6 @@ impl<T: TensorElement> Context<T> {
             src_seq_stride,
             dst_head_stride: dst_head_stride_u32,
             dst_seq_stride: dst_seq_stride_u32,
-            k_src_offset,
-            v_src_offset,
-            k_dst_offset,
-            v_dst_offset,
             total_threads,
         };
 
