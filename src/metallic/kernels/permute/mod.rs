@@ -3,6 +3,7 @@ use crate::metallic::{
     TensorElement, TensorInit, TensorStorage,
     resource_cache::{PermuteConstantKind, ResourceCache},
 };
+use objc2_metal::MTLBuffer;
 
 pub struct PermuteOp;
 
@@ -96,17 +97,17 @@ impl<T: TensorElement> Operation for Permute<T> {
         let permute_len = self.permute.len() * std::mem::size_of::<u32>();
 
         const INLINE_LIMIT: usize = 4 * 1024;
-        let device = self.src.buf.device();
-        let mut retained_buffers: Vec<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>> = Vec::new();
+        let device = &self.src.device;
+        let mut retained_buffers: Vec<Retained<ProtocolObject<dyn MTLBuffer>>> = Vec::new();
 
         let mut bind_slice = |index: usize, data: &[u32], length: usize, kind: PermuteConstantKind| -> Result<(), MetalError> {
             if length <= INLINE_LIMIT {
                 set_bytes_slice(&encoder, index, data);
                 Ok(())
             } else {
-                let buffer = cache.get_or_create_permute_constant_buffer(&device, kind, length)?;
+                let buffer = cache.get_or_create_permute_constant_buffer(device, kind, length)?;
                 unsafe {
-                    std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buffer.contents().as_ptr() as *mut u8, length);
+                    std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buffer.contents() as *mut u8, length);
                 }
                 set_buffer(&encoder, index, &buffer, 0);
                 retained_buffers.push(buffer);
