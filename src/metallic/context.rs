@@ -389,7 +389,13 @@ impl<T: TensorElement> Context<T> {
         Ok(idx as u32)
     }
 
-    pub(crate) fn sample_top_k_top_p_device(
+    /// Attempt to sample the next token using the GPU sampling kernel.
+    ///
+    /// Returns `Ok(Some(token))` when the device kernel handled the request.
+    /// When the current tensor dtype or requested `top_k` are unsupported the
+    /// method returns `Ok(None)` so the caller can fall back to the host
+    /// sampling implementation.
+    pub fn sample_top_k_top_p_device(
         &mut self,
         logits: &Tensor<T>,
         vocab_size: usize,
