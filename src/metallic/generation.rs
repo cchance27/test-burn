@@ -1,5 +1,7 @@
 use super::{Context, KvCacheDispatchStats, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
-use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
+use crate::metallic::instrumentation::{
+    MemoryEvent, MemoryUsage, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
+};
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::metrics::{
     BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
@@ -612,6 +614,10 @@ where
         &mut ui_connected,
         true,
     );
+    let latency_collector = new_latency_collector(n_layers);
+    let memory_collector = new_memory_collector(n_layers);
+    let mut forward_snapshot = StepLatencySnapshot::empty(n_layers);
+    let mut memory_snapshot = StepMemorySnapshot::empty(n_layers);
     for i in 0..cfg.max_tokens - 1 {
         let iteration_start = Instant::now();
         ctx.reset_pool();
@@ -635,15 +641,21 @@ where
         );
 
         let current_pos = prompt_len + i;
-        let latency_collector = new_latency_collector(n_layers);
-        let memory_collector = new_memory_collector(n_layers);
+        {
+            let mut latency_guard = latency_collector.borrow_mut();
+            latency_guard.reset();
+        }
+        {
+            let mut memory_guard = memory_collector.borrow_mut();
+            memory_guard.reset();
+        }
         ctx.set_latency_collector(Some(latency_collector.clone()));
         ctx.set_memory_collector(Some(memory_collector.clone()));
         ctx.record_memory_event(MemoryEvent::ForwardStart);
 
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
-        let forward_snapshot = latency_collector.borrow().snapshot();
-        let memory_snapshot = memory_collector.borrow_mut().snapshot();
+        latency_collector.borrow().snapshot_into(&mut forward_snapshot);
+        memory_collector.borrow_mut().snapshot_into(&mut memory_snapshot);
         ctx.set_latency_collector(None);
         ctx.set_memory_collector(None);
 

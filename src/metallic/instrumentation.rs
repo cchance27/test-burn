@@ -593,6 +593,14 @@ impl StepLatencyCollector {
         }
     }
 
+    /// Reset internal state without dropping any allocated storage.
+    pub fn reset(&mut self) {
+        self.forward_step = None;
+        for block in &mut self.block_durations {
+            block.reset();
+        }
+    }
+
     /// Update the collector with a new latency measurement for the given event.
     pub fn record(&mut self, event: LatencyEvent<'_>, duration: Duration) {
         match event {
@@ -622,9 +630,17 @@ impl StepLatencyCollector {
 
     /// Read the most recent measurements without consuming the collector.
     pub fn snapshot(&self) -> StepLatencySnapshot {
-        StepLatencySnapshot {
-            forward_step: self.forward_step.unwrap_or_default(),
-            blocks: self.block_durations.iter().map(BlockLatencyEntry::snapshot).collect(),
+        let mut snapshot = StepLatencySnapshot::empty(self.block_durations.len());
+        self.snapshot_into(&mut snapshot);
+        snapshot
+    }
+
+    /// Populate the provided snapshot with the most recent measurements.
+    pub fn snapshot_into(&self, snapshot: &mut StepLatencySnapshot) {
+        snapshot.forward_step = self.forward_step.unwrap_or_default();
+        snapshot.ensure_block_capacity(self.block_durations.len());
+        for (index, block) in self.block_durations.iter().enumerate() {
+            block.snapshot_into(&mut snapshot.blocks[index]);
         }
     }
 }
@@ -644,6 +660,14 @@ impl StepLatencySnapshot {
             blocks: vec![BlockLatencySnapshot::default(); block_count],
         }
     }
+
+    pub fn ensure_block_capacity(&mut self, block_count: usize) {
+        if self.blocks.len() < block_count {
+            self.blocks.resize_with(block_count, BlockLatencySnapshot::default);
+        } else if self.blocks.len() > block_count {
+            self.blocks.truncate(block_count);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -653,17 +677,19 @@ struct BlockLatencyEntry {
 }
 
 impl BlockLatencyEntry {
-    fn snapshot(&self) -> BlockLatencySnapshot {
-        BlockLatencySnapshot {
-            total: self.total.unwrap_or_default(),
-            phases: self
-                .phases
-                .iter()
-                .map(|phase| BlockPhaseSnapshot {
-                    label: phase.label.clone(),
-                    duration: phase.duration,
-                })
-                .collect(),
+    fn reset(&mut self) {
+        self.total = None;
+        self.phases.clear();
+    }
+
+    fn snapshot_into(&self, snapshot: &mut BlockLatencySnapshot) {
+        snapshot.total = self.total.unwrap_or_default();
+        snapshot.ensure_phase_capacity(self.phases.len());
+        for (index, phase) in self.phases.iter().enumerate() {
+            let slot = &mut snapshot.phases[index];
+            slot.label.clear();
+            slot.label.push_str(&phase.label);
+            slot.duration = phase.duration;
         }
     }
 }
@@ -680,10 +706,29 @@ pub struct BlockLatencySnapshot {
     pub phases: Vec<BlockPhaseSnapshot>,
 }
 
+impl BlockLatencySnapshot {
+    fn ensure_phase_capacity(&mut self, phase_count: usize) {
+        if self.phases.len() < phase_count {
+            self.phases.resize_with(phase_count, BlockPhaseSnapshot::default);
+        } else if self.phases.len() > phase_count {
+            self.phases.truncate(phase_count);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct BlockPhaseSnapshot {
     pub label: String,
     pub duration: Duration,
+}
+
+impl Default for BlockPhaseSnapshot {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            duration: Duration::default(),
+        }
+    }
 }
 
 /// Helper to create a new collector handle for the desired number of transformer blocks.
@@ -797,6 +842,14 @@ impl StepMemoryCollector {
         });
     }
 
+    pub fn reset(&mut self) {
+        self.forward.reset();
+        for block in &mut self.blocks {
+            block.reset();
+        }
+        while let Ok(_) = self.sample_rx.try_recv() {}
+    }
+
     pub fn drain_pending(&mut self) {
         while let Ok(sample) = self.sample_rx.try_recv() {
             self.apply_sample(sample);
@@ -804,10 +857,17 @@ impl StepMemoryCollector {
     }
 
     pub fn snapshot(&mut self) -> StepMemorySnapshot {
+        let mut snapshot = StepMemorySnapshot::empty(self.blocks.len());
+        self.snapshot_into(&mut snapshot);
+        snapshot
+    }
+
+    pub fn snapshot_into(&mut self, snapshot: &mut StepMemorySnapshot) {
         self.drain_pending();
-        StepMemorySnapshot {
-            forward: self.forward.snapshot(),
-            blocks: self.blocks.iter().map(BlockMemoryEntry::snapshot).collect(),
+        self.forward.snapshot_into(&mut snapshot.forward);
+        snapshot.ensure_block_capacity(self.blocks.len());
+        for (index, block) in self.blocks.iter().enumerate() {
+            block.snapshot_into(&mut snapshot.blocks[index]);
         }
     }
 
@@ -854,12 +914,18 @@ struct MemoryScopeEntry {
 }
 
 impl MemoryScopeEntry {
-    fn record_baseline(&mut self, usage: MemoryUsage) {
-        self.baseline = Some(usage);
-        self.last = Some(usage);
+    fn reset(&mut self) {
+        self.baseline = None;
+        self.last = None;
         self.peak_pool_delta = 0;
         self.peak_kv_delta = 0;
         self.peak_kv_cache_delta = 0;
+    }
+
+    fn record_baseline(&mut self, usage: MemoryUsage) {
+        self.reset();
+        self.baseline = Some(usage);
+        self.last = Some(usage);
     }
 
     fn record_sample(&mut self, usage: MemoryUsage) {
@@ -875,6 +941,12 @@ impl MemoryScopeEntry {
     }
 
     fn snapshot(&self) -> MemoryScopeSnapshot {
+        let mut snapshot = MemoryScopeSnapshot::default();
+        self.snapshot_into(&mut snapshot);
+        snapshot
+    }
+
+    fn snapshot_into(&self, snapshot: &mut MemoryScopeSnapshot) {
         let (current_pool_delta, current_kv_delta, current_kv_cache_delta) = if let (Some(base), Some(last)) = (self.baseline, self.last) {
             let delta = last.delta_from(base);
             (delta.pool_used, delta.kv_used, delta.kv_cache_bytes)
@@ -882,16 +954,14 @@ impl MemoryScopeEntry {
             (0, 0, 0)
         };
 
-        MemoryScopeSnapshot {
-            baseline: self.baseline,
-            last: self.last,
-            current_pool_delta,
-            current_kv_delta,
-            current_kv_cache_delta,
-            peak_pool_delta: self.peak_pool_delta,
-            peak_kv_delta: self.peak_kv_delta,
-            peak_kv_cache_delta: self.peak_kv_cache_delta,
-        }
+        snapshot.baseline = self.baseline;
+        snapshot.last = self.last;
+        snapshot.current_pool_delta = current_pool_delta;
+        snapshot.current_kv_delta = current_kv_delta;
+        snapshot.current_kv_cache_delta = current_kv_cache_delta;
+        snapshot.peak_pool_delta = self.peak_pool_delta;
+        snapshot.peak_kv_delta = self.peak_kv_delta;
+        snapshot.peak_kv_cache_delta = self.peak_kv_cache_delta;
     }
 }
 
@@ -903,11 +973,7 @@ struct BlockMemoryEntry {
 
 impl BlockMemoryEntry {
     fn reset(&mut self) {
-        self.scope.baseline = None;
-        self.scope.last = None;
-        self.scope.peak_kv_delta = 0;
-        self.scope.peak_pool_delta = 0;
-        self.scope.peak_kv_cache_delta = 0;
+        self.scope.reset();
         self.phases.clear();
     }
 
@@ -946,18 +1012,13 @@ impl BlockMemoryEntry {
         }
     }
 
-    fn snapshot(&self) -> BlockMemorySnapshot {
-        let scope = self.scope.snapshot();
-        BlockMemorySnapshot {
-            baseline: scope.baseline,
-            last: scope.last,
-            current_pool_delta: scope.current_pool_delta,
-            current_kv_delta: scope.current_kv_delta,
-            current_kv_cache_delta: scope.current_kv_cache_delta,
-            peak_pool_delta: scope.peak_pool_delta,
-            peak_kv_delta: scope.peak_kv_delta,
-            peak_kv_cache_delta: scope.peak_kv_cache_delta,
-            phases: self.phases.iter().map(MemoryPhaseEntry::snapshot).collect(),
+    fn snapshot_into(&self, snapshot: &mut BlockMemorySnapshot) {
+        let mut scope_snapshot = MemoryScopeSnapshot::default();
+        self.scope.snapshot_into(&mut scope_snapshot);
+        snapshot.apply_scope(&scope_snapshot);
+        snapshot.ensure_phase_capacity(self.phases.len());
+        for (index, phase) in self.phases.iter().enumerate() {
+            phase.snapshot_into(&mut snapshot.phases[index]);
         }
     }
 }
@@ -975,16 +1036,15 @@ struct MemoryPhaseEntry {
 }
 
 impl MemoryPhaseEntry {
-    fn snapshot(&self) -> MemoryPhaseSnapshot {
-        MemoryPhaseSnapshot {
-            label: self.label.clone(),
-            current_pool_delta: self.current_pool_delta,
-            current_kv_delta: self.current_kv_delta,
-            current_kv_cache_delta: self.current_kv_cache_delta,
-            peak_pool_delta: self.peak_pool_delta,
-            peak_kv_delta: self.peak_kv_delta,
-            peak_kv_cache_delta: self.peak_kv_cache_delta,
-        }
+    fn snapshot_into(&self, snapshot: &mut MemoryPhaseSnapshot) {
+        snapshot.label.clear();
+        snapshot.label.push_str(&self.label);
+        snapshot.current_pool_delta = self.current_pool_delta;
+        snapshot.current_kv_delta = self.current_kv_delta;
+        snapshot.current_kv_cache_delta = self.current_kv_cache_delta;
+        snapshot.peak_pool_delta = self.peak_pool_delta;
+        snapshot.peak_kv_delta = self.peak_kv_delta;
+        snapshot.peak_kv_cache_delta = self.peak_kv_cache_delta;
     }
 }
 
@@ -1013,6 +1073,27 @@ pub struct BlockMemorySnapshot {
     pub phases: Vec<MemoryPhaseSnapshot>,
 }
 
+impl BlockMemorySnapshot {
+    fn apply_scope(&mut self, scope: &MemoryScopeSnapshot) {
+        self.baseline = scope.baseline;
+        self.last = scope.last;
+        self.current_pool_delta = scope.current_pool_delta;
+        self.current_kv_delta = scope.current_kv_delta;
+        self.current_kv_cache_delta = scope.current_kv_cache_delta;
+        self.peak_pool_delta = scope.peak_pool_delta;
+        self.peak_kv_delta = scope.peak_kv_delta;
+        self.peak_kv_cache_delta = scope.peak_kv_cache_delta;
+    }
+
+    fn ensure_phase_capacity(&mut self, phase_count: usize) {
+        if self.phases.len() < phase_count {
+            self.phases.resize_with(phase_count, MemoryPhaseSnapshot::default);
+        } else if self.phases.len() > phase_count {
+            self.phases.truncate(phase_count);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MemoryPhaseSnapshot {
     pub label: String,
@@ -1022,6 +1103,20 @@ pub struct MemoryPhaseSnapshot {
     pub peak_pool_delta: usize,
     pub peak_kv_delta: usize,
     pub peak_kv_cache_delta: usize,
+}
+
+impl Default for MemoryPhaseSnapshot {
+    fn default() -> Self {
+        Self {
+            label: String::new(),
+            current_pool_delta: 0,
+            current_kv_delta: 0,
+            current_kv_cache_delta: 0,
+            peak_pool_delta: 0,
+            peak_kv_delta: 0,
+            peak_kv_cache_delta: 0,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -1035,6 +1130,14 @@ impl StepMemorySnapshot {
         Self {
             forward: MemoryScopeSnapshot::default(),
             blocks: vec![BlockMemorySnapshot::default(); block_count],
+        }
+    }
+
+    pub fn ensure_block_capacity(&mut self, block_count: usize) {
+        if self.blocks.len() < block_count {
+            self.blocks.resize_with(block_count, BlockMemorySnapshot::default);
+        } else if self.blocks.len() > block_count {
+            self.blocks.truncate(block_count);
         }
     }
 }

@@ -1,5 +1,5 @@
 #![cfg(test)]
-use crate::metallic::instrumentation::new_latency_collector;
+use crate::metallic::instrumentation::{StepLatencySnapshot, new_latency_collector};
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
@@ -313,7 +313,8 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     ctx.synchronize();
     ctx.set_latency_collector(None);
 
-    let snapshot = collector.borrow_mut().snapshot();
+    let mut snapshot = StepLatencySnapshot::empty(model.config.n_layers);
+    collector.borrow().snapshot_into(&mut snapshot);
     assert_eq!(snapshot.blocks.len(), model.config.n_layers);
     let has_kv_repeat = snapshot.blocks[0].phases.iter().any(|phase| phase.label == "kv_repeat");
     assert!(has_kv_repeat, "kv_repeat phase was not recorded");
