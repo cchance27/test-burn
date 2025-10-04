@@ -2,13 +2,14 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseBuffer, ParseStream};
+use syn::parse_macro_input;
+use syn::spanned::Spanned;
 use syn::{braced, Expr, ExprClosure, Ident, LitStr, Result, Token, Type};
 
 mod kw {
     syn::custom_keyword!(library);
 }
 
-#[derive(Debug)]
 struct KernelMacroInput {
     library_ident: Ident,
     source: Expr,
@@ -16,19 +17,16 @@ struct KernelMacroInput {
     operations: Vec<OperationSpec>,
 }
 
-#[derive(Debug)]
 struct FunctionSpec {
     ident: Ident,
     mappings: Vec<DtypeMapping>,
 }
 
-#[derive(Debug)]
 struct DtypeMapping {
     dtype: Ident,
     name: LitStr,
 }
 
-#[derive(Debug)]
 struct OperationSpec {
     ident: Ident,
     function_expr: Expr,
@@ -39,7 +37,6 @@ struct OperationSpec {
     encode_closure: ExprClosure,
 }
 
-#[derive(Debug)]
 struct StateField {
     ident: Ident,
     ty: Type,
@@ -273,9 +270,9 @@ fn expand_kernel(input: KernelMacroInput) -> Result<TokenStream2> {
         .functions
         .iter()
         .map(|spec| expand_function_spec(&library_descriptor_ident, spec))
-        .collect::<Result<_>>()?;
+        .collect::<Result<Vec<_>>>()?;
 
-    let operation_defs: Vec<TokenStream2> = input.operations.iter().map(expand_operation_spec).collect::<Result<_>>()?;
+    let operation_defs: Vec<TokenStream2> = input.operations.iter().map(expand_operation_spec).collect::<Result<Vec<_>>>()?;
 
     let expanded = quote! {
         #[allow(non_upper_case_globals)]
@@ -294,6 +291,7 @@ fn expand_kernel(input: KernelMacroInput) -> Result<TokenStream2> {
 fn expand_function_spec(library_descriptor_ident: &Ident, spec: &FunctionSpec) -> Result<TokenStream2> {
     let helper_fn_ident = format_ident!("__{}_name_for_dtype", spec.ident);
     let descriptor_ident = format_ident!("{}Descriptor", spec.ident);
+    let function_ident = &spec.ident;
 
     let mut match_arms = Vec::new();
     for mapping in &spec.mappings {
@@ -316,7 +314,7 @@ fn expand_function_spec(library_descriptor_ident: &Ident, spec: &FunctionSpec) -
 
         #[allow(non_upper_case_globals)]
         pub static #descriptor_ident: crate::metallic::kernels::KernelFunctionDescriptor = crate::metallic::kernels::KernelFunctionDescriptor {
-            id: stringify!(#spec.ident),
+            id: stringify!(#function_ident),
             library: &#library_descriptor_ident,
             name_for_dtype: #helper_fn_ident,
         };
