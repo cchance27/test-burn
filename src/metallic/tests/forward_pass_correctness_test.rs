@@ -1490,7 +1490,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     for (pos, _) in input_ids.iter().enumerate() {
         ctx.reset_pool();
         ctx.clear_cache();
-        ctx.kv_caches.clear();
+        ctx.clear_kv_caches();
         ctx.kv_cache_pool.reset();
 
         let prefix = &input_ids[..=pos];
@@ -1506,7 +1506,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
 
     ctx.reset_pool();
     ctx.clear_cache();
-    ctx.kv_caches.clear();
+    ctx.clear_kv_caches();
     ctx.kv_cache_pool.reset();
 
     // Prepare KV cache pool for incremental forward steps.
@@ -1518,7 +1518,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1;
 
-    ctx.kv_caches.clear();
+    ctx.clear_kv_caches();
     ctx.kv_cache_pool.reset();
     let kv_capacity = input_ids.len().max(1);
     for layer_idx in 0..n_layers {
