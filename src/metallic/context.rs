@@ -10,6 +10,7 @@ use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, kernels};
 use kernels::gemv::GemvOp;
+use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
@@ -114,6 +115,14 @@ pub struct SamplerBuffers {
     pub indices: Vec<usize>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct KvCacheDispatchStats {
+    pub canonical_dispatches: usize,
+    pub repeated_dispatches: usize,
+    pub canonical_fallback_blits: usize,
+    pub repeated_fallback_blits: usize,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct MatmulDims {
     batch: usize,
@@ -172,6 +181,8 @@ pub struct Context<T: TensorElement> {
     log_matmul_shapes: bool,
     /// Cache of MLX compute pipelines keyed by kernel configuration.
     pub(crate) mlx_kernel_cache: MlxKernelCache,
+    /// Instrumentation for KV cache write paths.
+    kv_cache_dispatch_stats: KvCacheDispatchStats,
     //config: ContextConfig,
 }
 
@@ -251,6 +262,7 @@ impl<T: TensorElement> Context<T> {
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),
+            kv_cache_dispatch_stats: KvCacheDispatchStats::default(),
             //config,
         })
     }
@@ -324,6 +336,14 @@ impl<T: TensorElement> Context<T> {
             Err(err) => err.into_inner(),
         };
         samples.drain(..).collect()
+    }
+
+    pub fn kv_cache_dispatch_stats(&self) -> KvCacheDispatchStats {
+        self.kv_cache_dispatch_stats
+    }
+
+    pub fn reset_kv_cache_dispatch_stats(&mut self) {
+        self.kv_cache_dispatch_stats = KvCacheDispatchStats::default();
     }
 
     fn compute_matmul_dims(&self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<MatmulDims, MetalError> {
@@ -895,7 +915,7 @@ impl<T: TensorElement> Context<T> {
                         //    return self.matmul_bias_add_gemv_path(a, b, bias, Some(dimensions), "mode=auto-gemv");
                         //}
 
-                        // We've seen MPS and MLX both perform well at times here, since we're putting in more MLX improvements 
+                        // We've seen MPS and MLX both perform well at times here, since we're putting in more MLX improvements
                         //we might as well use it and try for better MLX improvements since they are so close right now
                         let use_mlx = self.should_use_mlx_bias(&dimensions);
                         let dims = Some(dimensions);
@@ -1168,8 +1188,6 @@ impl<T: TensorElement> Context<T> {
     /// - `k_step` and `v_step` must be contiguous tensors with shape [batch_heads, head_dim] or [batch_heads, 1, head_dim].
     ///   This performs a device blit copy from the source buffer into the cache at the correct offset.
     pub fn write_kv_step(&mut self, layer_idx: usize, step: usize, k_step: &Tensor<T>, v_step: &Tensor<T>) -> Result<(), MetalError> {
-        let zero_ready = self.kv_caches.get(&layer_idx).map(|entry| entry.zeroing_complete).unwrap_or(false);
-
         let k_src = k_step.clone();
         let v_src = v_step.clone();
 
@@ -1177,140 +1195,40 @@ impl<T: TensorElement> Context<T> {
         let (bh, seq_in_src, hd) = match dims.len() {
             2 => (dims[0], 1, dims[1]),
             3 => (dims[0], dims[1], dims[2]),
-            _ => (0, 0, 0),
+            _ => {
+                return Err(MetalError::InvalidShape("write_kv_step expects source tensor rank 2 or 3".into()));
+            }
         };
 
         let v_dims = v_src.dims().to_vec();
         let (v_bh, v_seq_in_src, v_hd) = match v_dims.len() {
             2 => (v_dims[0], 1, v_dims[1]),
             3 => (v_dims[0], v_dims[1], v_dims[2]),
-            _ => (0, 0, 0),
+            _ => {
+                return Err(MetalError::InvalidShape("write_kv_step expects V tensor rank 2 or 3".into()));
+            }
         };
 
-        if zero_ready {
-            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src])?;
-            self.ensure_active_cmd_buffer()?;
-            let encoder = {
-                let cmd_buf = self.active_command_buffer_mut()?;
-                cmd_buf
-                    .raw()
-                    .blitCommandEncoder()
-                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?
-            };
-
-            let active_cmd_clone = self.active_cmd_buffer.clone();
-
-            {
-                let entry = self
-                    .kv_caches
-                    .get_mut(&layer_idx)
-                    .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
-
-                if step >= entry.capacity {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "Step {} exceeds KV cache capacity {} for layer {}",
-                        step, entry.capacity, layer_idx
-                    )));
-                }
-
-                let expected_bh = entry.k.dims()[0];
-                let expected_hd = entry.k.dims()[2];
-                if bh != expected_bh || hd != expected_hd {
-                    return Err(MetalError::DimensionMismatch {
-                        expected: expected_bh * expected_hd,
-                        actual: bh * hd,
-                    });
-                }
-
-                if seq_in_src != 1 {
-                    return Err(MetalError::OperationNotSupported(
-                        "write_kv_step currently expects a single timestep in the source tensor".into(),
-                    ));
-                }
-
-                if step + seq_in_src > entry.capacity {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "Writing KV step {} ({} timesteps) exceeds cache capacity {} for layer {}",
-                        step, seq_in_src, entry.capacity, layer_idx
-                    )));
-                }
-
-                if v_bh != expected_bh || v_hd != expected_hd {
-                    return Err(MetalError::DimensionMismatch {
-                        expected: expected_bh * expected_hd,
-                        actual: v_bh * v_hd,
-                    });
-                }
-                if v_seq_in_src != seq_in_src {
-                    return Err(MetalError::OperationNotSupported(
-                        "write_kv_step expects matching sequence dims for K and V".into(),
-                    ));
-                }
-
-                let row_elems = expected_hd;
-                let copy_bytes = row_elems * entry.element_size;
-                let cache_stride_elems = entry.capacity * expected_hd;
-
-                unsafe {
-                    for head_idx in 0..expected_bh {
-                        let src_elem_index = match dims.len() {
-                            2 => head_idx * expected_hd,
-                            3 => (head_idx * seq_in_src) * expected_hd,
-                            _ => unreachable!(),
-                        };
-                        let v_src_elem_index = match v_dims.len() {
-                            2 => head_idx * expected_hd,
-                            3 => (head_idx * v_seq_in_src) * expected_hd,
-                            _ => unreachable!(),
-                        };
-                        let dst_elem_index = head_idx * cache_stride_elems + step * expected_hd;
-
-                        let src_offset_k = k_src.offset + src_elem_index * entry.element_size;
-                        let src_offset_v = v_src.offset + v_src_elem_index * entry.element_size;
-                        let dst_offset_k = entry.k.offset + dst_elem_index * entry.element_size;
-                        let dst_offset_v = entry.v.offset + dst_elem_index * entry.element_size;
-
-                        encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                            &k_src.buf,
-                            src_offset_k,
-                            &entry.k.buf,
-                            dst_offset_k,
-                            copy_bytes,
-                        );
-                        encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                            &v_src.buf,
-                            src_offset_v,
-                            &entry.v.buf,
-                            dst_offset_v,
-                            copy_bytes,
-                        );
-                    }
-                }
-
-                entry.zeroing_complete = false;
-                if let Some(active) = active_cmd_clone {
-                    entry.k.defining_cmd_buffer.borrow_mut().replace(active.clone());
-                    entry.k.mark_device_dirty();
-                    entry.v.defining_cmd_buffer.borrow_mut().replace(active);
-                    entry.v.mark_device_dirty();
-                }
-            }
-
-            encoder.endEncoding();
-
-            return Ok(());
+        if seq_in_src != 1 {
+            return Err(MetalError::OperationNotSupported(
+                "write_kv_step currently expects a single timestep in the source tensor".into(),
+            ));
         }
 
-        // Lookup the canonical cache tensors and clone their handles for the general path.
-        let (k_cache_ref, v_cache_ref, capacity_seq_val, element_size) = match self.kv_caches.get(&layer_idx) {
-            Some(entry) => (entry.k.clone(), entry.v.clone(), entry.capacity, entry.element_size),
-            None => {
-                return Err(MetalError::InvalidOperation(format!(
-                    "KV cache for layer {} not allocated",
-                    layer_idx
-                )));
-            }
+        if v_seq_in_src != seq_in_src {
+            return Err(MetalError::OperationNotSupported(
+                "write_kv_step expects matching sequence dims for K and V".into(),
+            ));
+        }
+
+        let (k_cache, v_cache, capacity_seq_val, element_size) = {
+            let entry = self
+                .kv_caches
+                .get(&layer_idx)
+                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
+            (entry.k.clone(), entry.v.clone(), entry.capacity, entry.element_size)
         };
+
         if step >= capacity_seq_val {
             return Err(MetalError::InvalidOperation(format!(
                 "Step {} exceeds KV cache capacity {} for layer {}",
@@ -1318,12 +1236,16 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let k_cache = k_cache_ref;
-        let v_cache = v_cache_ref;
-        self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src])?;
+        let cache_dims = k_cache.dims();
+        if cache_dims.len() != 3 {
+            return Err(MetalError::InvalidShape(
+                "KV cache tensor must have shape [batch_heads, seq_len, head_dim]".into(),
+            ));
+        }
 
-        let expected_bh = k_cache.dims()[0];
-        let expected_hd = k_cache.dims()[2];
+        let expected_bh = cache_dims[0];
+        let expected_hd = cache_dims[2];
+
         if bh != expected_bh || hd != expected_hd {
             return Err(MetalError::DimensionMismatch {
                 expected: expected_bh * expected_hd,
@@ -1331,10 +1253,11 @@ impl<T: TensorElement> Context<T> {
             });
         }
 
-        if seq_in_src != 1 {
-            return Err(MetalError::OperationNotSupported(
-                "write_kv_step currently expects a single timestep in the source tensor".into(),
-            ));
+        if v_bh != expected_bh || v_hd != expected_hd {
+            return Err(MetalError::DimensionMismatch {
+                expected: expected_bh * expected_hd,
+                actual: v_bh * v_hd,
+            });
         }
 
         if step + seq_in_src > capacity_seq_val {
@@ -1344,80 +1267,100 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        if v_bh != expected_bh || v_hd != expected_hd {
-            return Err(MetalError::DimensionMismatch {
-                expected: expected_bh * expected_hd,
-                actual: v_bh * v_hd,
-            });
-        }
-        if v_seq_in_src != seq_in_src {
-            return Err(MetalError::OperationNotSupported(
-                "write_kv_step expects matching sequence dims for K and V".into(),
+        if k_src.strides.len() != v_src.strides.len()
+            || k_src.strides.get(0) != v_src.strides.get(0)
+            || (k_src.strides.len() > 1 && k_src.strides[1] != v_src.strides[1])
+        {
+            return Err(MetalError::InvalidShape(
+                "write_kv_step requires K and V to share the same layout".into(),
             ));
         }
 
-        let row_elems = expected_hd;
-        let copy_bytes = row_elems * element_size;
-        let cache_stride_elems = capacity_seq_val * expected_hd;
+        let head_dim_u32 = u32::try_from(expected_hd).map_err(|_| MetalError::InvalidShape("head dimension exceeds u32::MAX".into()))?;
+        let heads_u32 = u32::try_from(expected_bh).map_err(|_| MetalError::InvalidShape("batch_heads exceeds u32::MAX".into()))?;
+        let seq_len_u32 = u32::try_from(seq_in_src).map_err(|_| MetalError::InvalidShape("sequence length exceeds u32::MAX".into()))?;
+        let step_u32 = u32::try_from(step).map_err(|_| MetalError::InvalidShape("step index exceeds u32::MAX".into()))?;
+        let src_head_stride_u32 =
+            u32::try_from(k_src.strides[0]).map_err(|_| MetalError::InvalidShape("source head stride exceeds u32::MAX".into()))?;
+        let src_seq_stride = if dims.len() == 3 {
+            u32::try_from(k_src.strides[1]).map_err(|_| MetalError::InvalidShape("source sequence stride exceeds u32::MAX".into()))?
+        } else {
+            0
+        };
+        let dst_head_stride_u32 =
+            u32::try_from(k_cache.strides[0]).map_err(|_| MetalError::InvalidShape("cache head stride exceeds u32::MAX".into()))?;
+        let dst_seq_stride_u32 =
+            u32::try_from(k_cache.strides[1]).map_err(|_| MetalError::InvalidShape("cache sequence stride exceeds u32::MAX".into()))?;
 
-        self.ensure_active_cmd_buffer()?;
+        if k_src.offset % element_size != 0
+            || v_src.offset % element_size != 0
+            || k_cache.offset % element_size != 0
+            || v_cache.offset % element_size != 0
         {
-            let encoder = {
-                let cmd_buf = self.active_command_buffer_mut()?;
-                cmd_buf
-                    .raw()
-                    .blitCommandEncoder()
-                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?
-            };
+            return Err(MetalError::InvalidOperation("KV tensors must be element-aligned".into()));
+        }
 
-            unsafe {
-                for head_idx in 0..expected_bh {
-                    let src_elem_index = match dims.len() {
-                        2 => head_idx * expected_hd,
-                        3 => (head_idx * seq_in_src) * expected_hd,
-                        _ => unreachable!(),
-                    };
-                    let v_src_elem_index = match v_dims.len() {
-                        2 => head_idx * expected_hd,
-                        3 => (head_idx * v_seq_in_src) * expected_hd,
-                        _ => unreachable!(),
-                    };
-                    let dst_elem_index = head_idx * cache_stride_elems + step * expected_hd;
+        let k_src_offset =
+            u32::try_from(k_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
+        let v_src_offset =
+            u32::try_from(v_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
+        let k_dst_offset =
+            u32::try_from(k_cache.offset / element_size).map_err(|_| MetalError::InvalidShape("cache offset exceeds u32::MAX".into()))?;
+        let v_dst_offset =
+            u32::try_from(v_cache.offset / element_size).map_err(|_| MetalError::InvalidShape("cache offset exceeds u32::MAX".into()))?;
 
-                    let src_offset_k = k_src.offset + src_elem_index * element_size;
-                    let src_offset_v = v_src.offset + v_src_elem_index * element_size;
-                    let dst_offset_k = k_cache.offset + dst_elem_index * element_size;
-                    let dst_offset_v = v_cache.offset + dst_elem_index * element_size;
+        let total_threads = heads_u32
+            .checked_mul(head_dim_u32)
+            .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
 
-                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &k_src.buf,
-                        src_offset_k,
-                        &k_cache.buf,
-                        dst_offset_k,
-                        copy_bytes,
-                    );
-                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &v_src.buf,
-                        src_offset_v,
-                        &v_cache.buf,
-                        dst_offset_v,
-                        copy_bytes,
-                    );
+        self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src])?;
+
+        let config = KvCacheWriteConfig {
+            canonical_heads: heads_u32,
+            head_dim: head_dim_u32,
+            seq_len: seq_len_u32,
+            step: step_u32,
+            group_size: 1,
+            src_head_stride: src_head_stride_u32,
+            src_seq_stride,
+            dst_head_stride: dst_head_stride_u32,
+            dst_seq_stride: dst_seq_stride_u32,
+            k_src_offset,
+            v_src_offset,
+            k_dst_offset,
+            v_dst_offset,
+            total_threads,
+        };
+
+        match self.call::<KvCacheWriteOp>((k_src.clone(), v_src.clone(), k_cache.clone(), v_cache.clone(), config)) {
+            Ok(_) => {
+                self.kv_cache_dispatch_stats.canonical_dispatches += 1;
+                self.mark_tensor_pending(&k_cache);
+                self.mark_tensor_pending(&v_cache);
+                if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
+                    entry.zeroing_complete = false;
                 }
+                Ok(())
             }
-            encoder.endEncoding();
+            Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
+                self.kv_cache_dispatch_stats.canonical_fallback_blits += 1;
+                self.blit_write_kv_step(
+                    layer_idx,
+                    step,
+                    &k_src,
+                    &v_src,
+                    &k_cache,
+                    &v_cache,
+                    seq_in_src,
+                    expected_bh,
+                    expected_hd,
+                    capacity_seq_val,
+                    element_size,
+                )
+            }
+            Err(err) => Err(err),
         }
-
-        self.mark_tensor_pending(&k_cache);
-        self.mark_tensor_pending(&v_cache);
-
-        if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
-            entry.zeroing_complete = false;
-        }
-
-        Ok(())
     }
-
     /// Append a single timestep into the repeated KV cache by copying the canonical slice.
     #[allow(clippy::too_many_arguments)]
     pub fn write_repeated_kv_step(
@@ -1434,8 +1377,6 @@ impl<T: TensorElement> Context<T> {
             ));
         }
 
-        let zero_ready = self.kv_caches.get(&layer_idx).map(|entry| entry.zeroing_complete).unwrap_or(false);
-
         let k_src = k_step.clone();
         let v_src = v_step.clone();
 
@@ -1443,8 +1384,13 @@ impl<T: TensorElement> Context<T> {
         let (canonical_heads, seq_in_src, head_dim) = match k_dims.len() {
             2 => (k_dims[0], 1, k_dims[1]),
             3 => (k_dims[0], k_dims[1], k_dims[2]),
-            _ => (0, 0, 0),
+            _ => {
+                return Err(MetalError::InvalidShape(
+                    "write_repeated_kv_step expects source tensor rank 2 or 3".into(),
+                ));
+            }
         };
+
         if seq_in_src != 1 {
             return Err(MetalError::OperationNotSupported(
                 "write_repeated_kv_step expects a single timestep in the source tensor".into(),
@@ -1455,136 +1401,38 @@ impl<T: TensorElement> Context<T> {
         let (v_heads, v_seq_in_src, v_head_dim) = match v_dims.len() {
             2 => (v_dims[0], 1, v_dims[1]),
             3 => (v_dims[0], v_dims[1], v_dims[2]),
-            _ => (0, 0, 0),
+            _ => {
+                return Err(MetalError::InvalidShape(
+                    "write_repeated_kv_step expects V tensor rank 2 or 3".into(),
+                ));
+            }
         };
 
-        if zero_ready {
-            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src])?;
-            self.ensure_active_cmd_buffer()?;
-            let encoder = {
-                let cmd_buf = self.active_command_buffer_mut()?;
-                cmd_buf
-                    .raw()
-                    .blitCommandEncoder()
-                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?
-            };
+        let (repeated_k, repeated_v, canonical_expected, capacity_seq_val, element_size) = {
+            let entry = self
+                .kv_caches
+                .get(&layer_idx)
+                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
+            (
+                entry.repeated_k.clone(),
+                entry.repeated_v.clone(),
+                entry.k.dims()[0],
+                entry.capacity,
+                entry.element_size,
+            )
+        };
 
-            let active_cmd_clone = self.active_cmd_buffer.clone();
-
-            {
-                let entry = self
-                    .kv_caches
-                    .get_mut(&layer_idx)
-                    .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
-
-                if step >= entry.capacity {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "Step {} exceeds KV cache capacity {} for layer {}",
-                        step, entry.capacity, layer_idx
-                    )));
-                }
-
-                let repeated_heads_expected = canonical_heads
-                    .checked_mul(group_size)
-                    .ok_or_else(|| MetalError::InvalidOperation("group_size overflow while expanding KV heads".into()))?;
-
-                if entry.repeated_k.dims()[0] != repeated_heads_expected || entry.repeated_k.dims()[2] != head_dim {
-                    return Err(MetalError::DimensionMismatch {
-                        expected: repeated_heads_expected * head_dim,
-                        actual: entry.repeated_k.dims()[0] * entry.repeated_k.dims()[2],
-                    });
-                }
-
-                if v_heads != canonical_heads || v_head_dim != head_dim || v_seq_in_src != seq_in_src {
-                    return Err(MetalError::DimensionMismatch {
-                        expected: canonical_heads * head_dim,
-                        actual: v_heads * v_head_dim,
-                    });
-                }
-
-                let copy_bytes = head_dim * entry.element_size;
-                let repeated_stride_elems = entry.capacity * head_dim;
-
-                unsafe {
-                    for kv_head in 0..canonical_heads {
-                        let src_elem_index = match k_dims.len() {
-                            2 => kv_head * head_dim,
-                            3 => (kv_head * seq_in_src) * head_dim,
-                            _ => unreachable!(),
-                        };
-                        let v_src_elem_index = match v_dims.len() {
-                            2 => kv_head * head_dim,
-                            3 => (kv_head * v_seq_in_src) * head_dim,
-                            _ => unreachable!(),
-                        };
-
-                        let src_offset_k = k_src.offset + src_elem_index * entry.element_size;
-                        let src_offset_v = v_src.offset + v_src_elem_index * entry.element_size;
-
-                        for group in 0..group_size {
-                            let repeated_head = kv_head * group_size + group;
-                            let dst_elem_index = repeated_head * repeated_stride_elems + step * head_dim;
-
-                            let dst_offset_k = entry.repeated_k.offset + dst_elem_index * entry.element_size;
-                            let dst_offset_v = entry.repeated_v.offset + dst_elem_index * entry.element_size;
-
-                            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                                &k_src.buf,
-                                src_offset_k,
-                                &entry.repeated_k.buf,
-                                dst_offset_k,
-                                copy_bytes,
-                            );
-                            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                                &v_src.buf,
-                                src_offset_v,
-                                &entry.repeated_v.buf,
-                                dst_offset_v,
-                                copy_bytes,
-                            );
-                        }
-                    }
-                }
-
-                entry.zeroing_complete = false;
-                if let Some(active) = active_cmd_clone {
-                    entry.repeated_k.defining_cmd_buffer.borrow_mut().replace(active.clone());
-                    entry.repeated_k.mark_device_dirty();
-                    entry.repeated_v.defining_cmd_buffer.borrow_mut().replace(active);
-                    entry.repeated_v.mark_device_dirty();
-                }
-            }
-
-            encoder.endEncoding();
-            return Ok(());
-        }
-
-        let entry = self
-            .kv_caches
-            .get(&layer_idx)
-            .cloned()
-            .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
-
-        if step >= entry.capacity {
+        if step >= capacity_seq_val {
             return Err(MetalError::InvalidOperation(format!(
                 "Step {} exceeds KV cache capacity {} for layer {}",
-                step, entry.capacity, layer_idx
+                step, capacity_seq_val, layer_idx
             )));
         }
 
-        let repeated_k = entry.repeated_k.clone();
-        let repeated_v = entry.repeated_v.clone();
-
-        self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src])?;
-
-        let repeated_heads_expected = canonical_heads
-            .checked_mul(group_size)
-            .ok_or_else(|| MetalError::InvalidOperation("group_size overflow while expanding KV heads".into()))?;
-
-        if repeated_k.dims()[0] != repeated_heads_expected || repeated_k.dims()[2] != head_dim {
+        if canonical_heads != canonical_expected {
             return Err(MetalError::DimensionMismatch {
-                expected: repeated_heads_expected * head_dim,
-                actual: repeated_k.dims()[0] * repeated_k.dims()[2],
+                expected: canonical_expected,
+                actual: canonical_heads,
             });
         }
 
@@ -1595,9 +1443,143 @@ impl<T: TensorElement> Context<T> {
             });
         }
 
-        let copy_bytes = head_dim * entry.element_size;
-        let repeated_stride_elems = entry.capacity * head_dim;
+        if step + seq_in_src > capacity_seq_val {
+            return Err(MetalError::InvalidOperation(format!(
+                "Writing repeated KV step {} ({} timesteps) exceeds cache capacity {} for layer {}",
+                step, seq_in_src, capacity_seq_val, layer_idx
+            )));
+        }
 
+        let repeated_dims = repeated_k.dims();
+        if repeated_dims.len() != 3 {
+            return Err(MetalError::InvalidShape(
+                "Repeated KV cache tensor must have shape [batch_heads, seq_len, head_dim]".into(),
+            ));
+        }
+
+        let repeated_heads_expected = canonical_heads
+            .checked_mul(group_size)
+            .ok_or_else(|| MetalError::InvalidOperation("group_size overflow while expanding KV heads".into()))?;
+
+        if repeated_dims[0] != repeated_heads_expected || repeated_dims[2] != head_dim {
+            return Err(MetalError::DimensionMismatch {
+                expected: repeated_heads_expected * head_dim,
+                actual: repeated_dims[0] * repeated_dims[2],
+            });
+        }
+
+        if k_src.strides.len() != v_src.strides.len()
+            || k_src.strides.get(0) != v_src.strides.get(0)
+            || (k_src.strides.len() > 1 && k_src.strides[1] != v_src.strides[1])
+        {
+            return Err(MetalError::InvalidShape(
+                "write_repeated_kv_step requires K and V to share the same layout".into(),
+            ));
+        }
+
+        let head_dim_u32 = u32::try_from(head_dim).map_err(|_| MetalError::InvalidShape("head dimension exceeds u32::MAX".into()))?;
+        let canonical_heads_u32 =
+            u32::try_from(canonical_heads).map_err(|_| MetalError::InvalidShape("canonical head count exceeds u32::MAX".into()))?;
+        let seq_len_u32 = u32::try_from(seq_in_src).map_err(|_| MetalError::InvalidShape("sequence length exceeds u32::MAX".into()))?;
+        let step_u32 = u32::try_from(step).map_err(|_| MetalError::InvalidShape("step index exceeds u32::MAX".into()))?;
+        let group_size_u32 = u32::try_from(group_size).map_err(|_| MetalError::InvalidShape("group size exceeds u32::MAX".into()))?;
+        let src_head_stride_u32 =
+            u32::try_from(k_src.strides[0]).map_err(|_| MetalError::InvalidShape("source head stride exceeds u32::MAX".into()))?;
+        let src_seq_stride = if k_dims.len() == 3 {
+            u32::try_from(k_src.strides[1]).map_err(|_| MetalError::InvalidShape("source sequence stride exceeds u32::MAX".into()))?
+        } else {
+            0
+        };
+        let dst_head_stride_u32 = u32::try_from(repeated_k.strides[0])
+            .map_err(|_| MetalError::InvalidShape("repeated cache head stride exceeds u32::MAX".into()))?;
+        let dst_seq_stride_u32 = u32::try_from(repeated_k.strides[1])
+            .map_err(|_| MetalError::InvalidShape("repeated cache sequence stride exceeds u32::MAX".into()))?;
+
+        if k_src.offset % element_size != 0
+            || v_src.offset % element_size != 0
+            || repeated_k.offset % element_size != 0
+            || repeated_v.offset % element_size != 0
+        {
+            return Err(MetalError::InvalidOperation("KV tensors must be element-aligned".into()));
+        }
+
+        let k_src_offset =
+            u32::try_from(k_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
+        let v_src_offset =
+            u32::try_from(v_src.offset / element_size).map_err(|_| MetalError::InvalidShape("source offset exceeds u32::MAX".into()))?;
+        let k_dst_offset = u32::try_from(repeated_k.offset / element_size)
+            .map_err(|_| MetalError::InvalidShape("repeated cache offset exceeds u32::MAX".into()))?;
+        let v_dst_offset = u32::try_from(repeated_v.offset / element_size)
+            .map_err(|_| MetalError::InvalidShape("repeated cache offset exceeds u32::MAX".into()))?;
+
+        let total_threads = canonical_heads_u32
+            .checked_mul(head_dim_u32)
+            .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
+
+        self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src])?;
+
+        let config = KvCacheWriteConfig {
+            canonical_heads: canonical_heads_u32,
+            head_dim: head_dim_u32,
+            seq_len: seq_len_u32,
+            step: step_u32,
+            group_size: group_size_u32,
+            src_head_stride: src_head_stride_u32,
+            src_seq_stride,
+            dst_head_stride: dst_head_stride_u32,
+            dst_seq_stride: dst_seq_stride_u32,
+            k_src_offset,
+            v_src_offset,
+            k_dst_offset,
+            v_dst_offset,
+            total_threads,
+        };
+
+        match self.call::<KvCacheWriteOp>((k_src.clone(), v_src.clone(), repeated_k.clone(), repeated_v.clone(), config)) {
+            Ok(_) => {
+                self.kv_cache_dispatch_stats.repeated_dispatches += 1;
+                self.mark_tensor_pending(&repeated_k);
+                self.mark_tensor_pending(&repeated_v);
+                if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
+                    entry.zeroing_complete = false;
+                }
+                Ok(())
+            }
+            Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
+                self.kv_cache_dispatch_stats.repeated_fallback_blits += 1;
+                self.blit_write_repeated_kv_step(
+                    layer_idx,
+                    step,
+                    group_size,
+                    &k_src,
+                    &v_src,
+                    &repeated_k,
+                    &repeated_v,
+                    seq_in_src,
+                    canonical_heads,
+                    head_dim,
+                    capacity_seq_val,
+                    element_size,
+                )
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    fn blit_write_kv_step(
+        &mut self,
+        layer_idx: usize,
+        step: usize,
+        k_src: &Tensor<T>,
+        v_src: &Tensor<T>,
+        k_cache: &Tensor<T>,
+        v_cache: &Tensor<T>,
+        seq_in_src: usize,
+        expected_bh: usize,
+        head_dim: usize,
+        capacity: usize,
+        element_size: usize,
+    ) -> Result<(), MetalError> {
         self.ensure_active_cmd_buffer()?;
         let encoder = {
             let cmd_buf = self.active_command_buffer_mut()?;
@@ -1607,28 +1589,110 @@ impl<T: TensorElement> Context<T> {
                 .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?
         };
 
+        let cache_stride_elems = capacity * head_dim;
+        let copy_bytes = head_dim * element_size;
+        let k_dims_len = k_src.dims().len();
+        let v_dims_len = v_src.dims().len();
+
+        unsafe {
+            for head_idx in 0..expected_bh {
+                let src_elem_index = if k_dims_len == 2 {
+                    head_idx * head_dim
+                } else {
+                    (head_idx * seq_in_src) * head_dim
+                };
+                let v_src_elem_index = if v_dims_len == 2 {
+                    head_idx * head_dim
+                } else {
+                    (head_idx * seq_in_src) * head_dim
+                };
+                let dst_elem_index = head_idx * cache_stride_elems + step * head_dim;
+
+                let src_offset_k = k_src.offset + src_elem_index * element_size;
+                let src_offset_v = v_src.offset + v_src_elem_index * element_size;
+                let dst_offset_k = k_cache.offset + dst_elem_index * element_size;
+                let dst_offset_v = v_cache.offset + dst_elem_index * element_size;
+
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &k_src.buf,
+                    src_offset_k,
+                    &k_cache.buf,
+                    dst_offset_k,
+                    copy_bytes,
+                );
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &v_src.buf,
+                    src_offset_v,
+                    &v_cache.buf,
+                    dst_offset_v,
+                    copy_bytes,
+                );
+            }
+        }
+
+        encoder.endEncoding();
+
+        self.mark_tensor_pending(k_cache);
+        self.mark_tensor_pending(v_cache);
+
+        if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
+            entry.zeroing_complete = false;
+        }
+
+        Ok(())
+    }
+
+    fn blit_write_repeated_kv_step(
+        &mut self,
+        layer_idx: usize,
+        step: usize,
+        group_size: usize,
+        k_src: &Tensor<T>,
+        v_src: &Tensor<T>,
+        repeated_k: &Tensor<T>,
+        repeated_v: &Tensor<T>,
+        seq_in_src: usize,
+        canonical_heads: usize,
+        head_dim: usize,
+        capacity: usize,
+        element_size: usize,
+    ) -> Result<(), MetalError> {
+        self.ensure_active_cmd_buffer()?;
+        let encoder = {
+            let cmd_buf = self.active_command_buffer_mut()?;
+            cmd_buf
+                .raw()
+                .blitCommandEncoder()
+                .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?
+        };
+
+        let repeated_stride_elems = capacity * head_dim;
+        let copy_bytes = head_dim * element_size;
+        let k_dims_len = k_src.dims().len();
+        let v_dims_len = v_src.dims().len();
+
         unsafe {
             for kv_head in 0..canonical_heads {
-                let src_elem_index = match k_dims.len() {
-                    2 => kv_head * head_dim,
-                    3 => (kv_head * seq_in_src) * head_dim,
-                    _ => unreachable!(),
+                let src_elem_index = if k_dims_len == 2 {
+                    kv_head * head_dim
+                } else {
+                    (kv_head * seq_in_src) * head_dim
                 };
-                let v_src_elem_index = match v_dims.len() {
-                    2 => kv_head * head_dim,
-                    3 => (kv_head * v_seq_in_src) * head_dim,
-                    _ => unreachable!(),
+                let v_src_elem_index = if v_dims_len == 2 {
+                    kv_head * head_dim
+                } else {
+                    (kv_head * seq_in_src) * head_dim
                 };
 
-                let src_offset_k = k_src.offset + src_elem_index * entry.element_size;
-                let src_offset_v = v_src.offset + v_src_elem_index * entry.element_size;
+                let src_offset_k = k_src.offset + src_elem_index * element_size;
+                let src_offset_v = v_src.offset + v_src_elem_index * element_size;
 
                 for group in 0..group_size {
                     let repeated_head = kv_head * group_size + group;
                     let dst_elem_index = repeated_head * repeated_stride_elems + step * head_dim;
 
-                    let dst_offset_k = repeated_k.offset + dst_elem_index * entry.element_size;
-                    let dst_offset_v = repeated_v.offset + dst_elem_index * entry.element_size;
+                    let dst_offset_k = repeated_k.offset + dst_elem_index * element_size;
+                    let dst_offset_v = repeated_v.offset + dst_elem_index * element_size;
 
                     encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
                         &k_src.buf,
@@ -1647,16 +1711,28 @@ impl<T: TensorElement> Context<T> {
                 }
             }
         }
+
         encoder.endEncoding();
 
-        self.mark_tensor_pending(&repeated_k);
-        self.mark_tensor_pending(&repeated_v);
+        self.mark_tensor_pending(repeated_k);
+        self.mark_tensor_pending(repeated_v);
 
         if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
             entry.zeroing_complete = false;
         }
 
         Ok(())
+    }
+
+    fn kv_cache_kernel_unavailable(err: &MetalError) -> bool {
+        matches!(
+            err,
+            MetalError::LibraryCompilationFailed(_)
+                | MetalError::FunctionCreationFailed(_)
+                | MetalError::PipelineCreationFailed
+                | MetalError::ComputeEncoderCreationFailed
+                | MetalError::UnsupportedDtype { .. }
+        )
     }
 
     /// Create a strided view of the KV cache exposing the first `active_steps` positions in
