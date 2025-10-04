@@ -1,4 +1,4 @@
-use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
+use super::{Context, KvCacheDispatchStats, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
 use crate::metallic::instrumentation::{MemoryEvent, MemoryUsage, new_latency_collector, new_memory_collector};
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::metrics::{
@@ -123,12 +123,13 @@ fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize)
 
     let line = match ctx.get_cache_stats() {
         Some(stats) => {
-            let segments = [
+            let mut segments = vec![
                 describe_cache_metrics("gemm", &stats.gemm),
                 describe_cache_metrics("descriptor", &stats.descriptor),
                 describe_cache_metrics("softmax", &stats.softmax),
                 describe_cache_metrics("sdpa", &stats.sdpa),
             ];
+            segments.push(describe_kv_cache_metrics(&ctx.kv_cache_dispatch_stats()));
             format!("[metal-cache] {phase}#{step}: {}", segments.join(" "))
         }
         None => format!("[metal-cache] {phase}#{step}: cache-uninitialized"),
@@ -153,6 +154,28 @@ fn describe_cache_metrics(name: &str, metrics: &CacheMetrics) -> String {
     format!(
         "{name}(size={} hits={} misses={} requests={} hit_rate={hit_rate:.1}% last={last})",
         metrics.size, metrics.hits, metrics.misses, requests
+    )
+}
+
+fn describe_kv_cache_metrics(stats: &KvCacheDispatchStats) -> String {
+    let canonical_total = stats.canonical_dispatches + stats.canonical_fallback_blits;
+    let repeated_total = stats.repeated_dispatches + stats.repeated_fallback_blits;
+
+    let canonical_hit_rate = if canonical_total > 0 {
+        (stats.canonical_dispatches as f64 / canonical_total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    let repeated_hit_rate = if repeated_total > 0 {
+        (stats.repeated_dispatches as f64 / repeated_total as f64) * 100.0
+    } else {
+        0.0
+    };
+
+    format!(
+        "kv_cache(canonical_dispatches={} canonical_fallback_blits={} canonical_hit_rate={canonical_hit_rate:.1}% repeated_dispatches={} repeated_fallback_blits={} repeated_hit_rate={repeated_hit_rate:.1}%)",
+        stats.canonical_dispatches, stats.canonical_fallback_blits, stats.repeated_dispatches, stats.repeated_fallback_blits,
     )
 }
 
