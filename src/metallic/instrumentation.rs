@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -711,7 +712,28 @@ impl<'a> MemoryEvent<'a> {
             label: label.into(),
         }
     }
+
+    pub fn into_owned(self) -> MemoryEvent<'static> {
+        match self {
+            MemoryEvent::ForwardStart => MemoryEvent::ForwardStart,
+            MemoryEvent::ForwardSample => MemoryEvent::ForwardSample,
+            MemoryEvent::BlockStart { index } => MemoryEvent::BlockStart { index },
+            MemoryEvent::BlockEnd { index } => MemoryEvent::BlockEnd { index },
+            MemoryEvent::BlockPhase { index, label } => MemoryEvent::BlockPhase {
+                index,
+                label: Cow::Owned(label.into_owned()),
+            },
+        }
+    }
 }
+
+#[derive(Clone, Debug)]
+pub struct MemorySample {
+    pub event: MemoryEvent<'static>,
+    pub usage: MemoryUsage,
+}
+
+pub type MemorySampleSender = Sender<MemorySample>;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MemoryUsage {
@@ -749,52 +771,75 @@ impl MemoryUsageDelta {
 pub struct StepMemoryCollector {
     forward: MemoryScopeEntry,
     blocks: Vec<BlockMemoryEntry>,
+    sample_tx: MemorySampleSender,
+    sample_rx: Receiver<MemorySample>,
 }
 
 impl StepMemoryCollector {
     pub fn new(block_count: usize) -> Self {
+        let (sample_tx, sample_rx) = mpsc::channel();
         Self {
             forward: MemoryScopeEntry::default(),
             blocks: vec![BlockMemoryEntry::default(); block_count],
+            sample_tx,
+            sample_rx,
         }
     }
 
+    pub fn sample_sender(&self) -> MemorySampleSender {
+        self.sample_tx.clone()
+    }
+
     pub fn record(&mut self, event: MemoryEvent<'_>, usage: MemoryUsage) {
-        match event {
+        self.apply_sample(MemorySample {
+            event: event.into_owned(),
+            usage,
+        });
+    }
+
+    pub fn drain_pending(&mut self) {
+        while let Ok(sample) = self.sample_rx.try_recv() {
+            self.apply_sample(sample);
+        }
+    }
+
+    pub fn snapshot(&mut self) -> StepMemorySnapshot {
+        self.drain_pending();
+        StepMemorySnapshot {
+            forward: self.forward.snapshot(),
+            blocks: self.blocks.iter().map(BlockMemoryEntry::snapshot).collect(),
+        }
+    }
+
+    fn apply_sample(&mut self, sample: MemorySample) {
+        match sample.event {
             MemoryEvent::ForwardStart => {
-                self.forward.record_baseline(usage);
+                self.forward.record_baseline(sample.usage);
                 for block in &mut self.blocks {
                     block.reset();
                 }
             }
             MemoryEvent::ForwardSample => {
-                self.forward.record_sample(usage);
+                self.forward.record_sample(sample.usage);
             }
             MemoryEvent::BlockStart { index } => {
                 if let Some(block) = self.blocks.get_mut(index) {
-                    block.record_baseline(usage);
+                    block.record_baseline(sample.usage);
                 }
-                self.forward.record_sample(usage);
+                self.forward.record_sample(sample.usage);
             }
             MemoryEvent::BlockEnd { index } => {
                 if let Some(block) = self.blocks.get_mut(index) {
-                    block.record_sample(usage);
+                    block.record_sample(sample.usage);
                 }
-                self.forward.record_sample(usage);
+                self.forward.record_sample(sample.usage);
             }
             MemoryEvent::BlockPhase { index, label } => {
                 if let Some(block) = self.blocks.get_mut(index) {
-                    block.record_phase(label.into_owned(), usage);
+                    block.record_phase(label.into_owned(), sample.usage);
                 }
-                self.forward.record_sample(usage);
+                self.forward.record_sample(sample.usage);
             }
-        }
-    }
-
-    pub fn snapshot(&self) -> StepMemorySnapshot {
-        StepMemorySnapshot {
-            forward: self.forward.snapshot(),
-            blocks: self.blocks.iter().map(BlockMemoryEntry::snapshot).collect(),
         }
     }
 }

@@ -142,7 +142,7 @@ fn test_full_generation_correctness() -> Result<(), crate::metallic::MetalError>
 
     // --- Run 2: KV Cache Implementation ---
     // Reset context to ensure a clean run
-    ctx.kv_caches.clear();
+    ctx.clear_kv_caches();
     let kv_cache_new_ids =
         crate::metallic::generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg, &[])?;
     let mut kv_cache_ids = input_ids.clone();

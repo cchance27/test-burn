@@ -1,7 +1,7 @@
 use super::error::MetalError;
 use super::instrumentation::{
     LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchRegistration, MatMulInstrumentation,
-    MatMulSampleRecorder, MatmulDims, MemoryCollectorHandle, MemoryEvent, MemoryUsage,
+    MatMulSampleRecorder, MatmulDims, MemoryCollectorHandle, MemoryEvent, MemorySample, MemorySampleSender, MemoryUsage,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
@@ -118,6 +118,36 @@ pub struct SamplerBuffers {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+struct MemoryUsageCache {
+    pool_used: usize,
+    pool_capacity: usize,
+    kv_used: usize,
+    kv_capacity: usize,
+    kv_cache_bytes: usize,
+}
+
+impl MemoryUsageCache {
+    fn refresh(&mut self, pool: &MemoryPool, kv_pool: &MemoryPool, kv_cache_bytes: usize) -> MemoryUsage {
+        self.pool_used = pool.used_bytes();
+        self.pool_capacity = pool.total_capacity();
+        self.kv_used = kv_pool.used_bytes();
+        self.kv_capacity = kv_pool.total_capacity();
+        self.kv_cache_bytes = kv_cache_bytes;
+        self.current_usage()
+    }
+
+    fn current_usage(&self) -> MemoryUsage {
+        MemoryUsage {
+            pool_used: self.pool_used,
+            pool_capacity: self.pool_capacity,
+            kv_used: self.kv_used,
+            kv_capacity: self.kv_capacity,
+            kv_cache_bytes: self.kv_cache_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct KvCacheWritePathStats {
     pub kernel_dispatches: usize,
     pub fallback_blits: usize,
@@ -194,6 +224,7 @@ pub struct Context<T: TensorElement> {
 
     // Per-layer on-device KV caches stored centrally for developer DX.
     pub(crate) kv_caches: FxHashMap<usize, KvCacheEntry<T>>,
+    kv_cache_total_bytes: usize,
 
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     active_cmd_buffer: Option<CommandBuffer>,
@@ -203,6 +234,7 @@ pub struct Context<T: TensorElement> {
     latency_collector: Option<LatencyCollectorHandle>,
     /// Optional memory collector used to capture detailed allocation snapshots.
     memory_collector: Option<MemoryCollectorHandle>,
+    memory_sample_tx: Option<MemorySampleSender>,
     /// Shared instrumentation used to collect matmul GPU timings.
     matmul_instrumentation: MatMulInstrumentation,
     /// Matmul timing samples captured since the last drain.
@@ -219,6 +251,7 @@ pub struct Context<T: TensorElement> {
     pub(crate) mlx_kernel_cache: MlxKernelCache,
     /// Instrumentation for KV cache write paths.
     kv_cache_dispatch_stats: KvCacheDispatchStats,
+    memory_usage_cache: MemoryUsageCache,
     //config: ContextConfig,
 }
 
@@ -233,6 +266,12 @@ pub(crate) struct KvCacheEntry<T: TensorElement> {
     pub element_size: usize,
     pub zeroing_complete: bool,
     pub capacity: usize,
+}
+
+impl<T: TensorElement> KvCacheEntry<T> {
+    fn total_bytes(&self) -> usize {
+        self.k.size_bytes() + self.v.size_bytes() + self.repeated_k.size_bytes() + self.repeated_v.size_bytes()
+    }
 }
 
 const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
@@ -288,10 +327,12 @@ impl<T: TensorElement> Context<T> {
             pool_resets: 0,
             rng_seed_counter: 0,
             kv_caches: FxHashMap::default(),
+            kv_cache_total_bytes: 0,
             active_cmd_buffer: None,
             active_resource_cache: None,
             latency_collector: None,
             memory_collector: None,
+            memory_sample_tx: None,
             matmul_instrumentation,
             matmul_samples,
             matmul_recorder,
@@ -301,6 +342,7 @@ impl<T: TensorElement> Context<T> {
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),
             kv_cache_dispatch_stats: KvCacheDispatchStats::default(),
+            memory_usage_cache: MemoryUsageCache::default(),
             //config,
         })
     }
@@ -674,6 +716,8 @@ impl<T: TensorElement> Context<T> {
     /// disables memory instrumentation.
     #[inline]
     pub fn set_memory_collector(&mut self, collector: Option<MemoryCollectorHandle>) {
+        let sample_tx = collector.as_ref().map(|handle| handle.borrow().sample_sender());
+        self.memory_sample_tx = sample_tx;
         self.memory_collector = collector;
     }
 
@@ -681,29 +725,27 @@ impl<T: TensorElement> Context<T> {
     /// allocation snapshot inside the callback.
     #[inline]
     pub fn record_memory_event(&mut self, event: MemoryEvent<'_>) {
-        if let Some(collector) = self.memory_collector.as_ref() {
-            let usage = self.snapshot_memory_usage();
-            collector.borrow_mut().record(event, usage);
+        if let Some(sender) = self.memory_sample_tx.as_ref() {
+            let usage = self.refresh_memory_usage();
+            let sample = MemorySample {
+                event: event.into_owned(),
+                usage,
+            };
+            let _ = sender.send(sample);
         }
     }
 
     /// Capture a snapshot of the current memory usage for both the transient tensor pool
     /// and the persistent KV cache pool.
     #[inline]
-    pub fn snapshot_memory_usage(&self) -> MemoryUsage {
-        let kv_cache_bytes = self
-            .kv_caches
-            .values()
-            .map(|entry| entry.k.size_bytes() + entry.v.size_bytes() + entry.repeated_k.size_bytes() + entry.repeated_v.size_bytes())
-            .sum();
+    pub fn snapshot_memory_usage(&mut self) -> MemoryUsage {
+        self.refresh_memory_usage()
+    }
 
-        MemoryUsage {
-            pool_used: self.pool.used_bytes(),
-            pool_capacity: self.pool.total_capacity(),
-            kv_used: self.kv_cache_pool.used_bytes(),
-            kv_capacity: self.kv_cache_pool.total_capacity(),
-            kv_cache_bytes,
-        }
+    #[inline]
+    fn refresh_memory_usage(&mut self) -> MemoryUsage {
+        self.memory_usage_cache
+            .refresh(&self.pool, &self.kv_cache_pool, self.kv_cache_total_bytes)
     }
 
     #[inline]
@@ -1194,6 +1236,12 @@ impl<T: TensorElement> Context<T> {
         self.pool.reset();
     }
 
+    pub(crate) fn clear_kv_caches(&mut self) {
+        self.kv_caches.clear();
+        self.kv_cache_total_bytes = 0;
+        self.memory_usage_cache.kv_cache_bytes = 0;
+    }
+
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
     /// Layout: canonical [batch * n_kv_heads, seq_len, head_dim] and repeated [batch * n_heads, seq_len, head_dim].
     #[allow(clippy::too_many_arguments)]
@@ -1248,19 +1296,25 @@ impl<T: TensorElement> Context<T> {
         self.mark_tensor_pending(&repeated_k);
         self.mark_tensor_pending(&repeated_v);
 
-        self.kv_caches.insert(
-            layer_idx,
-            KvCacheEntry {
-                k,
-                v,
-                repeated_k,
-                repeated_v,
-                dtype,
-                element_size,
-                zeroing_complete: true,
-                capacity: seq_len,
-            },
-        );
+        let entry = KvCacheEntry {
+            k,
+            v,
+            repeated_k,
+            repeated_v,
+            dtype,
+            element_size,
+            zeroing_complete: true,
+            capacity: seq_len,
+        };
+        let entry_bytes = entry.total_bytes();
+        if let Some(prev) = self.kv_caches.insert(layer_idx, entry) {
+            self.kv_cache_total_bytes = self
+                .kv_cache_total_bytes
+                .saturating_sub(prev.total_bytes())
+                .saturating_add(entry_bytes);
+        } else {
+            self.kv_cache_total_bytes = self.kv_cache_total_bytes.saturating_add(entry_bytes);
+        }
         Ok(())
     }
 

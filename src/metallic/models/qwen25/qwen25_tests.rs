@@ -313,7 +313,7 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     ctx.synchronize();
     ctx.set_latency_collector(None);
 
-    let snapshot = collector.borrow().snapshot();
+    let snapshot = collector.borrow_mut().snapshot();
     assert_eq!(snapshot.blocks.len(), model.config.n_layers);
     let has_kv_repeat = snapshot.blocks[0].phases.iter().any(|phase| phase.label == "kv_repeat");
     assert!(has_kv_repeat, "kv_repeat phase was not recorded");

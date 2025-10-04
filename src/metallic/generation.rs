@@ -507,7 +507,7 @@ where
     }
 
     // Ensure KV caches start from a clean slate between generations.
-    ctx.kv_caches.clear();
+    ctx.clear_kv_caches();
     ctx.kv_cache_pool.reset();
 
     let log_interval = log_interval_from_env();
@@ -643,7 +643,7 @@ where
 
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
         let forward_snapshot = latency_collector.borrow().snapshot();
-        let memory_snapshot = memory_collector.borrow().snapshot();
+        let memory_snapshot = memory_collector.borrow_mut().snapshot();
         ctx.set_latency_collector(None);
         ctx.set_memory_collector(None);
 
