@@ -298,10 +298,7 @@ fn bench_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
             CaseKind::Matmul => 0,
         };
 
-        let total_elems = a_elems
-            .saturating_add(b_elems)
-            .saturating_add(c_elems)
-            .saturating_add(bias_elems);
+        let total_elems = a_elems.saturating_add(b_elems).saturating_add(c_elems).saturating_add(bias_elems);
 
         total_elems.saturating_mul(elem_size)
     };
@@ -387,7 +384,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     // Run generic shape benchmarks
     //bench_generic_shapes::<F16Element>(c, "f16");
     //bench_generic_shapes::<F32Element>(c, "f32");
-    
+
     // Run Qwen-specific shape benchmarks
     bench_qwen_shapes::<F16Element>(c, "f16");
     //bench_qwen_shapes::<F32Element>(c, "f32");

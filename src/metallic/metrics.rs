@@ -89,6 +89,7 @@ impl RollingStat {
 pub struct MatMulBackendStats {
     mps: RollingStat,
     mlx: RollingStat,
+    gemv: RollingStat,
 }
 
 impl MatMulBackendStats {
@@ -96,6 +97,7 @@ impl MatMulBackendStats {
         match backend {
             MatMulBackend::Mps => self.mps.record(duration),
             MatMulBackend::Mlx => self.mlx.record(duration),
+            MatMulBackend::Gemv => self.gemv.record(duration),
         }
     }
 
@@ -105,6 +107,10 @@ impl MatMulBackendStats {
 
     pub fn mlx(&self) -> &RollingStat {
         &self.mlx
+    }
+
+    pub fn gemv(&self) -> &RollingStat {
+        &self.gemv
     }
 }
 
@@ -538,6 +544,15 @@ pub fn build_latency_rows(
             label: "MatMul (MLX)".to_string(),
             last_ms: matmul.mlx().last_ms(),
             average_ms: matmul.mlx().average_ms(),
+            level: 0,
+        });
+    }
+
+    if matmul.gemv().has_samples() {
+        rows.push(LatencyRow {
+            label: "MatMul (GEMV)".to_string(),
+            last_ms: matmul.gemv().last_ms(),
+            average_ms: matmul.gemv().average_ms(),
             level: 0,
         });
     }

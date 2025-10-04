@@ -317,7 +317,7 @@ impl AppState {
             prompt_processing_time: Duration::default(),
             latency_rows: Vec::new(),
             metrics_view: MetricsView::Memory,
-            metrics_collapse_state: CollapseState::Uncollapsed,
+            metrics_collapse_state: CollapseState::Collapsed,
             focus: FocusArea::GeneratedText,
             text_scroll: 0,
             metrics_scroll: 0,

@@ -9,6 +9,7 @@ use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, kernels};
+use kernels::gemv::GemvOp;
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
@@ -49,6 +50,7 @@ fn detect_forced_matmul_backend() -> MatMulBackendOverride {
                 match trimmed.to_ascii_lowercase().as_str() {
                     "mlx" => MatMulBackendOverride::Force(MatMulBackend::Mlx),
                     "mps" => MatMulBackendOverride::Force(MatMulBackend::Mps),
+                    "gemv" => MatMulBackendOverride::Force(MatMulBackend::Gemv),
                     "auto" => MatMulBackendOverride::Auto,
                     _ => MatMulBackendOverride::Default,
                 }
@@ -410,6 +412,19 @@ impl<T: TensorElement> Context<T> {
         true
     }
 
+    #[inline]
+    fn can_use_gemv(&self, dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
+        if transpose_a || transpose_b {
+            return false;
+        }
+
+        if dims.batch != 1 {
+            return false;
+        }
+
+        dims.m == 1
+    }
+
     fn log_matmul_event(
         &self,
         op: &str,
@@ -496,6 +511,23 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     #[allow(clippy::too_many_arguments)]
+    fn matmul_bias_add_gemv_path(
+        &mut self,
+        a: &Tensor<T>,
+        b: &Tensor<T>,
+        bias: &Tensor<T>,
+        dims: Option<MatmulDims>,
+        note: &str,
+    ) -> Result<Tensor<T>, MetalError> {
+        self.with_matmul_logging("matmul_bias_add", MatMulBackend::Gemv, dims, note, |ctx| {
+            let mut linear = ctx.call::<GemvOp>((a, b))?;
+            linear = ctx.call::<BroadcastElemwiseAddInplaceOp>((linear, bias.clone()))?;
+            Ok(linear)
+        })
+    }
+
+    #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn matmul_bias_add_mlx_path(
         &mut self,
         a: &Tensor<T>,
@@ -569,44 +601,75 @@ impl<T: TensorElement> Context<T> {
     #[inline]
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
         match self.forced_matmul_backend {
-            MatMulBackendOverride::Force(MatMulBackend::Mlx) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
-                    ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
-                })
-            }
-            MatMulBackendOverride::Force(MatMulBackend::Mps) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
-                    ctx.call::<MatMulOp>((a, b, transpose_a, transpose_b))
-                })
-            }
-            MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
-                let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
-                let (dims, use_mlx) = match dims_result {
-                    Ok(dimensions) => {
-                        let use_mlx = self.should_use_mlx_dense(&dimensions);
-                        (Some(dimensions), use_mlx)
-                    }
-                    Err(_) => (None, true),
-                };
-
-                if use_mlx {
-                    self.with_matmul_logging("matmul", MatMulBackend::Mlx, dims, "mode=auto", |ctx| {
+            MatMulBackendOverride::Force(backend) => match backend {
+                MatMulBackend::Mlx => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
                         ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                     })
-                } else {
-                    self.with_matmul_logging("matmul", MatMulBackend::Mps, dims, "mode=auto-fallback", |ctx| {
+                }
+                MatMulBackend::Mps => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
                         ctx.call::<MatMulOp>((a, b, transpose_a, transpose_b))
                     })
+                }
+                MatMulBackend::Gemv => {
+                    let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
+                    return match dims_result {
+                        Ok(dimensions) => {
+                            let dims = if self.log_matmul_shapes { Some(dimensions) } else { None };
+                            if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
+                                self.with_matmul_logging("matmul", MatMulBackend::Gemv, dims, "mode=forced-gemv", |ctx| {
+                                    ctx.call::<GemvOp>((a, b))
+                                })
+                            } else {
+                                self.with_matmul_logging("matmul", MatMulBackend::Mlx, dims, "mode=forced-gemv-fallback", |ctx| {
+                                    ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                                })
+                            }
+                        }
+                        Err(_) => self.with_matmul_logging("matmul", MatMulBackend::Mlx, None, "mode=forced-gemv-fallback", |ctx| {
+                            ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                        }),
+                    };
+                }
+            },
+            MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
+                let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
+
+                match dims_result {
+                    Ok(dimensions) => {
+                        if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
+                            return self.with_matmul_logging("matmul", MatMulBackend::Gemv, Some(dimensions), "mode=auto-gemv", |ctx| {
+                                ctx.call::<GemvOp>((a, b))
+                            });
+                        }
+
+                        let use_mlx = self.should_use_mlx_dense(&dimensions);
+                        let dims = Some(dimensions);
+
+                        if use_mlx {
+                            self.with_matmul_logging("matmul", MatMulBackend::Mlx, dims, "mode=auto", |ctx| {
+                                ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                            })
+                        } else {
+                            self.with_matmul_logging("matmul", MatMulBackend::Mps, dims, "mode=auto-fallback", |ctx| {
+                                ctx.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+                            })
+                        }
+                    }
+                    Err(_) => self.with_matmul_logging("matmul", MatMulBackend::Mlx, None, "mode=auto", |ctx| {
+                        ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                    }),
                 }
             }
         }
@@ -622,44 +685,85 @@ impl<T: TensorElement> Context<T> {
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
         match self.forced_matmul_backend {
-            MatMulBackendOverride::Force(MatMulBackend::Mlx) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
-                    ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
-                })
-            }
-            MatMulBackendOverride::Force(MatMulBackend::Mps) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
-                    Self::call_with_cache::<MatMulOp>(ctx, (a, b, transpose_a, transpose_b), cache)
-                })
-            }
-            MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
-                let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
-                let (dims, use_mlx) = match dims_result {
-                    Ok(dimensions) => {
-                        let use_mlx = self.should_use_mlx_dense(&dimensions);
-                        (Some(dimensions), use_mlx)
-                    }
-                    Err(_) => (None, true),
-                };
-
-                if use_mlx {
-                    self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mlx, dims, "mode=auto", |ctx| {
+            MatMulBackendOverride::Force(backend) => match backend {
+                MatMulBackend::Mlx => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
                         ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                     })
-                } else {
-                    self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mps, dims, "mode=auto-fallback", |ctx| {
+                }
+                MatMulBackend::Mps => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
                         Self::call_with_cache::<MatMulOp>(ctx, (a, b, transpose_a, transpose_b), cache)
                     })
+                }
+                MatMulBackend::Gemv => {
+                    let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
+                    return match dims_result {
+                        Ok(dimensions) => {
+                            let dims = if self.log_matmul_shapes { Some(dimensions) } else { None };
+                            if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
+                                self.with_matmul_logging("matmul_with_cache", MatMulBackend::Gemv, dims, "mode=forced-gemv", |ctx| {
+                                    Self::call_with_cache::<GemvOp>(ctx, (a, b), cache)
+                                })
+                            } else {
+                                self.with_matmul_logging(
+                                    "matmul_with_cache",
+                                    MatMulBackend::Mlx,
+                                    dims,
+                                    "mode=forced-gemv-fallback",
+                                    |ctx| ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0)),
+                                )
+                            }
+                        }
+                        Err(_) => {
+                            self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mlx, None, "mode=forced-gemv-fallback", |ctx| {
+                                ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                            })
+                        }
+                    };
+                }
+            },
+            MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
+                let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
+
+                match dims_result {
+                    Ok(dimensions) => {
+                        if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
+                            return self.with_matmul_logging(
+                                "matmul_with_cache",
+                                MatMulBackend::Gemv,
+                                Some(dimensions),
+                                "mode=auto-gemv",
+                                |ctx| Self::call_with_cache::<GemvOp>(ctx, (a, b), cache),
+                            );
+                        }
+
+                        let use_mlx = self.should_use_mlx_dense(&dimensions);
+                        let dims = Some(dimensions);
+
+                        if use_mlx {
+                            self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mlx, dims, "mode=auto", |ctx| {
+                                ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                            })
+                        } else {
+                            self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mps, dims, "mode=auto-fallback", |ctx| {
+                                Self::call_with_cache::<MatMulOp>(ctx, (a, b, transpose_a, transpose_b), cache)
+                            })
+                        }
+                    }
+                    Err(_) => self.with_matmul_logging("matmul_with_cache", MatMulBackend::Mlx, None, "mode=auto", |ctx| {
+                        ctx.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
+                    }),
                 }
             }
         }
@@ -738,36 +842,60 @@ impl<T: TensorElement> Context<T> {
         transpose_b: bool,
     ) -> Result<Tensor<T>, MetalError> {
         match self.forced_matmul_backend {
-            MatMulBackendOverride::Force(MatMulBackend::Mlx) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, dims, "mode=forced-mlx")
-            }
-            MatMulBackendOverride::Force(MatMulBackend::Mps) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.matmul_bias_add_mps_path(a, b, bias, transpose_a, transpose_b, dims, "mode=forced-mps")
-            }
+            MatMulBackendOverride::Force(backend) => match backend {
+                MatMulBackend::Mlx => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, dims, "mode=forced-mlx")
+                }
+                MatMulBackend::Mps => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.matmul_bias_add_mps_path(a, b, bias, transpose_a, transpose_b, dims, "mode=forced-mps")
+                }
+                MatMulBackend::Gemv => {
+                    let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
+                    return match dims_result {
+                        Ok(dimensions) => {
+                            let dims = if self.log_matmul_shapes { Some(dimensions) } else { None };
+                            if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
+                                self.matmul_bias_add_gemv_path(a, b, bias, dims, "mode=forced-gemv")
+                            } else {
+                                self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, dims, "mode=forced-gemv-fallback")
+                            }
+                        }
+                        Err(_) => self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, None, "mode=forced-gemv-fallback"),
+                    };
+                }
+            },
             MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
                 let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
-                let (dims, use_mlx) = match dims_result {
-                    Ok(dimensions) => {
-                        let decision = self.should_use_mlx_bias(&dimensions);
-                        (Some(dimensions), decision)
-                    }
-                    Err(_) => (None, false),
-                };
 
-                if use_mlx {
-                    self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, dims, "mode=auto")
-                } else {
-                    self.matmul_bias_add_mps_path(a, b, bias, transpose_a, transpose_b, dims, "mode=auto-fallback")
+                match dims_result {
+                    Ok(dimensions) => {
+                        // DEBT: GEMV Needs to be optimized so it can push past MPS.
+                        // GEMV is still slightly slower than MPS
+                        //if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
+                        //    return self.matmul_bias_add_gemv_path(a, b, bias, Some(dimensions), "mode=auto-gemv");
+                        //}
+
+                        // DEBT: For now, gemv should take over above, but its disabled currently, disable MLX since MLX heuristics are getting selected without gemv, but MPS is faster than MLX for this.
+                        let use_mlx = false; //self.should_use_mlx_bias(&dimensions);
+                        let dims = Some(dimensions);
+
+                        if use_mlx {
+                            self.matmul_bias_add_mlx_path(a, b, bias, transpose_a, transpose_b, dims, "mode=auto")
+                        } else {
+                            self.matmul_bias_add_mps_path(a, b, bias, transpose_a, transpose_b, dims, "mode=auto-fallback")
+                        }
+                    }
+                    Err(_) => self.matmul_bias_add_mps_path(a, b, bias, transpose_a, transpose_b, None, "mode=auto-fallback"),
                 }
             }
         }
@@ -786,26 +914,38 @@ impl<T: TensorElement> Context<T> {
         beta: f32,
     ) -> Result<Tensor<T>, MetalError> {
         match self.forced_matmul_backend {
-            MatMulBackendOverride::Force(MatMulBackend::Mlx) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul_alpha_beta", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
-                    ctx.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
-                })
-            }
-            MatMulBackendOverride::Force(MatMulBackend::Mps) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul_alpha_beta", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
-                    ctx.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
-                })
-            }
+            MatMulBackendOverride::Force(backend) => match backend {
+                MatMulBackend::Mlx => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_alpha_beta", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
+                        ctx.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
+                    })
+                }
+                MatMulBackend::Mps => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_alpha_beta", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
+                        ctx.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
+                    })
+                }
+                MatMulBackend::Gemv => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_alpha_beta", MatMulBackend::Mlx, dims, "mode=forced-gemv-fallback", |ctx| {
+                        ctx.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
+                    })
+                }
+            },
             MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
                 let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
                 let (dims, use_mlx) = match dims_result {
@@ -864,26 +1004,42 @@ impl<T: TensorElement> Context<T> {
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
         match self.forced_matmul_backend {
-            MatMulBackendOverride::Force(MatMulBackend::Mlx) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul_alpha_beta_with_cache", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
-                    ctx.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
-                })
-            }
-            MatMulBackendOverride::Force(MatMulBackend::Mps) => {
-                let dims = if self.log_matmul_shapes {
-                    self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
-                } else {
-                    None
-                };
-                self.with_matmul_logging("matmul_alpha_beta_with_cache", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
-                    Self::call_with_cache::<MatMulAlphaBetaOp>(ctx, (a, b, result, transpose_a, transpose_b, alpha, beta), cache)
-                })
-            }
+            MatMulBackendOverride::Force(backend) => match backend {
+                MatMulBackend::Mlx => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_alpha_beta_with_cache", MatMulBackend::Mlx, dims, "mode=forced-mlx", |ctx| {
+                        ctx.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
+                    })
+                }
+                MatMulBackend::Mps => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging("matmul_alpha_beta_with_cache", MatMulBackend::Mps, dims, "mode=forced-mps", |ctx| {
+                        Self::call_with_cache::<MatMulAlphaBetaOp>(ctx, (a, b, result, transpose_a, transpose_b, alpha, beta), cache)
+                    })
+                }
+                MatMulBackend::Gemv => {
+                    let dims = if self.log_matmul_shapes {
+                        self.compute_matmul_dims(a, b, transpose_a, transpose_b).ok()
+                    } else {
+                        None
+                    };
+                    self.with_matmul_logging(
+                        "matmul_alpha_beta_with_cache",
+                        MatMulBackend::Mlx,
+                        dims,
+                        "mode=forced-gemv-fallback",
+                        |ctx| ctx.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta)),
+                    )
+                }
+            },
             MatMulBackendOverride::Default | MatMulBackendOverride::Auto => {
                 let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
                 let (dims, use_mlx) = match dims_result {

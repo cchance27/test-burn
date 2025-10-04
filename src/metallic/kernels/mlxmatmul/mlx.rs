@@ -519,7 +519,9 @@ fn determine_minor_stride<T: TensorElement>(tensor: &Tensor<T>) -> Result<i32, M
 fn select_tile(m: usize, n: usize) -> (usize, usize, usize, usize, usize) {
     // Default (32,32,16,2,2)
     // Prefer skinny M when M << N
-    if m <= 16 && n >= 64 {
+    if m == 1 {
+        (8, 128, 32, 1, 4)
+    } else if m <= 16 && n >= 64 {
         (16, 64, 16, 1, 4)
     } else if n <= 16 && m >= 64 {
         // Skinny N when N << M

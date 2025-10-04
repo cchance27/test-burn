@@ -20,6 +20,7 @@ pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
 pub mod gelu;
+pub mod gemv;
 pub mod kv_rearrange;
 pub mod layernorm;
 pub mod matmul;
@@ -53,6 +54,7 @@ pub enum KernelLibrary {
     Softmax,
     Swiglu,
     Tensors,
+    Gemv,
 }
 
 impl KernelLibrary {
@@ -74,6 +76,7 @@ impl KernelLibrary {
             KernelLibrary::Softmax => include_str!("softmax/kernel.metal"),
             KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
+            KernelLibrary::Gemv => include_str!("gemv/kernel.metal"),
         }
     }
 }
@@ -103,6 +106,7 @@ pub enum KernelFunction {
     Arange,
     Ones,
     RandomUniform,
+    Gemv,
 }
 
 impl KernelFunction {
@@ -126,6 +130,7 @@ impl KernelFunction {
             KernelFunction::FusedSoftmax => KernelLibrary::Softmax,
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
+            KernelFunction::Gemv => KernelLibrary::Gemv,
         }
     }
 
@@ -177,6 +182,8 @@ impl KernelFunction {
             (KernelFunction::Ones, F16) => "ones_kernel_f16",
             (KernelFunction::RandomUniform, F32) => "random_uniform_f32",
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
+            (KernelFunction::Gemv, F32) => "gemv_f32",
+            (KernelFunction::Gemv, F16) => "gemv_f16",
         };
 
         Ok(name)
