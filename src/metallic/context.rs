@@ -116,11 +116,52 @@ pub struct SamplerBuffers {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
+pub struct KvCacheWritePathStats {
+    pub kernel_dispatches: usize,
+    pub fallback_blits: usize,
+}
+
+impl KvCacheWritePathStats {
+    pub fn total(&self) -> usize {
+        self.kernel_dispatches + self.fallback_blits
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
 pub struct KvCacheDispatchStats {
-    pub canonical_dispatches: usize,
-    pub repeated_dispatches: usize,
-    pub canonical_fallback_blits: usize,
-    pub repeated_fallback_blits: usize,
+    pub single_layout: KvCacheWritePathStats,
+    pub fused_layout: KvCacheWritePathStats,
+}
+
+struct KvWritePlan<T: TensorElement> {
+    k_src: Tensor<T>,
+    v_src: Tensor<T>,
+    k_cache: Tensor<T>,
+    v_cache: Tensor<T>,
+    canonical_heads: usize,
+    seq_in_src: usize,
+    head_dim: usize,
+    capacity_seq_val: usize,
+    element_size: usize,
+    src_head_stride: u32,
+    src_seq_stride: u32,
+    dst_head_stride: u32,
+    dst_seq_stride: u32,
+    total_threads: u32,
+    heads_u32: u32,
+    head_dim_u32: u32,
+    seq_len_u32: u32,
+    step_u32: u32,
+    step: usize,
+}
+
+struct RepeatedWritePlan<T: TensorElement> {
+    group_size: usize,
+    group_size_u32: u32,
+    repeated_k: Tensor<T>,
+    repeated_v: Tensor<T>,
+    dst_head_stride: u32,
+    dst_seq_stride: u32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1188,6 +1229,32 @@ impl<T: TensorElement> Context<T> {
     /// - `k_step` and `v_step` must be contiguous tensors with shape [batch_heads, head_dim] or [batch_heads, 1, head_dim].
     ///   This performs a device blit copy from the source buffer into the cache at the correct offset.
     pub fn write_kv_step(&mut self, layer_idx: usize, step: usize, k_step: &Tensor<T>, v_step: &Tensor<T>) -> Result<(), MetalError> {
+        let plan = self.build_kv_write_plan(layer_idx, step, k_step, v_step)?;
+        self.dispatch_kv_write(layer_idx, plan, None)
+    }
+
+    /// Append a single timestep into the repeated KV cache, updating both canonical and repeated layouts in lockstep.
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_repeated_kv_step(
+        &mut self,
+        layer_idx: usize,
+        step: usize,
+        group_size: usize,
+        k_step: &Tensor<T>,
+        v_step: &Tensor<T>,
+    ) -> Result<(), MetalError> {
+        let plan = self.build_kv_write_plan(layer_idx, step, k_step, v_step)?;
+        let repeated_plan = self.build_repeated_write_plan(layer_idx, &plan, group_size)?;
+        self.dispatch_kv_write(layer_idx, plan, Some(repeated_plan))
+    }
+
+    fn build_kv_write_plan(
+        &self,
+        layer_idx: usize,
+        step: usize,
+        k_step: &Tensor<T>,
+        v_step: &Tensor<T>,
+    ) -> Result<KvWritePlan<T>, MetalError> {
         let k_src = k_step.clone();
         let v_src = v_step.clone();
 
@@ -1221,13 +1288,14 @@ impl<T: TensorElement> Context<T> {
             ));
         }
 
-        let (k_cache, v_cache, capacity_seq_val, element_size) = {
-            let entry = self
-                .kv_caches
-                .get(&layer_idx)
-                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
-            (entry.k.clone(), entry.v.clone(), entry.capacity, entry.element_size)
-        };
+        let entry = self
+            .kv_caches
+            .get(&layer_idx)
+            .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
+        let k_cache = entry.k.clone();
+        let v_cache = entry.v.clone();
+        let capacity_seq_val = entry.capacity;
+        let element_size = entry.element_size;
 
         if step >= capacity_seq_val {
             return Err(MetalError::InvalidOperation(format!(
@@ -1280,16 +1348,16 @@ impl<T: TensorElement> Context<T> {
         let heads_u32 = u32::try_from(expected_bh).map_err(|_| MetalError::InvalidShape("batch_heads exceeds u32::MAX".into()))?;
         let seq_len_u32 = u32::try_from(seq_in_src).map_err(|_| MetalError::InvalidShape("sequence length exceeds u32::MAX".into()))?;
         let step_u32 = u32::try_from(step).map_err(|_| MetalError::InvalidShape("step index exceeds u32::MAX".into()))?;
-        let src_head_stride_u32 =
+        let src_head_stride =
             u32::try_from(k_src.strides[0]).map_err(|_| MetalError::InvalidShape("source head stride exceeds u32::MAX".into()))?;
         let src_seq_stride = if dims.len() == 3 {
             u32::try_from(k_src.strides[1]).map_err(|_| MetalError::InvalidShape("source sequence stride exceeds u32::MAX".into()))?
         } else {
             0
         };
-        let dst_head_stride_u32 =
+        let dst_head_stride =
             u32::try_from(k_cache.strides[0]).map_err(|_| MetalError::InvalidShape("cache head stride exceeds u32::MAX".into()))?;
-        let dst_seq_stride_u32 =
+        let dst_seq_stride =
             u32::try_from(k_cache.strides[1]).map_err(|_| MetalError::InvalidShape("cache sequence stride exceeds u32::MAX".into()))?;
 
         if k_src.offset % element_size != 0
@@ -1304,138 +1372,48 @@ impl<T: TensorElement> Context<T> {
             .checked_mul(head_dim_u32)
             .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
 
-        self.prepare_tensors_for_active_cmd(&[&k_cache, &v_cache, &k_src, &v_src])?;
-
-        let config = KvCacheWriteConfig {
-            canonical_heads: heads_u32,
-            head_dim: head_dim_u32,
-            seq_len: seq_len_u32,
-            step: step_u32,
-            group_size: 1,
-            src_head_stride: src_head_stride_u32,
+        Ok(KvWritePlan {
+            k_src,
+            v_src,
+            k_cache,
+            v_cache,
+            canonical_heads: expected_bh,
+            seq_in_src,
+            head_dim: expected_hd,
+            capacity_seq_val,
+            element_size,
+            src_head_stride,
             src_seq_stride,
-            dst_head_stride: dst_head_stride_u32,
-            dst_seq_stride: dst_seq_stride_u32,
+            dst_head_stride,
+            dst_seq_stride,
             total_threads,
-        };
-
-        match self.call::<KvCacheWriteOp>((k_src.clone(), v_src.clone(), k_cache.clone(), v_cache.clone(), config)) {
-            Ok(_) => {
-                self.kv_cache_dispatch_stats.canonical_dispatches += 1;
-                self.mark_tensor_pending(&k_cache);
-                self.mark_tensor_pending(&v_cache);
-                if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
-                    entry.zeroing_complete = false;
-                }
-                Ok(())
-            }
-            Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
-                self.kv_cache_dispatch_stats.canonical_fallback_blits += 1;
-                self.blit_write_kv_step(
-                    layer_idx,
-                    step,
-                    &k_src,
-                    &v_src,
-                    &k_cache,
-                    &v_cache,
-                    seq_in_src,
-                    expected_bh,
-                    expected_hd,
-                    capacity_seq_val,
-                    element_size,
-                )
-            }
-            Err(err) => Err(err),
-        }
+            heads_u32,
+            head_dim_u32,
+            seq_len_u32,
+            step_u32,
+            step,
+        })
     }
-    /// Append a single timestep into the repeated KV cache by copying the canonical slice.
-    #[allow(clippy::too_many_arguments)]
-    pub fn write_repeated_kv_step(
-        &mut self,
+
+    fn build_repeated_write_plan(
+        &self,
         layer_idx: usize,
-        step: usize,
+        plan: &KvWritePlan<T>,
         group_size: usize,
-        k_step: &Tensor<T>,
-        v_step: &Tensor<T>,
-    ) -> Result<(), MetalError> {
+    ) -> Result<RepeatedWritePlan<T>, MetalError> {
         if group_size == 0 {
             return Err(MetalError::InvalidOperation(
                 "write_repeated_kv_step requires a non-zero group size".into(),
             ));
         }
 
-        let k_src = k_step.clone();
-        let v_src = v_step.clone();
+        let entry = self
+            .kv_caches
+            .get(&layer_idx)
+            .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
 
-        let k_dims = k_src.dims().to_vec();
-        let (canonical_heads, seq_in_src, head_dim) = match k_dims.len() {
-            2 => (k_dims[0], 1, k_dims[1]),
-            3 => (k_dims[0], k_dims[1], k_dims[2]),
-            _ => {
-                return Err(MetalError::InvalidShape(
-                    "write_repeated_kv_step expects source tensor rank 2 or 3".into(),
-                ));
-            }
-        };
-
-        if seq_in_src != 1 {
-            return Err(MetalError::OperationNotSupported(
-                "write_repeated_kv_step expects a single timestep in the source tensor".into(),
-            ));
-        }
-
-        let v_dims = v_src.dims().to_vec();
-        let (v_heads, v_seq_in_src, v_head_dim) = match v_dims.len() {
-            2 => (v_dims[0], 1, v_dims[1]),
-            3 => (v_dims[0], v_dims[1], v_dims[2]),
-            _ => {
-                return Err(MetalError::InvalidShape(
-                    "write_repeated_kv_step expects V tensor rank 2 or 3".into(),
-                ));
-            }
-        };
-
-        let (repeated_k, repeated_v, canonical_expected, capacity_seq_val, element_size) = {
-            let entry = self
-                .kv_caches
-                .get(&layer_idx)
-                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
-            (
-                entry.repeated_k.clone(),
-                entry.repeated_v.clone(),
-                entry.k.dims()[0],
-                entry.capacity,
-                entry.element_size,
-            )
-        };
-
-        if step >= capacity_seq_val {
-            return Err(MetalError::InvalidOperation(format!(
-                "Step {} exceeds KV cache capacity {} for layer {}",
-                step, capacity_seq_val, layer_idx
-            )));
-        }
-
-        if canonical_heads != canonical_expected {
-            return Err(MetalError::DimensionMismatch {
-                expected: canonical_expected,
-                actual: canonical_heads,
-            });
-        }
-
-        if v_heads != canonical_heads || v_head_dim != head_dim || v_seq_in_src != seq_in_src {
-            return Err(MetalError::DimensionMismatch {
-                expected: canonical_heads * head_dim,
-                actual: v_heads * v_head_dim,
-            });
-        }
-
-        if step + seq_in_src > capacity_seq_val {
-            return Err(MetalError::InvalidOperation(format!(
-                "Writing repeated KV step {} ({} timesteps) exceeds cache capacity {} for layer {}",
-                step, seq_in_src, capacity_seq_val, layer_idx
-            )));
-        }
+        let repeated_k = entry.repeated_k.clone();
+        let repeated_v = entry.repeated_v.clone();
 
         let repeated_dims = repeated_k.dims();
         if repeated_dims.len() != 3 {
@@ -1444,102 +1422,181 @@ impl<T: TensorElement> Context<T> {
             ));
         }
 
-        let repeated_heads_expected = canonical_heads
+        let repeated_heads_expected = plan
+            .canonical_heads
             .checked_mul(group_size)
             .ok_or_else(|| MetalError::InvalidOperation("group_size overflow while expanding KV heads".into()))?;
 
-        if repeated_dims[0] != repeated_heads_expected || repeated_dims[2] != head_dim {
+        if repeated_dims[0] != repeated_heads_expected || repeated_dims[2] != plan.head_dim {
             return Err(MetalError::DimensionMismatch {
-                expected: repeated_heads_expected * head_dim,
+                expected: repeated_heads_expected * plan.head_dim,
                 actual: repeated_dims[0] * repeated_dims[2],
             });
         }
 
-        if k_src.strides.len() != v_src.strides.len()
-            || k_src.strides.get(0) != v_src.strides.get(0)
-            || (k_src.strides.len() > 1 && k_src.strides[1] != v_src.strides[1])
-        {
-            return Err(MetalError::InvalidShape(
-                "write_repeated_kv_step requires K and V to share the same layout".into(),
-            ));
-        }
-
-        let head_dim_u32 = u32::try_from(head_dim).map_err(|_| MetalError::InvalidShape("head dimension exceeds u32::MAX".into()))?;
-        let canonical_heads_u32 =
-            u32::try_from(canonical_heads).map_err(|_| MetalError::InvalidShape("canonical head count exceeds u32::MAX".into()))?;
-        let seq_len_u32 = u32::try_from(seq_in_src).map_err(|_| MetalError::InvalidShape("sequence length exceeds u32::MAX".into()))?;
-        let step_u32 = u32::try_from(step).map_err(|_| MetalError::InvalidShape("step index exceeds u32::MAX".into()))?;
-        let group_size_u32 = u32::try_from(group_size).map_err(|_| MetalError::InvalidShape("group size exceeds u32::MAX".into()))?;
-        let src_head_stride_u32 =
-            u32::try_from(k_src.strides[0]).map_err(|_| MetalError::InvalidShape("source head stride exceeds u32::MAX".into()))?;
-        let src_seq_stride = if k_dims.len() == 3 {
-            u32::try_from(k_src.strides[1]).map_err(|_| MetalError::InvalidShape("source sequence stride exceeds u32::MAX".into()))?
-        } else {
-            0
-        };
-        let dst_head_stride_u32 = u32::try_from(repeated_k.strides[0])
-            .map_err(|_| MetalError::InvalidShape("repeated cache head stride exceeds u32::MAX".into()))?;
-        let dst_seq_stride_u32 = u32::try_from(repeated_k.strides[1])
-            .map_err(|_| MetalError::InvalidShape("repeated cache sequence stride exceeds u32::MAX".into()))?;
-
-        if k_src.offset % element_size != 0
-            || v_src.offset % element_size != 0
-            || repeated_k.offset % element_size != 0
-            || repeated_v.offset % element_size != 0
-        {
+        if repeated_k.offset % plan.element_size != 0 || repeated_v.offset % plan.element_size != 0 {
             return Err(MetalError::InvalidOperation("KV tensors must be element-aligned".into()));
         }
 
-        let total_threads = canonical_heads_u32
-            .checked_mul(head_dim_u32)
-            .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
+        let group_size_u32 = u32::try_from(group_size).map_err(|_| MetalError::InvalidShape("group size exceeds u32::MAX".into()))?;
+        let dst_head_stride = u32::try_from(repeated_k.strides[0])
+            .map_err(|_| MetalError::InvalidShape("repeated cache head stride exceeds u32::MAX".into()))?;
+        let dst_seq_stride = u32::try_from(repeated_k.strides[1])
+            .map_err(|_| MetalError::InvalidShape("repeated cache sequence stride exceeds u32::MAX".into()))?;
 
-        self.prepare_tensors_for_active_cmd(&[&repeated_k, &repeated_v, &k_src, &v_src])?;
+        Ok(RepeatedWritePlan {
+            group_size,
+            group_size_u32,
+            repeated_k,
+            repeated_v,
+            dst_head_stride,
+            dst_seq_stride,
+        })
+    }
+
+    fn dispatch_kv_write(
+        &mut self,
+        layer_idx: usize,
+        plan: KvWritePlan<T>,
+        mut repeated: Option<RepeatedWritePlan<T>>,
+    ) -> Result<(), MetalError> {
+        let KvWritePlan {
+            k_src,
+            v_src,
+            k_cache,
+            v_cache,
+            canonical_heads,
+            seq_in_src,
+            head_dim,
+            capacity_seq_val,
+            element_size,
+            src_head_stride,
+            src_seq_stride,
+            dst_head_stride,
+            dst_seq_stride,
+            total_threads,
+            heads_u32,
+            head_dim_u32,
+            seq_len_u32,
+            step_u32,
+            step,
+        } = plan;
+
+        let mut tensors: Vec<&Tensor<T>> = vec![&k_cache, &v_cache, &k_src, &v_src];
+        if let Some(ref rep) = repeated {
+            tensors.push(&rep.repeated_k);
+            tensors.push(&rep.repeated_v);
+        }
+        self.prepare_tensors_for_active_cmd(&tensors)?;
+
+        let mut group_size_u32 = 1;
+        let mut repeated_head_stride = 0;
+        let mut repeated_seq_stride = 0;
+        let mut repeated_buffers: Option<(Tensor<T>, Tensor<T>)> = None;
+        let mut repeated_group_size = 1usize;
+        let mut repeated_k_tensor: Option<Tensor<T>> = None;
+        let mut repeated_v_tensor: Option<Tensor<T>> = None;
+
+        if let Some(rep) = repeated.take() {
+            group_size_u32 = rep.group_size_u32;
+            repeated_head_stride = rep.dst_head_stride;
+            repeated_seq_stride = rep.dst_seq_stride;
+            repeated_group_size = rep.group_size;
+            repeated_buffers = Some((rep.repeated_k.clone(), rep.repeated_v.clone()));
+            repeated_k_tensor = Some(rep.repeated_k);
+            repeated_v_tensor = Some(rep.repeated_v);
+        }
+
+        let has_repeated = if repeated_buffers.is_some() { 1 } else { 0 };
 
         let config = KvCacheWriteConfig {
-            canonical_heads: canonical_heads_u32,
+            canonical_heads: heads_u32,
             head_dim: head_dim_u32,
             seq_len: seq_len_u32,
             step: step_u32,
             group_size: group_size_u32,
-            src_head_stride: src_head_stride_u32,
+            src_head_stride,
             src_seq_stride,
-            dst_head_stride: dst_head_stride_u32,
-            dst_seq_stride: dst_seq_stride_u32,
+            dst_head_stride,
+            dst_seq_stride,
             total_threads,
+            repeated_head_stride,
+            repeated_seq_stride,
+            has_repeated,
         };
 
-        match self.call::<KvCacheWriteOp>((k_src.clone(), v_src.clone(), repeated_k.clone(), repeated_v.clone(), config)) {
+        match self.call::<KvCacheWriteOp>((
+            k_src.clone(),
+            v_src.clone(),
+            k_cache.clone(),
+            v_cache.clone(),
+            repeated_buffers.clone(),
+            config,
+        )) {
             Ok(_) => {
-                self.kv_cache_dispatch_stats.repeated_dispatches += 1;
-                self.mark_tensor_pending(&repeated_k);
-                self.mark_tensor_pending(&repeated_v);
+                if repeated_buffers.is_some() {
+                    self.kv_cache_dispatch_stats.fused_layout.kernel_dispatches += 1;
+                } else {
+                    self.kv_cache_dispatch_stats.single_layout.kernel_dispatches += 1;
+                }
+
+                self.mark_tensor_pending(&k_cache);
+                self.mark_tensor_pending(&v_cache);
+                if let Some(ref repeated_k) = repeated_k_tensor {
+                    self.mark_tensor_pending(repeated_k);
+                }
+                if let Some(ref repeated_v) = repeated_v_tensor {
+                    self.mark_tensor_pending(repeated_v);
+                }
+
                 if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
                     entry.zeroing_complete = false;
                 }
                 Ok(())
             }
             Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
-                self.kv_cache_dispatch_stats.repeated_fallback_blits += 1;
-                self.blit_write_repeated_kv_step(
+                if repeated_buffers.is_some() {
+                    self.kv_cache_dispatch_stats.fused_layout.fallback_blits += 1;
+                } else {
+                    self.kv_cache_dispatch_stats.single_layout.fallback_blits += 1;
+                }
+
+                self.blit_write_kv_step(
                     layer_idx,
                     step,
-                    group_size,
                     &k_src,
                     &v_src,
-                    &repeated_k,
-                    &repeated_v,
+                    &k_cache,
+                    &v_cache,
                     seq_in_src,
                     canonical_heads,
                     head_dim,
                     capacity_seq_val,
                     element_size,
-                )
+                )?;
+
+                if let (Some(repeated_k), Some(repeated_v)) = (&repeated_k_tensor, &repeated_v_tensor) {
+                    self.blit_write_repeated_kv_step(
+                        layer_idx,
+                        step,
+                        repeated_group_size,
+                        &k_src,
+                        &v_src,
+                        repeated_k,
+                        repeated_v,
+                        seq_in_src,
+                        canonical_heads,
+                        head_dim,
+                        capacity_seq_val,
+                        element_size,
+                    )
+                } else {
+                    Ok(())
+                }
             }
             Err(err) => Err(err),
         }
     }
-
     fn blit_write_kv_step(
         &mut self,
         layer_idx: usize,

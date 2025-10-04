@@ -433,16 +433,15 @@ impl<T: TensorElement> Qwen25<T> {
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "rope"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "rope"));
 
-            // Update the KV cache with the new K and V values
-            phase_start = Instant::now();
-            ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
-
-            // Append the timestep into the repeated KV cache and create a view for attention
+            // Update both the canonical and repeated KV cache layouts with the new K and V values
             let group_size = n_heads / n_kv_heads;
             phase_start = Instant::now();
             ctx.write_repeated_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)?;
+            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
+
+            // Create a view over the repeated KV cache for attention
+            phase_start = Instant::now();
             let cache_entry = ctx
                 .kv_caches
                 .get(&layer_idx)

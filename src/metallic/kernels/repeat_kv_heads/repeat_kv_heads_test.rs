@@ -109,7 +109,6 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
             TensorInit::CopyFrom(&v_values),
         )?;
 
-        ctx.write_kv_step(layer_idx, step, &k_step, &v_step)?;
         ctx.write_repeated_kv_step(layer_idx, step, group_size, &k_step, &v_step)?;
     }
 
