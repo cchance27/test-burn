@@ -245,19 +245,19 @@ fn main() -> Result<()> {
             match event {
                 AppEvent::Token {
                     text,
-                    tokens_per_second,
                     prompt_processing,
-                    generation: _,
+                    iteration,
                 } => {
                     let was_following = app_state.text_follow_bottom;
                     app_state.generated_text.push_str(&text);
                     if was_following {
                         app_state.request_follow_text = true;
                     }
-                    app_state.tokens_per_second = tokens_per_second;
+                    app_state.update_generation_metrics(iteration);
                     app_state.prompt_processing_time = prompt_processing;
                 }
                 AppEvent::TokenCount(count) => {
+                    app_state.reset_generation_metrics();
                     app_state.prompt_token_count = count;
                 }
                 AppEvent::StatusUpdate(status) => {
@@ -283,9 +283,61 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+const RUNNING_AVERAGE_WINDOW: usize = 10;
+
+#[derive(Clone)]
+struct RunningAverage {
+    values: [f64; RUNNING_AVERAGE_WINDOW],
+    next_index: usize,
+    initialized: bool,
+}
+
+impl Default for RunningAverage {
+    fn default() -> Self {
+        Self {
+            values: [0.0; RUNNING_AVERAGE_WINDOW],
+            next_index: 0,
+            initialized: false,
+        }
+    }
+}
+
+impl RunningAverage {
+    fn record(&mut self, value: f64) {
+        if !value.is_finite() {
+            return;
+        }
+
+        if !self.initialized {
+            self.values = [value; RUNNING_AVERAGE_WINDOW];
+            self.initialized = true;
+            self.next_index = 1 % RUNNING_AVERAGE_WINDOW;
+        } else {
+            self.values[self.next_index] = value;
+            self.next_index = (self.next_index + 1) % RUNNING_AVERAGE_WINDOW;
+        }
+    }
+
+    fn average(&self) -> f64 {
+        if !self.initialized {
+            0.0
+        } else {
+            self.values.iter().sum::<f64>() / RUNNING_AVERAGE_WINDOW as f64
+        }
+    }
+
+    fn has_samples(&self) -> bool {
+        self.initialized
+    }
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+}
+
 struct AppState {
     generated_text: String,
-    tokens_per_second: f64,
+    iteration_latency: RunningAverage,
     prompt_token_count: usize,
     should_quit: bool,
     status: String,
@@ -309,7 +361,7 @@ impl AppState {
     fn new() -> Self {
         Self {
             generated_text: String::new(),
-            tokens_per_second: 0.0,
+            iteration_latency: RunningAverage::default(),
             prompt_token_count: 0,
             should_quit: false,
             status: "Initializing...".to_string(),
@@ -327,6 +379,36 @@ impl AppState {
             metrics_area: Rect::new(0, 0, 0, 0),
             alert_queue: VecDeque::new(),
             active_alert: None,
+        }
+    }
+
+    fn update_generation_metrics(&mut self, iteration: Option<Duration>) {
+        let Some(iteration) = iteration else {
+            return;
+        };
+
+        if iteration.is_zero() {
+            return;
+        }
+
+        self.iteration_latency.record(iteration.as_secs_f64() * 1000.0);
+    }
+
+    fn reset_generation_metrics(&mut self) {
+        self.iteration_latency.reset();
+    }
+
+    fn throughput_display(&self) -> String {
+        if self.iteration_latency.has_samples() {
+            let average_ms = self.iteration_latency.average();
+            if average_ms > 0.0 {
+                let tokens_per_second = 1000.0 / average_ms;
+                format!("{:.1} tok/s ({:.1}ms)", tokens_per_second, average_ms)
+            } else {
+                "-- tok/s (--ms)".to_string()
+            }
+        } else {
+            "-- tok/s (--ms)".to_string()
         }
     }
 
@@ -582,7 +664,7 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
 
     let status_text = Paragraph::new(state.status.clone()).style(Style::default().fg(Color::White).bg(Color::Blue));
 
-    let throughput_text = Paragraph::new(format!("{:.2} it/s", state.tokens_per_second))
+    let throughput_text = Paragraph::new(state.throughput_display())
         .style(Style::default().fg(Color::White).bg(Color::Blue))
         .alignment(Alignment::Right);
 

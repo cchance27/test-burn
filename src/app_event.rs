@@ -78,9 +78,8 @@ impl Alert {
 pub enum AppEvent {
     Token {
         text: Arc<str>,
-        tokens_per_second: f64,
         prompt_processing: Duration,
-        generation: Duration,
+        iteration: Option<Duration>,
     },
     TokenCount(usize),
     StatusUpdate(String),
