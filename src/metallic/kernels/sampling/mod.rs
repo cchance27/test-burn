@@ -1,5 +1,3 @@
-use super::*;
-
 /// Maximum supported top-k for the GPU sampling kernel. Larger requests fall
 /// back to the CPU implementation to avoid excessive per-thread stack usage.
 pub const MAX_TOP_K: usize = 256;

@@ -317,6 +317,9 @@ impl<T: TensorElement> Context<T> {
         });
         let matmul_instrumentation = MatMulInstrumentation::new(Some(&device));
 
+        let mut seeding_rng = rand::rng();
+        let sampler_seed = seeding_rng.next_u64();
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -339,7 +342,7 @@ impl<T: TensorElement> Context<T> {
             matmul_recorder,
             matmul_logging_session: RefCell::new(None),
             sampler_buffers: SamplerBuffers::default(),
-            sampler_rng: StdRng::from_entropy(),
+            sampler_rng: StdRng::seed_from_u64(sampler_seed),
             sampling_result_buffer: None,
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
@@ -467,7 +470,7 @@ impl<T: TensorElement> Context<T> {
         command_buffer.commit();
         command_buffer.wait();
 
-        let ptr = unsafe { result_buffer.contents().as_ptr().cast::<u32>() };
+        let ptr = result_buffer.contents().as_ptr().cast::<u32>();
         let token = unsafe { ptr.read_unaligned() };
         Ok(Some(token))
     }

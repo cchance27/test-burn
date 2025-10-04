@@ -9,7 +9,7 @@ use crate::metallic::metrics::{
     ScalarStat, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
-use crate::metallic::sampling::{effective_top_k, sample_top_k_top_p};
+use crate::metallic::sampling::effective_top_k;
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{TensorElement, Tokenizer};
 use crate::{alert, app_event::AppEvent};
