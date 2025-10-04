@@ -21,6 +21,7 @@ pub mod elemwise_mul;
 pub mod elemwise_sub;
 pub mod gelu;
 pub mod gemv;
+pub mod kv_cache_write;
 pub mod kv_rearrange;
 pub mod layernorm;
 pub mod matmul;
@@ -44,6 +45,7 @@ pub enum KernelLibrary {
     ElemwiseMul,
     ElemwiseSub,
     Gelu,
+    KvCacheWrite,
     KvRearrange,
     LayerNorm,
     Permute,
@@ -66,6 +68,7 @@ impl KernelLibrary {
             KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
             KernelLibrary::ElemwiseSub => include_str!("elemwise_sub/kernel.metal"),
             KernelLibrary::Gelu => include_str!("gelu/kernel.metal"),
+            KernelLibrary::KvCacheWrite => include_str!("kv_cache_write/kernel.metal"),
             KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
             KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
             KernelLibrary::Permute => include_str!("permute/kernel.metal"),
@@ -94,6 +97,7 @@ pub enum KernelFunction {
     ElemwiseMul,
     ElemwiseSub,
     Gelu,
+    KvCacheWrite,
     KvRearrange,
     LayerNorm,
     Permute,
@@ -120,6 +124,7 @@ impl KernelFunction {
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
             KernelFunction::ElemwiseSub => KernelLibrary::ElemwiseSub,
             KernelFunction::Gelu => KernelLibrary::Gelu,
+            KernelFunction::KvCacheWrite => KernelLibrary::KvCacheWrite,
             KernelFunction::KvRearrange => KernelLibrary::KvRearrange,
             KernelFunction::LayerNorm => KernelLibrary::LayerNorm,
             KernelFunction::Permute => KernelLibrary::Permute,
@@ -158,6 +163,8 @@ impl KernelFunction {
             (KernelFunction::ElemwiseSub, F16) => "sub_kernel_f16",
             (KernelFunction::Gelu, F32) => "gelu_kernel_f32",
             (KernelFunction::Gelu, F16) => "gelu_kernel_f16",
+            (KernelFunction::KvCacheWrite, F32) => "kv_cache_write_kernel_f32",
+            (KernelFunction::KvCacheWrite, F16) => "kv_cache_write_kernel_f16",
             (KernelFunction::KvRearrange, F32) => "kv_rearrange_kernel_f32",
             (KernelFunction::KvRearrange, F16) => "kv_rearrange_kernel_f16",
             (KernelFunction::LayerNorm, F32) => "layernorm_kernel_f32",

@@ -19,7 +19,7 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
 
     let stats_before = ctx.get_cache_stats().expect("resource cache should be initialized after dispatch");
     assert!(
-        stats_before.gemm_cache_size > 0 || stats_before.descriptor_cache_size > 0,
+        stats_before.gemm.size > 0 || stats_before.descriptor.size > 0,
         "matmul dispatch should populate the resource cache"
     );
 
@@ -28,19 +28,19 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
     let stats_after = ctx.get_cache_stats().expect("resource cache should persist after synchronization");
 
     assert_eq!(
-        stats_before.gemm_cache_size, stats_after.gemm_cache_size,
+        stats_before.gemm.size, stats_after.gemm.size,
         "GEMM cache entries should survive a command buffer flush",
     );
     assert_eq!(
-        stats_before.descriptor_cache_size, stats_after.descriptor_cache_size,
+        stats_before.descriptor.size, stats_after.descriptor.size,
         "Descriptor cache entries should survive a command buffer flush",
     );
     assert_eq!(
-        stats_before.softmax_cache_size, stats_after.softmax_cache_size,
+        stats_before.softmax.size, stats_after.softmax.size,
         "Softmax cache entries should survive a command buffer flush",
     );
     assert_eq!(
-        stats_before.sdpa_cache_size, stats_after.sdpa_cache_size,
+        stats_before.sdpa.size, stats_after.sdpa.size,
         "SDPA cache entries should survive a command buffer flush",
     );
 
