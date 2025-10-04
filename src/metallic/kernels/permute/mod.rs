@@ -106,8 +106,11 @@ impl<T: TensorElement> Operation for Permute<T> {
                 Ok(())
             } else {
                 let buffer = cache.get_or_create_permute_constant_buffer(device, kind, length)?;
-                unsafe {
-                    std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buffer.contents() as *mut u8, length);
+                if length > 0 {
+                    unsafe {
+                        let dst = buffer.contents().as_ptr().cast::<u8>();
+                        std::ptr::copy_nonoverlapping(data.as_ptr().cast::<u8>(), dst, length);
+                    }
                 }
                 set_buffer(&encoder, index, &buffer, 0);
                 retained_buffers.push(buffer);
