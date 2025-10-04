@@ -382,7 +382,11 @@ impl AppState {
         }
     }
 
-    fn update_generation_metrics(&mut self, iteration: Duration) {
+    fn update_generation_metrics(&mut self, iteration: Option<Duration>) {
+        let Some(iteration) = iteration else {
+            return;
+        };
+
         if iteration.is_zero() {
             return;
         }

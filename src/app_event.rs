@@ -79,7 +79,7 @@ pub enum AppEvent {
     Token {
         text: Arc<str>,
         prompt_processing: Duration,
-        iteration: Duration,
+        iteration: Option<Duration>,
     },
     TokenCount(usize),
     StatusUpdate(String),

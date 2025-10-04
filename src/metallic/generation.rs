@@ -329,27 +329,16 @@ pub fn generate_streaming<T: TensorElement>(
     let input_ids = tokenizer.encode(&full_prompt)?;
 
     let mut prompt_processing_duration: Option<Duration> = None;
-    let mut generation_start: Option<Instant> = None;
-
     let mut token_callback = |_token_id, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
         let now = Instant::now();
 
         let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
 
-        let gen_start = generation_start.get_or_insert(now);
-        let generation_elapsed = now.duration_since(*gen_start);
-
-        let iteration = if !iteration_duration.is_zero() {
-            iteration_duration
-        } else {
-            generation_elapsed
-        };
-
         if tx
             .send(AppEvent::Token {
                 text: decoded_token,
                 prompt_processing: prompt_duration,
-                iteration,
+                iteration: (!iteration_duration.is_zero()).then_some(iteration_duration),
             })
             .is_err()
         {
