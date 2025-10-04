@@ -3,7 +3,7 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState};
+use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 use std::time::Duration;
 
@@ -241,10 +241,11 @@ impl Operation for MatMul {
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Blit) {
                 if let Some(encoder) = command_buffer.blitCommandEncoder() {
+                    let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                     unsafe {
                         let _: () = msg_send![
                             &*encoder,
-                            sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                            sampleCountersInBuffer: sample_buffer,
                             atSampleIndex: timing.start_index(),
                             withBarrier: Bool::YES
                         ];
@@ -264,10 +265,11 @@ impl Operation for MatMul {
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Blit) {
                 if let Some(encoder) = command_buffer.blitCommandEncoder() {
+                    let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                     unsafe {
                         let _: () = msg_send![
                             &*encoder,
-                            sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                            sampleCountersInBuffer: sample_buffer,
                             atSampleIndex: timing.end_index(),
                             withBarrier: Bool::NO
                         ];

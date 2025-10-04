@@ -8,7 +8,7 @@ use crate::metallic::{
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer, MTLSize};
 
 #[repr(C)]
 struct GemvParams {
@@ -44,10 +44,11 @@ impl<T: TensorElement> Operation for Gemv<T> {
 
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
                         &*encoder,
-                        sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                        sampleCountersInBuffer: sample_buffer,
                         atSampleIndex: timing.start_index(),
                         withBarrier: Bool::YES
                     ];
@@ -65,10 +66,11 @@ impl<T: TensorElement> Operation for Gemv<T> {
 
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
                         &*encoder,
-                        sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                        sampleCountersInBuffer: sample_buffer,
                         atSampleIndex: timing.end_index(),
                         withBarrier: Bool::NO
                     ];

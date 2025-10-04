@@ -10,8 +10,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{
-    MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary,
-    MTLSize,
+    MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLCounterSampleBuffer, MTLDataType, MTLDevice,
+    MTLFunctionConstantValues, MTLLibrary, MTLSize,
 };
 use rustc_hash::FxHashMap;
 use std::convert::{TryFrom, TryInto};
@@ -436,10 +436,11 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
 
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
                         &*encoder,
-                        sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                        sampleCountersInBuffer: sample_buffer,
                         atSampleIndex: timing.start_index(),
                         withBarrier: Bool::YES
                     ];
@@ -483,10 +484,11 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
         if let Some(timing) = &self.dispatch_timing {
             if matches!(timing.kind(), MatMulDispatchKind::Compute) {
+                let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
                 unsafe {
                     let _: () = msg_send![
                         &*encoder,
-                        sampleCountersInBuffer: timing.sample_buffer().as_ref(),
+                        sampleCountersInBuffer: sample_buffer,
                         atSampleIndex: timing.end_index(),
                         withBarrier: Bool::NO
                     ];

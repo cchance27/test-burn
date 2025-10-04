@@ -6,7 +6,9 @@ use std::time::Duration;
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_foundation::{NSData, NSRange, NSString, NSUInteger};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSData;
+use objc2_foundation::{NSRange, NSString, NSUInteger};
 use objc2_metal::{
     MTLCommandBuffer, MTLCommonCounterSetTimestamp, MTLCounterErrorValue, MTLCounterResultTimestamp, MTLCounterSampleBuffer,
     MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
@@ -81,8 +83,8 @@ pub struct MatMulDispatchTiming {
 }
 
 impl MatMulDispatchTiming {
-    pub fn sample_buffer(&self) -> &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>> {
-        &self.sample_buffer
+    pub fn sample_buffer(&self) -> &ProtocolObject<dyn MTLCounterSampleBuffer> {
+        &*self.sample_buffer
     }
 
     pub fn start_index(&self) -> NSUInteger {
