@@ -1,6 +1,8 @@
 use super::*;
-use crate::metallic::{TensorElement, TensorInit, TensorStorage};
-use objc2_metal::MTLResource;
+use crate::metallic::{
+    TensorElement, TensorInit, TensorStorage,
+    resource_cache::{PermuteConstantKind, ResourceCache},
+};
 
 pub struct PermuteOp;
 
@@ -76,11 +78,7 @@ impl KernelInvocable for PermuteOp {
 }
 
 impl<T: TensorElement> Operation for Permute<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
@@ -88,69 +86,42 @@ impl<T: TensorElement> Operation for Permute<T> {
         let rank = self.src.dims.len() as u32;
         let num_elements = self.src.len() as u32;
 
-        // Create buffers for the arrays
-        // NOTE: We must create actual MTLBuffers for the arrays because set_bytes only works
-        // for small scalar values, not arrays. The Metal kernel expects these as constant buffers.
         let src_strides: Vec<u32> = self.src.strides.iter().map(|&x| x as u32).collect();
         let dst_strides: Vec<u32> = self.dst.strides.iter().map(|&x| x as u32).collect();
         let dims: Vec<u32> = self.src.dims.iter().map(|&x| x as u32).collect();
-
-        // Convert to byte slices and create NonNull pointers
-        let src_strides_ptr = std::ptr::NonNull::new(src_strides.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let dst_strides_ptr = std::ptr::NonNull::new(dst_strides.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let dims_ptr = std::ptr::NonNull::new(dims.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let permute_ptr = std::ptr::NonNull::new(self.permute.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
 
         let src_strides_len = src_strides.len() * std::mem::size_of::<u32>();
         let dst_strides_len = dst_strides.len() * std::mem::size_of::<u32>();
         let dims_len = dims.len() * std::mem::size_of::<u32>();
         let permute_len = self.permute.len() * std::mem::size_of::<u32>();
 
-        // Create temporary buffers
-        // DEBT: These buffers are created on-demand for each permute operation and not reused.
-        // This could be optimized by using a buffer pool or caching mechanism.
-        let src_strides_buf = unsafe {
-            self.src.buf.device().newBufferWithBytes_length_options(
-                src_strides_ptr,
-                src_strides_len,
-                objc2_metal::MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+        const INLINE_LIMIT: usize = 4 * 1024;
+        let device = self.src.buf.device();
+        let mut retained_buffers: Vec<Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>> = Vec::new();
 
-        let dst_strides_buf = unsafe {
-            self.src.buf.device().newBufferWithBytes_length_options(
-                dst_strides_ptr,
-                dst_strides_len,
-                objc2_metal::MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+        let mut bind_slice = |index: usize, data: &[u32], length: usize, kind: PermuteConstantKind| -> Result<(), MetalError> {
+            if length <= INLINE_LIMIT {
+                set_bytes_slice(&encoder, index, data);
+                Ok(())
+            } else {
+                let buffer = cache.get_or_create_permute_constant_buffer(&device, kind, length)?;
+                unsafe {
+                    std::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, buffer.contents().as_ptr() as *mut u8, length);
+                }
+                set_buffer(&encoder, index, &buffer, 0);
+                retained_buffers.push(buffer);
+                Ok(())
+            }
+        };
 
-        let dims_buf = unsafe {
-            self.src
-                .buf
-                .device()
-                .newBufferWithBytes_length_options(dims_ptr, dims_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
-
-        let permute_buf = unsafe {
-            self.src.buf.device().newBufferWithBytes_length_options(
-                permute_ptr,
-                permute_len,
-                objc2_metal::MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+        bind_slice(2, &src_strides, src_strides_len, PermuteConstantKind::SrcStrides)?;
+        bind_slice(3, &dst_strides, dst_strides_len, PermuteConstantKind::DstStrides)?;
+        bind_slice(4, &dims, dims_len, PermuteConstantKind::Dims)?;
+        bind_slice(5, &self.permute, permute_len, PermuteConstantKind::Permutation)?;
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.src.buf, self.src.offset);
         set_buffer(&encoder, 1, &self.dst.buf, self.dst.offset);
-        set_buffer(&encoder, 2, &src_strides_buf, 0);
-        set_buffer(&encoder, 3, &dst_strides_buf, 0);
-        set_buffer(&encoder, 4, &dims_buf, 0);
-        set_buffer(&encoder, 5, &permute_buf, 0);
         set_bytes(&encoder, 6, &rank);
         set_bytes(&encoder, 7, &num_elements);
 

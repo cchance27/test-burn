@@ -43,6 +43,18 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
         stats_before.sdpa_cache_size, stats_after.sdpa_cache_size,
         "SDPA cache entries should survive a command buffer flush",
     );
+    assert_eq!(
+        stats_before.permute_constant_cache_size, stats_after.permute_constant_cache_size,
+        "Permute constant cache entries should survive a command buffer flush",
+    );
+    assert_eq!(
+        stats_before.permute_constant_cache_hits, stats_after.permute_constant_cache_hits,
+        "Permute constant cache hits should survive a command buffer flush",
+    );
+    assert_eq!(
+        stats_before.permute_constant_cache_misses, stats_after.permute_constant_cache_misses,
+        "Permute constant cache misses should survive a command buffer flush",
+    );
 
     Ok(())
 }

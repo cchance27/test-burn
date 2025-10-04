@@ -7,7 +7,7 @@ use super::{
 };
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::MTLDevice;
+use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
 use rustc_hash::FxHashMap;
 use std::collections::hash_map::Entry;
 
@@ -20,6 +20,9 @@ pub struct ResourceCache {
     descriptor_cache: FxHashMap<MpsMatrixDescriptorKey, CacheableMpsMatrixDescriptor>,
     softmax_cache: FxHashMap<MpsSoftMaxKey, CacheableMpsSoftMax>,
     sdpa_cache: FxHashMap<SdpaKey, CacheableSdpa>,
+    permute_constant_cache: FxHashMap<PermuteConstantKey, CacheableConstantBuffer>,
+    permute_constant_cache_hits: usize,
+    permute_constant_cache_misses: usize,
 }
 
 impl ResourceCache {
@@ -42,6 +45,9 @@ impl ResourceCache {
             descriptor_cache: FxHashMap::default(),
             softmax_cache: FxHashMap::default(),
             sdpa_cache: FxHashMap::default(),
+            permute_constant_cache: FxHashMap::default(),
+            permute_constant_cache_hits: 0,
+            permute_constant_cache_misses: 0,
         }
     }
 
@@ -110,6 +116,37 @@ impl ResourceCache {
             .clone()
     }
 
+    /// Get or create a reusable constant buffer for permute kernels.
+    #[inline]
+    pub fn get_or_create_permute_constant_buffer(
+        &mut self,
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        kind: PermuteConstantKind,
+        length: usize,
+    ) -> Result<Retained<ProtocolObject<dyn MTLBuffer>>, MetalError> {
+        let key = PermuteConstantKey { kind, length };
+        match self.permute_constant_cache.entry(key) {
+            Entry::Occupied(entry) => {
+                debug_assert_eq!(entry.get().length, length);
+                self.permute_constant_cache_hits += 1;
+                Ok(entry.get().buffer.clone())
+            }
+            Entry::Vacant(entry) => {
+                let buffer = device
+                    .newBufferWithLength_options(length, MTLResourceOptions::StorageModeShared)
+                    .ok_or(MetalError::BufferCreationFailed(length))?;
+                self.permute_constant_cache_misses += 1;
+                Ok(entry
+                    .insert(CacheableConstantBuffer {
+                        buffer: buffer.clone(),
+                        length,
+                    })
+                    .buffer
+                    .clone())
+            }
+        }
+    }
+
     /// Get statistics about the cache.
     #[inline]
     pub fn get_stats(&self) -> CacheStats {
@@ -118,6 +155,9 @@ impl ResourceCache {
             descriptor_cache_size: self.descriptor_cache.len(),
             softmax_cache_size: self.softmax_cache.len(),
             sdpa_cache_size: self.sdpa_cache.len(),
+            permute_constant_cache_size: self.permute_constant_cache.len(),
+            permute_constant_cache_hits: self.permute_constant_cache_hits,
+            permute_constant_cache_misses: self.permute_constant_cache_misses,
         }
     }
 
@@ -127,6 +167,9 @@ impl ResourceCache {
         self.descriptor_cache.clear();
         self.softmax_cache.clear();
         self.sdpa_cache.clear();
+        self.permute_constant_cache.clear();
+        self.permute_constant_cache_hits = 0;
+        self.permute_constant_cache_misses = 0;
     }
 }
 
@@ -137,6 +180,29 @@ pub struct CacheStats {
     pub descriptor_cache_size: usize,
     pub softmax_cache_size: usize,
     pub sdpa_cache_size: usize,
+    pub permute_constant_cache_size: usize,
+    pub permute_constant_cache_hits: usize,
+    pub permute_constant_cache_misses: usize,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone, Copy)]
+pub enum PermuteConstantKind {
+    SrcStrides,
+    DstStrides,
+    Dims,
+    Permutation,
+}
+
+#[derive(Hash, Eq, PartialEq)]
+pub struct PermuteConstantKey {
+    kind: PermuteConstantKind,
+    length: usize,
+}
+
+#[derive(Clone)]
+pub struct CacheableConstantBuffer {
+    pub buffer: Retained<ProtocolObject<dyn MTLBuffer>>,
+    pub length: usize,
 }
 
 impl Default for ResourceCache {

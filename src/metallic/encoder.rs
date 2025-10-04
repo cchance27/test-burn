@@ -34,6 +34,23 @@ pub fn set_bytes<T: Sized>(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder
     }
 }
 
+/// Sets a slice of POD data for a compute kernel.
+#[inline]
+pub fn set_bytes_slice<T: Sized>(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, index: usize, data: &[T]) {
+    let size = std::mem::size_of::<T>() * data.len();
+    // SAFETY: slices are guaranteed to have non-null pointers when len > 0. For
+    // empty slices Metal still expects a valid pointer, so fall back to
+    // `std::ptr::NonNull::dangling` which is valid for zero-length accesses.
+    unsafe {
+        let ptr = if data.is_empty() {
+            std::ptr::NonNull::dangling().cast::<c_void>()
+        } else {
+            std::ptr::NonNull::new_unchecked(data.as_ptr() as *mut c_void)
+        };
+        encoder.setBytes_length_atIndex(ptr, size, index);
+    }
+}
+
 /// Dispatches a compute kernel.
 #[inline]
 pub fn dispatch_threadgroups(encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>, groups: MTLSize, threads_per_tg: MTLSize) {
