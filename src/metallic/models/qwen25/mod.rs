@@ -596,6 +596,13 @@ impl<T: TensorElement> Qwen25<T> {
             return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
+        if history.active_seq > history.cache_capacity {
+            return Err(MetalError::InvalidShape(format!(
+                "repeat_kv_heads active sequence {} exceeds cache capacity {}",
+                history.active_seq, history.cache_capacity
+            )));
+        }
+
         ctx.kv_repeat_view(
             &history.tensor,
             group_size,

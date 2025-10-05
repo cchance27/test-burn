@@ -4,6 +4,7 @@ use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
 use super::*;
+use objc2::rc::Retained;
 
 #[test]
 fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
@@ -204,7 +205,7 @@ fn test_repeat_kv_heads_returns_canonical_view() -> Result<(), MetalError> {
 
     assert_eq!(output.dims(), &[batch * n_kv_heads, seq, head_dim]);
     assert_eq!(output.as_slice(), input_data.as_slice());
-    assert_eq!(output.buf.as_ptr(), input.buf.as_ptr());
+    assert_eq!(Retained::as_ptr(&output.buf), Retained::as_ptr(&input.buf));
     assert_eq!(output.offset, input.offset);
 
     Ok(())
