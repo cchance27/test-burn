@@ -1,5 +1,6 @@
 use crate::gguf::GGUFFile;
 use crate::gguf::model_loader::GGUFModelLoader;
+use crate::metallic::context::RopeHandles;
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
@@ -161,8 +162,11 @@ fn run_blocks_up_to<T: TensorElement>(
         let kv_head_dim = kv_dim / n_kv_heads;
         let x_flat = x_normed.reshape(vec![m, d_model])?;
 
-        let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
+        let fused_linear = ctx.matmul_bias_add(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, false, false)?;
         ctx.synchronize();
+        let q_mat = fused_linear.slice_last_dim(0..d_model)?;
+        let k_mat = fused_linear.slice_last_dim(d_model..d_model + kv_dim)?;
+        let v_mat = fused_linear.slice_last_dim(d_model + kv_dim..d_model + 2 * kv_dim)?;
 
         // Rearrange into heads
         let q_heads = ctx.call::<KvRearrangeOp>((
@@ -231,6 +235,69 @@ fn run_blocks_up_to<T: TensorElement>(
         let sin_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &sin_buf_k)?;
         let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
         ctx.synchronize();
+
+        // Validate fused QKV path matches the legacy kernel chain.
+        let (fused_q_heads, fused_k_heads, fused_v_heads) = ctx.fused_qkv_projection(
+            &x_flat,
+            &block.attn_qkv_weight,
+            &block.attn_qkv_bias,
+            batch,
+            seq,
+            d_model,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            kv_head_dim,
+            kv_dim,
+            Some(RopeHandles {
+                cos: &model.rope_cos_cache,
+                sin: &model.rope_sin_cache,
+                position_offset: 0,
+            }),
+        )?;
+        ctx.synchronize();
+
+        let fused_q_host = ctx.materialize_contiguous_view(fused_q_heads.clone())?;
+        let fused_k_host = ctx.materialize_contiguous_view(fused_k_heads.clone())?;
+        let fused_v_host = ctx.materialize_contiguous_view(fused_v_heads.clone())?;
+        let legacy_q_host = ctx.materialize_contiguous_view(q_heads_after_rope.clone())?;
+        let legacy_k_host = ctx.materialize_contiguous_view(k_heads_after_rope.clone())?;
+        let legacy_v_host = ctx.materialize_contiguous_view(v_heads.clone())?;
+
+        assert_eq!(fused_q_host.dims(), legacy_q_host.dims(), "Fused Q dims mismatch");
+        assert_eq!(fused_k_host.dims(), legacy_k_host.dims(), "Fused K dims mismatch");
+        assert_eq!(fused_v_host.dims(), legacy_v_host.dims(), "Fused V dims mismatch");
+
+        let epsilon = dtype_threshold::<TestElement>(25.0, 25.0);
+        let significant = dtype_threshold::<TestElement>(25.0, 25.0);
+
+        for (name, fused, legacy) in [
+            ("Q", fused_q_host.as_slice(), legacy_q_host.as_slice()),
+            ("K", fused_k_host.as_slice(), legacy_k_host.as_slice()),
+            ("V", fused_v_host.as_slice(), legacy_v_host.as_slice()),
+        ] {
+            let mut max_diff = 0f32;
+            let mut diff_count = 0usize;
+            for (idx, (f, l)) in fused.iter().zip(legacy.iter()).enumerate() {
+                let f = T::to_f32(*f);
+                let l = T::to_f32(*l);
+                let diff = (f - l).abs();
+                if diff > significant {
+                    if diff_count < 10 {
+                        println!("Fused {name} diff at {idx}: fused={}, legacy={}, diff={}", f, l, diff);
+                    }
+                    diff_count += 1;
+                }
+                if diff > max_diff {
+                    max_diff = diff;
+                }
+            }
+            println!(
+                "Fused {name} vs legacy max diff: {} ({} differences > {})",
+                max_diff, diff_count, significant
+            );
+            assert_relative_eq!(max_diff, 0.0, epsilon = epsilon);
+        }
 
         // Repeat KV heads for SDPA (GQA)
         let group_size = n_heads / n_kv_heads;
@@ -403,8 +470,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
     // Check the dimensions of the weight tensor to see if it needs to be handled differently
     println!("Fused QKV weight dims: {:?}", block0.attn_qkv_weight.dims());
-    let (q_mat, k_mat, v_mat) =
-        ctx.fused_qkv_projection(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, d_model, block0.kv_dim)?;
+    let fused_linear = ctx.matmul_bias_add(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, false, false)?;
+    let q_mat = fused_linear.slice_last_dim(0..d_model)?;
     ctx.synchronize();
     let q_mat_host = ctx.materialize_contiguous_view(q_mat.clone())?;
     let rust_q_proj_slice = q_mat_host.as_slice();
@@ -1148,14 +1215,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     let m = attn_norm_last_view.dims()[0];
     let x_flat_last = attn_norm_last_view.reshape(vec![m, d_model])?;
 
-    let (q_mat_last, k_mat_last, v_mat_last) = ctx.fused_qkv_projection(
-        &x_flat_last,
-        &block_last.attn_qkv_weight,
-        &block_last.attn_qkv_bias,
-        d_model,
-        kv_dim_last,
-    )?;
+    let fused_linear_last = ctx.matmul_bias_add(&x_flat_last, &block_last.attn_qkv_weight, &block_last.attn_qkv_bias, false, false)?;
     ctx.synchronize();
+    let q_mat_last = fused_linear_last.slice_last_dim(0..d_model)?;
+    let k_mat_last = fused_linear_last.slice_last_dim(d_model..d_model + kv_dim_last)?;
+    let v_mat_last = fused_linear_last.slice_last_dim(d_model + kv_dim_last..d_model + 2 * kv_dim_last)?;
 
     // Rearrangement into heads
     let q_heads_last = ctx.call::<KvRearrangeOp>((

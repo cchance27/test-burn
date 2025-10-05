@@ -165,6 +165,12 @@ pub struct KvCacheDispatchStats {
     pub fused_layout: KvCacheWritePathStats,
 }
 
+pub struct RopeHandles<'a, T: TensorElement> {
+    pub cos: &'a Tensor<T>,
+    pub sin: &'a Tensor<T>,
+    pub position_offset: u32,
+}
+
 struct KvWritePlan<T: TensorElement> {
     k_src: Tensor<T>,
     v_src: Tensor<T>,
@@ -954,14 +960,21 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    #[allow(clippy::too_many_arguments)]
     pub fn fused_qkv_projection(
         &mut self,
         x_flat: &Tensor<T>,
         fused_weight: &Tensor<T>,
         fused_bias: &Tensor<T>,
+        batch: usize,
+        seq: usize,
         d_model: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        head_dim: usize,
+        kv_head_dim: usize,
         kv_dim: usize,
+        rope: Option<RopeHandles<'_, T>>,
     ) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>), MetalError> {
         let x_dims = x_flat.dims();
         if x_dims.len() != 2 {
@@ -971,12 +984,59 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
-        let _m = x_dims[0];
+        let m = x_dims[0];
         let in_features = x_dims[1];
         if in_features != d_model {
             return Err(MetalError::InvalidShape(format!(
                 "Input feature size {} does not match d_model {}",
                 in_features, d_model
+            )));
+        }
+
+        if batch == 0 || seq == 0 {
+            return Err(MetalError::InvalidShape(
+                "fused_qkv_projection requires positive batch and seq".to_string(),
+            ));
+        }
+
+        if batch
+            .checked_mul(seq)
+            .ok_or_else(|| MetalError::InvalidShape("Batch * seq exceeds representable range for fused_qkv_projection".to_string()))?
+            != m
+        {
+            return Err(MetalError::InvalidShape(format!(
+                "Batch {} multiplied by seq {} must equal flattened rows {}",
+                batch, seq, m
+            )));
+        }
+
+        if n_heads == 0 || n_kv_heads == 0 {
+            return Err(MetalError::InvalidShape("Head counts must be greater than zero".to_string()));
+        }
+
+        if head_dim == 0 || kv_head_dim == 0 {
+            return Err(MetalError::InvalidShape("Head dimensions must be greater than zero".to_string()));
+        }
+
+        if n_heads
+            .checked_mul(head_dim)
+            .ok_or_else(|| MetalError::InvalidShape("n_heads * head_dim exceeds representable range".to_string()))?
+            != d_model
+        {
+            return Err(MetalError::InvalidShape(format!(
+                "n_heads ({}) * head_dim ({}) must equal d_model ({})",
+                n_heads, head_dim, d_model
+            )));
+        }
+
+        if n_kv_heads
+            .checked_mul(kv_head_dim)
+            .ok_or_else(|| MetalError::InvalidShape("n_kv_heads * kv_head_dim exceeds representable range".to_string()))?
+            != kv_dim
+        {
+            return Err(MetalError::InvalidShape(format!(
+                "n_kv_heads ({}) * kv_head_dim ({}) must equal kv_dim ({})",
+                n_kv_heads, kv_head_dim, kv_dim
             )));
         }
 
@@ -1010,11 +1070,72 @@ impl<T: TensorElement> Context<T> {
         let k_range_end = d_model + kv_dim;
         let v_range_end = expected_total;
 
-        let q_out = linear.slice_last_dim(0..q_range_end)?;
-        let k_out = linear.slice_last_dim(d_model..k_range_end)?;
-        let v_out = linear.slice_last_dim(k_range_end..v_range_end)?;
+        let q_linear = linear.slice_last_dim(0..q_range_end)?;
+        let k_linear = linear.slice_last_dim(d_model..k_range_end)?;
+        let v_linear = linear.slice_last_dim(k_range_end..v_range_end)?;
 
-        Ok((q_out, k_out, v_out))
+        let seq_u32 = u32::try_from(seq).map_err(|_| MetalError::InvalidShape("Sequence length exceeds u32::MAX".to_string()))?;
+        let head_dim_u32 = u32::try_from(head_dim).map_err(|_| MetalError::InvalidShape("head_dim exceeds u32::MAX".to_string()))?;
+        let kv_head_dim_u32 =
+            u32::try_from(kv_head_dim).map_err(|_| MetalError::InvalidShape("kv_head_dim exceeds u32::MAX".to_string()))?;
+        let n_heads_u32 = u32::try_from(n_heads).map_err(|_| MetalError::InvalidShape("n_heads exceeds u32::MAX".to_string()))?;
+        let n_kv_heads_u32 = u32::try_from(n_kv_heads).map_err(|_| MetalError::InvalidShape("n_kv_heads exceeds u32::MAX".to_string()))?;
+        let d_model_u32 = u32::try_from(d_model).map_err(|_| MetalError::InvalidShape("d_model exceeds u32::MAX".to_string()))?;
+        let kv_dim_u32 = u32::try_from(kv_dim).map_err(|_| MetalError::InvalidShape("kv_dim exceeds u32::MAX".to_string()))?;
+
+        let q_heads = self.call::<crate::metallic::kernels::kv_rearrange::KvRearrangeOp>((
+            q_linear,
+            d_model_u32,
+            head_dim_u32,
+            n_heads_u32,
+            n_heads_u32,
+            head_dim_u32,
+            seq_u32,
+        ))?;
+
+        let k_heads = self.call::<crate::metallic::kernels::kv_rearrange::KvRearrangeOp>((
+            k_linear,
+            kv_dim_u32,
+            kv_head_dim_u32,
+            n_kv_heads_u32,
+            n_kv_heads_u32,
+            kv_head_dim_u32,
+            seq_u32,
+        ))?;
+
+        let v_heads = self.call::<crate::metallic::kernels::kv_rearrange::KvRearrangeOp>((
+            v_linear,
+            kv_dim_u32,
+            kv_head_dim_u32,
+            n_kv_heads_u32,
+            n_kv_heads_u32,
+            kv_head_dim_u32,
+            seq_u32,
+        ))?;
+
+        if let Some(rope_handles) = rope {
+            let q_with_rope = self.call::<crate::metallic::kernels::rope::RoPEOp>((
+                q_heads,
+                rope_handles.cos.clone(),
+                rope_handles.sin.clone(),
+                head_dim_u32,
+                seq_u32,
+                rope_handles.position_offset,
+            ))?;
+
+            let k_with_rope = self.call::<crate::metallic::kernels::rope::RoPEOp>((
+                k_heads,
+                rope_handles.cos.clone(),
+                rope_handles.sin.clone(),
+                kv_head_dim_u32,
+                seq_u32,
+                rope_handles.position_offset,
+            ))?;
+
+            Ok((q_with_rope, k_with_rope, v_heads))
+        } else {
+            Ok((q_heads, k_heads, v_heads))
+        }
     }
 
     #[inline]

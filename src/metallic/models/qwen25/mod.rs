@@ -1,8 +1,7 @@
+use crate::metallic::context::RopeHandles;
 use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
-use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
-use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::{Context, MetalError, Tensor, TensorElement};
 use std::time::Instant;
 
@@ -218,61 +217,29 @@ impl<T: TensorElement> Qwen25<T> {
             let m = batch * seq;
             let kv_dim = block.kv_dim;
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
-            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
-
-            // Defer RoPE until after head rearrangement
-            let (q_after, k_after) = (q_mat.clone(), k_mat.clone());
-            // KV Head Rearrangement
             let n_heads = self.config.n_heads;
             let n_kv_heads = self.config.n_kv_heads;
             let head_dim = d_model / n_heads;
             let kv_head_dim = kv_dim / n_kv_heads;
 
-            let q_heads = ctx.call::<KvRearrangeOp>((
-                q_after,
-                d_model as u32,
-                head_dim as u32,
-                n_heads as u32,
-                n_heads as u32,
-                head_dim as u32,
-                seq as u32,
-            ))?;
-            let k_heads = ctx.call::<KvRearrangeOp>((
-                k_after,
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-            ))?;
-            let v_heads = ctx.call::<KvRearrangeOp>((
-                v_mat,
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-            ))?;
-
-            // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
-            let q_heads_after_rope = ctx.call::<RoPEOp>((
-                q_heads,
-                self.rope_cos_cache.clone(),
-                self.rope_sin_cache.clone(),
-                head_dim as u32,
-                seq as u32,
-                0,
-            ))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((
-                k_heads,
-                self.rope_cos_cache.clone(),
-                self.rope_sin_cache.clone(),
-                kv_head_dim as u32,
-                seq as u32,
-                0,
-            ))?;
+            let (q_heads_after_rope, k_heads_after_rope, v_heads) = ctx.fused_qkv_projection(
+                &x_flat,
+                &block.attn_qkv_weight,
+                &block.attn_qkv_bias,
+                batch,
+                seq,
+                d_model,
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                kv_head_dim,
+                kv_dim,
+                Some(RopeHandles {
+                    cos: &self.rope_cos_cache,
+                    sin: &self.rope_sin_cache,
+                    position_offset: 0,
+                }),
+            )?;
 
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
@@ -370,68 +337,31 @@ impl<T: TensorElement> Qwen25<T> {
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
             phase_start = Instant::now();
-            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_qkv_proj"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_qkv_proj"));
-
-            // KV Head Rearrangement
             let n_heads = self.config.n_heads;
             let n_kv_heads = self.config.n_kv_heads;
             let head_dim = d_model / n_heads;
             let kv_head_dim = kv_dim / n_kv_heads;
 
-            phase_start = Instant::now();
-            let q_heads = ctx.call::<KvRearrangeOp>((
-                q_mat,
-                d_model as u32,
-                head_dim as u32,
-                n_heads as u32,
-                n_heads as u32,
-                head_dim as u32,
-                seq as u32,
-            ))?;
-            let k_heads = ctx.call::<KvRearrangeOp>((
-                k_mat,
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-            ))?;
-            let v_heads = ctx.call::<KvRearrangeOp>((
-                v_mat,
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-            ))?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_rearrange"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_rearrange"));
-
-            // Apply RoPE using the pre-computed cache for the current position
-            let position_offset = pos as u32;
-            phase_start = Instant::now();
-            let q_heads_after_rope = ctx.call::<RoPEOp>((
-                q_heads,
-                self.rope_cos_cache.clone(),
-                self.rope_sin_cache.clone(),
-                head_dim as u32,
-                seq as u32,
-                position_offset,
-            ))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((
-                k_heads,
-                self.rope_cos_cache.clone(),
-                self.rope_sin_cache.clone(),
-                kv_head_dim as u32,
-                seq as u32,
-                position_offset,
-            ))?;
-            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "rope"), phase_start.elapsed());
-            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "rope"));
+            let (q_heads_after_rope, k_heads_after_rope, v_heads) = ctx.fused_qkv_projection(
+                &x_flat,
+                &block.attn_qkv_weight,
+                &block.attn_qkv_bias,
+                batch,
+                seq,
+                d_model,
+                n_heads,
+                n_kv_heads,
+                head_dim,
+                kv_head_dim,
+                kv_dim,
+                Some(RopeHandles {
+                    cos: &self.rope_cos_cache,
+                    sin: &self.rope_sin_cache,
+                    position_offset: pos as u32,
+                }),
+            )?;
+            ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "attn_qkv_proj"), phase_start.elapsed());
+            ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "attn_qkv_proj"));
 
             // Update the KV cache with the new K and V values
             let group_size = n_heads / n_kv_heads;
