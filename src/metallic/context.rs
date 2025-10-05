@@ -2,12 +2,15 @@ use super::error::MetalError;
 use super::instrumentation::{
     LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchRegistration, MatMulInstrumentation,
     MatMulSampleRecorder, MatmulDims, MemoryCollectorHandle, MemoryEvent, MemorySample, MemorySampleSender, MemoryUsage,
+    SamplingDispatchRegistration, SamplingInstrumentation, SamplingSample, SamplingSampleRecorder,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use crate::metallic::kernels::sampling::{MAX_TOP_K, SampleTopKTopPOp, SamplingParams};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
+use crate::metallic::sampling::{SamplerBuffers, effective_top_k, sample_top_k_top_p_with_random_value};
 use crate::metallic::tensor::Dtype;
 use crate::metallic::{Tensor, TensorElement, kernels};
 use kernels::gemv::GemvOp;
@@ -21,7 +24,9 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+use rand::rngs::StdRng;
+use rand::{RngCore, SeedableRng};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::env;
@@ -109,12 +114,6 @@ fn matmul_shape_logger() -> Option<&'static MatmulShapeLogger> {
             })
         })
         .as_ref()
-}
-
-#[derive(Default)]
-pub struct SamplerBuffers {
-    pub scaled: Vec<f32>,
-    pub indices: Vec<usize>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -241,8 +240,14 @@ pub struct Context<T: TensorElement> {
     matmul_samples: Arc<Mutex<Vec<MatMulSample>>>,
     matmul_recorder: MatMulSampleRecorder,
     matmul_logging_session: RefCell<Option<Vec<MatMulDispatchHandle>>>,
+    /// Instrumentation used to capture sampling kernel timings.
+    sampling_instrumentation: SamplingInstrumentation,
+    sampling_samples: Arc<Mutex<Vec<SamplingSample>>>,
+    sampling_recorder: SamplingSampleRecorder,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
+    sampler_rng: StdRng,
+    sampling_result_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
     /// Optional override for the matmul backend chosen by this context.
     forced_matmul_backend: MatMulBackendOverride,
     /// Whether to emit shape/timing logs for matmul calls.
@@ -316,6 +321,21 @@ impl<T: TensorElement> Context<T> {
         });
         let matmul_instrumentation = MatMulInstrumentation::new(Some(&device));
 
+        let sampling_samples = Arc::new(Mutex::new(Vec::new()));
+        let sampling_samples_for_recorder = Arc::clone(&sampling_samples);
+        let sampling_recorder = SamplingSampleRecorder::new(move |sample| {
+            if sample.duration.is_zero() {
+                return;
+            }
+            if let Ok(mut samples) = sampling_samples_for_recorder.lock() {
+                samples.push(sample);
+            }
+        });
+        let sampling_instrumentation = SamplingInstrumentation::new(Some(&device));
+
+        let mut seeding_rng = rand::rng();
+        let sampler_seed = seeding_rng.next_u64();
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -337,7 +357,12 @@ impl<T: TensorElement> Context<T> {
             matmul_samples,
             matmul_recorder,
             matmul_logging_session: RefCell::new(None),
+            sampling_instrumentation,
+            sampling_samples,
+            sampling_recorder,
             sampler_buffers: SamplerBuffers::default(),
+            sampler_rng: StdRng::seed_from_u64(sampler_seed),
+            sampling_result_buffer: None,
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),
@@ -349,6 +374,103 @@ impl<T: TensorElement> Context<T> {
 
     pub fn tensor_dtype(&self) -> Dtype {
         T::DTYPE
+    }
+
+    /// Reseed the sampler RNG used for device and host sampling paths.
+    pub fn reseed_sampler(&mut self, seed: u64) {
+        self.sampler_rng = StdRng::seed_from_u64(seed);
+    }
+
+    #[inline]
+    pub(crate) fn next_sampler_random(&mut self) -> u32 {
+        self.sampler_rng.next_u32()
+    }
+
+    pub(crate) fn sample_top_k_top_p_host(
+        &mut self,
+        logits_tensor: &Tensor<T>,
+        vocab_size: usize,
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+        random_u32: u32,
+    ) -> Result<u32, MetalError> {
+        let logits = logits_tensor.to_vec();
+        if vocab_size > logits.len() {
+            return Err(MetalError::InvalidShape(format!(
+                "vocab slice {} exceeds logits length {}",
+                vocab_size,
+                logits.len()
+            )));
+        }
+
+        let vocab_logits = &logits[..vocab_size];
+        let idx = sample_top_k_top_p_with_random_value::<T>(vocab_logits, top_k, top_p, temperature, random_u32, &mut self.sampler_buffers);
+        Ok(idx as u32)
+    }
+
+    /// Attempt to sample the next token using the GPU sampling kernel.
+    ///
+    /// Returns `Ok(Some(token))` when the device kernel handled the request.
+    /// When the current tensor dtype or requested `top_k` are unsupported the
+    /// method returns `Ok(None)` so the caller can fall back to the host
+    /// sampling implementation.
+    pub fn sample_top_k_top_p_device(
+        &mut self,
+        logits: &Tensor<T>,
+        vocab_size: usize,
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+        random_u32: u32,
+    ) -> Result<Option<u32>, MetalError> {
+        if T::DTYPE != Dtype::F32 {
+            return Ok(None);
+        }
+
+        if vocab_size == 0 {
+            return Ok(Some(0));
+        }
+
+        let effective_top_k = effective_top_k(top_k, vocab_size);
+        if effective_top_k > MAX_TOP_K {
+            return Ok(None);
+        }
+
+        if self.sampling_result_buffer.is_none() {
+            let byte_len = std::mem::size_of::<u32>();
+            let buffer = self
+                .device
+                .newBufferWithLength_options(byte_len, MTLResourceOptions::StorageModeShared)
+                .ok_or(MetalError::BufferCreationFailed(byte_len))?;
+            self.sampling_result_buffer = Some(buffer);
+        }
+
+        let result_buffer = self
+            .sampling_result_buffer
+            .as_ref()
+            .expect("sampling result buffer must be initialized")
+            .clone();
+
+        let params = SamplingParams {
+            vocab_size: vocab_size as u32,
+            top_k: top_k as u32,
+            random_u32,
+            threadgroup_count: 0,
+            top_p,
+            temperature,
+            _padding0: 0,
+            _padding1: 0,
+        };
+
+        let logits_view = logits.clone();
+        let _ = self.call::<SampleTopKTopPOp>((logits_view, params, result_buffer.clone()))?;
+
+        self.synchronize();
+
+        let ptr = result_buffer.contents().as_ptr().cast::<u32>();
+        let token = unsafe { ptr.read_unaligned() };
+        Ok(Some(token))
     }
 
     pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
@@ -407,11 +529,23 @@ impl<T: TensorElement> Context<T> {
         dims: Option<MatmulDims>,
         kind: MatMulDispatchKind,
     ) -> MatMulDispatchRegistration {
-        let registration = self
-            .matmul_instrumentation
-            .register(command_buffer, backend, dims, kind, self.matmul_recorder.clone());
+        let registration =
+            self.matmul_instrumentation
+                .register_dispatch(command_buffer, kind, self.matmul_recorder.clone(), move |duration, handle| {
+                    MatMulSample {
+                        backend,
+                        duration,
+                        dims,
+                        handle: Some(handle),
+                    }
+                });
         self.track_matmul_dispatch(registration.handle());
         registration
+    }
+
+    pub(crate) fn register_sampling_dispatch(&self, command_buffer: &CommandBuffer) -> SamplingDispatchRegistration {
+        self.sampling_instrumentation
+            .register_sampling_dispatch(command_buffer, self.sampling_recorder.clone())
     }
 
     fn track_matmul_dispatch(&self, handle: MatMulDispatchHandle) {
@@ -447,6 +581,14 @@ impl<T: TensorElement> Context<T> {
         samples.drain(..).collect()
     }
 
+    pub fn take_sampling_samples(&self) -> Vec<SamplingSample> {
+        let mut samples = match self.sampling_samples.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        samples.drain(..).collect()
+    }
+
     fn matched_matmul_samples(&self, handles: &[MatMulDispatchHandle]) -> Vec<MatMulSample> {
         if handles.is_empty() {
             return Vec::new();
@@ -460,9 +602,10 @@ impl<T: TensorElement> Context<T> {
         let mut matches = Vec::new();
         for sample in guard.iter() {
             if let Some(handle) = sample.handle
-                && handles.contains(&handle) {
-                    matches.push(*sample);
-                }
+                && handles.contains(&handle)
+            {
+                matches.push(*sample);
+            }
         }
 
         matches

@@ -1,4 +1,5 @@
-use crate::metallic::{F32Element, SamplerBuffers, generation::sample_top_k_top_p};
+use crate::metallic::sampling::sample_top_k_top_p;
+use crate::metallic::{F32Element, SamplerBuffers};
 
 #[test]
 fn test_sample_top_k_top_p_extreme_logits() {

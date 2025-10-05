@@ -1,16 +1,18 @@
-use super::{Context, KvCacheDispatchStats, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
+use super::{Context, KvCacheDispatchStats, MetalError, Tensor, resource_cache::CacheMetrics};
 use crate::metallic::instrumentation::{
-    MemoryEvent, MemoryUsage, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
+    MemoryEvent, MemoryUsage, SamplingSample, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
 };
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
+use crate::metallic::kernels::sampling::MAX_TOP_K;
 use crate::metallic::metrics::{
     BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
     ScalarStat, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
+use crate::metallic::sampling::effective_top_k;
+use crate::metallic::tensor::Dtype;
 use crate::metallic::{TensorElement, Tokenizer};
 use crate::{alert, app_event::AppEvent};
-use rand::prelude::*;
 use rustc_hash::FxHashMap;
 use std::{
     env,
@@ -102,6 +104,16 @@ fn record_matmul_samples(stats: &mut MatMulBackendStats, samples: Vec<MatMulSamp
     }
 }
 
+fn record_sampling_samples(stats: &mut RollingStat, samples: Vec<SamplingSample>) {
+    for sample in samples {
+        if sample.duration.is_zero() {
+            continue;
+        }
+
+        stats.record(sample.duration);
+    }
+}
+
 pub(crate) fn aggregate_matmul_totals<I>(samples: I) -> FxHashMap<MatMulBackend, Duration>
 where
     I: IntoIterator<Item = MatMulSample>,
@@ -116,6 +128,39 @@ where
     }
 
     totals
+}
+
+fn sample_next_token_from_logits<T: TensorElement>(
+    ctx: &mut Context<T>,
+    logits_tensor: &Tensor<T>,
+    vocab_size: usize,
+    top_k: usize,
+    top_p: f32,
+    temperature: f32,
+    random: u32,
+    use_device: bool,
+) -> Result<(u32, Option<Duration>), MetalError> {
+    if vocab_size == 0 {
+        return Ok((0, None));
+    }
+
+    if use_device {
+        if let Some(token) = ctx.sample_top_k_top_p_device(logits_tensor, vocab_size, top_k, top_p, temperature, random)? {
+            return Ok((token, None));
+        }
+    }
+
+    ctx.synchronize();
+
+    let start = Instant::now();
+    let token = ctx.sample_top_k_top_p_host(logits_tensor, vocab_size, top_k, top_p, temperature, random)?;
+    let duration = start.elapsed();
+    Ok((token, Some(duration)))
+}
+
+#[inline]
+fn should_use_device_sampling<T: TensorElement>(vocab_size: usize, top_k: usize) -> bool {
+    vocab_size > 0 && T::DTYPE == Dtype::F32 && effective_top_k(top_k, vocab_size) <= MAX_TOP_K
 }
 
 fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {
@@ -201,142 +246,6 @@ impl Default for GenerationConfig {
             top_k: 40,
         }
     }
-}
-
-/// Sample from logits using top-k and top-p (nucleus) sampling.
-/// - `logits` is a slice of f32 representing vocabulary logits.
-///   Returns selected token index.
-pub fn sample_top_k_top_p<T: TensorElement>(
-    logits: &[T::Scalar],
-    top_k: usize,
-    top_p: f32,
-    temperature: f32,
-    buffers: &mut SamplerBuffers,
-) -> usize {
-    let mut fallback_idx = 0usize;
-    let mut fallback_found = false;
-    let mut fallback_val = f32::NEG_INFINITY;
-    for (i, &raw) in logits.iter().enumerate() {
-        let val = T::to_f32(raw);
-        if val.is_finite() && (!fallback_found || val > fallback_val || (val == fallback_val && i > fallback_idx)) {
-            fallback_idx = i;
-            fallback_val = val;
-            fallback_found = true;
-        }
-    }
-
-    // Handle deterministic (greedy) sampling when temperature is zero or non-finite.
-    if temperature <= 0.0 || !temperature.is_finite() {
-        return if fallback_found { fallback_idx } else { 0 };
-    }
-
-    if logits.is_empty() {
-        return 0;
-    }
-
-    if top_k == 0 {
-        return if fallback_found { fallback_idx } else { 0 };
-    }
-
-    let effective_top_k = std::cmp::min(top_k.max(1), logits.len());
-
-    let scaled = &mut buffers.scaled;
-    scaled.clear();
-    if scaled.capacity() < effective_top_k {
-        scaled.reserve(effective_top_k);
-    }
-
-    let indices = &mut buffers.indices;
-    indices.clear();
-    if indices.capacity() < effective_top_k {
-        indices.reserve(effective_top_k);
-    }
-
-    for (i, &raw) in logits.iter().enumerate() {
-        let val = T::to_f32(raw);
-        let scaled_val = val / temperature;
-        if !scaled_val.is_finite() {
-            continue;
-        }
-
-        let insert_pos = scaled.partition_point(|&existing| existing > scaled_val);
-        if indices.len() < effective_top_k {
-            scaled.insert(insert_pos, scaled_val);
-            indices.insert(insert_pos, i);
-        } else if insert_pos < effective_top_k {
-            scaled.insert(insert_pos, scaled_val);
-            indices.insert(insert_pos, i);
-            scaled.pop();
-            indices.pop();
-        }
-    }
-
-    if indices.is_empty() {
-        return if fallback_found { fallback_idx } else { 0 };
-    }
-
-    let mut has_positive = false;
-    let max_val = scaled[0];
-    let mut total = 0.0f32;
-    for val in scaled.iter_mut() {
-        if val.is_finite() {
-            let mut exp_val = (*val - max_val).exp();
-            if exp_val > 1e10 {
-                exp_val = 1e10;
-            } else if exp_val < 1e-10 {
-                exp_val = 0.0;
-            }
-            *val = exp_val;
-        } else {
-            *val = 0.0;
-        }
-        total += *val;
-        has_positive |= *val > 0.0;
-    }
-
-    if !has_positive || total <= 0.0 || total.is_infinite() || total.is_nan() {
-        return if fallback_found { fallback_idx } else { 0 };
-    }
-
-    let normalized_top_p = if top_p.is_finite() { top_p.clamp(0.0, 1.0) } else { 1.0 };
-    let mut cutoff = indices.len() - 1;
-    if normalized_top_p <= 0.0 {
-        cutoff = 0;
-    } else if normalized_top_p < 1.0 {
-        let mut cum = 0.0f32;
-        let threshold = normalized_top_p * total;
-        for (i, &weight) in scaled.iter().enumerate() {
-            cum += weight;
-            cutoff = i;
-            if cum >= threshold || cum.is_infinite() || cum.is_nan() {
-                break;
-            }
-        }
-    }
-
-    scaled.truncate(cutoff + 1);
-    indices.truncate(cutoff + 1);
-
-    let shortlist_total: f32 = scaled.iter().sum();
-    if shortlist_total <= 0.0 || shortlist_total.is_infinite() || shortlist_total.is_nan() {
-        return indices.first().copied().unwrap_or(if fallback_found { fallback_idx } else { 0 });
-    }
-
-    for weight in scaled.iter_mut() {
-        *weight /= shortlist_total;
-    }
-
-    // Sample using RNG (use simple rng.next_u32() -> float to avoid trait issues)
-    let mut rng = rand::rng();
-    let r = (rng.next_u32() as f32) / (u32::MAX as f32);
-    let mut acc = 0.0f32;
-    for (&idx, &prob) in indices.iter().zip(scaled.iter()) {
-        acc += prob;
-        if r <= acc || acc.is_infinite() || acc.is_nan() {
-            return idx;
-        }
-    }
-    indices.last().copied().unwrap_or(if fallback_found { fallback_idx } else { 0 })
 }
 
 /// High-level end-to-end generation pipeline that combines tokenization, embedding,
@@ -564,16 +473,26 @@ where
     let mut decode_scratch = Vec::new();
 
     if let Some(logits_tensor) = logits_tensor {
-        // Extract logits for the very last token of the prompt
-        let logits = logits_tensor.to_vec();
-        let vocab_logits = &logits[..vocab_size];
+        let use_device = should_use_device_sampling::<T>(vocab_size, cfg.top_k);
+        let random = ctx.next_sampler_random();
 
-        // Sample the first token
-        let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
-        let sample_duration = sample_start.elapsed();
-        if !sample_duration.is_zero() {
-            sample_stats.record(sample_duration);
+        let (token, host_duration) = sample_next_token_from_logits(
+            ctx,
+            &logits_tensor,
+            vocab_size,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.temperature,
+            random,
+            use_device,
+        )?;
+        next_token = token;
+        record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
+        record_sampling_samples(&mut sample_stats, ctx.take_sampling_samples());
+        if let Some(duration) = host_duration {
+            if !duration.is_zero() {
+                sample_stats.record(duration);
+            }
         }
     } else {
         // If there's no prompt, start with token 0.
@@ -714,17 +633,29 @@ where
 
         sample_process_memory(process_memory_tracker, host_memory);
 
-        let logits = logits_tensor.to_vec();
-        let vocab_logits = &logits[..vocab_size];
+        let use_device = should_use_device_sampling::<T>(vocab_size, cfg.top_k);
 
-        let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+        let random = ctx.next_sampler_random();
+        let (token, host_duration) = sample_next_token_from_logits(
+            ctx,
+            &logits_tensor,
+            vocab_size,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.temperature,
+            random,
+            use_device,
+        )?;
+        next_token = token;
+        record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
+        record_sampling_samples(&mut sample_stats, ctx.take_sampling_samples());
 
         generated_ids.push(next_token);
 
-        let sample_duration = sample_start.elapsed();
-        if !sample_duration.is_zero() {
-            sample_stats.record(sample_duration);
+        if let Some(duration) = host_duration {
+            if !duration.is_zero() {
+                sample_stats.record(duration);
+            }
         }
 
         let decode_start = Instant::now();
