@@ -30,6 +30,7 @@ pub mod permute;
 pub mod repeat_kv_heads;
 pub mod rmsnorm;
 pub mod rope;
+pub mod sampling;
 pub mod scaled_dot_product_attention;
 pub mod silu;
 pub mod softmax;
@@ -53,6 +54,7 @@ pub enum KernelLibrary {
     Rope,
     RMSNorm,
     Silu,
+    Sampling,
     Softmax,
     Swiglu,
     Tensors,
@@ -76,6 +78,7 @@ impl KernelLibrary {
             KernelLibrary::Rope => include_str!("rope/kernel.metal"),
             KernelLibrary::RMSNorm => include_str!("rmsnorm/kernel.metal"),
             KernelLibrary::Silu => include_str!("silu/kernel.metal"),
+            KernelLibrary::Sampling => include_str!("sampling/kernel.metal"),
             KernelLibrary::Softmax => include_str!("softmax/kernel.metal"),
             KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
@@ -111,6 +114,8 @@ pub enum KernelFunction {
     Ones,
     RandomUniform,
     Gemv,
+    SamplerF32,
+    SamplerF16,
 }
 
 impl KernelFunction {
@@ -136,6 +141,7 @@ impl KernelFunction {
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::Gemv => KernelLibrary::Gemv,
+            KernelFunction::SamplerF32 | KernelFunction::SamplerF16 => KernelLibrary::Sampling,
         }
     }
 
@@ -191,6 +197,8 @@ impl KernelFunction {
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
             (KernelFunction::Gemv, F32) => "gemv_f32",
             (KernelFunction::Gemv, F16) => "gemv_f16",
+            (KernelFunction::SamplerF32, F32) => "sample_top_k_top_p_f32",
+            (KernelFunction::SamplerF16, F16) => "sample_top_k_top_p_f16",
         };
 
         Ok(name)

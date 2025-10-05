@@ -14,6 +14,7 @@ use kernels::gemv::GemvOp;
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
+use kernels::sampling::{SamplerConfig, SamplerOperation, SamplerResult, kernel_function_for_dtype as sampler_kernel_for_dtype};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
 use objc2::rc::Retained;
@@ -21,13 +22,14 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
-use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::mem::size_of;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -239,6 +241,7 @@ pub struct Context<T: TensorElement> {
     matmul_logging_session: RefCell<Option<Vec<MatMulDispatchHandle>>>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
+    gpu_sampler_state: Option<GpuSamplerState>,
     /// Optional override for the matmul backend chosen by this context.
     forced_matmul_backend: MatMulBackendOverride,
     /// Whether to emit shape/timing logs for matmul calls.
@@ -320,6 +323,85 @@ struct InFlightArena {
     decode_window: Option<DecodeWindow>,
     completed_at: Option<Instant>,
     pool_acquire_delay: Duration,
+}
+
+struct GpuSamplerState {
+    shortlist_capacity: usize,
+    shortlist_values: Retained<ProtocolObject<dyn MTLBuffer>>,
+    shortlist_indices: Retained<ProtocolObject<dyn MTLBuffer>>,
+    result: Retained<ProtocolObject<dyn MTLBuffer>>,
+}
+
+impl GpuSamplerState {
+    fn new(device: &Retained<ProtocolObject<dyn MTLDevice>>, capacity: usize) -> Result<Self, MetalError> {
+        let effective = capacity.max(1);
+        let values_bytes = effective * size_of::<f32>();
+        let indices_bytes = effective * size_of::<u32>();
+        let shortlist_values = device
+            .newBufferWithLength_options(values_bytes, MTLResourceOptions::StorageModePrivate)
+            .ok_or(MetalError::BufferCreationFailed(values_bytes))?;
+        let shortlist_indices = device
+            .newBufferWithLength_options(indices_bytes, MTLResourceOptions::StorageModePrivate)
+            .ok_or(MetalError::BufferCreationFailed(indices_bytes))?;
+        let result_bytes = SamplerResult::size();
+        let result = device
+            .newBufferWithLength_options(result_bytes, MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferCreationFailed(result_bytes))?;
+
+        let mut state = Self {
+            shortlist_capacity: effective,
+            shortlist_values,
+            shortlist_indices,
+            result,
+        };
+        state.reset_result();
+        Ok(state)
+    }
+
+    fn ensure_capacity(&mut self, device: &Retained<ProtocolObject<dyn MTLDevice>>, capacity: usize) -> Result<(), MetalError> {
+        if capacity <= self.shortlist_capacity {
+            return Ok(());
+        }
+
+        let effective = capacity.max(1);
+        let values_bytes = effective * size_of::<f32>();
+        let indices_bytes = effective * size_of::<u32>();
+        self.shortlist_values = device
+            .newBufferWithLength_options(values_bytes, MTLResourceOptions::StorageModePrivate)
+            .ok_or(MetalError::BufferCreationFailed(values_bytes))?;
+        self.shortlist_indices = device
+            .newBufferWithLength_options(indices_bytes, MTLResourceOptions::StorageModePrivate)
+            .ok_or(MetalError::BufferCreationFailed(indices_bytes))?;
+        self.shortlist_capacity = effective;
+        self.reset_result();
+        Ok(())
+    }
+
+    fn reset_result(&mut self) {
+        let contents = self.result.contents();
+        if !contents.as_ptr().is_null() {
+            let result_ptr = contents.as_ptr() as *mut SamplerResult;
+            unsafe { result_ptr.write(SamplerResult::default()) };
+        }
+    }
+}
+
+pub struct GpuSampleTicket {
+    command_buffer: CommandBuffer,
+    result: Retained<ProtocolObject<dyn MTLBuffer>>,
+}
+
+impl GpuSampleTicket {
+    pub fn wait(self) -> Result<u32, MetalError> {
+        self.command_buffer.wait();
+        let ptr = self.result.contents();
+        if ptr.as_ptr().is_null() {
+            return Err(MetalError::NullPointer);
+        }
+        let result_ptr = ptr.as_ptr() as *const SamplerResult;
+        let result = unsafe { *result_ptr };
+        Ok(result.selected)
+    }
 }
 
 impl<T: TensorElement> Context<T> {
@@ -477,6 +559,69 @@ impl<T: TensorElement> Context<T> {
         Ok(ResourceCache::with_device(self.device.clone()))
     }
 
+    fn sampler_state_mut(&mut self, capacity: usize) -> Result<&mut GpuSamplerState, MetalError> {
+        if self.gpu_sampler_state.is_none() {
+            let state = GpuSamplerState::new(&self.device, capacity)?;
+            self.gpu_sampler_state = Some(state);
+        } else if let Some(state) = self.gpu_sampler_state.as_mut() {
+            state.ensure_capacity(&self.device, capacity)?;
+        }
+
+        self.gpu_sampler_state
+            .as_mut()
+            .ok_or_else(|| MetalError::InvalidOperation("GPU sampler state unavailable".into()))
+    }
+
+    pub fn encode_gpu_sampler(
+        &mut self,
+        logits: &Tensor<T>,
+        vocab_size: usize,
+        top_k: usize,
+        top_p: f32,
+        temperature: f32,
+    ) -> Result<GpuSampleTicket, MetalError> {
+        let dtype = logits.dtype;
+        let kernel_fn = sampler_kernel_for_dtype(dtype)?;
+        let pipeline = self.kernel_manager.get_pipeline(kernel_fn, dtype, &self.device)?;
+
+        let effective_top_k = top_k.max(1).min(vocab_size.max(1));
+        let state = self.sampler_state_mut(effective_top_k)?;
+        state.reset_result();
+
+        let vocab_size_u32 = u32::try_from(vocab_size).unwrap_or(u32::MAX);
+        let top_k_u32 = u32::try_from(effective_top_k).unwrap_or(u32::MAX);
+        let config = SamplerConfig {
+            vocab_size: vocab_size_u32,
+            top_k: top_k_u32,
+            top_p,
+            temperature,
+            rng_seed: self.rng_seed_counter as u32,
+        };
+        self.rng_seed_counter = self.rng_seed_counter.wrapping_add(1);
+
+        self.prepare_tensors_for_active_cmd(&[logits])?;
+        let command_buffer = self.active_command_buffer_mut()?;
+        let cache = self
+            .active_resource_cache
+            .as_mut()
+            .expect("active resource cache must exist for sampler encoding");
+
+        let operation = SamplerOperation {
+            logits: logits.clone(),
+            shortlist_values: state.shortlist_values.clone(),
+            shortlist_indices: state.shortlist_indices.clone(),
+            result: state.result.clone(),
+            config,
+            pipeline,
+        };
+
+        command_buffer.record(&operation, cache)?;
+        Ok(GpuSampleTicket {
+            command_buffer: command_buffer.clone(),
+            result: state.result.clone(),
+        })
+    }
+
     pub fn submit_active_command_buffer(&mut self) -> Result<Option<u64>, MetalError> {
         if !self.enable_decode_overlap {
             if let Some(cmd_buf) = self.active_cmd_buffer.take() {
@@ -535,6 +680,8 @@ impl<T: TensorElement> Context<T> {
             completed_at: None,
             pool_acquire_delay,
         });
+
+        self.active_cmd_buffer = None;
 
         Ok(Some(submission_id))
     }
@@ -617,6 +764,7 @@ impl<T: TensorElement> Context<T> {
             matmul_recorder,
             matmul_logging_session: RefCell::new(None),
             sampler_buffers: SamplerBuffers::default(),
+            gpu_sampler_state: None,
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),

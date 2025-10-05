@@ -1,4 +1,4 @@
-pub use context::{Context, KvCacheDispatchStats, SamplerBuffers};
+pub use context::{Context, GpuSampleTicket, KvCacheDispatchStats, SamplerBuffers};
 pub use error::MetalError;
 pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 

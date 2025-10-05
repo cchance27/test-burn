@@ -1,4 +1,4 @@
-use super::{Context, KvCacheDispatchStats, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
+use super::{Context, GpuSampleTicket, KvCacheDispatchStats, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
 use crate::metallic::instrumentation::{
     MemoryEvent, MemoryUsage, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
 };
@@ -556,20 +556,18 @@ where
     let mut decoded_chunk = String::new();
     let mut decode_scratch = Vec::new();
 
-    if let Some(logits_tensor) = logits_tensor {
-        // Extract logits for the very last token of the prompt
-        let logits = logits_tensor.to_vec();
-        let vocab_logits = &logits[..vocab_size];
+    let mut pending_sample: Option<GpuSampleTicket> = None;
 
-        // Sample the first token
+    if let Some(logits_tensor) = logits_tensor {
+        let sample_ticket = ctx.encode_gpu_sampler(&logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature)?;
+        let _ = ctx.submit_active_command_buffer()?;
         let sample_start = Instant::now();
-        current_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+        current_token = sample_ticket.wait()?;
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
         }
     } else {
-        // If there's no prompt, start with token 0.
         current_token = 0;
     }
 
@@ -596,7 +594,6 @@ where
     let memory_collector = new_memory_collector(n_layers);
     let mut forward_snapshot = StepLatencySnapshot::empty(n_layers);
     let mut memory_snapshot = StepMemorySnapshot::empty(n_layers);
-    let mut pending_logits: Option<Tensor<T>> = None;
     let mut iteration_start = Instant::now();
     let mut iteration = 0usize;
     while iteration < cfg.max_tokens {
@@ -611,14 +608,11 @@ where
         iteration_start = Instant::now();
 
         if iteration > 0 {
-            let logits_tensor = pending_logits
+            let sample_ticket = pending_sample
                 .take()
-                .ok_or_else(|| MetalError::InvalidOperation("Missing logits for next iteration".into()))?;
-            let logits = logits_tensor.to_vec();
-            let vocab_logits = &logits[..vocab_size];
-
+                .ok_or_else(|| MetalError::InvalidOperation("Missing sampler ticket for next iteration".into()))?;
             let sample_start = Instant::now();
-            current_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+            current_token = sample_ticket.wait()?;
             let sample_duration = sample_start.elapsed();
             if !sample_duration.is_zero() {
                 sample_stats.record(sample_duration);
@@ -628,7 +622,7 @@ where
         let should_schedule = iteration + 1 < cfg.max_tokens && current_token != eos_token_id;
         let mut submission_id = None;
         let expected_gpu_submission = should_schedule;
-        let mut next_logits: Option<Tensor<T>> = None;
+        let mut next_sample: Option<GpuSampleTicket> = None;
 
         if should_schedule {
             ctx.reset_pool();
@@ -723,10 +717,12 @@ where
                 output_delta.kv_cache_bytes,
             );
 
+            let sample_ticket = ctx.encode_gpu_sampler(&logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature)?;
+
             sample_process_memory(process_memory_tracker, host_memory);
 
             submission_id = ctx.submit_active_command_buffer()?;
-            next_logits = Some(logits_tensor);
+            next_sample = Some(sample_ticket);
         }
 
         generated_ids.push(current_token);
@@ -801,8 +797,8 @@ where
             break;
         }
 
-        if let Some(logits_tensor) = next_logits {
-            pending_logits = Some(logits_tensor);
+        if let Some(ticket) = next_sample {
+            pending_sample = Some(ticket);
         }
 
         iteration += 1;
