@@ -833,7 +833,8 @@ where
             }
         }
         if ui_connected && tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
-            ui_connected = false;
+            // The UI disconnected while sending the terminal latency update; the flag is no
+            // longer needed because the generation loop has finished at this point.
         }
     }
 

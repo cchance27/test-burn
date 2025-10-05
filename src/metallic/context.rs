@@ -585,8 +585,15 @@ impl<T: TensorElement> Context<T> {
         let pipeline = self.kernel_manager.get_pipeline(kernel_fn, dtype, &self.device)?;
 
         let effective_top_k = top_k.max(1).min(vocab_size.max(1));
-        let state = self.sampler_state_mut(effective_top_k)?;
-        state.reset_result();
+        let (shortlist_values, shortlist_indices, result) = {
+            let state = self.sampler_state_mut(effective_top_k)?;
+            state.reset_result();
+            (
+                state.shortlist_values.clone(),
+                state.shortlist_indices.clone(),
+                state.result.clone(),
+            )
+        };
 
         let vocab_size_u32 = u32::try_from(vocab_size).unwrap_or(u32::MAX);
         let top_k_u32 = u32::try_from(effective_top_k).unwrap_or(u32::MAX);
@@ -600,25 +607,27 @@ impl<T: TensorElement> Context<T> {
         self.rng_seed_counter = self.rng_seed_counter.wrapping_add(1);
 
         self.prepare_tensors_for_active_cmd(&[logits])?;
-        let command_buffer = self.active_command_buffer_mut()?;
-        let cache = self
-            .active_resource_cache
-            .as_mut()
-            .expect("active resource cache must exist for sampler encoding");
 
         let operation = SamplerOperation {
             logits: logits.clone(),
-            shortlist_values: state.shortlist_values.clone(),
-            shortlist_indices: state.shortlist_indices.clone(),
-            result: state.result.clone(),
+            shortlist_values,
+            shortlist_indices,
+            result: result.clone(),
             config,
             pipeline,
         };
 
-        command_buffer.record(&operation, cache)?;
+        let mut cache = self
+            .active_resource_cache
+            .take()
+            .unwrap_or_else(|| ResourceCache::with_device(self.device.clone()));
+        let command_buffer = self.active_command_buffer_mut()?;
+        let command_buffer_handle = command_buffer.clone();
+        command_buffer.record(&operation, &mut cache)?;
+        self.active_resource_cache = Some(cache);
         Ok(GpuSampleTicket {
-            command_buffer: command_buffer.clone(),
-            result: state.result.clone(),
+            command_buffer: command_buffer_handle,
+            result,
         })
     }
 

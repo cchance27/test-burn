@@ -1,5 +1,5 @@
 use super::*;
-use crate::metallic::{Dtype, MetalError, Tensor, TensorElement, resource_cache::ResourceCache};
+use crate::metallic::{Dtype, MetalError, Tensor, TensorElement, encoder::dispatch_threads, resource_cache::ResourceCache};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLSize};
@@ -81,9 +81,5 @@ pub fn kernel_function_for_dtype(dtype: Dtype) -> Result<KernelFunction, MetalEr
     match dtype {
         Dtype::F32 => Ok(KernelFunction::SamplerF32),
         Dtype::F16 => Ok(KernelFunction::SamplerF16),
-        other => Err(MetalError::UnsupportedDtype {
-            operation: "gpu_sampler",
-            dtype: other,
-        }),
     }
 }

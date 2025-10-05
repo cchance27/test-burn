@@ -199,6 +199,12 @@ impl KernelFunction {
             (KernelFunction::Gemv, F16) => "gemv_f16",
             (KernelFunction::SamplerF32, F32) => "sample_top_k_top_p_f32",
             (KernelFunction::SamplerF16, F16) => "sample_top_k_top_p_f16",
+            (KernelFunction::SamplerF32, other) | (KernelFunction::SamplerF16, other) => {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "gpu_sampler",
+                    dtype: other,
+                });
+            }
         };
 
         Ok(name)
