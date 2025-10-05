@@ -433,10 +433,10 @@ impl<T: TensorElement> Qwen25<T> {
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "rope"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "rope"));
 
-            // Update both the canonical and repeated KV cache layouts with the new K and V values
+            // Update the KV cache with the new K and V values
             let group_size = n_heads / n_kv_heads;
             phase_start = Instant::now();
-            ctx.write_repeated_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)?;
+            ctx.write_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
@@ -447,8 +447,8 @@ impl<T: TensorElement> Qwen25<T> {
                 .get(&layer_idx)
                 .cloned()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.repeated_k, pos + 1, ctx)?;
-            let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.repeated_v, pos + 1, ctx)?;
+            let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
+            let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
 
