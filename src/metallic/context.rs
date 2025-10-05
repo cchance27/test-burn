@@ -584,6 +584,9 @@ impl<T: TensorElement> Context<T> {
         }
 
         if dims.batch == 1 && dims.m <= 4 {
+            if dims.n <= 4 {
+                return false;
+            }
             if !has_strided_batch && dims.n <= 128 && dims.k >= dims.n * 2 {
                 return false;
             }

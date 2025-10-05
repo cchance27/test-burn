@@ -161,12 +161,6 @@ fn create_sdpa_operation<T: TensorElement>(
 
     let query_offset_rows =
         usize::try_from(query_offset).map_err(|_| MetalError::InvalidShape("SDPA query offset exceeds usize range".to_string()))?;
-    if query_offset_rows > s_q {
-        return Err(MetalError::InvalidShape(format!(
-            "SDPA query offset {} exceeds query rows {}",
-            query_offset_rows, s_q
-        )));
-    }
     if group_size > 1 && query_offset_rows % group_size != 0 {
         return Err(MetalError::InvalidShape(format!(
             "SDPA query offset {} must be divisible by group size {}",
@@ -279,11 +273,10 @@ fn create_sdpa_operation<T: TensorElement>(
 
     let row_offset_u32 = u32::try_from(row_offset)
         .map_err(|_| MetalError::InvalidShape(format!("SDPA row offset {row_offset} exceeds representable query offset range")))?;
-    let adjusted_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
-        MetalError::InvalidShape(format!(
-            "SDPA query offset {query_offset} with row offset {row_offset} exceeds u32::MAX"
-        ))
-    })?;
+    // Preserve the caller-provided offset when we materialize the entire query block,
+    // but switch to the sliced row offset when we only process a suffix so causal masks
+    // continue to align with the first active query row.
+    let adjusted_query_offset = if row_offset == 0 { query_offset } else { row_offset_u32 };
 
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();
