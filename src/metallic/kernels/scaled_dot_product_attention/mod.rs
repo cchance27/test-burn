@@ -80,15 +80,23 @@ struct ScaledDotProductAttention<T: TensorElement> {
     pub query_offset: u32,
     pub seq_len_delta: usize,
     pub config: SdpaConfig,
+    pub group_size: usize,
 }
 
 fn create_sdpa_operation<T: TensorElement>(
     ctx: &mut Context<T>,
-    args: (&Tensor<T>, &Tensor<T>, &Tensor<T>, bool, u32),
+    args: (&Tensor<T>, &Tensor<T>, &Tensor<T>, bool, u32, u32),
     mut cache: Option<&mut ResourceCache>,
     config: SdpaConfig,
 ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-    let (q, k, v, causal, query_offset) = args;
+    let (q, k, v, causal, query_offset, group_size_raw) = args;
+
+    if group_size_raw == 0 {
+        return Err(MetalError::InvalidShape(
+            "scaled_dot_product_attention requires a non-zero group size".to_string(),
+        ));
+    }
+    let group_size = group_size_raw as usize;
 
     ctx.prepare_tensors_for_active_cmd(&[q, k, v])?;
 
@@ -147,6 +155,10 @@ fn create_sdpa_operation<T: TensorElement>(
             ctx.reset_sdpa_workspace(workspace_key);
         }
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
+    }
+
+    if group_size > 1 {
+        seq_len_delta = seq_len_delta.saturating_mul(group_size);
     }
 
     let mut rows_to_process = seq_len_delta.min(s_q);
@@ -235,6 +247,7 @@ fn create_sdpa_operation<T: TensorElement>(
             query_offset: adjusted_query_offset,
             seq_len_delta: rows_to_process,
             config,
+            group_size,
         }),
         out,
     ))
@@ -254,7 +267,7 @@ fn compute_sdpa_scale(dim: usize) -> f32 {
 // Implement `KernelInvocable` for the public struct.
 impl KernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
@@ -271,7 +284,7 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
@@ -288,7 +301,7 @@ impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
@@ -305,7 +318,7 @@ impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None
@@ -322,7 +335,7 @@ impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
 }
 
 impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         None

@@ -10,7 +10,16 @@ const ITERATIONS: usize = 1;
 
 fn run_variant_batched<O>(ctx: &mut Context<F32Element>, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
 where
-    O: for<'a> KernelInvocable<Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32)>,
+    O: for<'a> KernelInvocable<
+        Args<'a, F32Element> = (
+            &'a Tensor<F32Element>,
+            &'a Tensor<F32Element>,
+            &'a Tensor<F32Element>,
+            bool,
+            u32,
+            u32,
+        ),
+    >,
 {
     let q_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
     let k_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
@@ -19,7 +28,9 @@ where
     let mut last_output = None;
 
     for _ in 0..ITERATIONS {
-        let out = ctx.call::<O>((&q_tensor, &k_tensor, &v_tensor, causal, 0u32)).unwrap();
+        let out = ctx
+            .call::<O>((&q_tensor, &k_tensor, &v_tensor, causal, 0u32, 1u32))
+            .unwrap();
         last_output = Some(out);
     }
 
@@ -30,7 +41,16 @@ where
 
 fn run_variant_per_batch<O>(ctx: &mut Context<F32Element>, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
 where
-    O: for<'a> KernelInvocable<Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32)>,
+    O: for<'a> KernelInvocable<
+        Args<'a, F32Element> = (
+            &'a Tensor<F32Element>,
+            &'a Tensor<F32Element>,
+            &'a Tensor<F32Element>,
+            bool,
+            u32,
+            u32,
+        ),
+    >,
 {
     let q_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
     let k_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
@@ -50,7 +70,9 @@ where
 
     for _ in 0..ITERATIONS {
         for i in 0..batch {
-            let out = ctx.call::<O>((&q_batches[i], &k_batches[i], &v_batches[i], causal, 0u32)).unwrap();
+            let out = ctx
+                .call::<O>((&q_batches[i], &k_batches[i], &v_batches[i], causal, 0u32, 1u32))
+                .unwrap();
             last_output = Some(out);
         }
     }

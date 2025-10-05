@@ -27,7 +27,6 @@ pub mod layernorm;
 pub mod matmul;
 pub mod mlxmatmul;
 pub mod permute;
-pub mod repeat_kv_heads;
 pub mod rmsnorm;
 pub mod rope;
 pub mod scaled_dot_product_attention;
@@ -49,7 +48,6 @@ pub enum KernelLibrary {
     KvRearrange,
     LayerNorm,
     Permute,
-    RepeatKvHeads,
     Rope,
     RMSNorm,
     Silu,
@@ -72,7 +70,6 @@ impl KernelLibrary {
             KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
             KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
             KernelLibrary::Permute => include_str!("permute/kernel.metal"),
-            KernelLibrary::RepeatKvHeads => include_str!("repeat_kv_heads/kernel.metal"),
             KernelLibrary::Rope => include_str!("rope/kernel.metal"),
             KernelLibrary::RMSNorm => include_str!("rmsnorm/kernel.metal"),
             KernelLibrary::Silu => include_str!("silu/kernel.metal"),
@@ -101,7 +98,6 @@ pub enum KernelFunction {
     KvRearrange,
     LayerNorm,
     Permute,
-    RepeatKvHeads,
     Rope,
     RMSNorm,
     Silu,
@@ -128,7 +124,6 @@ impl KernelFunction {
             KernelFunction::KvRearrange => KernelLibrary::KvRearrange,
             KernelFunction::LayerNorm => KernelLibrary::LayerNorm,
             KernelFunction::Permute => KernelLibrary::Permute,
-            KernelFunction::RepeatKvHeads => KernelLibrary::RepeatKvHeads,
             KernelFunction::Rope => KernelLibrary::Rope,
             KernelFunction::RMSNorm => KernelLibrary::RMSNorm,
             KernelFunction::Silu => KernelLibrary::Silu,
@@ -171,8 +166,6 @@ impl KernelFunction {
             (KernelFunction::LayerNorm, F16) => "layernorm_kernel_f16",
             (KernelFunction::Permute, F32) => "permute_kernel_f32",
             (KernelFunction::Permute, F16) => "permute_kernel_f16",
-            (KernelFunction::RepeatKvHeads, F32) => "repeat_kv_heads_kernel_f32",
-            (KernelFunction::RepeatKvHeads, F16) => "repeat_kv_heads_kernel_f16",
             (KernelFunction::Rope, F32) => "rope_kernel_f32",
             (KernelFunction::Rope, F16) => "rope_kernel_f16",
             (KernelFunction::RMSNorm, F32) => "rmsnorm_kernel_f32",

@@ -17,7 +17,7 @@ use std::env;
 use std::path::Path;
 
 #[allow(clippy::too_many_arguments)]
-fn repeat_kv_heads<T: TensorElement>(
+fn canonical_kv_view<T: TensorElement>(
     input: &Tensor<T>,
     group_size: usize,
     batch: usize,
@@ -29,32 +29,118 @@ fn repeat_kv_heads<T: TensorElement>(
 ) -> Result<Tensor<T>, MetalError> {
     let input_dims = input.dims();
     if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
-        return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
+        return Err(MetalError::InvalidShape("Invalid input dimensions for canonical_kv_view".to_string()));
     }
 
-    let output_dims = vec![batch * n_heads, seq, head_dim];
-    let mut output = Tensor::zeros(output_dims, ctx, true)?;
-    let input_slice = input.as_slice();
-    let output_slice = output.as_mut_slice();
+    ctx.kv_repeat_view(input, group_size, batch, n_kv_heads, n_heads, seq)
+}
 
-    for b in 0..batch {
-        for h_kv in 0..n_kv_heads {
-            let input_offset_base = ((b * n_kv_heads + h_kv) * seq) * head_dim;
-            for g in 0..group_size {
-                let h = h_kv * group_size + g;
-                let output_offset_base = ((b * n_heads + h) * seq) * head_dim;
-                for s in 0..seq {
-                    let input_offset = input_offset_base + s * head_dim;
-                    let output_offset = output_offset_base + s * head_dim;
-                    let src = &input_slice[input_offset..input_offset + head_dim];
-                    let dst = &mut output_slice[output_offset..output_offset + head_dim];
-                    dst.copy_from_slice(src);
-                }
-            }
-        }
+#[allow(clippy::too_many_arguments)]
+fn group_queries_for_gqa<T: TensorElement>(
+    q_heads: &Tensor<T>,
+    batch: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    group_size: usize,
+) -> Result<Tensor<T>, MetalError> {
+    if group_size == 0 {
+        return Err(MetalError::InvalidShape(
+            "group_queries_for_gqa requires non-zero group size".to_string(),
+        ));
+    }
+    if n_heads != n_kv_heads * group_size {
+        return Err(MetalError::InvalidShape(format!(
+            "group_queries_for_gqa expected n_heads {} == n_kv_heads {} * group_size {}",
+            n_heads, n_kv_heads, group_size
+        )));
     }
 
-    Ok(output)
+    let dims = q_heads.dims();
+    if dims.len() != 3 {
+        return Err(MetalError::InvalidShape(
+            "group_queries_for_gqa expects [batch*n_heads, seq, head_dim]".to_string(),
+        ));
+    }
+
+    let expected_heads = batch
+        .checked_mul(n_heads)
+        .ok_or_else(|| MetalError::InvalidShape("group_queries_for_gqa head count overflow".to_string()))?;
+    if dims[0] != expected_heads {
+        return Err(MetalError::InvalidShape(format!(
+            "group_queries_for_gqa expected {} heads, found {}",
+            expected_heads, dims[0]
+        )));
+    }
+
+    let seq = dims[1];
+    let head_dim = dims[2];
+
+    let stride_batch = q_heads
+        .strides
+        .get(0)
+        .copied()
+        .unwrap_or(seq.saturating_mul(head_dim));
+    let stride_seq = q_heads.strides.get(1).copied().unwrap_or(head_dim);
+    let stride_col = q_heads.strides.get(2).copied().unwrap_or(1);
+
+    let mut view = q_heads.clone();
+    view.dims = vec![batch * n_kv_heads, seq * group_size, head_dim];
+    view.strides = vec![stride_batch * group_size, stride_seq, stride_col];
+    Ok(view)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn ungroup_attention_output<T: TensorElement>(
+    grouped: &Tensor<T>,
+    batch: usize,
+    n_heads: usize,
+    n_kv_heads: usize,
+    group_size: usize,
+) -> Result<Tensor<T>, MetalError> {
+    if group_size == 0 {
+        return Err(MetalError::InvalidShape(
+            "ungroup_attention_output requires non-zero group size".to_string(),
+        ));
+    }
+    if n_heads != n_kv_heads * group_size {
+        return Err(MetalError::InvalidShape(format!(
+            "ungroup_attention_output expected n_heads {} == n_kv_heads {} * group_size {}",
+            n_heads, n_kv_heads, group_size
+        )));
+    }
+
+    let dims = grouped.dims();
+    if dims.len() != 3 {
+        return Err(MetalError::InvalidShape(
+            "ungroup_attention_output expects [batch*n_kv_heads, rows, head_dim]".to_string(),
+        ));
+    }
+
+    let expected_heads = batch
+        .checked_mul(n_kv_heads)
+        .ok_or_else(|| MetalError::InvalidShape("ungroup_attention_output head count overflow".to_string()))?;
+    if dims[0] != expected_heads {
+        return Err(MetalError::InvalidShape(format!(
+            "ungroup_attention_output expected {} canonical heads, found {}",
+            expected_heads, dims[0]
+        )));
+    }
+
+    let rows = dims[1];
+    if rows % group_size != 0 {
+        return Err(MetalError::InvalidShape(format!(
+            "ungroup_attention_output rows {} not divisible by group size {}",
+            rows, group_size
+        )));
+    }
+
+    let seq = rows / group_size;
+    let head_dim = dims[2];
+
+    let mut view = grouped.clone();
+    view.dims = vec![batch * n_heads, seq, head_dim];
+    view.strides = vec![seq * head_dim, head_dim, 1];
+    Ok(view)
 }
 
 /// Adjust this alias to run the correctness suite at different precisions (e.g. `F16Element`).
@@ -234,10 +320,20 @@ fn run_blocks_up_to<T: TensorElement>(
 
         // Repeat KV heads for SDPA (GQA)
         let group_size = n_heads / n_kv_heads;
-        let k_repeated = repeat_kv_heads(&k_heads_after_rope, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
-        let v_repeated = repeat_kv_heads(&v_heads, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
+        let k_canonical = canonical_kv_view(&k_heads_after_rope, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
+        let v_canonical = canonical_kv_view(&v_heads, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
 
-        let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
+        let q_grouped = group_queries_for_gqa(&q_heads_after_rope, batch, n_heads, n_kv_heads, group_size)?;
+        let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(
+            &q_grouped,
+            &k_canonical,
+            &v_canonical,
+            true,
+            0,
+            group_size,
+        )?;
+
+        let attn_out_heads = ungroup_attention_output(&attn_out_grouped, batch, n_heads, n_kv_heads, group_size)?;
 
         let attn_out_reshaped = attn_out_heads
             .reshape(vec![batch, n_heads, seq, head_dim])?
@@ -705,25 +801,30 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Repeat KV heads for GQA
     let group_size = n_heads / n_kv_heads;
-    let k_repeated = repeat_kv_heads(
+    let k_canonical = canonical_kv_view(
         &k_heads_after_rope,
         group_size,
-        1, // batch
+        1,
         n_kv_heads,
         n_heads,
         seq,
         kv_head_dim,
         &mut ctx,
     )?;
-    let v_repeated = repeat_kv_heads(&v_heads, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
+    let v_canonical = canonical_kv_view(&v_heads, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
+
+    let q_grouped = group_queries_for_gqa(&q_heads_after_rope, 1, n_heads, n_kv_heads, group_size)?;
+    let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(
+        &q_grouped,
+        &k_canonical,
+        &v_canonical,
+        true,
+        0,
+        group_size,
+    )?;
 
     // SDPA
-    let attn_out_heads = ctx.scaled_dot_product_attention(
-        &q_heads_after_rope,
-        &k_repeated,
-        &v_repeated,
-        true, // causal
-    )?;
+    let attn_out_heads = ungroup_attention_output(&attn_out_grouped, 1, n_heads, n_kv_heads, group_size)?;
 
     // Reshape and permute
     let attn_out_reshaped = attn_out_heads
@@ -1233,7 +1334,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Repeat KV heads for SDPA
     let group_size = n_heads / n_kv_heads;
-    let k_repeated_last = repeat_kv_heads(
+    let k_canonical_last = canonical_kv_view(
         &k_heads_after_rope_last,
         group_size,
         1,
@@ -1243,9 +1344,28 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         kv_head_dim,
         &mut ctx,
     )?;
-    let v_repeated_last = repeat_kv_heads(&v_heads_last, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
+    let v_canonical_last = canonical_kv_view(
+        &v_heads_last,
+        group_size,
+        1,
+        n_kv_heads,
+        n_heads,
+        seq,
+        kv_head_dim,
+        &mut ctx,
+    )?;
 
-    let attn_out_heads_last = ctx.scaled_dot_product_attention(&q_heads_after_rope_last, &k_repeated_last, &v_repeated_last, true)?;
+    let q_grouped_last = group_queries_for_gqa(&q_heads_after_rope_last, 1, n_heads, n_kv_heads, group_size)?;
+    let attn_out_grouped_last = ctx.scaled_dot_product_attention_with_group(
+        &q_grouped_last,
+        &k_canonical_last,
+        &v_canonical_last,
+        true,
+        0,
+        group_size,
+    )?;
+
+    let attn_out_heads_last = ungroup_attention_output(&attn_out_grouped_last, 1, n_heads, n_kv_heads, group_size)?;
 
     let attn_out_last = attn_out_heads_last
         .reshape(vec![1, n_heads, seq, head_dim])?

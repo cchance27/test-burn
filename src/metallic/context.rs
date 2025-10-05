@@ -1725,6 +1725,64 @@ impl<T: TensorElement> Context<T> {
         Ok((view, dims[1]))
     }
 
+    pub fn kv_repeat_view(
+        &mut self,
+        canonical: &Tensor<T>,
+        group_size: usize,
+        batch: usize,
+        n_kv_heads: usize,
+        n_heads: usize,
+        active_seq: usize,
+    ) -> Result<Tensor<T>, MetalError> {
+        if group_size == 0 {
+            return Err(MetalError::InvalidShape(
+                "kv_repeat_view requires a non-zero group size".to_string(),
+            ));
+        }
+        if n_kv_heads == 0 {
+            return Err(MetalError::InvalidShape(
+                "kv_repeat_view requires at least one KV head".to_string(),
+            ));
+        }
+        if n_heads != n_kv_heads * group_size {
+            return Err(MetalError::InvalidShape(format!(
+                "kv_repeat_view expected n_heads {} to equal n_kv_heads {} * group_size {}",
+                n_heads, n_kv_heads, group_size
+            )));
+        }
+
+        let dims = canonical.dims();
+        if dims.len() != 3 {
+            return Err(MetalError::InvalidShape(
+                "kv_repeat_view expects canonical tensors shaped [batch*n_kv_heads, seq, head_dim]".to_string(),
+            ));
+        }
+
+        let expected_heads = batch
+            .checked_mul(n_kv_heads)
+            .ok_or_else(|| MetalError::InvalidShape("kv_repeat_view head count overflow".to_string()))?;
+        if dims[0] != expected_heads {
+            return Err(MetalError::InvalidShape(format!(
+                "kv_repeat_view expected {} canonical heads, found {}",
+                expected_heads, dims[0]
+            )));
+        }
+        if active_seq == 0 || active_seq > dims[1] {
+            return Err(MetalError::InvalidShape(format!(
+                "kv_repeat_view active sequence {} exceeds available {}",
+                active_seq, dims[1]
+            )));
+        }
+
+        let mut view = canonical.clone();
+        view.dims = vec![expected_heads, active_seq, dims[2]];
+        view.strides = canonical.strides.clone();
+
+        self.prepare_tensors_for_active_cmd(&[&view])?;
+
+        Ok(view)
+    }
+
     pub(crate) fn sdpa_workspace_key_for(&self, tensor: &Tensor<T>) -> SdpaWorkspaceKey {
         SdpaWorkspaceKey::from_tensor(tensor)
     }
@@ -1758,7 +1816,7 @@ impl<T: TensorElement> Context<T> {
         v: &Tensor<T>,
         causal: bool,
     ) -> Result<Tensor<T>, MetalError> {
-        self.scaled_dot_product_attention_with_offset(q, k, v, causal, 0)
+        self.scaled_dot_product_attention_with_group(q, k, v, causal, 0, 1)
     }
 
     #[inline]
@@ -1770,8 +1828,23 @@ impl<T: TensorElement> Context<T> {
         causal: bool,
         query_offset: usize,
     ) -> Result<Tensor<T>, MetalError> {
+        self.scaled_dot_product_attention_with_group(q, k, v, causal, query_offset, 1)
+    }
+
+    #[inline]
+    pub fn scaled_dot_product_attention_with_group(
+        &mut self,
+        q: &Tensor<T>,
+        k: &Tensor<T>,
+        v: &Tensor<T>,
+        causal: bool,
+        query_offset: usize,
+        group_size: usize,
+    ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOptimizedOp>((q, k, v, causal, query_offset as u32))
+        self.call::<ScaledDotProductAttentionOptimizedOp>(
+            (q, k, v, causal, query_offset as u32, group_size as u32),
+        )
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.

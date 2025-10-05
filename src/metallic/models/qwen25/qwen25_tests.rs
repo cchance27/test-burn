@@ -176,7 +176,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
 }
 
 #[test]
-fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
+fn test_repeat_kv_heads_returns_canonical_view() -> Result<(), MetalError> {
     let mut ctx = Context::<F32Element>::new()?;
 
     let batch = 2usize;
@@ -199,34 +199,13 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
         cache_capacity: seq,
     };
 
-    let expected = {
-        let mut out = vec![0.0f32; batch * n_heads * seq * head_dim];
-        for b in 0..batch {
-            for h_kv in 0..n_kv_heads {
-                let input_offset_base = ((b * n_kv_heads + h_kv) * seq) * head_dim;
-                for g in 0..group_size {
-                    let h = h_kv * group_size + g;
-                    let output_offset_base = ((b * n_heads + h) * seq) * head_dim;
-                    for s in 0..seq {
-                        let input_offset = input_offset_base + s * head_dim;
-                        let output_offset = output_offset_base + s * head_dim;
-                        out[output_offset..output_offset + head_dim].copy_from_slice(&input_data[input_offset..input_offset + head_dim]);
-                    }
-                }
-            }
-        }
-        out
-    };
-
     let output = Qwen25::repeat_kv_heads(&history, group_size, batch, n_kv_heads, n_heads, head_dim, &mut ctx)?;
     ctx.synchronize();
 
-    assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);
-    let gpu_values = output.as_slice();
-    assert_eq!(gpu_values.len(), expected.len());
-    for (idx, (gpu, cpu)) in gpu_values.iter().zip(expected.iter()).enumerate() {
-        assert!((gpu - cpu).abs() < 1e-5, "Mismatch at index {}: gpu={} expected={}", idx, gpu, cpu);
-    }
+    assert_eq!(output.dims(), &[batch * n_kv_heads, seq, head_dim]);
+    assert_eq!(output.as_slice(), input_data.as_slice());
+    assert_eq!(output.buf.as_ptr(), input.buf.as_ptr());
+    assert_eq!(output.offset, input.offset);
 
     Ok(())
 }

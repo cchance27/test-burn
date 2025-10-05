@@ -1,6 +1,5 @@
 use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
-use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::metallic::kernels::rmsnorm::RMSNormOp;
 use crate::metallic::kernels::rope::RoPEOp;
 use crate::metallic::{Context, MetalError, Tensor, TensorElement};
@@ -280,12 +279,34 @@ impl<T: TensorElement> Qwen25<T> {
             let k_history = CacheHistory::from_tensor(k_heads_after_rope)?;
             let v_history = CacheHistory::from_tensor(v_heads)?;
 
-            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let k_canonical = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
 
-            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let v_canonical = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
 
-            // SDPA (causal mask enabled)
-            let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
+            let q_grouped = Qwen25::group_queries_for_gqa(
+                &q_heads_after_rope,
+                batch,
+                n_heads,
+                n_kv_heads,
+                group_size,
+            )?;
+
+            let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(
+                &q_grouped,
+                &k_canonical,
+                &v_canonical,
+                true,
+                0,
+                group_size,
+            )?;
+
+            let attn_out_heads = Qwen25::ungroup_attention_output(
+                &attn_out_grouped,
+                batch,
+                n_heads,
+                n_kv_heads,
+                group_size,
+            )?;
 
             // Attention Output Reassembly
             let attn_out_reshaped = attn_out_heads
@@ -449,14 +470,53 @@ impl<T: TensorElement> Qwen25<T> {
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
             let k_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
             let v_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
-            let k_repeated = Qwen25::repeat_kv_heads(&k_history, cache_entry.group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
-            let v_repeated = Qwen25::repeat_kv_heads(&v_history, cache_entry.group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let k_canonical = Qwen25::repeat_kv_heads(
+                &k_history,
+                cache_entry.group_size,
+                batch,
+                n_kv_heads,
+                n_heads,
+                kv_head_dim,
+                ctx,
+            )?;
+            let v_canonical = Qwen25::repeat_kv_heads(
+                &v_history,
+                cache_entry.group_size,
+                batch,
+                n_kv_heads,
+                n_heads,
+                kv_head_dim,
+                ctx,
+            )?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
 
             // SDPA (causal mask enabled)
             phase_start = Instant::now();
-            let attn_out_heads = ctx.scaled_dot_product_attention_with_offset(&q_heads_after_rope, &k_repeated, &v_repeated, true, pos)?;
+            let q_grouped = Qwen25::group_queries_for_gqa(
+                &q_heads_after_rope,
+                batch,
+                n_heads,
+                n_kv_heads,
+                cache_entry.group_size,
+            )?;
+
+            let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(
+                &q_grouped,
+                &k_canonical,
+                &v_canonical,
+                true,
+                pos * cache_entry.group_size,
+                cache_entry.group_size,
+            )?;
+
+            let attn_out_heads = Qwen25::ungroup_attention_output(
+                &attn_out_grouped,
+                batch,
+                n_heads,
+                n_kv_heads,
+                cache_entry.group_size,
+            )?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "sdpa"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "sdpa"));
 
@@ -527,27 +587,121 @@ impl<T: TensorElement> Qwen25<T> {
         head_dim: usize,
         ctx: &mut Context<T>,
     ) -> Result<Tensor<T>, MetalError> {
-        if group_size == 1 {
-            return Ok(history.tensor.clone());
+        if group_size == 0 {
+            return Err(MetalError::InvalidShape("repeat_kv_heads requires a non-zero group size".to_string()));
         }
 
-        let input = history.tensor.clone();
-        let input_dims = input.dims();
-        if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != history.active_seq || input_dims[2] != head_dim
-        {
+        let input_dims = history.tensor.dims();
+        if input_dims.len() != 3 || input_dims[2] != head_dim {
             return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
-        ctx.call::<RepeatKvHeadsOp>((
-            input,
-            group_size as u32,
-            batch as u32,
-            n_kv_heads as u32,
-            n_heads as u32,
-            history.active_seq as u32,
-            head_dim as u32,
-            history.cache_capacity as u32,
-        ))
+        ctx.kv_repeat_view(
+            &history.tensor,
+            group_size,
+            batch,
+            n_kv_heads,
+            n_heads,
+            history.active_seq,
+        )
+    }
+
+    fn group_queries_for_gqa(
+        q_heads: &Tensor<T>,
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        group_size: usize,
+    ) -> Result<Tensor<T>, MetalError> {
+        if group_size == 0 {
+            return Err(MetalError::InvalidShape("group_queries_for_gqa requires non-zero group size".to_string()));
+        }
+        if n_heads != n_kv_heads * group_size {
+            return Err(MetalError::InvalidShape(format!(
+                "group_queries_for_gqa expected n_heads {} == n_kv_heads {} * group_size {}",
+                n_heads, n_kv_heads, group_size
+            )));
+        }
+
+        let dims = q_heads.dims();
+        if dims.len() != 3 {
+            return Err(MetalError::InvalidShape("group_queries_for_gqa expects [batch*n_heads, seq, head_dim]".to_string()));
+        }
+
+        let expected_heads = batch
+            .checked_mul(n_heads)
+            .ok_or_else(|| MetalError::InvalidShape("group_queries_for_gqa head count overflow".to_string()))?;
+        if dims[0] != expected_heads {
+            return Err(MetalError::InvalidShape(format!(
+                "group_queries_for_gqa expected {} heads, found {}",
+                expected_heads, dims[0]
+            )));
+        }
+
+        let seq = dims[1];
+        let head_dim = dims[2];
+
+        let stride_batch = q_heads
+            .strides
+            .get(0)
+            .copied()
+            .unwrap_or(seq.saturating_mul(head_dim));
+        let stride_seq = q_heads.strides.get(1).copied().unwrap_or(head_dim);
+        let stride_col = q_heads.strides.get(2).copied().unwrap_or(1);
+
+        let mut view = q_heads.clone();
+        view.dims = vec![batch * n_kv_heads, seq * group_size, head_dim];
+        view.strides = vec![stride_batch * group_size, stride_seq, stride_col];
+        Ok(view)
+    }
+
+    fn ungroup_attention_output(
+        grouped: &Tensor<T>,
+        batch: usize,
+        n_heads: usize,
+        n_kv_heads: usize,
+        group_size: usize,
+    ) -> Result<Tensor<T>, MetalError> {
+        if group_size == 0 {
+            return Err(MetalError::InvalidShape("ungroup_attention_output requires non-zero group size".to_string()));
+        }
+        if n_heads != n_kv_heads * group_size {
+            return Err(MetalError::InvalidShape(format!(
+                "ungroup_attention_output expected n_heads {} == n_kv_heads {} * group_size {}",
+                n_heads, n_kv_heads, group_size
+            )));
+        }
+
+        let dims = grouped.dims();
+        if dims.len() != 3 {
+            return Err(MetalError::InvalidShape("ungroup_attention_output expects [batch*n_kv_heads, rows, head_dim]".to_string()));
+        }
+
+        let expected_heads = batch
+            .checked_mul(n_kv_heads)
+            .ok_or_else(|| MetalError::InvalidShape("ungroup_attention_output head count overflow".to_string()))?;
+        if dims[0] != expected_heads {
+            return Err(MetalError::InvalidShape(format!(
+                "ungroup_attention_output expected {} canonical heads, found {}",
+                expected_heads, dims[0]
+            )));
+        }
+
+        let rows = dims[1];
+        if rows % group_size != 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "ungroup_attention_output rows {} not divisible by group size {}",
+                rows, group_size
+            )));
+        }
+
+        let seq = rows / group_size;
+        let head_dim = dims[2];
+
+        let mut view = grouped.clone();
+        view.dims = vec![batch * n_heads, seq, head_dim];
+        view.strides = vec![seq * head_dim, head_dim, 1];
+        Ok(view)
     }
 
     fn gather_cache_history(cache: &Tensor<T>, steps: usize, ctx: &mut Context<T>) -> Result<CacheHistory<T>, MetalError> {
