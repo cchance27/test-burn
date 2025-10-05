@@ -3,7 +3,9 @@ use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 
 use super::{KernelFunction, KernelInvocable};
-use crate::metallic::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache};
+use crate::metallic::{
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, resource_cache::ResourceCache,
+};
 
 #[cfg(test)]
 mod scaled_dot_product_attention_test;
@@ -76,6 +78,7 @@ struct ScaledDotProductAttention<T: TensorElement> {
     pub dim: usize,
     pub scale: f32,
     pub query_offset: u32,
+    pub seq_len_delta: usize,
     pub config: SdpaConfig,
 }
 
@@ -124,11 +127,27 @@ fn create_sdpa_operation<T: TensorElement>(
     }
 
     // Calculate scale factor, reusing the cached SDPA descriptor when available.
+    let sdpa_descriptor = SdpaKey {
+        batch: b,
+        dim: d,
+        dtype: q.dtype,
+    };
     let scale = if let Some(cache_ref) = cache.as_mut() {
-        cache_ref.get_or_create_sdpa(b, s_q, s_k, d).scale
+        cache_ref
+            .get_or_create_sdpa(sdpa_descriptor.batch, sdpa_descriptor.dim, sdpa_descriptor.dtype)
+            .scale
     } else {
         compute_sdpa_scale(d)
     };
+
+    let mut seq_len_delta = s_k;
+    if causal {
+        let workspace_key = ctx.sdpa_workspace_key_for(k);
+        if query_offset == 0 {
+            ctx.reset_sdpa_workspace(workspace_key);
+        }
+        seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
+    }
 
     // Create output tensor
     let out = Tensor::new(vec![b, s_q, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
@@ -192,6 +211,7 @@ fn create_sdpa_operation<T: TensorElement>(
             dim: d,
             scale,
             query_offset,
+            seq_len_delta,
             config,
         }),
         out,

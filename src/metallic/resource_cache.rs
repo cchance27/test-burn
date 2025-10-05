@@ -5,6 +5,7 @@ use super::{
     cacheable_sdpa::CacheableSdpa,
     error::MetalError,
 };
+use crate::metallic::tensor::dtypes::Dtype;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLDevice;
@@ -136,8 +137,8 @@ impl ResourceCache {
 
     /// Get or create an SDPA operation.
     #[inline]
-    pub fn get_or_create_sdpa(&mut self, batch: usize, seq_q: usize, seq_k: usize, dim: usize) -> CacheableSdpa {
-        let key = SdpaKey { batch, seq_q, seq_k, dim };
+    pub fn get_or_create_sdpa(&mut self, batch: usize, dim: usize, dtype: Dtype) -> CacheableSdpa {
+        let key = SdpaKey { batch, dim, dtype };
         // SDPA creation should never fail, so we unwrap.
         Self::get_or_create_resource(
             &mut self.sdpa_cache,
