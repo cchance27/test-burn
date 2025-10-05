@@ -3,7 +3,7 @@
 using namespace metal;
 
 constant uint MAX_TOP_K = 256;
-constant uint THREADGROUP_SIZE = 32;
+constant uint THREADGROUP_SIZE = 8;
 
 struct SamplingParams {
     uint vocab_size;

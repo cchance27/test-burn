@@ -11,7 +11,7 @@ use std::mem;
 
 /// Number of threads launched for the sampling reduction kernel. This must match
 /// `THREADGROUP_SIZE` in `kernel.metal`.
-const THREADGROUP_SIZE: usize = 32;
+const THREADGROUP_SIZE: usize = 8;
 
 /// Maximum supported top-k for the GPU sampling kernel. Larger requests fall
 /// back to the CPU implementation to avoid excessive per-thread stack usage.
