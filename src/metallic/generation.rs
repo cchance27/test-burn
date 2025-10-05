@@ -846,7 +846,11 @@ where
         let mut total_gpu_samples = 0usize;
         let mut overlapped_samples = 0usize;
         let mut overlap_accumulator = 0.0f64;
+        let mut overlap_all_accumulator = 0.0f64;
         let mut cpu_only_decodes = 0usize;
+        let mut decode_accumulator = 0.0f64;
+        let mut waited_samples = 0usize;
+        let mut wait_accumulator = 0.0f64;
 
         for sample in &overlap_samples {
             if sample.gpu_duration.is_zero() {
@@ -855,9 +859,16 @@ where
             }
 
             total_gpu_samples += 1;
+            decode_accumulator += sample.decode_duration.as_secs_f64();
+            let overlap_secs = sample.overlap_duration.as_secs_f64();
+            overlap_all_accumulator += overlap_secs;
             if !sample.overlap_duration.is_zero() {
                 overlapped_samples += 1;
-                overlap_accumulator += sample.overlap_duration.as_secs_f64();
+                overlap_accumulator += overlap_secs;
+            }
+            if !sample.pool_acquire_delay.is_zero() {
+                waited_samples += 1;
+                wait_accumulator += sample.pool_acquire_delay.as_secs_f64();
             }
         }
 
@@ -867,11 +878,26 @@ where
             } else {
                 0.0
             };
+            let avg_overlap_all_ms = overlap_all_accumulator / total_gpu_samples as f64 * 1e3;
+            let avg_decode_ms = decode_accumulator / total_gpu_samples as f64 * 1e3;
+            let avg_wait_ms = if waited_samples > 0 {
+                wait_accumulator / waited_samples as f64 * 1e3
+            } else {
+                0.0
+            };
 
             let mut message = format!(
-                "GPU decode overlap: {overlapped_samples}/{total_gpu_samples} iterations with mean overlap {:.2} ms",
-                avg_overlap_ms
+                "GPU decode overlap: {overlapped_samples}/{total_gpu_samples} iterations observed overlap (mean overlapped {:.2} ms, overall mean {:.2} ms, mean decode {:.2} ms)",
+                avg_overlap_ms, avg_overlap_all_ms, avg_decode_ms
             );
+
+            if waited_samples > 0 {
+                let suffix = if waited_samples == 1 { "" } else { "s" };
+                message.push_str(&format!(
+                    " (pool acquire wait avg {:.2} ms across {waited_samples} iteration{suffix})",
+                    avg_wait_ms
+                ));
+            }
 
             if cpu_only_decodes > 0 {
                 let suffix = if cpu_only_decodes == 1 { "" } else { "s" };

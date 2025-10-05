@@ -283,6 +283,7 @@ pub struct OverlapSample {
     pub decode_duration: Duration,
     pub gpu_duration: Duration,
     pub overlap_duration: Duration,
+    pub pool_acquire_delay: Duration,
 }
 
 #[derive(Default)]
@@ -318,6 +319,7 @@ struct InFlightArena {
     submitted_at: Instant,
     decode_window: Option<DecodeWindow>,
     completed_at: Option<Instant>,
+    pool_acquire_delay: Duration,
 }
 
 impl<T: TensorElement> Context<T> {
@@ -365,6 +367,7 @@ impl<T: TensorElement> Context<T> {
                     decode_duration,
                     gpu_duration,
                     overlap_duration,
+                    pool_acquire_delay: arena.pool_acquire_delay,
                 });
             }
 
@@ -421,6 +424,7 @@ impl<T: TensorElement> Context<T> {
                         decode_duration,
                         gpu_duration,
                         overlap_duration,
+                        pool_acquire_delay: arena.pool_acquire_delay,
                     });
                 }
 
@@ -434,30 +438,34 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    fn acquire_idle_pool(&mut self) -> Result<MemoryPool, MetalError> {
+    fn acquire_idle_pool(&mut self) -> Result<(MemoryPool, Duration), MetalError> {
         self.recycle_completed_arenas();
 
         if let Some(mut pool) = self.idle_pools.pop() {
             pool.reset();
-            return Ok(pool);
+            return Ok((pool, Duration::ZERO));
         }
 
+        let mut wait_duration = Duration::ZERO;
         let future_in_flight = self.in_flight_arenas.len() + 1;
         if future_in_flight > self.max_in_flight_arenas {
+            let wait_start = Instant::now();
             if let Some(arena) = self.in_flight_arenas.first_mut() {
                 arena.command_buffer.wait();
                 if arena.completed_at.is_none() {
                     arena.completed_at = Some(Instant::now());
                 }
             }
+            wait_duration = wait_start.elapsed();
+
             self.recycle_completed_arenas();
             if let Some(mut pool) = self.idle_pools.pop() {
                 pool.reset();
-                return Ok(pool);
+                return Ok((pool, wait_duration));
             }
         }
 
-        MemoryPool::new(&self.device, &self.command_queue)
+        MemoryPool::new(&self.device, &self.command_queue).map(|pool| (pool, wait_duration))
     }
 
     fn acquire_idle_resource_cache(&mut self) -> Result<ResourceCache, MetalError> {
@@ -512,7 +520,7 @@ impl<T: TensorElement> Context<T> {
             .take()
             .unwrap_or_else(|| ResourceCache::with_device(self.device.clone()));
 
-        let next_pool = self.acquire_idle_pool()?;
+        let (next_pool, pool_acquire_delay) = self.acquire_idle_pool()?;
         let pool = std::mem::replace(&mut self.pool, next_pool);
         let next_cache = self.acquire_idle_resource_cache()?;
         self.active_resource_cache = Some(next_cache);
@@ -525,6 +533,7 @@ impl<T: TensorElement> Context<T> {
             submitted_at,
             decode_window: None,
             completed_at: None,
+            pool_acquire_delay,
         });
 
         Ok(Some(submission_id))
@@ -546,6 +555,7 @@ impl<T: TensorElement> Context<T> {
                     decode_duration,
                     gpu_duration: Duration::ZERO,
                     overlap_duration: Duration::ZERO,
+                    pool_acquire_delay: Duration::ZERO,
                 });
             }
         }
