@@ -187,6 +187,17 @@ fn create_sdpa_operation<T: TensorElement>(
         None => ctx.matmul_alpha_beta(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0)?,
     };
 
+    let row_offset_u32 = u32::try_from(row_offset).map_err(|_| {
+        MetalError::InvalidShape(format!(
+            "SDPA row offset {row_offset} exceeds representable query offset range"
+        ))
+    })?;
+    let softmax_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
+        MetalError::InvalidShape(format!(
+            "SDPA query offset {query_offset} with row offset {row_offset} exceeds u32::MAX"
+        ))
+    })?;
+
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();
         crate::metallic::kernels::softmax::apply_softmax(
@@ -197,7 +208,7 @@ fn create_sdpa_operation<T: TensorElement>(
             rows_to_process,
             s_k,
             causal,
-            query_offset,
+            softmax_query_offset,
             config.use_mps_softmax,
         )?
     };
@@ -224,7 +235,7 @@ fn create_sdpa_operation<T: TensorElement>(
             seq_k: s_k,
             dim: d,
             scale,
-            query_offset,
+            softmax_query_offset,
             seq_len_delta: rows_to_process,
             config,
         }),
