@@ -9,7 +9,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, TensorElement, cache_keys::SdpaKey, kernels};
+use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, kernels};
 use kernels::gemv::GemvOp;
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
@@ -1066,14 +1066,6 @@ impl<T: TensorElement> Context<T> {
 
         let linear = self.matmul_bias_add(x_flat, fused_weight, fused_bias, false, false)?;
 
-        let q_range_end = d_model;
-        let k_range_end = d_model + kv_dim;
-        let v_range_end = expected_total;
-
-        let q_linear = linear.slice_last_dim(0..q_range_end)?;
-        let k_linear = linear.slice_last_dim(d_model..k_range_end)?;
-        let v_linear = linear.slice_last_dim(k_range_end..v_range_end)?;
-
         let seq_u32 = u32::try_from(seq).map_err(|_| MetalError::InvalidShape("Sequence length exceeds u32::MAX".to_string()))?;
         let head_dim_u32 = u32::try_from(head_dim).map_err(|_| MetalError::InvalidShape("head_dim exceeds u32::MAX".to_string()))?;
         let kv_head_dim_u32 =
@@ -1083,59 +1075,50 @@ impl<T: TensorElement> Context<T> {
         let d_model_u32 = u32::try_from(d_model).map_err(|_| MetalError::InvalidShape("d_model exceeds u32::MAX".to_string()))?;
         let kv_dim_u32 = u32::try_from(kv_dim).map_err(|_| MetalError::InvalidShape("kv_dim exceeds u32::MAX".to_string()))?;
 
-        let q_heads = self.call::<crate::metallic::kernels::kv_rearrange::KvRearrangeOp>((
-            q_linear,
-            d_model_u32,
-            head_dim_u32,
-            n_heads_u32,
-            n_heads_u32,
-            head_dim_u32,
-            seq_u32,
-        ))?;
-
-        let k_heads = self.call::<crate::metallic::kernels::kv_rearrange::KvRearrangeOp>((
-            k_linear,
-            kv_dim_u32,
-            kv_head_dim_u32,
-            n_kv_heads_u32,
-            n_kv_heads_u32,
-            kv_head_dim_u32,
-            seq_u32,
-        ))?;
-
-        let v_heads = self.call::<crate::metallic::kernels::kv_rearrange::KvRearrangeOp>((
-            v_linear,
-            kv_dim_u32,
-            kv_head_dim_u32,
-            n_kv_heads_u32,
-            n_kv_heads_u32,
-            kv_head_dim_u32,
-            seq_u32,
-        ))?;
-
-        if let Some(rope_handles) = rope {
-            let q_with_rope = self.call::<crate::metallic::kernels::rope::RoPEOp>((
-                q_heads,
-                rope_handles.cos.clone(),
-                rope_handles.sin.clone(),
-                head_dim_u32,
-                seq_u32,
-                rope_handles.position_offset,
-            ))?;
-
-            let k_with_rope = self.call::<crate::metallic::kernels::rope::RoPEOp>((
-                k_heads,
-                rope_handles.cos.clone(),
-                rope_handles.sin.clone(),
-                kv_head_dim_u32,
-                seq_u32,
-                rope_handles.position_offset,
-            ))?;
-
-            Ok((q_with_rope, k_with_rope, v_heads))
-        } else {
-            Ok((q_heads, k_heads, v_heads))
+        let row_stride_elems = linear.strides().first().copied().unwrap_or(expected_total);
+        if row_stride_elems == 0 {
+            return Err(MetalError::InvalidShape(
+                "Row stride for fused_qkv_projection must be greater than zero".to_string(),
+            ));
         }
+        let row_stride_u32 = u32::try_from(row_stride_elems)
+            .map_err(|_| MetalError::InvalidShape("Row stride for fused_qkv_projection exceeds u32::MAX".to_string()))?;
+
+        let q_dims = vec![batch * n_heads, seq, head_dim];
+        let k_dims = vec![batch * n_kv_heads, seq, kv_head_dim];
+        let v_dims = k_dims.clone();
+
+        let q_heads = Tensor::new(q_dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+        let k_heads = Tensor::new(k_dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+        let v_heads = Tensor::new(v_dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+
+        let (rope_cos, rope_sin, rope_offset) = match rope {
+            Some(handles) => (Some(handles.cos.clone()), Some(handles.sin.clone()), handles.position_offset),
+            None => (None, None, 0),
+        };
+
+        let _ = self.call::<crate::metallic::kernels::fused_qkv::FusedQkvOp>((
+            linear.clone(),
+            q_heads.clone(),
+            k_heads.clone(),
+            v_heads.clone(),
+            rope_cos,
+            rope_sin,
+            row_stride_u32,
+            d_model_u32,
+            kv_dim_u32,
+            head_dim_u32,
+            kv_head_dim_u32,
+            n_heads_u32,
+            n_kv_heads_u32,
+            seq_u32,
+            rope_offset,
+        ))?;
+
+        self.mark_tensor_pending(&k_heads);
+        self.mark_tensor_pending(&v_heads);
+
+        Ok((q_heads, k_heads, v_heads))
     }
 
     #[inline]

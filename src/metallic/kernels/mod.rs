@@ -19,6 +19,7 @@ pub mod elemwise_add;
 pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
+pub mod fused_qkv;
 pub mod gelu;
 pub mod gemv;
 pub mod kv_cache_write;
@@ -47,6 +48,7 @@ pub enum KernelLibrary {
     Gelu,
     KvCacheWrite,
     KvRearrange,
+    FusedQkv,
     LayerNorm,
     Permute,
     RepeatKvHeads,
@@ -70,6 +72,7 @@ impl KernelLibrary {
             KernelLibrary::Gelu => include_str!("gelu/kernel.metal"),
             KernelLibrary::KvCacheWrite => include_str!("kv_cache_write/kernel.metal"),
             KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
+            KernelLibrary::FusedQkv => include_str!("fused_qkv/kernel.metal"),
             KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
             KernelLibrary::Permute => include_str!("permute/kernel.metal"),
             KernelLibrary::RepeatKvHeads => include_str!("repeat_kv_heads/kernel.metal"),
@@ -99,6 +102,7 @@ pub enum KernelFunction {
     Gelu,
     KvCacheWrite,
     KvRearrange,
+    FusedQkv,
     LayerNorm,
     Permute,
     RepeatKvHeads,
@@ -126,6 +130,7 @@ impl KernelFunction {
             KernelFunction::Gelu => KernelLibrary::Gelu,
             KernelFunction::KvCacheWrite => KernelLibrary::KvCacheWrite,
             KernelFunction::KvRearrange => KernelLibrary::KvRearrange,
+            KernelFunction::FusedQkv => KernelLibrary::FusedQkv,
             KernelFunction::LayerNorm => KernelLibrary::LayerNorm,
             KernelFunction::Permute => KernelLibrary::Permute,
             KernelFunction::RepeatKvHeads => KernelLibrary::RepeatKvHeads,
@@ -167,6 +172,8 @@ impl KernelFunction {
             (KernelFunction::KvCacheWrite, F16) => "kv_cache_write_kernel_f16",
             (KernelFunction::KvRearrange, F32) => "kv_rearrange_kernel_f32",
             (KernelFunction::KvRearrange, F16) => "kv_rearrange_kernel_f16",
+            (KernelFunction::FusedQkv, F32) => "fused_qkv_kernel_f32",
+            (KernelFunction::FusedQkv, F16) => "fused_qkv_kernel_f16",
             (KernelFunction::LayerNorm, F32) => "layernorm_kernel_f32",
             (KernelFunction::LayerNorm, F16) => "layernorm_kernel_f16",
             (KernelFunction::Permute, F32) => "permute_kernel_f32",
