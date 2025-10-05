@@ -1,7 +1,11 @@
 use super::*;
 
+use crate::metallic::instrumentation::{KernelDispatchKind, SamplingDispatchTiming};
 use crate::metallic::{TensorElement, tensor::RetainedBuffer};
+use objc2::msg_send;
+use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
+use objc2_metal::MTLCounterSampleBuffer;
 
 /// Number of threads launched for the sampling reduction kernel. This must match
 /// `THREADGROUP_SIZE` in `kernel.metal`.
@@ -29,6 +33,7 @@ struct SampleTopKTopP<T: TensorElement> {
     result: RetainedBuffer,
     params: SamplingParams,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    dispatch_timing: Option<SamplingDispatchTiming>,
 }
 
 impl KernelInvocable for SampleTopKTopPOp {
@@ -53,12 +58,21 @@ impl KernelInvocable for SampleTopKTopPOp {
         let (logits, params, result) = args;
         ctx.prepare_tensors_for_active_cmd(&[&logits])?;
 
+        let dispatch_timing = {
+            let command_buffer = {
+                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+                command_buffer.clone()
+            };
+            ctx.register_sampling_dispatch(&command_buffer).timing().cloned()
+        };
+
         let output = logits.clone();
         let op = SampleTopKTopP {
             logits,
             result,
             params,
             pipeline: pipeline.expect("Kernel Module should supply a pipeline"),
+            dispatch_timing,
         };
 
         Ok((Box::new(op), output))
@@ -74,6 +88,20 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), KernelDispatchKind::Compute)
+        {
+            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+            unsafe {
+                let _: () = msg_send![
+                    &*encoder,
+                    sampleCountersInBuffer: sample_buffer,
+                    atSampleIndex: timing.start_index(),
+                    withBarrier: Bool::YES
+                ];
+            }
+        }
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.logits.buf, self.logits.offset);
@@ -92,6 +120,21 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
         };
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
+
+        if let Some(timing) = &self.dispatch_timing
+            && matches!(timing.kind(), KernelDispatchKind::Compute)
+        {
+            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
+            unsafe {
+                let _: () = msg_send![
+                    &*encoder,
+                    sampleCountersInBuffer: sample_buffer,
+                    atSampleIndex: timing.end_index(),
+                    withBarrier: Bool::NO
+                ];
+            }
+        }
+
         encoder.endEncoding();
         Ok(())
     }

@@ -42,48 +42,54 @@ pub struct MatmulDims {
     pub k: usize,
 }
 
-/// Shared recorder handle that allows matmul dispatches to append timing samples
+/// Shared recorder handle that allows GPU dispatches to append timing samples
 /// once the GPU finishes executing a command buffer.
 #[derive(Clone)]
-pub struct MatMulSampleRecorder {
-    inner: Arc<dyn Fn(MatMulSample) + Send + Sync>,
+pub struct KernelSampleRecorder<S> {
+    inner: Arc<dyn Fn(S) + Send + Sync>,
 }
 
-impl MatMulSampleRecorder {
+impl<S> KernelSampleRecorder<S> {
     pub fn new<F>(callback: F) -> Self
     where
-        F: Fn(MatMulSample) + Send + Sync + 'static,
+        F: Fn(S) + Send + Sync + 'static,
     {
         Self { inner: Arc::new(callback) }
     }
 
-    pub fn record(&self, sample: MatMulSample) {
+    pub fn record(&self, sample: S) {
         (self.inner)(sample);
     }
 }
 
+pub type MatMulSampleRecorder = KernelSampleRecorder<MatMulSample>;
+
 /// Enumerates the sampling strategy required to surround a matmul dispatch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MatMulDispatchKind {
+pub enum KernelDispatchKind {
     Compute,
     Blit,
 }
 
+pub type MatMulDispatchKind = KernelDispatchKind;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct MatMulDispatchHandle {
+pub struct KernelDispatchHandle {
     key: usize,
     index: usize,
 }
 
+pub type MatMulDispatchHandle = KernelDispatchHandle;
+
 #[derive(Clone)]
-pub struct MatMulDispatchTiming {
+pub struct KernelDispatchTiming {
     sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     start_index: NSUInteger,
     end_index: NSUInteger,
-    kind: MatMulDispatchKind,
+    kind: KernelDispatchKind,
 }
 
-impl MatMulDispatchTiming {
+impl KernelDispatchTiming {
     pub fn sample_buffer(&self) -> &ProtocolObject<dyn MTLCounterSampleBuffer> {
         &self.sample_buffer
     }
@@ -96,43 +102,58 @@ impl MatMulDispatchTiming {
         self.end_index
     }
 
-    pub fn kind(&self) -> MatMulDispatchKind {
+    pub fn kind(&self) -> KernelDispatchKind {
         self.kind
     }
 }
 
-pub struct MatMulDispatchRegistration {
-    handle: MatMulDispatchHandle,
-    timing: Option<MatMulDispatchTiming>,
+pub struct KernelDispatchRegistration {
+    handle: KernelDispatchHandle,
+    timing: Option<KernelDispatchTiming>,
 }
 
-impl MatMulDispatchRegistration {
-    pub fn handle(&self) -> MatMulDispatchHandle {
+impl KernelDispatchRegistration {
+    pub fn handle(&self) -> KernelDispatchHandle {
         self.handle
     }
 
-    pub fn timing(&self) -> Option<&MatMulDispatchTiming> {
+    pub fn timing(&self) -> Option<&KernelDispatchTiming> {
         self.timing.as_ref()
     }
 }
 
-/// Tracks in-flight matmul dispatches so their GPU execution time can be
-/// recorded once the surrounding command buffer completes.
-#[derive(Clone)]
-pub struct MatMulInstrumentation {
-    inner: Arc<MatMulInstrumentationInner>,
+pub type MatMulDispatchRegistration = KernelDispatchRegistration;
+pub type MatMulDispatchTiming = KernelDispatchTiming;
+pub type MatMulInstrumentation = KernelInstrumentation<MatMulSample>;
+
+#[derive(Clone, Copy, Debug)]
+pub struct SamplingSample {
+    pub duration: Duration,
+    pub handle: Option<KernelDispatchHandle>,
 }
 
-struct MatMulInstrumentationInner {
-    pending: Mutex<FxHashMap<usize, PendingMatMul>>,
+pub type SamplingSampleRecorder = KernelSampleRecorder<SamplingSample>;
+pub type SamplingDispatchRegistration = KernelDispatchRegistration;
+pub type SamplingDispatchTiming = KernelDispatchTiming;
+pub type SamplingInstrumentation = KernelInstrumentation<SamplingSample>;
+
+/// Tracks in-flight GPU dispatches so their execution time can be recorded once
+/// the surrounding command buffer completes.
+#[derive(Clone)]
+pub struct KernelInstrumentation<S> {
+    inner: Arc<KernelInstrumentationInner<S>>,
+}
+
+struct KernelInstrumentationInner<S> {
+    pending: Mutex<FxHashMap<usize, PendingKernel<S>>>,
     #[cfg(target_os = "macos")]
     counter: CounterResources,
 }
 
-impl MatMulInstrumentation {
+impl<S: Send + 'static> KernelInstrumentation<S> {
     pub fn new(device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
         Self {
-            inner: Arc::new(MatMulInstrumentationInner {
+            inner: Arc::new(KernelInstrumentationInner {
                 pending: Mutex::new(FxHashMap::default()),
                 #[cfg(target_os = "macos")]
                 counter: CounterResources::new(device),
@@ -140,41 +161,45 @@ impl MatMulInstrumentation {
         }
     }
 
-    fn lock_pending(&self) -> MutexGuard<'_, FxHashMap<usize, PendingMatMul>> {
+    fn lock_pending(&self) -> MutexGuard<'_, FxHashMap<usize, PendingKernel<S>>> {
         self.inner.pending.lock().unwrap_or_else(|err| err.into_inner())
     }
 
-    pub fn register(
+    pub fn register_dispatch<F>(
         &self,
         command_buffer: &CommandBuffer,
-        backend: MatMulBackend,
-        dims: Option<MatmulDims>,
-        kind: MatMulDispatchKind,
-        recorder: MatMulSampleRecorder,
-    ) -> MatMulDispatchRegistration {
+        kind: KernelDispatchKind,
+        recorder: KernelSampleRecorder<S>,
+        builder: F,
+    ) -> KernelDispatchRegistration
+    where
+        F: Fn(Duration, KernelDispatchHandle) -> S + Send + Sync + 'static,
+    {
         let key = Self::buffer_key(command_buffer);
+
+        let builder: SampleBuilder<S> = Arc::new(builder);
 
         {
             let mut pending = self.lock_pending();
             if let Some(entry) = pending.get_mut(&key) {
                 let index = entry.next_index();
-                let handle = MatMulDispatchHandle { key, index };
-                let timing = entry.push_dispatch(handle, backend, dims, self.inner.allocate_timing(command_buffer, kind));
-                return MatMulDispatchRegistration { handle, timing };
+                let handle = KernelDispatchHandle { key, index };
+                let timing = entry.push_dispatch(handle, self.inner.allocate_timing(command_buffer, kind), Arc::clone(&builder));
+                return KernelDispatchRegistration { handle, timing };
             }
         }
 
         self.install_completion(command_buffer, key);
 
-        let mut entry = PendingMatMul::new(recorder);
-        let handle = MatMulDispatchHandle {
+        let mut entry = PendingKernel::new(recorder);
+        let handle = KernelDispatchHandle {
             key,
             index: entry.next_index(),
         };
-        let timing = entry.push_dispatch(handle, backend, dims, self.inner.allocate_timing(command_buffer, kind));
+        let timing = entry.push_dispatch(handle, self.inner.allocate_timing(command_buffer, kind), builder);
         self.lock_pending().insert(key, entry);
 
-        MatMulDispatchRegistration { handle, timing }
+        KernelDispatchRegistration { handle, timing }
     }
 
     fn install_completion(&self, command_buffer: &CommandBuffer, key: usize) {
@@ -187,37 +212,22 @@ impl MatMulInstrumentation {
             return;
         };
 
-        let PendingMatMul { recorder, dispatches } = entry;
+        let PendingKernel { recorder, dispatches } = entry;
         let mut resolved_total = Duration::default();
         let mut fallback = Vec::new();
 
         for dispatch in dispatches {
-            let PendingDispatch {
-                handle,
-                backend,
-                dims,
-                timing,
-            } = dispatch;
+            let PendingDispatch { handle, timing, builder } = dispatch;
 
             if let Some(timing) = timing.as_ref()
                 && let Some(duration) = self.inner.resolve_duration(timing)
             {
-                recorder.record(MatMulSample {
-                    backend,
-                    duration,
-                    dims,
-                    handle: Some(handle),
-                });
+                recorder.record(builder(duration, handle));
                 resolved_total += duration;
                 continue;
             }
 
-            fallback.push(PendingDispatch {
-                handle,
-                backend,
-                dims,
-                timing,
-            });
+            fallback.push(PendingDispatch { handle, timing, builder });
         }
 
         if fallback.is_empty() {
@@ -244,7 +254,7 @@ impl MatMulInstrumentation {
         Some(Duration::from_secs_f64(delta))
     }
 
-    fn dispatch_fallback(recorder: &MatMulSampleRecorder, dispatches: Vec<PendingDispatch>, remaining: Option<Duration>) {
+    fn dispatch_fallback(recorder: &KernelSampleRecorder<S>, dispatches: Vec<PendingDispatch<S>>, remaining: Option<Duration>) {
         let Some(total) = remaining else {
             return;
         };
@@ -260,12 +270,7 @@ impl MatMulInstrumentation {
 
         let duration = Duration::from_secs_f64(per_dispatch);
         for dispatch in dispatches {
-            recorder.record(MatMulSample {
-                backend: dispatch.backend,
-                duration,
-                dims: dispatch.dims,
-                handle: Some(dispatch.handle),
-            });
+            recorder.record((dispatch.builder)(duration, dispatch.handle));
         }
     }
 
@@ -274,19 +279,34 @@ impl MatMulInstrumentation {
     }
 }
 
-impl Default for MatMulInstrumentation {
+impl<S: Send + 'static> Default for KernelInstrumentation<S> {
     fn default() -> Self {
         Self::new(None)
     }
 }
 
-struct PendingMatMul {
-    recorder: MatMulSampleRecorder,
-    dispatches: Vec<PendingDispatch>,
+impl KernelInstrumentation<SamplingSample> {
+    pub fn register_sampling_dispatch(
+        &self,
+        command_buffer: &CommandBuffer,
+        recorder: SamplingSampleRecorder,
+    ) -> SamplingDispatchRegistration {
+        self.register_dispatch(command_buffer, KernelDispatchKind::Compute, recorder, |duration, handle| {
+            SamplingSample {
+                duration,
+                handle: Some(handle),
+            }
+        })
+    }
 }
 
-impl PendingMatMul {
-    fn new(recorder: MatMulSampleRecorder) -> Self {
+struct PendingKernel<S> {
+    recorder: KernelSampleRecorder<S>,
+    dispatches: Vec<PendingDispatch<S>>,
+}
+
+impl<S> PendingKernel<S> {
+    fn new(recorder: KernelSampleRecorder<S>) -> Self {
         Self {
             recorder,
             dispatches: Vec::new(),
@@ -299,39 +319,34 @@ impl PendingMatMul {
 
     fn push_dispatch(
         &mut self,
-        handle: MatMulDispatchHandle,
-        backend: MatMulBackend,
-        dims: Option<MatmulDims>,
+        handle: KernelDispatchHandle,
         timing: Option<PendingDispatchTiming>,
-    ) -> Option<MatMulDispatchTiming> {
+        builder: SampleBuilder<S>,
+    ) -> Option<KernelDispatchTiming> {
         let timing_for_handle = timing.as_ref().map(PendingDispatchTiming::to_public);
-        self.dispatches.push(PendingDispatch {
-            handle,
-            backend,
-            dims,
-            timing,
-        });
+        self.dispatches.push(PendingDispatch { handle, timing, builder });
         timing_for_handle
     }
 }
 
-struct PendingDispatch {
-    handle: MatMulDispatchHandle,
-    backend: MatMulBackend,
-    dims: Option<MatmulDims>,
+type SampleBuilder<S> = Arc<dyn Fn(Duration, KernelDispatchHandle) -> S + Send + Sync>;
+
+struct PendingDispatch<S> {
+    handle: KernelDispatchHandle,
     timing: Option<PendingDispatchTiming>,
+    builder: SampleBuilder<S>,
 }
 
 struct PendingDispatchTiming {
     sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     start_index: NSUInteger,
     end_index: NSUInteger,
-    kind: MatMulDispatchKind,
+    kind: KernelDispatchKind,
 }
 
 impl PendingDispatchTiming {
-    fn to_public(&self) -> MatMulDispatchTiming {
-        MatMulDispatchTiming {
+    fn to_public(&self) -> KernelDispatchTiming {
+        KernelDispatchTiming {
             sample_buffer: self.sample_buffer.clone(),
             start_index: self.start_index,
             end_index: self.end_index,
@@ -340,8 +355,8 @@ impl PendingDispatchTiming {
     }
 }
 
-impl MatMulInstrumentationInner {
-    fn allocate_timing(&self, command_buffer: &CommandBuffer, kind: MatMulDispatchKind) -> Option<PendingDispatchTiming> {
+impl<S> KernelInstrumentationInner<S> {
+    fn allocate_timing(&self, command_buffer: &CommandBuffer, kind: KernelDispatchKind) -> Option<PendingDispatchTiming> {
         #[cfg(target_os = "macos")]
         {
             self.counter.allocate_timing(command_buffer, kind)
@@ -399,11 +414,11 @@ impl CounterResources {
         }
     }
 
-    fn allocate_timing(&self, command_buffer: &CommandBuffer, kind: MatMulDispatchKind) -> Option<PendingDispatchTiming> {
+    fn allocate_timing(&self, command_buffer: &CommandBuffer, kind: KernelDispatchKind) -> Option<PendingDispatchTiming> {
         let counter_set = self.timestamp_counter_set.as_ref()?;
         match kind {
-            MatMulDispatchKind::Compute if !self.supports_dispatch_sampling => return None,
-            MatMulDispatchKind::Blit if !self.supports_blit_sampling => return None,
+            KernelDispatchKind::Compute if !self.supports_dispatch_sampling => return None,
+            KernelDispatchKind::Blit if !self.supports_blit_sampling => return None,
             _ => {}
         }
 
@@ -532,19 +547,27 @@ mod tests {
         let dispatches = vec![
             PendingDispatch {
                 handle: MatMulDispatchHandle { key: 0, index: 0 },
-                backend: MatMulBackend::Mps,
-                dims: None,
                 timing: None,
+                builder: Arc::new(|duration, handle| MatMulSample {
+                    backend: MatMulBackend::Mps,
+                    duration,
+                    dims: None,
+                    handle: Some(handle),
+                }),
             },
             PendingDispatch {
                 handle: MatMulDispatchHandle { key: 0, index: 1 },
-                backend: MatMulBackend::Mps,
-                dims: None,
                 timing: None,
+                builder: Arc::new(|duration, handle| MatMulSample {
+                    backend: MatMulBackend::Mps,
+                    duration,
+                    dims: None,
+                    handle: Some(handle),
+                }),
             },
         ];
 
-        MatMulInstrumentation::dispatch_fallback(&recorder, dispatches, Some(Duration::from_millis(30)));
+        KernelInstrumentation::<MatMulSample>::dispatch_fallback(&recorder, dispatches, Some(Duration::from_millis(30)));
 
         let recorded = samples.lock().unwrap();
         assert_eq!(recorded.len(), 2);

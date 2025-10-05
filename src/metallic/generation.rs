@@ -1,6 +1,6 @@
 use super::{Context, KvCacheDispatchStats, MetalError, Tensor, resource_cache::CacheMetrics};
 use crate::metallic::instrumentation::{
-    MemoryEvent, MemoryUsage, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
+    MemoryEvent, MemoryUsage, SamplingSample, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
 };
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::kernels::sampling::MAX_TOP_K;
@@ -104,6 +104,16 @@ fn record_matmul_samples(stats: &mut MatMulBackendStats, samples: Vec<MatMulSamp
     }
 }
 
+fn record_sampling_samples(stats: &mut RollingStat, samples: Vec<SamplingSample>) {
+    for sample in samples {
+        if sample.duration.is_zero() {
+            continue;
+        }
+
+        stats.record(sample.duration);
+    }
+}
+
 pub(crate) fn aggregate_matmul_totals<I>(samples: I) -> FxHashMap<MatMulBackend, Duration>
 where
     I: IntoIterator<Item = MatMulSample>,
@@ -129,18 +139,21 @@ fn sample_next_token_from_logits<T: TensorElement>(
     temperature: f32,
     random: u32,
     use_device: bool,
-) -> Result<u32, MetalError> {
+) -> Result<(u32, Option<Duration>), MetalError> {
     if vocab_size == 0 {
-        return Ok(0);
+        return Ok((0, None));
     }
 
     if use_device {
         if let Some(token) = ctx.sample_top_k_top_p_device(logits_tensor, vocab_size, top_k, top_p, temperature, random)? {
-            return Ok(token);
+            return Ok((token, None));
         }
     }
 
-    ctx.sample_top_k_top_p_host(logits_tensor, vocab_size, top_k, top_p, temperature, random)
+    let start = Instant::now();
+    let token = ctx.sample_top_k_top_p_host(logits_tensor, vocab_size, top_k, top_p, temperature, random)?;
+    let duration = start.elapsed();
+    Ok((token, Some(duration)))
 }
 
 #[inline]
@@ -461,13 +474,7 @@ where
         let use_device = should_use_device_sampling::<T>(vocab_size, cfg.top_k);
         let random = ctx.next_sampler_random();
 
-        if use_device {
-            ctx.synchronize();
-            record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
-        }
-
-        let sample_start = Instant::now();
-        next_token = sample_next_token_from_logits(
+        let (token, host_duration) = sample_next_token_from_logits(
             ctx,
             &logits_tensor,
             vocab_size,
@@ -477,10 +484,13 @@ where
             random,
             use_device,
         )?;
+        next_token = token;
         record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
-        let sample_duration = sample_start.elapsed();
-        if !sample_duration.is_zero() {
-            sample_stats.record(sample_duration);
+        record_sampling_samples(&mut sample_stats, ctx.take_sampling_samples());
+        if let Some(duration) = host_duration {
+            if !duration.is_zero() {
+                sample_stats.record(duration);
+            }
         }
     } else {
         // If there's no prompt, start with token 0.
@@ -623,14 +633,8 @@ where
 
         let use_device = should_use_device_sampling::<T>(vocab_size, cfg.top_k);
 
-        if use_device {
-            ctx.synchronize();
-            record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
-        }
-
         let random = ctx.next_sampler_random();
-        let sample_start = Instant::now();
-        next_token = sample_next_token_from_logits(
+        let (token, host_duration) = sample_next_token_from_logits(
             ctx,
             &logits_tensor,
             vocab_size,
@@ -640,13 +644,16 @@ where
             random,
             use_device,
         )?;
+        next_token = token;
         record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
+        record_sampling_samples(&mut sample_stats, ctx.take_sampling_samples());
 
         generated_ids.push(next_token);
 
-        let sample_duration = sample_start.elapsed();
-        if !sample_duration.is_zero() {
-            sample_stats.record(sample_duration);
+        if let Some(duration) = host_duration {
+            if !duration.is_zero() {
+                sample_stats.record(duration);
+            }
         }
 
         let decode_start = Instant::now();

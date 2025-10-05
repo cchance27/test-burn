@@ -2,6 +2,7 @@ use super::error::MetalError;
 use super::instrumentation::{
     LatencyCollectorHandle, LatencyEvent, MatMulDispatchHandle, MatMulDispatchKind, MatMulDispatchRegistration, MatMulInstrumentation,
     MatMulSampleRecorder, MatmulDims, MemoryCollectorHandle, MemoryEvent, MemorySample, MemorySampleSender, MemoryUsage,
+    SamplingDispatchRegistration, SamplingInstrumentation, SamplingSample, SamplingSampleRecorder,
 };
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
@@ -239,6 +240,10 @@ pub struct Context<T: TensorElement> {
     matmul_samples: Arc<Mutex<Vec<MatMulSample>>>,
     matmul_recorder: MatMulSampleRecorder,
     matmul_logging_session: RefCell<Option<Vec<MatMulDispatchHandle>>>,
+    /// Instrumentation used to capture sampling kernel timings.
+    sampling_instrumentation: SamplingInstrumentation,
+    sampling_samples: Arc<Mutex<Vec<SamplingSample>>>,
+    sampling_recorder: SamplingSampleRecorder,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     sampler_rng: StdRng,
@@ -316,6 +321,18 @@ impl<T: TensorElement> Context<T> {
         });
         let matmul_instrumentation = MatMulInstrumentation::new(Some(&device));
 
+        let sampling_samples = Arc::new(Mutex::new(Vec::new()));
+        let sampling_samples_for_recorder = Arc::clone(&sampling_samples);
+        let sampling_recorder = SamplingSampleRecorder::new(move |sample| {
+            if sample.duration.is_zero() {
+                return;
+            }
+            if let Ok(mut samples) = sampling_samples_for_recorder.lock() {
+                samples.push(sample);
+            }
+        });
+        let sampling_instrumentation = SamplingInstrumentation::new(Some(&device));
+
         let mut seeding_rng = rand::rng();
         let sampler_seed = seeding_rng.next_u64();
 
@@ -340,6 +357,9 @@ impl<T: TensorElement> Context<T> {
             matmul_samples,
             matmul_recorder,
             matmul_logging_session: RefCell::new(None),
+            sampling_instrumentation,
+            sampling_samples,
+            sampling_recorder,
             sampler_buffers: SamplerBuffers::default(),
             sampler_rng: StdRng::seed_from_u64(sampler_seed),
             sampling_result_buffer: None,
@@ -507,11 +527,23 @@ impl<T: TensorElement> Context<T> {
         dims: Option<MatmulDims>,
         kind: MatMulDispatchKind,
     ) -> MatMulDispatchRegistration {
-        let registration = self
-            .matmul_instrumentation
-            .register(command_buffer, backend, dims, kind, self.matmul_recorder.clone());
+        let registration =
+            self.matmul_instrumentation
+                .register_dispatch(command_buffer, kind, self.matmul_recorder.clone(), move |duration, handle| {
+                    MatMulSample {
+                        backend,
+                        duration,
+                        dims,
+                        handle: Some(handle),
+                    }
+                });
         self.track_matmul_dispatch(registration.handle());
         registration
+    }
+
+    pub(crate) fn register_sampling_dispatch(&self, command_buffer: &CommandBuffer) -> SamplingDispatchRegistration {
+        self.sampling_instrumentation
+            .register_sampling_dispatch(command_buffer, self.sampling_recorder.clone())
     }
 
     fn track_matmul_dispatch(&self, handle: MatMulDispatchHandle) {
@@ -541,6 +573,14 @@ impl<T: TensorElement> Context<T> {
 
     pub fn take_matmul_samples(&self) -> Vec<MatMulSample> {
         let mut samples = match self.matmul_samples.lock() {
+            Ok(guard) => guard,
+            Err(err) => err.into_inner(),
+        };
+        samples.drain(..).collect()
+    }
+
+    pub fn take_sampling_samples(&self) -> Vec<SamplingSample> {
+        let mut samples = match self.sampling_samples.lock() {
             Ok(guard) => guard,
             Err(err) => err.into_inner(),
         };
