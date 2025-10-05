@@ -455,10 +455,12 @@ impl<T: TensorElement> Context<T> {
         let params = SamplingParams {
             vocab_size: vocab_size as u32,
             top_k: top_k as u32,
+            random_u32,
+            threadgroup_count: 0,
             top_p,
             temperature,
-            random_u32,
-            _padding: 0,
+            _padding0: 0,
+            _padding1: 0,
         };
 
         let logits_view = logits.clone();
