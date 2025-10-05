@@ -13,12 +13,15 @@ struct RepeatKvHeads<T: TensorElement> {
     seq: u32,
     head_dim: u32,
     cache_stride: u32,
+    dest_offset: u32,
+    output_stride: u32,
     total_elements: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
 impl KernelInvocable for RepeatKvHeadsOp {
-    type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, u32, u32, u32, u32, u32);
+    #[allow(clippy::type_complexity)]
+    type Args<'a, T: TensorElement> = (Tensor<T>, Option<Tensor<T>>, u32, u32, u32, u32, u32, u32, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::RepeatKvHeads)
@@ -30,7 +33,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride) = args;
+        let (input, output_override, dest_offset, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride) = args;
 
         if group_size == 0 {
             return Err(MetalError::InvalidShape(
@@ -60,12 +63,6 @@ impl KernelInvocable for RepeatKvHeadsOp {
                 "Active sequence length for repeat_kv_heads must be greater than zero".to_string(),
             ));
         }
-        if seq > cache_stride {
-            return Err(MetalError::InvalidShape(format!(
-                "Active sequence length ({}) exceeds cache stride ({})",
-                seq, cache_stride
-            )));
-        }
 
         let input_dims = input.dims();
         if input_dims.len() != 3 || input_dims[0] != (batch * n_kv_heads) as usize || input_dims[2] != head_dim as usize {
@@ -74,10 +71,11 @@ impl KernelInvocable for RepeatKvHeadsOp {
                 input_dims
             )));
         }
-        if input_dims[1] != seq as usize {
+        let required_input = dest_offset as usize + seq as usize;
+        if input_dims[1] < required_input {
             return Err(MetalError::InvalidShape(format!(
-                "Input sequence ({}) must match active sequence ({})",
-                input_dims[1], seq
+                "Input sequence (len={}) is smaller than requested range dest_offset ({}) + seq ({})",
+                input_dims[1], dest_offset, seq
             )));
         }
 
@@ -95,15 +93,69 @@ impl KernelInvocable for RepeatKvHeadsOp {
             )));
         }
 
-        ctx.prepare_tensors_for_active_cmd(&[&input])?;
+        let mut output = if let Some(tensor) = output_override {
+            tensor
+        } else {
+            let output_dims = vec![(batch * n_heads) as usize, seq as usize, head_dim as usize];
+            Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
+        };
 
-        let output_dims = vec![(batch * n_heads) as usize, seq as usize, head_dim as usize];
-        let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
-        let total_elements = output.len() as u32;
+        let output_dims = output.dims().to_vec();
+        if output_dims.len() != 3 || output_dims[0] != (batch * n_heads) as usize || output_dims[2] != head_dim as usize {
+            return Err(MetalError::InvalidShape(format!(
+                "Output dims {:?} must be [batch*n_heads, cache_capacity, head_dim]",
+                output_dims
+            )));
+        }
+
+        let output_strides = output.strides.clone();
+        if output_strides.len() < 2 {
+            return Err(MetalError::InvalidShape(
+                "Output tensor for repeat_kv_heads must expose at least two strides".to_string(),
+            ));
+        }
+
+        if output_strides[2] != 1 {
+            return Err(MetalError::InvalidShape(
+                "Output tensor for repeat_kv_heads must have contiguous head_dim stride".to_string(),
+            ));
+        }
+
+        let output_stride = output_strides[0]
+            .checked_div(head_dim as usize)
+            .ok_or_else(|| MetalError::InvalidShape("Output tensor batch stride must be divisible by head_dim".to_string()))?;
+
+        let required_output = dest_offset as usize + seq as usize;
+        if required_output > output_stride {
+            return Err(MetalError::InvalidShape(format!(
+                "Requested output range dest_offset ({}) + seq ({}) exceeds output capacity ({})",
+                dest_offset, seq, output_stride
+            )));
+        }
+
+        ctx.prepare_tensors_for_active_cmd(&[&input, &output])?;
+
+        let total_elements_u64 = (batch as u64)
+            .checked_mul(n_heads as u64)
+            .and_then(|v| v.checked_mul(seq as u64))
+            .and_then(|v| v.checked_mul(head_dim as u64))
+            .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads element count overflowed u32".to_string()))?;
+
+        if total_elements_u64 == 0 {
+            return Err(MetalError::InvalidShape(
+                "repeat_kv_heads requires a non-zero element count".to_string(),
+            ));
+        }
+
+        let total_elements = total_elements_u64 as u32;
+
+        let mut output_view = output.clone();
+        output_view.dims = vec![(batch * n_heads) as usize, (dest_offset + seq) as usize, head_dim as usize];
+        output_view.strides = output.strides.clone();
 
         let op = RepeatKvHeads {
             input,
-            output: output.clone(),
+            output: output_view.clone(),
             group_size,
             batch,
             n_kv_heads,
@@ -111,11 +163,13 @@ impl KernelInvocable for RepeatKvHeadsOp {
             seq,
             head_dim,
             cache_stride,
+            dest_offset,
+            output_stride: output_stride as u32,
             total_elements,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
         };
 
-        Ok((Box::new(op), output))
+        Ok((Box::new(op), output_view))
     }
 }
 
@@ -150,7 +204,9 @@ impl<T: TensorElement> Operation for RepeatKvHeads<T> {
         set_bytes(&encoder, 6, &self.seq);
         set_bytes(&encoder, 7, &self.head_dim);
         set_bytes(&encoder, 8, &self.cache_stride);
-        set_bytes(&encoder, 9, &self.total_elements);
+        set_bytes(&encoder, 9, &self.dest_offset);
+        set_bytes(&encoder, 10, &self.output_stride);
+        set_bytes(&encoder, 11, &self.total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();

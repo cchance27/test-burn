@@ -144,6 +144,8 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
 
             let repeated = ctx.call::<RepeatKvHeadsOp>((
                 canonical_view.clone(),
+                None,
+                0,
                 group_size as u32,
                 batch as u32,
                 n_kv_heads as u32,
@@ -209,6 +211,7 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
         tensor: input.clone(),
         active_seq: seq,
         cache_capacity: seq,
+        repeat: None,
     };
 
     let expected = {
@@ -238,6 +241,86 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
     assert_eq!(gpu_values.len(), expected.len());
     for (idx, (gpu, cpu)) in gpu_values.iter().zip(expected.iter()).enumerate() {
         assert!((gpu - cpu).abs() < 1e-5, "Mismatch at index {}: gpu={} expected={}", idx, gpu, cpu);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_repeat_kv_heads_incremental_workspace_reuse() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+    let cfg = Qwen25Config {
+        n_layers: 1,
+        d_model: 16,
+        ff_dim: 32,
+        n_heads: 4,
+        n_kv_heads: 2,
+        seq_len: 6,
+        vocab_size: 32,
+        rope_freq_base: 1e6,
+        rms_eps: 1e-6,
+    };
+    let model = Qwen25::new(cfg, &mut ctx)?;
+
+    let layer_idx = 0usize;
+    let batch = 1usize;
+    let seq = 4usize;
+    let n_heads = model.config.n_heads;
+    let n_kv_heads = model.config.n_kv_heads;
+    let group_size = n_heads / n_kv_heads;
+    let head_dim = model.config.d_model / n_heads;
+    let kv_head_dim = (model.config.d_model * n_kv_heads / n_heads) / n_kv_heads;
+
+    ctx.alloc_kv_cache(layer_idx, seq, batch * n_kv_heads, kv_head_dim)?;
+
+    for step in 0..seq {
+        let mut step_values = Vec::with_capacity(batch * n_kv_heads * kv_head_dim);
+        for bh in 0..batch * n_kv_heads {
+            for d in 0..kv_head_dim {
+                step_values.push((step * 100 + bh * 10 + d) as f32);
+            }
+        }
+
+        let step_tensor = Tensor::new(
+            vec![batch * n_kv_heads, 1, kv_head_dim],
+            TensorStorage::Dedicated(&ctx),
+            TensorInit::CopyFrom(&step_values),
+        )?;
+
+        ctx.write_kv_step(layer_idx, step, &step_tensor, &step_tensor)?;
+    }
+
+    let cache_entry = ctx.kv_caches.get(&layer_idx).cloned().expect("kv cache entry must exist");
+
+    let mut previous_steps = 0usize;
+    for steps in 1..=seq {
+        let workspace_history = Qwen25::gather_cache_history(
+            &cache_entry.k,
+            steps,
+            Some(RepeatCacheRequest {
+                layer_idx,
+                kind: RepeatKvKind::Key,
+                batch,
+                n_heads,
+                head_dim: kv_head_dim,
+            }),
+            &mut ctx,
+        )?;
+        let baseline_history = Qwen25::gather_cache_history(&cache_entry.k, steps, None, &mut ctx)?;
+
+        let reservation = workspace_history
+            .repeat
+            .as_ref()
+            .expect("workspace history must expose repeat reservation");
+        assert_eq!(reservation.dest_offset, previous_steps);
+        assert_eq!(reservation.write_steps, steps - previous_steps);
+
+        let baseline = Qwen25::repeat_kv_heads(&baseline_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, &mut ctx)?;
+        let reused = Qwen25::repeat_kv_heads(&workspace_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, &mut ctx)?;
+
+        ctx.synchronize();
+        assert_eq!(reused.as_slice(), baseline.as_slice());
+        previous_steps = steps;
     }
 
     Ok(())
@@ -309,7 +392,7 @@ fn test_gather_cache_history_gpu_path() -> Result<(), MetalError> {
     )?;
 
     for steps in 1..=seq {
-        let history = Qwen25::gather_cache_history(&cache, steps, &mut ctx)?;
+        let history = Qwen25::gather_cache_history(&cache, steps, None, &mut ctx)?;
         assert_eq!(history.tensor.dims(), &[batch_heads, steps, head_dim]);
         assert_eq!(history.active_seq, steps);
         assert_eq!(history.cache_capacity, seq);

@@ -53,6 +53,8 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
 
     let output = ctx.call::<RepeatKvHeadsOp>((
         input,
+        None,
+        0,
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -153,6 +155,8 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
 
     let repeated_k = ctx.call::<RepeatKvHeadsOp>((
         canonical_k_history.clone(),
+        None,
+        0,
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -163,6 +167,8 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     ))?;
     let repeated_v = ctx.call::<RepeatKvHeadsOp>((
         canonical_v_history.clone(),
+        None,
+        0,
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -184,6 +190,46 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
 
     assert_eq!(repeated_k_slice, cpu_expected_k.as_slice());
     assert_eq!(repeated_v_slice, cpu_expected_v.as_slice());
+
+    // Incrementally fill a reusable buffer and ensure only new regions are written.
+    let mut repeated_workspace = Tensor::zeros(vec![batch * n_heads, cache_capacity, head_dim], &mut ctx, true)?;
+
+    // First, materialize the initial two steps.
+    let delta_first = 2usize;
+    let _ = ctx.call::<RepeatKvHeadsOp>((
+        canonical_k_history.clone(),
+        Some(repeated_workspace.clone()),
+        0,
+        group_size as u32,
+        batch as u32,
+        n_kv_heads as u32,
+        n_heads as u32,
+        delta_first as u32,
+        head_dim as u32,
+        cache_capacity as u32,
+    ))?;
+
+    // Then, write the remaining suffix without touching the prefix.
+    let delta_second = seq - delta_first;
+    let _ = ctx.call::<RepeatKvHeadsOp>((
+        canonical_k_history.clone(),
+        Some(repeated_workspace.clone()),
+        delta_first as u32,
+        group_size as u32,
+        batch as u32,
+        n_kv_heads as u32,
+        n_heads as u32,
+        delta_second as u32,
+        head_dim as u32,
+        cache_capacity as u32,
+    ))?;
+
+    ctx.synchronize();
+
+    let mut repeated_view = repeated_workspace.clone();
+    repeated_view.dims = vec![batch * n_heads, seq, head_dim];
+    let repeated_slice = repeated_view.as_slice();
+    assert_eq!(repeated_slice, cpu_expected_k.as_slice());
 
     Ok(())
 }

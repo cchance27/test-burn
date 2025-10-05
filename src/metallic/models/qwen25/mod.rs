@@ -1,3 +1,4 @@
+use crate::metallic::context::{RepeatKvKind, RepeatKvWorkspaceReservation};
 use crate::metallic::instrumentation::{LatencyEvent, MemoryEvent};
 use crate::metallic::kernels::kv_rearrange::KvRearrangeOp;
 use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
@@ -446,8 +447,30 @@ impl<T: TensorElement> Qwen25<T> {
                 .get(&layer_idx)
                 .cloned()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
-            let v_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
+            let k_history = Qwen25::gather_cache_history(
+                &cache_entry.k,
+                pos + 1,
+                Some(RepeatCacheRequest {
+                    layer_idx,
+                    kind: RepeatKvKind::Key,
+                    batch,
+                    n_heads,
+                    head_dim: kv_head_dim,
+                }),
+                ctx,
+            )?;
+            let v_history = Qwen25::gather_cache_history(
+                &cache_entry.v,
+                pos + 1,
+                Some(RepeatCacheRequest {
+                    layer_idx,
+                    kind: RepeatKvKind::Value,
+                    batch,
+                    n_heads,
+                    head_dim: kv_head_dim,
+                }),
+                ctx,
+            )?;
             let group_size = n_heads / n_kv_heads;
             let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
             let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
@@ -534,24 +557,77 @@ impl<T: TensorElement> Qwen25<T> {
             return Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string()));
         }
 
-        ctx.call::<RepeatKvHeadsOp>((
+        let (output_override, dest_offset, seq_to_write, cache_capacity, workspace_key) = if let Some(reservation) = &history.repeat {
+            if reservation.write_steps == 0 {
+                let mut view = reservation.buffer.clone();
+                view.dims = vec![batch * n_heads, history.active_seq, head_dim];
+                return Ok(view);
+            }
+
+            (
+                Some(reservation.buffer.clone()),
+                reservation.dest_offset,
+                reservation.write_steps,
+                reservation.cache_capacity,
+                Some(reservation.key),
+            )
+        } else {
+            (None, 0usize, history.active_seq, history.cache_capacity, None)
+        };
+
+        if seq_to_write == 0 {
+            return Err(MetalError::InvalidShape(
+                "repeat_kv_heads requires a non-zero sequence length to materialize".to_string(),
+            ));
+        }
+
+        let mut repeated = ctx.call::<RepeatKvHeadsOp>((
             input,
+            output_override,
+            dest_offset as u32,
             group_size as u32,
             batch as u32,
             n_kv_heads as u32,
             n_heads as u32,
-            history.active_seq as u32,
+            seq_to_write as u32,
             head_dim as u32,
-            history.cache_capacity as u32,
-        ))
+            cache_capacity as u32,
+        ))?;
+
+        if let Some(key) = workspace_key {
+            ctx.commit_repeat_kv_workspace(key, dest_offset + seq_to_write);
+        }
+
+        repeated.dims = vec![batch * n_heads, history.active_seq, head_dim];
+        Ok(repeated)
     }
 
-    fn gather_cache_history(cache: &Tensor<T>, steps: usize, ctx: &mut Context<T>) -> Result<CacheHistory<T>, MetalError> {
+    fn gather_cache_history(
+        cache: &Tensor<T>,
+        steps: usize,
+        repeat_request: Option<RepeatCacheRequest>,
+        ctx: &mut Context<T>,
+    ) -> Result<CacheHistory<T>, MetalError> {
         let (view, cache_capacity) = ctx.kv_cache_history_view(cache, steps)?;
+        let repeat = if let Some(request) = repeat_request {
+            Some(ctx.prepare_repeat_kv_workspace(
+                request.layer_idx,
+                request.kind,
+                request.batch,
+                request.n_heads,
+                cache_capacity,
+                request.head_dim,
+                steps,
+            )?)
+        } else {
+            None
+        };
+
         Ok(CacheHistory {
             tensor: view,
             active_seq: steps,
             cache_capacity,
+            repeat,
         })
     }
 }
@@ -561,6 +637,7 @@ struct CacheHistory<T: TensorElement> {
     tensor: Tensor<T>,
     active_seq: usize,
     cache_capacity: usize,
+    repeat: Option<RepeatKvWorkspaceReservation<T>>,
 }
 
 impl<T: TensorElement> CacheHistory<T> {
@@ -579,6 +656,16 @@ impl<T: TensorElement> CacheHistory<T> {
             cache_capacity: dims[1],
             active_seq: dims[1],
             tensor,
+            repeat: None,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+struct RepeatCacheRequest {
+    layer_idx: usize,
+    kind: RepeatKvKind,
+    batch: usize,
+    n_heads: usize,
+    head_dim: usize,
 }

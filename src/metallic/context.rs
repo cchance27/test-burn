@@ -9,7 +9,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, TensorElement, cache_keys::SdpaKey, kernels};
+use crate::metallic::{Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, kernels};
 use kernels::gemv::GemvOp;
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
@@ -24,6 +24,7 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
+use std::collections::hash_map::Entry;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -283,6 +284,7 @@ pub struct Context<T: TensorElement> {
     kv_cache_dispatch_stats: KvCacheDispatchStats,
     memory_usage_cache: MemoryUsageCache,
     sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
+    repeat_kv_workspaces: FxHashMap<RepeatKvWorkspaceKey, RepeatKvWorkspaceState<T>>,
     //config: ContextConfig,
 }
 
@@ -301,6 +303,53 @@ impl<T: TensorElement> KvCacheEntry<T> {
     fn total_bytes(&self) -> usize {
         self.k.size_bytes() + self.v.size_bytes()
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RepeatKvKind {
+    Key,
+    Value,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct RepeatKvWorkspaceKey {
+    layer_idx: usize,
+    kind: RepeatKvKind,
+}
+
+struct RepeatKvWorkspaceState<T: TensorElement> {
+    buffer: Tensor<T>,
+    batch_heads: usize,
+    cache_capacity: usize,
+    head_dim: usize,
+    last_written: usize,
+}
+
+impl<T: TensorElement> RepeatKvWorkspaceState<T> {
+    fn new(buffer: Tensor<T>, batch_heads: usize, cache_capacity: usize, head_dim: usize) -> Self {
+        Self {
+            buffer,
+            batch_heads,
+            cache_capacity,
+            head_dim,
+            last_written: 0,
+        }
+    }
+
+    fn matches(&self, batch_heads: usize, cache_capacity: usize, head_dim: usize) -> bool {
+        self.batch_heads == batch_heads && self.cache_capacity == cache_capacity && self.head_dim == head_dim
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct RepeatKvWorkspaceReservation<T: TensorElement> {
+    pub key: RepeatKvWorkspaceKey,
+    pub buffer: Tensor<T>,
+    pub dest_offset: usize,
+    pub write_steps: usize,
+    pub cache_capacity: usize,
+    pub batch_heads: usize,
+    pub head_dim: usize,
 }
 
 const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
@@ -373,6 +422,7 @@ impl<T: TensorElement> Context<T> {
             kv_cache_dispatch_stats: KvCacheDispatchStats::default(),
             memory_usage_cache: MemoryUsageCache::default(),
             sdpa_workspaces: FxHashMap::default(),
+            repeat_kv_workspaces: FxHashMap::default(),
             //config,
         })
     }
@@ -1261,10 +1311,12 @@ impl<T: TensorElement> Context<T> {
             cache.clear();
         }
         self.sdpa_workspaces.clear();
+        self.repeat_kv_workspaces.clear();
     }
 
     pub fn reset_pool(&mut self) {
         self.pool.reset();
+        self.repeat_kv_workspaces.clear();
     }
 
     pub(crate) fn clear_kv_caches(&mut self) {
@@ -1272,6 +1324,7 @@ impl<T: TensorElement> Context<T> {
         self.kv_cache_total_bytes = 0;
         self.memory_usage_cache.kv_cache_bytes = 0;
         self.sdpa_workspaces.clear();
+        self.repeat_kv_workspaces.clear();
     }
 
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
@@ -1680,6 +1733,83 @@ impl<T: TensorElement> Context<T> {
         self.prepare_tensors_for_active_cmd(&[&view])?;
 
         Ok((view, dims[1]))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_repeat_kv_workspace(
+        &mut self,
+        layer_idx: usize,
+        kind: RepeatKvKind,
+        batch: usize,
+        n_heads: usize,
+        cache_capacity: usize,
+        head_dim: usize,
+        active_seq: usize,
+    ) -> Result<RepeatKvWorkspaceReservation<T>, MetalError> {
+        let batch_heads = batch
+            .checked_mul(n_heads)
+            .ok_or_else(|| MetalError::InvalidShape("batch*n_heads overflowed".to_string()))?;
+
+        if active_seq > cache_capacity {
+            return Err(MetalError::InvalidShape(format!(
+                "Active sequence length ({}) exceeds cache capacity ({})",
+                active_seq, cache_capacity
+            )));
+        }
+
+        let key = RepeatKvWorkspaceKey { layer_idx, kind };
+
+        let entry = match self.repeat_kv_workspaces.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let needs_refresh = {
+                    let state = occupied.get();
+                    !state.matches(batch_heads, cache_capacity, head_dim)
+                };
+
+                if needs_refresh {
+                    let dims = vec![batch_heads, cache_capacity, head_dim];
+                    let buffer = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+                    *occupied.get_mut() = RepeatKvWorkspaceState::new(buffer, batch_heads, cache_capacity, head_dim);
+                }
+
+                occupied.into_mut()
+            }
+            Entry::Vacant(vacant) => {
+                let dims = vec![batch_heads, cache_capacity, head_dim];
+                let buffer = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+                vacant.insert(RepeatKvWorkspaceState::new(buffer, batch_heads, cache_capacity, head_dim))
+            }
+        };
+
+        if entry.last_written > active_seq {
+            entry.last_written = active_seq;
+        }
+
+        let dest_offset = entry.last_written;
+        let write_steps = active_seq.saturating_sub(entry.last_written);
+
+        if dest_offset + write_steps > cache_capacity {
+            return Err(MetalError::InvalidShape(format!(
+                "repeat_kv workspace request exceeds capacity: dest_offset={} write_steps={} capacity={}",
+                dest_offset, write_steps, cache_capacity
+            )));
+        }
+
+        Ok(RepeatKvWorkspaceReservation {
+            key,
+            buffer: entry.buffer.clone(),
+            dest_offset,
+            write_steps,
+            cache_capacity,
+            batch_heads,
+            head_dim,
+        })
+    }
+
+    pub(crate) fn commit_repeat_kv_workspace(&mut self, key: RepeatKvWorkspaceKey, new_written: usize) {
+        if let Some(state) = self.repeat_kv_workspaces.get_mut(&key) {
+            state.last_written = new_written.min(state.cache_capacity);
+        }
     }
 
     pub(crate) fn sdpa_workspace_key_for(&self, tensor: &Tensor<T>) -> SdpaWorkspaceKey {
