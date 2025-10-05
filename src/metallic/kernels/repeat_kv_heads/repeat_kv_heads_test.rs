@@ -86,15 +86,22 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let head_dim = 5usize;
 
     let layer_idx = 0usize;
-    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_kv_heads, batch * n_heads, head_dim)?;
+    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_heads, head_dim)?;
+
+    let mut canonical_k = vec![0f32; batch * n_kv_heads * seq * head_dim];
+    let mut canonical_v = vec![0f32; batch * n_kv_heads * seq * head_dim];
 
     for step in 0..seq {
         let mut k_values = Vec::with_capacity(batch * n_kv_heads * head_dim);
         let mut v_values = Vec::with_capacity(batch * n_kv_heads * head_dim);
         for bh in 0..batch * n_kv_heads {
             for d in 0..head_dim {
-                k_values.push((step * 100 + bh * 10 + d) as f32);
-                v_values.push((step * 100 + bh * 10 + d) as f32 + 0.5);
+                let value = (step * 100 + bh * 10 + d) as f32;
+                k_values.push(value);
+                v_values.push(value + 0.5);
+                let base = (bh * seq + step) * head_dim + d;
+                canonical_k[base] = value;
+                canonical_v[base] = value + 0.5;
             }
         }
 
@@ -109,7 +116,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
             TensorInit::CopyFrom(&v_values),
         )?;
 
-        ctx.write_repeated_kv_step(layer_idx, step, group_size, &k_step, &v_step)?;
+        ctx.write_kv_step(layer_idx, step, group_size, &k_step, &v_step)?;
     }
 
     let entry = ctx
@@ -118,58 +125,52 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         .cloned()
         .expect("kv cache must exist after allocation");
 
-    let (k_canonical_view, cache_stride) = ctx.kv_cache_history_view(&entry.k, seq)?;
-    let (v_canonical_view, _) = ctx.kv_cache_history_view(&entry.v, seq)?;
+    let canonical_k_tensor = Tensor::new(
+        vec![batch * n_kv_heads, seq, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&canonical_k),
+    )?;
+    let canonical_v_tensor = Tensor::new(
+        vec![batch * n_kv_heads, seq, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&canonical_v),
+    )?;
 
     let expected_k = ctx.call::<RepeatKvHeadsOp>((
-        k_canonical_view.clone(),
+        canonical_k_tensor.clone(),
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
         n_heads as u32,
         seq as u32,
         head_dim as u32,
-        cache_stride as u32,
+        seq as u32,
     ))?;
     let expected_v = ctx.call::<RepeatKvHeadsOp>((
-        v_canonical_view.clone(),
+        canonical_v_tensor.clone(),
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
         n_heads as u32,
         seq as u32,
         head_dim as u32,
-        cache_stride as u32,
+        seq as u32,
     ))?;
 
     ctx.synchronize();
 
-    let repeated_heads = entry.repeated_k.dims()[0];
-    let repeated_stride = entry.repeated_k.dims()[1];
-    let repeated_head_dim = entry.repeated_k.dims()[2];
-    assert_eq!(repeated_head_dim, head_dim);
+    let repeated_k_history = ctx.kv_cache_history_view(&entry.k, seq)?.0;
+    let repeated_v_history = ctx.kv_cache_history_view(&entry.v, seq)?.0;
 
-    let repeated_k_raw = entry.repeated_k.as_slice();
-    let repeated_v_raw = entry.repeated_v.as_slice();
-
-    let mut actual_k = Vec::with_capacity(repeated_heads * seq * head_dim);
-    let mut actual_v = Vec::with_capacity(repeated_heads * seq * head_dim);
-    for bh in 0..repeated_heads {
-        for s in 0..seq {
-            let start = (bh * repeated_stride + s) * head_dim;
-            let end = start + head_dim;
-            actual_k.extend_from_slice(&repeated_k_raw[start..end]);
-            actual_v.extend_from_slice(&repeated_v_raw[start..end]);
-        }
-    }
-
+    let repeated_k_slice = repeated_k_history.as_slice();
+    let repeated_v_slice = repeated_v_history.as_slice();
     let expected_k_slice = expected_k.as_slice();
     let expected_v_slice = expected_v.as_slice();
 
-    assert_eq!(actual_k.len(), expected_k_slice.len());
-    assert_eq!(actual_v.len(), expected_v_slice.len());
+    assert_eq!(repeated_k_slice.len(), expected_k_slice.len());
+    assert_eq!(repeated_v_slice.len(), expected_v_slice.len());
 
-    for (idx, (actual, expected)) in actual_k.iter().zip(expected_k_slice.iter()).enumerate() {
+    for (idx, (actual, expected)) in repeated_k_slice.iter().zip(expected_k_slice.iter()).enumerate() {
         assert!(
             (actual - expected).abs() < 1e-5,
             "K repeat mismatch at element {}: got {} expected {}",
@@ -179,7 +180,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         );
     }
 
-    for (idx, (actual, expected)) in actual_v.iter().zip(expected_v_slice.iter()).enumerate() {
+    for (idx, (actual, expected)) in repeated_v_slice.iter().zip(expected_v_slice.iter()).enumerate() {
         assert!(
             (actual - expected).abs() < 1e-5,
             "V repeat mismatch at element {}: got {} expected {}",

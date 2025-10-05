@@ -29,21 +29,16 @@ block.
 
 ### KV cache lifecycle instrumentation
 
-KV caching now keeps two synchronized views per transformer layer: the
-canonical GQA layout (`[batch * n_kv_heads, seq, head_dim]`) and a persistent
-repeated buffer (`[batch * n_heads, seq, head_dim]`). `Context::write_kv_step`
-appends the latest timestep into the canonical cache, while
-`Context::write_repeated_kv_step` mirrors just that row into the repeated view.
-Incremental generation reuses the repeated buffers directly, so the
-`kv_repeat` latency phase still appears in telemetry but reflects the cheap
-append instead of replaying the full history via the `RepeatKvHeads` kernel.
-This ensures the dashboard continues to show a stable `kv_repeat` duration
-even though the underlying work is now amortized. The dedicated KV cache pool
-still has an 8 GB safety limit, but generation now sizes each allocation to the
-active prompt window (`prompt_tokens + max_new_tokens`, clamped to the model's
-maximum). The memory collector reports the combined canonical + repeated usage
-per layer using this per-run capacity so the UI mirrors the smaller footprint
-instead of the legacy full-sequence reservation.
+KV caching now maintains a single attention-ready buffer per transformer layer
+with layout `[batch * n_heads, seq, head_dim]`. `Context::write_kv_step` writes
+new timesteps directly into this layout, avoiding the previous canonical
+mirroring pass. Incremental generation reuses the unified cache directly, so
+the `kv_repeat` latency phase continues to capture the light append work rather
+than an expensive replay. The dedicated KV cache pool still has an 8 GB safety
+limit, but generation sizes each allocation to the active prompt window
+(`prompt_tokens + max_new_tokens`, clamped to the model's maximum). The memory
+collector reports the per-layer footprint using this per-run capacity so the UI
+mirrors the smaller reservation instead of the legacy full-sequence sizing.
 
 ### Softmax backend benchmarking
 

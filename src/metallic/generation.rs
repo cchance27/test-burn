@@ -481,7 +481,6 @@ where
 
     // Determine whether existing cache-backed descriptors must be invalidated because
     // their shapes changed (e.g. when generating with a longer context than before).
-    let canonical_batch_heads = batch_size * n_kv_heads;
     let repeated_batch_heads = batch_size * n_heads;
     let mut cache_shapes_changed = false;
     if !ctx.kv_caches.is_empty() {
@@ -489,13 +488,7 @@ where
             match ctx.kv_caches.get(&layer_idx) {
                 Some(entry) => {
                     let k_dims = entry.k.dims();
-                    let repeated_k_dims = entry.repeated_k.dims();
-                    if entry.capacity != kv_capacity
-                        || k_dims[0] != canonical_batch_heads
-                        || k_dims[2] != kv_head_dim
-                        || repeated_k_dims[0] != repeated_batch_heads
-                        || repeated_k_dims[2] != kv_head_dim
-                    {
+                    if entry.capacity != kv_capacity || k_dims[0] != repeated_batch_heads || k_dims[2] != kv_head_dim {
                         cache_shapes_changed = true;
                         break;
                     }
@@ -533,7 +526,7 @@ where
     let model_memory_tree = build_model_memory_tree(qwen);
 
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, batch_size * n_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_heads, kv_head_dim)?;
     }
 
     if cache_shapes_changed {
