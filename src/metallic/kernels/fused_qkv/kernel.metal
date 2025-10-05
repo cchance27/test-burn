@@ -40,10 +40,8 @@ kernel void fused_qkv_kernel_##SUFFIX( \
         uint out_batch = tmp / seq; \
         uint b = out_batch / n_heads; \
         uint h = out_batch % n_heads; \
-        uint group_size = n_heads / n_kv_heads; \
-        uint kv_h = h / group_size; \
         uint row = b * seq + s; \
-        uint head_base = kv_h * head_dim; \
+        uint head_base = h * head_dim; \
         uint base_offset = head_base + feature; \
         uint src_idx = row * row_stride + base_offset; \
         SCALAR raw = fused[src_idx]; \
