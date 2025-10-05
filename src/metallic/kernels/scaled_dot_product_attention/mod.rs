@@ -157,13 +157,31 @@ fn create_sdpa_operation<T: TensorElement>(
     let row_multiplier = if group_size > 1 { group_size } else { 1 };
     let seq_q_units = if group_size > 1 { s_q / group_size } else { s_q };
     if seq_q_units == 0 {
-        return Err(MetalError::InvalidShape(
-            "SDPA requires at least one query row".to_string(),
-        ));
+        return Err(MetalError::InvalidShape("SDPA requires at least one query row".to_string()));
     }
 
+    let query_offset_usize =
+        usize::try_from(query_offset).map_err(|_| MetalError::InvalidShape("SDPA query offset exceeds usize range".to_string()))?;
+    let query_offset_units = if group_size > 1 {
+        if query_offset_usize % group_size != 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "SDPA query offset {} must be divisible by group size {}",
+                query_offset, group_size
+            )));
+        }
+        query_offset_usize / group_size
+    } else {
+        query_offset_usize
+    };
+
     let mut rows_to_process_units = seq_q_units;
-    let mut row_offset_units = 0usize;
+
+    if query_offset_units > 0 {
+        rows_to_process_units = seq_q_units.saturating_sub(query_offset_units);
+        if rows_to_process_units == 0 {
+            rows_to_process_units = seq_q_units;
+        }
+    }
 
     if causal {
         let workspace_key = ctx.sdpa_workspace_key_for(k);
@@ -171,19 +189,24 @@ fn create_sdpa_operation<T: TensorElement>(
             ctx.reset_sdpa_workspace(workspace_key);
         }
         let delta_units = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), seq_q_units, s_k);
-        rows_to_process_units = if delta_units == 0 {
-            seq_q_units
-        } else {
-            delta_units.min(seq_q_units)
-        };
-        row_offset_units = seq_q_units.saturating_sub(rows_to_process_units);
+
+        if query_offset == 0 {
+            rows_to_process_units = seq_q_units;
+        } else if delta_units > 0 {
+            rows_to_process_units = rows_to_process_units.min(delta_units);
+            if rows_to_process_units == 0 {
+                rows_to_process_units = delta_units.min(seq_q_units).max(1);
+            }
+        }
     }
 
+    if rows_to_process_units == 0 {
+        rows_to_process_units = seq_q_units;
+    }
+
+    let row_offset_units = seq_q_units.saturating_sub(rows_to_process_units);
     let rows_to_process = rows_to_process_units.saturating_mul(row_multiplier);
     let row_offset = row_offset_units.saturating_mul(row_multiplier);
-
-    let rows_to_process = if rows_to_process == 0 { s_q } else { rows_to_process };
-    let row_offset = if row_offset >= s_q { 0 } else { row_offset };
 
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
