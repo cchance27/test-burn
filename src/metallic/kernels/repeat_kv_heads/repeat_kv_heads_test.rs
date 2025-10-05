@@ -162,32 +162,59 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let repeated_k_history = ctx.kv_cache_history_view(&entry.k, seq)?.0;
     let repeated_v_history = ctx.kv_cache_history_view(&entry.v, seq)?.0;
 
-    let repeated_k_slice = repeated_k_history.as_slice();
-    let repeated_v_slice = repeated_v_history.as_slice();
     let expected_k_slice = expected_k.as_slice();
     let expected_v_slice = expected_v.as_slice();
 
-    assert_eq!(repeated_k_slice.len(), expected_k_slice.len());
-    assert_eq!(repeated_v_slice.len(), expected_v_slice.len());
+    let expected_dims = expected_k.dims();
+    assert_eq!(expected_dims, repeated_k_history.dims());
+    assert_eq!(expected_dims, repeated_v_history.dims());
 
-    for (idx, (actual, expected)) in repeated_k_slice.iter().zip(expected_k_slice.iter()).enumerate() {
-        assert!(
-            (actual - expected).abs() < 1e-5,
-            "K repeat mismatch at element {}: got {} expected {}",
-            idx,
-            actual,
-            expected
-        );
-    }
+    let head_stride = entry.k.strides[0];
+    let seq_stride = entry.k.strides[1];
+    let dim_stride = entry.k.strides[2];
+    assert_eq!(head_stride, entry.v.strides[0]);
+    assert_eq!(seq_stride, entry.v.strides[1]);
+    let value_stride = entry.v.strides[2];
 
-    for (idx, (actual, expected)) in repeated_v_slice.iter().zip(expected_v_slice.iter()).enumerate() {
-        assert!(
-            (actual - expected).abs() < 1e-5,
-            "V repeat mismatch at element {}: got {} expected {}",
-            idx,
-            actual,
-            expected
-        );
+    let repeated_k_data = entry.k.as_slice();
+    let repeated_v_data = entry.v.as_slice();
+
+    let heads = expected_dims[0];
+    let steps = expected_dims[1];
+    let dims = expected_dims[2];
+
+    for head in 0..heads {
+        for step_idx in 0..steps {
+            for dim_idx in 0..dims {
+                let expected_index = (head * steps + step_idx) * dims + dim_idx;
+                let k_actual_index = head * head_stride + step_idx * seq_stride + dim_idx * dim_stride;
+                let v_actual_index = head * head_stride + step_idx * seq_stride + dim_idx * value_stride;
+
+                let k_actual = repeated_k_data[k_actual_index];
+                let v_actual = repeated_v_data[v_actual_index];
+                let k_expected = expected_k_slice[expected_index];
+                let v_expected = expected_v_slice[expected_index];
+
+                assert!(
+                    (k_actual - k_expected).abs() < 1e-5,
+                    "K repeat mismatch at head {}, step {}, dim {}: got {} expected {}",
+                    head,
+                    step_idx,
+                    dim_idx,
+                    k_actual,
+                    k_expected
+                );
+                assert!(
+                    (v_actual - v_expected).abs() < 1e-5,
+                    "V repeat mismatch at head {}, step {}, dim {}: got {} expected {}",
+                    head,
+                    step_idx,
+                    dim_idx,
+                    v_actual,
+                    v_expected
+                );
+            }
+        }
     }
 
     Ok(())
