@@ -41,3 +41,57 @@ fn sdpa_cache_hits_increase_for_repeated_requests() {
     assert_eq!(stats_after_hits.sdpa.misses, 1);
     assert_eq!(stats_after_hits.sdpa.hits, 3);
 }
+
+#[test]
+fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(), MetalError> {
+    use crate::metallic::tensor::TensorStorage;
+    use crate::metallic::tensor::dtypes::F32Element;
+
+    let mut ctx = Context::<F32Element>::new()?;
+    let batch = 1;
+    let dim = 4;
+    let prefill = 3;
+    let total = 4;
+
+    let q_data: Vec<f32> = (0..batch * total * dim).map(|i| (i as f32) * 0.01).collect();
+    let k_data: Vec<f32> = (0..batch * total * dim).map(|i| (i as f32) * 0.02).collect();
+    let v_data: Vec<f32> = (0..batch * total * dim).map(|i| (i as f32) * 0.03).collect();
+
+    let q_full = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx), &q_data)?;
+    let k_full = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx), &k_data)?;
+    let v_full = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx), &v_data)?;
+
+    let q_prefill = q_full.slice(&[0..batch, 0..prefill, 0..dim])?;
+    let k_prefill = k_full.slice(&[0..batch, 0..prefill, 0..dim])?;
+    let v_prefill = v_full.slice(&[0..batch, 0..prefill, 0..dim])?;
+
+    let _ = ctx.scaled_dot_product_attention_with_offset(&q_prefill, &k_prefill, &v_prefill, true, 0)?;
+    ctx.synchronize();
+
+    let stats_after_prefill = ctx.get_cache_stats().expect("cache stats should be available after prefill");
+
+    let decode_out = ctx.scaled_dot_product_attention_with_offset(&q_full, &k_full, &v_full, true, prefill as u32)?;
+    ctx.synchronize();
+
+    let stats_after_decode = ctx.get_cache_stats().expect("cache stats should be available after decode");
+
+    assert_eq!(stats_after_decode.sdpa.misses, stats_after_prefill.sdpa.misses);
+    assert!(stats_after_decode.sdpa.hits >= stats_after_prefill.sdpa.hits);
+
+    let mut baseline_ctx = Context::<F32Element>::new()?;
+    let q_full_baseline = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut baseline_ctx), &q_data)?;
+    let k_full_baseline = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut baseline_ctx), &k_data)?;
+    let v_full_baseline = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut baseline_ctx), &v_data)?;
+
+    let full_out = baseline_ctx.scaled_dot_product_attention_with_offset(&q_full_baseline, &k_full_baseline, &v_full_baseline, true, 0)?;
+    baseline_ctx.synchronize();
+
+    let decode_slice = decode_out.as_slice();
+    let full_slice = full_out.as_slice();
+    assert_eq!(decode_slice.len(), dim);
+    let start = (total - 1) * dim;
+    let end = start + dim;
+    assert_eq!(&full_slice[start..end], decode_slice);
+
+    Ok(())
+}
