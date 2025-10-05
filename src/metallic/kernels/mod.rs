@@ -1,6 +1,6 @@
 use crate::metallic::{
     Context, Dtype, MetalError, Operation, Tensor,
-    encoder::{dispatch_threadgroups, dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
+    encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     resource_cache::ResourceCache,
 };
 use objc2::rc::Retained;

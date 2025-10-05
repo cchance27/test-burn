@@ -6,9 +6,8 @@ use crate::metallic::{TensorElement, tensor::RetainedBuffer};
 use objc2::msg_send;
 use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLCounterSampleBuffer, MTLResourceOptions};
+use objc2_metal::{MTLBuffer, MTLCounterSampleBuffer, MTLResourceOptions};
 use std::mem;
-use std::ptr;
 
 /// Number of threads launched for the sampling reduction kernel. This must match
 /// `THREADGROUP_SIZE` in `kernel.metal`.
