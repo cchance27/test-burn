@@ -112,18 +112,19 @@ impl Hash for MpsSoftMaxKey {
 
 /// Key for SDPA operations.
 ///
-/// This key uniquely identifies an SDPA operation based on its dimensions.
+/// This key uniquely identifies an SDPA operation based on attributes that
+/// remain stable throughout a decoding session. Sequence lengths are tracked
+/// separately so that incremental decoding can continue to hit the cache.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SdpaKey {
     pub batch: usize,
-    pub seq_q: usize,
-    pub seq_k: usize,
     pub dim: usize,
+    pub dtype: Dtype,
 }
 
 impl PartialEq for SdpaKey {
     fn eq(&self, other: &Self) -> bool {
-        self.batch == other.batch && self.seq_q == other.seq_q && self.seq_k == other.seq_k && self.dim == other.dim
+        self.batch == other.batch && self.dim == other.dim && self.dtype == other.dtype
     }
 }
 
@@ -132,8 +133,7 @@ impl Eq for SdpaKey {}
 impl Hash for SdpaKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.batch.hash(state);
-        self.seq_q.hash(state);
-        self.seq_k.hash(state);
         self.dim.hash(state);
+        self.dtype.hash(state);
     }
 }

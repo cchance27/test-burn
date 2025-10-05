@@ -9,7 +9,7 @@ use super::resource_cache::{CacheStats, ResourceCache};
 use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::tensor::Dtype;
-use crate::metallic::{Tensor, TensorElement, kernels};
+use crate::metallic::{Tensor, TensorElement, cache_keys::SdpaKey, kernels};
 use kernels::gemv::GemvOp;
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
 use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp, MatMulSample};
@@ -202,6 +202,45 @@ impl MatmulShapeLogger {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct SdpaWorkspaceKey {
+    buffer: usize,
+    offset: usize,
+}
+
+impl SdpaWorkspaceKey {
+    fn from_tensor<T: TensorElement>(tensor: &Tensor<T>) -> Self {
+        let buffer = Retained::as_ptr(&tensor.buf) as *const _ as usize;
+        Self {
+            buffer,
+            offset: tensor.offset,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct SdpaWorkspaceState {
+    descriptor: SdpaKey,
+    last_seq_q: usize,
+    last_seq_k: usize,
+}
+
+impl SdpaWorkspaceState {
+    fn new(descriptor: SdpaKey) -> Self {
+        Self {
+            descriptor,
+            last_seq_q: 0,
+            last_seq_k: 0,
+        }
+    }
+
+    fn reset(&mut self, descriptor: SdpaKey) {
+        self.descriptor = descriptor;
+        self.last_seq_q = 0;
+        self.last_seq_k = 0;
+    }
+}
+
 /// The main context for Metal operations.
 pub struct Context<T: TensorElement> {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
@@ -246,6 +285,7 @@ pub struct Context<T: TensorElement> {
     /// Instrumentation for KV cache write paths.
     kv_cache_dispatch_stats: KvCacheDispatchStats,
     memory_usage_cache: MemoryUsageCache,
+    sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
     //config: ContextConfig,
 }
 
@@ -335,6 +375,7 @@ impl<T: TensorElement> Context<T> {
             mlx_kernel_cache: MlxKernelCache::default(),
             kv_cache_dispatch_stats: KvCacheDispatchStats::default(),
             memory_usage_cache: MemoryUsageCache::default(),
+            sdpa_workspaces: FxHashMap::default(),
             //config,
         })
     }
@@ -1222,6 +1263,7 @@ impl<T: TensorElement> Context<T> {
         if let Some(cache) = self.active_resource_cache.as_mut() {
             cache.clear();
         }
+        self.sdpa_workspaces.clear();
     }
 
     pub fn reset_pool(&mut self) {
@@ -1232,6 +1274,7 @@ impl<T: TensorElement> Context<T> {
         self.kv_caches.clear();
         self.kv_cache_total_bytes = 0;
         self.memory_usage_cache.kv_cache_bytes = 0;
+        self.sdpa_workspaces.clear();
     }
 
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
@@ -1688,6 +1731,31 @@ impl<T: TensorElement> Context<T> {
         self.prepare_tensors_for_active_cmd(&[&view])?;
 
         Ok((view, dims[1]))
+    }
+
+    pub(crate) fn sdpa_workspace_key_for(&self, tensor: &Tensor<T>) -> SdpaWorkspaceKey {
+        SdpaWorkspaceKey::from_tensor(tensor)
+    }
+
+    pub(crate) fn reset_sdpa_workspace(&mut self, key: SdpaWorkspaceKey) {
+        self.sdpa_workspaces.remove(&key);
+    }
+
+    pub(crate) fn sdpa_seq_delta(&mut self, key: SdpaWorkspaceKey, descriptor: SdpaKey, seq_q: usize, seq_k: usize) -> usize {
+        let entry = self
+            .sdpa_workspaces
+            .entry(key)
+            .or_insert_with(|| SdpaWorkspaceState::new(descriptor.clone()));
+
+        if entry.descriptor != descriptor {
+            entry.reset(descriptor);
+        }
+
+        let delta = seq_k.saturating_sub(entry.last_seq_k);
+        entry.last_seq_q = seq_q;
+        entry.last_seq_k = seq_k;
+
+        if delta == 0 { seq_k } else { delta }
     }
 
     #[inline]
