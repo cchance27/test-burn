@@ -834,21 +834,49 @@ where
 
     let overlap_samples = ctx.take_overlap_samples();
     if !overlap_samples.is_empty() {
-        let overlapped = overlap_samples.iter().filter(|sample| !sample.overlap_duration.is_zero()).count();
-        let total = overlap_samples.len();
-        let avg_overlap_ms = overlap_samples
-            .iter()
-            .map(|sample| sample.overlap_duration.as_secs_f64())
-            .sum::<f64>()
-            / total as f64
-            * 1e3;
-        alert::emit_info(
-            tx,
-            format!(
-                "GPU decode overlap: {overlapped}/{total} iterations with mean overlap {:.2} ms",
+        let mut total_gpu_samples = 0usize;
+        let mut overlapped_samples = 0usize;
+        let mut overlap_accumulator = 0.0f64;
+        let mut cpu_only_decodes = 0usize;
+
+        for sample in &overlap_samples {
+            if sample.gpu_duration.is_zero() {
+                cpu_only_decodes += 1;
+                continue;
+            }
+
+            total_gpu_samples += 1;
+            if !sample.overlap_duration.is_zero() {
+                overlapped_samples += 1;
+                overlap_accumulator += sample.overlap_duration.as_secs_f64();
+            }
+        }
+
+        if total_gpu_samples > 0 {
+            let avg_overlap_ms = if overlapped_samples > 0 {
+                overlap_accumulator / overlapped_samples as f64 * 1e3
+            } else {
+                0.0
+            };
+
+            let mut message = format!(
+                "GPU decode overlap: {overlapped_samples}/{total_gpu_samples} iterations with mean overlap {:.2} ms",
                 avg_overlap_ms
-            ),
-        );
+            );
+
+            if cpu_only_decodes > 0 {
+                let suffix = if cpu_only_decodes == 1 { "" } else { "s" };
+                message.push_str(&format!(" ({cpu_only_decodes} CPU-only decode{suffix})"));
+            }
+
+            alert::emit_info(tx, message);
+        } else if cpu_only_decodes > 0 {
+            let suffix = if cpu_only_decodes == 1 { "" } else { "s" };
+            alert::emit_info(
+                tx,
+                format!("GPU decode overlap disabled: {cpu_only_decodes} CPU-only decode{suffix} observed"),
+            );
+        }
     }
 
     Ok(())
