@@ -572,6 +572,26 @@ impl<T: TensorElement> Context<T> {
             .ok_or_else(|| MetalError::InvalidOperation("GPU sampler state unavailable".into()))
     }
 
+    fn acquire_sampler_buffers(
+        &mut self,
+        capacity: usize,
+    ) -> Result<
+        (
+            Retained<ProtocolObject<dyn MTLBuffer>>,
+            Retained<ProtocolObject<dyn MTLBuffer>>,
+            Retained<ProtocolObject<dyn MTLBuffer>>,
+        ),
+        MetalError,
+    > {
+        let state = self.sampler_state_mut(capacity)?;
+        state.reset_result();
+        Ok((
+            state.shortlist_values.clone(),
+            state.shortlist_indices.clone(),
+            state.result.clone(),
+        ))
+    }
+
     pub fn encode_gpu_sampler(
         &mut self,
         logits: &Tensor<T>,
@@ -585,26 +605,19 @@ impl<T: TensorElement> Context<T> {
         let pipeline = self.kernel_manager.get_pipeline(kernel_fn, dtype, &self.device)?;
 
         let effective_top_k = top_k.max(1).min(vocab_size.max(1));
-        let (shortlist_values, shortlist_indices, result) = {
-            let state = self.sampler_state_mut(effective_top_k)?;
-            state.reset_result();
-            (
-                state.shortlist_values.clone(),
-                state.shortlist_indices.clone(),
-                state.result.clone(),
-            )
-        };
+        let (shortlist_values, shortlist_indices, result) = self.acquire_sampler_buffers(effective_top_k)?;
 
         let vocab_size_u32 = u32::try_from(vocab_size).unwrap_or(u32::MAX);
         let top_k_u32 = u32::try_from(effective_top_k).unwrap_or(u32::MAX);
+        let rng_seed = self.rng_seed_counter as u32;
+        self.rng_seed_counter = self.rng_seed_counter.wrapping_add(1);
         let config = SamplerConfig {
             vocab_size: vocab_size_u32,
             top_k: top_k_u32,
             top_p,
             temperature,
-            rng_seed: self.rng_seed_counter as u32,
+            rng_seed,
         };
-        self.rng_seed_counter = self.rng_seed_counter.wrapping_add(1);
 
         self.prepare_tensors_for_active_cmd(&[logits])?;
 
@@ -621,9 +634,12 @@ impl<T: TensorElement> Context<T> {
             .active_resource_cache
             .take()
             .unwrap_or_else(|| ResourceCache::with_device(self.device.clone()));
-        let command_buffer = self.active_command_buffer_mut()?;
-        let command_buffer_handle = command_buffer.clone();
-        command_buffer.record(&operation, &mut cache)?;
+        let command_buffer_handle = {
+            let command_buffer = self.active_command_buffer_mut()?;
+            let handle = command_buffer.clone();
+            command_buffer.record(&operation, &mut cache)?;
+            handle
+        };
         self.active_resource_cache = Some(cache);
         Ok(GpuSampleTicket {
             command_buffer: command_buffer_handle,

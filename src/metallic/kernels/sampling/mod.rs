@@ -1,8 +1,12 @@
 use super::*;
-use crate::metallic::{Dtype, MetalError, Tensor, TensorElement, encoder::dispatch_threads, resource_cache::ResourceCache};
+use crate::metallic::{
+    Dtype, MetalError, Tensor, TensorElement,
+    encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
+    resource_cache::ResourceCache,
+};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState, MTLSize};
 use std::mem::size_of;
 
 #[repr(C)]

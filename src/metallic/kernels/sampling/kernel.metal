@@ -27,7 +27,7 @@ static inline float uniform_from_state(uint state) {
     return (float)(state & 0xFFFFFFFFu) / 4294967295.0f;
 }
 
-static inline void initialize_result(SamplerResult &result, uint fallback_idx) {
+static inline void initialize_result(thread SamplerResult &result, uint fallback_idx) {
     result.selected = fallback_idx;
     result.fallback = fallback_idx;
     result.used_fallback = 1u;
@@ -35,7 +35,7 @@ static inline void initialize_result(SamplerResult &result, uint fallback_idx) {
 }
 
 static inline void finalize_result(
-    SamplerResult &result,
+    thread SamplerResult &result,
     uint selected_idx,
     uint fallback_idx,
     bool used_fallback) {
@@ -57,8 +57,8 @@ static inline float clamp_exp(float value) {
 
 template <typename Loader>
 static inline void sample_impl(
-    const Loader &loader,
-    const SamplerConfig &cfg,
+    Loader loader,
+    SamplerConfig cfg,
     device float *shortlist_values,
     device uint *shortlist_indices,
     device SamplerResult *out_result) {
