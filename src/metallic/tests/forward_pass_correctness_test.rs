@@ -472,6 +472,9 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
     println!("Fused QKV weight dims: {:?}", block0.attn_qkv_weight.dims());
     let fused_linear = ctx.matmul_bias_add(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, false, false)?;
     let q_mat = fused_linear.slice_last_dim(0..d_model)?;
+    let kv_dim = block0.kv_dim;
+    let k_mat = fused_linear.slice_last_dim(d_model..d_model + kv_dim)?;
+    let v_mat = fused_linear.slice_last_dim(d_model + kv_dim..d_model + 2 * kv_dim)?;
     ctx.synchronize();
     let q_mat_host = ctx.materialize_contiguous_view(q_mat.clone())?;
     let rust_q_proj_slice = q_mat_host.as_slice();
@@ -542,7 +545,6 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // --- 4. Test First Block K Projection ---
     println!("--- 4. Testing First Block K Projection ---");
-    let k_mat = k_mat.clone();
     let k_mat_host = ctx.materialize_contiguous_view(k_mat.clone())?;
     let rust_k_proj_slice = k_mat_host.as_slice();
     println!(
@@ -612,7 +614,6 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // --- 5. Test First Block V Projection ---
     println!("--- 5. Testing First Block V Projection ---");
-    let v_mat = v_mat.clone();
     let v_mat_host = ctx.materialize_contiguous_view(v_mat.clone())?;
     let rust_v_proj_slice = v_mat_host.as_slice();
     println!(
