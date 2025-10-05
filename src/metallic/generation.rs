@@ -150,6 +150,8 @@ fn sample_next_token_from_logits<T: TensorElement>(
         }
     }
 
+    ctx.synchronize();
+
     let start = Instant::now();
     let token = ctx.sample_top_k_top_p_host(logits_tensor, vocab_size, top_k, top_p, temperature, random)?;
     let duration = start.elapsed();
