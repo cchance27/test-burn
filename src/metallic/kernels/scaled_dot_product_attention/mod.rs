@@ -158,7 +158,16 @@ fn create_sdpa_operation<T: TensorElement>(
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
     } else {
-        q.slice(&[0..b, row_offset..s_q, 0..d])?
+        let mut view = q.clone();
+        let seq_stride = if view.strides.len() > 1 { view.strides[1] } else { d };
+        let elem_size = view.dtype.size_bytes();
+        view.offset = view
+            .offset
+            .saturating_add(row_offset * seq_stride * elem_size);
+        if view.dims.len() >= 2 {
+            view.dims[1] = rows_to_process;
+        }
+        view
     };
 
     // Create output tensor

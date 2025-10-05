@@ -80,6 +80,7 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     let stats_after_prefill = ctx.get_cache_stats().expect("cache stats should be available after prefill");
 
     let decode_out = ctx.scaled_dot_product_attention_with_offset(&q_full, &k_full, &v_full, true, prefill)?;
+    assert_eq!(decode_out.dims(), &[batch, total - prefill, dim]);
     ctx.synchronize();
 
     let stats_after_decode = ctx.get_cache_stats().expect("cache stats should be available after decode");
@@ -124,6 +125,7 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     ctx_zero_offset.synchronize();
 
     let incremental_zero = ctx_zero_offset.scaled_dot_product_attention_with_offset(&q_full_zero, &k_full_zero, &v_full_zero, true, 0)?;
+    assert_eq!(incremental_zero.dims(), &[batch, total, dim]);
     ctx_zero_offset.synchronize();
 
     let incremental_zero_slice = incremental_zero.as_slice();
