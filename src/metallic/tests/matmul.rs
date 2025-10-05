@@ -31,7 +31,14 @@ fn restore_backend_env_var(previous: Option<String>) {
 fn new_context_for_backend(backend: &str) -> Result<Context<F32Element>, MetalError> {
     let guard = backend_env_lock().lock().expect("env mutex poisoned");
     let previous = std::env::var(FORCE_MATMUL_BACKEND_ENV).ok();
-    set_backend_env_var(backend);
+    if backend == "auto" {
+        // SAFETY: See `set_backend_env_var` for synchronization guarantees.
+        unsafe {
+            std::env::remove_var(FORCE_MATMUL_BACKEND_ENV);
+        }
+    } else {
+        set_backend_env_var(backend);
+    }
     let ctx_result = Context::<F32Element>::new();
     restore_backend_env_var(previous);
     drop(guard);
@@ -133,7 +140,7 @@ fn run_alpha_beta_case(index: usize, alpha: f32, beta: f32) -> Result<(), MetalE
 
 #[test]
 fn test_strided_kv_history_prefers_mlx_backend() -> Result<(), MetalError> {
-    let mut ctx = Context::<F32Element>::new()?;
+    let mut ctx = new_context_for_backend("auto")?;
 
     let batch_heads = 2;
     let seq_len = 64;
