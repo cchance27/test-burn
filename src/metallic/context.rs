@@ -171,9 +171,6 @@ struct KvWritePlan<T: TensorElement> {
     k_cache: Tensor<T>,
     v_cache: Tensor<T>,
     canonical_heads: usize,
-    repeated_heads: usize,
-    group_size: usize,
-    group_size_u32: u32,
     seq_in_src: usize,
     head_dim: usize,
     capacity_seq_val: usize,
@@ -1278,20 +1275,14 @@ impl<T: TensorElement> Context<T> {
     }
 
     /// Allocate an on-device per-layer KV cache and register it in the centralized kv_caches map.
-    /// Layout: [batch * n_heads, seq_len, head_dim].
+    /// Layout: [batch * n_kv_heads, seq_len, head_dim].
     #[allow(clippy::too_many_arguments)]
-    pub fn alloc_kv_cache(
-        &mut self,
-        layer_idx: usize,
-        seq_len: usize,
-        repeated_batch_heads: usize,
-        head_dim: usize,
-    ) -> Result<(), MetalError> {
-        let repeated_dims = vec![repeated_batch_heads, seq_len, head_dim];
+    pub fn alloc_kv_cache(&mut self, layer_idx: usize, seq_len: usize, batch_kv_heads: usize, head_dim: usize) -> Result<(), MetalError> {
+        let canonical_dims = vec![batch_kv_heads, seq_len, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
-        let k_allocation = self.kv_cache_pool.alloc_tensor::<T>(repeated_dims.clone())?;
-        let v_allocation = self.kv_cache_pool.alloc_tensor::<T>(repeated_dims)?;
+        let k_allocation = self.kv_cache_pool.alloc_tensor::<T>(canonical_dims.clone())?;
+        let v_allocation = self.kv_cache_pool.alloc_tensor::<T>(canonical_dims)?;
 
         let dtype = k_allocation.dtype();
         let element_size = k_allocation.element_size();
@@ -1340,15 +1331,8 @@ impl<T: TensorElement> Context<T> {
     /// - `k_step` and `v_step` must be contiguous tensors with shape [batch_heads, head_dim] or [batch_heads, 1, head_dim].
     ///   This performs a device blit copy from the source buffer into the cache at the correct offset.
     #[allow(clippy::too_many_arguments)]
-    pub fn write_kv_step(
-        &mut self,
-        layer_idx: usize,
-        step: usize,
-        group_size: usize,
-        k_step: &Tensor<T>,
-        v_step: &Tensor<T>,
-    ) -> Result<(), MetalError> {
-        let plan = self.build_kv_write_plan(layer_idx, step, group_size, k_step, v_step)?;
+    pub fn write_kv_step(&mut self, layer_idx: usize, step: usize, k_step: &Tensor<T>, v_step: &Tensor<T>) -> Result<(), MetalError> {
+        let plan = self.build_kv_write_plan(layer_idx, step, k_step, v_step)?;
         self.dispatch_kv_write(layer_idx, plan)
     }
 
@@ -1356,7 +1340,6 @@ impl<T: TensorElement> Context<T> {
         &self,
         layer_idx: usize,
         step: usize,
-        group_size: usize,
         k_step: &Tensor<T>,
         v_step: &Tensor<T>,
     ) -> Result<KvWritePlan<T>, MetalError> {
@@ -1402,10 +1385,6 @@ impl<T: TensorElement> Context<T> {
         let capacity_seq_val = entry.capacity;
         let element_size = entry.element_size;
 
-        if group_size == 0 {
-            return Err(MetalError::InvalidOperation("write_kv_step requires a non-zero group size".into()));
-        }
-
         if step >= capacity_seq_val {
             return Err(MetalError::InvalidOperation(format!(
                 "Step {} exceeds KV cache capacity {} for layer {}",
@@ -1420,7 +1399,7 @@ impl<T: TensorElement> Context<T> {
             ));
         }
 
-        let expected_repeated_heads = cache_dims[0];
+        let expected_heads = cache_dims[0];
         let expected_hd = cache_dims[2];
 
         if hd != expected_hd {
@@ -1445,14 +1424,10 @@ impl<T: TensorElement> Context<T> {
         }
 
         let canonical_heads = bh;
-        let repeated_heads_expected = canonical_heads
-            .checked_mul(group_size)
-            .ok_or_else(|| MetalError::InvalidOperation("group_size overflow while expanding KV heads".into()))?;
-
-        if expected_repeated_heads != repeated_heads_expected {
+        if expected_heads != canonical_heads {
             return Err(MetalError::DimensionMismatch {
-                expected: repeated_heads_expected,
-                actual: expected_repeated_heads,
+                expected: canonical_heads,
+                actual: expected_heads,
             });
         }
 
@@ -1488,9 +1463,6 @@ impl<T: TensorElement> Context<T> {
         let dst_seq_stride =
             u32::try_from(k_cache.strides[1]).map_err(|_| MetalError::InvalidShape("cache sequence stride exceeds u32::MAX".into()))?;
 
-        let repeated_heads = expected_repeated_heads;
-        let group_size_u32 = u32::try_from(group_size).map_err(|_| MetalError::InvalidShape("group size exceeds u32::MAX".into()))?;
-
         if !k_src.offset.is_multiple_of(element_size)
             || !v_src.offset.is_multiple_of(element_size)
             || k_cache.offset % element_size != 0
@@ -1509,9 +1481,6 @@ impl<T: TensorElement> Context<T> {
             k_cache,
             v_cache,
             canonical_heads,
-            repeated_heads,
-            group_size,
-            group_size_u32,
             seq_in_src,
             head_dim: expected_hd,
             capacity_seq_val,
@@ -1536,9 +1505,6 @@ impl<T: TensorElement> Context<T> {
             k_cache,
             v_cache,
             canonical_heads,
-            repeated_heads,
-            group_size,
-            group_size_u32,
             seq_in_src,
             head_dim,
             capacity_seq_val,
@@ -1563,14 +1529,11 @@ impl<T: TensorElement> Context<T> {
             head_dim: head_dim_u32,
             seq_len: seq_len_u32,
             step: step_u32,
-            group_size: group_size_u32,
             src_head_stride,
             src_seq_stride,
             dst_head_stride,
             dst_seq_stride,
             total_threads,
-            repeated_heads: u32::try_from(repeated_heads)
-                .map_err(|_| MetalError::InvalidShape("repeated head count exceeds u32::MAX".into()))?,
         };
 
         match self.call::<KvCacheWriteOp>((k_src.clone(), v_src.clone(), k_cache.clone(), v_cache.clone(), config)) {
@@ -1591,8 +1554,6 @@ impl<T: TensorElement> Context<T> {
                     head_dim,
                     capacity_seq_val,
                     element_size,
-                    group_size,
-                    repeated_heads,
                 );
             }
             Err(err) => return Err(err),
@@ -1620,8 +1581,6 @@ impl<T: TensorElement> Context<T> {
         head_dim: usize,
         capacity: usize,
         element_size: usize,
-        group_size: usize,
-        repeated_heads: usize,
     ) -> Result<(), MetalError> {
         self.ensure_active_cmd_buffer()?;
         let encoder = {
@@ -1636,13 +1595,6 @@ impl<T: TensorElement> Context<T> {
         let copy_bytes = head_dim * element_size;
         let k_dims_len = k_src.dims().len();
         let v_dims_len = v_src.dims().len();
-
-        if repeated_heads != canonical_heads * group_size {
-            return Err(MetalError::DimensionMismatch {
-                expected: canonical_heads * group_size,
-                actual: repeated_heads,
-            });
-        }
 
         unsafe {
             for head_idx in 0..canonical_heads {
@@ -1659,28 +1611,25 @@ impl<T: TensorElement> Context<T> {
                 let src_offset_k = k_src.offset + src_elem_index * element_size;
                 let src_offset_v = v_src.offset + v_src_elem_index * element_size;
 
-                for group in 0..group_size {
-                    let repeated_head = head_idx * group_size + group;
-                    let dst_elem_index = repeated_head * cache_stride_elems + step * head_dim;
+                let dst_elem_index = head_idx * cache_stride_elems + step * head_dim;
 
-                    let dst_offset_k = k_cache.offset + dst_elem_index * element_size;
-                    let dst_offset_v = v_cache.offset + dst_elem_index * element_size;
+                let dst_offset_k = k_cache.offset + dst_elem_index * element_size;
+                let dst_offset_v = v_cache.offset + dst_elem_index * element_size;
 
-                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &k_src.buf,
-                        src_offset_k,
-                        &k_cache.buf,
-                        dst_offset_k,
-                        copy_bytes,
-                    );
-                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &v_src.buf,
-                        src_offset_v,
-                        &v_cache.buf,
-                        dst_offset_v,
-                        copy_bytes,
-                    );
-                }
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &k_src.buf,
+                    src_offset_k,
+                    &k_cache.buf,
+                    dst_offset_k,
+                    copy_bytes,
+                );
+                encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    &v_src.buf,
+                    src_offset_v,
+                    &v_cache.buf,
+                    dst_offset_v,
+                    copy_bytes,
+                );
             }
         }
 

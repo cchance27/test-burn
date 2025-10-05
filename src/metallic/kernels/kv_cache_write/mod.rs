@@ -9,13 +9,11 @@ pub struct KvCacheWriteConfig {
     pub head_dim: u32,
     pub seq_len: u32,
     pub step: u32,
-    pub group_size: u32,
     pub src_head_stride: u32,
     pub src_seq_stride: u32,
     pub dst_head_stride: u32,
     pub dst_seq_stride: u32,
     pub total_threads: u32,
-    pub repeated_heads: u32,
 }
 
 struct KvCacheWrite<T: TensorElement> {
@@ -55,11 +53,6 @@ impl KernelInvocable for KvCacheWriteOp {
         if params.seq_len == 0 {
             return Err(MetalError::InvalidShape(
                 "kv_cache_write expects at least one active sequence element".to_string(),
-            ));
-        }
-        if params.group_size == 0 {
-            return Err(MetalError::InvalidShape(
-                "kv_cache_write requires a non-zero group size".to_string(),
             ));
         }
 
@@ -111,13 +104,11 @@ impl<T: TensorElement> Operation for KvCacheWrite<T> {
         set_bytes(&encoder, 5, &self.params.head_dim);
         set_bytes(&encoder, 6, &self.params.seq_len);
         set_bytes(&encoder, 7, &self.params.step);
-        set_bytes(&encoder, 8, &self.params.group_size);
-        set_bytes(&encoder, 9, &self.params.src_head_stride);
-        set_bytes(&encoder, 10, &self.params.src_seq_stride);
-        set_bytes(&encoder, 11, &self.params.dst_head_stride);
-        set_bytes(&encoder, 12, &self.params.dst_seq_stride);
-        set_bytes(&encoder, 13, &self.params.total_threads);
-        set_bytes(&encoder, 14, &self.params.repeated_heads);
+        set_bytes(&encoder, 8, &self.params.src_head_stride);
+        set_bytes(&encoder, 9, &self.params.src_seq_stride);
+        set_bytes(&encoder, 10, &self.params.dst_head_stride);
+        set_bytes(&encoder, 11, &self.params.dst_seq_stride);
+        set_bytes(&encoder, 12, &self.params.total_threads);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();

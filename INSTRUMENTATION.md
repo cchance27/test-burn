@@ -29,13 +29,13 @@ block.
 
 ### KV cache lifecycle instrumentation
 
-KV caching now maintains a single attention-ready buffer per transformer layer
-with layout `[batch * n_heads, seq, head_dim]`. `Context::write_kv_step` writes
-new timesteps directly into this layout, avoiding the previous canonical
-mirroring pass. Incremental generation reuses the unified cache directly, so
-the `kv_repeat` latency phase continues to capture the light append work rather
-than an expensive replay. The dedicated KV cache pool still has an 8 GB safety
-limit, but generation sizes each allocation to the active prompt window
+KV caching now maintains a canonical buffer per transformer layer with layout
+`[batch * n_kv_heads, seq, head_dim]`. `Context::write_kv_step` appends each
+new timestep once into this compact layout, and attention paths invoke
+`repeat_kv_heads` on demand to expand the heads for GQA. The `kv_repeat`
+latency phase therefore captures only the lightweight replication kernel rather
+than a redundant cache write. The dedicated KV cache pool still has an 8 GB
+safety limit, but generation sizes each allocation to the active prompt window
 (`prompt_tokens + max_new_tokens`, clamped to the model's maximum). The memory
 collector reports the per-layer footprint using this per-run capacity so the UI
 mirrors the smaller reservation instead of the legacy full-sequence sizing.

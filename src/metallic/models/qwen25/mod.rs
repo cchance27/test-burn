@@ -434,9 +434,8 @@ impl<T: TensorElement> Qwen25<T> {
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "rope"));
 
             // Update the KV cache with the new K and V values
-            let group_size = n_heads / n_kv_heads;
             phase_start = Instant::now();
-            ctx.write_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)?;
+            ctx.write_kv_step(layer_idx, pos, &k_heads_after_rope, &v_heads)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
@@ -447,13 +446,13 @@ impl<T: TensorElement> Qwen25<T> {
                 .get(&layer_idx)
                 .cloned()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
-            let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
+            let k_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
+            let v_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
+            let group_size = n_heads / n_kv_heads;
+            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
-
-            let k_repeated = k_repeated_history.tensor;
-            let v_repeated = v_repeated_history.tensor;
 
             // SDPA (causal mask enabled)
             phase_start = Instant::now();

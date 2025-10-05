@@ -1522,7 +1522,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::meta
     ctx.kv_cache_pool.reset();
     let kv_capacity = input_ids.len().max(1);
     for layer_idx in 0..n_layers {
-        ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_kv_heads, kv_head_dim)?;
     }
 
     println!("--- Comparing incremental forward_step logits against PyTorch reference ---");
@@ -1695,12 +1695,10 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
     let layer_idx = 0usize;
     let batch = 1usize;
     let n_kv_heads = 2usize;
-    let group_size = 3usize;
-    let n_heads = n_kv_heads * group_size;
     let head_dim = 4usize;
     let cache_capacity = 5usize;
 
-    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_heads, head_dim)?;
+    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_kv_heads, head_dim)?;
 
     let mut k_values = Vec::with_capacity(batch * n_kv_heads * head_dim);
     let mut v_values = Vec::with_capacity(batch * n_kv_heads * head_dim);
@@ -1723,8 +1721,7 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
     )?;
 
     ctx.reset_kv_cache_dispatch_stats();
-    let group_size = n_heads / n_kv_heads;
-    ctx.write_kv_step(layer_idx, 0, group_size, &k_step, &v_step)?;
+    ctx.write_kv_step(layer_idx, 0, &k_step, &v_step)?;
     ctx.synchronize();
 
     let stats = ctx.kv_cache_dispatch_stats();
@@ -1739,15 +1736,14 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
     let k_cache_slice = entry.k.as_slice();
     let v_cache_slice = entry.v.as_slice();
 
-    for bh in 0..(batch * n_heads) {
-        let kv_head = bh / group_size;
+    for bh in 0..(batch * n_kv_heads) {
         for d in 0..head_dim {
-            let expected_k = k_values[kv_head * head_dim + d];
-            let expected_v = v_values[kv_head * head_dim + d];
+            let expected_k = k_values[bh * head_dim + d];
+            let expected_v = v_values[bh * head_dim + d];
             let index = (bh * cache_capacity + 0) * head_dim + d;
             assert!(
                 (k_cache_slice[index] - expected_k).abs() < 1e-6,
-                "repeated K mismatch at head {} dim {}: {} vs {}",
+                "canonical K mismatch at head {} dim {}: {} vs {}",
                 bh,
                 d,
                 k_cache_slice[index],
@@ -1755,7 +1751,7 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
             );
             assert!(
                 (v_cache_slice[index] - expected_v).abs() < 1e-6,
-                "repeated V mismatch at head {} dim {}: {} vs {}",
+                "canonical V mismatch at head {} dim {}: {} vs {}",
                 bh,
                 d,
                 v_cache_slice[index],

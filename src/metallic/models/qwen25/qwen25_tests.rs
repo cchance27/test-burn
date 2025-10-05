@@ -1,5 +1,6 @@
 #![cfg(test)]
 use crate::metallic::instrumentation::{StepLatencySnapshot, new_latency_collector};
+use crate::metallic::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::{F32Element, TensorInit, TensorStorage};
 
@@ -115,7 +116,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let batch_size = 1;
     let kv_capacity = prompt_tokens.len().max(1);
     for i in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(i, kv_capacity, batch_size * n_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(i, kv_capacity, batch_size * n_kv_heads, kv_head_dim)?;
     }
 
     // --- Multi-step correctness check ---
@@ -131,16 +132,27 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
         kv_cache_logits_history.push(logits_tensor.to_vec());
 
-        // Validate that the KV cache grows with each token and exposes the expected repeated layout.
+        // Validate that the KV cache grows with each token and stores the canonical KV heads.
         let cache_snapshots: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
 
         for (layer_idx, entry) in cache_snapshots {
-            let history = ctx.kv_cache_history_view(&entry.k, i + 1)?;
-            let view = history.0;
-            let dims = view.dims();
-            assert_eq!(dims[0], batch * n_heads, "unexpected head count for layer {}", layer_idx);
+            let (canonical_view, capacity) = ctx.kv_cache_history_view(&entry.k, i + 1)?;
+            let dims = canonical_view.dims();
+            assert_eq!(dims[0], batch * n_kv_heads, "unexpected KV head count for layer {}", layer_idx);
             assert_eq!(dims[1], i + 1, "unexpected sequence length for layer {}", layer_idx);
             assert_eq!(dims[2], kv_head_dim, "unexpected head dim for layer {}", layer_idx);
+
+            let repeated = ctx.call::<RepeatKvHeadsOp>((
+                canonical_view.clone(),
+                group_size as u32,
+                batch as u32,
+                n_kv_heads as u32,
+                n_heads as u32,
+                (i + 1) as u32,
+                kv_head_dim as u32,
+                capacity as u32,
+            ))?;
+            assert_eq!(repeated.dims(), &[batch * n_heads, i + 1, kv_head_dim]);
         }
     }
 
@@ -252,10 +264,9 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let kv_head_dim = kv_dim / model.config.n_kv_heads;
     let batch_size = 1;
     let canonical_heads = batch_size * model.config.n_kv_heads;
-    let repeated_heads = batch_size * model.config.n_heads;
     let kv_capacity = 1usize;
     for layer_idx in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(layer_idx, kv_capacity, repeated_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, canonical_heads, kv_head_dim)?;
     }
 
     let collector = new_latency_collector(model.config.n_layers);
