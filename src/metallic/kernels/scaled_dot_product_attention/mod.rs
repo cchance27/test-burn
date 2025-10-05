@@ -154,32 +154,37 @@ fn create_sdpa_operation<T: TensorElement>(
         )));
     }
 
-    let row_multiplier = if group_size > 1 { group_size } else { 1 };
-    let seq_q_units = if group_size > 1 { s_q / group_size } else { s_q };
-    if seq_q_units == 0 {
+    let tokens_total = if group_size > 1 { s_q / group_size } else { s_q };
+    if tokens_total == 0 {
         return Err(MetalError::InvalidShape("SDPA requires at least one query row".to_string()));
     }
 
-    let query_offset_usize =
+    let query_offset_rows =
         usize::try_from(query_offset).map_err(|_| MetalError::InvalidShape("SDPA query offset exceeds usize range".to_string()))?;
-    let query_offset_units = if group_size > 1 {
-        if query_offset_usize % group_size != 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "SDPA query offset {} must be divisible by group size {}",
-                query_offset, group_size
-            )));
-        }
-        query_offset_usize / group_size
+    if query_offset_rows > s_q {
+        return Err(MetalError::InvalidShape(format!(
+            "SDPA query offset {} exceeds query rows {}",
+            query_offset_rows, s_q
+        )));
+    }
+    if group_size > 1 && query_offset_rows % group_size != 0 {
+        return Err(MetalError::InvalidShape(format!(
+            "SDPA query offset {} must be divisible by group size {}",
+            query_offset, group_size
+        )));
+    }
+
+    let offset_tokens = if group_size > 1 {
+        query_offset_rows / group_size
     } else {
-        query_offset_usize
+        query_offset_rows
     };
 
-    let mut rows_to_process_units = seq_q_units;
-
-    if query_offset_units > 0 {
-        rows_to_process_units = seq_q_units.saturating_sub(query_offset_units);
-        if rows_to_process_units == 0 {
-            rows_to_process_units = seq_q_units;
+    let mut rows_to_process_tokens = tokens_total;
+    if query_offset_rows > 0 {
+        rows_to_process_tokens = tokens_total.saturating_sub(offset_tokens);
+        if rows_to_process_tokens == 0 {
+            rows_to_process_tokens = tokens_total;
         }
     }
 
@@ -188,25 +193,44 @@ fn create_sdpa_operation<T: TensorElement>(
         if query_offset == 0 {
             ctx.reset_sdpa_workspace(workspace_key);
         }
-        let delta_units = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), seq_q_units, s_k);
+        let delta_tokens = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), tokens_total, s_k);
 
         if query_offset == 0 {
-            rows_to_process_units = seq_q_units;
-        } else if delta_units > 0 {
-            rows_to_process_units = rows_to_process_units.min(delta_units);
-            if rows_to_process_units == 0 {
-                rows_to_process_units = delta_units.min(seq_q_units).max(1);
+            rows_to_process_tokens = tokens_total;
+        } else if delta_tokens > 0 {
+            rows_to_process_tokens = rows_to_process_tokens.min(delta_tokens);
+            if rows_to_process_tokens == 0 {
+                rows_to_process_tokens = delta_tokens.min(tokens_total).max(1);
             }
         }
     }
 
-    if rows_to_process_units == 0 {
-        rows_to_process_units = seq_q_units;
+    rows_to_process_tokens = rows_to_process_tokens.min(tokens_total);
+    if rows_to_process_tokens == 0 {
+        rows_to_process_tokens = tokens_total;
     }
 
-    let row_offset_units = seq_q_units.saturating_sub(rows_to_process_units);
-    let rows_to_process = rows_to_process_units.saturating_mul(row_multiplier);
-    let row_offset = row_offset_units.saturating_mul(row_multiplier);
+    let rows_to_process = rows_to_process_tokens
+        .checked_mul(group_size)
+        .ok_or_else(|| MetalError::InvalidShape("SDPA rows_to_process overflow".to_string()))?;
+    if rows_to_process == 0 {
+        return Err(MetalError::InvalidShape("SDPA requires at least one query row".to_string()));
+    }
+    if rows_to_process > s_q {
+        return Err(MetalError::InvalidShape(format!(
+            "SDPA computed rows_to_process {} exceeds available queries {}",
+            rows_to_process, s_q
+        )));
+    }
+
+    let mut row_offset = s_q.saturating_sub(rows_to_process);
+    if group_size > 1 {
+        // Ensure we maintain whole-token groupings when slicing grouped queries.
+        let remainder = row_offset % group_size;
+        if remainder != 0 {
+            row_offset = row_offset.saturating_sub(remainder);
+        }
+    }
 
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
