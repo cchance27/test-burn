@@ -155,8 +155,13 @@ fn create_sdpa_operation<T: TensorElement>(
         s_q
     } else {
         let remaining = s_q.saturating_sub(offset_usize);
-        let capped = seq_len_delta.min(remaining);
-        if capped == 0 { remaining } else { capped }
+        let growth = seq_len_delta.min(s_q);
+
+        if remaining > 0 {
+            if growth == 0 { remaining } else { remaining.min(growth) }
+        } else {
+            growth
+        }
     };
 
     if rows_to_process == 0 {
