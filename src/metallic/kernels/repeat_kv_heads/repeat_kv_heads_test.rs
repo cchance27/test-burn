@@ -54,7 +54,6 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
     let output = ctx.call::<RepeatKvHeadsOp>((
         input,
         None,
-        0,
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -156,7 +155,6 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let repeated_k = ctx.call::<RepeatKvHeadsOp>((
         canonical_k_history.clone(),
         None,
-        0,
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -168,7 +166,6 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let repeated_v = ctx.call::<RepeatKvHeadsOp>((
         canonical_v_history.clone(),
         None,
-        0,
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -199,10 +196,13 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let mut k_prefix = canonical_k_history.clone();
     k_prefix.dims = vec![batch * n_kv_heads, delta_first, head_dim];
 
+    let mut workspace_prefix = repeated_workspace.clone();
+    workspace_prefix.dims = vec![batch * n_heads, delta_first, head_dim];
+    workspace_prefix.strides = repeated_workspace.strides.clone();
+
     let _ = ctx.call::<RepeatKvHeadsOp>((
         k_prefix,
-        Some(repeated_workspace.clone()),
-        0,
+        Some(workspace_prefix),
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,
@@ -221,10 +221,14 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     k_suffix.offset += offset_adjust;
     k_suffix.dims = vec![batch * n_kv_heads, delta_second, head_dim];
 
+    let mut workspace_suffix = repeated_workspace.clone();
+    workspace_suffix.offset += offset_adjust;
+    workspace_suffix.dims = vec![batch * n_heads, delta_second, head_dim];
+    workspace_suffix.strides = repeated_workspace.strides.clone();
+
     let _ = ctx.call::<RepeatKvHeadsOp>((
         k_suffix,
-        Some(repeated_workspace.clone()),
-        delta_first as u32,
+        Some(workspace_suffix),
         group_size as u32,
         batch as u32,
         n_kv_heads as u32,

@@ -16,9 +16,7 @@ kernel void repeat_kv_heads_kernel_##SUFFIX( \
     constant uint& seq [[buffer(6)]], \
     constant uint& head_dim [[buffer(7)]], \
     constant uint& cache_stride [[buffer(8)]], \
-    constant uint& dest_offset [[buffer(9)]], \
-    constant uint& output_stride [[buffer(10)]], \
-    constant uint& total_elements [[buffer(11)]], \
+    constant uint& total_elements [[buffer(9)]], \
     uint gid [[thread_position_in_grid]]) { \
     if (gid >= total_elements) { \
         return; \
@@ -32,7 +30,7 @@ kernel void repeat_kv_heads_kernel_##SUFFIX( \
     uint kv_head = h / group_size; \
     uint input_batch_head = b * n_kv_heads + kv_head; \
     uint input_index = ((input_batch_head * cache_stride) + seq_idx) * head_dim + dim_idx; \
-    uint output_index = ((batch_head_idx * output_stride) + dest_offset + seq_idx) * head_dim + dim_idx; \
+    uint output_index = ((batch_head_idx * cache_stride) + seq_idx) * head_dim + dim_idx; \
     output[output_index] = input[input_index]; \
 }
 

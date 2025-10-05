@@ -145,7 +145,6 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
             let repeated = ctx.call::<RepeatKvHeadsOp>((
                 canonical_view.clone(),
                 None,
-                0,
                 group_size as u32,
                 batch as u32,
                 n_kv_heads as u32,

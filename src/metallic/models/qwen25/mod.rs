@@ -564,8 +564,27 @@ impl<T: TensorElement> Qwen25<T> {
                 return Ok(view);
             }
 
+            let mut workspace_view = reservation.buffer.clone();
+            let seq_stride = workspace_view
+                .strides
+                .get(1)
+                .copied()
+                .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads workspace tensor must expose a seq stride".to_string()))?;
+            let elem_size = workspace_view.dtype.size_bytes();
+            let offset_adjust = reservation
+                .dest_offset
+                .checked_mul(seq_stride)
+                .and_then(|v| v.checked_mul(elem_size))
+                .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads workspace offset computation overflowed".to_string()))?;
+            workspace_view.offset = workspace_view
+                .offset
+                .checked_add(offset_adjust)
+                .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads workspace offset application overflowed".to_string()))?;
+            workspace_view.dims = vec![batch * n_heads, reservation.write_steps, head_dim];
+            workspace_view.strides = reservation.buffer.strides.clone();
+
             (
-                Some(reservation.buffer.clone()),
+                Some(workspace_view),
                 reservation.dest_offset,
                 reservation.write_steps,
                 reservation.cache_capacity,
@@ -604,7 +623,6 @@ impl<T: TensorElement> Qwen25<T> {
         let mut repeated = ctx.call::<RepeatKvHeadsOp>((
             input_view,
             output_override,
-            dest_offset as u32,
             group_size as u32,
             batch as u32,
             n_kv_heads as u32,
