@@ -86,7 +86,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     let head_dim = 5usize;
 
     let layer_idx = 0usize;
-    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_heads, head_dim)?;
+    ctx.alloc_kv_cache(layer_idx, cache_capacity, batch * n_kv_heads, head_dim, group_size)?;
 
     let mut canonical_k = vec![0f32; batch * n_kv_heads * seq * head_dim];
     let mut canonical_v = vec![0f32; batch * n_kv_heads * seq * head_dim];

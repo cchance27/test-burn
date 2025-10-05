@@ -115,7 +115,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let batch_size = 1;
     let kv_capacity = prompt_tokens.len().max(1);
     for i in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(i, kv_capacity, batch_size * n_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(i, kv_capacity, batch_size * n_kv_heads, kv_head_dim, group_size)?;
     }
 
     // --- Multi-step correctness check ---
@@ -131,14 +131,14 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         let logits_tensor = model.output(&hidden_state, &mut ctx)?;
         kv_cache_logits_history.push(logits_tensor.to_vec());
 
-        // Validate that the KV cache grows with each token and exposes the expected repeated layout.
+        // Validate that the KV cache grows with each token and exposes the expected canonical layout.
         let cache_snapshots: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
 
         for (layer_idx, entry) in cache_snapshots {
             let history = ctx.kv_cache_history_view(&entry.k, i + 1)?;
             let view = history.0;
             let dims = view.dims();
-            assert_eq!(dims[0], batch * n_heads, "unexpected head count for layer {}", layer_idx);
+            assert_eq!(dims[0], batch * n_kv_heads, "unexpected head count for layer {}", layer_idx);
             assert_eq!(dims[1], i + 1, "unexpected sequence length for layer {}", layer_idx);
             assert_eq!(dims[2], kv_head_dim, "unexpected head dim for layer {}", layer_idx);
         }
@@ -252,10 +252,10 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let kv_head_dim = kv_dim / model.config.n_kv_heads;
     let batch_size = 1;
     let canonical_heads = batch_size * model.config.n_kv_heads;
-    let repeated_heads = batch_size * model.config.n_heads;
+    let group_size = model.config.n_heads / model.config.n_kv_heads;
     let kv_capacity = 1usize;
     for layer_idx in 0..model.config.n_layers {
-        ctx.alloc_kv_cache(layer_idx, kv_capacity, repeated_heads, kv_head_dim)?;
+        ctx.alloc_kv_cache(layer_idx, kv_capacity, canonical_heads, kv_head_dim, group_size)?;
     }
 
     let collector = new_latency_collector(model.config.n_layers);

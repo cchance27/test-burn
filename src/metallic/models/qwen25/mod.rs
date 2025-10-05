@@ -440,20 +440,19 @@ impl<T: TensorElement> Qwen25<T> {
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_cache"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_cache"));
 
-            // Create a view over the repeated KV cache for attention
+            // Gather canonical cache history and expand to query heads for attention
             phase_start = Instant::now();
             let cache_entry = ctx
                 .kv_caches
                 .get(&layer_idx)
                 .cloned()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
-            let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
+            let k_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
+            let v_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
+            let k_repeated = Qwen25::repeat_kv_heads(&k_history, cache_entry.group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let v_repeated = Qwen25::repeat_kv_heads(&v_history, cache_entry.group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
             ctx.record_latency_event(LatencyEvent::block_phase(layer_idx, "kv_repeat"), phase_start.elapsed());
             ctx.record_memory_event(MemoryEvent::block_phase(layer_idx, "kv_repeat"));
-
-            let k_repeated = k_repeated_history.tensor;
-            let v_repeated = v_repeated_history.tensor;
 
             // SDPA (causal mask enabled)
             phase_start = Instant::now();
@@ -528,6 +527,10 @@ impl<T: TensorElement> Qwen25<T> {
         head_dim: usize,
         ctx: &mut Context<T>,
     ) -> Result<Tensor<T>, MetalError> {
+        if group_size == 1 {
+            return Ok(history.tensor.clone());
+        }
+
         let input = history.tensor.clone();
         let input_dims = input.dims();
         if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != history.active_seq || input_dims[2] != head_dim
