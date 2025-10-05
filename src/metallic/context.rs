@@ -442,8 +442,8 @@ impl<T: TensorElement> Context<T> {
             return Ok(pool);
         }
 
-        let total_pools = 1 + self.idle_pools.len() + self.in_flight_arenas.len();
-        if total_pools >= self.max_in_flight_arenas {
+        let future_in_flight = self.in_flight_arenas.len() + 1;
+        if future_in_flight > self.max_in_flight_arenas {
             if let Some(arena) = self.in_flight_arenas.first_mut() {
                 arena.command_buffer.wait();
                 if arena.completed_at.is_none() {

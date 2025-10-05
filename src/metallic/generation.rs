@@ -597,8 +597,19 @@ where
     let mut forward_snapshot = StepLatencySnapshot::empty(n_layers);
     let mut memory_snapshot = StepMemorySnapshot::empty(n_layers);
     let mut pending_logits: Option<Tensor<T>> = None;
+    let mut iteration_start = Instant::now();
     let mut iteration = 0usize;
     while iteration < cfg.max_tokens {
+        if iteration > 0 {
+            let iteration_duration = iteration_start.elapsed();
+            if !iteration_duration.is_zero() {
+                iteration_stats.record(iteration_duration);
+                latencies_ready = true;
+            }
+        }
+
+        iteration_start = Instant::now();
+
         if iteration > 0 {
             let logits_tensor = pending_logits
                 .take()
@@ -614,7 +625,6 @@ where
             }
         }
 
-        let iteration_start = Instant::now();
         let should_schedule = iteration + 1 < cfg.max_tokens && current_token != eos_token_id;
         let mut submission_id = None;
         let mut next_logits: Option<Tensor<T>> = None;
@@ -729,16 +739,12 @@ where
         let decode_end = decode_start + decode_duration;
         ctx.record_decode_window(submission_id, decode_start, decode_end);
 
-        let iteration_duration = iteration_start.elapsed();
-        if !iteration_duration.is_zero() {
-            iteration_stats.record(iteration_duration);
-            latencies_ready = true;
-        }
-
         log_cache_stats(ctx, "generate", generated_ids.len());
 
+        let iteration_cpu_duration = iteration_start.elapsed();
+
         if let Some(piece) = decoded_piece
-            && !token_callback(current_token, piece, iteration_duration)?
+            && !token_callback(current_token, piece, iteration_cpu_duration)?
         {
             break;
         }
@@ -794,6 +800,38 @@ where
     }
 
     ctx.synchronize();
+
+    let generated_count = generated_ids.len().saturating_sub(prompt_len);
+    if generated_count > 0 {
+        let final_iteration_duration = iteration_start.elapsed();
+        if !final_iteration_duration.is_zero() {
+            iteration_stats.record(final_iteration_duration);
+            latencies_ready = true;
+        }
+    }
+
+    if latencies_ready {
+        let rows = build_latency_rows(
+            &iteration_stats,
+            &embed_stats,
+            &forward_stats,
+            &block_stats,
+            &matmul_backend_stats,
+            &output_stats,
+            &sample_stats,
+            &decode_stats,
+        );
+        if let Some(loggers) = metrics_loggers.as_mut() {
+            let log_now = Instant::now();
+            if let Err(err) = loggers.log_latency(&rows, log_now, true) {
+                alert::emit_warning(tx, format!("Failed to log latency metrics: {err}"));
+            }
+        }
+        if ui_connected && tx.send(AppEvent::LatencyUpdate(rows)).is_err() {
+            ui_connected = false;
+        }
+    }
+
     let overlap_samples = ctx.take_overlap_samples();
     if !overlap_samples.is_empty() {
         let overlapped = overlap_samples.iter().filter(|sample| !sample.overlap_duration.is_zero()).count();
