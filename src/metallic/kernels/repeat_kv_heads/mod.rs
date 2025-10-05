@@ -93,7 +93,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
             )));
         }
 
-        let mut output = if let Some(tensor) = output_override {
+        let output = if let Some(tensor) = output_override {
             tensor
         } else {
             let output_dims = vec![(batch * n_heads) as usize, seq as usize, head_dim as usize];

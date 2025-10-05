@@ -24,7 +24,6 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
-use std::collections::hash_map::Entry;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -1759,34 +1758,28 @@ impl<T: TensorElement> Context<T> {
 
         let key = RepeatKvWorkspaceKey { layer_idx, kind };
 
-        let entry = match self.repeat_kv_workspaces.entry(key) {
-            Entry::Occupied(mut occupied) => {
-                let needs_refresh = {
-                    let state = occupied.get();
-                    !state.matches(batch_heads, cache_capacity, head_dim)
-                };
-
-                if needs_refresh {
+        let mut state = match self.repeat_kv_workspaces.remove(&key) {
+            Some(mut state) => {
+                if !state.matches(batch_heads, cache_capacity, head_dim) {
                     let dims = vec![batch_heads, cache_capacity, head_dim];
                     let buffer = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
-                    *occupied.get_mut() = RepeatKvWorkspaceState::new(buffer, batch_heads, cache_capacity, head_dim);
+                    state = RepeatKvWorkspaceState::new(buffer, batch_heads, cache_capacity, head_dim);
                 }
-
-                occupied.into_mut()
+                state
             }
-            Entry::Vacant(vacant) => {
+            None => {
                 let dims = vec![batch_heads, cache_capacity, head_dim];
                 let buffer = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
-                vacant.insert(RepeatKvWorkspaceState::new(buffer, batch_heads, cache_capacity, head_dim))
+                RepeatKvWorkspaceState::new(buffer, batch_heads, cache_capacity, head_dim)
             }
         };
 
-        if entry.last_written > active_seq {
-            entry.last_written = active_seq;
+        if state.last_written > active_seq {
+            state.last_written = active_seq;
         }
 
-        let dest_offset = entry.last_written;
-        let write_steps = active_seq.saturating_sub(entry.last_written);
+        let dest_offset = state.last_written;
+        let write_steps = active_seq.saturating_sub(state.last_written);
 
         if dest_offset + write_steps > cache_capacity {
             return Err(MetalError::InvalidShape(format!(
@@ -1795,9 +1788,13 @@ impl<T: TensorElement> Context<T> {
             )));
         }
 
+        let buffer = state.buffer.clone();
+
+        self.repeat_kv_workspaces.insert(key, state);
+
         Ok(RepeatKvWorkspaceReservation {
             key,
-            buffer: entry.buffer.clone(),
+            buffer,
             dest_offset,
             write_steps,
             cache_capacity,
