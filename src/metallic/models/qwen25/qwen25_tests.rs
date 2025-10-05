@@ -104,7 +104,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let prompt_tokens = [1, 2, 3, 4, 5];
     let vocab_size = model.config.vocab_size;
     let batch = 1;
-    let group_size = model.config.n_heads / model.config.n_kv_heads;
+    let _group_size = model.config.n_heads / model.config.n_kv_heads;
 
     // Pre-allocate KV cache
     let n_kv_heads = model.config.n_kv_heads;
@@ -251,7 +251,7 @@ fn test_forward_step_records_kv_repeat_phase() -> Result<(), MetalError> {
     let kv_dim = block.kv_dim;
     let kv_head_dim = kv_dim / model.config.n_kv_heads;
     let batch_size = 1;
-    let canonical_heads = batch_size * model.config.n_kv_heads;
+    let _canonical_heads = batch_size * model.config.n_kv_heads;
     let repeated_heads = batch_size * model.config.n_heads;
     let kv_capacity = 1usize;
     for layer_idx in 0..model.config.n_layers {

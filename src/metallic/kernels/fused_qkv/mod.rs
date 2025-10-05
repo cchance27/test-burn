@@ -43,6 +43,7 @@ impl KernelInvocable for FusedQkvOp {
         u32,
         u32,
         u32,
+        u32,
     );
 
     fn function_id() -> Option<KernelFunction> {

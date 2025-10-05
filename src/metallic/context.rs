@@ -1075,7 +1075,7 @@ impl<T: TensorElement> Context<T> {
         let d_model_u32 = u32::try_from(d_model).map_err(|_| MetalError::InvalidShape("d_model exceeds u32::MAX".to_string()))?;
         let kv_dim_u32 = u32::try_from(kv_dim).map_err(|_| MetalError::InvalidShape("kv_dim exceeds u32::MAX".to_string()))?;
 
-        let row_stride_elems = linear.strides().first().copied().unwrap_or(expected_total);
+        let row_stride_elems = linear.strides.first().copied().unwrap_or(expected_total);
         if row_stride_elems == 0 {
             return Err(MetalError::InvalidShape(
                 "Row stride for fused_qkv_projection must be greater than zero".to_string(),
