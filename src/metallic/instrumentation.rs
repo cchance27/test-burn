@@ -16,7 +16,7 @@ use objc2_metal::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
+use crate::metallic::kernels::matmul::MatMulSample;
 use crate::metallic::operation::CommandBuffer;
 
 #[cfg(target_os = "macos")]
@@ -203,8 +203,11 @@ impl<S: Send + 'static> KernelInstrumentation<S> {
     }
 
     fn install_completion(&self, command_buffer: &CommandBuffer, key: usize) {
-        let instrumentation = self.clone();
-        command_buffer.on_completed(move |raw| instrumentation.complete(key, raw));
+        let inner = Arc::clone(&self.inner);
+        command_buffer.on_completed(move |raw| {
+            let instrumentation = KernelInstrumentation { inner: Arc::clone(&inner) };
+            instrumentation.complete(key, raw);
+        });
     }
 
     fn complete(&self, key: usize, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
@@ -530,6 +533,7 @@ impl CounterResources {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::metallic::kernels::matmul::MatMulBackend;
     use std::sync::{Arc, Mutex};
 
     #[test]
