@@ -1686,6 +1686,10 @@ impl<T: TensorElement> Context<T> {
         SdpaWorkspaceKey::from_tensor(tensor)
     }
 
+    pub(crate) fn has_sdpa_workspace(&self, key: SdpaWorkspaceKey) -> bool {
+        self.sdpa_workspaces.contains_key(&key)
+    }
+
     pub(crate) fn reset_sdpa_workspace(&mut self, key: SdpaWorkspaceKey) {
         self.sdpa_workspaces.remove(&key);
     }

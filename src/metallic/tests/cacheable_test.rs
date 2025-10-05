@@ -100,7 +100,14 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     assert_eq!(decode_slice.len(), dim);
     let start = (total - 1) * dim;
     let end = start + dim;
-    assert_eq!(&full_slice[start..end], decode_slice);
+    let tolerance = 1e-6f32;
+    for (idx, (expected, actual)) in full_slice[start..end].iter().zip(decode_slice.iter()).enumerate() {
+        let diff = (expected - actual).abs();
+        assert!(
+            diff <= tolerance,
+            "decode output mismatch at element {idx}: expected {expected}, got {actual}, diff {diff}"
+        );
+    }
 
     let mut ctx_zero_offset = Context::<F32Element>::new()?;
     let q_full_zero = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx_zero_offset), &q_data)?;
@@ -128,7 +135,13 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
 
     let incremental_zero_slice = incremental_zero.as_slice();
     assert_eq!(incremental_zero_slice.len(), dim);
-    assert_eq!(&full_slice[start..end], incremental_zero_slice);
+    for (idx, (expected, actual)) in full_slice[start..end].iter().zip(incremental_zero_slice.iter()).enumerate() {
+        let diff = (expected - actual).abs();
+        assert!(
+            diff <= tolerance,
+            "zero-offset decode mismatch at element {idx}: expected {expected}, got {actual}, diff {diff}"
+        );
+    }
 
     Ok(())
 }

@@ -68,6 +68,93 @@ fn test_scaled_dot_product_attention_kernel_causal() -> Result<(), MetalError> {
     Ok(())
 }
 
+#[test]
+fn test_sdpa_noncausal_seqk_shorter_than_seqq() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+
+    let batch = 2;
+    let seq_q = 4;
+    let seq_k = 2;
+    let dim = 3;
+
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|idx| idx as f32).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|idx| (idx as f32) * 0.5).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|idx| (idx as f32) * 1.5).collect();
+
+    let q_tensor = Tensor::new(
+        vec![batch, seq_q, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&q_data),
+    )?;
+    let k_tensor = Tensor::new(
+        vec![batch, seq_k, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&k_data),
+    )?;
+    let v_tensor = Tensor::new(
+        vec![batch, seq_k, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&v_data),
+    )?;
+
+    let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, false, 0))?;
+    ctx.synchronize();
+
+    assert_eq!(result_tensor.dims(), &[batch, seq_q, dim]);
+
+    Ok(())
+}
+
+#[test]
+fn test_sdpa_incremental_decode_with_query_offset() -> Result<(), MetalError> {
+    let mut ctx = Context::<F32Element>::new()?;
+
+    let batch = 1;
+    let seq_q = 4;
+    let initial_k = 4;
+    let extended_k = 5;
+    let dim = 2;
+
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|idx| idx as f32).collect();
+    let kv_data: Vec<f32> = (0..(batch * extended_k * dim)).map(|idx| (idx as f32) * 0.25).collect();
+    let value_data: Vec<f32> = (0..(batch * extended_k * dim)).map(|idx| (idx as f32) * 0.75).collect();
+
+    let q_tensor = Tensor::new(
+        vec![batch, seq_q, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&q_data),
+    )?;
+
+    let base_k_tensor = Tensor::new(
+        vec![batch, extended_k, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&kv_data),
+    )?;
+    let base_v_tensor = Tensor::new(
+        vec![batch, extended_k, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&value_data),
+    )?;
+
+    let mut k_initial = base_k_tensor.clone();
+    k_initial.dims = vec![batch, initial_k, dim];
+    k_initial.strides = base_k_tensor.strides.clone();
+    let mut v_initial = base_v_tensor.clone();
+    v_initial.dims = vec![batch, initial_k, dim];
+    v_initial.strides = base_v_tensor.strides.clone();
+
+    let _ = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_initial, &v_initial, true, 0))?;
+    ctx.synchronize();
+
+    let result_tensor =
+        ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &base_k_tensor, &base_v_tensor, true, initial_k as u32))?;
+    ctx.synchronize();
+
+    assert_eq!(result_tensor.dims(), &[batch, extended_k - initial_k, dim]);
+
+    Ok(())
+}
+
 const PYTORCH_ARANGE_NONCAUSAL: [f32; 256] = [
     112.0, 113.0, 114.0, 115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0,
     115.0, 116.0, 117.0, 118.0, 119.0, 120.0, 121.0, 122.0, 123.0, 124.0, 125.0, 126.0, 127.0, 112.0, 113.0, 114.0, 115.0, 116.0, 117.0,

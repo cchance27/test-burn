@@ -1,4 +1,53 @@
+use std::ffi::OsString;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+
 use crate::metallic::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+
+const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+fn env_mutex() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let lock = env_mutex().lock().expect("env mutex poisoned");
+        let original = std::env::var_os(key);
+        // SAFETY: Environment mutations are serialized by `env_mutex`, ensuring
+        // no other threads observe the partially-updated state.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self {
+            key,
+            original,
+            _lock: lock,
+        }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(ref original) = self.original {
+            // SAFETY: See `EnvVarGuard::set` for synchronization guarantees.
+            unsafe {
+                std::env::set_var(self.key, original);
+            }
+        } else {
+            // SAFETY: See `EnvVarGuard::set` for synchronization guarantees.
+            unsafe {
+                std::env::remove_var(self.key);
+            }
+        }
+    }
+}
 
 fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Result<Tensor<F32Element>, MetalError> {
     Tensor::new(dims.to_vec(), TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(data))
@@ -6,6 +55,8 @@ fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Resu
 
 #[test]
 fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
+    let _backend_guard = EnvVarGuard::set(FORCE_MATMUL_BACKEND_ENV, "mps");
+
     let mut ctx = Context::<F32Element>::new()?;
 
     let a_data: Vec<f32> = (0..6).map(|idx| idx as f32 + 1.0).collect();
