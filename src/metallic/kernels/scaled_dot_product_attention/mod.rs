@@ -149,15 +149,27 @@ fn create_sdpa_operation<T: TensorElement>(
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
+    let mut rows_to_process = seq_len_delta.min(s_q);
+    if rows_to_process == 0 {
+        rows_to_process = s_q;
+    }
+    let row_offset = s_q.saturating_sub(rows_to_process);
+
+    let q_active = if row_offset == 0 && rows_to_process == s_q {
+        q.clone()
+    } else {
+        q.slice(&[0..b, row_offset..s_q, 0..d])?
+    };
+
     // Create output tensor
-    let out = Tensor::new(vec![b, s_q, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+    let out = Tensor::new(vec![b, rows_to_process, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
     let attention = if config.reuse_workspace {
-        let buffer = Tensor::new(vec![b, s_q, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+        let buffer = Tensor::new(vec![b, rows_to_process, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         ctx.prepare_tensors_for_active_cmd(&[&buffer])?;
         buffer
     } else {
-        Tensor::new(vec![b, s_q, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
+        Tensor::new(vec![b, rows_to_process, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
     };
 
     ctx.prepare_tensors_for_active_cmd(&[&attention])?;
@@ -169,9 +181,22 @@ fn create_sdpa_operation<T: TensorElement>(
     };
 
     let qk_scaled_result = match cache.as_deref_mut() {
-        Some(cache_ref) => ctx.matmul_alpha_beta_with_cache(q, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?,
-        None => ctx.matmul_alpha_beta(q, &k_operand, &attention, false, transpose_b, scale, 0.0)?,
+        Some(cache_ref) => {
+            ctx.matmul_alpha_beta_with_cache(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?
+        }
+        None => ctx.matmul_alpha_beta(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0)?,
     };
+
+    let row_offset_u32 = u32::try_from(row_offset).map_err(|_| {
+        MetalError::InvalidShape(format!(
+            "SDPA row offset {row_offset} exceeds representable query offset range"
+        ))
+    })?;
+    let adjusted_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
+        MetalError::InvalidShape(format!(
+            "SDPA query offset {query_offset} with row offset {row_offset} exceeds u32::MAX"
+        ))
+    })?;
 
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();
@@ -180,10 +205,10 @@ fn create_sdpa_operation<T: TensorElement>(
             cache_opt,
             &qk_scaled_result,
             b,
-            s_q,
+            rows_to_process,
             s_k,
             causal,
-            query_offset,
+            adjusted_query_offset,
             config.use_mps_softmax,
         )?
     };
@@ -206,12 +231,12 @@ fn create_sdpa_operation<T: TensorElement>(
             output: out.clone(),
             causal,
             batch: b,
-            seq_q: s_q,
+            seq_q: rows_to_process,
             seq_k: s_k,
             dim: d,
             scale,
-            query_offset,
-            seq_len_delta,
+            query_offset: adjusted_query_offset,
+            seq_len_delta: rows_to_process,
             config,
         }),
         out,
