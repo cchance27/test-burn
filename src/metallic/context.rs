@@ -1740,9 +1740,7 @@ impl<T: TensorElement> Context<T> {
             ));
         }
         if n_kv_heads == 0 {
-            return Err(MetalError::InvalidShape(
-                "kv_repeat_view requires at least one KV head".to_string(),
-            ));
+            return Err(MetalError::InvalidShape("kv_repeat_view requires at least one KV head".to_string()));
         }
         if n_heads != n_kv_heads * group_size {
             return Err(MetalError::InvalidShape(format!(
@@ -1842,9 +1840,7 @@ impl<T: TensorElement> Context<T> {
         group_size: usize,
     ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionOptimizedOp>(
-            (q, k, v, causal, query_offset as u32, group_size as u32),
-        )
+        self.call::<ScaledDotProductAttentionOptimizedOp>((q, k, v, causal, query_offset as u32, group_size as u32))
     }
 
     /// SwiGLU implementation extracted from Qwen25 FFN block.

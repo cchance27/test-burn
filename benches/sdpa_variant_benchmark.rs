@@ -28,9 +28,7 @@ where
     let mut last_output = None;
 
     for _ in 0..ITERATIONS {
-        let out = ctx
-            .call::<O>((&q_tensor, &k_tensor, &v_tensor, causal, 0u32, 1u32))
-            .unwrap();
+        let out = ctx.call::<O>((&q_tensor, &k_tensor, &v_tensor, causal, 0u32, 1u32)).unwrap();
         last_output = Some(out);
     }
 

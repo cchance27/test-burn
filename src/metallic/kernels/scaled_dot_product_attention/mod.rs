@@ -80,7 +80,6 @@ struct ScaledDotProductAttention<T: TensorElement> {
     pub query_offset: u32,
     pub seq_len_delta: usize,
     pub config: SdpaConfig,
-    pub group_size: usize,
 }
 
 fn create_sdpa_operation<T: TensorElement>(
@@ -157,8 +156,11 @@ fn create_sdpa_operation<T: TensorElement>(
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
-    if group_size > 1 {
-        seq_len_delta = seq_len_delta.saturating_mul(group_size);
+    if group_size > 1 && s_q % group_size != 0 {
+        return Err(MetalError::InvalidShape(format!(
+            "SDPA group size {} requires query rows {} to be divisible",
+            group_size, s_q
+        )));
     }
 
     let mut rows_to_process = seq_len_delta.min(s_q);
@@ -170,7 +172,20 @@ fn create_sdpa_operation<T: TensorElement>(
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
     } else {
-        q.slice(&[0..b, row_offset..s_q, 0..d])?
+        let seq_stride = *q.strides.get(1).unwrap_or(&d);
+        let elem_size = q.dtype.size_bytes();
+        let offset_bytes = row_offset
+            .checked_mul(seq_stride)
+            .and_then(|v| v.checked_mul(elem_size))
+            .ok_or_else(|| MetalError::InvalidShape("SDPA query slice offset exceeds representable range".to_string()))?;
+
+        let mut view = q.clone();
+        view.offset = view
+            .offset
+            .checked_add(offset_bytes)
+            .ok_or_else(|| MetalError::InvalidShape("SDPA query view offset exceeds representable range".to_string()))?;
+        view.dims = vec![b, rows_to_process, d];
+        view
     };
 
     // Create output tensor
@@ -247,7 +262,6 @@ fn create_sdpa_operation<T: TensorElement>(
             query_offset: adjusted_query_offset,
             seq_len_delta: rows_to_process,
             config,
-            group_size,
         }),
         out,
     ))

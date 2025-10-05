@@ -29,7 +29,9 @@ fn canonical_kv_view<T: TensorElement>(
 ) -> Result<Tensor<T>, MetalError> {
     let input_dims = input.dims();
     if input_dims.len() != 3 || input_dims[0] != batch * n_kv_heads || input_dims[1] != seq || input_dims[2] != head_dim {
-        return Err(MetalError::InvalidShape("Invalid input dimensions for canonical_kv_view".to_string()));
+        return Err(MetalError::InvalidShape(
+            "Invalid input dimensions for canonical_kv_view".to_string(),
+        ));
     }
 
     ctx.kv_repeat_view(input, group_size, batch, n_kv_heads, n_heads, seq)
@@ -75,11 +77,7 @@ fn group_queries_for_gqa<T: TensorElement>(
     let seq = dims[1];
     let head_dim = dims[2];
 
-    let stride_batch = q_heads
-        .strides
-        .get(0)
-        .copied()
-        .unwrap_or(seq.saturating_mul(head_dim));
+    let stride_batch = q_heads.strides.get(0).copied().unwrap_or(seq.saturating_mul(head_dim));
     let stride_seq = q_heads.strides.get(1).copied().unwrap_or(head_dim);
     let stride_col = q_heads.strides.get(2).copied().unwrap_or(1);
 
@@ -324,14 +322,7 @@ fn run_blocks_up_to<T: TensorElement>(
         let v_canonical = canonical_kv_view(&v_heads, group_size, batch, n_kv_heads, n_heads, seq, kv_head_dim, ctx)?;
 
         let q_grouped = group_queries_for_gqa(&q_heads_after_rope, batch, n_heads, n_kv_heads, group_size)?;
-        let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(
-            &q_grouped,
-            &k_canonical,
-            &v_canonical,
-            true,
-            0,
-            group_size,
-        )?;
+        let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(&q_grouped, &k_canonical, &v_canonical, true, 0, group_size)?;
 
         let attn_out_heads = ungroup_attention_output(&attn_out_grouped, batch, n_heads, n_kv_heads, group_size)?;
 
@@ -801,27 +792,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
 
     // Repeat KV heads for GQA
     let group_size = n_heads / n_kv_heads;
-    let k_canonical = canonical_kv_view(
-        &k_heads_after_rope,
-        group_size,
-        1,
-        n_kv_heads,
-        n_heads,
-        seq,
-        kv_head_dim,
-        &mut ctx,
-    )?;
+    let k_canonical = canonical_kv_view(&k_heads_after_rope, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
     let v_canonical = canonical_kv_view(&v_heads, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
 
     let q_grouped = group_queries_for_gqa(&q_heads_after_rope, 1, n_heads, n_kv_heads, group_size)?;
-    let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(
-        &q_grouped,
-        &k_canonical,
-        &v_canonical,
-        true,
-        0,
-        group_size,
-    )?;
+    let attn_out_grouped = ctx.scaled_dot_product_attention_with_group(&q_grouped, &k_canonical, &v_canonical, true, 0, group_size)?;
 
     // SDPA
     let attn_out_heads = ungroup_attention_output(&attn_out_grouped, 1, n_heads, n_kv_heads, group_size)?;
@@ -1344,26 +1319,11 @@ fn test_forward_pass_correctness() -> Result<(), crate::metallic::MetalError> {
         kv_head_dim,
         &mut ctx,
     )?;
-    let v_canonical_last = canonical_kv_view(
-        &v_heads_last,
-        group_size,
-        1,
-        n_kv_heads,
-        n_heads,
-        seq,
-        kv_head_dim,
-        &mut ctx,
-    )?;
+    let v_canonical_last = canonical_kv_view(&v_heads_last, group_size, 1, n_kv_heads, n_heads, seq, kv_head_dim, &mut ctx)?;
 
     let q_grouped_last = group_queries_for_gqa(&q_heads_after_rope_last, 1, n_heads, n_kv_heads, group_size)?;
-    let attn_out_grouped_last = ctx.scaled_dot_product_attention_with_group(
-        &q_grouped_last,
-        &k_canonical_last,
-        &v_canonical_last,
-        true,
-        0,
-        group_size,
-    )?;
+    let attn_out_grouped_last =
+        ctx.scaled_dot_product_attention_with_group(&q_grouped_last, &k_canonical_last, &v_canonical_last, true, 0, group_size)?;
 
     let attn_out_heads_last = ungroup_attention_output(&attn_out_grouped_last, 1, n_heads, n_kv_heads, group_size)?;
 
