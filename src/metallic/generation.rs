@@ -627,6 +627,7 @@ where
 
         let should_schedule = iteration + 1 < cfg.max_tokens && current_token != eos_token_id;
         let mut submission_id = None;
+        let expected_gpu_submission = should_schedule;
         let mut next_logits: Option<Tensor<T>> = None;
 
         if should_schedule {
@@ -736,16 +737,24 @@ where
         if !decode_duration.is_zero() {
             decode_stats.record(decode_duration);
         }
-        let decode_end = decode_start + decode_duration;
-        ctx.record_decode_window(submission_id, decode_start, decode_end);
 
         log_cache_stats(ctx, "generate", generated_ids.len());
 
         let iteration_cpu_duration = iteration_start.elapsed();
 
-        if let Some(piece) = decoded_piece
-            && !token_callback(current_token, piece, iteration_cpu_duration)?
-        {
+        let mut should_stop = false;
+        if let Some(piece) = decoded_piece {
+            if !token_callback(current_token, piece, iteration_cpu_duration)? {
+                should_stop = true;
+            }
+        }
+
+        if expected_gpu_submission {
+            let decode_window_end = Instant::now();
+            ctx.record_decode_window(submission_id, decode_start, decode_window_end);
+        }
+
+        if should_stop {
             break;
         }
 
