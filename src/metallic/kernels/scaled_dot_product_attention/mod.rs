@@ -168,41 +168,25 @@ fn create_sdpa_operation<T: TensorElement>(
         )));
     }
 
-    let offset_tokens = if group_size > 1 {
-        query_offset_rows / group_size
-    } else {
-        query_offset_rows
-    };
-
-    let mut rows_to_process_tokens = tokens_total;
-    if query_offset_rows > 0 {
-        rows_to_process_tokens = tokens_total.saturating_sub(offset_tokens);
-        if rows_to_process_tokens == 0 {
-            rows_to_process_tokens = tokens_total;
-        }
-    }
+    let mut seq_len_delta_tokens = s_k;
 
     if causal {
         let workspace_key = ctx.sdpa_workspace_key_for(k);
         if query_offset == 0 {
             ctx.reset_sdpa_workspace(workspace_key);
         }
-        let delta_tokens = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), tokens_total, s_k);
-
-        if query_offset == 0 {
-            rows_to_process_tokens = tokens_total;
-        } else if delta_tokens > 0 {
-            rows_to_process_tokens = rows_to_process_tokens.min(delta_tokens);
-            if rows_to_process_tokens == 0 {
-                rows_to_process_tokens = delta_tokens.min(tokens_total).max(1);
-            }
-        }
+        seq_len_delta_tokens = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), tokens_total, s_k);
     }
 
-    rows_to_process_tokens = rows_to_process_tokens.min(tokens_total);
-    if rows_to_process_tokens == 0 {
-        rows_to_process_tokens = tokens_total;
+    if seq_len_delta_tokens == 0 {
+        seq_len_delta_tokens = tokens_total;
     }
+
+    if seq_len_delta_tokens > tokens_total {
+        seq_len_delta_tokens = tokens_total;
+    }
+
+    let rows_to_process_tokens = seq_len_delta_tokens;
 
     let rows_to_process = rows_to_process_tokens
         .checked_mul(group_size)
@@ -217,14 +201,10 @@ fn create_sdpa_operation<T: TensorElement>(
         )));
     }
 
-    let mut row_offset = s_q.saturating_sub(rows_to_process);
-    if group_size > 1 {
-        // Ensure we maintain whole-token groupings when slicing grouped queries.
-        let remainder = row_offset % group_size;
-        if remainder != 0 {
-            row_offset = row_offset.saturating_sub(remainder);
-        }
-    }
+    let row_offset_tokens = tokens_total.saturating_sub(rows_to_process_tokens);
+    let row_offset = row_offset_tokens
+        .checked_mul(group_size)
+        .ok_or_else(|| MetalError::InvalidShape("SDPA row offset overflow".to_string()))?;
 
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
@@ -273,10 +253,13 @@ fn create_sdpa_operation<T: TensorElement>(
 
     let row_offset_u32 = u32::try_from(row_offset)
         .map_err(|_| MetalError::InvalidShape(format!("SDPA row offset {row_offset} exceeds representable query offset range")))?;
-    // Preserve the caller-provided offset when we materialize the entire query block,
-    // but switch to the sliced row offset when we only process a suffix so causal masks
-    // continue to align with the first active query row.
-    let adjusted_query_offset = if row_offset == 0 { query_offset } else { row_offset_u32 };
+    // Offset the caller-provided base by the number of rows we skipped so causal masks
+    // continue to align with the first active query row within the sliced window.
+    let adjusted_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
+        MetalError::InvalidShape(format!(
+            "SDPA query offset {query_offset} with row offset {row_offset} exceeds u32::MAX"
+        ))
+    })?;
 
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();

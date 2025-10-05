@@ -785,6 +785,20 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     pub fn matmul(&mut self, a: &Tensor<T>, b: &Tensor<T>, transpose_a: bool, transpose_b: bool) -> Result<Tensor<T>, MetalError> {
+        self.ensure_active_cmd_buffer()?;
+
+        let seed_mps_backend = matches!(
+            self.forced_matmul_backend,
+            MatMulBackendOverride::Default | MatMulBackendOverride::Auto
+        ) && self
+            .active_resource_cache
+            .as_ref()
+            .map(|cache| {
+                let stats = cache.get_stats();
+                stats.gemm.size == 0 && stats.descriptor.size == 0
+            })
+            .unwrap_or(false);
+
         match self.forced_matmul_backend {
             MatMulBackendOverride::Force(backend) => match backend {
                 MatMulBackend::Mlx => {
@@ -836,6 +850,12 @@ impl<T: TensorElement> Context<T> {
                         if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
                             return self.with_matmul_logging("matmul", MatMulBackend::Gemv, Some(dimensions), "mode=auto-gemv", |ctx| {
                                 ctx.call::<GemvOp>((a, b))
+                            });
+                        }
+
+                        if seed_mps_backend {
+                            return self.with_matmul_logging("matmul", MatMulBackend::Mps, Some(dimensions), "mode=auto-seed", |ctx| {
+                                ctx.call::<MatMulOp>((a, b, transpose_a, transpose_b))
                             });
                         }
 
