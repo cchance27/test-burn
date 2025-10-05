@@ -20,7 +20,7 @@ struct SamplingParams {
 
 kernel void sample_top_k_top_p_stage1_f32(
     device const float* logits [[buffer(0)]],
-    device uint* /*output*/ [[buffer(1)]],
+    device uint* unused_output [[buffer(1)]],
     device float* partial_vals [[buffer(2)]],
     device uint* partial_indices [[buffer(3)]],
     device uint* partial_counts [[buffer(4)]],
@@ -31,6 +31,8 @@ kernel void sample_top_k_top_p_stage1_f32(
     uint tid [[thread_index_in_threadgroup]],
     uint3 tg_pos [[threadgroup_position_in_grid]])
 {
+    (void)unused_output;
+
     uint vocab_size = params.vocab_size;
     if (vocab_size == 0u) {
         return;
@@ -219,7 +221,7 @@ kernel void sample_top_k_top_p_stage1_f32(
 }
 
 kernel void sample_top_k_top_p_finalize_f32(
-    device const float* /*logits*/ [[buffer(0)]],
+    device const float* logits [[buffer(0)]],
     device uint* output [[buffer(1)]],
     device const float* partial_vals [[buffer(2)]],
     device const uint* partial_indices [[buffer(3)]],
@@ -230,6 +232,8 @@ kernel void sample_top_k_top_p_finalize_f32(
     constant SamplingParams& params [[buffer(9)]],
     uint tid [[thread_index_in_threadgroup]])
 {
+    (void)logits;
+
     if (tid != 0u) {
         return;
     }

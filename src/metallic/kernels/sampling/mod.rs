@@ -51,7 +51,6 @@ struct SampleTopKTopP<T: TensorElement> {
     stage1_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     stage2_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     dispatch_timing: Option<SamplingDispatchTiming>,
-    effective_top_k: usize,
     threadgroup_count: usize,
 }
 
@@ -173,7 +172,6 @@ impl KernelInvocable for SampleTopKTopPOp {
             stage1_pipeline,
             stage2_pipeline,
             dispatch_timing,
-            effective_top_k,
             threadgroup_count,
         };
 
