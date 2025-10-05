@@ -271,8 +271,71 @@ fn run_blocks_up_to<T: TensorElement>(
         let epsilon = dtype_threshold::<TestElement>(25.0, 25.0);
         let significant = dtype_threshold::<TestElement>(25.0, 25.0);
 
+        assert!(
+            n_heads > n_kv_heads,
+            "Forward pass regression expects grouped-query attention configuration"
+        );
+
+        let q_elements_per_head = seq * head_dim;
+        let fused_q_slice = fused_q_host.as_slice();
+        let legacy_q_slice = legacy_q_host.as_slice();
+
+        let mut distinct_q_heads = false;
+        'outer: for h in 0..n_heads {
+            let head_start = h * q_elements_per_head;
+            let head_end = head_start + q_elements_per_head;
+            let legacy_head = &legacy_q_slice[head_start..head_end];
+            for other in 0..h {
+                let other_start = other * q_elements_per_head;
+                let other_end = other_start + q_elements_per_head;
+                let other_head = &legacy_q_slice[other_start..other_end];
+                if legacy_head
+                    .iter()
+                    .zip(other_head.iter())
+                    .any(|(a, b)| T::to_f32(*a).to_bits() != T::to_f32(*b).to_bits())
+                {
+                    distinct_q_heads = true;
+                    break 'outer;
+                }
+            }
+        }
+
+        assert!(
+            distinct_q_heads,
+            "Legacy Q heads are numerically identical; multi-query regression cannot validate grouping"
+        );
+
+        for h in 0..n_heads {
+            let head_start = h * q_elements_per_head;
+            let head_end = head_start + q_elements_per_head;
+            let fused_head = &fused_q_slice[head_start..head_end];
+            let legacy_head = &legacy_q_slice[head_start..head_end];
+
+            let mut head_max_diff = 0f32;
+            let mut head_diff_count = 0usize;
+            for (idx, (f, l)) in fused_head.iter().zip(legacy_head.iter()).enumerate() {
+                let f = T::to_f32(*f);
+                let l = T::to_f32(*l);
+                let diff = (f - l).abs();
+                if diff > significant {
+                    if head_diff_count < 10 {
+                        println!("Fused Q head {h} diff at {idx}: fused={}, legacy={}, diff={}", f, l, diff);
+                    }
+                    head_diff_count += 1;
+                }
+                if diff > head_max_diff {
+                    head_max_diff = diff;
+                }
+            }
+
+            println!(
+                "Fused Q head {h} vs legacy max diff: {} ({} differences > {})",
+                head_max_diff, head_diff_count, significant
+            );
+            assert_relative_eq!(head_max_diff, 0.0, epsilon = epsilon);
+        }
+
         for (name, fused, legacy) in [
-            ("Q", fused_q_host.as_slice(), legacy_q_host.as_slice()),
             ("K", fused_k_host.as_slice(), legacy_k_host.as_slice()),
             ("V", fused_v_host.as_slice(), legacy_v_host.as_slice()),
         ] {
