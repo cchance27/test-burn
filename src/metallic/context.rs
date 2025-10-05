@@ -203,7 +203,7 @@ impl MatmulShapeLogger {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct SdpaWorkspaceKey {
+pub(crate) struct SdpaWorkspaceKey {
     buffer: usize,
     offset: usize,
 }
