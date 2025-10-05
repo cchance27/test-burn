@@ -319,7 +319,10 @@ fn test_repeat_kv_heads_incremental_workspace_reuse() -> Result<(), MetalError> 
         let reused = Qwen25::repeat_kv_heads(&workspace_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, &mut ctx)?;
 
         ctx.synchronize();
-        assert_eq!(reused.as_slice(), baseline.as_slice());
+        let baseline_contiguous = ctx.materialize_contiguous_view(baseline.clone())?;
+        let reused_contiguous = ctx.materialize_contiguous_view(reused.clone())?;
+        ctx.synchronize();
+        assert_eq!(reused_contiguous.as_slice(), baseline_contiguous.as_slice());
         previous_steps = steps;
     }
 

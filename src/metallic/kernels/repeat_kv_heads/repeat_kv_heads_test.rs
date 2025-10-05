@@ -238,8 +238,9 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
 
     let mut repeated_view = repeated_workspace.clone();
     repeated_view.dims = vec![batch * n_heads, seq, head_dim];
-    let repeated_slice = repeated_view.as_slice();
-    assert_eq!(repeated_slice, cpu_expected_k.as_slice());
+    let repeated_contiguous = ctx.materialize_contiguous_view(repeated_view)?;
+    ctx.synchronize();
+    assert_eq!(repeated_contiguous.as_slice(), cpu_expected_k.as_slice());
 
     Ok(())
 }
