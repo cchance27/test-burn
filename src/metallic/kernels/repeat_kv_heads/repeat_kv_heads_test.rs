@@ -196,8 +196,11 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
 
     // First, materialize the initial two steps.
     let delta_first = 2usize;
+    let mut k_prefix = canonical_k_history.clone();
+    k_prefix.dims = vec![batch * n_kv_heads, delta_first, head_dim];
+
     let _ = ctx.call::<RepeatKvHeadsOp>((
-        canonical_k_history.clone(),
+        k_prefix,
         Some(repeated_workspace.clone()),
         0,
         group_size as u32,
@@ -208,11 +211,18 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         head_dim as u32,
         cache_capacity as u32,
     ))?;
-
     // Then, write the remaining suffix without touching the prefix.
     let delta_second = seq - delta_first;
+    let seq_stride = canonical_k_history.strides[1];
+    let elem_size = canonical_k_history.dtype.size_bytes();
+    let offset_adjust = delta_first * seq_stride * elem_size;
+
+    let mut k_suffix = canonical_k_history.clone();
+    k_suffix.offset += offset_adjust;
+    k_suffix.dims = vec![batch * n_kv_heads, delta_second, head_dim];
+
     let _ = ctx.call::<RepeatKvHeadsOp>((
-        canonical_k_history.clone(),
+        k_suffix,
         Some(repeated_workspace.clone()),
         delta_first as u32,
         group_size as u32,

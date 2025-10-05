@@ -581,8 +581,28 @@ impl<T: TensorElement> Qwen25<T> {
             ));
         }
 
+        let seq_stride = input
+            .strides
+            .get(1)
+            .copied()
+            .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads input tensor must expose a seq stride".to_string()))?;
+        let elem_size = input.dtype.size_bytes();
+
+        let mut input_view = input.clone();
+        input_view.dims = vec![batch * n_kv_heads, seq_to_write, head_dim];
+        if dest_offset > 0 {
+            let offset_adjust = dest_offset
+                .checked_mul(seq_stride)
+                .and_then(|v| v.checked_mul(elem_size))
+                .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads offset computation overflowed".to_string()))?;
+            input_view.offset = input_view
+                .offset
+                .checked_add(offset_adjust)
+                .ok_or_else(|| MetalError::InvalidShape("repeat_kv_heads offset application overflowed".to_string()))?;
+        }
+
         let mut repeated = ctx.call::<RepeatKvHeadsOp>((
-            input,
+            input_view,
             output_override,
             dest_offset as u32,
             group_size as u32,

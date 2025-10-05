@@ -31,7 +31,7 @@ kernel void repeat_kv_heads_kernel_##SUFFIX( \
     uint h = batch_head_idx % n_heads; \
     uint kv_head = h / group_size; \
     uint input_batch_head = b * n_kv_heads + kv_head; \
-    uint input_index = ((input_batch_head * cache_stride) + dest_offset + seq_idx) * head_dim + dim_idx; \
+    uint input_index = ((input_batch_head * cache_stride) + seq_idx) * head_dim + dim_idx; \
     uint output_index = ((batch_head_idx * output_stride) + dest_offset + seq_idx) * head_dim + dim_idx; \
     output[output_index] = input[input_index]; \
 }

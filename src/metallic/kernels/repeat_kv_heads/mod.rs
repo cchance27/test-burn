@@ -71,11 +71,10 @@ impl KernelInvocable for RepeatKvHeadsOp {
                 input_dims
             )));
         }
-        let required_input = dest_offset as usize + seq as usize;
-        if input_dims[1] < required_input {
+        if input_dims[1] != seq as usize {
             return Err(MetalError::InvalidShape(format!(
-                "Input sequence (len={}) is smaller than requested range dest_offset ({}) + seq ({})",
-                input_dims[1], dest_offset, seq
+                "Input sequence (len={}) must match requested materialization seq ({})",
+                input_dims[1], seq
             )));
         }
 
@@ -85,11 +84,13 @@ impl KernelInvocable for RepeatKvHeadsOp {
                 "Input tensor for repeat_kv_heads must expose at least two strides".to_string(),
             ));
         }
-        let expected_stride = cache_stride as usize * head_dim as usize;
-        if input_strides[0] != expected_stride {
+        let computed_stride = input_strides[0]
+            .checked_div(head_dim as usize)
+            .ok_or_else(|| MetalError::InvalidShape("Input tensor batch stride must be divisible by head_dim".to_string()))?;
+        if cache_stride as usize != computed_stride {
             return Err(MetalError::InvalidShape(format!(
-                "Input batch stride ({}) does not match cache stride ({})",
-                input_strides[0], expected_stride
+                "Provided cache stride ({}) does not match tensor batch stride ({}). Expected strides to agree for repeat_kv_heads",
+                cache_stride, computed_stride
             )));
         }
 
@@ -162,7 +163,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
             n_heads,
             seq,
             head_dim,
-            cache_stride,
+            cache_stride: computed_stride as u32,
             dest_offset,
             output_stride: output_stride as u32,
             total_elements,
