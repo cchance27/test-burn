@@ -114,7 +114,8 @@ pub enum KernelFunction {
     Ones,
     RandomUniform,
     Gemv,
-    SampleTopKTopP,
+    SampleTopKTopPStage1,
+    SampleTopKTopPFinalize,
 }
 
 impl KernelFunction {
@@ -140,7 +141,7 @@ impl KernelFunction {
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::Gemv => KernelLibrary::Gemv,
-            KernelFunction::SampleTopKTopP => KernelLibrary::Sampling,
+            KernelFunction::SampleTopKTopPStage1 | KernelFunction::SampleTopKTopPFinalize => KernelLibrary::Sampling,
         }
     }
 
@@ -196,8 +197,9 @@ impl KernelFunction {
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
             (KernelFunction::Gemv, F32) => "gemv_f32",
             (KernelFunction::Gemv, F16) => "gemv_f16",
-            (KernelFunction::SampleTopKTopP, F32) => "sample_top_k_top_p_f32",
-            (KernelFunction::SampleTopKTopP, F16) => {
+            (KernelFunction::SampleTopKTopPStage1, F32) => "sample_top_k_top_p_stage1_f32",
+            (KernelFunction::SampleTopKTopPFinalize, F32) => "sample_top_k_top_p_finalize_f32",
+            (KernelFunction::SampleTopKTopPStage1 | KernelFunction::SampleTopKTopPFinalize, F16) => {
                 return Err(MetalError::OperationNotSupported(
                     "top-k/top-p sampling kernel does not support f16 logits".to_string(),
                 ));

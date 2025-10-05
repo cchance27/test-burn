@@ -137,6 +137,30 @@ impl MatMulBackendStats {
 }
 
 #[derive(Clone, Default)]
+pub struct SamplingLatencyStats {
+    kernel: RollingStat,
+    cpu: RollingStat,
+}
+
+impl SamplingLatencyStats {
+    pub fn kernel(&self) -> &RollingStat {
+        &self.kernel
+    }
+
+    pub fn cpu(&self) -> &RollingStat {
+        &self.cpu
+    }
+
+    pub fn kernel_mut(&mut self) -> &mut RollingStat {
+        &mut self.kernel
+    }
+
+    pub fn cpu_mut(&mut self) -> &mut RollingStat {
+        &mut self.cpu
+    }
+}
+
+#[derive(Clone, Default)]
 pub struct BlockPhaseStat {
     label: String,
     stat: RollingStat,
@@ -534,7 +558,7 @@ pub fn build_latency_rows(
     blocks: &[BlockStat],
     matmul: &MatMulBackendStats,
     output: &RollingStat,
-    sample: &RollingStat,
+    sample: &SamplingLatencyStats,
     decode: &RollingStat,
 ) -> Vec<LatencyRow> {
     let mut rows = Vec::new();
@@ -613,12 +637,26 @@ pub fn build_latency_rows(
         level: 0,
     });
 
-    rows.push(LatencyRow {
-        label: "Sampling".to_string(),
-        last_ms: sample.last_ms(),
-        average_ms: sample.average_ms(),
-        level: 0,
-    });
+    let kernel_has_samples = sample.kernel().has_samples();
+    let cpu_has_samples = sample.cpu().has_samples();
+
+    if kernel_has_samples || (!kernel_has_samples && !cpu_has_samples) {
+        rows.push(LatencyRow {
+            label: "Sampling (Kernel)".to_string(),
+            last_ms: sample.kernel().last_ms(),
+            average_ms: sample.kernel().average_ms(),
+            level: 0,
+        });
+    }
+
+    if cpu_has_samples || (!kernel_has_samples && !cpu_has_samples) {
+        rows.push(LatencyRow {
+            label: "Sampling (CPU)".to_string(),
+            last_ms: sample.cpu().last_ms(),
+            average_ms: sample.cpu().average_ms(),
+            level: 0,
+        });
+    }
 
     rows.push(LatencyRow {
         label: "Decode".to_string(),

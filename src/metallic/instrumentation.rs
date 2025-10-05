@@ -126,9 +126,16 @@ pub type MatMulDispatchRegistration = KernelDispatchRegistration;
 pub type MatMulDispatchTiming = KernelDispatchTiming;
 pub type MatMulInstrumentation = KernelInstrumentation<MatMulSample>;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SamplingBackend {
+    Kernel,
+    Cpu,
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct SamplingSample {
     pub duration: Duration,
+    pub backend: SamplingBackend,
     pub handle: Option<KernelDispatchHandle>,
 }
 
@@ -297,6 +304,7 @@ impl KernelInstrumentation<SamplingSample> {
         self.register_dispatch(command_buffer, KernelDispatchKind::Compute, recorder, |duration, handle| {
             SamplingSample {
                 duration,
+                backend: SamplingBackend::Kernel,
                 handle: Some(handle),
             }
         })

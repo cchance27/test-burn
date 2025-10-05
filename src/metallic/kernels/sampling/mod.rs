@@ -11,7 +11,13 @@ use std::mem;
 
 /// Number of threads launched for the sampling reduction kernel. This must match
 /// `THREADGROUP_SIZE` in `kernel.metal`.
-const THREADGROUP_SIZE: usize = 8;
+const THREADGROUP_SIZE: usize = 64;
+
+/// Number of vocabulary elements processed by each thread within a threadgroup.
+const TOKENS_PER_THREAD: usize = 16;
+
+/// Total number of vocabulary elements covered by a single threadgroup.
+const THREADGROUP_TOKENS: usize = THREADGROUP_SIZE * TOKENS_PER_THREAD;
 
 /// Maximum supported top-k for the GPU sampling kernel. Larger requests fall
 /// back to the CPU implementation to avoid excessive per-thread stack usage.
@@ -41,9 +47,9 @@ struct SampleTopKTopP<T: TensorElement> {
     fallback_vals: RetainedBuffer,
     fallback_indices: RetainedBuffer,
     fallback_flags: RetainedBuffer,
-    completion_counter: RetainedBuffer,
     params: SamplingParams,
-    pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    stage1_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    stage2_pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     dispatch_timing: Option<SamplingDispatchTiming>,
     effective_top_k: usize,
     threadgroup_count: usize,
@@ -53,7 +59,7 @@ impl KernelInvocable for SampleTopKTopPOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, SamplingParams, RetainedBuffer);
 
     fn function_id() -> Option<KernelFunction> {
-        Some(KernelFunction::SampleTopKTopP)
+        Some(KernelFunction::SampleTopKTopPStage1)
     }
 
     fn new<'a, T: TensorElement>(
@@ -80,7 +86,7 @@ impl KernelInvocable for SampleTopKTopPOp {
         };
 
         let vocab_size = raw_params.vocab_size as usize;
-        let threadgroup_count = ((vocab_size + THREADGROUP_SIZE - 1) / THREADGROUP_SIZE).max(1);
+        let threadgroup_count = ((vocab_size + THREADGROUP_TOKENS - 1) / THREADGROUP_TOKENS).max(1);
         if threadgroup_count > u32::MAX as usize {
             return Err(MetalError::OperationNotSupported(
                 "sampling kernel threadgroup count exceeds u32::MAX".to_string(),
@@ -137,16 +143,10 @@ impl KernelInvocable for SampleTopKTopPOp {
             .newBufferWithLength_options(fallback_index_bytes, MTLResourceOptions::StorageModePrivate)
             .ok_or(MetalError::BufferCreationFailed(fallback_index_bytes))?;
 
-        let completion_counter_bytes = mem::size_of::<u32>();
-        let completion_counter = ctx
-            .device
-            .newBufferWithLength_options(completion_counter_bytes, MTLResourceOptions::StorageModeShared)
-            .ok_or(MetalError::BufferCreationFailed(completion_counter_bytes))?;
-
-        unsafe {
-            let ptr = completion_counter.contents().as_ptr().cast::<u32>();
-            ptr.write_unaligned(0);
-        }
+        let stage1_pipeline = pipeline.expect("Kernel Module should supply a pipeline");
+        let stage2_pipeline = ctx
+            .kernel_manager
+            .get_pipeline(KernelFunction::SampleTopKTopPFinalize, T::DTYPE, &ctx.device)?;
 
         let params = SamplingParams {
             vocab_size: raw_params.vocab_size,
@@ -169,9 +169,9 @@ impl KernelInvocable for SampleTopKTopPOp {
             fallback_vals,
             fallback_indices,
             fallback_flags,
-            completion_counter,
             params,
-            pipeline: pipeline.expect("Kernel Module should supply a pipeline"),
+            stage1_pipeline,
+            stage2_pipeline,
             dispatch_timing,
             effective_top_k,
             threadgroup_count,
@@ -191,11 +191,6 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
-        unsafe {
-            let ptr = self.completion_counter.contents().as_ptr().cast::<u32>();
-            ptr.write_unaligned(0);
-        }
-
         if let Some(timing) = &self.dispatch_timing
             && matches!(timing.kind(), KernelDispatchKind::Compute)
         {
@@ -210,7 +205,7 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
             }
         }
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
+        set_compute_pipeline_state(&encoder, &self.stage1_pipeline);
         set_buffer(&encoder, 0, &self.logits.buf, self.logits.offset);
         set_buffer(&encoder, 1, &self.result, 0);
         set_buffer(&encoder, 2, &self.partial_vals, 0);
@@ -219,7 +214,6 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
         set_buffer(&encoder, 5, &self.fallback_vals, 0);
         set_buffer(&encoder, 6, &self.fallback_indices, 0);
         set_buffer(&encoder, 7, &self.fallback_flags, 0);
-        set_buffer(&encoder, 8, &self.completion_counter, 0);
         set_bytes(&encoder, 9, &self.params);
 
         let threadgroup_size = MTLSize {
@@ -234,6 +228,36 @@ impl<T: TensorElement> Operation for SampleTopKTopP<T> {
         };
 
         dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
+
+        encoder.endEncoding();
+
+        let encoder = command_buffer
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        set_compute_pipeline_state(&encoder, &self.stage2_pipeline);
+        set_buffer(&encoder, 0, &self.logits.buf, self.logits.offset);
+        set_buffer(&encoder, 1, &self.result, 0);
+        set_buffer(&encoder, 2, &self.partial_vals, 0);
+        set_buffer(&encoder, 3, &self.partial_indices, 0);
+        set_buffer(&encoder, 4, &self.partial_counts, 0);
+        set_buffer(&encoder, 5, &self.fallback_vals, 0);
+        set_buffer(&encoder, 6, &self.fallback_indices, 0);
+        set_buffer(&encoder, 7, &self.fallback_flags, 0);
+        set_bytes(&encoder, 9, &self.params);
+
+        let finalize_threadgroup_size = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let finalize_threadgroups = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+
+        dispatch_threadgroups(&encoder, finalize_threadgroups, finalize_threadgroup_size);
 
         if let Some(timing) = &self.dispatch_timing
             && matches!(timing.kind(), KernelDispatchKind::Compute)

@@ -1,12 +1,14 @@
 use super::{Context, KvCacheDispatchStats, MetalError, Tensor, resource_cache::CacheMetrics};
 use crate::metallic::instrumentation::{
-    MemoryEvent, MemoryUsage, SamplingSample, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector, new_memory_collector,
+    MemoryEvent, MemoryUsage, SamplingBackend, SamplingSample, StepLatencySnapshot, StepMemorySnapshot, new_latency_collector,
+    new_memory_collector,
 };
 use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::kernels::sampling::MAX_TOP_K;
 use crate::metallic::metrics::{
     BlockStat, MatMulBackendStats, MemoryBlockStat, MemoryScopeStat, MetricsLoggers, ModelMemoryNode, ProcessMemoryTracker, RollingStat,
-    ScalarStat, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env, sample_process_memory,
+    SamplingLatencyStats, ScalarStat, build_latency_rows, build_memory_rows, build_model_memory_tree, log_interval_from_env,
+    sample_process_memory,
 };
 use crate::metallic::models::qwen25::Qwen25;
 use crate::metallic::sampling::effective_top_k;
@@ -104,13 +106,16 @@ fn record_matmul_samples(stats: &mut MatMulBackendStats, samples: Vec<MatMulSamp
     }
 }
 
-fn record_sampling_samples(stats: &mut RollingStat, samples: Vec<SamplingSample>) {
+fn record_sampling_samples(stats: &mut SamplingLatencyStats, samples: Vec<SamplingSample>) {
     for sample in samples {
         if sample.duration.is_zero() {
             continue;
         }
 
-        stats.record(sample.duration);
+        match sample.backend {
+            SamplingBackend::Kernel => stats.kernel_mut().record(sample.duration),
+            SamplingBackend::Cpu => stats.cpu_mut().record(sample.duration),
+        }
     }
 }
 
@@ -428,7 +433,7 @@ where
     let mut embed_stats = RollingStat::default();
     let mut forward_stats = RollingStat::default();
     let mut output_stats = RollingStat::default();
-    let mut sample_stats = RollingStat::default();
+    let mut sample_stats = SamplingLatencyStats::default();
     let mut decode_stats = RollingStat::default();
     let mut block_stats = vec![BlockStat::default(); n_layers];
     let mut matmul_backend_stats = MatMulBackendStats::default();
@@ -491,7 +496,7 @@ where
         record_sampling_samples(&mut sample_stats, ctx.take_sampling_samples());
         if let Some(duration) = host_duration {
             if !duration.is_zero() {
-                sample_stats.record(duration);
+                sample_stats.cpu_mut().record(duration);
             }
         }
     } else {
@@ -654,7 +659,7 @@ where
 
         if let Some(duration) = host_duration {
             if !duration.is_zero() {
-                sample_stats.record(duration);
+                sample_stats.cpu_mut().record(duration);
             }
         }
 
