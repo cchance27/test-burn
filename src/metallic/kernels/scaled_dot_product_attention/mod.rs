@@ -192,7 +192,7 @@ fn create_sdpa_operation<T: TensorElement>(
             "SDPA row offset {row_offset} exceeds representable query offset range"
         ))
     })?;
-    let softmax_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
+    let adjusted_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
         MetalError::InvalidShape(format!(
             "SDPA query offset {query_offset} with row offset {row_offset} exceeds u32::MAX"
         ))
@@ -208,7 +208,7 @@ fn create_sdpa_operation<T: TensorElement>(
             rows_to_process,
             s_k,
             causal,
-            softmax_query_offset,
+            adjusted_query_offset,
             config.use_mps_softmax,
         )?
     };
@@ -235,7 +235,7 @@ fn create_sdpa_operation<T: TensorElement>(
             seq_k: s_k,
             dim: d,
             scale,
-            softmax_query_offset,
+            query_offset: adjusted_query_offset,
             seq_len_delta: rows_to_process,
             config,
         }),
