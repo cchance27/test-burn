@@ -203,7 +203,7 @@ kernel void sample_top_k_top_p_f32(
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
     if (tid == 0u) {
-        uint prev = atomic_fetch_add_explicit(completion_counter, 1u, memory_order_acq_rel);
+        uint prev = atomic_fetch_add_explicit(completion_counter, 1u, memory_order_relaxed);
         bool is_last = (prev + 1u) == threadgroup_count;
         if (!is_last) {
             return;
@@ -228,7 +228,7 @@ kernel void sample_top_k_top_p_f32(
 
         if (skip_sampling) {
             output[0] = fallback_found ? fallback_idx : 0u;
-            atomic_store_explicit(completion_counter, 0u, memory_order_release);
+            atomic_store_explicit(completion_counter, 0u, memory_order_relaxed);
             return;
         }
 
@@ -269,7 +269,7 @@ kernel void sample_top_k_top_p_f32(
 
         if (shortlist_count == 0u) {
             output[0] = fallback_found ? fallback_idx : 0u;
-            atomic_store_explicit(completion_counter, 0u, memory_order_release);
+            atomic_store_explicit(completion_counter, 0u, memory_order_relaxed);
             return;
         }
 
@@ -296,7 +296,7 @@ kernel void sample_top_k_top_p_f32(
 
         if (!has_positive || total <= 0.0f || !isfinite(total)) {
             output[0] = fallback_found ? fallback_idx : shortlist_indices[0];
-            atomic_store_explicit(completion_counter, 0u, memory_order_release);
+            atomic_store_explicit(completion_counter, 0u, memory_order_relaxed);
             return;
         }
 
@@ -329,7 +329,7 @@ kernel void sample_top_k_top_p_f32(
 
         if (shortlist_total <= 0.0f || !isfinite(shortlist_total)) {
             output[0] = shortlist_indices[0];
-            atomic_store_explicit(completion_counter, 0u, memory_order_release);
+            atomic_store_explicit(completion_counter, 0u, memory_order_relaxed);
             return;
         }
 
@@ -343,12 +343,12 @@ kernel void sample_top_k_top_p_f32(
             acc += shortlist_vals[i];
             if (random_value <= acc || !isfinite(acc)) {
                 output[0] = shortlist_indices[i];
-                atomic_store_explicit(completion_counter, 0u, memory_order_release);
+                atomic_store_explicit(completion_counter, 0u, memory_order_relaxed);
                 return;
             }
         }
 
         output[0] = shortlist_indices[cutoff];
-        atomic_store_explicit(completion_counter, 0u, memory_order_release);
+        atomic_store_explicit(completion_counter, 0u, memory_order_relaxed);
     }
 }
