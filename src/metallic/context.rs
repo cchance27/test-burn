@@ -24,6 +24,7 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::env;
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -35,6 +36,7 @@ const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
 const MATMUL_TRACE_ENV: &str = "METALLIC_LOG_MATMUL_SHAPES";
 const MATMUL_TRACE_FILE_ENV: &str = "METALLIC_LOG_MATMUL_SHAPES_FILE";
 const MATMUL_TRACE_DEFAULT_FILE: &str = "metal-matmul-shapes.log";
+const FORCE_SYNC_DECODE_ENV: &str = "METALLIC_FORCE_SYNC_DECODE";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MatMulBackendOverride {
@@ -246,6 +248,14 @@ pub struct Context<T: TensorElement> {
     /// Instrumentation for KV cache write paths.
     kv_cache_dispatch_stats: KvCacheDispatchStats,
     memory_usage_cache: MemoryUsageCache,
+    enable_decode_overlap: bool,
+    max_in_flight_arenas: usize,
+    idle_pools: Vec<MemoryPool>,
+    idle_resource_caches: Vec<ResourceCache>,
+    in_flight_arenas: Vec<InFlightArena>,
+    completion_events: Arc<Mutex<VecDeque<CompletionEvent>>>,
+    next_arena_id: u64,
+    overlap_tracker: OverlapTracker,
     //config: ContextConfig,
 }
 
@@ -268,20 +278,285 @@ impl<T: TensorElement> KvCacheEntry<T> {
 
 const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct OverlapSample {
+    pub decode_duration: Duration,
+    pub gpu_duration: Duration,
+    pub overlap_duration: Duration,
+}
+
+#[derive(Default)]
+struct OverlapTracker {
+    samples: Vec<OverlapSample>,
+}
+
+impl OverlapTracker {
+    fn record(&mut self, sample: OverlapSample) {
+        self.samples.push(sample);
+    }
+
+    fn take(&mut self) -> Vec<OverlapSample> {
+        std::mem::take(&mut self.samples)
+    }
+}
+
+struct DecodeWindow {
+    start: Instant,
+    end: Instant,
+}
+
+struct CompletionEvent {
+    id: u64,
+    completed_at: Instant,
+}
+
+struct InFlightArena {
+    id: u64,
+    command_buffer: CommandBuffer,
+    pool: MemoryPool,
+    resource_cache: ResourceCache,
+    submitted_at: Instant,
+    decode_window: Option<DecodeWindow>,
+    completed_at: Option<Instant>,
+}
+
 impl<T: TensorElement> Context<T> {
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.
     /// Falls back to the legacy submit/wait path if no active buffer exists.
     pub fn synchronize(&mut self) {
-        if let Some(cmd_buf) = self.active_cmd_buffer.take() {
-            cmd_buf.commit();
-            cmd_buf.wait();
+        if !self.enable_decode_overlap {
+            if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+                cmd_buf.commit();
+                cmd_buf.wait();
+                self.pool.reset();
+                return;
+            }
+
+            if let Some(cb) = self.command_queue.commandBuffer() {
+                cb.commit();
+                unsafe { cb.waitUntilCompleted() };
+            }
             return;
         }
 
-        if let Some(cb) = self.command_queue.commandBuffer() {
-            cb.commit();
-            unsafe { cb.waitUntilCompleted() };
+        if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+            cmd_buf.commit();
+            cmd_buf.wait();
         }
+
+        for mut arena in self.in_flight_arenas.drain(..) {
+            arena.command_buffer.wait();
+            let completed_at = arena.completed_at.unwrap_or_else(Instant::now);
+            if let Some(window) = arena.decode_window.take() {
+                let decode_duration = window.end.saturating_duration_since(window.start);
+                let gpu_duration = completed_at.saturating_duration_since(arena.submitted_at);
+                let overlap_start = if window.start > arena.submitted_at {
+                    window.start
+                } else {
+                    arena.submitted_at
+                };
+                let overlap_end = if window.end < completed_at { window.end } else { completed_at };
+                let overlap_duration = if overlap_end > overlap_start {
+                    overlap_end.saturating_duration_since(overlap_start)
+                } else {
+                    Duration::ZERO
+                };
+                self.overlap_tracker.record(OverlapSample {
+                    decode_duration,
+                    gpu_duration,
+                    overlap_duration,
+                });
+            }
+
+            arena.pool.reset();
+            arena.resource_cache.clear();
+            self.idle_pools.push(arena.pool);
+            self.idle_resource_caches.push(arena.resource_cache);
+        }
+
+        self.recycle_completed_arenas();
+    }
+
+    fn recycle_completed_arenas(&mut self) {
+        if !self.enable_decode_overlap {
+            return;
+        }
+
+        let events = self.completion_events.lock();
+        let mut events = match events {
+            Ok(mut guard) => {
+                let mut drained = VecDeque::new();
+                std::mem::swap(&mut *guard, &mut drained);
+                drained
+            }
+            Err(_) => VecDeque::new(),
+        };
+
+        while let Some(event) = events.pop_front() {
+            if let Some(arena) = self.in_flight_arenas.iter_mut().find(|arena| arena.id == event.id) {
+                arena.completed_at = Some(event.completed_at);
+            }
+        }
+
+        let mut idx = 0;
+        while idx < self.in_flight_arenas.len() {
+            if self.in_flight_arenas[idx].completed_at.is_some() {
+                let mut arena = self.in_flight_arenas.swap_remove(idx);
+                let completed_at = arena.completed_at.unwrap_or_else(Instant::now);
+                if let Some(window) = arena.decode_window.take() {
+                    let decode_duration = window.end.saturating_duration_since(window.start);
+                    let gpu_duration = completed_at.saturating_duration_since(arena.submitted_at);
+                    let overlap_start = if window.start > arena.submitted_at {
+                        window.start
+                    } else {
+                        arena.submitted_at
+                    };
+                    let overlap_end = if window.end < completed_at { window.end } else { completed_at };
+                    let overlap_duration = if overlap_end > overlap_start {
+                        overlap_end.saturating_duration_since(overlap_start)
+                    } else {
+                        Duration::ZERO
+                    };
+                    self.overlap_tracker.record(OverlapSample {
+                        decode_duration,
+                        gpu_duration,
+                        overlap_duration,
+                    });
+                }
+
+                arena.pool.reset();
+                arena.resource_cache.clear();
+                self.idle_pools.push(arena.pool);
+                self.idle_resource_caches.push(arena.resource_cache);
+            } else {
+                idx += 1;
+            }
+        }
+    }
+
+    fn acquire_idle_pool(&mut self) -> Result<MemoryPool, MetalError> {
+        self.recycle_completed_arenas();
+
+        if let Some(mut pool) = self.idle_pools.pop() {
+            pool.reset();
+            return Ok(pool);
+        }
+
+        let total_pools = 1 + self.idle_pools.len() + self.in_flight_arenas.len();
+        if total_pools >= self.max_in_flight_arenas {
+            if let Some(arena) = self.in_flight_arenas.first_mut() {
+                arena.command_buffer.wait();
+                if arena.completed_at.is_none() {
+                    arena.completed_at = Some(Instant::now());
+                }
+            }
+            self.recycle_completed_arenas();
+            if let Some(mut pool) = self.idle_pools.pop() {
+                pool.reset();
+                return Ok(pool);
+            }
+        }
+
+        MemoryPool::new(&self.device, &self.command_queue)
+    }
+
+    fn acquire_idle_resource_cache(&mut self) -> Result<ResourceCache, MetalError> {
+        if let Some(mut cache) = self.idle_resource_caches.pop() {
+            cache.clear();
+            return Ok(cache);
+        }
+
+        Ok(ResourceCache::with_device(self.device.clone()))
+    }
+
+    pub fn submit_active_command_buffer(&mut self) -> Result<Option<u64>, MetalError> {
+        if !self.enable_decode_overlap {
+            if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+                cmd_buf.commit();
+                cmd_buf.wait();
+                if let Some(mut cache) = self.active_resource_cache.take() {
+                    cache.clear();
+                    self.active_resource_cache = Some(cache);
+                } else {
+                    self.active_resource_cache = Some(ResourceCache::with_device(self.device.clone()));
+                }
+                self.pool.reset();
+            }
+            return Ok(None);
+        }
+
+        let Some(cmd_buf) = self.active_cmd_buffer.take() else {
+            return Ok(None);
+        };
+
+        self.recycle_completed_arenas();
+
+        let submission_id = self.next_arena_id;
+        self.next_arena_id = self.next_arena_id.wrapping_add(1);
+
+        let completion_events = Arc::clone(&self.completion_events);
+        cmd_buf.on_completed(move |_| {
+            if let Ok(mut queue) = completion_events.lock() {
+                queue.push_back(CompletionEvent {
+                    id: submission_id,
+                    completed_at: Instant::now(),
+                });
+            }
+        });
+
+        let submitted_at = Instant::now();
+        cmd_buf.commit();
+
+        let cache = self
+            .active_resource_cache
+            .take()
+            .unwrap_or_else(|| ResourceCache::with_device(self.device.clone()));
+
+        let pool = std::mem::replace(&mut self.pool, self.acquire_idle_pool()?);
+        let next_cache = self.acquire_idle_resource_cache()?;
+        self.active_resource_cache = Some(next_cache);
+
+        self.in_flight_arenas.push(InFlightArena {
+            id: submission_id,
+            command_buffer: cmd_buf,
+            pool,
+            resource_cache: cache,
+            submitted_at,
+            decode_window: None,
+            completed_at: None,
+        });
+
+        Ok(Some(submission_id))
+    }
+
+    pub fn record_decode_window(&mut self, submission_id: Option<u64>, start: Instant, end: Instant) {
+        if !self.enable_decode_overlap {
+            return;
+        }
+
+        if let Some(id) = submission_id {
+            if let Some(arena) = self.in_flight_arenas.iter_mut().find(|arena| arena.id == id) {
+                arena.decode_window = Some(DecodeWindow { start, end });
+            }
+        } else {
+            let decode_duration = end.saturating_duration_since(start);
+            if !decode_duration.is_zero() {
+                self.overlap_tracker.record(OverlapSample {
+                    decode_duration,
+                    gpu_duration: Duration::ZERO,
+                    overlap_duration: Duration::ZERO,
+                });
+            }
+        }
+    }
+
+    pub fn take_overlap_samples(&mut self) -> Vec<OverlapSample> {
+        if !self.enable_decode_overlap {
+            return Vec::new();
+        }
+
+        self.recycle_completed_arenas();
+        self.overlap_tracker.take()
     }
 
     pub fn new() -> Result<Self, MetalError> {
@@ -291,6 +566,7 @@ impl<T: TensorElement> Context<T> {
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
         let log_matmul_shapes = env_flag_enabled(env::var(MATMUL_TRACE_ENV));
+        let force_sync_decode = env_flag_enabled(env::var(FORCE_SYNC_DECODE_ENV));
 
         if log_matmul_shapes {
             let _ = matmul_shape_logger();
@@ -335,6 +611,14 @@ impl<T: TensorElement> Context<T> {
             mlx_kernel_cache: MlxKernelCache::default(),
             kv_cache_dispatch_stats: KvCacheDispatchStats::default(),
             memory_usage_cache: MemoryUsageCache::default(),
+            enable_decode_overlap: !force_sync_decode,
+            max_in_flight_arenas: if force_sync_decode { 1 } else { 2 },
+            idle_pools: Vec::new(),
+            idle_resource_caches: Vec::new(),
+            in_flight_arenas: Vec::new(),
+            completion_events: Arc::new(Mutex::new(VecDeque::new())),
+            next_arena_id: 0,
+            overlap_tracker: OverlapTracker::default(),
             //config,
         })
     }
@@ -1222,6 +1506,10 @@ impl<T: TensorElement> Context<T> {
         if let Some(cache) = self.active_resource_cache.as_mut() {
             cache.clear();
         }
+
+        for cache in &mut self.idle_resource_caches {
+            cache.clear();
+        }
     }
 
     pub fn reset_pool(&mut self) {
@@ -1759,6 +2047,10 @@ impl<T: TensorElement> Context<T> {
     }
 
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
+        if self.enable_decode_overlap {
+            self.recycle_completed_arenas();
+        }
+
         let should_refresh = if let Some(active) = self.active_cmd_buffer.as_ref() {
             if active.is_committed() {
                 if !active.is_completed() {
@@ -1782,7 +2074,12 @@ impl<T: TensorElement> Context<T> {
         }
 
         if ensure_cache && self.active_resource_cache.is_none() {
-            self.active_resource_cache = Some(ResourceCache::with_device(self.device.clone()));
+            let cache = if self.enable_decode_overlap {
+                self.acquire_idle_resource_cache()?
+            } else {
+                ResourceCache::with_device(self.device.clone())
+            };
+            self.active_resource_cache = Some(cache);
         }
 
         Ok(())

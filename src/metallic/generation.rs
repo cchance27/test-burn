@@ -552,7 +552,7 @@ where
     let mut generated_ids = input_ids.to_vec();
     let prompt_len = input_ids.len();
     let vocab_size = qwen.config.vocab_size;
-    let mut next_token;
+    let mut current_token;
     let mut decoded_chunk = String::new();
     let mut decode_scratch = Vec::new();
 
@@ -563,30 +563,14 @@ where
 
         // Sample the first token
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+        current_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
         let sample_duration = sample_start.elapsed();
         if !sample_duration.is_zero() {
             sample_stats.record(sample_duration);
         }
     } else {
         // If there's no prompt, start with token 0.
-        next_token = 0;
-    }
-
-    generated_ids.push(next_token);
-    let decode_start = Instant::now();
-    let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
-    let decode_duration = decode_start.elapsed();
-    if !decode_duration.is_zero() {
-        decode_stats.record(decode_duration);
-    }
-
-    log_cache_stats(ctx, "generate", generated_ids.len());
-
-    if let Some(piece) = decoded_piece
-        && !token_callback(next_token, piece, Duration::ZERO)?
-    {
-        return Ok(());
+        current_token = 0;
     }
 
     // --- Autoregressive Generation Loop ---
@@ -607,125 +591,143 @@ where
         &mut ui_connected,
         true,
     );
+    let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
     let latency_collector = new_latency_collector(n_layers);
     let memory_collector = new_memory_collector(n_layers);
     let mut forward_snapshot = StepLatencySnapshot::empty(n_layers);
     let mut memory_snapshot = StepMemorySnapshot::empty(n_layers);
-    for i in 0..cfg.max_tokens - 1 {
+    let mut pending_logits: Option<Tensor<T>> = None;
+    let mut iteration = 0usize;
+    while iteration < cfg.max_tokens {
+        if iteration > 0 {
+            let logits_tensor = pending_logits
+                .take()
+                .ok_or_else(|| MetalError::InvalidOperation("Missing logits for next iteration".into()))?;
+            let logits = logits_tensor.to_vec();
+            let vocab_logits = &logits[..vocab_size];
+
+            let sample_start = Instant::now();
+            current_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+            let sample_duration = sample_start.elapsed();
+            if !sample_duration.is_zero() {
+                sample_stats.record(sample_duration);
+            }
+        }
+
         let iteration_start = Instant::now();
-        ctx.reset_pool();
+        let should_schedule = iteration + 1 < cfg.max_tokens && current_token != eos_token_id;
+        let mut submission_id = None;
+        let mut next_logits: Option<Tensor<T>> = None;
 
-        let embed_usage_before = ctx.snapshot_memory_usage();
-        let embed_start = Instant::now();
-        let input_tensor = qwen.embed(&[next_token], ctx)?;
-        let embed_duration = embed_start.elapsed();
-        if !embed_duration.is_zero() {
-            embed_stats.record(embed_duration);
-        }
-        let embed_usage_after = ctx.snapshot_memory_usage();
-        let embed_delta = embed_usage_after.delta_from(embed_usage_before);
-        memory_embed.update(
-            embed_delta.pool_used,
-            embed_delta.kv_used,
-            embed_delta.kv_cache_bytes,
-            embed_delta.pool_used,
-            embed_delta.kv_used,
-            embed_delta.kv_cache_bytes,
-        );
+        if should_schedule {
+            ctx.reset_pool();
 
-        let current_pos = prompt_len + i;
-        {
-            let mut latency_guard = latency_collector.borrow_mut();
-            latency_guard.reset();
-        }
-        {
-            let mut memory_guard = memory_collector.borrow_mut();
-            memory_guard.reset();
-        }
-        ctx.set_latency_collector(Some(latency_collector.clone()));
-        ctx.set_memory_collector(Some(memory_collector.clone()));
-        ctx.record_memory_event(MemoryEvent::ForwardStart);
-
-        let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
-        latency_collector.borrow().snapshot_into(&mut forward_snapshot);
-        memory_collector.borrow_mut().snapshot_into(&mut memory_snapshot);
-        ctx.set_latency_collector(None);
-        ctx.set_memory_collector(None);
-
-        record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
-
-        if let Some(usage) = memory_snapshot.forward.last {
-            latest_forward_usage = Some(usage);
-        }
-        if memory_snapshot.forward.baseline.is_some() {
-            memory_forward.update(
-                memory_snapshot.forward.current_pool_delta,
-                memory_snapshot.forward.current_kv_delta,
-                memory_snapshot.forward.current_kv_cache_delta,
-                memory_snapshot.forward.peak_pool_delta,
-                memory_snapshot.forward.peak_kv_delta,
-                memory_snapshot.forward.peak_kv_cache_delta,
+            let embed_usage_before = ctx.snapshot_memory_usage();
+            let embed_start = Instant::now();
+            let input_tensor = qwen.embed(&[current_token], ctx)?;
+            let embed_duration = embed_start.elapsed();
+            if !embed_duration.is_zero() {
+                embed_stats.record(embed_duration);
+            }
+            let embed_usage_after = ctx.snapshot_memory_usage();
+            let embed_delta = embed_usage_after.delta_from(embed_usage_before);
+            memory_embed.update(
+                embed_delta.pool_used,
+                embed_delta.kv_used,
+                embed_delta.kv_cache_bytes,
+                embed_delta.pool_used,
+                embed_delta.kv_used,
+                embed_delta.kv_cache_bytes,
             );
-            for (idx, block_snapshot) in memory_snapshot.blocks.iter().enumerate() {
-                memory_blocks[idx].update_from_snapshot(block_snapshot);
-            }
-            memory_ready = true;
-        }
 
-        if !forward_snapshot.forward_step.is_zero() {
-            forward_stats.record(forward_snapshot.forward_step);
-            latencies_ready = true;
-        }
-        for (idx, block_snapshot) in forward_snapshot.blocks.iter().enumerate() {
-            if !block_snapshot.total.is_zero() {
-                block_stats[idx].record_total(block_snapshot.total);
+            let current_pos = prompt_len + iteration;
+            {
+                let mut latency_guard = latency_collector.borrow_mut();
+                latency_guard.reset();
             }
-            for phase in &block_snapshot.phases {
-                if !phase.duration.is_zero() {
-                    block_stats[idx].record_phase(&phase.label, phase.duration);
+            {
+                let mut memory_guard = memory_collector.borrow_mut();
+                memory_guard.reset();
+            }
+            ctx.set_latency_collector(Some(latency_collector.clone()));
+            ctx.set_memory_collector(Some(memory_collector.clone()));
+            ctx.record_memory_event(MemoryEvent::ForwardStart);
+
+            let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
+            latency_collector.borrow().snapshot_into(&mut forward_snapshot);
+            memory_collector.borrow_mut().snapshot_into(&mut memory_snapshot);
+            ctx.set_latency_collector(None);
+            ctx.set_memory_collector(None);
+
+            record_matmul_samples(&mut matmul_backend_stats, ctx.take_matmul_samples());
+
+            if let Some(usage) = memory_snapshot.forward.last {
+                latest_forward_usage = Some(usage);
+            }
+            if memory_snapshot.forward.baseline.is_some() {
+                memory_forward.update(
+                    memory_snapshot.forward.current_pool_delta,
+                    memory_snapshot.forward.current_kv_delta,
+                    memory_snapshot.forward.current_kv_cache_delta,
+                    memory_snapshot.forward.peak_pool_delta,
+                    memory_snapshot.forward.peak_kv_delta,
+                    memory_snapshot.forward.peak_kv_cache_delta,
+                );
+                for (idx, block_snapshot) in memory_snapshot.blocks.iter().enumerate() {
+                    memory_blocks[idx].update_from_snapshot(block_snapshot);
+                }
+                memory_ready = true;
+            }
+
+            if !forward_snapshot.forward_step.is_zero() {
+                forward_stats.record(forward_snapshot.forward_step);
+                latencies_ready = true;
+            }
+            for (idx, block_snapshot) in forward_snapshot.blocks.iter().enumerate() {
+                if !block_snapshot.total.is_zero() {
+                    block_stats[idx].record_total(block_snapshot.total);
+                }
+                for phase in &block_snapshot.phases {
+                    if !phase.duration.is_zero() {
+                        block_stats[idx].record_phase(&phase.label, phase.duration);
+                    }
                 }
             }
+
+            let output_usage_before = ctx.snapshot_memory_usage();
+            let output_start = Instant::now();
+            let logits_tensor = qwen.output(&hidden_states, ctx)?;
+            let output_duration = output_start.elapsed();
+            if !output_duration.is_zero() {
+                output_stats.record(output_duration);
+            }
+            let output_usage_after = ctx.snapshot_memory_usage();
+            let output_delta = output_usage_after.delta_from(output_usage_before);
+            memory_output.update(
+                output_delta.pool_used,
+                output_delta.kv_used,
+                output_delta.kv_cache_bytes,
+                output_delta.pool_used,
+                output_delta.kv_used,
+                output_delta.kv_cache_bytes,
+            );
+
+            sample_process_memory(process_memory_tracker, host_memory);
+
+            submission_id = ctx.submit_active_command_buffer()?;
+            next_logits = Some(logits_tensor);
         }
 
-        let output_usage_before = ctx.snapshot_memory_usage();
-        let output_start = Instant::now();
-        let logits_tensor = qwen.output(&hidden_states, ctx)?;
-        let output_duration = output_start.elapsed();
-        if !output_duration.is_zero() {
-            output_stats.record(output_duration);
-        }
-        let output_usage_after = ctx.snapshot_memory_usage();
-        let output_delta = output_usage_after.delta_from(output_usage_before);
-        memory_output.update(
-            output_delta.pool_used,
-            output_delta.kv_used,
-            output_delta.kv_cache_bytes,
-            output_delta.pool_used,
-            output_delta.kv_used,
-            output_delta.kv_cache_bytes,
-        );
-
-        sample_process_memory(process_memory_tracker, host_memory);
-
-        let logits = logits_tensor.to_vec();
-        let vocab_logits = &logits[..vocab_size];
-
-        let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
-
-        generated_ids.push(next_token);
-
-        let sample_duration = sample_start.elapsed();
-        if !sample_duration.is_zero() {
-            sample_stats.record(sample_duration);
-        }
+        generated_ids.push(current_token);
 
         let decode_start = Instant::now();
-        let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
+        let decoded_piece = tokenizer.decode_token_arc(current_token, &mut decoded_chunk, &mut decode_scratch)?;
         let decode_duration = decode_start.elapsed();
         if !decode_duration.is_zero() {
             decode_stats.record(decode_duration);
         }
+        let decode_end = decode_start + decode_duration;
+        ctx.record_decode_window(submission_id, decode_start, decode_end);
 
         let iteration_duration = iteration_start.elapsed();
         if !iteration_duration.is_zero() {
@@ -736,7 +738,7 @@ where
         log_cache_stats(ctx, "generate", generated_ids.len());
 
         if let Some(piece) = decoded_piece
-            && !token_callback(next_token, piece, iteration_duration)?
+            && !token_callback(current_token, piece, iteration_duration)?
         {
             break;
         }
@@ -780,10 +782,35 @@ where
             );
         }
 
-        let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-        if next_token == eos_token_id {
+        if current_token == eos_token_id {
             break;
         }
+
+        if let Some(logits_tensor) = next_logits {
+            pending_logits = Some(logits_tensor);
+        }
+
+        iteration += 1;
+    }
+
+    ctx.synchronize();
+    let overlap_samples = ctx.take_overlap_samples();
+    if !overlap_samples.is_empty() {
+        let overlapped = overlap_samples.iter().filter(|sample| !sample.overlap_duration.is_zero()).count();
+        let total = overlap_samples.len();
+        let avg_overlap_ms = overlap_samples
+            .iter()
+            .map(|sample| sample.overlap_duration.as_secs_f64())
+            .sum::<f64>()
+            / total as f64
+            * 1e3;
+        alert::emit_info(
+            tx,
+            format!(
+                "GPU decode overlap: {overlapped}/{total} iterations with mean overlap {:.2} ms",
+                avg_overlap_ms
+            ),
+        );
     }
 
     Ok(())
