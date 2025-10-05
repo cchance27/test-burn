@@ -165,7 +165,7 @@ fn sample_next_token_from_logits<T: TensorElement>(
 
 #[inline]
 fn should_use_device_sampling<T: TensorElement>(vocab_size: usize, top_k: usize) -> bool {
-    vocab_size > 0 && T::DTYPE == Dtype::F32 && effective_top_k(top_k, vocab_size) <= MAX_TOP_K
+    vocab_size > 0 && matches!(T::DTYPE, Dtype::F32 | Dtype::F16) && effective_top_k(top_k, vocab_size) <= MAX_TOP_K
 }
 
 fn log_cache_stats<T: TensorElement>(ctx: &Context<T>, phase: &str, step: usize) {

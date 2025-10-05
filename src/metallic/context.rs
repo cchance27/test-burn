@@ -11,7 +11,7 @@ use crate::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::metallic::kernels::sampling::{MAX_TOP_K, SampleTopKTopPOp, SamplingParams};
 use crate::metallic::kernels::swiglu::SwiGLUOp;
 use crate::metallic::sampling::{SamplerBuffers, effective_top_k, sample_top_k_top_p_with_random_value};
-use crate::metallic::tensor::Dtype;
+use crate::metallic::tensor::{Dtype, RetainedBuffer};
 use crate::metallic::{Tensor, TensorElement, kernels};
 use kernels::gemv::GemvOp;
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
@@ -248,6 +248,7 @@ pub struct Context<T: TensorElement> {
     pub sampler_buffers: SamplerBuffers,
     sampler_rng: StdRng,
     sampling_result_buffer: Option<Retained<ProtocolObject<dyn MTLBuffer>>>,
+    sampling_scratch: SamplingScratchBuffers,
     /// Optional override for the matmul backend chosen by this context.
     forced_matmul_backend: MatMulBackendOverride,
     /// Whether to emit shape/timing logs for matmul calls.
@@ -280,6 +281,125 @@ impl<T: TensorElement> KvCacheEntry<T> {
 }
 
 const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
+const SAMPLING_BUFFER_ALIGNMENT: usize = 256;
+
+#[derive(Default)]
+struct SamplingScratchBuffers {
+    partial_capacity: usize,
+    fallback_capacity: usize,
+    partial_vals: Option<RetainedBuffer>,
+    partial_indices: Option<RetainedBuffer>,
+    partial_counts: Option<RetainedBuffer>,
+    fallback_vals: Option<RetainedBuffer>,
+    fallback_indices: Option<RetainedBuffer>,
+    fallback_flags: Option<RetainedBuffer>,
+}
+
+pub(crate) struct SamplingScratchSet {
+    pub partial_vals: RetainedBuffer,
+    pub partial_indices: RetainedBuffer,
+    pub partial_counts: RetainedBuffer,
+    pub fallback_vals: RetainedBuffer,
+    pub fallback_indices: RetainedBuffer,
+    pub fallback_flags: RetainedBuffer,
+}
+
+impl SamplingScratchBuffers {
+    fn ensure(
+        &mut self,
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+        threadgroup_count: usize,
+        effective_top_k: usize,
+    ) -> Result<SamplingScratchSet, MetalError> {
+        if threadgroup_count == 0 || effective_top_k == 0 {
+            return Err(MetalError::OperationNotSupported(
+                "sampling kernel requires non-zero threadgroup count and top-k".to_string(),
+            ));
+        }
+
+        let partial_entries = threadgroup_count
+            .checked_mul(effective_top_k)
+            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel partial buffer size overflow".to_string()))?;
+        let fallback_entries = threadgroup_count;
+
+        if partial_entries > self.partial_capacity {
+            let vals_bytes = aligned_byte_size(partial_entries, std::mem::size_of::<f32>())?;
+            let indices_bytes = aligned_byte_size(partial_entries, std::mem::size_of::<u32>())?;
+            self.partial_vals = Some(new_private_buffer(device, vals_bytes)?);
+            self.partial_indices = Some(new_private_buffer(device, indices_bytes)?);
+            self.partial_capacity = partial_entries;
+        }
+
+        if fallback_entries > self.fallback_capacity {
+            let counts_bytes = aligned_byte_size(fallback_entries, std::mem::size_of::<u32>())?;
+            let fallback_vals_bytes = aligned_byte_size(fallback_entries, std::mem::size_of::<f32>())?;
+            let fallback_indices_bytes = aligned_byte_size(fallback_entries, std::mem::size_of::<u32>())?;
+            self.partial_counts = Some(new_private_buffer(device, counts_bytes)?);
+            self.fallback_vals = Some(new_private_buffer(device, fallback_vals_bytes)?);
+            self.fallback_indices = Some(new_private_buffer(device, fallback_indices_bytes)?);
+            self.fallback_flags = Some(new_private_buffer(device, fallback_indices_bytes)?);
+            self.fallback_capacity = fallback_entries;
+        }
+
+        Ok(SamplingScratchSet {
+            partial_vals: self
+                .partial_vals
+                .as_ref()
+                .expect("sampling partial values buffer must be allocated")
+                .clone(),
+            partial_indices: self
+                .partial_indices
+                .as_ref()
+                .expect("sampling partial indices buffer must be allocated")
+                .clone(),
+            partial_counts: self
+                .partial_counts
+                .as_ref()
+                .expect("sampling partial counts buffer must be allocated")
+                .clone(),
+            fallback_vals: self
+                .fallback_vals
+                .as_ref()
+                .expect("sampling fallback values buffer must be allocated")
+                .clone(),
+            fallback_indices: self
+                .fallback_indices
+                .as_ref()
+                .expect("sampling fallback indices buffer must be allocated")
+                .clone(),
+            fallback_flags: self
+                .fallback_flags
+                .as_ref()
+                .expect("sampling fallback flags buffer must be allocated")
+                .clone(),
+        })
+    }
+}
+
+fn aligned_byte_size(entries: usize, element_size: usize) -> Result<usize, MetalError> {
+    let bytes = entries
+        .checked_mul(element_size)
+        .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel buffer size overflow".to_string()))?;
+    align_to(bytes, SAMPLING_BUFFER_ALIGNMENT)
+        .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel buffer size overflow".to_string()))
+}
+
+fn align_to(value: usize, alignment: usize) -> Option<usize> {
+    if alignment == 0 {
+        return Some(value);
+    }
+    let mask = alignment - 1;
+    if alignment & mask != 0 {
+        return None;
+    }
+    value.checked_add(mask).map(|val| val & !mask)
+}
+
+fn new_private_buffer(device: &Retained<ProtocolObject<dyn MTLDevice>>, length: usize) -> Result<RetainedBuffer, MetalError> {
+    device
+        .newBufferWithLength_options(length, MTLResourceOptions::StorageModePrivate)
+        .ok_or(MetalError::BufferCreationFailed(length))
+}
 
 impl<T: TensorElement> Context<T> {
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.
@@ -363,6 +483,7 @@ impl<T: TensorElement> Context<T> {
             sampler_buffers: SamplerBuffers::default(),
             sampler_rng: StdRng::seed_from_u64(sampler_seed),
             sampling_result_buffer: None,
+            sampling_scratch: SamplingScratchBuffers::default(),
             forced_matmul_backend: forced_backend,
             log_matmul_shapes,
             mlx_kernel_cache: MlxKernelCache::default(),
@@ -384,6 +505,15 @@ impl<T: TensorElement> Context<T> {
     #[inline]
     pub(crate) fn next_sampler_random(&mut self) -> u32 {
         self.sampler_rng.next_u32()
+    }
+
+    #[inline]
+    pub(crate) fn acquire_sampling_scratch(
+        &mut self,
+        threadgroup_count: usize,
+        effective_top_k: usize,
+    ) -> Result<SamplingScratchSet, MetalError> {
+        self.sampling_scratch.ensure(&self.device, threadgroup_count, effective_top_k)
     }
 
     pub(crate) fn sample_top_k_top_p_host(
@@ -424,7 +554,7 @@ impl<T: TensorElement> Context<T> {
         temperature: f32,
         random_u32: u32,
     ) -> Result<Option<u32>, MetalError> {
-        if T::DTYPE != Dtype::F32 {
+        if !matches!(T::DTYPE, Dtype::F32 | Dtype::F16) {
             return Ok(None);
         }
 

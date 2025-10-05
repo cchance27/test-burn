@@ -55,36 +55,30 @@ pub fn sample_top_k_top_p_with_random_value<T: TensorElement>(
 
     let effective_top_k = effective_top_k(top_k, logits.len());
 
+    let mut top_k_candidates: Vec<_> = logits.iter().enumerate().map(|(i, &raw)| {
+        let val = T::to_f32(raw);
+        let scaled_val = val / temperature;
+        (scaled_val, i)
+    }).filter(|(s, _)| s.is_finite()).collect();
+
+    if top_k_candidates.len() > effective_top_k {
+        top_k_candidates.select_nth_unstable_by(effective_top_k - 1, |a, b| {
+            b.0.partial_cmp(&a.0).unwrap().then_with(|| b.1.cmp(&a.1))
+        });
+        top_k_candidates.truncate(effective_top_k);
+    }
+
+    top_k_candidates.sort_unstable_by(|a, b| {
+        b.0.partial_cmp(&a.0).unwrap().then_with(|| b.1.cmp(&a.1))
+    });
+
     let scaled = &mut buffers.scaled;
     scaled.clear();
-    if scaled.capacity() < effective_top_k {
-        scaled.reserve(effective_top_k);
-    }
+    scaled.extend(top_k_candidates.iter().map(|(s, _)| *s));
 
     let indices = &mut buffers.indices;
     indices.clear();
-    if indices.capacity() < effective_top_k {
-        indices.reserve(effective_top_k);
-    }
-
-    for (i, &raw) in logits.iter().enumerate() {
-        let val = T::to_f32(raw);
-        let scaled_val = val / temperature;
-        if !scaled_val.is_finite() {
-            continue;
-        }
-
-        let insert_pos = scaled.partition_point(|&existing| existing > scaled_val);
-        if indices.len() < effective_top_k {
-            scaled.insert(insert_pos, scaled_val);
-            indices.insert(insert_pos, i);
-        } else if insert_pos < effective_top_k {
-            scaled.insert(insert_pos, scaled_val);
-            indices.insert(insert_pos, i);
-            scaled.pop();
-            indices.pop();
-        }
-    }
+    indices.extend(top_k_candidates.iter().map(|(_, i)| *i));
 
     if indices.is_empty() {
         return if fallback_found { fallback_idx } else { 0 };

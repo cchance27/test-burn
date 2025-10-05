@@ -3,7 +3,10 @@ use crate::metallic::kernels::matmul::{MatMulBackend, MatMulSample};
 use crate::metallic::kernels::sampling::MAX_TOP_K;
 use crate::metallic::models::{Qwen25, Qwen25Config};
 use crate::metallic::sampling::{sample_top_k_top_p, sample_top_k_top_p_with_random_value};
-use crate::metallic::{Context, F32Element, MetalError, SamplerBuffers, Tensor, TensorElement, TensorInit, TensorStorage, Tokenizer};
+use crate::metallic::{
+    Context, F16Element, F32Element, MetalError, SamplerBuffers, Tensor, TensorElement, TensorInit, TensorStorage, Tokenizer,
+};
+use half::f16;
 use rustc_hash::FxHashMap;
 
 #[test]
@@ -277,6 +280,38 @@ fn test_device_sampling_matches_cpu_with_fixed_seed() -> Result<(), MetalError> 
             .sample_top_k_top_p_device(&tensor, logits.len(), top_k, top_p, temperature, random)?
             .expect("GPU kernel should support f32 logits within limit");
         let cpu_idx = sample_top_k_top_p_with_random_value::<F32Element>(&logits, top_k, top_p, temperature, random, &mut buffers);
+        assert_eq!(gpu_token as usize, cpu_idx);
+    }
+
+    Ok(())
+}
+
+#[test]
+fn test_device_sampling_matches_cpu_with_fixed_seed_f16() -> Result<(), MetalError> {
+    let mut ctx = Context::<F16Element>::new()?;
+    let logits: Vec<f32> = vec![0.25, -0.15, 1.2, 0.7, 0.05, -1.0, 0.9, 0.33, 0.61, -0.42, 1.75, 0.0];
+    let logits_f16: Vec<f16> = logits.iter().copied().map(f16::from_f32).collect();
+    let tensor = {
+        let ctx_ref: &Context<F16Element> = &ctx;
+        Tensor::new(
+            vec![logits_f16.len()],
+            TensorStorage::Dedicated(ctx_ref),
+            TensorInit::CopyFrom(&logits_f16),
+        )?
+    };
+
+    let top_k = 5usize;
+    let top_p = 0.85f32;
+    let temperature = 0.95f32;
+    ctx.reseed_sampler(1234);
+    let mut buffers = SamplerBuffers::default();
+
+    for _ in 0..4 {
+        let random = ctx.next_sampler_random();
+        let gpu_token = ctx
+            .sample_top_k_top_p_device(&tensor, logits_f16.len(), top_k, top_p, temperature, random)?
+            .expect("GPU kernel should support f16 logits within limit");
+        let cpu_idx = sample_top_k_top_p_with_random_value::<F16Element>(&logits_f16, top_k, top_p, temperature, random, &mut buffers);
         assert_eq!(gpu_token as usize, cpu_idx);
     }
 

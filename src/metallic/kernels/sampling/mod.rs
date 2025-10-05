@@ -6,8 +6,7 @@ use crate::metallic::{TensorElement, tensor::RetainedBuffer};
 use objc2::msg_send;
 use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCounterSampleBuffer, MTLResourceOptions};
-use std::mem;
+use objc2_metal::MTLCounterSampleBuffer;
 
 /// Number of threads launched for the sampling reduction kernel. This must match
 /// `THREADGROUP_SIZE` in `kernel.metal`.
@@ -67,9 +66,9 @@ impl KernelInvocable for SampleTopKTopPOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        if T::DTYPE != Dtype::F32 {
+        if !matches!(T::DTYPE, Dtype::F32 | Dtype::F16) {
             return Err(MetalError::OperationNotSupported(
-                "top-k/top-p sampling kernel only supports f32 logits".to_string(),
+                "top-k/top-p sampling kernel only supports f32 or f16 logits".to_string(),
             ));
         }
 
@@ -94,53 +93,13 @@ impl KernelInvocable for SampleTopKTopPOp {
 
         let effective_top_k = effective_top_k(raw_params.top_k as usize, vocab_size).min(MAX_TOP_K);
 
-        let partial_len = threadgroup_count
-            .checked_mul(effective_top_k)
-            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel partial buffer size overflow".to_string()))?;
-
-        let partial_vals_bytes = partial_len
-            .checked_mul(mem::size_of::<f32>())
-            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel partial values byte size overflow".to_string()))?;
-        let partial_indices_bytes = partial_len
-            .checked_mul(mem::size_of::<u32>())
-            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel partial indices byte size overflow".to_string()))?;
-
-        let counts_bytes = threadgroup_count
-            .checked_mul(mem::size_of::<u32>())
-            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel counts byte size overflow".to_string()))?;
-
-        let fallback_bytes = threadgroup_count
-            .checked_mul(mem::size_of::<f32>())
-            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel fallback values byte size overflow".to_string()))?;
-
-        let fallback_index_bytes = threadgroup_count
-            .checked_mul(mem::size_of::<u32>())
-            .ok_or_else(|| MetalError::OperationNotSupported("sampling kernel fallback indices byte size overflow".to_string()))?;
-
-        let partial_vals = ctx
-            .device
-            .newBufferWithLength_options(partial_vals_bytes, MTLResourceOptions::StorageModePrivate)
-            .ok_or(MetalError::BufferCreationFailed(partial_vals_bytes))?;
-        let partial_indices = ctx
-            .device
-            .newBufferWithLength_options(partial_indices_bytes, MTLResourceOptions::StorageModePrivate)
-            .ok_or(MetalError::BufferCreationFailed(partial_indices_bytes))?;
-        let partial_counts = ctx
-            .device
-            .newBufferWithLength_options(counts_bytes, MTLResourceOptions::StorageModePrivate)
-            .ok_or(MetalError::BufferCreationFailed(counts_bytes))?;
-        let fallback_vals = ctx
-            .device
-            .newBufferWithLength_options(fallback_bytes, MTLResourceOptions::StorageModePrivate)
-            .ok_or(MetalError::BufferCreationFailed(fallback_bytes))?;
-        let fallback_indices = ctx
-            .device
-            .newBufferWithLength_options(fallback_index_bytes, MTLResourceOptions::StorageModePrivate)
-            .ok_or(MetalError::BufferCreationFailed(fallback_index_bytes))?;
-        let fallback_flags = ctx
-            .device
-            .newBufferWithLength_options(fallback_index_bytes, MTLResourceOptions::StorageModePrivate)
-            .ok_or(MetalError::BufferCreationFailed(fallback_index_bytes))?;
+        let scratch = ctx.acquire_sampling_scratch(threadgroup_count, effective_top_k)?;
+        let partial_vals = scratch.partial_vals;
+        let partial_indices = scratch.partial_indices;
+        let partial_counts = scratch.partial_counts;
+        let fallback_vals = scratch.fallback_vals;
+        let fallback_indices = scratch.fallback_indices;
+        let fallback_flags = scratch.fallback_flags;
 
         let stage1_pipeline = pipeline.expect("Kernel Module should supply a pipeline");
         let stage2_pipeline = ctx

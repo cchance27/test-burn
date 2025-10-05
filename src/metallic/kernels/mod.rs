@@ -198,12 +198,9 @@ impl KernelFunction {
             (KernelFunction::Gemv, F32) => "gemv_f32",
             (KernelFunction::Gemv, F16) => "gemv_f16",
             (KernelFunction::SampleTopKTopPStage1, F32) => "sample_top_k_top_p_stage1_f32",
+            (KernelFunction::SampleTopKTopPStage1, F16) => "sample_top_k_top_p_stage1_f16",
             (KernelFunction::SampleTopKTopPFinalize, F32) => "sample_top_k_top_p_finalize_f32",
-            (KernelFunction::SampleTopKTopPStage1 | KernelFunction::SampleTopKTopPFinalize, F16) => {
-                return Err(MetalError::OperationNotSupported(
-                    "top-k/top-p sampling kernel does not support f16 logits".to_string(),
-                ));
-            }
+            (KernelFunction::SampleTopKTopPFinalize, F16) => "sample_top_k_top_p_finalize_f16",
         };
 
         Ok(name)
