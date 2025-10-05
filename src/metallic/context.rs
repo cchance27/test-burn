@@ -512,7 +512,8 @@ impl<T: TensorElement> Context<T> {
             .take()
             .unwrap_or_else(|| ResourceCache::with_device(self.device.clone()));
 
-        let pool = std::mem::replace(&mut self.pool, self.acquire_idle_pool()?);
+        let next_pool = self.acquire_idle_pool()?;
+        let pool = std::mem::replace(&mut self.pool, next_pool);
         let next_cache = self.acquire_idle_resource_cache()?;
         self.active_resource_cache = Some(next_cache);
 
