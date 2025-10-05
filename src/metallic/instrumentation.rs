@@ -931,12 +931,6 @@ impl MemoryScopeEntry {
         self.peak_kv_cache_delta = self.peak_kv_cache_delta.max(delta.kv_cache_bytes);
     }
 
-    fn snapshot(&self) -> MemoryScopeSnapshot {
-        let mut snapshot = MemoryScopeSnapshot::default();
-        self.snapshot_into(&mut snapshot);
-        snapshot
-    }
-
     fn snapshot_into(&self, snapshot: &mut MemoryScopeSnapshot) {
         let (current_pool_delta, current_kv_delta, current_kv_cache_delta) = if let (Some(base), Some(last)) = (self.baseline, self.last) {
             let delta = last.delta_from(base);

@@ -79,8 +79,7 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
 
     let stats_after_prefill = ctx.get_cache_stats().expect("cache stats should be available after prefill");
 
-    let decode_out =
-        ctx.scaled_dot_product_attention_with_offset(&q_full, &k_full, &v_full, true, prefill as u32)?;
+    let decode_out = ctx.scaled_dot_product_attention_with_offset(&q_full, &k_full, &v_full, true, prefill)?;
     ctx.synchronize();
 
     let stats_after_decode = ctx.get_cache_stats().expect("cache stats should be available after decode");
@@ -93,13 +92,7 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     let k_full_baseline = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut baseline_ctx), &k_data)?;
     let v_full_baseline = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut baseline_ctx), &v_data)?;
 
-    let full_out = baseline_ctx.scaled_dot_product_attention_with_offset(
-        &q_full_baseline,
-        &k_full_baseline,
-        &v_full_baseline,
-        true,
-        0,
-    )?;
+    let full_out = baseline_ctx.scaled_dot_product_attention_with_offset(&q_full_baseline, &k_full_baseline, &v_full_baseline, true, 0)?;
     baseline_ctx.synchronize();
 
     let decode_slice = decode_out.as_slice();
@@ -110,21 +103,9 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     assert_eq!(&full_slice[start..end], decode_slice);
 
     let mut ctx_zero_offset = Context::<F32Element>::new()?;
-    let q_full_zero = Tensor::<F32Element>::from_f32_slice(
-        vec![batch, total, dim],
-        TensorStorage::Pooled(&mut ctx_zero_offset),
-        &q_data,
-    )?;
-    let k_full_zero = Tensor::<F32Element>::from_f32_slice(
-        vec![batch, total, dim],
-        TensorStorage::Pooled(&mut ctx_zero_offset),
-        &k_data,
-    )?;
-    let v_full_zero = Tensor::<F32Element>::from_f32_slice(
-        vec![batch, total, dim],
-        TensorStorage::Pooled(&mut ctx_zero_offset),
-        &v_data,
-    )?;
+    let q_full_zero = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx_zero_offset), &q_data)?;
+    let k_full_zero = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx_zero_offset), &k_data)?;
+    let v_full_zero = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx_zero_offset), &v_data)?;
 
     let q_prefill_zero = q_full_zero
         .reshape(vec![batch * total, dim])?
@@ -139,22 +120,10 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
         .slice(&[0..batch * prefill])?
         .reshape(vec![batch, prefill, dim])?;
 
-    let _ = ctx_zero_offset.scaled_dot_product_attention_with_offset(
-        &q_prefill_zero,
-        &k_prefill_zero,
-        &v_prefill_zero,
-        true,
-        0,
-    )?;
+    let _ = ctx_zero_offset.scaled_dot_product_attention_with_offset(&q_prefill_zero, &k_prefill_zero, &v_prefill_zero, true, 0)?;
     ctx_zero_offset.synchronize();
 
-    let incremental_zero = ctx_zero_offset.scaled_dot_product_attention_with_offset(
-        &q_full_zero,
-        &k_full_zero,
-        &v_full_zero,
-        true,
-        0,
-    )?;
+    let incremental_zero = ctx_zero_offset.scaled_dot_product_attention_with_offset(&q_full_zero, &k_full_zero, &v_full_zero, true, 0)?;
     ctx_zero_offset.synchronize();
 
     let incremental_zero_slice = incremental_zero.as_slice();
