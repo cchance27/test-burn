@@ -149,17 +149,25 @@ fn create_sdpa_operation<T: TensorElement>(
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
-    let mut rows_to_process = seq_len_delta.min(s_q);
+    let mut rows_to_process = if query_offset == 0 { s_q } else { seq_len_delta.min(s_q) };
     if rows_to_process == 0 {
         rows_to_process = s_q;
     }
     let row_offset = s_q.saturating_sub(rows_to_process);
 
-    let q_active = if row_offset == 0 && rows_to_process == s_q {
-        q.clone()
-    } else {
-        q.slice(&[0..b, row_offset..s_q, 0..d])?
-    };
+    let mut q_active = q.clone();
+    if row_offset != 0 || rows_to_process != s_q {
+        if q_active.dims.len() < 2 || q_active.strides.len() < 2 {
+            return Err(MetalError::InvalidShape(
+                "SDPA queries must have at least two dimensions".to_string(),
+            ));
+        }
+
+        q_active.dims[1] = rows_to_process;
+        let elem_size = q_active.dtype.size_bytes();
+        let row_stride = q_active.strides[1];
+        q_active.offset += row_offset * row_stride * elem_size;
+    }
 
     // Create output tensor
     let out = Tensor::new(vec![b, rows_to_process, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
