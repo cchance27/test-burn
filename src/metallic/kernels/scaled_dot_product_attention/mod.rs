@@ -149,15 +149,13 @@ fn create_sdpa_operation<T: TensorElement>(
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
-    let mut rows_to_process = if seq_len_delta == 0 || seq_len_delta >= s_q {
-        s_q
-    } else {
-        seq_len_delta.min(s_q)
-    };
-    if rows_to_process == 0 {
-        rows_to_process = s_q;
+    let mut rows_to_process = s_q;
+    let mut row_offset = 0usize;
+
+    if causal && seq_len_delta > 0 && seq_len_delta < s_q {
+        rows_to_process = seq_len_delta;
+        row_offset = s_q - rows_to_process;
     }
-    let row_offset = s_q.saturating_sub(rows_to_process);
 
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
