@@ -193,12 +193,13 @@ enum EncoderHandle {
 
 impl EncoderHandle {
     unsafe fn sample(&self, sample_buffer: &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>, index: NSUInteger, barrier: Bool) {
+        let buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = sample_buffer.as_ref();
         match self {
             EncoderHandle::Compute(encoder) => {
                 let _: () = unsafe {
                     msg_send![
                         &**encoder,
-                        sampleCountersInBuffer: sample_buffer.as_ref(),
+                        sampleCountersInBuffer: buffer,
                         atSampleIndex: index,
                         withBarrier: barrier
                     ]
@@ -208,7 +209,7 @@ impl EncoderHandle {
                 let _: () = unsafe {
                     msg_send![
                         &**encoder,
-                        sampleCountersInBuffer: sample_buffer.as_ref(),
+                        sampleCountersInBuffer: buffer,
                         atSampleIndex: index,
                         withBarrier: barrier
                     ]
