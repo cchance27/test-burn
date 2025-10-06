@@ -51,7 +51,8 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     let batch = 1;
     let dim = 4;
     let prefill = 3;
-    let total = 4;
+    let total = 5;
+    let decode_steps = total - prefill;
 
     let q_data: Vec<f32> = (0..batch * total * dim).map(|i| (i as f32) * 0.01).collect();
     let k_data: Vec<f32> = (0..batch * total * dim).map(|i| (i as f32) * 0.02).collect();
@@ -80,7 +81,7 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     let stats_after_prefill = ctx.get_cache_stats().expect("cache stats should be available after prefill");
 
     let decode_out = ctx.scaled_dot_product_attention_with_offset(&q_full, &k_full, &v_full, true, prefill)?;
-    assert_eq!(decode_out.dims(), &[batch, total - prefill, dim]);
+    assert_eq!(decode_out.dims(), &[batch, decode_steps, dim]);
     ctx.synchronize();
 
     let stats_after_decode = ctx.get_cache_stats().expect("cache stats should be available after decode");
@@ -96,12 +97,15 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     let full_out = baseline_ctx.scaled_dot_product_attention_with_offset(&q_full_baseline, &k_full_baseline, &v_full_baseline, true, 0)?;
     baseline_ctx.synchronize();
 
-    let decode_slice = decode_out.as_slice();
-    let full_slice = full_out.as_slice();
-    assert_eq!(decode_slice.len(), dim);
-    let start = (total - 1) * dim;
-    let end = start + dim;
-    assert_eq!(&full_slice[start..end], decode_slice);
+    let decode_flat = decode_out.reshape(vec![batch * decode_steps, dim])?;
+    let decode_slice = decode_flat.as_slice();
+    assert_eq!(decode_slice.len(), decode_steps * dim);
+
+    let full_flat = full_out.reshape(vec![batch * total, dim])?;
+    let full_slice = full_flat.as_slice();
+    let baseline_window_start = prefill * dim;
+    let baseline_window_end = baseline_window_start + decode_steps * dim;
+    assert_eq!(decode_slice, &full_slice[baseline_window_start..baseline_window_end]);
 
     let mut ctx_zero_offset = Context::<F32Element>::new()?;
     let q_full_zero = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx_zero_offset), &q_data)?;
@@ -128,9 +132,10 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     assert_eq!(incremental_zero.dims(), &[batch, total, dim]);
     ctx_zero_offset.synchronize();
 
-    let incremental_zero_slice = incremental_zero.as_slice();
-    assert_eq!(incremental_zero_slice.len(), dim);
-    assert_eq!(&full_slice[start..end], incremental_zero_slice);
+    let incremental_zero_flat = incremental_zero.reshape(vec![batch * total, dim])?;
+    let incremental_zero_slice = incremental_zero_flat.as_slice();
+    assert_eq!(incremental_zero_slice.len(), total * dim);
+    assert_eq!(&full_slice[..total * dim], incremental_zero_slice);
 
     Ok(())
 }

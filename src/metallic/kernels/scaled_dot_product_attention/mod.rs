@@ -149,7 +149,11 @@ fn create_sdpa_operation<T: TensorElement>(
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
-    let mut rows_to_process = seq_len_delta.min(s_q);
+    let mut rows_to_process = if seq_len_delta == 0 || seq_len_delta >= s_q {
+        s_q
+    } else {
+        seq_len_delta.min(s_q)
+    };
     if rows_to_process == 0 {
         rows_to_process = s_q;
     }
@@ -161,9 +165,7 @@ fn create_sdpa_operation<T: TensorElement>(
         let mut view = q.clone();
         let seq_stride = if view.strides.len() > 1 { view.strides[1] } else { d };
         let elem_size = view.dtype.size_bytes();
-        view.offset = view
-            .offset
-            .saturating_add(row_offset * seq_stride * elem_size);
+        view.offset = view.offset.saturating_add(row_offset * seq_stride * elem_size);
         if view.dims.len() >= 2 {
             view.dims[1] = rows_to_process;
         }
@@ -198,11 +200,11 @@ fn create_sdpa_operation<T: TensorElement>(
 
     let row_offset_u32 = u32::try_from(row_offset)
         .map_err(|_| MetalError::InvalidShape(format!("SDPA row offset {row_offset} exceeds representable query offset range")))?;
-    let adjusted_query_offset = query_offset.checked_add(row_offset_u32).ok_or_else(|| {
-        MetalError::InvalidShape(format!(
-            "SDPA query offset {query_offset} with row offset {row_offset} exceeds u32::MAX"
-        ))
-    })?;
+    let adjusted_query_offset = if query_offset < row_offset_u32 {
+        row_offset_u32
+    } else {
+        query_offset
+    };
 
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();

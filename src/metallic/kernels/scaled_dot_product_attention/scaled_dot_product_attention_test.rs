@@ -1125,6 +1125,41 @@ fn property_based_sdpa_test(max_batch: usize, max_seq_q: usize, max_seq_k: usize
     }
 }
 
+fn sdpa_shape_with_shorter_keys(causal: bool) {
+    let mut ctx = Context::<F32Element>::new().unwrap();
+    let batch = 2;
+    let seq_q = 5;
+    let seq_k = 3;
+    let dim = 4;
+
+    let q_data: Vec<f32> = (0..(batch * seq_q * dim)).map(|i| (i as f32) * 0.01).collect();
+    let k_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.02).collect();
+    let v_data: Vec<f32> = (0..(batch * seq_k * dim)).map(|i| (i as f32) * 0.03).collect();
+
+    let q_tensor = Tensor::new(
+        vec![batch, seq_q, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&q_data),
+    )
+    .unwrap();
+    let k_tensor = Tensor::new(
+        vec![batch, seq_k, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&k_data),
+    )
+    .unwrap();
+    let v_tensor = Tensor::new(
+        vec![batch, seq_k, dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&v_data),
+    )
+    .unwrap();
+
+    let result = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, causal).unwrap();
+
+    assert_eq!(result.dims(), &[batch, seq_q, dim]);
+}
+
 #[test]
 fn sdpa_row_stochastic_non_causal() {
     check_row_stochastic_property(2, 5, 7, 4, false);
@@ -1140,6 +1175,16 @@ fn sdpa_property_based_small() {
     for _ in 0..10 {
         property_based_sdpa_test(2, 8, 8, 8);
     }
+}
+
+#[test]
+fn sdpa_full_sequence_shape_preserved_with_shorter_keys_non_causal() {
+    sdpa_shape_with_shorter_keys(false);
+}
+
+#[test]
+fn sdpa_full_sequence_shape_preserved_with_shorter_keys_causal() {
+    sdpa_shape_with_shorter_keys(true);
 }
 
 #[test]
