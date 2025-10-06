@@ -14,7 +14,7 @@ use objc2_metal::{
 };
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mach2::{
     kern_return::KERN_SUCCESS,
@@ -50,18 +50,35 @@ impl Drop for GpuProfilerScope {
 
 struct GpuProfilerScopeInner {
     state: Arc<GpuProfilerState>,
-    record: Option<GpuOpRecord>,
+    timing: Option<PendingTiming>,
     encoder: EncoderHandle,
+    op_name: String,
+    backend: String,
+    cpu_start: Instant,
 }
 
 impl GpuProfilerScopeInner {
     fn complete(mut self) {
-        if let Some(mut record) = self.record.take() {
+        let cpu_duration = self.cpu_start.elapsed();
+        let mut record = GpuOpRecord {
+            op_name: self.op_name,
+            backend: self.backend,
+            timing: GpuTiming::None,
+            cpu_duration,
+        };
+
+        if let Some(mut timing) = self.timing.take() {
             unsafe {
-                self.encoder.sample(&record.sample_buffer, record.end_index, Bool::NO);
+                self.encoder.sample(&timing.sample_buffer, timing.end_index, Bool::YES);
             }
-            self.state.push_record(record);
+            record.timing = GpuTiming::Counters {
+                sample_buffer: timing.sample_buffer,
+                start_index: timing.start_index,
+                end_index: timing.end_index,
+            };
         }
+
+        self.state.push_record(record);
     }
 }
 
@@ -73,16 +90,13 @@ struct GpuProfilerState {
 }
 
 impl GpuProfilerState {
-    fn new(key: usize, counter: CounterResources) -> Option<Self> {
-        if !counter.supports_sampling() {
-            return None;
-        }
-        Some(Self {
+    fn new(key: usize, counter: CounterResources) -> Self {
+        Self {
             key,
             counter,
             records: Mutex::new(Vec::new()),
             sequence: Mutex::new(0),
-        })
+        }
     }
 
     fn next_sequence(&self) -> u64 {
@@ -110,14 +124,27 @@ impl GpuProfilerState {
         }
 
         for record in records {
-            if let Some(duration) = self.counter.resolve_duration(&record) {
-                let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
-                record_metric!(MetricEvent::GpuOpCompleted {
-                    op_name: record.op_name,
-                    backend: record.backend,
-                    duration_us,
-                });
+            let gpu_duration = self.counter.resolve_duration(&record);
+            let mut duration = gpu_duration.unwrap_or(record.cpu_duration);
+            if duration.is_zero() {
+                duration = Duration::from_micros(1);
             }
+
+            if gpu_duration.is_none() {
+                tracing::debug!(
+                    target: "instrument",
+                    op = %record.op_name,
+                    backend = %record.backend,
+                    "falling back to CPU timing for GPU profiler scope"
+                );
+            }
+
+            let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
+            record_metric!(MetricEvent::GpuOpCompleted {
+                op_name: record.op_name,
+                backend: record.backend,
+                duration_us,
+            });
         }
 
         registry().lock().expect("registry mutex poisoned").remove(&self.key);
@@ -128,18 +155,34 @@ impl GpuProfilerState {
 struct GpuOpRecord {
     op_name: String,
     backend: String,
-    sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
-    start_index: NSUInteger,
-    end_index: NSUInteger,
+    timing: GpuTiming,
+    cpu_duration: Duration,
+}
+
+#[derive(Clone)]
+enum GpuTiming {
+    Counters {
+        sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+        start_index: NSUInteger,
+        end_index: NSUInteger,
+    },
+    None,
 }
 
 // SAFETY: `MTLCounterSampleBuffer` is documented by Apple as thread-safe, and we only
 // issue immutable method calls (`resolveCounterRange`) from the completion handler.
 // Objective-C reference counting already enforces correct lifetimes across threads.
-unsafe impl Send for GpuOpRecord {}
+unsafe impl Send for GpuTiming {}
 
 // SAFETY: See `Send` rationale above; sharing immutable references to the retained
 // counter sample buffer between threads is safe.
+unsafe impl Sync for GpuTiming {}
+
+// SAFETY: `GpuOpRecord` only contains owned data and `GpuTiming`, which is safe to
+// share across threads as documented above.
+unsafe impl Send for GpuOpRecord {}
+
+// SAFETY: See `Send` rationale.
 unsafe impl Sync for GpuOpRecord {}
 
 #[derive(Clone)]
@@ -149,13 +192,23 @@ enum EncoderHandle {
 }
 
 impl EncoderHandle {
-    unsafe fn sample(&self, sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer>, index: NSUInteger, barrier: Bool) {
+    unsafe fn sample(&self, sample_buffer: &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>, index: NSUInteger, barrier: Bool) {
         match self {
             EncoderHandle::Compute(encoder) => {
-                let _: () = msg_send![&**encoder, sampleCountersInBuffer: sample_buffer, atSampleIndex: index, withBarrier: barrier];
+                let _: () = msg_send![
+                    &**encoder,
+                    sampleCountersInBuffer: sample_buffer.as_ref(),
+                    atSampleIndex: index,
+                    withBarrier: barrier
+                ];
             }
             EncoderHandle::Blit(encoder) => {
-                let _: () = msg_send![&**encoder, sampleCountersInBuffer: sample_buffer, atSampleIndex: index, withBarrier: barrier];
+                let _: () = msg_send![
+                    &**encoder,
+                    sampleCountersInBuffer: sample_buffer.as_ref(),
+                    atSampleIndex: index,
+                    withBarrier: barrier
+                ];
             }
         }
     }
@@ -176,7 +229,7 @@ impl GpuProfiler {
         let raw = command_buffer.raw();
         let device = unsafe { raw.device() };
         let counter = CounterResources::new(Some(device.as_ref()));
-        let state = Arc::new(GpuProfilerState::new(key, counter)?);
+        let state = Arc::new(GpuProfilerState::new(key, counter));
 
         registry()
             .lock()
@@ -198,24 +251,21 @@ impl GpuProfiler {
         op_name: String,
         backend: String,
     ) -> Option<GpuProfilerScope> {
-        let sample = state.counter.allocate_timing(command_buffer, &encoder).map(|timing| GpuOpRecord {
-            op_name,
-            backend,
-            sample_buffer: timing.sample_buffer,
-            start_index: timing.start_index,
-            end_index: timing.end_index,
-        })?;
-
-        let sample_buffer = sample.sample_buffer.clone();
-        unsafe {
-            encoder.sample(&sample_buffer, sample.start_index, Bool::YES);
+        let mut timing = state.counter.allocate_timing(command_buffer, &encoder);
+        if let Some(sample) = timing.as_ref() {
+            unsafe {
+                encoder.sample(&sample.sample_buffer, sample.start_index, Bool::YES);
+            }
         }
 
         Some(GpuProfilerScope {
             inner: Some(GpuProfilerScopeInner {
                 state,
-                record: Some(sample),
+                timing,
                 encoder,
+                op_name,
+                backend,
+                cpu_start: Instant::now(),
             }),
         })
     }
@@ -308,12 +358,6 @@ impl CounterResources {
         resources
     }
 
-    fn supports_sampling(&self) -> bool {
-        self.timestamp_counter_set.is_some()
-            && self.timestamp_period.is_some()
-            && (self.supports_stage_sampling || self.supports_dispatch_sampling || self.supports_blit_sampling)
-    }
-
     fn allocate_timing(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -347,10 +391,19 @@ impl CounterResources {
         })
     }
 
-    fn resolve_duration(&self, timing: &GpuOpRecord) -> Option<Duration> {
+    fn resolve_duration(&self, record: &GpuOpRecord) -> Option<Duration> {
+        let GpuTiming::Counters {
+            sample_buffer,
+            start_index,
+            end_index,
+        } = &record.timing
+        else {
+            return None;
+        };
+
         let period = self.timestamp_period?;
-        let length = timing.end_index - timing.start_index + 1;
-        let data: Retained<NSData> = unsafe { timing.sample_buffer.resolveCounterRange(NSRange::new(timing.start_index, length))? };
+        let length = end_index - start_index + 1;
+        let data: Retained<NSData> = unsafe { sample_buffer.resolveCounterRange(NSRange::new(*start_index, length))? };
         let bytes = unsafe { data.as_bytes_unchecked() };
         if bytes.len() < core::mem::size_of::<MTLCounterResultTimestamp>() * 2 {
             return None;
@@ -363,8 +416,8 @@ impl CounterResources {
             )
         };
 
-        let start_index: usize = timing.start_index.try_into().ok()?;
-        let end_index: usize = timing.end_index.try_into().ok()?;
+        let start_index: usize = (*start_index).try_into().ok()?;
+        let end_index: usize = (*end_index).try_into().ok()?;
         let start = samples.get(start_index)?.timestamp;
         let end = samples.get(end_index)?.timestamp;
         if start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start {
