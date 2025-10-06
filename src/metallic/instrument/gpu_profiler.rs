@@ -251,7 +251,7 @@ impl GpuProfiler {
         op_name: String,
         backend: String,
     ) -> Option<GpuProfilerScope> {
-        let mut timing = state.counter.allocate_timing(command_buffer, &encoder);
+        let timing = state.counter.allocate_timing(command_buffer, &encoder);
         if let Some(sample) = timing.as_ref() {
             unsafe {
                 encoder.sample(&sample.sample_buffer, sample.start_index, Bool::YES);
@@ -349,9 +349,9 @@ impl CounterResources {
 
         if let Some(device) = device {
             resources.timestamp_counter_set = Self::find_timestamp_counter_set(device);
-            resources.supports_stage_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary);
-            resources.supports_dispatch_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary);
-            resources.supports_blit_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary);
+            resources.supports_stage_sampling = bool::from(device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary));
+            resources.supports_dispatch_sampling = bool::from(device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary));
+            resources.supports_blit_sampling = bool::from(device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary));
             resources.timestamp_period = Self::gpu_timestamp_period(device);
         }
 
