@@ -6,7 +6,8 @@ pub use crate::metallic::instrument::exporters::{ChannelExporter, ConsoleExporte
 pub use crate::metallic::instrument::recorder::{EnrichedMetricEvent, MetricExporter, MetricsLayer};
 pub use crate::record_metric;
 
-pub use metallic_env::{EnvVar, EnvVarGuard, Environment, InstrumentEnvVar};
+pub use metallic_env::environment::instrument::{LOG_LEVEL_VAR, METRICS_CONSOLE_VAR, METRICS_JSONL_PATH_VAR};
+pub use metallic_env::{EnvVar, EnvVarError, EnvVarGuard, Environment, InstrumentEnvVar};
 
 pub use chrono::{DateTime, Utc};
 pub use serde_json;

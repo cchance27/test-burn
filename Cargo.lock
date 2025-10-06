@@ -3200,10 +3200,6 @@ dependencies = [
  "libc",
 ]
 
-
-[[package]]
-name = "metallic_env"
-version = "0.1.0"
 [[package]]
 name = "malloc_buf"
 version = "0.0.6"
@@ -3277,6 +3273,14 @@ dependencies = [
  "log",
  "objc",
  "paste",
+]
+
+[[package]]
+name = "metallic_env"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.17",
+ "tracing",
 ]
 
 [[package]]
@@ -5119,6 +5123,8 @@ dependencies = [
  "serde_json",
  "sysinfo 0.37.1",
  "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
 ]
 

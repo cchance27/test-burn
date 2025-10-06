@@ -2,6 +2,7 @@
 
 pub mod guard;
 pub mod instrument;
+pub mod value;
 
 use std::sync::{Mutex, MutexGuard, OnceLock};
 

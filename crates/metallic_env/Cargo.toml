@@ -10,3 +10,5 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
+thiserror = "2"
+tracing = "0.1"
