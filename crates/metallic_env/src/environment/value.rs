@@ -18,6 +18,7 @@
 
 use std::marker::PhantomData;
 use std::ops::Deref;
+use std::sync::MutexGuard;
 
 use super::{EnvVar, Environment, guard::EnvVarGuard};
 
@@ -179,10 +180,15 @@ impl<T> TypedEnvVar<T> {
 
     /// Set the environment variable for the lifetime of the returned guard.
     pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
-        let formatted = self.format_value(&value)?;
         let mut lock = Environment::lock();
+        self.set_guard_with_lock(value, &mut lock)
+    }
+
+    /// Set the environment variable for the guard lifetime while reusing a lock.
+    pub fn set_guard_with_lock(&self, value: T, lock: &mut MutexGuard<'static, ()>) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
+        let formatted = self.format_value(&value)?;
         let previous = Environment::get(self.var);
-        Environment::set_locked(self.var, &formatted, &mut lock);
+        Environment::set_locked(self.var, &formatted, lock);
         Ok(TypedEnvVarGuard {
             descriptor: self,
             previous,
@@ -193,6 +199,11 @@ impl<T> TypedEnvVar<T> {
     /// Unset the environment variable for the lifetime of the guard.
     pub fn unset_guard(&self) -> EnvVarGuard {
         EnvVarGuard::unset(self.var)
+    }
+
+    /// Unset the environment variable for the guard lifetime while reusing a lock.
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+        EnvVarGuard::unset_with_lock(self.var, lock)
     }
 }
 

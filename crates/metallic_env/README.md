@@ -48,7 +48,9 @@ Key capabilities:
 * `TypedEnvVar::get` reads the environment, returning a typed value or `None` if unset.
 * `TypedEnvVar::set` serialises the value and updates the environment.
 * `TypedEnvVar::set_guard` scopes a mutation, automatically restoring the prior state on drop via `TypedEnvVarGuard`.
+* `TypedEnvVar::set_guard_with_lock` mirrors `set_guard` but accepts an existing `Environment::lock()` guard so you can batch multiple mutations in a single critical section.
 * `TypedEnvVar::unset_guard` removes the variable for the guard lifetime using `EnvVarGuard`.
+* `TypedEnvVar::unset_guard_with_lock` mirrors `unset_guard` for callers already holding the mutex.
 
 Errors are surfaced via `EnvVarError`, which distinguishes between parse and format failures so callers can surface actionable diagnostics.
 
@@ -60,7 +62,7 @@ For convenience, the crate ships with ready-made descriptors and shim types for 
 * `METRICS_JSONL_PATH` / `METRICS_JSONL_PATH_VAR` for directing JSONL metric output.
 * `METRICS_CONSOLE` / `METRICS_CONSOLE_VAR` for toggling console metric emission.
 
-Each shim (`InstrumentLogLevel`, `InstrumentMetricsJsonlPath`, `InstrumentMetricsConsole`) exposes ergonomic `get`, `set`, `set_guard`, `unset`, and `unset_guard` helpers while reusing the underlying typed descriptors.
+Each shim (`InstrumentLogLevel`, `InstrumentMetricsJsonlPath`, `InstrumentMetricsConsole`) exposes ergonomic `get`, `set`, `set_guard`, `set_guard_with_lock`, `unset`, `unset_guard`, and `unset_guard_with_lock` helpers while reusing the underlying typed descriptors.
 
 ## Adding new environment variable categories
 
@@ -79,7 +81,7 @@ When exposing new descriptors, follow the existing pattern of exporting both the
 All setters ultimately call into `std::env::set_var`/`remove_var`, which are marked `unsafe` because concurrent mutation is UB without synchronisation. `Environment::lock()` provides the global mutex that the crate uses internally. Callers should:
 
 * Hold the lock before invoking sequences of `get`, `set`, or guard-producing APIs when there is a risk of concurrent access so the operations share a critical section.
-* Prefer the guard helpers (`EnvVarGuard`, `TypedEnvVarGuard`) for scoped mutations to ensure the previous state is restored even if a panic occurs.
+* Prefer the guard helpers (`EnvVarGuard`, `TypedEnvVarGuard`) for scoped mutations to ensure the previous state is restored even if a panic occurs. When you already hold the mutex, use the `_with_lock` variants to avoid re-locking and to keep related mutations in the same critical section.
 
 When writing tests, always acquire the lock at the start of each case that manipulates environment variables. This mirrors the defensive patterns already used internally and prevents flaky behaviour when tests run in parallel.
 

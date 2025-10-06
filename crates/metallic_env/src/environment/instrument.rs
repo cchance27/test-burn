@@ -1,6 +1,7 @@
 //! Instrumentation-specific environment variable identifiers and descriptors.
 
 use std::path::PathBuf;
+use std::sync::MutexGuard;
 
 use tracing::Level;
 
@@ -74,6 +75,15 @@ impl InstrumentLogLevel {
         LOG_LEVEL.set_guard(value)
     }
 
+    /// Set the environment variable for the guard's lifetime while reusing a lock.
+    pub fn set_guard_with_lock(
+        &self,
+        value: Level,
+        lock: &mut MutexGuard<'static, ()>,
+    ) -> Result<TypedEnvVarGuard<'_, Level>, EnvVarError> {
+        LOG_LEVEL.set_guard_with_lock(value, lock)
+    }
+
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
         LOG_LEVEL.unset()
@@ -82,6 +92,11 @@ impl InstrumentLogLevel {
     /// Unset the environment variable for the guard's lifetime.
     pub fn unset_guard(&self) -> EnvVarGuard {
         LOG_LEVEL.unset_guard()
+    }
+
+    /// Unset the environment variable for the guard's lifetime while reusing a lock.
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+        LOG_LEVEL.unset_guard_with_lock(lock)
     }
 }
 
@@ -114,6 +129,15 @@ impl InstrumentMetricsJsonlPath {
         METRICS_JSONL_PATH.set_guard(value.into())
     }
 
+    /// Set the environment variable for the guard's lifetime while reusing a lock.
+    pub fn set_guard_with_lock(
+        &self,
+        value: impl Into<PathBuf>,
+        lock: &mut MutexGuard<'static, ()>,
+    ) -> Result<TypedEnvVarGuard<'_, PathBuf>, EnvVarError> {
+        METRICS_JSONL_PATH.set_guard_with_lock(value.into(), lock)
+    }
+
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
         METRICS_JSONL_PATH.unset()
@@ -122,6 +146,11 @@ impl InstrumentMetricsJsonlPath {
     /// Unset the environment variable for the guard's lifetime.
     pub fn unset_guard(&self) -> EnvVarGuard {
         METRICS_JSONL_PATH.unset_guard()
+    }
+
+    /// Unset the environment variable for the guard's lifetime while reusing a lock.
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+        METRICS_JSONL_PATH.unset_guard_with_lock(lock)
     }
 }
 
@@ -154,6 +183,11 @@ impl InstrumentMetricsConsole {
         METRICS_CONSOLE.set_guard(value)
     }
 
+    /// Set the environment variable for the guard's lifetime while reusing a lock.
+    pub fn set_guard_with_lock(&self, value: bool, lock: &mut MutexGuard<'static, ()>) -> Result<TypedEnvVarGuard<'_, bool>, EnvVarError> {
+        METRICS_CONSOLE.set_guard_with_lock(value, lock)
+    }
+
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
         METRICS_CONSOLE.unset()
@@ -162,6 +196,11 @@ impl InstrumentMetricsConsole {
     /// Unset the environment variable for the guard's lifetime.
     pub fn unset_guard(&self) -> EnvVarGuard {
         METRICS_CONSOLE.unset_guard()
+    }
+
+    /// Unset the environment variable for the guard's lifetime while reusing a lock.
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+        METRICS_CONSOLE.unset_guard_with_lock(lock)
     }
 }
 

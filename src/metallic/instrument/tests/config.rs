@@ -1,12 +1,16 @@
 use crate::metallic::instrument::prelude::*;
 #[test]
 fn app_config_parses_environment_and_initialises() {
-    let _lock = Environment::lock();
-    let _log_level = LOG_LEVEL_VAR.set_guard(Level::DEBUG).expect("log level should set");
+    let mut env_lock = Environment::lock();
+    let _log_level = LOG_LEVEL_VAR
+        .set_guard_with_lock(Level::DEBUG, &mut env_lock)
+        .expect("log level should set");
     let _jsonl_path = METRICS_JSONL_PATH_VAR
-        .set_guard("/tmp/metrics.jsonl")
+        .set_guard_with_lock("/tmp/metrics.jsonl", &mut env_lock)
         .expect("metrics path should set");
-    let _console = METRICS_CONSOLE_VAR.set_guard(true).expect("console flag should set");
+    let _console = METRICS_CONSOLE_VAR
+        .set_guard_with_lock(true, &mut env_lock)
+        .expect("console flag should set");
 
     let config = AppConfig::from_env().expect("configuration should parse");
     assert_eq!(config.log_level, Level::DEBUG);
@@ -29,10 +33,10 @@ fn app_config_parses_environment_and_initialises() {
 
 #[test]
 fn app_config_rejects_invalid_log_level() {
-    let _lock = Environment::lock();
-    let _log_level = EnvVarGuard::set(InstrumentEnvVar::LogLevel, "verbose");
-    let _jsonl_path = METRICS_JSONL_PATH_VAR.unset_guard();
-    let _console = METRICS_CONSOLE_VAR.unset_guard();
+    let mut env_lock = Environment::lock();
+    let _log_level = EnvVarGuard::set_with_lock(InstrumentEnvVar::LogLevel, "verbose", &mut env_lock);
+    let _jsonl_path = METRICS_JSONL_PATH_VAR.unset_guard_with_lock(&mut env_lock);
+    let _console = METRICS_CONSOLE_VAR.unset_guard_with_lock(&mut env_lock);
 
     match AppConfig::from_env() {
         Err(AppConfigError::InvalidLogLevel { value }) => assert_eq!(value, "verbose"),
@@ -42,10 +46,10 @@ fn app_config_rejects_invalid_log_level() {
 
 #[test]
 fn app_config_rejects_invalid_console_flag() {
-    let _lock = Environment::lock();
-    let _console = EnvVarGuard::set(InstrumentEnvVar::MetricsConsole, "maybe");
-    let _log_level = LOG_LEVEL_VAR.unset_guard();
-    let _jsonl_path = METRICS_JSONL_PATH_VAR.unset_guard();
+    let mut env_lock = Environment::lock();
+    let _console = EnvVarGuard::set_with_lock(InstrumentEnvVar::MetricsConsole, "maybe", &mut env_lock);
+    let _log_level = LOG_LEVEL_VAR.unset_guard_with_lock(&mut env_lock);
+    let _jsonl_path = METRICS_JSONL_PATH_VAR.unset_guard_with_lock(&mut env_lock);
 
     match AppConfig::from_env() {
         Err(AppConfigError::InvalidBoolean { name, value }) => {
