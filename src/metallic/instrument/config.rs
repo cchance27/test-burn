@@ -1,10 +1,11 @@
 //! Centralised instrumentation configuration handling.
 
-use std::env;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use tracing::Level;
+
+use crate::metallic::instrument::environment::{EnvVar, Environment, InstrumentEnvVar};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
@@ -36,16 +37,17 @@ static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
 impl AppConfig {
     /// Load configuration from the process environment.
     pub fn from_env() -> Result<Self, AppConfigError> {
-        let log_level = match env::var("METALLIC_LOG_LEVEL") {
-            Ok(value) => parse_level(&value)?,
-            Err(_) => Level::INFO,
+        let log_level = match Environment::get(InstrumentEnvVar::LogLevel) {
+            Some(value) => parse_level(&value)?,
+            None => Level::INFO,
         };
 
-        let metrics_jsonl_path = env::var("METALLIC_METRICS_JSONL_PATH").ok().map(PathBuf::from);
+        let metrics_jsonl_path = Environment::get(InstrumentEnvVar::MetricsJsonlPath).map(PathBuf::from);
 
-        let enable_console_metrics = match env::var("METALLIC_METRICS_CONSOLE") {
-            Ok(value) => parse_bool("METALLIC_METRICS_CONSOLE", &value)?,
-            Err(_) => false,
+        let console_var = EnvVar::from(InstrumentEnvVar::MetricsConsole);
+        let enable_console_metrics = match Environment::get(console_var) {
+            Some(value) => parse_bool(console_var, &value)?,
+            None => false,
         };
 
         Ok(Self {
@@ -79,12 +81,12 @@ fn parse_level(value: &str) -> Result<Level, AppConfigError> {
         .map_err(|_| AppConfigError::InvalidLogLevel { value: value.to_string() })
 }
 
-fn parse_bool(name: &'static str, value: &str) -> Result<bool, AppConfigError> {
+fn parse_bool(var: EnvVar, value: &str) -> Result<bool, AppConfigError> {
     match value.to_ascii_lowercase().as_str() {
         "1" | "true" | "yes" | "on" => Ok(true),
         "0" | "false" | "no" | "off" => Ok(false),
         _ => Err(AppConfigError::InvalidBoolean {
-            name,
+            name: var.key(),
             value: value.to_string(),
         }),
     }

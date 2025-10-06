@@ -1,6 +1,7 @@
 //! Unified instrumentation module scaffolding the upcoming metrics system.
 
 pub mod config;
+pub mod environment;
 pub mod event;
 pub mod exporters;
 pub mod macros;
