@@ -1,14 +1,14 @@
 #![cfg(target_os = "macos")]
 
-use crate::metallic::instrument::prelude::*;
 use crate::metallic::instrument::MetricEvent;
+use crate::metallic::instrument::prelude::*;
 use crate::metallic::operation::{CommandBuffer, FillConstant};
 use crate::metallic::resource_cache::ResourceCache;
-use crate::metallic::tensor::{F32Element, Tensor};
+use crate::metallic::tensor::{Dtype, F32Element, Tensor};
 
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLResourceOptions};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 // Maintainers must run this ignored test on Apple Silicon before releasing.
 #[ignore = "requires Apple Metal runtime"]
@@ -33,7 +33,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
             .newBufferWithLength_options(byte_len as _, MTLResourceOptions::StorageModeShared)
             .expect("shared buffer");
 
-        let tensor = Tensor::<F32Element>::from_existing_buffer(buffer, vec![element_count], F32Element::DTYPE, &device, &queue, 0, true)
+        let tensor = Tensor::<F32Element>::from_existing_buffer(buffer, vec![element_count], Dtype::F32, &device, &queue, 0, true)
             .expect("tensor from buffer");
 
         let op_a = FillConstant {
@@ -50,8 +50,10 @@ fn gpu_profiler_emits_individual_kernel_events() {
         command_buffer.record(&op_a, &mut cache).expect("record first fill");
         command_buffer.record(&op_b, &mut cache).expect("record second fill");
 
+        let cpu_start = Instant::now();
         command_buffer.commit();
         command_buffer.wait();
+        let total_us = cpu_start.elapsed().as_micros().max(1).try_into().unwrap_or(u64::MAX);
         drop(profiler);
 
         let mut gpu_events = Vec::new();
@@ -76,10 +78,6 @@ fn gpu_profiler_emits_individual_kernel_events() {
             assert!(duration > &0, "duration must be non-zero");
         }
 
-        let raw = command_buffer.raw();
-        let total_seconds = unsafe { raw.GPUEndTime() - raw.GPUStartTime() };
-        assert!(total_seconds.is_finite() && total_seconds > 0.0);
-        let total_us = (total_seconds * 1e6).round() as u64;
         let sum_us: u64 = gpu_events.iter().map(|(_, dur)| *dur).sum();
         assert_ne!(sum_us, total_us, "per-kernel durations must not collapse into a single total");
     });

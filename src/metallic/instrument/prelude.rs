@@ -9,5 +9,5 @@ pub use crate::record_metric;
 
 pub use chrono::{DateTime, Utc};
 pub use serde_json;
-pub use tracing::{info, info_span, subscriber, Level};
+pub use tracing::{Level, info, info_span, subscriber};
 pub use tracing_subscriber::{self, layer::SubscriberExt};

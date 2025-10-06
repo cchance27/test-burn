@@ -3,8 +3,8 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
-use std::sync::mpsc::Sender;
 use std::sync::Mutex;
+use std::sync::mpsc::Sender;
 
 use serde_json::to_string;
 

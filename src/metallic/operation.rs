@@ -1,9 +1,9 @@
-use super::{error::MetalError, resource_cache::ResourceCache, Tensor};
+use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
 use crate::metallic::instrument::gpu_profiler::GpuProfiler;
 
 use crate::metallic::{
-    encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
     TensorElement,
+    encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
 };
 use block2::RcBlock;
 use objc2::rc::Retained;

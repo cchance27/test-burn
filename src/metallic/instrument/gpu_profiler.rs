@@ -14,8 +14,8 @@ use objc2::runtime::{Bool, ProtocolObject};
 use objc2_foundation::{NSData, NSRange, NSString, NSUInteger};
 #[cfg(target_os = "macos")]
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLCommandBuffer, MTLComputeCommandEncoder, MTLCounterErrorValue, MTLCounterResultTimestamp,
-    MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder, MTLCounterErrorValue,
+    MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
 };
 #[cfg(target_os = "macos")]
 use std::ptr::NonNull;
@@ -150,6 +150,17 @@ struct GpuOpRecord {
 }
 
 #[cfg(target_os = "macos")]
+// SAFETY: `MTLCounterSampleBuffer` is documented by Apple as thread-safe, and we only
+// issue immutable method calls (`resolveCounterRange`) from the completion handler.
+// Objective-C reference counting already enforces correct lifetimes across threads.
+unsafe impl Send for GpuOpRecord {}
+
+#[cfg(target_os = "macos")]
+// SAFETY: See `Send` rationale above; sharing immutable references to the retained
+// counter sample buffer between threads is safe.
+unsafe impl Sync for GpuOpRecord {}
+
+#[cfg(target_os = "macos")]
 #[derive(Clone)]
 enum EncoderHandle {
     Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
@@ -187,7 +198,7 @@ impl GpuProfiler {
         let key = buffer_key(command_buffer);
         let raw = command_buffer.raw();
         let device = unsafe { raw.device() };
-        let counter = CounterResources::new(Some(device));
+        let counter = CounterResources::new(Some(device.as_ref()));
         let state = Arc::new(GpuProfilerState::new(key, counter)?);
 
         registry()
@@ -285,6 +296,17 @@ struct CounterResources {
 }
 
 #[cfg(target_os = "macos")]
+// SAFETY: `MTLCounterSet` handles are immutable configuration objects that Metal
+// allows to be shared freely across threads. We never mutate the retained object
+// after construction, so moving the wrapper between threads is sound.
+unsafe impl Send for CounterResources {}
+
+#[cfg(target_os = "macos")]
+// SAFETY: Same justification as `Send` — the retained counter set is immutable and
+// may be safely observed from multiple threads.
+unsafe impl Sync for CounterResources {}
+
+#[cfg(target_os = "macos")]
 struct PendingTiming {
     sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     start_index: NSUInteger,
@@ -303,10 +325,8 @@ impl CounterResources {
 
         if let Some(device) = device {
             resources.timestamp_counter_set = Self::find_timestamp_counter_set(device);
-            resources.supports_dispatch_sampling =
-                unsafe { device.supportsCounterSampling_atSamplePoint(MTLCounterSamplingPoint::DispatchBoundary) };
-            resources.supports_blit_sampling =
-                unsafe { device.supportsCounterSampling_atSamplePoint(MTLCounterSamplingPoint::BlitBoundary) };
+            resources.supports_dispatch_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary);
+            resources.supports_blit_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary);
             resources.timestamp_period = Self::gpu_timestamp_period(device);
         }
 
@@ -368,8 +388,10 @@ impl CounterResources {
             )
         };
 
-        let start = samples.get(timing.start_index)?.timestamp;
-        let end = samples.get(timing.end_index)?.timestamp;
+        let start_index: usize = timing.start_index.try_into().ok()?;
+        let end_index: usize = timing.end_index.try_into().ok()?;
+        let start = samples.get(start_index)?.timestamp;
+        let end = samples.get(end_index)?.timestamp;
         if start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start {
             return None;
         }
@@ -383,13 +405,13 @@ impl CounterResources {
     }
 
     unsafe fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
-        let sets = device.counterSets()?;
-        let desired: &NSString = MTLCommonCounterSetTimestamp;
+        let sets = unsafe { device.counterSets() }?;
+        let desired: &NSString = unsafe { &*MTLCommonCounterSetTimestamp };
         let count = sets.count();
         for idx in 0..count {
             let set = sets.objectAtIndex(idx as NSUInteger);
-            let name = set.name();
-            if name.isEqualToString(desired) {
+            let name = unsafe { set.name() };
+            if unsafe { name.isEqualToString(desired) } {
                 return Some(set);
             }
         }
