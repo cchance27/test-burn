@@ -11,7 +11,6 @@
 //! use metallic_env::environment::instrument::LOG_LEVEL;
 //! use tracing::Level;
 //!
-//! let _lock = metallic_env::Environment::lock();
 //! let _guard = LOG_LEVEL.set_guard(Level::DEBUG).expect("set log level");
 //! assert_eq!(*_guard, Level::DEBUG);
 //! ```
@@ -19,7 +18,8 @@
 use std::marker::PhantomData;
 use std::ops::Deref;
 
-use super::{EnvVar, Environment, guard::EnvVarGuard};
+use super::guard::EnvVarGuard;
+use super::{EnvVar, Environment};
 
 /// Errors emitted when interacting with typed environment variables.
 #[derive(Debug, thiserror::Error)]
@@ -179,27 +179,34 @@ impl<T> TypedEnvVar<T> {
 
     /// Set the environment variable for the lifetime of the returned guard.
     pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
-        let previous = Environment::get(self.var);
         let formatted = self.format_value(&value)?;
+        let previous = Environment::get(self.var);
         Environment::set(self.var, &formatted);
         Ok(TypedEnvVarGuard {
             descriptor: self,
             previous,
             value: Some(value),
+            _marker: PhantomData,
         })
     }
 
     /// Unset the environment variable for the lifetime of the guard.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         EnvVarGuard::unset(self.var)
     }
 }
 
 /// Guard that restores the previous state of a typed environment variable.
+///
+/// Dropping the guard acquires and releases the global environment mutex before
+/// restoring the prior value to guarantee serialised mutations. The mutex is
+/// only held during the mutation itself so the guard can coexist with other
+/// helpers that also manage their own locking.
 pub struct TypedEnvVarGuard<'a, T> {
     descriptor: &'a TypedEnvVar<T>,
     previous: Option<String>,
     value: Option<T>,
+    _marker: PhantomData<&'a ()>,
 }
 
 impl<'a, T> TypedEnvVarGuard<'a, T> {

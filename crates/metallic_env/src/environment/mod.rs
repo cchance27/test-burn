@@ -43,26 +43,32 @@ impl Environment {
     /// Read the environment variable as a UTF-8 string if present.
     pub fn get(var: impl Into<EnvVar>) -> Option<String> {
         let var = var.into();
+        let _guard = Self::lock();
         std::env::var(var.key()).ok()
     }
 
     /// Set the environment variable using the provided UTF-8 value.
-    #[allow(unused_unsafe)]
+    ///
+    /// This method acquires and releases the global environment mutex for the
+    /// duration of the call so isolated mutations remain serialised without the
+    /// caller managing synchronisation manually.
     pub fn set(var: impl Into<EnvVar>, value: &str) {
         let var = var.into();
-        // SAFETY: Environment mutations are synchronised via [`Environment::lock`].
-        unsafe {
-            std::env::set_var(var.key(), value);
-        }
+        let _guard = Self::lock();
+        // SAFETY: Holding the mutex guard serialises environment access across
+        // threads, satisfying the requirements of `std::env::set_var`.
+        unsafe { std::env::set_var(var.key(), value) };
     }
 
     /// Remove the environment variable from the process environment.
-    #[allow(unused_unsafe)]
+    ///
+    /// Like [`Environment::set`], this acquires and releases the global mutex for
+    /// the duration of the operation.
     pub fn remove(var: impl Into<EnvVar>) {
         let var = var.into();
-        // SAFETY: Environment mutations are synchronised via [`Environment::lock`].
-        unsafe {
-            std::env::remove_var(var.key());
-        }
+        let _guard = Self::lock();
+        // SAFETY: The mutex guard serialises access across threads, satisfying
+        // the requirements of `std::env::remove_var`.
+        unsafe { std::env::remove_var(var.key()) };
     }
 }

@@ -1,7 +1,6 @@
 //! Instrumentation-specific environment variable identifiers and descriptors.
 
 use std::path::PathBuf;
-
 use tracing::Level;
 
 use super::EnvVar;
@@ -80,7 +79,7 @@ impl InstrumentLogLevel {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         LOG_LEVEL.unset_guard()
     }
 }
@@ -120,7 +119,7 @@ impl InstrumentMetricsJsonlPath {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         METRICS_JSONL_PATH.unset_guard()
     }
 }
@@ -160,7 +159,7 @@ impl InstrumentMetricsConsole {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         METRICS_CONSOLE.unset_guard()
     }
 }

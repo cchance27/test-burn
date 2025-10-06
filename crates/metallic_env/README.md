@@ -11,7 +11,7 @@ Add the crate to your workspace dependencies and re-export the types you need:
 metallic_env = { path = "crates/metallic_env" }
 ```
 
-The environment helpers rely on Rust's standard library and do not require additional setup beyond linking the crate. Because the crate manipulates process-level state, prefer to hold the global `Environment::lock()` guard when performing multiple reads or writes to guarantee serialisation.
+The environment helpers rely on Rust's standard library and do not require additional setup beyond linking the crate. Each getter and setter acquires and releases the global mutex internally so callers do not have to manage locking for common one-off mutations.
 
 ## Core abstractions
 
@@ -19,10 +19,10 @@ The environment helpers rely on Rust's standard library and do not require addit
 
 `Environment` exposes safe wrappers over the process environment:
 
-* `Environment::lock()` provides a `MutexGuard` that callers **must** hold while mutating environment variables to prevent races between tests or instrumentation threads.
+* `Environment::lock()` exposes the underlying mutex for advanced scenarios, but typical callers should rely on the higher-level helpers which perform their own locking.
 * `Environment::get(var)` returns the UTF-8 value if the variable is set.
-* `Environment::set(var, value)` writes a UTF-8 value under the canonical key.
-* `Environment::remove(var)` deletes the variable entirely.
+* `Environment::set(var, value)` writes a UTF-8 value under the canonical key while automatically serialising the mutation.
+* `Environment::remove(var)` deletes the variable entirely using the same internal lock.
 
 `Environment` accepts any type that implements `Into<EnvVar>`. Instrumentation-specific identifiers are provided by `InstrumentEnvVar`, and additional categories can be added as described below.
 
@@ -33,9 +33,8 @@ The environment helpers rely on Rust's standard library and do not require addit
 Typical usage pattern:
 
 ```rust
-use metallic_env::{Environment, METRICS_CONSOLE};
+use metallic_env::METRICS_CONSOLE;
 
-let _env_lock = Environment::lock();
 let metrics_enabled = METRICS_CONSOLE.get()?;
 if metrics_enabled != Some(true) {
     METRICS_CONSOLE.set(true)?;
@@ -70,18 +69,13 @@ Instrumentation variables live under the `InstrumentEnvVar` namespace, which is 
 2. **Extend `EnvVar`** with a new variant (e.g., `EnvVar::Feature(FeatureEnvVar)`) and implement `From<FeatureEnvVar>` and the corresponding match arm in `EnvVar::key()`.
 3. **Use a consistent prefix** for keys (`METALLIC_<CATEGORY>_<NAME>`) to maintain discoverability. Avoid generic names to reduce clashes with user-defined variables.
 4. **Provide defensive parsing/formatting** that fails loudly on invalid input by returning descriptive `EnvVarParseError` or `EnvVarFormatError` instances. Do not silently coerce or clamp values; report invalid data so operators can fix their configuration.
-5. **Document thread-safety expectations** for any new helpers and ensure they reuse `Environment::lock()` to guard mutations.
+5. **Document thread-safety expectations** for any new helpers and confirm they rely on the existing `Environment` wrappers so locking remains consistent.
 
 When exposing new descriptors, follow the existing pattern of exporting both the `TypedEnvVar` constant and a shim struct with ergonomic methods. This ensures consistency for downstream consumers and makes the API easy to discover via autocomplete.
 
 ## Safety and locking requirements
 
-All setters ultimately call into `std::env::set_var`/`remove_var`, which are marked `unsafe` because concurrent mutation is UB without synchronisation. `Environment::lock()` provides the global mutex that the crate uses internally. Callers should:
-
-* Hold the lock before invoking `set`, `remove`, or any guard-producing APIs when there is a risk of concurrent access.
-* Prefer the guard helpers (`EnvVarGuard`, `TypedEnvVarGuard`) for scoped mutations to ensure the previous state is restored even if a panic occurs.
-
-When writing tests, always acquire the lock at the start of each case that manipulates environment variables. This mirrors the defensive patterns already used internally and prevents flaky behaviour when tests run in parallel.
+All setters ultimately call into `std::env::set_var`/`remove_var`, which are marked `unsafe` because concurrent mutation is UB without synchronisation. The high-level helpers in `Environment`, `EnvVarGuard`, and `TypedEnvVarGuard` acquire and release the global mutex for each operation so callers remain safe without managing a guard manually. Avoid holding the mutex across calls into the guard APIs; doing so will deadlock because the helpers expect to manage the lock themselves.
 
 ## Platform considerations
 
