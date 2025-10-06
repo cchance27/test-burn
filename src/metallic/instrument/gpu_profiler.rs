@@ -67,7 +67,7 @@ impl GpuProfilerScopeInner {
             cpu_duration,
         };
 
-        if let Some(mut timing) = self.timing.take() {
+        if let Some(timing) = self.timing.take() {
             unsafe {
                 self.encoder.sample(&timing.sample_buffer, timing.end_index, Bool::YES);
             }
@@ -195,20 +195,24 @@ impl EncoderHandle {
     unsafe fn sample(&self, sample_buffer: &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>, index: NSUInteger, barrier: Bool) {
         match self {
             EncoderHandle::Compute(encoder) => {
-                let _: () = msg_send![
-                    &**encoder,
-                    sampleCountersInBuffer: sample_buffer.as_ref(),
-                    atSampleIndex: index,
-                    withBarrier: barrier
-                ];
+                let _: () = unsafe {
+                    msg_send![
+                        &**encoder,
+                        sampleCountersInBuffer: sample_buffer.as_ref(),
+                        atSampleIndex: index,
+                        withBarrier: barrier
+                    ]
+                };
             }
             EncoderHandle::Blit(encoder) => {
-                let _: () = msg_send![
-                    &**encoder,
-                    sampleCountersInBuffer: sample_buffer.as_ref(),
-                    atSampleIndex: index,
-                    withBarrier: barrier
-                ];
+                let _: () = unsafe {
+                    msg_send![
+                        &**encoder,
+                        sampleCountersInBuffer: sample_buffer.as_ref(),
+                        atSampleIndex: index,
+                        withBarrier: barrier
+                    ]
+                };
             }
         }
     }
