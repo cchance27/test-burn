@@ -1744,7 +1744,7 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
         for d in 0..head_dim {
             let expected_k = k_values[kv_head * head_dim + d];
             let expected_v = v_values[kv_head * head_dim + d];
-            let index = (bh * cache_capacity + 0) * head_dim + d;
+            let index = (bh * cache_capacity) * head_dim + d;
             assert!(
                 (k_cache_slice[index] - expected_k).abs() < 1e-6,
                 "repeated K mismatch at head {} dim {}: {} vs {}",

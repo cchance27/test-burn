@@ -329,6 +329,9 @@ struct PendingDispatchTiming {
     kind: MatMulDispatchKind,
 }
 
+unsafe impl Send for PendingDispatchTiming {}
+unsafe impl Sync for PendingDispatchTiming {}
+
 impl PendingDispatchTiming {
     fn to_public(&self) -> MatMulDispatchTiming {
         MatMulDispatchTiming {
@@ -373,6 +376,11 @@ struct CounterResources {
     supports_dispatch_sampling: bool,
     supports_blit_sampling: bool,
 }
+
+#[cfg(target_os = "macos")]
+unsafe impl Send for CounterResources {}
+#[cfg(target_os = "macos")]
+unsafe impl Sync for CounterResources {}
 
 #[cfg(target_os = "macos")]
 impl CounterResources {

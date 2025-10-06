@@ -147,11 +147,7 @@ fn create_sdpa_operation<T: TensorElement>(
     }
 
     let is_incremental_decode = causal && seq_len_delta == 1 && s_q > 1 && s_k > 1;
-    let mut rows_to_process = if is_incremental_decode {
-        1
-    } else {
-        s_q
-    };
+    let mut rows_to_process = if is_incremental_decode { 1 } else { s_q };
 
     if rows_to_process == 0 && s_q > 0 {
         rows_to_process = s_q;
@@ -167,7 +163,7 @@ fn create_sdpa_operation<T: TensorElement>(
             ));
         }
         let q_2d = q.reshape(vec![s_q, d])?;
-        let sliced_q = q_2d.slice(&[row_offset..s_q])?;
+        let sliced_q = q_2d.slice(row_offset..s_q)?;
         sliced_q.reshape(vec![b, rows_to_process, d])?
     };
 

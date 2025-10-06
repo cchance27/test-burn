@@ -763,41 +763,29 @@ impl<T: TensorElement> Tensor<T> {
         Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), self.offset))
     }
 
-    pub fn slice(&self, ranges: &[std::ops::Range<usize>]) -> Result<Self, MetalError> {
-        if ranges.len() > self.dims.len() {
-            return Err(MetalError::InvalidShape(
-                "Number of slice ranges cannot exceed tensor rank".to_string(),
-            ));
-        }
-
-        // TODO: Generalize to support multi-dimensional slicing.
-        if ranges.len() > 1 {
-            return Err(MetalError::OperationNotSupported(
-                "Slicing on more than one dimension is not yet supported.".to_string(),
-            ));
+    pub fn slice(&self, range: std::ops::Range<usize>) -> Result<Self, MetalError> {
+        if self.dims.is_empty() {
+            return Err(MetalError::InvalidShape("Cannot slice a scalar tensor".to_string()));
         }
 
         let mut new_dims = self.dims.clone();
         let mut new_offset = self.offset;
 
-        if !ranges.is_empty() {
-            let range0 = &ranges[0];
-            let start = range0.start;
-            let end = range0.end;
+        let start = range.start;
+        let end = range.end;
 
-            if start > end || end > self.dims[0] {
-                return Err(MetalError::InvalidShape(format!(
-                    "Invalid slice range {:?} for dimension 0 with size {}",
-                    range0, self.dims[0]
-                )));
-            }
-
-            // Update dimension for the sliced axis
-            new_dims[0] = end - start;
-
-            // Update the byte offset into the buffer
-            new_offset += start * self.strides[0] * self.dtype.size_bytes();
+        if start > end || end > self.dims[0] {
+            return Err(MetalError::InvalidShape(format!(
+                "Invalid slice range {:?} for dimension 0 with size {}",
+                range, self.dims[0]
+            )));
         }
+
+        // Update dimension for the sliced axis
+        new_dims[0] = end - start;
+
+        // Update the byte offset into the buffer
+        new_offset += start * self.strides[0] * self.dtype.size_bytes();
 
         Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), new_offset))
     }

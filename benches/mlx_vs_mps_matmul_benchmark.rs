@@ -382,12 +382,12 @@ fn bench_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
 
 fn criterion_benchmark(c: &mut Criterion) {
     // Run generic shape benchmarks
-    //bench_generic_shapes::<F16Element>(c, "f16");
-    //bench_generic_shapes::<F32Element>(c, "f32");
+    bench_generic_shapes::<F16Element>(c, "f16");
+    bench_generic_shapes::<F32Element>(c, "f32");
 
     // Run Qwen-specific shape benchmarks
     bench_qwen_shapes::<F16Element>(c, "f16");
-    //bench_qwen_shapes::<F32Element>(c, "f32");
+    bench_qwen_shapes::<F32Element>(c, "f32");
 }
 
 criterion_group!(benches, criterion_benchmark);

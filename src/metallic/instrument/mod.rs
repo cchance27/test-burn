@@ -13,5 +13,4 @@ pub use event::MetricEvent;
 pub use gpu_profiler::{GpuProfiler, GpuProfilerScope};
 pub use recorder::{EnrichedMetricEvent, MetricExporter, MetricsLayer};
 
-#[cfg(test)]
 mod tests;

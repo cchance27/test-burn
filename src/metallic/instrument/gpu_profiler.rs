@@ -366,9 +366,9 @@ impl CounterResources {
 
         if let Some(device) = device {
             resources.timestamp_counter_set = Self::find_timestamp_counter_set(device);
-            resources.supports_stage_sampling = bool::from(device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary));
-            resources.supports_dispatch_sampling = bool::from(device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary));
-            resources.supports_blit_sampling = bool::from(device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary));
+            resources.supports_stage_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary);
+            resources.supports_dispatch_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary);
+            resources.supports_blit_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary);
             resources.timestamp_period = Self::gpu_timestamp_period(device);
         }
 
@@ -433,8 +433,8 @@ impl CounterResources {
             )
         };
 
-        let start_index: usize = (*start_index).try_into().ok()?;
-        let end_index: usize = (*end_index).try_into().ok()?;
+        let start_index: usize = *start_index;
+        let end_index: usize = *end_index;
         let start = samples.get(start_index)?.timestamp;
         let end = samples.get(end_index)?.timestamp;
         if start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start {
@@ -451,7 +451,7 @@ impl CounterResources {
 
     fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
         let sets = unsafe { device.counterSets() }?;
-        let desired: &NSString = unsafe { &*MTLCommonCounterSetTimestamp };
+        let desired: &NSString = unsafe { MTLCommonCounterSetTimestamp };
         let count = sets.count();
         for idx in 0..count {
             let set = sets.objectAtIndex(idx as NSUInteger);

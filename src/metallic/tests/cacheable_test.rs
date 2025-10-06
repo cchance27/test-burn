@@ -63,15 +63,15 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
 
     let q_prefill = q_full
         .reshape(vec![batch * total, dim])?
-        .slice(&[0..batch * prefill])?
+        .slice(0..batch * prefill)?
         .reshape(vec![batch, prefill, dim])?;
     let k_prefill = k_full
         .reshape(vec![batch * total, dim])?
-        .slice(&[0..batch * prefill])?
+        .slice(0..batch * prefill)?
         .reshape(vec![batch, prefill, dim])?;
     let v_prefill = v_full
         .reshape(vec![batch * total, dim])?
-        .slice(&[0..batch * prefill])?
+        .slice(0..batch * prefill)?
         .reshape(vec![batch, prefill, dim])?;
 
     let _ = ctx.scaled_dot_product_attention_with_offset(&q_prefill, &k_prefill, &v_prefill, true, 0)?;
@@ -113,15 +113,15 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
 
     let q_prefill_zero = q_full_zero
         .reshape(vec![batch * total, dim])?
-        .slice(&[0..batch * prefill])?
+        .slice(0..batch * prefill)?
         .reshape(vec![batch, prefill, dim])?;
     let k_prefill_zero = k_full_zero
         .reshape(vec![batch * total, dim])?
-        .slice(&[0..batch * prefill])?
+        .slice(0..batch * prefill)?
         .reshape(vec![batch, prefill, dim])?;
     let v_prefill_zero = v_full_zero
         .reshape(vec![batch * total, dim])?
-        .slice(&[0..batch * prefill])?
+        .slice(0..batch * prefill)?
         .reshape(vec![batch, prefill, dim])?;
 
     let _ = ctx_zero_offset.scaled_dot_product_attention_with_offset(&q_prefill_zero, &k_prefill_zero, &v_prefill_zero, true, 0)?;

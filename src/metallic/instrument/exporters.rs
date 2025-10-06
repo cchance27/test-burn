@@ -27,18 +27,23 @@ impl JsonlExporter {
 
 impl MetricExporter for JsonlExporter {
     fn export(&self, event: &EnrichedMetricEvent) {
-        if let Ok(serialised) = to_string(event) {
-            if let Ok(mut writer) = self.writer.lock() {
-                if let Err(error) = writeln!(writer, "{}", serialised) {
-                    tracing::error!(target: "instrument", ?error, "failed to write metric to jsonl");
-                }
-            }
+        if let Ok(serialised) = to_string(event)
+            && let Ok(mut writer) = self.writer.lock()
+            && let Err(error) = writeln!(writer, "{}", serialised)
+        {
+            tracing::error!(target: "instrument", ?error, "failed to write metric to jsonl");
         }
     }
 }
 
 /// Emit metrics to stdout for rapid prototyping and debugging.
 pub struct ConsoleExporter;
+
+impl Default for ConsoleExporter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ConsoleExporter {
     /// Construct a new console exporter.

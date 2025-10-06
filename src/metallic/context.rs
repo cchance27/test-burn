@@ -1607,6 +1607,8 @@ impl<T: TensorElement> Context<T> {
 
         Ok(())
     }
+
+    #[allow(clippy::too_many_arguments)]
     fn blit_write_kv_step(
         &mut self,
         layer_idx: usize,

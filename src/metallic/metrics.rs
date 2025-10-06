@@ -527,6 +527,7 @@ fn logging_enabled() -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_latency_rows(
     iteration: &RollingStat,
     embed: &RollingStat,

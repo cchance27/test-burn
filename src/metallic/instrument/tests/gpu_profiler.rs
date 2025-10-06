@@ -62,10 +62,10 @@ fn gpu_profiler_emits_individual_kernel_events() {
                 backend,
                 duration_us,
             } = enriched.event
+                && backend == "Metal"
+                && op_name.starts_with("FillConstantZero")
             {
-                if backend == "Metal" && op_name.starts_with("FillConstantZero") {
-                    gpu_events.push((op_name, duration_us));
-                }
+                gpu_events.push((op_name, duration_us));
             }
         }
 
