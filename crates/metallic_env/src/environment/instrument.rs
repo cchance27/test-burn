@@ -71,7 +71,7 @@ impl InstrumentLogLevel {
     }
 
     /// Set the environment variable for the guard's lifetime.
-    pub fn set_guard(&self, value: Level) -> Result<TypedEnvVarGuard<'_, Level>, EnvVarError> {
+    pub fn set_guard(&self, value: Level) -> Result<TypedEnvVarGuard<'static, Level>, EnvVarError> {
         LOG_LEVEL.set_guard(value)
     }
 
@@ -90,12 +90,12 @@ impl InstrumentLogLevel {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
         LOG_LEVEL.unset_guard()
     }
 
     /// Unset the environment variable for the guard's lifetime while reusing a lock.
-    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard<'_> {
         LOG_LEVEL.unset_guard_with_lock(lock)
     }
 }
@@ -125,7 +125,7 @@ impl InstrumentMetricsJsonlPath {
     }
 
     /// Set the environment variable for the guard's lifetime.
-    pub fn set_guard(&self, value: impl Into<PathBuf>) -> Result<TypedEnvVarGuard<'_, PathBuf>, EnvVarError> {
+    pub fn set_guard(&self, value: impl Into<PathBuf>) -> Result<TypedEnvVarGuard<'static, PathBuf>, EnvVarError> {
         METRICS_JSONL_PATH.set_guard(value.into())
     }
 
@@ -144,12 +144,12 @@ impl InstrumentMetricsJsonlPath {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
         METRICS_JSONL_PATH.unset_guard()
     }
 
     /// Unset the environment variable for the guard's lifetime while reusing a lock.
-    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard<'_> {
         METRICS_JSONL_PATH.unset_guard_with_lock(lock)
     }
 }
@@ -179,7 +179,7 @@ impl InstrumentMetricsConsole {
     }
 
     /// Set the environment variable for the guard's lifetime.
-    pub fn set_guard(&self, value: bool) -> Result<TypedEnvVarGuard<'_, bool>, EnvVarError> {
+    pub fn set_guard(&self, value: bool) -> Result<TypedEnvVarGuard<'static, bool>, EnvVarError> {
         METRICS_CONSOLE.set_guard(value)
     }
 
@@ -194,12 +194,12 @@ impl InstrumentMetricsConsole {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
         METRICS_CONSOLE.unset_guard()
     }
 
     /// Unset the environment variable for the guard's lifetime while reusing a lock.
-    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard<'_> {
         METRICS_CONSOLE.unset_guard_with_lock(lock)
     }
 }

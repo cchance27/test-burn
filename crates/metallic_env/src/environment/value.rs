@@ -179,13 +179,25 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Set the environment variable for the lifetime of the returned guard.
-    pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
+    pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'static, T>, EnvVarError> {
+        let formatted = self.format_value(&value)?;
         let mut lock = Environment::lock();
-        self.set_guard_with_lock(value, &mut lock)
+        let previous = Environment::get(self.var);
+        Environment::set_locked(self.var, &formatted, &mut lock);
+        Ok(TypedEnvVarGuard {
+            descriptor: self,
+            previous,
+            value: Some(value),
+            lock: EnvLock::Owned,
+        })
     }
 
     /// Set the environment variable for the guard lifetime while reusing a lock.
-    pub fn set_guard_with_lock(&self, value: T, lock: &mut MutexGuard<'static, ()>) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
+    pub fn set_guard_with_lock<'a>(
+        &'a self,
+        value: T,
+        lock: &'a mut MutexGuard<'static, ()>,
+    ) -> Result<TypedEnvVarGuard<'a, T>, EnvVarError> {
         let formatted = self.format_value(&value)?;
         let previous = Environment::get(self.var);
         Environment::set_locked(self.var, &formatted, lock);
@@ -193,16 +205,17 @@ impl<T> TypedEnvVar<T> {
             descriptor: self,
             previous,
             value: Some(value),
+            lock: EnvLock::Borrowed(lock),
         })
     }
 
     /// Unset the environment variable for the lifetime of the guard.
-    pub fn unset_guard(&self) -> EnvVarGuard {
+    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
         EnvVarGuard::unset(self.var)
     }
 
     /// Unset the environment variable for the guard lifetime while reusing a lock.
-    pub fn unset_guard_with_lock(&self, lock: &mut MutexGuard<'static, ()>) -> EnvVarGuard {
+    pub fn unset_guard_with_lock<'a>(&self, lock: &'a mut MutexGuard<'static, ()>) -> EnvVarGuard<'a> {
         EnvVarGuard::unset_with_lock(self.var, lock)
     }
 }
@@ -210,11 +223,14 @@ impl<T> TypedEnvVar<T> {
 /// Guard that restores the previous state of a typed environment variable.
 ///
 /// Dropping the guard acquires the global environment mutex before restoring
-/// the prior value to guarantee serialised mutations.
+/// the prior value to guarantee serialised mutations. When created through the
+/// `_with_lock` helpers it borrows the caller's mutex guard, ensuring the guard
+/// cannot outlive the critical section that produced it.
 pub struct TypedEnvVarGuard<'a, T> {
     descriptor: &'a TypedEnvVar<T>,
     previous: Option<String>,
     value: Option<T>,
+    lock: EnvLock<'a>,
 }
 
 impl<'a, T> TypedEnvVarGuard<'a, T> {
@@ -234,11 +250,12 @@ impl<'a, T> Deref for TypedEnvVarGuard<'a, T> {
 
 impl<'a, T> Drop for TypedEnvVarGuard<'a, T> {
     fn drop(&mut self) {
-        let mut lock = Environment::lock();
-        if let Some(previous) = &self.previous {
-            Environment::set_locked(self.descriptor.var, previous, &mut lock);
-        } else {
-            Environment::remove_locked(self.descriptor.var, &mut lock);
-        }
+        self.lock.with_lock(|lock| {
+            if let Some(previous) = &self.previous {
+                Environment::set_locked(self.descriptor.var, previous, lock);
+            } else {
+                Environment::remove_locked(self.descriptor.var, lock);
+            }
+        });
     }
 }

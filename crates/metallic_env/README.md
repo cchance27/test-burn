@@ -81,7 +81,7 @@ When exposing new descriptors, follow the existing pattern of exporting both the
 All setters ultimately call into `std::env::set_var`/`remove_var`, which are marked `unsafe` because concurrent mutation is UB without synchronisation. `Environment::lock()` provides the global mutex that the crate uses internally. Callers should:
 
 * Hold the lock before invoking sequences of `get`, `set`, or guard-producing APIs when there is a risk of concurrent access so the operations share a critical section.
-* Prefer the guard helpers (`EnvVarGuard`, `TypedEnvVarGuard`) for scoped mutations to ensure the previous state is restored even if a panic occurs. When you already hold the mutex, use the `_with_lock` variants to avoid re-locking and to keep related mutations in the same critical section.
+* Prefer the guard helpers (`EnvVarGuard`, `TypedEnvVarGuard`) for scoped mutations to ensure the previous state is restored even if a panic occurs. When you already hold the mutex, use the `_with_lock` variants to avoid re-locking; these guards borrow the provided lock so they must drop before the caller releases the mutex.
 
 When writing tests, always acquire the lock at the start of each case that manipulates environment variables. This mirrors the defensive patterns already used internally and prevents flaky behaviour when tests run in parallel.
 
