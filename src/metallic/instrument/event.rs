@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum MetricEvent {
     /// Indicates that a GPU kernel has been dispatched and is now in-flight.
     GpuKernelDispatched {
-        kernel_name: &'static str,
+        kernel_name: String,
         /// A unique name for this specific operation instance.
         op_name: String,
         thread_groups: (u32, u32, u32),
