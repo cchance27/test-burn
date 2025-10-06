@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 
 use tracing::Level;
 
-use crate::metallic::instrument::environment::{EnvVar, Environment, InstrumentEnvVar};
+use metallic_env::{EnvVar, Environment, InstrumentEnvVar};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
