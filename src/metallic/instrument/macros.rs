@@ -10,7 +10,7 @@ macro_rules! record_metric {
             if let Ok(__metric_json) = serde_json::to_string(&$event) {
                 tracing::event!(
                     target: "metrics",
-                    level: Level::INFO,
+                    Level::INFO,
                     metric = %__metric_json
                 );
             }
