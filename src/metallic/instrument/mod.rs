@@ -4,6 +4,7 @@ pub mod config;
 pub mod environment;
 pub mod event;
 pub mod exporters;
+pub mod gpu_profiler;
 pub mod macros;
 pub mod prelude;
 pub mod recorder;

@@ -1,0 +1,456 @@
+//! GPU command-buffer profiler emitting per-operation metrics.
+
+use crate::metallic::instrument::event::MetricEvent;
+use crate::metallic::operation::CommandBuffer;
+use crate::record_metric;
+
+#[cfg(target_os = "macos")]
+use objc2::msg_send;
+#[cfg(target_os = "macos")]
+use objc2::rc::Retained;
+#[cfg(target_os = "macos")]
+use objc2::runtime::{Bool, ProtocolObject};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSData, NSRange, NSString, NSUInteger};
+#[cfg(target_os = "macos")]
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLComputeCommandEncoder, MTLCounterErrorValue, MTLCounterResultTimestamp,
+    MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
+};
+#[cfg(target_os = "macos")]
+use std::ptr::NonNull;
+#[cfg(target_os = "macos")]
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+#[cfg(target_os = "macos")]
+use std::time::Duration;
+
+#[cfg(target_os = "macos")]
+use mach2::{
+    kern_return::KERN_SUCCESS,
+    mach_time::{mach_timebase_info, mach_timebase_info_data_t},
+};
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+pub struct GpuProfiler {
+    state: Arc<GpuProfilerState>,
+}
+
+#[cfg(target_os = "macos")]
+pub struct GpuProfilerScope {
+    inner: Option<GpuProfilerScopeInner>,
+}
+
+#[cfg(target_os = "macos")]
+impl GpuProfilerScope {
+    pub fn finish(mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.complete();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for GpuProfilerScope {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.complete();
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct GpuProfilerScopeInner {
+    state: Arc<GpuProfilerState>,
+    record: Option<GpuOpRecord>,
+    encoder: EncoderHandle,
+}
+
+#[cfg(target_os = "macos")]
+impl GpuProfilerScopeInner {
+    fn complete(mut self) {
+        if let Some(mut record) = self.record.take() {
+            unsafe {
+                self.encoder.sample(&record.sample_buffer, record.end_index, Bool::NO);
+            }
+            self.state.push_record(record);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct GpuProfilerState {
+    key: usize,
+    counter: CounterResources,
+    records: Mutex<Vec<GpuOpRecord>>,
+    sequence: Mutex<u64>,
+}
+
+#[cfg(target_os = "macos")]
+impl GpuProfilerState {
+    fn new(key: usize, counter: CounterResources) -> Option<Self> {
+        if !counter.supports_sampling() {
+            return None;
+        }
+        Some(Self {
+            key,
+            counter,
+            records: Mutex::new(Vec::new()),
+            sequence: Mutex::new(0),
+        })
+    }
+
+    fn next_sequence(&self) -> u64 {
+        let mut guard = self.sequence.lock().expect("sequence mutex poisoned");
+        let value = *guard;
+        *guard = guard.saturating_add(1);
+        value
+    }
+
+    fn push_record(&self, record: GpuOpRecord) {
+        let mut guard = self.records.lock().expect("record mutex poisoned");
+        guard.push(record);
+    }
+
+    fn take_records(&self) -> Vec<GpuOpRecord> {
+        let mut guard = self.records.lock().expect("record mutex poisoned");
+        guard.drain(..).collect()
+    }
+
+    fn process_completion(&self, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+        let records = self.take_records();
+        if records.is_empty() {
+            registry().lock().expect("registry mutex poisoned").remove(&self.key);
+            return;
+        }
+
+        for record in records {
+            if let Some(duration) = self.counter.resolve_duration(&record) {
+                let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
+                record_metric!(MetricEvent::GpuOpCompleted {
+                    op_name: record.op_name,
+                    backend: record.backend,
+                    duration_us,
+                });
+            }
+        }
+
+        registry().lock().expect("registry mutex poisoned").remove(&self.key);
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+struct GpuOpRecord {
+    op_name: String,
+    backend: String,
+    sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    start_index: NSUInteger,
+    end_index: NSUInteger,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Clone)]
+enum EncoderHandle {
+    Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
+    Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
+}
+
+#[cfg(target_os = "macos")]
+impl EncoderHandle {
+    unsafe fn sample(&self, sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer>, index: NSUInteger, barrier: Bool) {
+        match self {
+            EncoderHandle::Compute(encoder) => {
+                let _: () = msg_send![&**encoder, sampleCountersInBuffer: sample_buffer, atSampleIndex: index, withBarrier: barrier];
+            }
+            EncoderHandle::Blit(encoder) => {
+                let _: () = msg_send![&**encoder, sampleCountersInBuffer: sample_buffer, atSampleIndex: index, withBarrier: barrier];
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn registry() -> &'static Mutex<std::collections::HashMap<usize, Weak<GpuProfilerState>>> {
+    static REGISTRY: OnceLock<Mutex<std::collections::HashMap<usize, Weak<GpuProfilerState>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(target_os = "macos")]
+fn buffer_key(command_buffer: &CommandBuffer) -> usize {
+    Retained::as_ptr(command_buffer.raw()) as usize
+}
+
+#[cfg(target_os = "macos")]
+impl GpuProfiler {
+    pub fn attach(command_buffer: &CommandBuffer) -> Option<Self> {
+        let key = buffer_key(command_buffer);
+        let raw = command_buffer.raw();
+        let device = unsafe { raw.device() };
+        let counter = CounterResources::new(Some(device));
+        let state = Arc::new(GpuProfilerState::new(key, counter)?);
+
+        registry()
+            .lock()
+            .expect("registry mutex poisoned")
+            .insert(key, Arc::downgrade(&state));
+
+        let completion_state = Arc::clone(&state);
+        command_buffer.on_completed(move |buffer| {
+            completion_state.process_completion(buffer);
+        });
+
+        Some(Self { state })
+    }
+
+    fn scope_for_encoder(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        state: Arc<GpuProfilerState>,
+        encoder: EncoderHandle,
+        op_name: String,
+        backend: String,
+    ) -> Option<GpuProfilerScope> {
+        let sample = state.counter.allocate_timing(command_buffer, &encoder).map(|timing| GpuOpRecord {
+            op_name,
+            backend,
+            sample_buffer: timing.sample_buffer,
+            start_index: timing.start_index,
+            end_index: timing.end_index,
+        })?;
+
+        let sample_buffer = sample.sample_buffer.clone();
+        unsafe {
+            encoder.sample(&sample_buffer, sample.start_index, Bool::YES);
+        }
+
+        Some(GpuProfilerScope {
+            inner: Some(GpuProfilerScopeInner {
+                state,
+                record: Some(sample),
+                encoder,
+            }),
+        })
+    }
+
+    fn from_command_buffer(command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> Option<Arc<GpuProfilerState>> {
+        let key = Retained::as_ptr(command_buffer) as usize;
+        registry()
+            .lock()
+            .expect("registry mutex poisoned")
+            .get(&key)
+            .and_then(|weak| weak.upgrade())
+    }
+
+    pub fn profile_compute(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
+        op_name: String,
+        backend: String,
+    ) -> Option<GpuProfilerScope> {
+        let state = Self::from_command_buffer(command_buffer)?;
+        let sequence = state.next_sequence();
+        Self::scope_for_encoder(
+            command_buffer,
+            state,
+            EncoderHandle::Compute(encoder.clone()),
+            format!("{op_name}#{sequence}"),
+            backend,
+        )
+    }
+
+    pub fn profile_blit(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        encoder: &Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>,
+        op_name: String,
+        backend: String,
+    ) -> Option<GpuProfilerScope> {
+        let state = Self::from_command_buffer(command_buffer)?;
+        let sequence = state.next_sequence();
+        Self::scope_for_encoder(
+            command_buffer,
+            state,
+            EncoderHandle::Blit(encoder.clone()),
+            format!("{op_name}#{sequence}"),
+            backend,
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct CounterResources {
+    timestamp_counter_set: Option<Retained<ProtocolObject<dyn MTLCounterSet>>>,
+    supports_dispatch_sampling: bool,
+    supports_blit_sampling: bool,
+    timestamp_period: Option<f64>,
+}
+
+#[cfg(target_os = "macos")]
+struct PendingTiming {
+    sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+    start_index: NSUInteger,
+    end_index: NSUInteger,
+}
+
+#[cfg(target_os = "macos")]
+impl CounterResources {
+    fn new(device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
+        let mut resources = Self {
+            timestamp_counter_set: None,
+            supports_dispatch_sampling: false,
+            supports_blit_sampling: false,
+            timestamp_period: None,
+        };
+
+        if let Some(device) = device {
+            resources.timestamp_counter_set = Self::find_timestamp_counter_set(device);
+            resources.supports_dispatch_sampling =
+                unsafe { device.supportsCounterSampling_atSamplePoint(MTLCounterSamplingPoint::DispatchBoundary) };
+            resources.supports_blit_sampling =
+                unsafe { device.supportsCounterSampling_atSamplePoint(MTLCounterSamplingPoint::BlitBoundary) };
+            resources.timestamp_period = Self::gpu_timestamp_period(device);
+        }
+
+        resources
+    }
+
+    fn supports_sampling(&self) -> bool {
+        self.timestamp_counter_set.is_some()
+            && self.timestamp_period.is_some()
+            && (self.supports_dispatch_sampling || self.supports_blit_sampling)
+    }
+
+    fn allocate_timing(
+        &self,
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        encoder: &EncoderHandle,
+    ) -> Option<PendingTiming> {
+        let counter_set = self.timestamp_counter_set.as_ref()?;
+        match encoder {
+            EncoderHandle::Compute(_) if !self.supports_dispatch_sampling => return None,
+            EncoderHandle::Blit(_) if !self.supports_blit_sampling => return None,
+            _ => {}
+        }
+
+        let descriptor = unsafe { MTLCounterSampleBufferDescriptor::new() };
+        unsafe {
+            descriptor.setCounterSet(Some(counter_set.as_ref()));
+            descriptor.setSampleCount(2);
+        }
+
+        let device = unsafe { command_buffer.device() };
+        let sample_buffer = unsafe {
+            match device.newCounterSampleBufferWithDescriptor_error(&descriptor) {
+                Ok(buffer) => buffer,
+                Err(_) => return None,
+            }
+        };
+
+        Some(PendingTiming {
+            sample_buffer,
+            start_index: 0,
+            end_index: 1,
+        })
+    }
+
+    fn resolve_duration(&self, timing: &GpuOpRecord) -> Option<Duration> {
+        let period = self.timestamp_period?;
+        let length = timing.end_index - timing.start_index + 1;
+        let data: Retained<NSData> = unsafe { timing.sample_buffer.resolveCounterRange(NSRange::new(timing.start_index, length))? };
+        let bytes = unsafe { data.as_bytes_unchecked() };
+        if bytes.len() < core::mem::size_of::<MTLCounterResultTimestamp>() * 2 {
+            return None;
+        }
+
+        let samples = unsafe {
+            core::slice::from_raw_parts(
+                bytes.as_ptr() as *const MTLCounterResultTimestamp,
+                bytes.len() / core::mem::size_of::<MTLCounterResultTimestamp>(),
+            )
+        };
+
+        let start = samples.get(timing.start_index)?.timestamp;
+        let end = samples.get(timing.end_index)?.timestamp;
+        if start == MTLCounterErrorValue || end == MTLCounterErrorValue || end <= start {
+            return None;
+        }
+
+        let delta = (end - start) as f64 * period;
+        if delta <= 0.0 || !delta.is_finite() {
+            return None;
+        }
+
+        Some(Duration::from_secs_f64(delta))
+    }
+
+    unsafe fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+        let sets = device.counterSets()?;
+        let desired: &NSString = MTLCommonCounterSetTimestamp;
+        let count = sets.count();
+        for idx in 0..count {
+            let set = sets.objectAtIndex(idx as NSUInteger);
+            let name = set.name();
+            if name.isEqualToString(desired) {
+                return Some(set);
+            }
+        }
+        None
+    }
+
+    fn gpu_timestamp_period(device: &ProtocolObject<dyn MTLDevice>) -> Option<f64> {
+        let mut cpu_start: u64 = 0;
+        let mut gpu_start: u64 = 0;
+        unsafe {
+            device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu_start), NonNull::from(&mut gpu_start));
+        }
+
+        std::thread::sleep(Duration::from_micros(200));
+
+        let mut cpu_end: u64 = 0;
+        let mut gpu_end: u64 = 0;
+        unsafe {
+            device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu_end), NonNull::from(&mut gpu_end));
+        }
+
+        let cpu_delta = cpu_end.saturating_sub(cpu_start);
+        let gpu_delta = gpu_end.saturating_sub(gpu_start);
+        if cpu_delta == 0 || gpu_delta == 0 {
+            return None;
+        }
+
+        let mut info = mach_timebase_info_data_t { numer: 0, denom: 0 };
+        let status = unsafe { mach_timebase_info(&mut info) };
+        if status != KERN_SUCCESS || info.denom == 0 {
+            return None;
+        }
+
+        let cpu_delta_ns = (cpu_delta as u128 * info.numer as u128) / info.denom as u128;
+        Some(cpu_delta_ns as f64 / 1e9 / gpu_delta as f64)
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+#[derive(Clone)]
+pub struct GpuProfiler;
+
+#[cfg(not(target_os = "macos"))]
+pub struct GpuProfilerScope;
+
+#[cfg(not(target_os = "macos"))]
+impl GpuProfiler {
+    pub fn attach(_command_buffer: &CommandBuffer) -> Option<Self> {
+        None
+    }
+
+    pub fn profile_compute(_command_buffer: &(), _encoder: &(), _op_name: String, _backend: String) -> Option<GpuProfilerScope> {
+        None
+    }
+
+    pub fn profile_blit(_command_buffer: &(), _encoder: &(), _op_name: String, _backend: String) -> Option<GpuProfilerScope> {
+        None
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+impl GpuProfilerScope {
+    pub fn finish(self) {}
+}

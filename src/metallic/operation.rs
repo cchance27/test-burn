@@ -1,8 +1,9 @@
-use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
+use super::{error::MetalError, resource_cache::ResourceCache, Tensor};
+use crate::metallic::instrument::gpu_profiler::GpuProfiler;
 
 use crate::metallic::{
-    TensorElement,
     encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
+    TensorElement,
 };
 use block2::RcBlock;
 use objc2::rc::Retained;
@@ -38,13 +39,31 @@ impl<T: TensorElement> Operation for FillConstant<T> {
         if self.value == 0.0 {
             // Encode blit fill for zeros
             let encoder = command_buffer.blitCommandEncoder().unwrap();
+            #[cfg(target_os = "macos")]
+            let mut profiler_scope = GpuProfiler::profile_blit(
+                command_buffer,
+                &encoder,
+                format!("FillConstantZero@{:p}", self),
+                "Metal".to_string(),
+            );
             encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
+            #[cfg(target_os = "macos")]
+            if let Some(scope) = profiler_scope.take() {
+                scope.finish();
+            }
             encoder.endEncoding();
             Ok(())
         } else if self.value == 1.0 {
             // Encode compute kernel for ones
             if let Some(pipeline) = &self.ones_pipeline {
                 let encoder = command_buffer.computeCommandEncoder().unwrap();
+                #[cfg(target_os = "macos")]
+                let mut profiler_scope = GpuProfiler::profile_compute(
+                    command_buffer,
+                    &encoder,
+                    format!("FillConstantOnes@{:p}", self),
+                    "Metal".to_string(),
+                );
                 set_compute_pipeline_state(&encoder, pipeline);
                 set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
                 // pass total elements for tail-guarding
@@ -64,6 +83,10 @@ impl<T: TensorElement> Operation for FillConstant<T> {
                     depth: 1,
                 };
                 dispatch_threads(&encoder, grid_size, threadgroup_size);
+                #[cfg(target_os = "macos")]
+                if let Some(scope) = profiler_scope.take() {
+                    scope.finish();
+                }
                 encoder.endEncoding();
                 Ok(())
             } else {
@@ -224,6 +247,11 @@ impl CommandBuffer {
     /// Borrow the underlying command buffer if direct access is needed.
     pub fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>> {
         &self.inner.buffer
+    }
+
+    /// Attach the GPU profiler to this command buffer if platform support exists.
+    pub fn attach_profiler(&self) -> Option<GpuProfiler> {
+        GpuProfiler::attach(self)
     }
 
     /// Returns true if two command buffers wrap the same underlying buffer.

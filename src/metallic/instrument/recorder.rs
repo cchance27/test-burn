@@ -5,7 +5,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tracing::{Event, Subscriber};
-use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
+use tracing_subscriber::{layer::Context, registry::LookupSpan, Layer};
 
 use crate::metallic::instrument::event::MetricEvent;
 
