@@ -20,7 +20,8 @@ use std::marker::PhantomData;
 use std::ops::Deref;
 use std::sync::MutexGuard;
 
-use super::{EnvVar, Environment, guard::EnvVarGuard};
+use super::guard::{EnvLock, EnvVarGuard};
+use super::{EnvVar, Environment};
 
 /// Errors emitted when interacting with typed environment variables.
 #[derive(Debug, thiserror::Error)]
