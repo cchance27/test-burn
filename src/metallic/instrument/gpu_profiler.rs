@@ -4,44 +4,32 @@ use crate::metallic::instrument::event::MetricEvent;
 use crate::metallic::operation::CommandBuffer;
 use crate::record_metric;
 
-#[cfg(target_os = "macos")]
 use objc2::msg_send;
-#[cfg(target_os = "macos")]
 use objc2::rc::Retained;
-#[cfg(target_os = "macos")]
 use objc2::runtime::{Bool, ProtocolObject};
-#[cfg(target_os = "macos")]
 use objc2_foundation::{NSData, NSRange, NSString, NSUInteger};
-#[cfg(target_os = "macos")]
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder, MTLCounterErrorValue,
     MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
 };
-#[cfg(target_os = "macos")]
 use std::ptr::NonNull;
-#[cfg(target_os = "macos")]
 use std::sync::{Arc, Mutex, OnceLock, Weak};
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 
-#[cfg(target_os = "macos")]
 use mach2::{
     kern_return::KERN_SUCCESS,
     mach_time::{mach_timebase_info, mach_timebase_info_data_t},
 };
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
 pub struct GpuProfiler {
     state: Arc<GpuProfilerState>,
 }
 
-#[cfg(target_os = "macos")]
 pub struct GpuProfilerScope {
     inner: Option<GpuProfilerScopeInner>,
 }
 
-#[cfg(target_os = "macos")]
 impl GpuProfilerScope {
     pub fn finish(mut self) {
         if let Some(inner) = self.inner.take() {
@@ -50,7 +38,6 @@ impl GpuProfilerScope {
     }
 }
 
-#[cfg(target_os = "macos")]
 impl Drop for GpuProfilerScope {
     fn drop(&mut self) {
         if let Some(inner) = self.inner.take() {
@@ -59,14 +46,12 @@ impl Drop for GpuProfilerScope {
     }
 }
 
-#[cfg(target_os = "macos")]
 struct GpuProfilerScopeInner {
     state: Arc<GpuProfilerState>,
     record: Option<GpuOpRecord>,
     encoder: EncoderHandle,
 }
 
-#[cfg(target_os = "macos")]
 impl GpuProfilerScopeInner {
     fn complete(mut self) {
         if let Some(mut record) = self.record.take() {
@@ -78,7 +63,6 @@ impl GpuProfilerScopeInner {
     }
 }
 
-#[cfg(target_os = "macos")]
 struct GpuProfilerState {
     key: usize,
     counter: CounterResources,
@@ -86,7 +70,6 @@ struct GpuProfilerState {
     sequence: Mutex<u64>,
 }
 
-#[cfg(target_os = "macos")]
 impl GpuProfilerState {
     fn new(key: usize, counter: CounterResources) -> Option<Self> {
         if !counter.supports_sampling() {
@@ -117,7 +100,7 @@ impl GpuProfilerState {
         guard.drain(..).collect()
     }
 
-    fn process_completion(&self, command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) {
+    fn process_completion(&self) {
         let records = self.take_records();
         if records.is_empty() {
             registry().lock().expect("registry mutex poisoned").remove(&self.key);
@@ -139,7 +122,6 @@ impl GpuProfilerState {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
 struct GpuOpRecord {
     op_name: String,
@@ -149,25 +131,21 @@ struct GpuOpRecord {
     end_index: NSUInteger,
 }
 
-#[cfg(target_os = "macos")]
 // SAFETY: `MTLCounterSampleBuffer` is documented by Apple as thread-safe, and we only
 // issue immutable method calls (`resolveCounterRange`) from the completion handler.
 // Objective-C reference counting already enforces correct lifetimes across threads.
 unsafe impl Send for GpuOpRecord {}
 
-#[cfg(target_os = "macos")]
 // SAFETY: See `Send` rationale above; sharing immutable references to the retained
 // counter sample buffer between threads is safe.
 unsafe impl Sync for GpuOpRecord {}
 
-#[cfg(target_os = "macos")]
 #[derive(Clone)]
 enum EncoderHandle {
     Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
     Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
 }
 
-#[cfg(target_os = "macos")]
 impl EncoderHandle {
     unsafe fn sample(&self, sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer>, index: NSUInteger, barrier: Bool) {
         match self {
@@ -181,18 +159,15 @@ impl EncoderHandle {
     }
 }
 
-#[cfg(target_os = "macos")]
 fn registry() -> &'static Mutex<std::collections::HashMap<usize, Weak<GpuProfilerState>>> {
     static REGISTRY: OnceLock<Mutex<std::collections::HashMap<usize, Weak<GpuProfilerState>>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
 }
 
-#[cfg(target_os = "macos")]
 fn buffer_key(command_buffer: &CommandBuffer) -> usize {
     Retained::as_ptr(command_buffer.raw()) as usize
 }
 
-#[cfg(target_os = "macos")]
 impl GpuProfiler {
     pub fn attach(command_buffer: &CommandBuffer) -> Option<Self> {
         let key = buffer_key(command_buffer);
@@ -207,8 +182,8 @@ impl GpuProfiler {
             .insert(key, Arc::downgrade(&state));
 
         let completion_state = Arc::clone(&state);
-        command_buffer.on_completed(move |buffer| {
-            completion_state.process_completion(buffer);
+        command_buffer.on_completed(move |_| {
+            completion_state.process_completion();
         });
 
         Some(Self { state })
@@ -287,7 +262,6 @@ impl GpuProfiler {
     }
 }
 
-#[cfg(target_os = "macos")]
 struct CounterResources {
     timestamp_counter_set: Option<Retained<ProtocolObject<dyn MTLCounterSet>>>,
     supports_dispatch_sampling: bool,
@@ -295,25 +269,21 @@ struct CounterResources {
     timestamp_period: Option<f64>,
 }
 
-#[cfg(target_os = "macos")]
 // SAFETY: `MTLCounterSet` handles are immutable configuration objects that Metal
 // allows to be shared freely across threads. We never mutate the retained object
 // after construction, so moving the wrapper between threads is sound.
 unsafe impl Send for CounterResources {}
 
-#[cfg(target_os = "macos")]
 // SAFETY: Same justification as `Send` — the retained counter set is immutable and
 // may be safely observed from multiple threads.
 unsafe impl Sync for CounterResources {}
 
-#[cfg(target_os = "macos")]
 struct PendingTiming {
     sample_buffer: Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
     start_index: NSUInteger,
     end_index: NSUInteger,
 }
 
-#[cfg(target_os = "macos")]
 impl CounterResources {
     fn new(device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
         let mut resources = Self {
@@ -404,7 +374,7 @@ impl CounterResources {
         Some(Duration::from_secs_f64(delta))
     }
 
-    unsafe fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
+    fn find_timestamp_counter_set(device: &ProtocolObject<dyn MTLDevice>) -> Option<Retained<ProtocolObject<dyn MTLCounterSet>>> {
         let sets = unsafe { device.counterSets() }?;
         let desired: &NSString = unsafe { &*MTLCommonCounterSetTimestamp };
         let count = sets.count();
@@ -448,31 +418,4 @@ impl CounterResources {
         let cpu_delta_ns = (cpu_delta as u128 * info.numer as u128) / info.denom as u128;
         Some(cpu_delta_ns as f64 / 1e9 / gpu_delta as f64)
     }
-}
-
-#[cfg(not(target_os = "macos"))]
-#[derive(Clone)]
-pub struct GpuProfiler;
-
-#[cfg(not(target_os = "macos"))]
-pub struct GpuProfilerScope;
-
-#[cfg(not(target_os = "macos"))]
-impl GpuProfiler {
-    pub fn attach(_command_buffer: &CommandBuffer) -> Option<Self> {
-        None
-    }
-
-    pub fn profile_compute(_command_buffer: &(), _encoder: &(), _op_name: String, _backend: String) -> Option<GpuProfilerScope> {
-        None
-    }
-
-    pub fn profile_blit(_command_buffer: &(), _encoder: &(), _op_name: String, _backend: String) -> Option<GpuProfilerScope> {
-        None
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
-impl GpuProfilerScope {
-    pub fn finish(self) {}
 }

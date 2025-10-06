@@ -11,6 +11,7 @@ pub mod recorder;
 
 pub use config::{AppConfig, AppConfigError};
 pub use event::MetricEvent;
+pub use gpu_profiler::{GpuProfiler, GpuProfilerScope};
 pub use recorder::{EnrichedMetricEvent, MetricExporter, MetricsLayer};
 
 #[cfg(test)]

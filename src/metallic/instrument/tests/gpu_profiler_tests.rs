@@ -1,5 +1,4 @@
-#![cfg(target_os = "macos")]
-
+use crate::metallic::instrument::GpuProfiler;
 use crate::metallic::instrument::MetricEvent;
 use crate::metallic::instrument::prelude::*;
 use crate::metallic::operation::{CommandBuffer, FillConstant};
@@ -10,8 +9,7 @@ use objc2_metal::{MTLCreateSystemDefaultDevice, MTLResourceOptions};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-// Maintainers must run this ignored test on Apple Silicon before releasing.
-#[ignore = "requires Apple Metal runtime"]
+// Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]
 fn gpu_profiler_emits_individual_kernel_events() {
     let (sender, receiver) = mpsc::channel();
@@ -25,7 +23,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
 
         let mut cache = ResourceCache::with_device(device.clone());
         let mut command_buffer = CommandBuffer::new(&queue).expect("command buffer");
-        let profiler = command_buffer.attach_profiler().expect("gpu profiler support");
+        let profiler = GpuProfiler::attach(&command_buffer).expect("gpu profiler support");
 
         let element_count = 16usize;
         let byte_len = element_count * std::mem::size_of::<f32>();
