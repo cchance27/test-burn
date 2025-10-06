@@ -165,12 +165,12 @@ impl InstrumentMetricsConsole {
     }
 }
 
-/// Ergonomic constant mirroring the previous enum-style API for the log level.
-pub const LogLevel: InstrumentLogLevel = InstrumentLogLevel;
-/// Ergonomic constant mirroring the previous enum-style API for the JSONL path.
-pub const MetricsJsonlPath: InstrumentMetricsJsonlPath = InstrumentMetricsJsonlPath;
-/// Ergonomic constant mirroring the previous enum-style API for the console toggle.
-pub const MetricsConsole: InstrumentMetricsConsole = InstrumentMetricsConsole;
+/// Ergonomic constant exposing the log-level helper methods.
+pub const LOG_LEVEL_VAR: InstrumentLogLevel = InstrumentLogLevel;
+/// Ergonomic constant exposing the JSONL-path helper methods.
+pub const METRICS_JSONL_PATH_VAR: InstrumentMetricsJsonlPath = InstrumentMetricsJsonlPath;
+/// Ergonomic constant exposing the console-toggle helper methods.
+pub const METRICS_CONSOLE_VAR: InstrumentMetricsConsole = InstrumentMetricsConsole;
 
 fn parse_log_level(value: &str) -> Result<Level, EnvVarParseError> {
     value.parse::<Level>().map_err(|_| EnvVarParseError::new("invalid tracing level"))
