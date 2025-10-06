@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tracing::{Event, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 use crate::metallic::instrument::event::MetricEvent;
@@ -55,6 +55,14 @@ impl<S> Layer<S> for MetricsLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
+        if metadata.target() == "metrics" {
+            true
+        } else {
+            ctx.enabled(metadata)
+        }
+    }
+
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         if event.metadata().target() != "metrics" {
             return;
