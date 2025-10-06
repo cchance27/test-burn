@@ -84,9 +84,9 @@ where
         let span = ctx.lookup_current();
         let enriched = EnrichedMetricEvent {
             timestamp: Utc::now(),
-            span_id: span.map(|s| s.id().into_u64()),
-            parent_span_id: span.and_then(|s| s.parent()).map(|parent| parent.id().into_u64()),
-            span_name: span.and_then(|s| s.metadata().map(|meta| meta.name().to_string())),
+            span_id: span.as_ref().map(|s| s.id().into_u64()),
+            parent_span_id: span.as_ref().and_then(|s| s.parent().map(|parent| parent.id().into_u64())),
+            span_name: span.as_ref().map(|s| s.metadata().name().to_string()),
             event: metric_event,
         };
 
