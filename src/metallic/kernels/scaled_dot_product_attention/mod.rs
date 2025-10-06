@@ -143,14 +143,17 @@ fn create_sdpa_operation<T: TensorElement>(
     let mut seq_len_delta = s_k;
     if causal {
         let workspace_key = ctx.sdpa_workspace_key_for(k);
-        if query_offset == 0 {
-            ctx.reset_sdpa_workspace(workspace_key);
-        }
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
-    let mut rows_to_process = seq_len_delta.min(s_q);
-    if rows_to_process == 0 {
+    let is_incremental_decode = causal && seq_len_delta == 1 && s_q > 1 && s_k > 1;
+    let mut rows_to_process = if is_incremental_decode {
+        1
+    } else {
+        s_q
+    };
+
+    if rows_to_process == 0 && s_q > 0 {
         rows_to_process = s_q;
     }
     let row_offset = s_q.saturating_sub(rows_to_process);
@@ -158,7 +161,14 @@ fn create_sdpa_operation<T: TensorElement>(
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
     } else {
-        q.slice(&[0..b, row_offset..s_q, 0..d])?
+        if b > 1 {
+            return Err(MetalError::OperationNotSupported(
+                "Incremental SDPA with batch size > 1 is not yet supported.".to_string(),
+            ));
+        }
+        let q_2d = q.reshape(vec![s_q, d])?;
+        let sliced_q = q_2d.slice(&[row_offset..s_q])?;
+        sliced_q.reshape(vec![b, rows_to_process, d])?
     };
 
     // Create output tensor

@@ -1737,10 +1737,6 @@ impl<T: TensorElement> Context<T> {
         SdpaWorkspaceKey::from_tensor(tensor)
     }
 
-    pub(crate) fn reset_sdpa_workspace(&mut self, key: SdpaWorkspaceKey) {
-        self.sdpa_workspaces.remove(&key);
-    }
-
     pub(crate) fn sdpa_seq_delta(&mut self, key: SdpaWorkspaceKey, descriptor: SdpaKey, seq_q: usize, seq_k: usize) -> usize {
         let entry = self
             .sdpa_workspaces

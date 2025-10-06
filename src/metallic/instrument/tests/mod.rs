@@ -2,5 +2,5 @@
 
 mod config;
 mod exporters;
-mod gpu_profiler_tests;
+mod gpu_profiler;
 mod layer;

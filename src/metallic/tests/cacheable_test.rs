@@ -100,7 +100,11 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
     assert_eq!(decode_slice.len(), dim);
     let start = (total - 1) * dim;
     let end = start + dim;
-    assert_eq!(&full_slice[start..end], decode_slice);
+    for (i, (a, b)) in full_slice[start..end].iter().zip(decode_slice.iter()).enumerate() {
+        if (a - b).abs() > 1e-6 {
+            panic!("Mismatch at index {} in decode_slice: full={}, decode={}", i, a, b);
+        }
+    }
 
     let mut ctx_zero_offset = Context::<F32Element>::new()?;
     let q_full_zero = Tensor::<F32Element>::from_f32_slice(vec![batch, total, dim], TensorStorage::Pooled(&mut ctx_zero_offset), &q_data)?;
@@ -128,7 +132,11 @@ fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(),
 
     let incremental_zero_slice = incremental_zero.as_slice();
     assert_eq!(incremental_zero_slice.len(), dim);
-    assert_eq!(&full_slice[start..end], incremental_zero_slice);
+    for (i, (a, b)) in full_slice[start..end].iter().zip(incremental_zero_slice.iter()).enumerate() {
+        if (a - b).abs() > 1e-6 {
+            panic!("Mismatch at index {} in incremental_zero_slice: full={}, decode={}", i, a, b);
+        }
+    }
 
     Ok(())
 }

@@ -1,6 +1,6 @@
 use crate::metallic::instrument::prelude::*;
 #[test]
-fn app_config_parses_environment_and_initialises() {
+fn app_config_parses_rejects() {
     let _log_level = LOG_LEVEL_VAR.set_guard(Level::DEBUG).expect("log level should set");
     let _jsonl_path = METRICS_JSONL_PATH_VAR
         .set_guard("/tmp/metrics.jsonl")
@@ -24,10 +24,7 @@ fn app_config_parses_environment_and_initialises() {
         Err(AppConfigError::AlreadyInitialised) => {}
         other => panic!("expected already initialised error, got {other:?}"),
     }
-}
 
-#[test]
-fn app_config_rejects_invalid_log_level() {
     let _log_level = EnvVarGuard::set(InstrumentEnvVar::LogLevel, "verbose");
     let _jsonl_path = METRICS_JSONL_PATH_VAR.unset_guard();
     let _console = METRICS_CONSOLE_VAR.unset_guard();
@@ -36,10 +33,7 @@ fn app_config_rejects_invalid_log_level() {
         Err(AppConfigError::InvalidLogLevel { value }) => assert_eq!(value, "verbose"),
         other => panic!("expected invalid log level error, got {other:?}"),
     }
-}
 
-#[test]
-fn app_config_rejects_invalid_console_flag() {
     let _console = EnvVarGuard::set(InstrumentEnvVar::MetricsConsole, "maybe");
     let _log_level = LOG_LEVEL_VAR.unset_guard();
     let _jsonl_path = METRICS_JSONL_PATH_VAR.unset_guard();
