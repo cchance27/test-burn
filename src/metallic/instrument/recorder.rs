@@ -110,7 +110,16 @@ struct MetricVisitor {
 impl tracing::field::Visit for MetricVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "metric" {
-            self.metric_json = Some(format!("{:?}", value));
+            let raw = format!("{:?}", value);
+            // `tracing` records `%` formatted fields via the debug visitor, which
+            // wraps string values in quotes. Attempt to recover the original JSON
+            // payload by unescaping when possible so downstream deserialisation
+            // succeeds even if the macro passed a display-formatted string.
+            if let Ok(unescaped) = serde_json::from_str::<String>(&raw) {
+                self.metric_json = Some(unescaped);
+            } else {
+                self.metric_json = Some(raw);
+            }
         }
     }
 
