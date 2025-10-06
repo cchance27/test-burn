@@ -149,10 +149,31 @@ fn create_sdpa_operation<T: TensorElement>(
         seq_len_delta = ctx.sdpa_seq_delta(workspace_key, sdpa_descriptor.clone(), s_q, s_k);
     }
 
-    let mut rows_to_process = seq_len_delta.min(s_q);
-    if rows_to_process == 0 {
-        rows_to_process = s_q;
+    let query_offset_usize = usize::try_from(query_offset)
+        .map_err(|_| MetalError::InvalidShape(format!("SDPA query offset {query_offset} exceeds native platform usize")))?;
+
+    if query_offset_usize > s_q {
+        return Err(MetalError::InvalidShape(format!(
+            "SDPA query offset {query_offset_usize} exceeds query length {s_q}"
+        )));
     }
+
+    let desired_rows = s_q.saturating_sub(query_offset_usize);
+    let mut rows_to_process = if query_offset_usize == 0 {
+        s_q
+    } else if seq_len_delta == 0 {
+        desired_rows
+    } else {
+        seq_len_delta.min(desired_rows)
+    };
+
+    if rows_to_process == 0 {
+        rows_to_process = if query_offset_usize == 0 { s_q } else { desired_rows };
+        if rows_to_process == 0 {
+            rows_to_process = s_q;
+        }
+    }
+
     let row_offset = s_q.saturating_sub(rows_to_process);
 
     let q_active = if row_offset == 0 && rows_to_process == s_q {
@@ -166,15 +187,16 @@ fn create_sdpa_operation<T: TensorElement>(
     // but we return a view containing only the freshly written rows to preserve the
     // public contract of emitting `rows_to_process` results.
     let full_output_dims = vec![b, s_q, d];
-    let out_full = if rows_to_process == s_q {
-        Tensor::new(full_output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
-    } else {
+    let returning_partial = query_offset_usize != 0 && rows_to_process != s_q;
+    let out_full = if returning_partial {
         Tensor::zeros(full_output_dims, ctx, true)?
-    };
-    let out_active = if rows_to_process == s_q {
-        out_full.clone()
     } else {
+        Tensor::new(full_output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
+    };
+    let out_active = if returning_partial {
         out_full.slice_axis(1, row_offset..s_q)?
+    } else {
+        out_full.clone()
     };
 
     let attention = if config.reuse_workspace {
