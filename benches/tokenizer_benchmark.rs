@@ -5,8 +5,8 @@
 //! Each benchmark iteration measures a single encoding operation.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use metallic::gguf::GGUFFile;
 use metallic::Tokenizer;
+use metallic::gguf::GGUFFile;
 
 fn load_tokenizer() -> Tokenizer {
     let path = "/Volumes/2TB/test-burn/models/Qwen2.5-Coder-0.5B-Instruct-Q8_0.gguf";

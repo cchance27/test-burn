@@ -1,14 +1,14 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::{
     TensorElement, TensorInit, TensorStorage,
-    instrumentation::{MatMulDispatchKind, MatMulDispatchTiming, MatmulDims},
-    kernels::{KernelFunction, KernelInvocable, matmul::MatMulBackend},
+    kernels::{KernelFunction, KernelInvocable},
 };
-use objc2::msg_send;
+use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, ProtocolObject};
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLCounterSampleBuffer, MTLSize};
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLSize};
 
 #[repr(C)]
 struct GemvParams {
@@ -29,7 +29,7 @@ struct Gemv<T: TensorElement> {
     params: GemvParams,
     grid_size: MTLSize,
     threadgroup_size: MTLSize,
-    dispatch_timing: Option<MatMulDispatchTiming>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl<T: TensorElement> Operation for Gemv<T> {
@@ -42,19 +42,8 @@ impl<T: TensorElement> Operation for Gemv<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
-        if let Some(timing) = &self.dispatch_timing
-            && matches!(timing.kind(), MatMulDispatchKind::Compute)
-        {
-            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
-            unsafe {
-                let _: () = msg_send![
-                    &*encoder,
-                    sampleCountersInBuffer: sample_buffer,
-                    atSampleIndex: timing.start_index(),
-                    withBarrier: Bool::YES
-                ];
-            }
-        }
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
@@ -63,20 +52,6 @@ impl<T: TensorElement> Operation for Gemv<T> {
         set_bytes(&encoder, 3, &self.params);
 
         dispatch_threadgroups(&encoder, self.grid_size, self.threadgroup_size);
-
-        if let Some(timing) = &self.dispatch_timing
-            && matches!(timing.kind(), MatMulDispatchKind::Compute)
-        {
-            let sample_buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = timing.sample_buffer();
-            unsafe {
-                let _: () = msg_send![
-                    &*encoder,
-                    sampleCountersInBuffer: sample_buffer,
-                    atSampleIndex: timing.end_index(),
-                    withBarrier: Bool::NO
-                ];
-            }
-        }
 
         encoder.endEncoding();
         Ok(())
@@ -138,17 +113,7 @@ impl KernelInvocable for GemvOp {
             depth: 1,
         };
 
-        let dims = MatmulDims { batch: 1, m: 1, n, k };
-
-        let dispatch_timing = {
-            let command_buffer = {
-                let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-                command_buffer.clone()
-            };
-            ctx.register_matmul_dispatch(&command_buffer, MatMulBackend::Gemv, Some(dims), MatMulDispatchKind::Compute)
-                .timing()
-                .cloned()
-        };
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("gemv_op"));
 
         let op = Gemv {
             pipeline,
@@ -158,7 +123,7 @@ impl KernelInvocable for GemvOp {
             params,
             grid_size,
             threadgroup_size,
-            dispatch_timing,
+            profiler_label,
         };
 
         Ok((Box::new(op), y))

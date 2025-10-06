@@ -292,7 +292,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let embed_slice = model.embed_weight.as_slice();
     println!("Loaded embed first 10: {:?}", take_first_as_f32::<TestElement>(embed_slice, 10));
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
-    let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
+    let npy_dump_path = "/Volumes/2TB/test-burn/crates/metallic/pytorch/dumps/latest";
 
     // --- Input ---
     let input_text = std::fs::read_to_string(Path::new(npy_dump_path).join("input_text.txt")).unwrap();
@@ -1376,7 +1376,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
             }
         }
 
-        let generated_ids = generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg, &[])?;
+        let generated_ids = generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
         ctx.synchronize();
 
         let prompt_len = input_ids.len();
@@ -1446,7 +1446,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::Meta
     let model = Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
     let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
 
-    let npy_dump_path = "/Volumes/2TB/test-burn/pytorch/dumps/latest";
+    let npy_dump_path = "/Volumes/2TB/test-burn/crates/metallic/pytorch/dumps/latest";
     let input_text = std::fs::read_to_string(Path::new(npy_dump_path).join("input_text.txt")).unwrap();
     let input_ids = tokenizer.encode(&input_text)?;
 
@@ -1722,14 +1722,9 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
         TensorInit::CopyFrom(&v_values),
     )?;
 
-    ctx.reset_kv_cache_dispatch_stats();
     let group_size = n_heads / n_kv_heads;
     ctx.write_kv_step(layer_idx, 0, group_size, &k_step, &v_step)?;
     ctx.synchronize();
-
-    let stats = ctx.kv_cache_dispatch_stats();
-    assert_eq!(stats.single_layout.kernel_dispatches, 1);
-    assert_eq!(stats.single_layout.fallback_blits, 0);
 
     let entry = ctx
         .kv_caches

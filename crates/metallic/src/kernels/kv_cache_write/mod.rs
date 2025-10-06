@@ -1,5 +1,7 @@
 use super::*;
 use crate::TensorElement;
+use crate::context::GpuProfilerLabel;
+use metallic_instrumentation::GpuProfiler;
 
 pub struct KvCacheWriteOp;
 
@@ -25,6 +27,7 @@ struct KvCacheWrite<T: TensorElement> {
     v_dst: Tensor<T>,
     params: KvCacheWriteConfig,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for KvCacheWriteOp {
@@ -68,6 +71,9 @@ impl KernelInvocable for KvCacheWriteOp {
         ctx.prepare_tensors_for_active_cmd(&tensors)?;
 
         let pipeline = pipeline.expect("Kernel Library supplied for MetalKernels");
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("kv_cache_write_op"));
         let op = KvCacheWrite {
             k_src: k_src.clone(),
             v_src,
@@ -75,6 +81,7 @@ impl KernelInvocable for KvCacheWriteOp {
             v_dst,
             params,
             pipeline,
+            profiler_label,
         };
 
         Ok((Box::new(op), k_dst))
@@ -90,6 +97,9 @@ impl<T: TensorElement> Operation for KvCacheWrite<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let threads_per_tg = MTLSize {
             width: 256,

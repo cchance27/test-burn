@@ -8,10 +8,10 @@ use burn::backend::wgpu::WgpuDevice;
 use burn::prelude::*;
 use burn::tensor::{Distribution, Float, Tensor as BurnTensor};
 use criterion::{Criterion, criterion_group, criterion_main};
-use std::ffi::c_void;
 use metallic::alternatives::sdpa_burn::scaled_dot_product_attention_burn;
 use metallic::alternatives::sdpa_metal::scaled_dot_product_attention_metal;
 use metallic::{Context, F32Element, Tensor};
+use std::ffi::c_void;
 
 /// Number of iterations to run within each benchmark measurement
 /// This helps reduce measurement noise for faster operations

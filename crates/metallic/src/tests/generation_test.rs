@@ -1,5 +1,4 @@
-use crate::generation::{GenerationConfig, aggregate_matmul_totals, generate, sample_top_k_top_p};
-use crate::kernels::matmul::{MatMulBackend, MatMulSample};
+use crate::generation::{GenerationConfig, generate, sample_top_k_top_p};
 use crate::models::{Qwen25, Qwen25Config};
 use crate::{Context, F32Element, MetalError, SamplerBuffers, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
@@ -144,7 +143,7 @@ fn test_full_generation_correctness() -> Result<(), crate::MetalError> {
     // Reset context to ensure a clean run
     ctx.clear_kv_caches();
     let kv_cache_new_ids =
-        crate::generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg, &[])?;
+        crate::generation::generate_autoregressive_with_kv_cache(&mut model, &tokenizer, &mut ctx, &input_ids, &gen_cfg)?;
     let mut kv_cache_ids = input_ids.clone();
     kv_cache_ids.extend(kv_cache_new_ids);
 
@@ -206,40 +205,6 @@ fn test_sample_top_k_top_p_zero_temperature_prefers_highest_index() {
         result, 2,
         "Zero temperature should greedily select the highest logit, preferring the last index on ties"
     );
-}
-
-#[test]
-fn matmul_sample_aggregation_sums_backend_totals() {
-    use std::time::Duration;
-
-    let totals = aggregate_matmul_totals(vec![
-        MatMulSample {
-            backend: MatMulBackend::Mps,
-            duration: Duration::from_millis(8),
-            dims: None,
-            handle: None,
-        },
-        MatMulSample {
-            backend: MatMulBackend::Mps,
-            duration: Duration::from_millis(4),
-            dims: None,
-            handle: None,
-        },
-        MatMulSample {
-            backend: MatMulBackend::Mps,
-            duration: Duration::from_millis(0),
-            dims: None,
-            handle: None,
-        },
-    ]);
-
-    let total = totals
-        .get(&MatMulBackend::Mps)
-        .copied()
-        .expect("aggregated totals should include the MPS backend");
-
-    assert_eq!(total, Duration::from_millis(12));
-    assert_eq!(totals.len(), 1);
 }
 
 #[test]

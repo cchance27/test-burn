@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache};
+use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
@@ -19,6 +21,7 @@ struct RoPE<T: TensorElement> {
     seq_len: u32,
     position_offset: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for RoPEOp {
@@ -80,6 +83,8 @@ impl KernelInvocable for RoPEOp {
         // Create the output tensor with same shape as input
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("rope_op"));
+
         // Create the internal operation struct.
         let op = RoPE {
             input,
@@ -90,6 +95,7 @@ impl KernelInvocable for RoPEOp {
             seq_len,
             position_offset,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         // Return the boxed operation and the output tensor.
@@ -106,6 +112,9 @@ impl<T: TensorElement> Operation for RoPE<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.input.len() as u32;
         let threads_per_tg = MTLSize {

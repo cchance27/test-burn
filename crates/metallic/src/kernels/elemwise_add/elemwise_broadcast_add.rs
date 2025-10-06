@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
+use metallic_instrumentation::GpuProfiler;
 
 // User-facing struct for the broadcast element-wise add operation.
 pub struct BroadcastElemwiseAddOp;
@@ -15,6 +17,7 @@ struct BroadcastElemwiseAdd<T: TensorElement> {
     out: Tensor<T>,
     b_len: usize,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for BroadcastElemwiseAddOp {
@@ -42,12 +45,16 @@ impl KernelInvocable for BroadcastElemwiseAddOp {
         ctx.prepare_tensors_for_active_cmd(&[&a, &b])?;
 
         let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("broadcast_elemwise_add_op"));
         let op = BroadcastElemwiseAdd {
             a,
             b,
             out: out.clone(),
             b_len,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
         Ok((Box::new(op), out))
     }
@@ -79,11 +86,16 @@ impl KernelInvocable for BroadcastElemwiseAddInplaceOp {
 
         let out = a.clone();
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("broadcast_elemwise_add_inplace_op"));
+
         let op = BroadcastElemwiseAddInplace {
             a,
             b,
             b_len,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), out))
@@ -99,6 +111,9 @@ impl<T: TensorElement> Operation for BroadcastElemwiseAdd<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {
@@ -130,6 +145,7 @@ struct BroadcastElemwiseAddInplace<T: TensorElement> {
     b: Tensor<T>,
     b_len: usize,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl<T: TensorElement> Operation for BroadcastElemwiseAddInplace<T> {
@@ -141,6 +157,9 @@ impl<T: TensorElement> Operation for BroadcastElemwiseAddInplace<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {

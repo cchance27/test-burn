@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
+use metallic_instrumentation::GpuProfiler;
 
 pub struct RepeatKvHeadsOp;
 
@@ -15,6 +17,7 @@ struct RepeatKvHeads<T: TensorElement> {
     cache_stride: u32,
     total_elements: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for RepeatKvHeadsOp {
@@ -101,6 +104,10 @@ impl KernelInvocable for RepeatKvHeadsOp {
         let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let total_elements = output.len() as u32;
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("repeat_kv_heads_op"));
+
         let op = RepeatKvHeads {
             input,
             output: output.clone(),
@@ -113,6 +120,7 @@ impl KernelInvocable for RepeatKvHeadsOp {
             cache_stride,
             total_elements,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), output))
@@ -128,6 +136,9 @@ impl<T: TensorElement> Operation for RepeatKvHeads<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let threads_per_tg = MTLSize {
             width: 256,

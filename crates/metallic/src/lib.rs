@@ -1,4 +1,4 @@
-pub use context::{Context, KvCacheDispatchStats, SamplerBuffers};
+pub use context::{Context, SamplerBuffers};
 pub use error::MetalError;
 pub use operation::{CommandBuffer, Operation};
 pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
@@ -14,8 +14,7 @@ pub mod encoder;
 pub mod error;
 pub mod generation;
 pub mod gguf;
-pub mod instrumentation;
-pub mod metrics;
+
 pub mod models;
 pub mod operation;
 pub mod pool;

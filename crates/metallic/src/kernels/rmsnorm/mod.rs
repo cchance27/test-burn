@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
+use metallic_instrumentation::GpuProfiler;
 
 pub struct RMSNormOp;
 
@@ -9,6 +11,7 @@ struct RMSNorm<T: TensorElement> {
     gamma: Tensor<T>,
     feature_dim: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for RMSNormOp {
@@ -46,12 +49,15 @@ impl KernelInvocable for RMSNormOp {
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("rmsnorm_op"));
+
         let op = RMSNorm {
             input,
             output: output.clone(),
             gamma,
             feature_dim,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), output))
@@ -67,6 +73,9 @@ impl<T: TensorElement> Operation for RMSNorm<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.input.len() as u32;
         let threads_per_tg = MTLSize {

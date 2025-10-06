@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
+use metallic_instrumentation::GpuProfiler;
 use std::convert::TryFrom;
 
 /// Public, user-facing, zero-sized struct for the KV rearrange operation.
@@ -17,6 +19,7 @@ struct KvRearrange<T: TensorElement> {
     head_dim: u32,
     seq: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for KvRearrangeOp {
@@ -57,6 +60,10 @@ impl KernelInvocable for KvRearrangeOp {
 
         let output = Tensor::new(output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("kv_rearrange_op"));
+
         let op = KvRearrange {
             input,
             output: output.clone(),
@@ -68,6 +75,7 @@ impl KernelInvocable for KvRearrangeOp {
             head_dim,
             seq,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), output))
@@ -83,6 +91,9 @@ impl<T: TensorElement> Operation for KvRearrange<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.output.len() as u32;
         let threads_per_tg = MTLSize {

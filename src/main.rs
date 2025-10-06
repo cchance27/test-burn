@@ -1,5 +1,12 @@
 use anyhow::Result;
 use chrono::SecondsFormat;
+use metallic::{
+    Context, F16Element, Tokenizer,
+    generation::{GenerationConfig, generate_streaming},
+    gguf::{GGUFFile, model_loader::GGUFModelLoader},
+};
+use metallic_cli_helpers::prelude::*;
+use metallic_instrumentation::prelude::*;
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
@@ -15,18 +22,195 @@ use std::{
     thread,
     time::Duration,
 };
-use metallic::{
-    Context, F16Element, Tokenizer,
-    generation::{GenerationConfig, generate_streaming},
-    gguf::{GGUFFile, model_loader::GGUFModelLoader},
-    metrics::{
-        MemoryBlockStat, MemoryScopeStat, ModelMemoryNode, ProcessMemoryTracker, ScalarStat, build_memory_rows, build_model_memory_tree,
-        sample_process_memory,
-    },
-};
-use metallic_cli_helpers::prelude::*;
+
+#[derive(Clone)]
+struct HierarchicalMetric {
+    label: String,
+    last_ms: f64,
+    average_ms: f64,
+    level: u8,
+    children: Vec<HierarchicalMetric>,
+}
+
+impl HierarchicalMetric {
+    fn new(label: String, last_ms: f64, average_ms: f64, level: u8) -> Self {
+        Self {
+            label,
+            last_ms,
+            average_ms,
+            level,
+            children: Vec::new(),
+        }
+    }
+
+    fn ensure_child(&mut self, label: &str, level: u8) -> &mut HierarchicalMetric {
+        if let Some(position) = self.children.iter().position(|child| child.label == label) {
+            &mut self.children[position]
+        } else {
+            self.children.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0, level));
+            self.children
+                .last_mut()
+                .expect("children vector cannot be empty immediately after push")
+        }
+    }
+
+    fn upsert_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64, level: u8) {
+        if path.is_empty() {
+            return;
+        }
+
+        let label = path[0];
+        let child = self.ensure_child(label, level);
+
+        if path.len() == 1 {
+            child.last_ms = last_ms;
+            child.average_ms = average_ms;
+        } else {
+            child.upsert_path(&path[1..], last_ms, average_ms, level + 1);
+        }
+    }
+}
+
+const GENERATION_LOOP_LABEL: &str = "Generation Loop";
+const PROMPT_PROCESSING_LABEL: &str = "Prompt Processing";
+
+const BLOCK_STAGE_PREFIXES: &[(&str, &str)] = &[
+    ("attn_norm_block_", "attn_norm"),
+    ("qkv_proj_block_", "attn_qkv_proj"),
+    ("attn_rearrange_block_", "attn_rearrange"),
+    ("rope_block_", "Rope"),
+    ("kv_cache_block_", "kv_cache"),
+    ("kv_repeat_block_", "kv_repeat"),
+    ("sdpa_block_", "Sdpa"),
+    ("attn_output_block_", "attn_output"),
+    ("mlp_norm_block_", "mlp_norm"),
+    ("mlp_swiglu_block_", "mlp_swiglu"),
+    ("mlp_output_block_", "mlp_output"),
+];
+
+fn metric_event_to_latency_rows(event: &MetricEvent) -> Vec<LatencyRow> {
+    match event {
+        MetricEvent::GpuOpCompleted { op_name, duration_us, .. } => map_gpu_op_completed(op_name)
+            .into_iter()
+            .map(|segments| build_latency_row(segments, *duration_us))
+            .collect(),
+        MetricEvent::InternalKernelCompleted {
+            parent_op_name,
+            internal_kernel_name,
+            duration_us,
+        } => map_internal_kernel(parent_op_name, internal_kernel_name)
+            .into_iter()
+            .map(|segments| build_latency_row(segments, *duration_us))
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn map_internal_kernel(parent: &str, kernel: &str) -> Option<Vec<String>> {
+    let base_parent = parent.to_ascii_lowercase();
+    match base_parent.as_str() {
+        "sampling" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Sampling".to_string()]),
+        "decoding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Decode".to_string()]),
+        "generation_loop" => match kernel {
+            "embedding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Embedding".to_string()]),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn map_gpu_op_completed(op_name: &str) -> Option<Vec<String>> {
+    let base_name = op_name.split('#').next().unwrap_or(op_name);
+    if let Some(segments) = map_generation_stage(base_name) {
+        return Some(segments);
+    }
+    if let Some(segments) = map_block_stage(base_name) {
+        return Some(segments);
+    }
+    map_prompt_stage(base_name)
+}
+
+fn map_generation_stage(name: &str) -> Option<Vec<String>> {
+    if let Some(rest) = name.strip_prefix("generation_step_")
+        && rest.ends_with("_output")
+    {
+        return Some(vec![GENERATION_LOOP_LABEL.to_string(), "Output".to_string()]);
+    }
+
+    if let Some(_idx) = name.strip_prefix("iteration_") {
+        return Some(vec![GENERATION_LOOP_LABEL.to_string()]);
+    }
+
+    if name == "forward_step" {
+        return Some(vec![GENERATION_LOOP_LABEL.to_string(), "Forward Step".to_string()]);
+    }
+
+    if let Some(idx_str) = name.strip_prefix("block_")
+        && let Ok(idx) = idx_str.parse::<usize>()
+    {
+        return Some(vec![
+            GENERATION_LOOP_LABEL.to_string(),
+            "Forward Step".to_string(),
+            format!("Block {}", idx),
+        ]);
+    }
+
+    None
+}
+
+fn map_block_stage(name: &str) -> Option<Vec<String>> {
+    let base = name.strip_suffix("_op").unwrap_or(name);
+    for (prefix, display) in BLOCK_STAGE_PREFIXES {
+        if let Some(rest) = base.strip_prefix(prefix)
+            && let Ok(idx) = rest.parse::<usize>()
+        {
+            return Some(vec![
+                GENERATION_LOOP_LABEL.to_string(),
+                "Forward Step".to_string(),
+                format!("Block {}", idx),
+                (*display).to_string(),
+            ]);
+        }
+    }
+    None
+}
+
+fn map_prompt_stage(name: &str) -> Option<Vec<String>> {
+    if let Some(rest) = name.strip_prefix("prompt_step_")
+        && rest.parse::<usize>().is_ok()
+    {
+        return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
+    }
+    None
+}
+
+fn build_latency_row(segments: Vec<String>, duration_us: u64) -> LatencyRow {
+    let level = segments.len().saturating_sub(1) as u8;
+    let label = segments.join("::");
+    let duration_ms = duration_us as f64 / 1000.0;
+    LatencyRow {
+        label,
+        last_ms: duration_ms,
+        average_ms: duration_ms,
+        level,
+    }
+}
 
 fn main() -> Result<()> {
+    // Initialize instrumentation system with tracing subscriber and metrics layer
+    let (sender, receiver) = mpsc::channel();
+    let channel_exporter = Box::new(ChannelExporter::new(sender));
+    //let console_exporter = Box::new(ConsoleExporter::new());
+
+    let exporters: Vec<Box<dyn MetricExporter>> = vec![
+        channel_exporter,
+        //console_exporter,
+    ];
+
+    let metrics_layer = MetricsLayer::new(exporters);
+    let subscriber = tracing_subscriber::registry().with(metrics_layer);
+    tracing::subscriber::set_global_default(subscriber).expect("setting global default subscriber failed");
+
     // Minimal CLI:
     //   cargo run -- /path/to/model.gguf [PROMPT]
     let mut args = env::args().skip(1);
@@ -48,93 +232,35 @@ fn main() -> Result<()> {
         let worker_tx = tx.clone();
         thread::spawn(move || -> Result<()> {
             let worker = || -> Result<()> {
-                let mut process_memory_tracker = ProcessMemoryTracker::new();
-                let mut host_memory = ScalarStat::default();
-                let mut model_memory_tree = ModelMemoryNode::branch("Model Weights", Vec::new());
-                let mut host_overheads: Vec<(String, usize)> = Vec::new();
-
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                // Send initial empty memory update - simplified for new system
+                emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
                 let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
                 let mut ctx = Context::<F16Element>::new()?;
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
                 let loader = GGUFModelLoader::new(gguf);
-                host_overheads.clear();
-                let mapped_bytes = loader.mapped_len();
-                if mapped_bytes > 0 {
-                    host_overheads.push(("GGUF File MMAP".to_string(), mapped_bytes));
-                }
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
                 let gguf_model = loader.load_model()?;
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
                 let mut qwen = gguf_model.instantiate(&mut ctx)?;
-                model_memory_tree = build_model_memory_tree(&qwen);
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
                 let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
                 let tokens = tokenizer.encode(&prompt)?;
                 worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
-                emit_startup_memory_update(
-                    &worker_tx,
-                    &mut process_memory_tracker,
-                    &mut host_memory,
-                    &model_memory_tree,
-                    &host_overheads,
-                )?;
+                emit_startup_memory_update(&worker_tx)?;
 
                 let cfg = GenerationConfig {
                     max_tokens: 4096,
@@ -144,17 +270,7 @@ fn main() -> Result<()> {
                 };
 
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                generate_streaming(
-                    &mut qwen,
-                    &tokenizer,
-                    &mut ctx,
-                    &prompt,
-                    &cfg,
-                    &worker_tx,
-                    &host_overheads,
-                    &mut host_memory,
-                    &mut process_memory_tracker,
-                )?;
+                generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx)?;
                 worker_tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
                 Ok(())
             };
@@ -237,6 +353,15 @@ fn main() -> Result<()> {
             }
         }
 
+        // Process metric events from the instrumentation system
+        while let Ok(event) = receiver.try_recv() {
+            let rows = metric_event_to_latency_rows(&event.event);
+            if !rows.is_empty() {
+                tx.send(AppEvent::LatencyUpdate(rows))?;
+            }
+        }
+
+        // Process app events
         while let Ok(event) = rx.try_recv() {
             match event {
                 AppEvent::Token {
@@ -262,8 +387,11 @@ fn main() -> Result<()> {
                 AppEvent::MemoryUpdate(memory_rows) => {
                     app_state.memory_rows = memory_rows;
                 }
-                AppEvent::LatencyUpdate(rows) => {
-                    app_state.latency_rows = rows;
+                AppEvent::LatencyUpdate(new_rows) => {
+                    // Process the incoming metrics and add them to our hierarchical structure
+                    for row in new_rows {
+                        app_state.add_latency_metric(row);
+                    }
                 }
                 AppEvent::Alert(alert) => {
                     app_state.push_alert(alert);
@@ -339,7 +467,7 @@ struct AppState {
     status: String,
     memory_rows: Vec<MemoryRow>,
     prompt_processing_time: Duration,
-    latency_rows: Vec<LatencyRow>,
+    latency_tree: Vec<HierarchicalMetric>,
     metrics_view: MetricsView,
     metrics_collapse_state: CollapseState,
     focus: FocusArea,
@@ -363,7 +491,7 @@ impl AppState {
             status: "Initializing...".to_string(),
             memory_rows: Vec::new(),
             prompt_processing_time: Duration::default(),
-            latency_rows: Vec::new(),
+            latency_tree: Vec::new(),
             metrics_view: MetricsView::Memory,
             metrics_collapse_state: CollapseState::Collapsed,
             focus: FocusArea::GeneratedText,
@@ -376,6 +504,41 @@ impl AppState {
             alert_queue: VecDeque::new(),
             active_alert: None,
         }
+    }
+
+    fn add_latency_metric(&mut self, row: LatencyRow) {
+        let segments: Vec<&str> = row.label.split("::").collect();
+        if segments.is_empty() {
+            return;
+        }
+
+        self.upsert_latency_path(&segments, row.last_ms, row.average_ms, 0);
+    }
+
+    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64, level: u8) {
+        if path.is_empty() {
+            return;
+        }
+
+        let label = path[0];
+        let entry = self.latency_tree.iter_mut().position(|metric| metric.label == label);
+
+        let metric = if let Some(idx) = entry {
+            &mut self.latency_tree[idx]
+        } else {
+            self.latency_tree.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0, level));
+            self.latency_tree
+                .last_mut()
+                .expect("latency_tree cannot be empty immediately after push")
+        };
+
+        if path.len() == 1 {
+            metric.last_ms = last_ms;
+            metric.average_ms = average_ms;
+            return;
+        }
+
+        metric.upsert_path(&path[1..], last_ms, average_ms, level + 1);
     }
 
     fn update_generation_metrics(&mut self, iteration: Option<Duration>) {
@@ -549,29 +712,9 @@ impl AppState {
     }
 }
 
-fn emit_startup_memory_update(
-    tx: &mpsc::Sender<AppEvent>,
-    tracker: &mut Option<ProcessMemoryTracker>,
-    host_memory: &mut ScalarStat,
-    model_memory_tree: &ModelMemoryNode,
-    host_overheads: &[(String, usize)],
-) -> Result<(), mpsc::SendError<AppEvent>> {
-    sample_process_memory(tracker, host_memory);
-    let empty_embed = MemoryScopeStat::default();
-    let empty_forward = MemoryScopeStat::default();
-    let empty_output = MemoryScopeStat::default();
-    let empty_blocks: Vec<MemoryBlockStat> = Vec::new();
-    let rows = build_memory_rows(
-        model_memory_tree,
-        host_memory,
-        &empty_embed,
-        &empty_forward,
-        None,
-        &empty_blocks,
-        &empty_output,
-        host_overheads,
-    );
-    tx.send(AppEvent::MemoryUpdate(rows))
+fn emit_startup_memory_update(tx: &mpsc::Sender<AppEvent>) -> Result<(), mpsc::SendError<AppEvent>> {
+    // Send empty memory rows as placeholder in the new system
+    tx.send(AppEvent::MemoryUpdate(vec![]))
 }
 
 fn setup_terminal() -> Result<Terminal<impl Backend>> {
@@ -641,7 +784,7 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
 
     let metrics_text = match state.metrics_view {
         MetricsView::Memory => render_memory_metrics(&state.memory_rows, state.metrics_collapse_state),
-        MetricsView::Latency => render_latency_metrics(&state.latency_rows, state.metrics_collapse_state),
+        MetricsView::Latency => render_hierarchical_latency_metrics(&state.latency_tree, state.metrics_collapse_state),
     };
 
     let metrics_block = Block::default()
@@ -750,99 +893,40 @@ fn render_memory_metrics(rows: &[MemoryRow], collapse_state: CollapseState) -> S
         .join("\n")
 }
 
-fn render_latency_metrics(rows: &[LatencyRow], collapse_state: CollapseState) -> String {
-    if rows.is_empty() {
+fn render_hierarchical_latency_metrics(metrics: &[HierarchicalMetric], collapse_state: CollapseState) -> String {
+    if metrics.is_empty() {
         return "Collecting data...".to_string();
     }
 
-    match collapse_state {
-        CollapseState::Uncollapsed => render_latency_uncollapsed(rows),
-        CollapseState::Collapsed => render_latency_collapsed(rows),
-        CollapseState::VeryCollapsed => render_latency_very_collapsed(rows),
-    }
-}
-
-fn render_latency_uncollapsed(rows: &[LatencyRow]) -> String {
-    rows.iter()
-        .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_latency_very_collapsed(rows: &[LatencyRow]) -> String {
-    rows.iter()
-        .filter(|row| row.level <= 1)
-        .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_latency_collapsed(rows: &[LatencyRow]) -> String {
-    let Some(block_start) = rows.iter().position(|row| row.level == 1 && row.label.starts_with("Block ")) else {
-        return render_latency_uncollapsed(rows);
+    let max_depth = match collapse_state {
+        CollapseState::Uncollapsed => usize::MAX,
+        CollapseState::Collapsed => 2,
+        CollapseState::VeryCollapsed => 0,
     };
 
-    let mut block_end = block_start;
-    #[allow(clippy::needless_range_loop)]
-    for idx in block_start..rows.len() {
-        let row = &rows[idx];
-        if idx != block_start && row.level == 0 {
-            break;
-        }
-        block_end = idx;
-    }
-
-    let mut block_total_last = 0.0;
-    let mut block_total_avg = 0.0;
-    let mut block_count = 0u32;
-    let mut phase_totals: Vec<(String, f64, f64)> = Vec::new();
-
-    for row in &rows[block_start..=block_end] {
-        match row.level {
-            1 => {
-                block_count += 1;
-                block_total_last += row.last_ms;
-                block_total_avg += row.average_ms;
-            }
-            2 => {
-                if let Some((_, total_last, total_avg)) = phase_totals.iter_mut().find(|(label, _, _)| label == &row.label) {
-                    *total_last += row.last_ms;
-                    *total_avg += row.average_ms;
-                } else {
-                    phase_totals.push((row.label.clone(), row.last_ms, row.average_ms));
-                }
-            }
-            _ => {}
-        }
-    }
-
-    if block_count == 0 {
-        return render_latency_uncollapsed(rows);
-    }
-
-    let mut lines: Vec<String> = Vec::new();
-
-    lines.extend(
-        rows[..block_start]
-            .iter()
-            .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms)),
-    );
-
-    lines.push(format_latency_line(0, "Blocks", block_total_last, block_total_avg));
-
-    for (label, total_last, total_avg) in phase_totals {
-        lines.push(format_latency_line(1, &label, total_last, total_avg));
-    }
-
-    if block_end + 1 < rows.len() {
-        lines.extend(
-            rows[block_end + 1..]
-                .iter()
-                .map(|row| format_latency_line(row.level, &row.label, row.last_ms, row.average_ms)),
-        );
+    let mut lines = Vec::new();
+    for metric in metrics {
+        render_metric(metric, 0, max_depth, &mut lines);
     }
 
     lines.join("\n")
+}
+
+fn render_metric(metric: &HierarchicalMetric, depth: usize, max_depth: usize, lines: &mut Vec<String>) {
+    if depth > max_depth {
+        return;
+    }
+
+    let level = u8::try_from(depth).unwrap_or(u8::MAX);
+    lines.push(format_latency_line(level, &metric.label, metric.last_ms, metric.average_ms));
+
+    if depth == max_depth {
+        return;
+    }
+
+    for child in &metric.children {
+        render_metric(child, depth + 1, max_depth, lines);
+    }
 }
 
 fn format_latency_line(level: u8, label: &str, last_ms: f64, avg_ms: f64) -> String {

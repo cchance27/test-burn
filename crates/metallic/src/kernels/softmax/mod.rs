@@ -1,9 +1,11 @@
 use super::*;
 use crate::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
+use crate::context::GpuProfilerLabel;
 use crate::kernels::matmul::mps_matrix_from_buffer;
 use crate::resource_cache::ResourceCache;
 use crate::tensor::MpsMatrixBatchView;
 use crate::{Dtype, TensorElement};
+use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
@@ -174,6 +176,7 @@ struct SoftmaxOperation<T: TensorElement> {
     causal: u32,
     query_offset: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for SoftmaxOp {
@@ -219,6 +222,8 @@ impl KernelInvocable for SoftmaxOp {
 
         ctx.prepare_tensors_for_active_cmd(&[attn])?;
 
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("softmax_op"));
+
         let op = SoftmaxOperation {
             attn: attn.clone(),
             rows_total,
@@ -227,6 +232,7 @@ impl KernelInvocable for SoftmaxOp {
             causal,
             query_offset,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), attn.clone())) // Return a shallow clone since operation is in-place
@@ -242,6 +248,9 @@ impl<T: TensorElement> Operation for SoftmaxOperation<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         // Ensure at least 32 threads per threadgroup to satisfy kernel's reduction assumptions
         let native = self.pipeline.threadExecutionWidth();

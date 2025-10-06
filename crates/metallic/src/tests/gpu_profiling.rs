@@ -1,8 +1,4 @@
-use metallic_instrumentation::{
-    event::MetricEvent,
-    gpu_profiler::GpuProfiler,
-    prelude::*,
-};
+use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
 
 use crate::{
     operation::{CommandBuffer, FillConstant},
@@ -39,16 +35,8 @@ fn gpu_profiler_emits_individual_kernel_events() {
             .newBufferWithLength_options(byte_len as _, MTLResourceOptions::StorageModeShared)
             .expect("shared buffer");
 
-        let tensor = Tensor::<F32Element>::from_existing_buffer(
-            buffer,
-            vec![element_count],
-            Dtype::F32,
-            &device,
-            &queue,
-            0,
-            true,
-        )
-        .expect("tensor from buffer");
+        let tensor = Tensor::<F32Element>::from_existing_buffer(buffer, vec![element_count], Dtype::F32, &device, &queue, 0, true)
+            .expect("tensor from buffer");
 
         let op_a = FillConstant {
             dst: tensor.clone(),
@@ -61,12 +49,8 @@ fn gpu_profiler_emits_individual_kernel_events() {
             ones_pipeline: None,
         };
 
-        command_buffer
-            .record(&op_a, &mut cache)
-            .expect("record first fill");
-        command_buffer
-            .record(&op_b, &mut cache)
-            .expect("record second fill");
+        command_buffer.record(&op_a, &mut cache).expect("record first fill");
+        command_buffer.record(&op_b, &mut cache).expect("record second fill");
 
         let cpu_start = Instant::now();
         command_buffer.commit();
@@ -97,10 +81,6 @@ fn gpu_profiler_emits_individual_kernel_events() {
         }
 
         let sum_us: u64 = gpu_events.iter().map(|(_, dur)| *dur).sum();
-        assert_ne!(
-            sum_us,
-            total_us,
-            "per-kernel durations must not collapse into a single total"
-        );
+        assert_ne!(sum_us, total_us, "per-kernel durations must not collapse into a single total");
     });
 }

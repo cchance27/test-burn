@@ -1,5 +1,7 @@
 use super::*;
+use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
+use metallic_instrumentation::GpuProfiler;
 
 // Additional Operations for this Metal Kernel (additional functions in the kernel)
 mod elemwise_broadcast_add;
@@ -20,6 +22,7 @@ struct ElemwiseAdd<T: TensorElement> {
     b: Tensor<T>,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for ElemwiseAddOp {
@@ -45,11 +48,15 @@ impl KernelInvocable for ElemwiseAddOp {
         }
         ctx.prepare_tensors_for_active_cmd(&[&a, &b])?;
         let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("elemwise_add_op"));
         let op = ElemwiseAdd {
             a,
             b,
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
         Ok((Box::new(op), out))
     }
@@ -64,6 +71,9 @@ impl<T: TensorElement> Operation for ElemwiseAdd<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {

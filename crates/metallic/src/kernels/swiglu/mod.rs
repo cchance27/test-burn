@@ -5,7 +5,9 @@ use crate::Dtype;
 use crate::MetalError;
 use crate::Tensor;
 use crate::TensorElement;
+use crate::context::GpuProfilerLabel;
 use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use metallic_instrumentation::GpuProfiler;
 use std::convert::TryFrom;
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
@@ -29,6 +31,7 @@ struct SwiGLUFusedActivation<T: TensorElement> {
     gate_leading_stride: u32,
     up_leading_stride: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl KernelInvocable for SwiGLUFusedActivationOp {
@@ -96,6 +99,10 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
             1
         };
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("swiglu_fused_activation_op"));
+
         let op = SwiGLUFusedActivation {
             gate,
             gate_bias,
@@ -107,6 +114,7 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
             gate_leading_stride,
             up_leading_stride,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), out))
@@ -122,6 +130,9 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
         let encoder = command_buffer
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let vector_width = std::cmp::max(self.vector_width as usize, 1);
         let base_threads = 256usize;
