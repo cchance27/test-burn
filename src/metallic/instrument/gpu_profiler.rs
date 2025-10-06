@@ -16,6 +16,9 @@ use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
+use tracing::Dispatch;
+use tracing::{self, dispatcher};
+
 use mach2::{
     kern_return::KERN_SUCCESS,
     mach_time::{mach_timebase_info, mach_timebase_info_data_t},
@@ -85,15 +88,17 @@ impl GpuProfilerScopeInner {
 struct GpuProfilerState {
     key: usize,
     counter: CounterResources,
+    dispatch: Dispatch,
     records: Mutex<Vec<GpuOpRecord>>,
     sequence: Mutex<u64>,
 }
 
 impl GpuProfilerState {
-    fn new(key: usize, counter: CounterResources) -> Self {
+    fn new(key: usize, counter: CounterResources, dispatch: Dispatch) -> Self {
         Self {
             key,
             counter,
+            dispatch,
             records: Mutex::new(Vec::new()),
             sequence: Mutex::new(0),
         }
@@ -117,6 +122,12 @@ impl GpuProfilerState {
     }
 
     fn process_completion(&self) {
+        dispatcher::with_default(&self.dispatch, || {
+            self.process_completion_inner();
+        });
+    }
+
+    fn process_completion_inner(&self) {
         let records = self.take_records();
         if records.is_empty() {
             registry().lock().expect("registry mutex poisoned").remove(&self.key);
@@ -234,7 +245,8 @@ impl GpuProfiler {
         let raw = command_buffer.raw();
         let device = unsafe { raw.device() };
         let counter = CounterResources::new(Some(device.as_ref()));
-        let state = Arc::new(GpuProfilerState::new(key, counter));
+        let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
+        let state = Arc::new(GpuProfilerState::new(key, counter, dispatch));
 
         registry()
             .lock()
