@@ -2,8 +2,6 @@ use crate::metallic::instrument::prelude::*;
 
 use super::{EnvVarGuard, env_mutex};
 
-use tracing::Level;
-
 #[test]
 fn app_config_parses_environment_and_initialises() {
     let _lock = env_mutex().lock().expect("env mutex poisoned");

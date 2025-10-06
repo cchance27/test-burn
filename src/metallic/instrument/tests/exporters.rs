@@ -3,8 +3,6 @@ use crate::metallic::instrument::prelude::*;
 use std::sync::mpsc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use chrono::Utc;
-
 #[test]
 fn jsonl_exporter_writes_serialised_metrics() {
     let mut path = std::env::temp_dir();

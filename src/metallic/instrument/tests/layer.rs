@@ -3,9 +3,6 @@ use crate::metallic::instrument::prelude::*;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use tracing::{info, info_span};
-use tracing_subscriber::layer::SubscriberExt;
-
 #[test]
 fn metrics_layer_enriches_span_context() {
     let (sender, receiver) = mpsc::channel();
@@ -19,7 +16,7 @@ fn metrics_layer_enriches_span_context() {
         thread_groups: (8, 8, 1),
     };
 
-    let (parent_id, child_id) = tracing::subscriber::with_default(subscriber, || {
+    let (parent_id, child_id) = subscriber::with_default(subscriber, || {
         let parent_span = info_span!("parent_span");
         let parent_id = parent_span.id().map(|id| id.into_u64()).expect("parent span should be active");
         let _parent_guard = parent_span.enter();
@@ -59,7 +56,7 @@ fn metrics_layer_ignores_non_metric_events() {
     let layer = MetricsLayer::new(exporters);
     let subscriber = tracing_subscriber::registry().with(layer);
 
-    tracing::subscriber::with_default(subscriber, || {
+    subscriber::with_default(subscriber, || {
         let span = info_span!("non_metric_span");
         let _guard = span.enter();
         info!("non-metric event should be ignored");
