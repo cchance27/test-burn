@@ -1,3 +1,6 @@
+[workspace]
+members = ["crates/metallic_env"]
+
 [package]
 name = "test-burn"
 version = "0.1.0"
@@ -47,6 +50,7 @@ half = { version = "2.6.0", features = ["zerocopy", "bytemuck", "num-traits", "u
 num-traits = "0.2.19"
 libc = { version = "0.2", optional = false }
 mach2 = "0.4"
+metallic_env = { path = "crates/metallic_env" }
 
 [dev-dependencies]
 approx = "0.5.1"
