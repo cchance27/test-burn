@@ -1,4 +1,5 @@
 use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
+use crate::metallic::instrument::gpu_profiler::GpuProfiler;
 
 use crate::metallic::{
     TensorElement,
@@ -38,13 +39,28 @@ impl<T: TensorElement> Operation for FillConstant<T> {
         if self.value == 0.0 {
             // Encode blit fill for zeros
             let encoder = command_buffer.blitCommandEncoder().unwrap();
+            let profiler_scope = GpuProfiler::profile_blit(
+                command_buffer,
+                &encoder,
+                format!("FillConstantZero@{:p}", self),
+                "Metal".to_string(),
+            );
             encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
+            if let Some(scope) = profiler_scope {
+                scope.finish();
+            }
             encoder.endEncoding();
             Ok(())
         } else if self.value == 1.0 {
             // Encode compute kernel for ones
             if let Some(pipeline) = &self.ones_pipeline {
                 let encoder = command_buffer.computeCommandEncoder().unwrap();
+                let profiler_scope = GpuProfiler::profile_compute(
+                    command_buffer,
+                    &encoder,
+                    format!("FillConstantOnes@{:p}", self),
+                    "Metal".to_string(),
+                );
                 set_compute_pipeline_state(&encoder, pipeline);
                 set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
                 // pass total elements for tail-guarding
@@ -64,6 +80,9 @@ impl<T: TensorElement> Operation for FillConstant<T> {
                     depth: 1,
                 };
                 dispatch_threads(&encoder, grid_size, threadgroup_size);
+                if let Some(scope) = profiler_scope {
+                    scope.finish();
+                }
                 encoder.endEncoding();
                 Ok(())
             } else {

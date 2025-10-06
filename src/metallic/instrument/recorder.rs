@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use tracing::{Event, Subscriber};
+use tracing::{Event, Metadata, Subscriber};
 use tracing_subscriber::{Layer, layer::Context, registry::LookupSpan};
 
 use crate::metallic::instrument::event::MetricEvent;
@@ -55,6 +55,14 @@ impl<S> Layer<S> for MetricsLayer
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
 {
+    fn enabled(&self, metadata: &Metadata<'_>, ctx: Context<'_, S>) -> bool {
+        if metadata.target() == "metrics" {
+            true
+        } else {
+            ctx.enabled(metadata)
+        }
+    }
+
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         if event.metadata().target() != "metrics" {
             return;
@@ -102,7 +110,16 @@ struct MetricVisitor {
 impl tracing::field::Visit for MetricVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
         if field.name() == "metric" {
-            self.metric_json = Some(format!("{:?}", value));
+            let raw = format!("{:?}", value);
+            // `tracing` records `%` formatted fields via the debug visitor, which
+            // wraps string values in quotes. Attempt to recover the original JSON
+            // payload by unescaping when possible so downstream deserialisation
+            // succeeds even if the macro passed a display-formatted string.
+            if let Ok(unescaped) = serde_json::from_str::<String>(&raw) {
+                self.metric_json = Some(unescaped);
+            } else {
+                self.metric_json = Some(raw);
+            }
         }
     }
 
