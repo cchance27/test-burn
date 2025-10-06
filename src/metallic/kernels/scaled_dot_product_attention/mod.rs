@@ -161,17 +161,20 @@ fn create_sdpa_operation<T: TensorElement>(
         q.slice_axis(1, row_offset..s_q)?
     };
 
-    // Create output tensor covering the full sequence length so callers observe consistent shapes.
+    // Create output tensor. When we're only updating a suffix we still back it with
+    // a full-sequence buffer so incremental callers can reuse the same allocation,
+    // but we return a view containing only the freshly written rows to preserve the
+    // public contract of emitting `rows_to_process` results.
     let full_output_dims = vec![b, s_q, d];
-    let out = if rows_to_process == s_q {
+    let out_full = if rows_to_process == s_q {
         Tensor::new(full_output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
     } else {
         Tensor::zeros(full_output_dims, ctx, true)?
     };
     let out_active = if rows_to_process == s_q {
-        out.clone()
+        out_full.clone()
     } else {
-        out.slice_axis(1, row_offset..s_q)?
+        out_full.slice_axis(1, row_offset..s_q)?
     };
 
     let attention = if config.reuse_workspace {
@@ -235,7 +238,7 @@ fn create_sdpa_operation<T: TensorElement>(
             q: q.clone(),
             k: k.clone(),
             v: v.clone(),
-            output: out.clone(),
+            output: out_full.clone(),
             causal,
             batch: b,
             seq_q: rows_to_process,
@@ -246,7 +249,7 @@ fn create_sdpa_operation<T: TensorElement>(
             seq_len_delta: rows_to_process,
             config,
         }),
-        out,
+        out_active,
     ))
 }
 
