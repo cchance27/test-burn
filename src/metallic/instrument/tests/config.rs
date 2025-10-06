@@ -1,11 +1,10 @@
 use crate::metallic::instrument::prelude::*;
-
 #[test]
 fn app_config_parses_environment_and_initialises() {
     let _lock = Environment::lock();
-    let _log_level = EnvVarGuard::set(InstrumentEnvVar::LogLevel, "debug");
-    let _jsonl_path = EnvVarGuard::set(InstrumentEnvVar::MetricsJsonlPath, "/tmp/metrics.jsonl");
-    let _console = EnvVarGuard::set(InstrumentEnvVar::MetricsConsole, "true");
+    let _log_level = LogLevel.set_guard(Level::DEBUG).expect("log level should set");
+    let _jsonl_path = MetricsJsonlPath.set_guard("/tmp/metrics.jsonl").expect("metrics path should set");
+    let _console = MetricsConsole.set_guard(true).expect("console flag should set");
 
     let config = AppConfig::from_env().expect("configuration should parse");
     assert_eq!(config.log_level, Level::DEBUG);
@@ -30,8 +29,8 @@ fn app_config_parses_environment_and_initialises() {
 fn app_config_rejects_invalid_log_level() {
     let _lock = Environment::lock();
     let _log_level = EnvVarGuard::set(InstrumentEnvVar::LogLevel, "verbose");
-    let _jsonl_path = EnvVarGuard::unset(InstrumentEnvVar::MetricsJsonlPath);
-    let _console = EnvVarGuard::unset(InstrumentEnvVar::MetricsConsole);
+    let _jsonl_path = MetricsJsonlPath.unset_guard();
+    let _console = MetricsConsole.unset_guard();
 
     match AppConfig::from_env() {
         Err(AppConfigError::InvalidLogLevel { value }) => assert_eq!(value, "verbose"),
@@ -43,8 +42,8 @@ fn app_config_rejects_invalid_log_level() {
 fn app_config_rejects_invalid_console_flag() {
     let _lock = Environment::lock();
     let _console = EnvVarGuard::set(InstrumentEnvVar::MetricsConsole, "maybe");
-    let _log_level = EnvVarGuard::unset(InstrumentEnvVar::LogLevel);
-    let _jsonl_path = EnvVarGuard::unset(InstrumentEnvVar::MetricsJsonlPath);
+    let _log_level = LogLevel.unset_guard();
+    let _jsonl_path = MetricsJsonlPath.unset_guard();
 
     match AppConfig::from_env() {
         Err(AppConfigError::InvalidBoolean { name, value }) => {

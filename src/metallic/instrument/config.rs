@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 
 use tracing::Level;
 
-use metallic_env::{EnvVar, Environment, InstrumentEnvVar};
+use metallic_env::EnvVarError;
+use metallic_env::environment::instrument::{LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
@@ -19,6 +20,12 @@ pub enum AppConfigError {
     /// A provided boolean flag could not be parsed.
     #[error("invalid boolean flag '{value}' for {name}")]
     InvalidBoolean { name: &'static str, value: String },
+    /// A typed environment variable interaction failed unexpectedly.
+    #[error("failed to access instrumentation environment: {source}")]
+    EnvVar {
+        #[from]
+        source: EnvVarError,
+    },
 }
 
 /// Global application configuration for instrumentation and logging.
@@ -37,17 +44,25 @@ static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
 impl AppConfig {
     /// Load configuration from the process environment.
     pub fn from_env() -> Result<Self, AppConfigError> {
-        let log_level = match Environment::get(InstrumentEnvVar::LogLevel) {
-            Some(value) => parse_level(&value)?,
-            None => Level::INFO,
+        let log_level = match LOG_LEVEL.get() {
+            Ok(Some(value)) => value,
+            Ok(None) => Level::INFO,
+            Err(EnvVarError::Parse { value, .. }) => return Err(AppConfigError::InvalidLogLevel { value }),
+            Err(err) => return Err(err.into()),
         };
 
-        let metrics_jsonl_path = Environment::get(InstrumentEnvVar::MetricsJsonlPath).map(PathBuf::from);
+        let metrics_jsonl_path = METRICS_JSONL_PATH.get()?;
 
-        let console_var = EnvVar::from(InstrumentEnvVar::MetricsConsole);
-        let enable_console_metrics = match Environment::get(console_var) {
-            Some(value) => parse_bool(console_var, &value)?,
-            None => false,
+        let enable_console_metrics = match METRICS_CONSOLE.get() {
+            Ok(Some(value)) => value,
+            Ok(None) => false,
+            Err(EnvVarError::Parse { value, .. }) => {
+                return Err(AppConfigError::InvalidBoolean {
+                    name: METRICS_CONSOLE.key(),
+                    value,
+                });
+            }
+            Err(err) => return Err(err.into()),
         };
 
         Ok(Self {
@@ -72,22 +87,5 @@ impl AppConfig {
     /// Access the globally-initialised configuration.
     pub fn global() -> &'static Self {
         APP_CONFIG.get().expect("AppConfig not initialised")
-    }
-}
-
-fn parse_level(value: &str) -> Result<Level, AppConfigError> {
-    value
-        .parse::<Level>()
-        .map_err(|_| AppConfigError::InvalidLogLevel { value: value.to_string() })
-}
-
-fn parse_bool(var: EnvVar, value: &str) -> Result<bool, AppConfigError> {
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(AppConfigError::InvalidBoolean {
-            name: var.key(),
-            value: value.to_string(),
-        }),
     }
 }
