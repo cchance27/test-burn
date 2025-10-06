@@ -185,7 +185,7 @@ impl<T> TypedEnvVar<T> {
         Ok(TypedEnvVarGuard {
             descriptor: self,
             previous,
-            value,
+            value: Some(value),
         })
     }
 
@@ -199,13 +199,13 @@ impl<T> TypedEnvVar<T> {
 pub struct TypedEnvVarGuard<'a, T> {
     descriptor: &'a TypedEnvVar<T>,
     previous: Option<String>,
-    value: T,
+    value: Option<T>,
 }
 
 impl<'a, T> TypedEnvVarGuard<'a, T> {
     /// Consume the guard, returning the typed value that was set.
-    pub fn into_inner(self) -> T {
-        self.value
+    pub fn into_inner(mut self) -> T {
+        self.value.take().expect("typed environment guard should always contain a value")
     }
 }
 
@@ -213,7 +213,7 @@ impl<'a, T> Deref for TypedEnvVarGuard<'a, T> {
     type Target = T;
 
     fn deref(&self) -> &Self::Target {
-        &self.value
+        self.value.as_ref().expect("typed environment guard should always contain a value")
     }
 }
 
