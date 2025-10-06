@@ -5,7 +5,7 @@ use crate::metallic::operation::{CommandBuffer, FillConstant};
 use crate::metallic::resource_cache::ResourceCache;
 use crate::metallic::tensor::{Dtype, F32Element, Tensor};
 
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLResourceOptions};
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 

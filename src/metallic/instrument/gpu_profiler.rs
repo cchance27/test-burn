@@ -23,7 +23,9 @@ use mach2::{
 
 #[derive(Clone)]
 pub struct GpuProfiler {
-    state: Arc<GpuProfilerState>,
+    // Keep the profiler state alive for the lifetime of this handle so scopes
+    // may continue to resolve even if the handle is dropped early.
+    _state: Arc<GpuProfilerState>,
 }
 
 pub struct GpuProfilerScope {
@@ -186,7 +188,7 @@ impl GpuProfiler {
             completion_state.process_completion();
         });
 
-        Some(Self { state })
+        Some(Self { _state: state })
     }
 
     fn scope_for_encoder(
@@ -264,6 +266,7 @@ impl GpuProfiler {
 
 struct CounterResources {
     timestamp_counter_set: Option<Retained<ProtocolObject<dyn MTLCounterSet>>>,
+    supports_stage_sampling: bool,
     supports_dispatch_sampling: bool,
     supports_blit_sampling: bool,
     timestamp_period: Option<f64>,
@@ -288,6 +291,7 @@ impl CounterResources {
     fn new(device: Option<&ProtocolObject<dyn MTLDevice>>) -> Self {
         let mut resources = Self {
             timestamp_counter_set: None,
+            supports_stage_sampling: false,
             supports_dispatch_sampling: false,
             supports_blit_sampling: false,
             timestamp_period: None,
@@ -295,6 +299,7 @@ impl CounterResources {
 
         if let Some(device) = device {
             resources.timestamp_counter_set = Self::find_timestamp_counter_set(device);
+            resources.supports_stage_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtStageBoundary);
             resources.supports_dispatch_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtDispatchBoundary);
             resources.supports_blit_sampling = device.supportsCounterSampling(MTLCounterSamplingPoint::AtBlitBoundary);
             resources.timestamp_period = Self::gpu_timestamp_period(device);
@@ -306,7 +311,7 @@ impl CounterResources {
     fn supports_sampling(&self) -> bool {
         self.timestamp_counter_set.is_some()
             && self.timestamp_period.is_some()
-            && (self.supports_dispatch_sampling || self.supports_blit_sampling)
+            && (self.supports_stage_sampling || self.supports_dispatch_sampling || self.supports_blit_sampling)
     }
 
     fn allocate_timing(
@@ -316,7 +321,7 @@ impl CounterResources {
     ) -> Option<PendingTiming> {
         let counter_set = self.timestamp_counter_set.as_ref()?;
         match encoder {
-            EncoderHandle::Compute(_) if !self.supports_dispatch_sampling => return None,
+            EncoderHandle::Compute(_) if !self.supports_dispatch_sampling && !self.supports_stage_sampling => return None,
             EncoderHandle::Blit(_) if !self.supports_blit_sampling => return None,
             _ => {}
         }
@@ -389,33 +394,40 @@ impl CounterResources {
     }
 
     fn gpu_timestamp_period(device: &ProtocolObject<dyn MTLDevice>) -> Option<f64> {
-        let mut cpu_start: u64 = 0;
-        let mut gpu_start: u64 = 0;
-        unsafe {
-            device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu_start), NonNull::from(&mut gpu_start));
-        }
-
-        std::thread::sleep(Duration::from_micros(200));
-
-        let mut cpu_end: u64 = 0;
-        let mut gpu_end: u64 = 0;
-        unsafe {
-            device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu_end), NonNull::from(&mut gpu_end));
-        }
-
-        let cpu_delta = cpu_end.saturating_sub(cpu_start);
-        let gpu_delta = gpu_end.saturating_sub(gpu_start);
-        if cpu_delta == 0 || gpu_delta == 0 {
-            return None;
-        }
-
         let mut info = mach_timebase_info_data_t { numer: 0, denom: 0 };
-        let status = unsafe { mach_timebase_info(&mut info) };
-        if status != KERN_SUCCESS || info.denom == 0 {
+        if unsafe { mach_timebase_info(&mut info) } != KERN_SUCCESS || info.denom == 0 {
             return None;
         }
 
-        let cpu_delta_ns = (cpu_delta as u128 * info.numer as u128) / info.denom as u128;
-        Some(cpu_delta_ns as f64 / 1e9 / gpu_delta as f64)
+        let mut sleep = Duration::from_micros(200);
+        for _ in 0..5 {
+            let mut cpu_start: u64 = 0;
+            let mut gpu_start: u64 = 0;
+            unsafe {
+                device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu_start), NonNull::from(&mut gpu_start));
+            }
+
+            std::thread::sleep(sleep);
+
+            let mut cpu_end: u64 = 0;
+            let mut gpu_end: u64 = 0;
+            unsafe {
+                device.sampleTimestamps_gpuTimestamp(NonNull::from(&mut cpu_end), NonNull::from(&mut gpu_end));
+            }
+
+            let cpu_delta = cpu_end.saturating_sub(cpu_start);
+            let gpu_delta = gpu_end.saturating_sub(gpu_start);
+            if cpu_delta != 0 && gpu_delta != 0 {
+                let cpu_delta_ns = (cpu_delta as u128 * info.numer as u128) / info.denom as u128;
+                let period = cpu_delta_ns as f64 / 1e9 / gpu_delta as f64;
+                if period.is_finite() && period > 0.0 {
+                    return Some(period);
+                }
+            }
+
+            sleep = sleep.saturating_mul(2);
+        }
+
+        None
     }
 }
