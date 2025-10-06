@@ -770,36 +770,40 @@ impl<T: TensorElement> Tensor<T> {
             ));
         }
 
-        // TODO: Generalize to support multi-dimensional slicing.
-        if ranges.len() > 1 {
-            return Err(MetalError::OperationNotSupported(
-                "Slicing on more than one dimension is not yet supported.".to_string(),
-            ));
+        let mut view = self.clone();
+        for (axis, range) in ranges.iter().enumerate() {
+            if range.start == 0 && range.end == view.dims[axis] {
+                continue;
+            }
+            view = view.slice_axis(axis, range.clone())?;
+        }
+
+        Ok(view)
+    }
+
+    /// Create a view that selects a contiguous span along `axis`.
+    pub fn slice_axis(&self, axis: usize, range: std::ops::Range<usize>) -> Result<Self, MetalError> {
+        if axis >= self.dims.len() {
+            return Err(MetalError::InvalidShape(format!(
+                "Cannot slice axis {axis} on tensor with rank {}",
+                self.dims.len()
+            )));
+        }
+
+        if range.start > range.end || range.end > self.dims[axis] {
+            return Err(MetalError::InvalidShape(format!(
+                "Invalid slice range {:?} for axis {} with size {}",
+                range, axis, self.dims[axis]
+            )));
         }
 
         let mut new_dims = self.dims.clone();
-        let mut new_offset = self.offset;
+        new_dims[axis] = range.end - range.start;
 
-        if !ranges.is_empty() {
-            let range0 = &ranges[0];
-            let start = range0.start;
-            let end = range0.end;
+        let elem_size = self.dtype.size_bytes();
+        let offset_adjust = range.start * self.strides[axis] * elem_size;
 
-            if start > end || end > self.dims[0] {
-                return Err(MetalError::InvalidShape(format!(
-                    "Invalid slice range {:?} for dimension 0 with size {}",
-                    range0, self.dims[0]
-                )));
-            }
-
-            // Update dimension for the sliced axis
-            new_dims[0] = end - start;
-
-            // Update the byte offset into the buffer
-            new_offset += start * self.strides[0] * self.dtype.size_bytes();
-        }
-
-        Ok(self.build_view(new_dims.clone(), Self::compute_strides(&new_dims), new_offset))
+        Ok(self.build_view(new_dims, self.strides.clone(), self.offset + offset_adjust))
     }
 
     /// Create a view into a contiguous range along the last dimension of the tensor.

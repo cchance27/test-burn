@@ -158,11 +158,21 @@ fn create_sdpa_operation<T: TensorElement>(
     let q_active = if row_offset == 0 && rows_to_process == s_q {
         q.clone()
     } else {
-        q.slice(&[0..b, row_offset..s_q, 0..d])?
+        q.slice_axis(1, row_offset..s_q)?
     };
 
-    // Create output tensor
-    let out = Tensor::new(vec![b, rows_to_process, d], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+    // Create output tensor covering the full sequence length so callers observe consistent shapes.
+    let full_output_dims = vec![b, s_q, d];
+    let out = if rows_to_process == s_q {
+        Tensor::new(full_output_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
+    } else {
+        Tensor::zeros(full_output_dims, ctx, true)?
+    };
+    let out_active = if rows_to_process == s_q {
+        out.clone()
+    } else {
+        out.slice_axis(1, row_offset..s_q)?
+    };
 
     let attention = if config.reuse_workspace {
         let buffer = Tensor::new(vec![b, rows_to_process, s_k], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
@@ -212,10 +222,10 @@ fn create_sdpa_operation<T: TensorElement>(
 
     match cache {
         Some(cache_ref) => {
-            ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;
+            ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out_active, false, false, 1.0, 0.0, cache_ref)?;
         }
         None => {
-            ctx.matmul_alpha_beta(&softmax_result, v, &out, false, false, 1.0, 0.0)?;
+            ctx.matmul_alpha_beta(&softmax_result, v, &out_active, false, false, 1.0, 0.0)?;
         }
     };
 
