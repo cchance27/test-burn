@@ -71,7 +71,7 @@ impl InstrumentLogLevel {
     }
 
     /// Set the environment variable for the guard's lifetime.
-    pub fn set_guard(&self, value: Level) -> Result<TypedEnvVarGuard<'static, Level>, EnvVarError> {
+    pub fn set_guard(&self, value: Level) -> Result<TypedEnvVarGuard<'_, Level>, EnvVarError> {
         LOG_LEVEL.set_guard(value)
     }
 
@@ -90,7 +90,7 @@ impl InstrumentLogLevel {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         LOG_LEVEL.unset_guard()
     }
 
@@ -125,7 +125,7 @@ impl InstrumentMetricsJsonlPath {
     }
 
     /// Set the environment variable for the guard's lifetime.
-    pub fn set_guard(&self, value: impl Into<PathBuf>) -> Result<TypedEnvVarGuard<'static, PathBuf>, EnvVarError> {
+    pub fn set_guard(&self, value: impl Into<PathBuf>) -> Result<TypedEnvVarGuard<'_, PathBuf>, EnvVarError> {
         METRICS_JSONL_PATH.set_guard(value.into())
     }
 
@@ -144,7 +144,7 @@ impl InstrumentMetricsJsonlPath {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         METRICS_JSONL_PATH.unset_guard()
     }
 
@@ -179,7 +179,7 @@ impl InstrumentMetricsConsole {
     }
 
     /// Set the environment variable for the guard's lifetime.
-    pub fn set_guard(&self, value: bool) -> Result<TypedEnvVarGuard<'static, bool>, EnvVarError> {
+    pub fn set_guard(&self, value: bool) -> Result<TypedEnvVarGuard<'_, bool>, EnvVarError> {
         METRICS_CONSOLE.set_guard(value)
     }
 
@@ -198,7 +198,7 @@ impl InstrumentMetricsConsole {
     }
 
     /// Unset the environment variable for the guard's lifetime.
-    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         METRICS_CONSOLE.unset_guard()
     }
 

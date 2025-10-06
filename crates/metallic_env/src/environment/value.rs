@@ -180,7 +180,7 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Set the environment variable for the lifetime of the returned guard.
-    pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'static, T>, EnvVarError> {
+    pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
         let formatted = self.format_value(&value)?;
         let mut lock = Environment::lock();
         let previous = Environment::get(self.var);
@@ -211,7 +211,7 @@ impl<T> TypedEnvVar<T> {
     }
 
     /// Unset the environment variable for the lifetime of the guard.
-    pub fn unset_guard(&self) -> EnvVarGuard<'static> {
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
         EnvVarGuard::unset(self.var)
     }
 
