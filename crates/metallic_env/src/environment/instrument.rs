@@ -184,8 +184,8 @@ fn parse_path(value: &str) -> Result<PathBuf, EnvVarParseError> {
     Ok(PathBuf::from(value))
 }
 
-fn format_path(path: &PathBuf) -> Result<String, EnvVarFormatError> {
-    Ok(path.to_string_lossy().into_owned())
+fn format_path(path: &impl AsRef<std::path::Path>) -> Result<String, EnvVarFormatError> {
+    Ok(path.as_ref().to_string_lossy().into_owned())
 }
 
 fn parse_bool(value: &str) -> Result<bool, EnvVarParseError> {
