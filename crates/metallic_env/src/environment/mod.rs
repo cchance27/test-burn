@@ -47,22 +47,35 @@ impl Environment {
     }
 
     /// Set the environment variable using the provided UTF-8 value.
-    #[allow(unused_unsafe)]
+    ///
+    /// This method acquires the global environment mutex, ensuring callers do not
+    /// have to manage synchronisation for isolated mutations. Prefer
+    /// [`Environment::lock`] when batching multiple operations so they can share a
+    /// single critical section.
     pub fn set(var: impl Into<EnvVar>, value: &str) {
         let var = var.into();
-        // SAFETY: Environment mutations are synchronised via [`Environment::lock`].
-        unsafe {
-            std::env::set_var(var.key(), value);
-        }
+        let mut guard = Self::lock();
+        Self::set_locked(var, value, &mut guard);
     }
 
     /// Remove the environment variable from the process environment.
-    #[allow(unused_unsafe)]
+    ///
+    /// Like [`Environment::set`], this acquires the global mutex internally. Hold
+    /// the lock manually via [`Environment::lock`] if you need to couple the
+    /// deletion with additional reads or writes.
     pub fn remove(var: impl Into<EnvVar>) {
         let var = var.into();
-        // SAFETY: Environment mutations are synchronised via [`Environment::lock`].
-        unsafe {
-            std::env::remove_var(var.key());
-        }
+        let mut guard = Self::lock();
+        Self::remove_locked(var, &mut guard);
+    }
+
+    /// Set the environment variable while reusing an existing environment lock.
+    pub(crate) fn set_locked(var: EnvVar, value: &str, _guard: &mut MutexGuard<'static, ()>) {
+        std::env::set_var(var.key(), value);
+    }
+
+    /// Remove the environment variable while reusing an existing environment lock.
+    pub(crate) fn remove_locked(var: EnvVar, _guard: &mut MutexGuard<'static, ()>) {
+        std::env::remove_var(var.key());
     }
 }

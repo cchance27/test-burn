@@ -179,9 +179,10 @@ impl<T> TypedEnvVar<T> {
 
     /// Set the environment variable for the lifetime of the returned guard.
     pub fn set_guard(&self, value: T) -> Result<TypedEnvVarGuard<'_, T>, EnvVarError> {
-        let previous = Environment::get(self.var);
         let formatted = self.format_value(&value)?;
-        Environment::set(self.var, &formatted);
+        let mut lock = Environment::lock();
+        let previous = Environment::get(self.var);
+        Environment::set_locked(self.var, &formatted, &mut lock);
         Ok(TypedEnvVarGuard {
             descriptor: self,
             previous,
@@ -196,6 +197,9 @@ impl<T> TypedEnvVar<T> {
 }
 
 /// Guard that restores the previous state of a typed environment variable.
+///
+/// Dropping the guard acquires the global environment mutex before restoring
+/// the prior value to guarantee serialised mutations.
 pub struct TypedEnvVarGuard<'a, T> {
     descriptor: &'a TypedEnvVar<T>,
     previous: Option<String>,
@@ -219,10 +223,11 @@ impl<'a, T> Deref for TypedEnvVarGuard<'a, T> {
 
 impl<'a, T> Drop for TypedEnvVarGuard<'a, T> {
     fn drop(&mut self) {
+        let mut lock = Environment::lock();
         if let Some(previous) = &self.previous {
-            Environment::set(self.descriptor.var, previous);
+            Environment::set_locked(self.descriptor.var, previous, &mut lock);
         } else {
-            Environment::remove(self.descriptor.var);
+            Environment::remove_locked(self.descriptor.var, &mut lock);
         }
     }
 }
