@@ -54,7 +54,7 @@ use serde::Serialize;
 #[serde(tag = "type", content = "data")]
 pub enum MetricEvent {
     GpuKernelDispatched {
-        kernel_name: &'static str,
+        kernel_name: String,
         /// A unique name for this specific operation instance.
         op_name: String,
         thread_groups: (u32, u32, u32),

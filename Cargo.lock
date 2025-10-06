@@ -3276,6 +3276,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "metallic_env"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5098,6 +5106,7 @@ dependencies = [
  "libc",
  "mach2",
  "memmap2",
+ "metallic_env",
  "ndarray",
  "ndarray-npy",
  "num-traits",
@@ -5114,6 +5123,8 @@ dependencies = [
  "serde_json",
  "sysinfo 0.37.1",
  "thiserror 2.0.17",
+ "tracing",
+ "tracing-subscriber",
  "unicode-normalization",
 ]
 
