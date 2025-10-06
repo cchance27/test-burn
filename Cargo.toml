@@ -23,6 +23,8 @@ byteorder = "1.5"
 bytemuck = { version = "1.15", features = ["derive"] }
 approx = "0.5.1"
 serde_json = "1.0.145"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["registry"] }
 ndarray-npy = "0.9.1"
 ndarray = "0.16.1"
 regex = "1.11.3"
