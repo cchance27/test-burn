@@ -6,7 +6,8 @@
 use burn::prelude::Backend;
 use burn::tensor::{Distribution, Float, Int, Tensor as BurnTensor};
 use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::{Context, F32Element, Tensor};
+use metallic::{Context, F32Element, Tensor};
+
 type MyBackend = burn::backend::Metal;
 
 fn benchmark_random_uniform_creation(c: &mut Criterion) {
@@ -130,7 +131,7 @@ fn benchmark_batched_operations(c: &mut Criterion) {
     group.bench_function("batched", |b| {
         b.iter(|| {
             context.pool.reset();
-            let cb = test_burn::metallic::operation::CommandBuffer::new(&context.command_queue).unwrap();
+            let cb = metallic::operation::CommandBuffer::new(&context.command_queue).unwrap();
             let _t1 = Tensor::zeros_batched(shape.to_vec(), &cb, &mut context).unwrap();
             let _t2 = Tensor::ones_batched(shape.to_vec(), &cb, &mut context).unwrap();
             let _t3 = Tensor::random_uniform_batched(shape.to_vec(), &cb, &mut context).unwrap();

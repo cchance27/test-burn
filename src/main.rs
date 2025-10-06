@@ -15,20 +15,16 @@ use std::{
     thread,
     time::Duration,
 };
-
-use test_burn::{
-    alert,
-    app_event::{Alert, AlertLevel, AppEvent, LatencyRow, MemoryRow},
+use metallic::{
+    Context, F16Element, Tokenizer,
+    generation::{GenerationConfig, generate_streaming},
     gguf::{GGUFFile, model_loader::GGUFModelLoader},
-    metallic::{
-        Context, F16Element, Tokenizer,
-        generation::{GenerationConfig, generate_streaming},
-        metrics::{
-            MemoryBlockStat, MemoryScopeStat, ModelMemoryNode, ProcessMemoryTracker, ScalarStat, build_memory_rows,
-            build_model_memory_tree, sample_process_memory,
-        },
+    metrics::{
+        MemoryBlockStat, MemoryScopeStat, ModelMemoryNode, ProcessMemoryTracker, ScalarStat, build_memory_rows, build_model_memory_tree,
+        sample_process_memory,
     },
 };
+use metallic_cli_helpers::prelude::*;
 
 fn main() -> Result<()> {
     // Minimal CLI:

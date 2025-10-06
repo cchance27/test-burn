@@ -1,7 +1,7 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
-use test_burn::metallic::resource_cache::ResourceCache;
-use test_burn::metallic::{Context, F32Element, Tensor};
+use metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
+use metallic::resource_cache::ResourceCache;
+use metallic::{Context, F32Element, Tensor};
 
 const ITERATIONS: usize = 5;
 const ROWS: usize = 512;

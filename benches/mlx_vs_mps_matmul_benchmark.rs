@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use test_burn::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use test_burn::metallic::{Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use metallic::{Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 
 use std::sync::{Mutex, OnceLock};
 
