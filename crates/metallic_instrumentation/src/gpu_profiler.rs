@@ -53,7 +53,7 @@ struct GpuProfilerScopeInner {
 }
 
 impl GpuProfilerScopeInner {
-    fn complete(mut self) {
+    fn complete(self) {
         let cpu_duration = self.cpu_start.elapsed();
         let record = GpuOpRecord {
             op_name: self.op_name,

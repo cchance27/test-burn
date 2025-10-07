@@ -101,7 +101,16 @@ impl AppConfig {
 
     /// Retrieve the global configuration, initialising it from the environment when absent.
     pub fn get_or_init_from_env() -> Result<&'static Self, AppConfigError> {
-        APP_CONFIG.get_or_try_init(Self::from_env)
+        if let Some(config) = APP_CONFIG.get() {
+            return Ok(config);
+        }
+
+        let config = Self::from_env()?;
+
+        match APP_CONFIG.set(config) {
+            Ok(()) => Ok(APP_CONFIG.get().expect("configuration just initialised")),
+            Err(_) => Ok(APP_CONFIG.get().expect("configuration concurrently initialised")),
+        }
     }
 
     /// Access the globally-initialised configuration.
