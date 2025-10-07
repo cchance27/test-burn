@@ -175,19 +175,30 @@ struct CommandBufferInner {
     buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     committed: AtomicBool,
     completed: AtomicBool,
+    #[allow(dead_code)]
+    profiler: Option<GpuProfiler>,
 }
 
 impl CommandBuffer {
     /// Create a new command buffer from a command queue.
     pub fn new(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Result<Self, MetalError> {
         let buffer = queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
-        Ok(Self {
+        let mut command_buffer = Self {
             inner: Rc::new(CommandBufferInner {
                 buffer,
                 committed: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
+                profiler: None,
             }),
-        })
+        };
+
+        if let Some(profiler) = GpuProfiler::attach(&command_buffer) {
+            if let Some(inner) = Rc::get_mut(&mut command_buffer.inner) {
+                inner.profiler = Some(profiler);
+            }
+        }
+
+        Ok(command_buffer)
     }
 
     /// Record an operation on this command buffer.
