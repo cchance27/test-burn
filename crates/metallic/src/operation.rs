@@ -14,7 +14,7 @@ use std::{
     rc::Rc,
     sync::{
         Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
@@ -182,6 +182,7 @@ struct CommandBufferInner {
     host_commit_time: Mutex<Option<Instant>>,
     #[allow(dead_code)]
     profiler: Option<GpuProfiler>,
+    recorded_scopes: AtomicUsize,
 }
 
 impl CommandBuffer {
@@ -195,6 +196,7 @@ impl CommandBuffer {
                 completed: AtomicBool::new(false),
                 host_commit_time: Mutex::new(None),
                 profiler: None,
+                recorded_scopes: AtomicUsize::new(0),
             }),
         };
 
@@ -214,7 +216,11 @@ impl CommandBuffer {
                 "Attempted to record on a committed command buffer".to_string(),
             ));
         }
-        operation.encode(&self.inner.buffer, cache)
+        let result = operation.encode(&self.inner.buffer, cache);
+        if result.is_ok() {
+            self.inner.recorded_scopes.fetch_add(1, Ordering::Release);
+        }
+        result
     }
 
     /// Commit the command buffer for execution.
@@ -263,6 +269,14 @@ impl CommandBuffer {
     /// Borrow the underlying command buffer if direct access is needed.
     pub fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>> {
         &self.inner.buffer
+    }
+
+    pub(crate) fn is_profiled(&self) -> bool {
+        self.inner.profiler.is_some()
+    }
+
+    pub(crate) fn has_recorded_work(&self) -> bool {
+        self.inner.recorded_scopes.load(Ordering::Acquire) > 0
     }
 
     /// Returns true if two command buffers wrap the same underlying buffer.

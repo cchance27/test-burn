@@ -1364,21 +1364,25 @@ impl<T: TensorElement> Context<T> {
     }
 
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
-        let should_refresh = if let Some(active) = self.active_cmd_buffer.as_ref() {
+        let mut needs_new_buffer = false;
+
+        if let Some(active) = self.active_cmd_buffer.as_ref() {
             if active.is_committed() {
                 if !active.is_completed() {
                     active.wait();
                 }
-                true
-            } else {
-                false
+                needs_new_buffer = true;
+            } else if active.is_profiled() && active.has_recorded_work() {
+                needs_new_buffer = true;
             }
-        } else {
-            false
-        };
+        }
 
-        if should_refresh {
-            self.active_cmd_buffer = None;
+        if needs_new_buffer {
+            if let Some(active) = self.active_cmd_buffer.take() {
+                if !active.is_committed() {
+                    active.commit();
+                }
+            }
         }
 
         if self.active_cmd_buffer.is_none() {
