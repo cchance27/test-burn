@@ -4,7 +4,7 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{KernelFunction, KernelInvocable};
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
     context::GpuProfilerLabel,
     resource_cache::ResourceCache,
 };
-use metallic_instrumentation::{MetricEvent, record_metric};
+use metallic_instrumentation::GpuProfiler;
 
 #[cfg(test)]
 mod matmul_test;
@@ -218,7 +218,7 @@ impl Operation for MatMul {
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
         let label = self.profiler_label.clone();
-        let cpu_start = Instant::now();
+        let scope = GpuProfiler::profile_command_buffer(command_buffer, label.op_name, label.backend);
 
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
@@ -232,13 +232,9 @@ impl Operation for MatMul {
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
 
-        let elapsed = cpu_start.elapsed();
-        let duration_us = elapsed.as_micros().max(1) as u64;
-        record_metric!(MetricEvent::GpuOpCompleted {
-            op_name: label.op_name,
-            backend: label.backend,
-            duration_us,
-        });
+        if let Some(scope) = scope {
+            scope.finish();
+        }
 
         Ok(())
     }

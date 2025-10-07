@@ -58,7 +58,7 @@ impl Drop for GpuProfilerScope {
 struct GpuProfilerScopeInner {
     state: Arc<GpuProfilerState>,
     timing: Option<PendingTiming>,
-    encoder: EncoderHandle,
+    encoder: Option<EncoderHandle>,
     op_name: String,
     backend: String,
     cpu_start: Instant,
@@ -66,23 +66,24 @@ struct GpuProfilerScopeInner {
 
 impl GpuProfilerScopeInner {
     fn complete(mut self) {
-        let cpu_duration = self.cpu_start.elapsed();
         let mut record = GpuOpRecord {
             op_name: self.op_name,
             backend: self.backend,
             timing: GpuTiming::None,
-            cpu_duration,
+            cpu_start: self.cpu_start,
         };
 
-        if let Some(timing) = self.timing.take() {
-            unsafe {
-                self.encoder.sample(&timing.sample_buffer, timing.end_index, Bool::YES);
+        if let Some(mut timing) = self.timing.take() {
+            if let Some(encoder) = self.encoder.as_ref() {
+                unsafe {
+                    encoder.sample(&timing.sample_buffer, timing.end_index, Bool::YES);
+                }
+                record.timing = GpuTiming::Counters {
+                    sample_buffer: timing.sample_buffer,
+                    start_index: timing.start_index,
+                    end_index: timing.end_index,
+                };
             }
-            record.timing = GpuTiming::Counters {
-                sample_buffer: timing.sample_buffer,
-                start_index: timing.start_index,
-                end_index: timing.end_index,
-            };
         }
 
         self.state.push_record(record);
@@ -140,7 +141,8 @@ impl GpuProfilerState {
 
         for record in records {
             let gpu_duration = self.counter.resolve_duration(&record);
-            let mut duration = gpu_duration.unwrap_or(record.cpu_duration);
+            let cpu_duration = record.cpu_start.elapsed();
+            let mut duration = gpu_duration.unwrap_or(cpu_duration);
             if duration.is_zero() {
                 duration = Duration::from_micros(1);
             }
@@ -171,7 +173,7 @@ struct GpuOpRecord {
     op_name: String,
     backend: String,
     timing: GpuTiming,
-    cpu_duration: Duration,
+    cpu_start: Instant,
 }
 
 #[derive(Clone)]
@@ -265,19 +267,24 @@ impl GpuProfiler {
         Some(Self { _state: state })
     }
 
-    fn scope_for_encoder(
+    fn scope_for_operation(
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         state: Arc<GpuProfilerState>,
-        encoder: EncoderHandle,
+        encoder: Option<EncoderHandle>,
         op_name: String,
         backend: String,
     ) -> Option<GpuProfilerScope> {
-        let timing = state.counter.allocate_timing(command_buffer, &encoder);
-        if let Some(sample) = timing.as_ref() {
-            unsafe {
-                encoder.sample(&sample.sample_buffer, sample.start_index, Bool::YES);
+        let timing = if let Some(ref encoder_handle) = encoder {
+            let timing = state.counter.allocate_timing(command_buffer, encoder_handle);
+            if let Some(sample) = timing.as_ref() {
+                unsafe {
+                    encoder_handle.sample(&sample.sample_buffer, sample.start_index, Bool::YES);
+                }
             }
-        }
+            timing
+        } else {
+            None
+        };
 
         Some(GpuProfilerScope {
             inner: Some(GpuProfilerScopeInner {
@@ -308,10 +315,10 @@ impl GpuProfiler {
     ) -> Option<GpuProfilerScope> {
         let state = Self::from_command_buffer(command_buffer)?;
         let sequence = state.next_sequence();
-        Self::scope_for_encoder(
+        Self::scope_for_operation(
             command_buffer,
             state,
-            EncoderHandle::Compute(encoder.clone()),
+            Some(EncoderHandle::Compute(encoder.clone())),
             format!("{op_name}#{sequence}"),
             backend,
         )
@@ -325,13 +332,23 @@ impl GpuProfiler {
     ) -> Option<GpuProfilerScope> {
         let state = Self::from_command_buffer(command_buffer)?;
         let sequence = state.next_sequence();
-        Self::scope_for_encoder(
+        Self::scope_for_operation(
             command_buffer,
             state,
-            EncoderHandle::Blit(encoder.clone()),
+            Some(EncoderHandle::Blit(encoder.clone())),
             format!("{op_name}#{sequence}"),
             backend,
         )
+    }
+
+    pub fn profile_command_buffer(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        op_name: String,
+        backend: String,
+    ) -> Option<GpuProfilerScope> {
+        let state = Self::from_command_buffer(command_buffer)?;
+        let sequence = state.next_sequence();
+        Self::scope_for_operation(command_buffer, state, None, format!("{op_name}#{sequence}"), backend)
     }
 }
 
