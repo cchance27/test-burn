@@ -1399,8 +1399,10 @@ impl<T: TensorElement> Context<T> {
 
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
-            if let Some(profiler) = GpuProfiler::attach(&cmd_buf) {
-                cmd_buf.retain_profiler(profiler);
+            if self.emit_latency {
+                if let Some(profiler) = GpuProfiler::attach(&cmd_buf) {
+                    cmd_buf.retain_profiler(profiler);
+                }
             }
             self.active_cmd_buffer = Some(cmd_buf);
         }

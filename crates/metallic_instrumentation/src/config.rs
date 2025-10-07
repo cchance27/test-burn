@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use tracing::Level;
 
 use metallic_env::EnvVarError;
-use metallic_env::environment::instrument::{LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
+use metallic_env::environment::instrument::{EMIT_LATENCY, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
@@ -67,11 +67,23 @@ impl AppConfig {
             Err(err) => return Err(err.into()),
         };
 
+        let emit_latency = match EMIT_LATENCY.get() {
+            Ok(Some(value)) => value,
+            Ok(None) => true,
+            Err(EnvVarError::Parse { value, .. }) => {
+                return Err(AppConfigError::InvalidBoolean {
+                    name: EMIT_LATENCY.key(),
+                    value,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
+
         Ok(Self {
             log_level,
             metrics_jsonl_path,
             enable_console_metrics,
-            emit_latency: true,
+            emit_latency,
         })
     }
 
