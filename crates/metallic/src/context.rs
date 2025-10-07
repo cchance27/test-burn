@@ -12,7 +12,7 @@ use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
-use metallic_instrumentation::{MetricEvent, gpu_profiler::GpuProfiler, record_metric};
+use metallic_instrumentation::{MetricEvent, config::AppConfig, gpu_profiler::GpuProfiler, record_metric};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
@@ -21,7 +21,7 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::env;
-use std::path::PathBuf;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryUsage {
@@ -60,9 +60,6 @@ impl GpuProfilerLabel {
 }
 
 const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
-const MATMUL_TRACE_ENV: &str = "METALLIC_LOG_MATMUL_SHAPES";
-const MATMUL_TRACE_FILE_ENV: &str = "METALLIC_LOG_MATMUL_SHAPES_FILE";
-const MATMUL_TRACE_DEFAULT_FILE: &str = "metal-matmul-shapes.log";
 pub(crate) const GPU_PROFILER_BACKEND: &str = "Metal";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,36 +87,6 @@ fn detect_forced_matmul_backend() -> MatMulBackendOverride {
         }
         Err(env::VarError::NotPresent) => MatMulBackendOverride::Default,
         Err(env::VarError::NotUnicode(_)) => MatMulBackendOverride::Default,
-    }
-}
-
-fn env_flag_enabled(value: Result<String, env::VarError>) -> bool {
-    match value {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                false
-            } else {
-                !matches!(trimmed.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no")
-            }
-        }
-        Err(env::VarError::NotPresent) => false,
-        Err(env::VarError::NotUnicode(_)) => false,
-    }
-}
-
-fn matmul_log_path_from_env() -> Option<PathBuf> {
-    match env::var(MATMUL_TRACE_FILE_ENV) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                Some(PathBuf::from(MATMUL_TRACE_DEFAULT_FILE))
-            } else {
-                Some(PathBuf::from(trimmed))
-            }
-        }
-        Err(env::VarError::NotPresent) => Some(PathBuf::from(MATMUL_TRACE_DEFAULT_FILE)),
-        Err(env::VarError::NotUnicode(_)) => None,
     }
 }
 
@@ -224,6 +191,7 @@ pub struct Context<T: TensorElement> {
     sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
     pending_gpu_scope: Option<GpuProfilerLabel>,
     gpu_scope_stack: Vec<GpuProfilerLabel>,
+    emit_latency: bool,
 }
 
 struct GpuScopeGuard<T: TensorElement> {
@@ -279,6 +247,16 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
+        let emit_latency = match AppConfig::get_or_init_from_env() {
+            Ok(cfg) => cfg.emit_latency,
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    "failed to initialise instrumentation config from environment; defaulting to emit_latency=true"
+                );
+                true
+            }
+        };
 
         Ok(Context::<T> {
             device,
@@ -300,7 +278,7 @@ impl<T: TensorElement> Context<T> {
             sdpa_workspaces: FxHashMap::default(),
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
-            //config,
+            emit_latency,
         })
     }
 
@@ -333,6 +311,13 @@ impl<T: TensorElement> Context<T> {
                 .expect("active resource cache must be initialized after refresh");
         }
 
+        if self.active_cmd_buffer.is_none() {
+            // `K::new` may materialize resources that require a fresh command buffer,
+            // so ensure one is available without reinitializing the resource cache we
+            // already pulled above.
+            self.ensure_active_cmd_buffer_internal(false)?;
+        }
+
         let command_buffer = self.active_cmd_buffer.as_mut().expect("active command buffer must exist");
 
         command_buffer.record(&*operation, &mut cache)?;
@@ -346,7 +331,18 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(&output);
 
+        self.finalize_active_command_buffer_if_latency();
+
         Ok(output)
+    }
+
+    pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
+        if self.emit_latency
+            && let Some(cmd_buf) = self.active_cmd_buffer.take()
+        {
+            cmd_buf.commit();
+            cmd_buf.wait();
+        }
     }
 
     pub fn set_pending_gpu_scope<S: Into<String>>(&mut self, op_name: S) {
@@ -372,7 +368,27 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn take_gpu_scope(&mut self) -> Option<GpuProfilerLabel> {
-        self.pending_gpu_scope.take().or_else(|| self.gpu_scope_stack.last().cloned())
+        let mut path_segments = Vec::new();
+        for scope in &self.gpu_scope_stack {
+            path_segments.push(scope.op_name.clone());
+        }
+
+        if let Some(pending_scope) = self.pending_gpu_scope.take() {
+            path_segments.push(pending_scope.op_name);
+        }
+
+        if path_segments.is_empty() {
+            return None;
+        }
+
+        let op_name = path_segments.join("/");
+        let backend = self
+            .gpu_scope_stack
+            .last()
+            .map(|s| s.backend.clone())
+            .unwrap_or_else(|| GPU_PROFILER_BACKEND.to_string());
+
+        Some(GpuProfilerLabel::new(op_name, backend))
     }
 
     // Compute matmul dims from tensor views
@@ -740,6 +756,8 @@ impl<T: TensorElement> Context<T> {
         );
         self.mark_tensor_pending(&output);
 
+        self.finalize_active_command_buffer_if_latency();
+
         Ok(output)
     }
 
@@ -842,6 +860,7 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(&k);
         self.mark_tensor_pending(&v);
+        self.finalize_active_command_buffer_if_latency();
 
         let entry = KvCacheEntry {
             k,
@@ -1106,7 +1125,7 @@ impl<T: TensorElement> Context<T> {
                 record_metric!(MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_write".to_string(),
                     op_name: format!("kv_cache_write_step_{}_layer_{}", step, layer_idx),
-                    thread_groups: (config.total_threads as u32, 1, 1),
+                    thread_groups: (config.total_threads, 1, 1),
                 });
             }
             Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
@@ -1141,6 +1160,7 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(&k_cache);
         self.mark_tensor_pending(&v_cache);
+        self.finalize_active_command_buffer_if_latency();
 
         Ok(())
     }
@@ -1229,6 +1249,7 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(k_cache);
         self.mark_tensor_pending(v_cache);
+        self.finalize_active_command_buffer_if_latency();
 
         if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
             entry.zeroing_complete = false;
@@ -1383,6 +1404,9 @@ impl<T: TensorElement> Context<T> {
 
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
+            if let Some(profiler) = GpuProfiler::attach(&cmd_buf, self.emit_latency) {
+                cmd_buf.retain_profiler(profiler);
+            }
             self.active_cmd_buffer = Some(cmd_buf);
         }
 
@@ -1445,6 +1469,7 @@ impl<T: TensorElement> Context<T> {
 
         encoder.endEncoding();
         self.mark_tensor_pending(&contiguous);
+        self.finalize_active_command_buffer_if_latency();
 
         Ok(contiguous)
     }

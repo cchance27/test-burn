@@ -28,80 +28,94 @@ struct HierarchicalMetric {
     label: String,
     last_ms: f64,
     average_ms: f64,
-    level: u8,
     children: Vec<HierarchicalMetric>,
 }
 
 impl HierarchicalMetric {
-    fn new(label: String, last_ms: f64, average_ms: f64, level: u8) -> Self {
+    fn new(label: String, last_ms: f64, average_ms: f64) -> Self {
         Self {
             label,
             last_ms,
             average_ms,
-            level,
             children: Vec::new(),
         }
     }
 
-    fn ensure_child(&mut self, label: &str, level: u8) -> &mut HierarchicalMetric {
+    fn ensure_child(&mut self, label: &str) -> &mut HierarchicalMetric {
         if let Some(position) = self.children.iter().position(|child| child.label == label) {
             &mut self.children[position]
         } else {
-            self.children.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0, level));
+            self.children.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0));
             self.children
                 .last_mut()
                 .expect("children vector cannot be empty immediately after push")
         }
     }
 
-    fn upsert_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64, level: u8) {
+    fn upsert_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64) {
         if path.is_empty() {
             return;
         }
 
         let label = path[0];
-        let child = self.ensure_child(label, level);
+        let child = self.ensure_child(label);
 
         if path.len() == 1 {
             child.last_ms = last_ms;
             child.average_ms = average_ms;
         } else {
-            child.upsert_path(&path[1..], last_ms, average_ms, level + 1);
+            child.upsert_path(&path[1..], last_ms, average_ms);
         }
+    }
+
+    // Calculate inclusive timing (the time for this node plus all its descendants)
+    // without modifying the stored values
+    fn get_inclusive_timing(&self) -> (f64, f64) {
+        let mut last_ms_total = self.last_ms;
+        let mut average_ms_total = self.average_ms;
+
+        for child in &self.children {
+            let (child_last, child_avg) = child.get_inclusive_timing();
+            last_ms_total += child_last;
+            average_ms_total += child_avg;
+        }
+
+        (last_ms_total, average_ms_total)
     }
 }
 
 const GENERATION_LOOP_LABEL: &str = "Generation Loop";
 const PROMPT_PROCESSING_LABEL: &str = "Prompt Processing";
 
-const BLOCK_STAGE_PREFIXES: &[(&str, &str)] = &[
-    ("attn_norm_block_", "attn_norm"),
-    ("qkv_proj_block_", "attn_qkv_proj"),
-    ("attn_rearrange_block_", "attn_rearrange"),
-    ("rope_block_", "Rope"),
-    ("kv_cache_block_", "kv_cache"),
-    ("kv_repeat_block_", "kv_repeat"),
-    ("sdpa_block_", "Sdpa"),
-    ("attn_output_block_", "attn_output"),
-    ("mlp_norm_block_", "mlp_norm"),
-    ("mlp_swiglu_block_", "mlp_swiglu"),
-    ("mlp_output_block_", "mlp_output"),
-];
-
 fn metric_event_to_latency_rows(event: &MetricEvent) -> Vec<LatencyRow> {
     match event {
-        MetricEvent::GpuOpCompleted { op_name, duration_us, .. } => map_gpu_op_completed(op_name)
-            .into_iter()
-            .map(|segments| build_latency_row(segments, *duration_us))
-            .collect(),
+        MetricEvent::GpuOpCompleted { op_name, duration_us, .. } => {
+            let base_name = op_name.split('#').next().unwrap_or(op_name);
+            let segments: Vec<String> = base_name.split('/').map(|s| s.to_string()).collect();
+            if segments.is_empty() || (segments.len() == 1 && segments[0].is_empty()) {
+                Vec::new()
+            } else {
+                // Check if this operation is part of prompt processing
+                if segments[0] == PROMPT_PROCESSING_LABEL {
+                    // For operations under prompt processing, we want to ensure proper hierarchy
+                    // but still create the latency row as normal
+                    vec![build_latency_row(segments, *duration_us)]
+                } else {
+                    vec![build_latency_row(segments, *duration_us)]
+                }
+            }
+        }
         MetricEvent::InternalKernelCompleted {
             parent_op_name,
             internal_kernel_name,
             duration_us,
-        } => map_internal_kernel(parent_op_name, internal_kernel_name)
-            .into_iter()
-            .map(|segments| build_latency_row(segments, *duration_us))
-            .collect(),
+        } => {
+            if let Some(segments) = map_internal_kernel(parent_op_name, internal_kernel_name) {
+                vec![build_latency_row(segments, *duration_us)]
+            } else {
+                Vec::new()
+            }
+        }
         _ => Vec::new(),
     }
 }
@@ -109,79 +123,11 @@ fn metric_event_to_latency_rows(event: &MetricEvent) -> Vec<LatencyRow> {
 fn map_internal_kernel(parent: &str, kernel: &str) -> Option<Vec<String>> {
     let base_parent = parent.to_ascii_lowercase();
     match base_parent.as_str() {
-        "sampling" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Sampling".to_string()]),
-        "decoding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Decode".to_string()]),
-        "generation_loop" => match kernel {
-            "embedding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Embedding".to_string()]),
-            _ => None,
-        },
+        "sampling" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Sampling".to_string(), kernel.to_string()]),
+        "decoding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Decode".to_string(), kernel.to_string()]),
+        "generation_loop" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Embedding".to_string(), kernel.to_string()]),
         _ => None,
     }
-}
-
-fn map_gpu_op_completed(op_name: &str) -> Option<Vec<String>> {
-    let base_name = op_name.split('#').next().unwrap_or(op_name);
-    if let Some(segments) = map_generation_stage(base_name) {
-        return Some(segments);
-    }
-    if let Some(segments) = map_block_stage(base_name) {
-        return Some(segments);
-    }
-    map_prompt_stage(base_name)
-}
-
-fn map_generation_stage(name: &str) -> Option<Vec<String>> {
-    if let Some(rest) = name.strip_prefix("generation_step_")
-        && rest.ends_with("_output")
-    {
-        return Some(vec![GENERATION_LOOP_LABEL.to_string(), "Output".to_string()]);
-    }
-
-    if let Some(_idx) = name.strip_prefix("iteration_") {
-        return Some(vec![GENERATION_LOOP_LABEL.to_string()]);
-    }
-
-    if name == "forward_step" {
-        return Some(vec![GENERATION_LOOP_LABEL.to_string(), "Forward Step".to_string()]);
-    }
-
-    if let Some(idx_str) = name.strip_prefix("block_")
-        && let Ok(idx) = idx_str.parse::<usize>()
-    {
-        return Some(vec![
-            GENERATION_LOOP_LABEL.to_string(),
-            "Forward Step".to_string(),
-            format!("Block {}", idx),
-        ]);
-    }
-
-    None
-}
-
-fn map_block_stage(name: &str) -> Option<Vec<String>> {
-    let base = name.strip_suffix("_op").unwrap_or(name);
-    for (prefix, display) in BLOCK_STAGE_PREFIXES {
-        if let Some(rest) = base.strip_prefix(prefix)
-            && let Ok(idx) = rest.parse::<usize>()
-        {
-            return Some(vec![
-                GENERATION_LOOP_LABEL.to_string(),
-                "Forward Step".to_string(),
-                format!("Block {}", idx),
-                (*display).to_string(),
-            ]);
-        }
-    }
-    None
-}
-
-fn map_prompt_stage(name: &str) -> Option<Vec<String>> {
-    if let Some(rest) = name.strip_prefix("prompt_step_")
-        && rest.parse::<usize>().is_ok()
-    {
-        return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
-    }
-    None
 }
 
 fn build_latency_row(segments: Vec<String>, duration_us: u64) -> LatencyRow {
@@ -379,6 +325,7 @@ fn main() -> Result<()> {
                 }
                 AppEvent::TokenCount(count) => {
                     app_state.reset_generation_metrics();
+                    app_state.reset_prompt_processing_metrics();
                     app_state.prompt_token_count = count;
                 }
                 AppEvent::StatusUpdate(status) => {
@@ -386,6 +333,8 @@ fn main() -> Result<()> {
                 }
                 AppEvent::MemoryUpdate(memory_rows) => {
                     app_state.memory_rows = memory_rows;
+                    // Recalculate max depth for memory metrics since the rows may have changed
+                    app_state.memory_collapse_depth.calculate_max_depth(&app_state.memory_rows);
                 }
                 AppEvent::LatencyUpdate(new_rows) => {
                     // Process the incoming metrics and add them to our hierarchical structure
@@ -469,7 +418,8 @@ struct AppState {
     prompt_processing_time: Duration,
     latency_tree: Vec<HierarchicalMetric>,
     metrics_view: MetricsView,
-    metrics_collapse_state: CollapseState,
+    latency_collapse_depth: CollapseDepth,
+    memory_collapse_depth: MemoryCollapseDepth,
     focus: FocusArea,
     text_scroll: u16,
     metrics_scroll: u16,
@@ -479,6 +429,10 @@ struct AppState {
     metrics_area: Rect,
     alert_queue: VecDeque<Alert>,
     active_alert: Option<Alert>,
+    // Track prompt processing metrics separately for aggregation
+    prompt_processing_total_last_ms: f64,
+    prompt_processing_total_average_ms: f64,
+    prompt_processing_average_samples: usize,
 }
 
 impl AppState {
@@ -493,7 +447,8 @@ impl AppState {
             prompt_processing_time: Duration::default(),
             latency_tree: Vec::new(),
             metrics_view: MetricsView::Memory,
-            metrics_collapse_state: CollapseState::Collapsed,
+            latency_collapse_depth: CollapseDepth::new(),
+            memory_collapse_depth: MemoryCollapseDepth::new(),
             focus: FocusArea::GeneratedText,
             text_scroll: 0,
             metrics_scroll: 0,
@@ -503,6 +458,9 @@ impl AppState {
             metrics_area: Rect::new(0, 0, 0, 0),
             alert_queue: VecDeque::new(),
             active_alert: None,
+            prompt_processing_total_last_ms: 0.0,
+            prompt_processing_total_average_ms: 0.0,
+            prompt_processing_average_samples: 0,
         }
     }
 
@@ -512,10 +470,54 @@ impl AppState {
             return;
         }
 
-        self.upsert_latency_path(&segments, row.last_ms, row.average_ms, 0);
+        // Check if this is a prompt processing related metric
+        // Look for "Prompt Processing" anywhere in the path
+        if segments.contains(&PROMPT_PROCESSING_LABEL) {
+            // For prompt processing operations, just accumulate the time
+            // but don't add individual sub-operations to maintain a single line display
+            self.prompt_processing_total_last_ms += row.last_ms;
+
+            // Update the running average: (old_total + new_value) / (count + 1)
+            let new_average_total =
+                self.prompt_processing_total_average_ms * (self.prompt_processing_average_samples as f64) + row.average_ms;
+            self.prompt_processing_average_samples += 1;
+            self.prompt_processing_total_average_ms = new_average_total / (self.prompt_processing_average_samples as f64);
+
+            // Update the Prompt Processing entry with the accumulated time
+            self.update_prompt_processing_entry();
+
+            // Don't add sub-items for prompt processing - this keeps it as a single line
+        } else {
+            // For non-prompt processing metrics, add normally
+            self.upsert_latency_path(&segments, row.last_ms, row.average_ms);
+        }
+
+        // Recalculate max depth for latency metrics since the tree structure may have changed
+        self.latency_collapse_depth.calculate_max_depth(&self.latency_tree);
     }
 
-    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64, level: u8) {
+    fn update_prompt_processing_entry(&mut self) {
+        // Find if there's already a root-level "Prompt Processing" entry and update it
+        // This is a simplified approach that creates "Prompt Processing" at the root level
+        // with the aggregated time
+        match self.latency_tree.iter_mut().find(|metric| metric.label == PROMPT_PROCESSING_LABEL) {
+            Some(metric) => {
+                // Update existing entry with accumulated time
+                metric.last_ms = self.prompt_processing_total_last_ms;
+                metric.average_ms = self.prompt_processing_total_average_ms;
+            }
+            None => {
+                // Create new "Prompt Processing" entry at root level with accumulated time
+                self.latency_tree.push(HierarchicalMetric::new(
+                    PROMPT_PROCESSING_LABEL.to_string(),
+                    self.prompt_processing_total_last_ms,
+                    self.prompt_processing_total_average_ms,
+                ));
+            }
+        }
+    }
+
+    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64) {
         if path.is_empty() {
             return;
         }
@@ -526,7 +528,7 @@ impl AppState {
         let metric = if let Some(idx) = entry {
             &mut self.latency_tree[idx]
         } else {
-            self.latency_tree.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0, level));
+            self.latency_tree.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0));
             self.latency_tree
                 .last_mut()
                 .expect("latency_tree cannot be empty immediately after push")
@@ -538,7 +540,7 @@ impl AppState {
             return;
         }
 
-        metric.upsert_path(&path[1..], last_ms, average_ms, level + 1);
+        metric.upsert_path(&path[1..], last_ms, average_ms);
     }
 
     fn update_generation_metrics(&mut self, iteration: Option<Duration>) {
@@ -555,6 +557,15 @@ impl AppState {
 
     fn reset_generation_metrics(&mut self) {
         self.iteration_latency.reset();
+    }
+
+    fn reset_prompt_processing_metrics(&mut self) {
+        self.prompt_processing_total_last_ms = 0.0;
+        self.prompt_processing_total_average_ms = 0.0;
+        self.prompt_processing_average_samples = 0;
+
+        // Remove any existing Prompt Processing entry from the tree
+        self.latency_tree.retain(|metric| metric.label != PROMPT_PROCESSING_LABEL);
     }
 
     fn throughput_display(&self) -> String {
@@ -607,26 +618,140 @@ enum MetricsView {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
-enum CollapseState {
-    Uncollapsed,
-    Collapsed,
-    VeryCollapsed,
+struct CollapseDepth {
+    current: usize,
+    max: Option<usize>,
 }
 
-impl CollapseState {
-    fn next(self) -> Self {
-        match self {
-            Self::Uncollapsed => Self::Collapsed,
-            Self::Collapsed => Self::VeryCollapsed,
-            Self::VeryCollapsed => Self::Uncollapsed,
+impl CollapseDepth {
+    fn new() -> Self {
+        Self {
+            current: usize::MAX, // Start fully uncollapsed (show all levels)
+            max: None,           // Will be calculated dynamically based on data
         }
     }
 
-    fn label(self) -> &'static str {
-        match self {
-            Self::Uncollapsed => "Uncollapsed",
-            Self::Collapsed => "Collapsed",
-            Self::VeryCollapsed => "Very Collapsed",
+    fn calculate_max_depth(&mut self, metrics: &[HierarchicalMetric]) {
+        let max_found = find_max_depth(metrics, 0);
+        self.max = Some(max_found);
+        // If current is set to MAX (default), set it to the max found
+        if self.current == usize::MAX {
+            self.current = max_found;
+        } else {
+            // Ensure current doesn't exceed the max
+            self.current = self.current.min(max_found);
+        }
+    }
+
+    fn next(&mut self) {
+        if let Some(max) = self.max {
+            if max == 0 {
+                // If max depth is 0, just toggle between 0 and 0
+                self.current = 0;
+            } else if self.current == 0 {
+                // If at min depth (0), go back to max-1
+                self.current = max - 1;
+            } else if self.current == max {
+                // If at max, go to max-1
+                self.current = max - 1;
+            } else {
+                // Otherwise, decrease depth by 1
+                self.current -= 1;
+            }
+        } else {
+            // If max hasn't been calculated yet, go to 0
+            self.current = 0;
+        }
+    }
+
+    fn get_current_depth(&self) -> usize {
+        self.current
+    }
+
+    fn label(&self) -> String {
+        match self.max {
+            Some(max) => {
+                if self.current > max {
+                    format!("Level {}", max)
+                } else {
+                    format!("Level {}", self.current)
+                }
+            }
+            None => "Unknown".to_string(),
+        }
+    }
+}
+
+fn find_max_depth(metrics: &[HierarchicalMetric], current_depth: usize) -> usize {
+    let mut max_depth = current_depth;
+    for metric in metrics {
+        let child_depth = find_max_depth(&metric.children, current_depth + 1);
+        max_depth = max_depth.max(child_depth);
+    }
+    max_depth
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct MemoryCollapseDepth {
+    current: u8,
+    max: Option<u8>,
+}
+
+impl MemoryCollapseDepth {
+    fn new() -> Self {
+        Self {
+            current: u8::MAX, // Start fully uncollapsed (show all levels)
+            max: None,        // Will be calculated dynamically based on data
+        }
+    }
+
+    fn calculate_max_depth(&mut self, rows: &[MemoryRow]) {
+        let max_found = rows.iter().map(|row| row.level).max().unwrap_or(0);
+        self.max = Some(max_found);
+        // If current is set to MAX (default), set it to the max found
+        if self.current == u8::MAX {
+            self.current = max_found;
+        } else {
+            // Ensure current doesn't exceed the max
+            self.current = self.current.min(max_found);
+        }
+    }
+
+    fn next(&mut self) {
+        if let Some(max) = self.max {
+            if max == 0 {
+                // If max depth is 0, just toggle between 0 and 0
+                self.current = 0;
+            } else if self.current == 0 {
+                // If at min depth (0), go back to max-1
+                self.current = max - 1;
+            } else if self.current == max {
+                // If at max, go to max-1
+                self.current = max - 1;
+            } else {
+                // Otherwise, decrease depth by 1
+                self.current -= 1;
+            }
+        } else {
+            // If max hasn't been calculated yet, go to 0
+            self.current = 0;
+        }
+    }
+
+    fn get_current_depth(&self) -> u8 {
+        self.current
+    }
+
+    fn label(&self) -> String {
+        match self.max {
+            Some(max) => {
+                if self.current > max {
+                    format!("Level {}", max)
+                } else {
+                    format!("Level {}", self.current)
+                }
+            }
+            None => "Unknown".to_string(),
         }
     }
 }
@@ -695,7 +820,10 @@ impl AppState {
     }
 
     fn toggle_collapse(&mut self) {
-        self.metrics_collapse_state = self.metrics_collapse_state.next();
+        match self.metrics_view {
+            MetricsView::Latency => self.latency_collapse_depth.next(),
+            MetricsView::Memory => self.memory_collapse_depth.next(),
+        }
         self.reset_metrics_scroll();
     }
 
@@ -780,11 +908,22 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
         MetricsView::Latency => "Latency",
     };
 
-    let metrics_help = format!("[m] Memory [l] Latency [c] Collapse ({})", state.metrics_collapse_state.label());
+    let collapse_label = match state.metrics_view {
+        MetricsView::Memory => state.memory_collapse_depth.label(),
+        MetricsView::Latency => state.latency_collapse_depth.label(),
+    };
+    let metrics_help = format!("[m] Memory [l] Latency [c] Collapse ({})", collapse_label);
+
+    // Always calculate and update max depths before rendering to account for dynamic changes
+    if matches!(state.metrics_view, MetricsView::Memory) && !state.memory_rows.is_empty() {
+        state.memory_collapse_depth.calculate_max_depth(&state.memory_rows);
+    } else if matches!(state.metrics_view, MetricsView::Latency) && !state.latency_tree.is_empty() {
+        state.latency_collapse_depth.calculate_max_depth(&state.latency_tree);
+    }
 
     let metrics_text = match state.metrics_view {
-        MetricsView::Memory => render_memory_metrics(&state.memory_rows, state.metrics_collapse_state),
-        MetricsView::Latency => render_hierarchical_latency_metrics(&state.latency_tree, state.metrics_collapse_state),
+        MetricsView::Memory => render_memory_metrics(&state.memory_rows, state.memory_collapse_depth.get_current_depth()),
+        MetricsView::Latency => render_hierarchical_latency_metrics(&state.latency_tree, state.latency_collapse_depth.get_current_depth()),
     };
 
     let metrics_block = Block::default()
@@ -832,16 +971,10 @@ fn ui(frame: &mut Frame, state: &mut AppState) {
     }
 }
 
-fn render_memory_metrics(rows: &[MemoryRow], collapse_state: CollapseState) -> String {
+fn render_memory_metrics(rows: &[MemoryRow], collapse_depth: u8) -> String {
     if rows.is_empty() {
         return "Collecting data...".to_string();
     }
-
-    let collapse_depth = match collapse_state {
-        CollapseState::Uncollapsed => u8::MAX,
-        CollapseState::Collapsed => 1,
-        CollapseState::VeryCollapsed => 0,
-    };
 
     rows.iter()
         .filter(|row| row.level <= collapse_depth)
@@ -893,16 +1026,10 @@ fn render_memory_metrics(rows: &[MemoryRow], collapse_state: CollapseState) -> S
         .join("\n")
 }
 
-fn render_hierarchical_latency_metrics(metrics: &[HierarchicalMetric], collapse_state: CollapseState) -> String {
+fn render_hierarchical_latency_metrics(metrics: &[HierarchicalMetric], max_depth: usize) -> String {
     if metrics.is_empty() {
         return "Collecting data...".to_string();
     }
-
-    let max_depth = match collapse_state {
-        CollapseState::Uncollapsed => usize::MAX,
-        CollapseState::Collapsed => 2,
-        CollapseState::VeryCollapsed => 0,
-    };
 
     let mut lines = Vec::new();
     for metric in metrics {
@@ -918,7 +1045,9 @@ fn render_metric(metric: &HierarchicalMetric, depth: usize, max_depth: usize, li
     }
 
     let level = u8::try_from(depth).unwrap_or(u8::MAX);
-    lines.push(format_latency_line(level, &metric.label, metric.last_ms, metric.average_ms));
+    // Use inclusive timing for display (parent + all descendants) to show total impact
+    let (inclusive_last_ms, inclusive_average_ms) = metric.get_inclusive_timing();
+    lines.push(format_latency_line(level, &metric.label, inclusive_last_ms, inclusive_average_ms));
 
     if depth == max_depth {
         return;

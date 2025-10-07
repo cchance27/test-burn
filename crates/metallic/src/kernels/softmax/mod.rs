@@ -134,6 +134,7 @@ fn try_apply_mps_softmax<T: TensorElement>(
     };
     command_buffer.record(&op, cache)?;
     ctx.mark_tensor_pending(attn);
+    ctx.finalize_active_command_buffer_if_latency();
     Ok(())
 }
 

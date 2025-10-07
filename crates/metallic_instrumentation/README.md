@@ -26,6 +26,8 @@ The system is founded on a few key principles:
     -   `ChannelExporter`: Sends metrics over a standard `mpsc::channel` for real-time, in-process consumption (e.g., by a UI).
 -   **Environment-Based Configuration**: Easily configure logging and metrics without changing code.
 -   **Ergonomic API**: Use simple macros (`record_metric!`) and RAII guards for clean and safe instrumentation.
+-   **Latency-Oriented GPU Command Buffers**: When latency emission is enabled (the default), every kernel executes in its own
+    Metal command buffer so we can capture accurate scheduling and execution timings even without GPU counter support.
 
 ## Getting Started
 
@@ -121,7 +123,8 @@ fn profile_gpu_work() {
     let mut command_buffer = MyCommandBuffer::new(&queue).unwrap();
 
     // 1. Attach the profiler
-    let profiler = GpuProfiler::attach(&command_buffer).expect("Profiler should attach");
+    let profiler = GpuProfiler::attach(&command_buffer, /* record_command_buffer_timing = */ true)
+        .expect("Profiler should attach");
 
     // 2. Get an encoder and profile a scope of work
     let encoder = command_buffer.new_compute_command_encoder();
@@ -157,6 +160,14 @@ The instrumentation system is configured via environment variables:
     -   Default: `false`
 -   **`METALLIC_METRICS_JSONL_PATH`**: If set, enables the `JsonlExporter` and writes metrics to the specified file path.
     -   Example: `/tmp/metrics.jsonl`
+-   **`METALLIC_EMIT_LATENCY`**: Controls whether GPU kernels execute in dedicated command buffers to
+    surface precise `kernelStartTime`/`GPUEndTime` measurements. Defaults to `true`. Set to `false` to
+    reuse command buffers when prioritising throughput over latency observability.
+
+`AppConfig::get_or_init_from_env()` can be called at startup to populate the global configuration from
+these variables. Consumers such as the Metal `Context` automatically use this helper, so setting the
+environment is typically sufficient; explicit initialisation is only required when customisation beyond
+environment variables is desired.
 
 ## Extending the System
 

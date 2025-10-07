@@ -1,5 +1,5 @@
 use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
-use metallic_instrumentation::gpu_profiler::{GpuProfiler, ProfiledCommandBuffer};
+use metallic_instrumentation::gpu_profiler::{CommandBufferCompletionHandler, GpuProfiler, ProfiledCommandBuffer};
 
 use crate::{
     TensorElement,
@@ -12,7 +12,10 @@ use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MT
 use std::{
     ptr::NonNull,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
@@ -175,6 +178,7 @@ struct CommandBufferInner {
     buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     committed: AtomicBool,
     completed: AtomicBool,
+    profiler: Mutex<Option<GpuProfiler>>,
 }
 
 impl CommandBuffer {
@@ -186,6 +190,7 @@ impl CommandBuffer {
                 buffer,
                 committed: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
+                profiler: Mutex::new(None),
             }),
         })
     }
@@ -217,6 +222,8 @@ impl CommandBuffer {
         if !self.inner.completed.swap(true, Ordering::AcqRel) {
             self.inner.buffer.waitUntilCompleted();
         }
+        // Release any retained profiler handle once the buffer has finished executing.
+        self.clear_profiler();
     }
 
     /// Register a callback that fires when the command buffer completes on the GPU.
@@ -245,6 +252,20 @@ impl CommandBuffer {
         &self.inner.buffer
     }
 
+    /// Retain the GPU profiler handle for the lifetime of this command buffer.
+    pub fn retain_profiler(&self, profiler: GpuProfiler) {
+        if let Ok(mut slot) = self.inner.profiler.lock() {
+            *slot = Some(profiler);
+        }
+    }
+
+    /// Drop the retained GPU profiler handle, if present.
+    pub fn clear_profiler(&self) {
+        if let Ok(mut slot) = self.inner.profiler.lock() {
+            slot.take();
+        }
+    }
+
     /// Returns true if two command buffers wrap the same underlying buffer.
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Rc::ptr_eq(&self.inner, &other.inner)
@@ -266,11 +287,12 @@ impl ProfiledCommandBuffer for CommandBuffer {
         self.raw()
     }
 
-    fn on_completed(&self, handler: Box<dyn FnOnce() + Send + 'static>) {
+    fn on_completed(&self, handler: CommandBufferCompletionHandler) {
         let handler = std::sync::Mutex::new(Some(handler));
-        let block = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-            if let Some(h) = handler.lock().unwrap().take() {
-                h();
+        let block = RcBlock::new(move |cmd: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            if let Some(callback) = handler.lock().unwrap().take() {
+                let command_buffer = unsafe { cmd.as_ref() };
+                callback(command_buffer);
             }
         });
         let raw_block = RcBlock::into_raw(block);

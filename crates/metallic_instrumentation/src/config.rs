@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use tracing::Level;
 
 use metallic_env::EnvVarError;
-use metallic_env::environment::instrument::{LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
+use metallic_env::environment::instrument::{EMIT_LATENCY, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub metrics_jsonl_path: Option<PathBuf>,
     /// Whether console metrics should be emitted.
     pub enable_console_metrics: bool,
+    /// Whether GPU latency metrics should emit per-command-buffer timings.
+    pub emit_latency: bool,
 }
 
 static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -65,10 +67,23 @@ impl AppConfig {
             Err(err) => return Err(err.into()),
         };
 
+        let emit_latency = match EMIT_LATENCY.get() {
+            Ok(Some(value)) => value,
+            Ok(None) => true,
+            Err(EnvVarError::Parse { value, .. }) => {
+                return Err(AppConfigError::InvalidBoolean {
+                    name: EMIT_LATENCY.key(),
+                    value,
+                });
+            }
+            Err(err) => return Err(err.into()),
+        };
+
         Ok(Self {
             log_level,
             metrics_jsonl_path,
             enable_console_metrics,
+            emit_latency,
         })
     }
 
@@ -84,8 +99,37 @@ impl AppConfig {
         Ok(APP_CONFIG.get().expect("configuration just initialised"))
     }
 
+    /// Retrieve the global configuration, initialising it from the environment when absent.
+    pub fn get_or_init_from_env() -> Result<&'static Self, AppConfigError> {
+        if let Some(config) = APP_CONFIG.get() {
+            return Ok(config);
+        }
+
+        let config = Self::from_env()?;
+
+        match APP_CONFIG.set(config) {
+            Ok(()) => Ok(APP_CONFIG.get().expect("configuration just initialised")),
+            Err(_) => Ok(APP_CONFIG.get().expect("configuration concurrently initialised")),
+        }
+    }
+
     /// Access the globally-initialised configuration.
     pub fn global() -> &'static Self {
         APP_CONFIG.get().expect("AppConfig not initialised")
     }
+
+    /// Try to access the globally-initialised configuration without panicking.
+    pub fn try_global() -> Option<&'static Self> {
+        APP_CONFIG.get()
+    }
+}
+
+#[cfg(test)]
+pub fn reset_app_config_for_tests() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    // A flag to indicate that tests should reset config state if needed
+    // Since OnceLock can't be reset, we'll use a different mechanism for tests
+    // In a real testing scenario, we'd likely avoid global state in tests altogether
+    static TEST_RESET_FLAG: AtomicBool = AtomicBool::new(false);
+    TEST_RESET_FLAG.store(true, Ordering::SeqCst);
 }
