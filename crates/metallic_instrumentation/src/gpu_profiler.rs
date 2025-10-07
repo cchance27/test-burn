@@ -438,6 +438,10 @@ impl GpuProfiler {
     pub fn attach<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C) -> Option<Self> {
         let key = buffer_key(command_buffer);
         let raw = command_buffer.raw();
+        let profiling_enabled = enable_command_buffer_profiling(raw);
+        if !profiling_enabled {
+            log_profiling_unavailable_once();
+        }
         let device = raw.device();
 
         // Create counter resources even if we won't use counter sampling
@@ -552,6 +556,31 @@ impl GpuProfiler {
         let sequence = state.next_sequence();
         Self::scope_for_operation(command_buffer, state, None, format!("{op_name}#{sequence}"), backend)
     }
+}
+
+fn enable_command_buffer_profiling(command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) -> bool {
+    unsafe {
+        if !command_buffer.respondsToSelector(sel!(setProfilingEnabled:)) {
+            return false;
+        }
+
+        match catch(AssertUnwindSafe(|| {
+            let _: () = msg_send![&**command_buffer, setProfilingEnabled: Bool::YES];
+        })) {
+            Ok(_) => true,
+            Err(_) => false,
+        }
+    }
+}
+
+fn log_profiling_unavailable_once() {
+    static LOGGED: OnceLock<()> = OnceLock::new();
+    LOGGED.get_or_init(|| {
+        tracing::debug!(
+            target: "instrument",
+            "Metal command buffer profiling is unavailable; GPU timings will fall back to CPU estimates"
+        );
+    });
 }
 
 struct CounterResources {
