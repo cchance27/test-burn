@@ -17,6 +17,7 @@ use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder, MTLCounterErrorValue,
     MTLCounterResultTimestamp, MTLCounterSampleBuffer, MTLCounterSampleBufferDescriptor, MTLCounterSamplingPoint, MTLCounterSet, MTLDevice,
 };
+use std::panic::AssertUnwindSafe;
 use std::ptr::NonNull;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
@@ -218,7 +219,7 @@ impl EncoderHandle {
     ) -> bool {
         let buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = sample_buffer.as_ref();
         let result: Result<(), _> = unsafe {
-            catch(|| match self {
+            catch(AssertUnwindSafe(|| match self {
                 EncoderHandle::Compute(encoder) => {
                     let _: () = unsafe {
                         msg_send![
@@ -239,7 +240,7 @@ impl EncoderHandle {
                         ]
                     };
                 }
-            })
+            }))
         };
 
         if result.is_err() {
