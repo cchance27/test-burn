@@ -11,7 +11,7 @@ pub trait ProfiledCommandBuffer {
 use objc2::exception::catch;
 use objc2::msg_send;
 use objc2::rc::Retained;
-use objc2::runtime::{Bool, ProtocolObject};
+use objc2::runtime::{Bool, NSObjectProtocol, ProtocolObject};
 use objc2_foundation::{NSData, NSRange, NSString, NSUInteger};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommonCounterSetTimestamp, MTLComputeCommandEncoder, MTLCounterErrorValue,
@@ -211,12 +211,28 @@ enum EncoderHandle {
 }
 
 impl EncoderHandle {
+    fn supports_sampling(&self) -> bool {
+        let selector = objc2::sel!(sampleCountersInBuffer:atSampleIndex:withBarrier:);
+        match self {
+            EncoderHandle::Compute(encoder) => encoder.respondsToSelector(selector),
+            EncoderHandle::Blit(encoder) => encoder.respondsToSelector(selector),
+        }
+    }
+
     unsafe fn try_sample(
         &self,
         sample_buffer: &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
         index: NSUInteger,
         barrier: Bool,
     ) -> bool {
+        if !self.supports_sampling() {
+            tracing::debug!(
+                target: "instrument",
+                "GPU counter sampling unavailable on encoder; falling back to CPU timing"
+            );
+            return false;
+        }
+
         let buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = sample_buffer.as_ref();
         let result: Result<(), _> = unsafe {
             catch(AssertUnwindSafe(|| match self {
