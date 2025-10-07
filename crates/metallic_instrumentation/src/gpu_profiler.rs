@@ -3,9 +3,11 @@
 use crate::event::MetricEvent;
 use crate::record_metric;
 
+pub type CommandBufferCompletionHandler = Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>;
+
 pub trait ProfiledCommandBuffer {
     fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>>;
-    fn on_completed(&self, handler: Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>);
+    fn on_completed(&self, handler: CommandBufferCompletionHandler);
 }
 
 use objc2::msg_send;

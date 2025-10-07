@@ -111,6 +111,9 @@ fn context_call_attaches_gpu_profiler() {
 
         let _out = ctx.call::<ElemwiseAddOp>((a.clone(), b.clone())).expect("elemwise add call");
 
+        // Ensure all GPU work is completed before checking for events
+        ctx.synchronize();
+
         let mut observed = None;
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {

@@ -3,8 +3,6 @@ use crate::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::kernels::rmsnorm::RMSNormOp;
 use crate::kernels::rope::RoPEOp;
 use crate::{Context, MetalError, Tensor, TensorElement};
-use metallic_instrumentation::{MetricEvent, record_metric};
-use std::time::{Duration, Instant};
 
 mod qwen25_tests;
 
@@ -350,299 +348,153 @@ impl<T: TensorElement> Qwen25<T> {
         let d_model = dims[2];
 
         let mut x = input.clone();
-        let overall_start = Instant::now();
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
-            let block_start = Instant::now();
-            let resid_attn = x.clone();
+            x = ctx.with_gpu_scope(format!("block_{}", layer_idx), |ctx| -> Result<Tensor<T>, MetalError> {
+                let resid_attn = x.clone();
 
-            let mut record_stage = |label: &str, duration: Duration| {
-                if !duration.is_zero() {
-                    record_metric!(MetricEvent::GpuOpCompleted {
-                        op_name: format!("{}_block_{}", label, layer_idx),
-                        backend: "Metal".to_string(),
-                        duration_us: duration.as_micros() as u64,
-                    });
-                }
-            };
+                // RMSNorm before Attention
+                ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
+                let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
 
-            // RMSNorm before Attention
-            let stage_start = Instant::now();
-            ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
-            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
-            record_stage("attn_norm", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("attn_norm_block_{}", layer_idx),
-                op_name: format!("attn_norm_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("attn_norm_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
+                // QKV GEMMs for the single token
+                let m = batch * seq; // m is always 1 for a single token
+                let kv_dim = block.kv_dim;
+                let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
-            // QKV GEMMs for the single token
-            let m = batch * seq; // m is always 1 for a single token
-            let kv_dim = block.kv_dim;
-            let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
+                let (q_mat, k_mat, v_mat) = ctx.with_gpu_scope(format!("attn_qkv_proj_block_{}_op", layer_idx), |ctx| {
+                    ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)
+                })?;
 
-            let stage_start = Instant::now();
-            let (q_mat, k_mat, v_mat) = ctx.with_gpu_scope(format!("attn_qkv_proj_block_{}_op", layer_idx), |ctx| {
-                ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)
+                // KV Head Rearrangement
+                let n_heads = self.config.n_heads;
+                let n_kv_heads = self.config.n_kv_heads;
+                let head_dim = d_model / n_heads;
+                let kv_head_dim = kv_dim / n_kv_heads;
+
+                let (q_heads, k_heads, v_heads) = ctx.with_gpu_scope(format!("attn_rearrange_block_{}_op", layer_idx), |ctx| {
+                    let q_heads = ctx.call::<KvRearrangeOp>((
+                        q_mat,
+                        d_model as u32,
+                        head_dim as u32,
+                        n_heads as u32,
+                        n_heads as u32,
+                        head_dim as u32,
+                        seq as u32,
+                    ))?;
+                    let k_heads = ctx.call::<KvRearrangeOp>((
+                        k_mat,
+                        kv_dim as u32,
+                        kv_head_dim as u32,
+                        n_kv_heads as u32,
+                        n_kv_heads as u32,
+                        kv_head_dim as u32,
+                        seq as u32,
+                    ))?;
+                    let v_heads = ctx.call::<KvRearrangeOp>((
+                        v_mat,
+                        kv_dim as u32,
+                        kv_head_dim as u32,
+                        n_kv_heads as u32,
+                        n_kv_heads as u32,
+                        kv_head_dim as u32,
+                        seq as u32,
+                    ))?;
+                    Ok::<_, MetalError>((q_heads, k_heads, v_heads))
+                })?;
+
+                // Apply RoPE using the pre-computed cache for the current position
+                let position_offset = pos as u32;
+                let (q_heads_after_rope, k_heads_after_rope) = ctx.with_gpu_scope(format!("rope_block_{}_op", layer_idx), |ctx| {
+                    let q_heads_after_rope = ctx.call::<RoPEOp>((
+                        q_heads,
+                        self.rope_cos_cache.clone(),
+                        self.rope_sin_cache.clone(),
+                        head_dim as u32,
+                        seq as u32,
+                        position_offset,
+                    ))?;
+                    let k_heads_after_rope = ctx.call::<RoPEOp>((
+                        k_heads,
+                        self.rope_cos_cache.clone(),
+                        self.rope_sin_cache.clone(),
+                        kv_head_dim as u32,
+                        seq as u32,
+                        position_offset,
+                    ))?;
+                    Ok::<_, MetalError>((q_heads_after_rope, k_heads_after_rope))
+                })?;
+
+                // Update the KV cache with the new K and V values
+                let group_size = n_heads / n_kv_heads;
+                ctx.with_gpu_scope(format!("kv_cache_block_{}_op", layer_idx), |ctx| {
+                    ctx.write_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)
+                })?;
+
+                // Create a view over the repeated KV cache for attention
+                let cache_entry = ctx
+                    .kv_caches
+                    .get(&layer_idx)
+                    .cloned()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
+                let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
+                let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
+                let (k_repeated, v_repeated) = ctx.with_gpu_scope(format!("kv_repeat_block_{}_op", layer_idx), |ctx| {
+                    let k_repeated =
+                        Qwen25::repeat_kv_heads(&k_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+                    let v_repeated =
+                        Qwen25::repeat_kv_heads(&v_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+                    Ok::<_, MetalError>((k_repeated, v_repeated))
+                })?;
+
+                // SDPA (causal mask enabled)
+                let attn_out_heads = ctx.with_gpu_scope(format!("sdpa_block_{}_op", layer_idx), |ctx| {
+                    ctx.scaled_dot_product_attention_with_offset(&q_heads_after_rope, &k_repeated, &v_repeated, true, pos)
+                })?;
+
+                // Attention Output Reassembly
+                let attn_out_reshaped_1 = attn_out_heads.reshape(vec![batch, n_heads, seq, head_dim])?;
+                let attn_out_permuted = attn_out_reshaped_1.permute(&[0, 2, 1, 3], ctx)?;
+                let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
+
+                let attn_out = ctx
+                    .with_gpu_scope(format!("attn_output_block_{}_op", layer_idx), |ctx| {
+                        ctx.matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)
+                    })?
+                    .reshape(vec![batch, seq, d_model])?;
+
+                // Residual Add
+                let x = resid_attn.add_elem(&attn_out, ctx)?;
+
+                // --- MLP Block ---
+                let resid_mlp = x.clone();
+                ctx.set_pending_gpu_scope(format!("mlp_norm_block_{}_op", layer_idx));
+                let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
+                let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
+
+                let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
+                    ctx.SwiGLU(
+                        &x_normed_mlp_flat,
+                        &block.ffn_gate,
+                        &block.ffn_gate_bias,
+                        &block.ffn_up,
+                        &block.ffn_up_bias,
+                        &block.ffn_down,
+                        &block.ffn_down_bias,
+                        Some(&block.ffn_gate_up_weight),
+                    )
+                })?;
+                let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
+
+                // Residual Add
+                ctx.set_pending_gpu_scope(format!("mlp_output_block_{}_op", layer_idx));
+                let x = resid_mlp.add_elem(&ffn_output, ctx)?;
+                Ok(x)
             })?;
-            record_stage("attn_qkv_proj", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("qkv_proj_block_{}", layer_idx),
-                op_name: format!("qkv_proj_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("qkv_proj_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // KV Head Rearrangement
-            let n_heads = self.config.n_heads;
-            let n_kv_heads = self.config.n_kv_heads;
-            let head_dim = d_model / n_heads;
-            let kv_head_dim = kv_dim / n_kv_heads;
-
-            let stage_start = Instant::now();
-            let (q_heads, k_heads, v_heads) = ctx.with_gpu_scope(format!("attn_rearrange_block_{}_op", layer_idx), |ctx| {
-                let q_heads = ctx.call::<KvRearrangeOp>((
-                    q_mat,
-                    d_model as u32,
-                    head_dim as u32,
-                    n_heads as u32,
-                    n_heads as u32,
-                    head_dim as u32,
-                    seq as u32,
-                ))?;
-                let k_heads = ctx.call::<KvRearrangeOp>((
-                    k_mat,
-                    kv_dim as u32,
-                    kv_head_dim as u32,
-                    n_kv_heads as u32,
-                    n_kv_heads as u32,
-                    kv_head_dim as u32,
-                    seq as u32,
-                ))?;
-                let v_heads = ctx.call::<KvRearrangeOp>((
-                    v_mat,
-                    kv_dim as u32,
-                    kv_head_dim as u32,
-                    n_kv_heads as u32,
-                    n_kv_heads as u32,
-                    kv_head_dim as u32,
-                    seq as u32,
-                ))?;
-                Ok::<_, MetalError>((q_heads, k_heads, v_heads))
-            })?;
-            record_stage("attn_rearrange", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("attn_rearrange_block_{}", layer_idx),
-                op_name: format!("attn_rearrange_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("attn_rearrange_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // Apply RoPE using the pre-computed cache for the current position
-            let position_offset = pos as u32;
-            let stage_start = Instant::now();
-            let (q_heads_after_rope, k_heads_after_rope) = ctx.with_gpu_scope(format!("rope_block_{}_op", layer_idx), |ctx| {
-                let q_heads_after_rope = ctx.call::<RoPEOp>((
-                    q_heads,
-                    self.rope_cos_cache.clone(),
-                    self.rope_sin_cache.clone(),
-                    head_dim as u32,
-                    seq as u32,
-                    position_offset,
-                ))?;
-                let k_heads_after_rope = ctx.call::<RoPEOp>((
-                    k_heads,
-                    self.rope_cos_cache.clone(),
-                    self.rope_sin_cache.clone(),
-                    kv_head_dim as u32,
-                    seq as u32,
-                    position_offset,
-                ))?;
-                Ok::<_, MetalError>((q_heads_after_rope, k_heads_after_rope))
-            })?;
-            record_stage("Rope", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("rope_block_{}", layer_idx),
-                op_name: format!("rope_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("rope_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // Update the KV cache with the new K and V values
-            let group_size = n_heads / n_kv_heads;
-            let stage_start = Instant::now();
-            ctx.with_gpu_scope(format!("kv_cache_block_{}_op", layer_idx), |ctx| {
-                ctx.write_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)
-            })?;
-            record_stage("kv_cache", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("kv_cache_block_{}", layer_idx),
-                op_name: format!("kv_cache_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("kv_cache_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // Create a view over the repeated KV cache for attention
-            let cache_entry = ctx
-                .kv_caches
-                .get(&layer_idx)
-                .cloned()
-                .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
-            let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
-            let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
-            let stage_start = Instant::now();
-            let (k_repeated, v_repeated) = ctx.with_gpu_scope(format!("kv_repeat_block_{}_op", layer_idx), |ctx| {
-                let k_repeated = Qwen25::repeat_kv_heads(&k_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
-                let v_repeated = Qwen25::repeat_kv_heads(&v_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
-                Ok::<_, MetalError>((k_repeated, v_repeated))
-            })?;
-            record_stage("kv_repeat", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("kv_repeat_block_{}", layer_idx),
-                op_name: format!("kv_repeat_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("kv_repeat_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // SDPA (causal mask enabled)
-            let stage_start = Instant::now();
-            let attn_out_heads = ctx.with_gpu_scope(format!("sdpa_block_{}_op", layer_idx), |ctx| {
-                ctx.scaled_dot_product_attention_with_offset(&q_heads_after_rope, &k_repeated, &v_repeated, true, pos)
-            })?;
-            record_stage("Sdpa", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("sdpa_block_{}", layer_idx),
-                op_name: format!("sdpa_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("sdpa_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // Attention Output Reassembly
-            let attn_out_reshaped_1 = attn_out_heads.reshape(vec![batch, n_heads, seq, head_dim])?;
-            let attn_out_permuted = attn_out_reshaped_1.permute(&[0, 2, 1, 3], ctx)?;
-            let attn_out_reshaped = attn_out_permuted.reshape(vec![batch, seq, d_model])?;
-
-            let stage_start = Instant::now();
-            let attn_out = ctx
-                .with_gpu_scope(format!("attn_output_block_{}_op", layer_idx), |ctx| {
-                    ctx.matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)
-                })?
-                .reshape(vec![batch, seq, d_model])?;
-
-            // Residual Add
-            x = resid_attn.add_elem(&attn_out, ctx)?;
-            record_stage("attn_output", stage_start.elapsed());
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("attn_output_block_{}", layer_idx),
-                op_name: format!("attn_output_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("attn_output_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // --- MLP Block ---
-            let resid_mlp = x.clone();
-            let stage_start = Instant::now();
-            ctx.set_pending_gpu_scope(format!("mlp_norm_block_{}_op", layer_idx));
-            let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
-            record_stage("mlp_norm", stage_start.elapsed());
-            let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("mlp_norm_block_{}", layer_idx),
-                op_name: format!("mlp_norm_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-
-            let stage_start = Instant::now();
-            let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
-                ctx.SwiGLU(
-                    &x_normed_mlp_flat,
-                    &block.ffn_gate,
-                    &block.ffn_gate_bias,
-                    &block.ffn_up,
-                    &block.ffn_up_bias,
-                    &block.ffn_down,
-                    &block.ffn_down_bias,
-                    Some(&block.ffn_gate_up_weight),
-                )
-            })?;
-            record_stage("mlp_swiglu", stage_start.elapsed());
-            let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("mlp_swiglu_block_{}", layer_idx),
-                op_name: format!("mlp_swiglu_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("mlp_swiglu_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-
-            // Residual Add
-            let stage_start = Instant::now();
-            ctx.set_pending_gpu_scope(format!("mlp_output_block_{}_op", layer_idx));
-            x = resid_mlp.add_elem(&ffn_output, ctx)?;
-            record_stage("mlp_output", stage_start.elapsed());
-
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: format!("mlp_output_block_{}", layer_idx),
-                op_name: format!("mlp_output_block_{}_op", layer_idx),
-                thread_groups: (1, 1, 1),
-            });
-            record_metric!(MetricEvent::ResourceCacheAccess {
-                cache_key: format!("mlp_output_{}", layer_idx),
-                hit: true,
-                bytes: 0,
-            });
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("block_{}", layer_idx),
-                backend: "Metal".to_string(),
-                duration_us: block_start.elapsed().as_micros() as u64,
-            });
         }
 
         // Final RMSNorm after all blocks
         let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
-
-        record_metric!(MetricEvent::GpuOpCompleted {
-            op_name: "forward_step".to_string(),
-            backend: "Metal".to_string(),
-            duration_us: overall_start.elapsed().as_micros() as u64,
-        });
 
         Ok(final_normed)
     }
@@ -661,7 +513,7 @@ impl<T: TensorElement> Qwen25<T> {
         if n_kv_heads == 0 || n_heads == 0 {
             return Err(MetalError::InvalidShape("Invalid head counts for repeat_kv_heads".to_string()));
         }
-        if n_heads % n_kv_heads != 0 {
+        if !n_heads.is_multiple_of(n_kv_heads) {
             return Err(MetalError::InvalidShape("Invalid head counts for repeat_kv_heads".to_string()));
         }
 

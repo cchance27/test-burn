@@ -21,7 +21,6 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::env;
-use std::path::PathBuf;
 use tracing::warn;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -61,9 +60,6 @@ impl GpuProfilerLabel {
 }
 
 const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
-const MATMUL_TRACE_ENV: &str = "METALLIC_LOG_MATMUL_SHAPES";
-const MATMUL_TRACE_FILE_ENV: &str = "METALLIC_LOG_MATMUL_SHAPES_FILE";
-const MATMUL_TRACE_DEFAULT_FILE: &str = "metal-matmul-shapes.log";
 pub(crate) const GPU_PROFILER_BACKEND: &str = "Metal";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -91,36 +87,6 @@ fn detect_forced_matmul_backend() -> MatMulBackendOverride {
         }
         Err(env::VarError::NotPresent) => MatMulBackendOverride::Default,
         Err(env::VarError::NotUnicode(_)) => MatMulBackendOverride::Default,
-    }
-}
-
-fn env_flag_enabled(value: Result<String, env::VarError>) -> bool {
-    match value {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                false
-            } else {
-                !matches!(trimmed.to_ascii_lowercase().as_str(), "0" | "false" | "off" | "no")
-            }
-        }
-        Err(env::VarError::NotPresent) => false,
-        Err(env::VarError::NotUnicode(_)) => false,
-    }
-}
-
-fn matmul_log_path_from_env() -> Option<PathBuf> {
-    match env::var(MATMUL_TRACE_FILE_ENV) {
-        Ok(raw) => {
-            let trimmed = raw.trim();
-            if trimmed.is_empty() {
-                Some(PathBuf::from(MATMUL_TRACE_DEFAULT_FILE))
-            } else {
-                Some(PathBuf::from(trimmed))
-            }
-        }
-        Err(env::VarError::NotPresent) => Some(PathBuf::from(MATMUL_TRACE_DEFAULT_FILE)),
-        Err(env::VarError::NotUnicode(_)) => None,
     }
 }
 
@@ -371,11 +337,11 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
-        if self.emit_latency {
-            if let Some(cmd_buf) = self.active_cmd_buffer.take() {
-                cmd_buf.commit();
-                cmd_buf.wait();
-            }
+        if self.emit_latency
+            && let Some(cmd_buf) = self.active_cmd_buffer.take()
+        {
+            cmd_buf.commit();
+            cmd_buf.wait();
         }
     }
 
@@ -402,7 +368,27 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn take_gpu_scope(&mut self) -> Option<GpuProfilerLabel> {
-        self.pending_gpu_scope.take().or_else(|| self.gpu_scope_stack.last().cloned())
+        let mut path_segments = Vec::new();
+        for scope in &self.gpu_scope_stack {
+            path_segments.push(scope.op_name.clone());
+        }
+
+        if let Some(pending_scope) = self.pending_gpu_scope.take() {
+            path_segments.push(pending_scope.op_name);
+        }
+
+        if path_segments.is_empty() {
+            return None;
+        }
+
+        let op_name = path_segments.join("/");
+        let backend = self
+            .gpu_scope_stack
+            .last()
+            .map(|s| s.backend.clone())
+            .unwrap_or_else(|| GPU_PROFILER_BACKEND.to_string());
+
+        Some(GpuProfilerLabel::new(op_name, backend))
     }
 
     // Compute matmul dims from tensor views
@@ -1139,7 +1125,7 @@ impl<T: TensorElement> Context<T> {
                 record_metric!(MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_write".to_string(),
                     op_name: format!("kv_cache_write_step_{}_layer_{}", step, layer_idx),
-                    thread_groups: (config.total_threads as u32, 1, 1),
+                    thread_groups: (config.total_threads, 1, 1),
                 });
             }
             Err(err) if Self::kv_cache_kernel_unavailable(&err) => {

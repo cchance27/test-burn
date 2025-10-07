@@ -1,5 +1,5 @@
 use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
-use metallic_instrumentation::gpu_profiler::{GpuProfiler, ProfiledCommandBuffer};
+use metallic_instrumentation::gpu_profiler::{CommandBufferCompletionHandler, GpuProfiler, ProfiledCommandBuffer};
 
 use crate::{
     TensorElement,
@@ -287,7 +287,7 @@ impl ProfiledCommandBuffer for CommandBuffer {
         self.raw()
     }
 
-    fn on_completed(&self, handler: Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>) {
+    fn on_completed(&self, handler: CommandBufferCompletionHandler) {
         let handler = std::sync::Mutex::new(Some(handler));
         let block = RcBlock::new(move |cmd: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             if let Some(callback) = handler.lock().unwrap().take() {

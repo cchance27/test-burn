@@ -356,13 +356,7 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
         for (i, &token_id) in input_ids.iter().enumerate() {
             let input_tensor = qwen.embed(&[token_id], ctx)?;
             let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
-            // Record metrics using new system
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: "forward_step".to_string(),
-                op_name: format!("prompt_step_{}", i),
-                thread_groups: (1, 1, 1),
-            });
-            logits_tensor = Some(ctx.with_gpu_scope(format!("prompt_step_{}", i), |ctx| qwen.output(&hidden_states, ctx))?);
+            logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
             log_cache_stats(ctx, "prompt", i + 1);
         }
     }
@@ -398,7 +392,7 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     // --- Autoregressive Generation Loop ---
     // Now, generate tokens one by one using the KV cache.
     for i in 0..cfg.max_tokens - 1 {
-        let iteration_start = Instant::now();
+        let _iteration_start = Instant::now();
         ctx.reset_pool();
 
         let current_pos = prompt_len + i;
@@ -415,22 +409,7 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
         }
 
         let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
-        record_metric!(MetricEvent::GpuKernelDispatched {
-            kernel_name: "forward_step".to_string(),
-            op_name: format!("generation_step_{}", i),
-            thread_groups: (1, 1, 1),
-        });
-
-        let output_start = Instant::now();
-        let logits_tensor = ctx.with_gpu_scope(format!("generation_step_{}_output", i), |ctx| qwen.output(&hidden_states, ctx))?;
-        let output_duration = output_start.elapsed();
-        if !output_duration.is_zero() {
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("generation_step_{}_output", i),
-                backend: "Metal".to_string(),
-                duration_us: output_duration.as_micros() as u64,
-            });
-        }
+        let logits_tensor = qwen.output(&hidden_states, ctx)?;
 
         let logits = logits_tensor.to_vec();
         let vocab_logits = &logits[..vocab_size];
@@ -446,15 +425,6 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
                 parent_op_name: "sampling".to_string(),
                 internal_kernel_name: "top_k_top_p".to_string(),
                 duration_us: sample_duration.as_micros() as u64,
-            });
-        }
-
-        let iteration_duration = iteration_start.elapsed();
-        if !iteration_duration.is_zero() {
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("iteration_{}", i),
-                backend: "Metal".to_string(),
-                duration_us: iteration_duration.as_micros() as u64,
             });
         }
 
@@ -490,7 +460,7 @@ pub fn generate_streaming<T: TensorElement>(
     let input_ids = tokenizer.encode(&full_prompt)?;
 
     let mut prompt_processing_duration: Option<Duration> = None;
-    let mut token_callback = |token_id, decoded_token: std::sync::Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
+    let mut token_callback = |_token_id, decoded_token: std::sync::Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
         let now = Instant::now();
 
         let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
@@ -523,7 +493,7 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
     input_ids: &[u32],
     cfg: &GenerationConfig,
     token_callback: &mut F,
-    tx: &mpsc::Sender<AppEvent>,
+    _tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError>
 where
     F: FnMut(u32, std::sync::Arc<str>, Duration) -> Result<bool, MetalError>,
@@ -574,21 +544,17 @@ where
     }
 
     // --- Prompt Processing Pass ---
-    // Process the prompt token by token to warm up the KV cache.
     let mut logits_tensor: Option<Tensor<T>> = None;
     if !input_ids.is_empty() {
-        for (i, &token_id) in input_ids.iter().enumerate() {
-            let input_tensor = qwen.embed(&[token_id], ctx)?;
-            let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
-            // Record metrics using new system
-            record_metric!(MetricEvent::GpuKernelDispatched {
-                kernel_name: "forward_step".to_string(),
-                op_name: format!("prompt_step_{}", i),
-                thread_groups: (1, 1, 1),
-            });
-            logits_tensor = Some(ctx.with_gpu_scope(format!("prompt_step_{}", i), |ctx| qwen.output(&hidden_states, ctx))?);
-            log_cache_stats(ctx, "prompt", i + 1);
-        }
+        ctx.with_gpu_scope("Prompt Processing", |ctx| {
+            for (i, &token_id) in input_ids.iter().enumerate() {
+                let input_tensor = qwen.embed(&[token_id], ctx)?;
+                let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
+                logits_tensor = Some(qwen.output(&hidden_states, ctx)?);
+                log_cache_stats(ctx, "prompt", i + 1);
+            }
+            Ok::<(), MetalError>(())
+        })?;
     }
 
     let mut generated_ids = input_ids.to_vec();
@@ -599,11 +565,9 @@ where
     let mut decode_scratch = Vec::new();
 
     if let Some(logits_tensor) = logits_tensor {
-        // Extract logits for the very last token of the prompt
         let logits = logits_tensor.to_vec();
         let vocab_logits = &logits[..vocab_size];
 
-        // Sample the first token
         let sample_start = Instant::now();
         next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
         let sample_duration = sample_start.elapsed();
@@ -615,7 +579,6 @@ where
             });
         }
     } else {
-        // If there's no prompt, start with token 0.
         next_token = 0;
     }
 
@@ -640,94 +603,72 @@ where
     }
 
     // --- Autoregressive Generation Loop ---
-    // Now, generate tokens one by one using the KV cache.
-    let mut ui_connected = true;
+    ctx.with_gpu_scope("Generation Loop", |ctx| {
+        for i in 0..cfg.max_tokens - 1 {
+            let iteration_start = Instant::now();
+            ctx.reset_pool();
 
-    for i in 0..cfg.max_tokens - 1 {
-        let iteration_start = Instant::now();
-        ctx.reset_pool();
+            let current_pos = prompt_len + i;
 
-        let current_pos = prompt_len + i;
+            let embed_start = Instant::now();
+            let input_tensor = qwen.embed(&[next_token], ctx)?;
+            let embed_duration = embed_start.elapsed();
+            if !embed_duration.is_zero() {
+                record_metric!(MetricEvent::InternalKernelCompleted {
+                    parent_op_name: "generation_loop".to_string(),
+                    internal_kernel_name: "embedding".to_string(),
+                    duration_us: embed_duration.as_micros() as u64,
+                });
+            }
 
-        let embed_start = Instant::now();
-        let input_tensor = qwen.embed(&[next_token], ctx)?;
-        let embed_duration = embed_start.elapsed();
-        if !embed_duration.is_zero() {
-            record_metric!(MetricEvent::InternalKernelCompleted {
-                parent_op_name: "generation_loop".to_string(),
-                internal_kernel_name: "embedding".to_string(),
-                duration_us: embed_duration.as_micros() as u64,
-            });
+            let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
+
+            let logits_tensor = qwen.output(&hidden_states, ctx)?;
+
+            let logits = logits_tensor.to_vec();
+            let vocab_logits = &logits[..vocab_size];
+
+            let sample_start = Instant::now();
+            next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+
+            generated_ids.push(next_token);
+
+            let sample_duration = sample_start.elapsed();
+            if !sample_duration.is_zero() {
+                record_metric!(MetricEvent::InternalKernelCompleted {
+                    parent_op_name: "sampling".to_string(),
+                    internal_kernel_name: "top_k_top_p".to_string(),
+                    duration_us: sample_duration.as_micros() as u64,
+                });
+            }
+
+            let decode_start = Instant::now();
+            let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
+            let decode_duration = decode_start.elapsed();
+            if !decode_duration.is_zero() {
+                record_metric!(MetricEvent::InternalKernelCompleted {
+                    parent_op_name: "decoding".to_string(),
+                    internal_kernel_name: "token_decode".to_string(),
+                    duration_us: decode_duration.as_micros() as u64,
+                });
+            }
+
+            let iteration_duration = iteration_start.elapsed();
+
+            log_cache_stats(ctx, "generate", generated_ids.len());
+
+            if let Some(piece) = decoded_piece
+                && !token_callback(next_token, piece, iteration_duration)?
+            {
+                break;
+            }
+
+            let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+            if next_token == eos_token_id {
+                break;
+            }
         }
-
-        let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
-        record_metric!(MetricEvent::GpuKernelDispatched {
-            kernel_name: "forward_step".to_string(),
-            op_name: format!("generation_step_{}", i),
-            thread_groups: (1, 1, 1),
-        });
-
-        let output_start = Instant::now();
-        let logits_tensor = ctx.with_gpu_scope(format!("generation_step_{}_output", i), |ctx| qwen.output(&hidden_states, ctx))?;
-        let output_duration = output_start.elapsed();
-        if !output_duration.is_zero() {
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("generation_step_{}_output", i),
-                backend: "Metal".to_string(),
-                duration_us: output_duration.as_micros() as u64,
-            });
-        }
-
-        let logits = logits_tensor.to_vec();
-        let vocab_logits = &logits[..vocab_size];
-
-        let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
-
-        generated_ids.push(next_token);
-
-        let sample_duration = sample_start.elapsed();
-        if !sample_duration.is_zero() {
-            record_metric!(MetricEvent::InternalKernelCompleted {
-                parent_op_name: "sampling".to_string(),
-                internal_kernel_name: "top_k_top_p".to_string(),
-                duration_us: sample_duration.as_micros() as u64,
-            });
-        }
-
-        let decode_start = Instant::now();
-        let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
-        let decode_duration = decode_start.elapsed();
-        if !decode_duration.is_zero() {
-            record_metric!(MetricEvent::InternalKernelCompleted {
-                parent_op_name: "decoding".to_string(),
-                internal_kernel_name: "token_decode".to_string(),
-                duration_us: decode_duration.as_micros() as u64,
-            });
-        }
-
-        let iteration_duration = iteration_start.elapsed();
-        if !iteration_duration.is_zero() {
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("iteration_{}", i),
-                backend: "Metal".to_string(),
-                duration_us: iteration_duration.as_micros() as u64,
-            });
-        }
-
-        log_cache_stats(ctx, "generate", generated_ids.len());
-
-        if let Some(piece) = decoded_piece
-            && !token_callback(next_token, piece, iteration_duration)?
-        {
-            break;
-        }
-
-        let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-        if next_token == eos_token_id {
-            break;
-        }
-    }
-
-    Ok(())
+        Ok::<(), MetalError>(())
+    })?;
+    Ok::<(), MetalError>(())
 }
