@@ -8,6 +8,7 @@ pub trait ProfiledCommandBuffer {
     fn on_completed(&self, handler: Box<dyn FnOnce() + Send + 'static>);
 }
 
+use objc2::exception::catch;
 use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::{Bool, ProtocolObject};
@@ -73,16 +74,16 @@ impl GpuProfilerScopeInner {
             cpu_start: self.cpu_start,
         };
 
-        if let Some(mut timing) = self.timing.take() {
+        if let Some(timing) = self.timing.take() {
             if let Some(encoder) = self.encoder.as_ref() {
-                unsafe {
-                    encoder.sample(&timing.sample_buffer, timing.end_index, Bool::YES);
+                let success = unsafe { encoder.try_sample(&timing.sample_buffer, timing.end_index, Bool::YES) };
+                if success {
+                    record.timing = GpuTiming::Counters {
+                        sample_buffer: timing.sample_buffer,
+                        start_index: timing.start_index,
+                        end_index: timing.end_index,
+                    };
                 }
-                record.timing = GpuTiming::Counters {
-                    sample_buffer: timing.sample_buffer,
-                    start_index: timing.start_index,
-                    end_index: timing.end_index,
-                };
             }
         }
 
@@ -209,30 +210,47 @@ enum EncoderHandle {
 }
 
 impl EncoderHandle {
-    unsafe fn sample(&self, sample_buffer: &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>, index: NSUInteger, barrier: Bool) {
+    unsafe fn try_sample(
+        &self,
+        sample_buffer: &Retained<ProtocolObject<dyn MTLCounterSampleBuffer>>,
+        index: NSUInteger,
+        barrier: Bool,
+    ) -> bool {
         let buffer: &ProtocolObject<dyn MTLCounterSampleBuffer> = sample_buffer.as_ref();
-        match self {
-            EncoderHandle::Compute(encoder) => {
-                let _: () = unsafe {
-                    msg_send![
-                        &**encoder,
-                        sampleCountersInBuffer: buffer,
-                        atSampleIndex: index,
-                        withBarrier: barrier
-                    ]
-                };
-            }
-            EncoderHandle::Blit(encoder) => {
-                let _: () = unsafe {
-                    msg_send![
-                        &**encoder,
-                        sampleCountersInBuffer: buffer,
-                        atSampleIndex: index,
-                        withBarrier: barrier
-                    ]
-                };
-            }
+        let result: Result<(), _> = unsafe {
+            catch(|| match self {
+                EncoderHandle::Compute(encoder) => {
+                    let _: () = unsafe {
+                        msg_send![
+                            &**encoder,
+                            sampleCountersInBuffer: buffer,
+                            atSampleIndex: index,
+                            withBarrier: barrier
+                        ]
+                    };
+                }
+                EncoderHandle::Blit(encoder) => {
+                    let _: () = unsafe {
+                        msg_send![
+                            &**encoder,
+                            sampleCountersInBuffer: buffer,
+                            atSampleIndex: index,
+                            withBarrier: barrier
+                        ]
+                    };
+                }
+            })
+        };
+
+        if result.is_err() {
+            tracing::debug!(
+                target: "instrument",
+                "GPU counter sampling not supported; falling back to CPU timing"
+            );
+            return false;
         }
+
+        true
     }
 }
 
@@ -275,13 +293,13 @@ impl GpuProfiler {
         backend: String,
     ) -> Option<GpuProfilerScope> {
         let timing = if let Some(ref encoder_handle) = encoder {
-            let timing = state.counter.allocate_timing(command_buffer, encoder_handle);
-            if let Some(sample) = timing.as_ref() {
-                unsafe {
-                    encoder_handle.sample(&sample.sample_buffer, sample.start_index, Bool::YES);
+            match state.counter.allocate_timing(command_buffer, encoder_handle) {
+                Some(pending) => {
+                    let success = unsafe { encoder_handle.try_sample(&pending.sample_buffer, pending.start_index, Bool::YES) };
+                    if success { Some(pending) } else { None }
                 }
+                None => None,
             }
-            timing
         } else {
             None
         };
