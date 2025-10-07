@@ -204,7 +204,7 @@ fn main() -> Result<()> {
 
     let exporters: Vec<Box<dyn MetricExporter>> = vec![
         channel_exporter,
-        //console_exporter,
+        //console_exporter
     ];
 
     let metrics_layer = MetricsLayer::new(exporters);
@@ -723,7 +723,7 @@ fn setup_terminal() -> Result<Terminal<impl Backend>> {
     crossterm::execute!(
         stdout(),
         crossterm::terminal::EnterAlternateScreen,
-        crossterm::event::EnableMouseCapture
+        //crossterm::event::EnableMouseCapture
     )?;
     terminal.clear()?;
     Ok(terminal)
@@ -733,7 +733,7 @@ fn restore_terminal() -> Result<()> {
     crossterm::execute!(
         stdout(),
         crossterm::terminal::LeaveAlternateScreen,
-        crossterm::event::DisableMouseCapture
+        //crossterm::event::DisableMouseCapture
     )?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())

@@ -12,7 +12,11 @@ use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MT
 use std::{
     ptr::NonNull,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
@@ -175,6 +179,7 @@ struct CommandBufferInner {
     buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     committed: AtomicBool,
     completed: AtomicBool,
+    host_commit_time: Mutex<Option<Instant>>,
     #[allow(dead_code)]
     profiler: Option<GpuProfiler>,
 }
@@ -188,6 +193,7 @@ impl CommandBuffer {
                 buffer,
                 committed: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
+                host_commit_time: Mutex::new(None),
                 profiler: None,
             }),
         };
@@ -218,6 +224,9 @@ impl CommandBuffer {
     /// call sites may attempt to commit the same wrapper.
     pub fn commit(&self) {
         if !self.inner.committed.swap(true, Ordering::AcqRel) {
+            if let Ok(mut guard) = self.inner.host_commit_time.lock() {
+                *guard = Some(Instant::now());
+            }
             self.inner.buffer.commit();
         }
     }
@@ -277,11 +286,14 @@ impl ProfiledCommandBuffer for CommandBuffer {
         self.raw()
     }
 
-    fn on_completed(&self, handler: Box<dyn FnOnce() + Send + 'static>) {
+    fn on_completed(&self, handler: Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>, Option<Instant>) + Send + 'static>) {
+        let inner = self.inner.clone();
         let handler = std::sync::Mutex::new(Some(handler));
-        let block = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+        let block = RcBlock::new(move |command_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             if let Some(h) = handler.lock().unwrap().take() {
-                h();
+                let cmd_ref: &ProtocolObject<dyn MTLCommandBuffer> = unsafe { command_buffer.as_ref() };
+                let host_time = inner.host_commit_time.lock().ok().and_then(|g| *g);
+                h(cmd_ref, host_time);
             }
         });
         let raw_block = RcBlock::into_raw(block);
