@@ -1,5 +1,7 @@
 //! Convenience re-exports for instrumentation consumers.
 
+#[cfg(test)]
+pub use crate::config::reset_app_config_for_tests;
 pub use crate::config::{AppConfig, AppConfigError};
 pub use crate::event::MetricEvent;
 pub use crate::exporters::{ChannelExporter, ConsoleExporter, JsonlExporter};

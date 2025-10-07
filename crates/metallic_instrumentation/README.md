@@ -163,6 +163,11 @@ The instrumentation system is configured via environment variables:
     surface precise `kernelStartTime`/`GPUEndTime` measurements. Defaults to `true`. Set to `false` to
     reuse command buffers when prioritising throughput over latency observability.
 
+`AppConfig::get_or_init_from_env()` can be called at startup to populate the global configuration from
+these variables. Consumers such as the Metal `Context` automatically use this helper, so setting the
+environment is typically sufficient; explicit initialisation is only required when customisation beyond
+environment variables is desired.
+
 ## Extending the System
 
 ### Adding a New Metric Type

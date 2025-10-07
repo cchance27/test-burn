@@ -99,6 +99,11 @@ impl AppConfig {
         Ok(APP_CONFIG.get().expect("configuration just initialised"))
     }
 
+    /// Retrieve the global configuration, initialising it from the environment when absent.
+    pub fn get_or_init_from_env() -> Result<&'static Self, AppConfigError> {
+        APP_CONFIG.get_or_try_init(Self::from_env)
+    }
+
     /// Access the globally-initialised configuration.
     pub fn global() -> &'static Self {
         APP_CONFIG.get().expect("AppConfig not initialised")
@@ -108,4 +113,9 @@ impl AppConfig {
     pub fn try_global() -> Option<&'static Self> {
         APP_CONFIG.get()
     }
+}
+
+#[cfg(test)]
+pub(crate) fn reset_app_config_for_tests() {
+    APP_CONFIG.take();
 }

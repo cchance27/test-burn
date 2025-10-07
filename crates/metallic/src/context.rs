@@ -22,6 +22,7 @@ use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::env;
 use std::path::PathBuf;
+use tracing::warn;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryUsage {
@@ -280,7 +281,16 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
-        let emit_latency = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+        let emit_latency = match AppConfig::get_or_init_from_env() {
+            Ok(cfg) => cfg.emit_latency,
+            Err(err) => {
+                warn!(
+                    error = ?err,
+                    "failed to initialise instrumentation config from environment; defaulting to emit_latency=true"
+                );
+                true
+            }
+        };
 
         Ok(Context::<T> {
             device,
