@@ -335,6 +335,13 @@ impl<T: TensorElement> Context<T> {
                 .expect("active resource cache must be initialized after refresh");
         }
 
+        if self.active_cmd_buffer.is_none() {
+            // `K::new` may materialize resources that require a fresh command buffer,
+            // so ensure one is available without reinitializing the resource cache we
+            // already pulled above.
+            self.ensure_active_cmd_buffer_internal(false)?;
+        }
+
         let command_buffer = self.active_cmd_buffer.as_mut().expect("active command buffer must exist");
 
         command_buffer.record(&*operation, &mut cache)?;
