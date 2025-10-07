@@ -15,11 +15,13 @@ fn app_config_parses_rejects() {
         Some(std::path::Path::new("/tmp/metrics.jsonl"))
     );
     assert!(config.enable_console_metrics);
+    assert!(config.emit_latency);
 
     let initialised = AppConfig::initialise(config.clone()).expect("initialise should succeed once");
     assert_eq!(initialised.log_level, Level::DEBUG);
     assert_eq!(initialised.metrics_jsonl_path, config.metrics_jsonl_path);
     assert!(initialised.enable_console_metrics);
+    assert!(initialised.emit_latency);
 
     match AppConfig::initialise(config) {
         Err(AppConfigError::AlreadyInitialised) => {}

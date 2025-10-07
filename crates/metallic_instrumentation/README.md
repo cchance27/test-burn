@@ -26,6 +26,8 @@ The system is founded on a few key principles:
     -   `ChannelExporter`: Sends metrics over a standard `mpsc::channel` for real-time, in-process consumption (e.g., by a UI).
 -   **Environment-Based Configuration**: Easily configure logging and metrics without changing code.
 -   **Ergonomic API**: Use simple macros (`record_metric!`) and RAII guards for clean and safe instrumentation.
+-   **Latency-Oriented GPU Command Buffers**: When latency emission is enabled (the default), every kernel executes in its own
+    Metal command buffer so we can capture accurate scheduling and execution timings even without GPU counter support.
 
 ## Getting Started
 
@@ -157,6 +159,9 @@ The instrumentation system is configured via environment variables:
     -   Default: `false`
 -   **`METALLIC_METRICS_JSONL_PATH`**: If set, enables the `JsonlExporter` and writes metrics to the specified file path.
     -   Example: `/tmp/metrics.jsonl`
+-   **Latency Emission (`AppConfig::emit_latency`)**: Controls whether GPU kernels execute in dedicated command buffers to
+    surface precise `kernelStartTime`/`GPUEndTime` measurements. This flag currently defaults to `true` and can be toggled via
+    `AppConfig` for future performance/latency trade-offs.
 
 ## Extending the System
 

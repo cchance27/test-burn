@@ -12,7 +12,10 @@ use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MT
 use std::{
     ptr::NonNull,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
@@ -175,6 +178,7 @@ struct CommandBufferInner {
     buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     committed: AtomicBool,
     completed: AtomicBool,
+    profiler: Mutex<Option<GpuProfiler>>,
 }
 
 impl CommandBuffer {
@@ -186,6 +190,7 @@ impl CommandBuffer {
                 buffer,
                 committed: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
+                profiler: Mutex::new(None),
             }),
         })
     }
@@ -217,6 +222,8 @@ impl CommandBuffer {
         if !self.inner.completed.swap(true, Ordering::AcqRel) {
             self.inner.buffer.waitUntilCompleted();
         }
+        // Release any retained profiler handle once the buffer has finished executing.
+        self.clear_profiler();
     }
 
     /// Register a callback that fires when the command buffer completes on the GPU.
@@ -243,6 +250,20 @@ impl CommandBuffer {
     /// Borrow the underlying command buffer if direct access is needed.
     pub fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>> {
         &self.inner.buffer
+    }
+
+    /// Retain the GPU profiler handle for the lifetime of this command buffer.
+    pub fn retain_profiler(&self, profiler: GpuProfiler) {
+        if let Ok(mut slot) = self.inner.profiler.lock() {
+            *slot = Some(profiler);
+        }
+    }
+
+    /// Drop the retained GPU profiler handle, if present.
+    pub fn clear_profiler(&self) {
+        if let Ok(mut slot) = self.inner.profiler.lock() {
+            slot.take();
+        }
     }
 
     /// Returns true if two command buffers wrap the same underlying buffer.

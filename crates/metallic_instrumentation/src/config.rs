@@ -37,6 +37,8 @@ pub struct AppConfig {
     pub metrics_jsonl_path: Option<PathBuf>,
     /// Whether console metrics should be emitted.
     pub enable_console_metrics: bool,
+    /// Whether GPU latency metrics should emit per-command-buffer timings.
+    pub emit_latency: bool,
 }
 
 static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -69,6 +71,7 @@ impl AppConfig {
             log_level,
             metrics_jsonl_path,
             enable_console_metrics,
+            emit_latency: true,
         })
     }
 
@@ -87,5 +90,10 @@ impl AppConfig {
     /// Access the globally-initialised configuration.
     pub fn global() -> &'static Self {
         APP_CONFIG.get().expect("AppConfig not initialised")
+    }
+
+    /// Try to access the globally-initialised configuration without panicking.
+    pub fn try_global() -> Option<&'static Self> {
+        APP_CONFIG.get()
     }
 }

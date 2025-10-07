@@ -95,16 +95,23 @@ struct GpuProfilerState {
     dispatch: Dispatch,
     records: Mutex<Vec<GpuOpRecord>>,
     sequence: Mutex<u64>,
+    command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
 }
 
 impl GpuProfilerState {
-    fn new(key: usize, counter: CounterResources, dispatch: Dispatch) -> Self {
+    fn new(
+        key: usize,
+        counter: CounterResources,
+        dispatch: Dispatch,
+        command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    ) -> Self {
         Self {
             key,
             counter,
             dispatch,
             records: Mutex::new(Vec::new()),
             sequence: Mutex::new(0),
+            command_buffer,
         }
     }
 
@@ -138,20 +145,36 @@ impl GpuProfilerState {
             return;
         }
 
+        let command_buffer_duration = self.command_buffer_runtime();
         for record in records {
             let gpu_duration = self.counter.resolve_duration(&record);
-            let mut duration = gpu_duration.unwrap_or(record.cpu_duration);
+            let mut duration = if let Some(duration) = gpu_duration {
+                duration
+            } else if let Some(fallback) = command_buffer_duration {
+                fallback
+            } else {
+                record.cpu_duration
+            };
             if duration.is_zero() {
                 duration = Duration::from_micros(1);
             }
 
             if gpu_duration.is_none() {
-                tracing::debug!(
-                    target: "instrument",
-                    op = %record.op_name,
-                    backend = %record.backend,
-                    "falling back to CPU timing for GPU profiler scope"
-                );
+                if command_buffer_duration.is_some() {
+                    tracing::debug!(
+                        target: "instrument",
+                        op = %record.op_name,
+                        backend = %record.backend,
+                        "falling back to command buffer timing for GPU profiler scope"
+                    );
+                } else {
+                    tracing::debug!(
+                        target: "instrument",
+                        op = %record.op_name,
+                        backend = %record.backend,
+                        "falling back to CPU timing for GPU profiler scope"
+                    );
+                }
             }
 
             let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
@@ -163,6 +186,32 @@ impl GpuProfilerState {
         }
 
         registry().lock().expect("registry mutex poisoned").remove(&self.key);
+    }
+
+    fn command_buffer_runtime(&self) -> Option<Duration> {
+        fn host_interval(start: f64, end: f64) -> Option<Duration> {
+            if start <= 0.0 || end <= 0.0 {
+                return None;
+            }
+            let delta = end - start;
+            if delta <= 0.0 || !delta.is_finite() {
+                return None;
+            }
+            Some(Duration::from_secs_f64(delta))
+        }
+
+        let raw = self.command_buffer.as_ref();
+        unsafe {
+            let gpu_start: f64 = msg_send![raw, GPUStartTime];
+            let gpu_end: f64 = msg_send![raw, GPUEndTime];
+            if let Some(duration) = host_interval(gpu_start, gpu_end) {
+                return Some(duration);
+            }
+
+            let kernel_start: f64 = msg_send![raw, kernelStartTime];
+            let kernel_end: f64 = msg_send![raw, kernelEndTime];
+            host_interval(kernel_start, kernel_end)
+        }
     }
 }
 
@@ -250,7 +299,7 @@ impl GpuProfiler {
         let device = raw.device();
         let counter = CounterResources::new(Some(device.as_ref()));
         let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
-        let state = Arc::new(GpuProfilerState::new(key, counter, dispatch));
+        let state = Arc::new(GpuProfilerState::new(key, counter, dispatch, raw.clone()));
 
         registry()
             .lock()

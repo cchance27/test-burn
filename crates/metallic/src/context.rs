@@ -12,7 +12,7 @@ use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
-use metallic_instrumentation::{MetricEvent, gpu_profiler::GpuProfiler, record_metric};
+use metallic_instrumentation::{MetricEvent, config::AppConfig, gpu_profiler::GpuProfiler, record_metric};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
@@ -224,6 +224,7 @@ pub struct Context<T: TensorElement> {
     sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
     pending_gpu_scope: Option<GpuProfilerLabel>,
     gpu_scope_stack: Vec<GpuProfilerLabel>,
+    emit_latency: bool,
 }
 
 struct GpuScopeGuard<T: TensorElement> {
@@ -279,6 +280,7 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
+        let emit_latency = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
 
         Ok(Context::<T> {
             device,
@@ -300,7 +302,7 @@ impl<T: TensorElement> Context<T> {
             sdpa_workspaces: FxHashMap::default(),
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
-            //config,
+            emit_latency,
         })
     }
 
@@ -345,6 +347,13 @@ impl<T: TensorElement> Context<T> {
         self.active_resource_cache = Some(cache);
 
         self.mark_tensor_pending(&output);
+
+        if self.emit_latency {
+            if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+                cmd_buf.commit();
+                cmd_buf.wait();
+            }
+        }
 
         Ok(output)
     }
@@ -1383,6 +1392,9 @@ impl<T: TensorElement> Context<T> {
 
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
+            if let Some(profiler) = GpuProfiler::attach(&cmd_buf) {
+                cmd_buf.retain_profiler(profiler);
+            }
             self.active_cmd_buffer = Some(cmd_buf);
         }
 
