@@ -287,11 +287,12 @@ impl ProfiledCommandBuffer for CommandBuffer {
         self.raw()
     }
 
-    fn on_completed(&self, handler: Box<dyn FnOnce() + Send + 'static>) {
+    fn on_completed(&self, handler: Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>) {
         let handler = std::sync::Mutex::new(Some(handler));
-        let block = RcBlock::new(move |_: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
-            if let Some(h) = handler.lock().unwrap().take() {
-                h();
+        let block = RcBlock::new(move |cmd: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
+            if let Some(callback) = handler.lock().unwrap().take() {
+                let command_buffer = unsafe { cmd.as_ref() };
+                callback(command_buffer);
             }
         });
         let raw_block = RcBlock::into_raw(block);

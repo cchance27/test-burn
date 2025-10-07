@@ -5,7 +5,7 @@ use crate::record_metric;
 
 pub trait ProfiledCommandBuffer {
     fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>>;
-    fn on_completed(&self, handler: Box<dyn FnOnce() + Send + 'static>);
+    fn on_completed(&self, handler: Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>);
 }
 
 use objc2::msg_send;
@@ -95,23 +95,50 @@ struct GpuProfilerState {
     dispatch: Dispatch,
     records: Mutex<Vec<GpuOpRecord>>,
     sequence: Mutex<u64>,
-    command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    command_buffer_timing: Mutex<Option<CommandBufferTiming>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CommandBufferTiming {
+    gpu: Option<Duration>,
+    kernel: Option<Duration>,
+}
+
+impl CommandBufferTiming {
+    fn from_command_buffer(buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> Self {
+        unsafe {
+            Self {
+                gpu: host_interval(msg_send![buffer, GPUStartTime], msg_send![buffer, GPUEndTime]),
+                kernel: host_interval(msg_send![buffer, kernelStartTime], msg_send![buffer, kernelEndTime]),
+            }
+        }
+    }
+
+    fn best_duration(&self) -> Option<Duration> {
+        self.gpu.or(self.kernel)
+    }
+}
+
+fn host_interval(start: f64, end: f64) -> Option<Duration> {
+    if start <= 0.0 || end <= 0.0 {
+        return None;
+    }
+    let delta = end - start;
+    if delta <= 0.0 || !delta.is_finite() {
+        return None;
+    }
+    Some(Duration::from_secs_f64(delta))
 }
 
 impl GpuProfilerState {
-    fn new(
-        key: usize,
-        counter: CounterResources,
-        dispatch: Dispatch,
-        command_buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-    ) -> Self {
+    fn new(key: usize, counter: CounterResources, dispatch: Dispatch) -> Self {
         Self {
             key,
             counter,
             dispatch,
             records: Mutex::new(Vec::new()),
             sequence: Mutex::new(0),
-            command_buffer,
+            command_buffer_timing: Mutex::new(None),
         }
     }
 
@@ -189,28 +216,15 @@ impl GpuProfilerState {
     }
 
     fn command_buffer_runtime(&self) -> Option<Duration> {
-        fn host_interval(start: f64, end: f64) -> Option<Duration> {
-            if start <= 0.0 || end <= 0.0 {
-                return None;
-            }
-            let delta = end - start;
-            if delta <= 0.0 || !delta.is_finite() {
-                return None;
-            }
-            Some(Duration::from_secs_f64(delta))
-        }
+        self.command_buffer_timing
+            .lock()
+            .ok()
+            .and_then(|guard| guard.as_ref().and_then(CommandBufferTiming::best_duration))
+    }
 
-        let raw = self.command_buffer.as_ref();
-        unsafe {
-            let gpu_start: f64 = msg_send![raw, GPUStartTime];
-            let gpu_end: f64 = msg_send![raw, GPUEndTime];
-            if let Some(duration) = host_interval(gpu_start, gpu_end) {
-                return Some(duration);
-            }
-
-            let kernel_start: f64 = msg_send![raw, kernelStartTime];
-            let kernel_end: f64 = msg_send![raw, kernelEndTime];
-            host_interval(kernel_start, kernel_end)
+    fn record_command_buffer_timing(&self, timing: CommandBufferTiming) {
+        if let Ok(mut slot) = self.command_buffer_timing.lock() {
+            *slot = Some(timing);
         }
     }
 }
@@ -299,7 +313,7 @@ impl GpuProfiler {
         let device = raw.device();
         let counter = CounterResources::new(Some(device.as_ref()));
         let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
-        let state = Arc::new(GpuProfilerState::new(key, counter, dispatch, raw.clone()));
+        let state = Arc::new(GpuProfilerState::new(key, counter, dispatch));
 
         registry()
             .lock()
@@ -307,7 +321,8 @@ impl GpuProfiler {
             .insert(key, Arc::downgrade(&state));
 
         let completion_state = Arc::clone(&state);
-        command_buffer.on_completed(Box::new(move || {
+        command_buffer.on_completed(Box::new(move |completed_buffer| {
+            completion_state.record_command_buffer_timing(CommandBufferTiming::from_command_buffer(completed_buffer));
             completion_state.process_completion();
         }));
 
