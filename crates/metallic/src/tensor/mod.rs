@@ -873,6 +873,7 @@ impl<T: TensorElement> Tensor<T> {
         encoder.endEncoding();
 
         ctx.mark_tensor_pending(&compact);
+        ctx.finalize_active_command_buffer_if_latency();
 
         let compact_view = compact.as_mps_matrix_batch_view()?;
         Ok((compact, compact_view))

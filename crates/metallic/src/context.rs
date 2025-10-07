@@ -365,14 +365,18 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(&output);
 
+        self.finalize_active_command_buffer_if_latency();
+
+        Ok(output)
+    }
+
+    pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
         if self.emit_latency {
             if let Some(cmd_buf) = self.active_cmd_buffer.take() {
                 cmd_buf.commit();
                 cmd_buf.wait();
             }
         }
-
-        Ok(output)
     }
 
     pub fn set_pending_gpu_scope<S: Into<String>>(&mut self, op_name: S) {
@@ -766,6 +770,8 @@ impl<T: TensorElement> Context<T> {
         );
         self.mark_tensor_pending(&output);
 
+        self.finalize_active_command_buffer_if_latency();
+
         Ok(output)
     }
 
@@ -868,6 +874,7 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(&k);
         self.mark_tensor_pending(&v);
+        self.finalize_active_command_buffer_if_latency();
 
         let entry = KvCacheEntry {
             k,
@@ -1167,6 +1174,7 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(&k_cache);
         self.mark_tensor_pending(&v_cache);
+        self.finalize_active_command_buffer_if_latency();
 
         Ok(())
     }
@@ -1255,6 +1263,7 @@ impl<T: TensorElement> Context<T> {
 
         self.mark_tensor_pending(k_cache);
         self.mark_tensor_pending(v_cache);
+        self.finalize_active_command_buffer_if_latency();
 
         if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
             entry.zeroing_complete = false;
@@ -1476,6 +1485,7 @@ impl<T: TensorElement> Context<T> {
 
         encoder.endEncoding();
         self.mark_tensor_pending(&contiguous);
+        self.finalize_active_command_buffer_if_latency();
 
         Ok(contiguous)
     }
