@@ -398,7 +398,6 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     // --- Autoregressive Generation Loop ---
     // Now, generate tokens one by one using the KV cache.
     for i in 0..cfg.max_tokens - 1 {
-        let iteration_start = Instant::now();
         ctx.reset_pool();
 
         let current_pos = prompt_len + i;
@@ -414,23 +413,18 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
             });
         }
 
-        let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
+        let hidden_states = ctx.with_gpu_scope(format!("generation_step_{}", i), |gpu_ctx| {
+            qwen.forward_step(&input_tensor, current_pos, gpu_ctx)
+        })?;
         record_metric!(MetricEvent::GpuKernelDispatched {
             kernel_name: "forward_step".to_string(),
             op_name: format!("generation_step_{}", i),
             thread_groups: (1, 1, 1),
         });
 
-        let output_start = Instant::now();
-        let logits_tensor = ctx.with_gpu_scope(format!("generation_step_{}_output", i), |ctx| qwen.output(&hidden_states, ctx))?;
-        let output_duration = output_start.elapsed();
-        if !output_duration.is_zero() {
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("generation_step_{}_output", i),
-                backend: "Metal".to_string(),
-                duration_us: output_duration.as_micros() as u64,
-            });
-        }
+        let logits_tensor = ctx.with_gpu_scope(format!("generation_step_{}_output", i), |gpu_ctx| {
+            qwen.output(&hidden_states, gpu_ctx)
+        })?;
 
         let logits = logits_tensor.to_vec();
         let vocab_logits = &logits[..vocab_size];
@@ -446,15 +440,6 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
                 parent_op_name: "sampling".to_string(),
                 internal_kernel_name: "top_k_top_p".to_string(),
                 duration_us: sample_duration.as_micros() as u64,
-            });
-        }
-
-        let iteration_duration = iteration_start.elapsed();
-        if !iteration_duration.is_zero() {
-            record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: format!("iteration_{}", i),
-                backend: "Metal".to_string(),
-                duration_us: iteration_duration.as_micros() as u64,
             });
         }
 
