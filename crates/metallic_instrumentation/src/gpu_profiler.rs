@@ -71,6 +71,7 @@ struct GpuProfilerState {
     records: Mutex<Vec<GpuOpRecord>>,
     sequence: Mutex<u64>,
     command_buffer_timing: Mutex<Option<CommandBufferTiming>>,
+    record_command_buffer_timing: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -106,13 +107,14 @@ fn host_interval(start: f64, end: f64) -> Option<Duration> {
 }
 
 impl GpuProfilerState {
-    fn new(key: usize, dispatch: Dispatch) -> Self {
+    fn new(key: usize, dispatch: Dispatch, record_command_buffer_timing: bool) -> Self {
         Self {
             key,
             dispatch,
             records: Mutex::new(Vec::new()),
             sequence: Mutex::new(0),
             command_buffer_timing: Mutex::new(None),
+            record_command_buffer_timing,
         }
     }
 
@@ -185,6 +187,10 @@ impl GpuProfilerState {
     }
 
     fn command_buffer_runtime(&self) -> Option<Duration> {
+        if !self.record_command_buffer_timing {
+            return None;
+        }
+
         self.command_buffer_timing
             .lock()
             .ok()
@@ -192,6 +198,10 @@ impl GpuProfilerState {
     }
 
     fn record_command_buffer_timing(&self, timing: CommandBufferTiming) {
+        if !self.record_command_buffer_timing {
+            return;
+        }
+
         if let Ok(mut slot) = self.command_buffer_timing.lock() {
             *slot = Some(timing);
         }
@@ -222,10 +232,10 @@ fn buffer_key<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C) -> usize {
 }
 
 impl GpuProfiler {
-    pub fn attach<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C) -> Option<Self> {
+    pub fn attach<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C, record_command_buffer_timing: bool) -> Option<Self> {
         let key = buffer_key(command_buffer);
         let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
-        let state = Arc::new(GpuProfilerState::new(key, dispatch));
+        let state = Arc::new(GpuProfilerState::new(key, dispatch, record_command_buffer_timing));
 
         registry()
             .lock()

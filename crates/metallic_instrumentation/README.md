@@ -123,7 +123,8 @@ fn profile_gpu_work() {
     let mut command_buffer = MyCommandBuffer::new(&queue).unwrap();
 
     // 1. Attach the profiler
-    let profiler = GpuProfiler::attach(&command_buffer).expect("Profiler should attach");
+    let profiler = GpuProfiler::attach(&command_buffer, /* record_command_buffer_timing = */ true)
+        .expect("Profiler should attach");
 
     // 2. Get an encoder and profile a scope of work
     let encoder = command_buffer.new_compute_command_encoder();
