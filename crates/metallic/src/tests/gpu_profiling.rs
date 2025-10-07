@@ -133,3 +133,54 @@ fn context_call_attaches_gpu_profiler() {
         assert!(observed.is_some(), "expected elemwise_add_op GPU event");
     });
 }
+
+// Maintainers: run this test on Apple Silicon hardware before releasing.
+#[test]
+fn matmul_mps_emits_gpu_event() {
+    let (sender, receiver) = mpsc::channel();
+    let exporters: Vec<Box<dyn MetricExporter>> = vec![Box::new(ChannelExporter::new(sender))];
+    let layer = MetricsLayer::new(exporters);
+    let subscriber = tracing_subscriber::registry().with(layer);
+
+    subscriber::with_default(subscriber, || {
+        let mut ctx = Context::<F32Element>::new().expect("metal context");
+
+        let dims = vec![2usize, 2];
+        let mut a = Tensor::new(dims.clone(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor a");
+        let mut b = Tensor::new(dims.clone(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor b");
+        let out = Tensor::new(dims.clone(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor out");
+
+        for (idx, value) in a.as_mut_slice().iter_mut().enumerate() {
+            *value = idx as f32;
+        }
+        for (idx, value) in b.as_mut_slice().iter_mut().enumerate() {
+            *value = (idx as f32) * 0.5;
+        }
+
+        ctx.set_pending_gpu_scope("matmul_test_scope");
+        let _result = ctx.matmul_alpha_beta(&a, &b, &out, false, false, 1.0, 0.0).expect("matmul call");
+
+        ctx.synchronize();
+
+        let mut observed = None;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while Instant::now() < deadline {
+            if let Ok(enriched) = receiver.recv_timeout(Duration::from_millis(100)) {
+                if let MetricEvent::GpuOpCompleted {
+                    op_name,
+                    backend,
+                    duration_us,
+                } = enriched.event
+                {
+                    if backend == "Metal" && op_name.starts_with("matmul_test_scope") {
+                        assert!(duration_us > 0, "duration must be positive");
+                        observed = Some((op_name, duration_us));
+                        break;
+                    }
+                }
+            }
+        }
+
+        assert!(observed.is_some(), "expected matmul_test_scope GPU event");
+    });
+}

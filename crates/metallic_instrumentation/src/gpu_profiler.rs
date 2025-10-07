@@ -282,4 +282,14 @@ impl GpuProfiler {
         let sequence = state.next_sequence();
         Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend)
     }
+
+    pub fn profile_command_buffer(
+        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+        op_name: String,
+        backend: String,
+    ) -> Option<GpuProfilerScope> {
+        let state = Self::from_command_buffer(command_buffer)?;
+        let sequence = state.next_sequence();
+        Self::scope_for_encoder(state, format!("{op_name}#{sequence}"), backend)
+    }
 }

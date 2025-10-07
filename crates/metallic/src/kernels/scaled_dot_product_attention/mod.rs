@@ -186,6 +186,7 @@ fn create_sdpa_operation<T: TensorElement>(
         (k.permute(&[0, 2, 1], ctx)?, false)
     };
 
+    ctx.set_pending_gpu_scope("sdpa_matmul_qk_op");
     let qk_scaled_result = match cache.as_deref_mut() {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?
@@ -201,6 +202,7 @@ fn create_sdpa_operation<T: TensorElement>(
         ))
     })?;
 
+    ctx.set_pending_gpu_scope("sdpa_softmax_op");
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();
         crate::kernels::softmax::apply_softmax(
@@ -216,6 +218,7 @@ fn create_sdpa_operation<T: TensorElement>(
         )?
     };
 
+    ctx.set_pending_gpu_scope("sdpa_matmul_av_op");
     match cache {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;

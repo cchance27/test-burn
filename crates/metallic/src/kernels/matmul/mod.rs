@@ -10,8 +10,10 @@ use super::{KernelFunction, KernelInvocable};
 use crate::{
     Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    context::GpuProfilerLabel,
     resource_cache::ResourceCache,
 };
+use metallic_instrumentation::gpu_profiler::GpuProfiler;
 
 #[cfg(test)]
 mod matmul_test;
@@ -55,6 +57,7 @@ struct MatMul {
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
     // profiling scope is handled at a higher level
+    pub profiler_label: GpuProfilerLabel,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -185,6 +188,8 @@ impl KernelInvocable for MatMulOp {
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul_mps_op"));
+
         let op = MatMul {
             left_buf: matmul_left_buf,
             left_offset: matmul_left_offset,
@@ -197,6 +202,7 @@ impl KernelInvocable for MatMulOp {
             result_desc,
             gemm,
             batch_size: matmul_result_view.batch,
+            profiler_label,
         };
 
         // Return the boxed operation and the output tensor.
@@ -218,6 +224,10 @@ impl Operation for MatMul {
         let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
 
         // Encode the MPS matrix multiplication
+        let _scope = {
+            let label = &self.profiler_label;
+            GpuProfiler::profile_command_buffer(command_buffer, label.op_name.clone(), label.backend.clone())
+        };
         unsafe {
             self.gemm.setBatchStart(0 as NSUInteger);
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
