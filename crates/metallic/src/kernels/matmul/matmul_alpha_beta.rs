@@ -4,12 +4,15 @@ use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
+use std::time::Instant;
 
 use crate::{
     Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
+    context::GpuProfilerLabel,
     resource_cache::ResourceCache,
 };
+use metallic_instrumentation::{MetricEvent, record_metric};
 
 // Public struct for matmul with alpha/beta scaling
 pub struct MatMulAlphaBetaOp;
@@ -27,7 +30,7 @@ struct MatMulAlphaBeta {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
-    // profiling handled externally
+    pub profiler_label: GpuProfilerLabel,
 }
 
 // Implement `KernelInvocable` for the public struct.
@@ -156,6 +159,10 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("matmul_alpha_beta_op"));
+
         let op = MatMulAlphaBeta {
             left_buf: matmul_left_buf,
             left_offset: matmul_left_offset,
@@ -168,6 +175,7 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             result_desc,
             gemm,
             batch_size: matmul_result_view.batch,
+            profiler_label,
         };
 
         // Return the boxed operation and the result tensor (already provided)
@@ -183,6 +191,9 @@ impl Operation for MatMulAlphaBeta {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        let label = self.profiler_label.clone();
+        let cpu_start = Instant::now();
+
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -194,6 +205,14 @@ impl Operation for MatMulAlphaBeta {
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+
+        let elapsed = cpu_start.elapsed();
+        let duration_us = elapsed.as_micros().max(1) as u64;
+        record_metric!(MetricEvent::GpuOpCompleted {
+            op_name: label.op_name,
+            backend: label.backend,
+            duration_us,
+        });
 
         Ok(())
     }

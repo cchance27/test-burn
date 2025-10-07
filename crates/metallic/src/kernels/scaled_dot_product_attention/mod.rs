@@ -4,7 +4,8 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, context::GpuProfilerLabel,
+    resource_cache::ResourceCache,
 };
 
 #[cfg(test)]
@@ -89,6 +90,10 @@ fn create_sdpa_operation<T: TensorElement>(
     config: SdpaConfig,
 ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
     let (q, k, v, causal, query_offset) = args;
+
+    let sdpa_scope_label = ctx
+        .take_gpu_scope()
+        .unwrap_or_else(|| GpuProfilerLabel::fallback("scaled_dot_product_attention_op"));
 
     ctx.prepare_tensors_for_active_cmd(&[q, k, v])?;
 
@@ -186,6 +191,7 @@ fn create_sdpa_operation<T: TensorElement>(
         (k.permute(&[0, 2, 1], ctx)?, false)
     };
 
+    ctx.set_pending_gpu_scope(sdpa_scope_label.op_name.clone());
     let qk_scaled_result = match cache.as_deref_mut() {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?
@@ -201,6 +207,7 @@ fn create_sdpa_operation<T: TensorElement>(
         ))
     })?;
 
+    ctx.set_pending_gpu_scope(sdpa_scope_label.op_name.clone());
     let softmax_result = {
         let cache_opt = cache.as_deref_mut();
         crate::kernels::softmax::apply_softmax(
@@ -216,6 +223,7 @@ fn create_sdpa_operation<T: TensorElement>(
         )?
     };
 
+    ctx.set_pending_gpu_scope(sdpa_scope_label.op_name.clone());
     match cache {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;
