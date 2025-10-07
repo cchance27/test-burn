@@ -26,4 +26,5 @@ The following are design goals and rules for our Agents and Developers for the p
 - Unit tests should have strict tollerances and we should avoid adjusting tests to work around issues, and instead fix issues if the tests are valid.
 - Please remember to context.synchronize() as needed to make sure that tensors are settled in the gpu memory when created or used.
 - If updating code that has comments that reference it make sure the comments are updated to match the new changes.
-- Use ideomatic rust always
+- Use ideomatic rust Always
+- Never call "sampleCountersInBuffer:atSampleIndex:withBarrier" or access it it causes a panic that will crash the app.
