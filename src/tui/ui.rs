@@ -358,8 +358,6 @@ impl App {
 
     pub fn reset_prompt_processing_metrics(&mut self) {
         self.prompt_processing_total_last_ms = 0.0;
-        self.prompt_processing_total_average_ms = 0.0;
-        self.prompt_processing_average_samples = 0;
 
         // Remove any existing Prompt Processing entry from the tree
         self.latency_tree.retain(|metric| metric.label != "Prompt Processing");
@@ -380,49 +378,40 @@ impl App {
             // but don't add individual sub-operations to maintain a single line display
             self.prompt_processing_total_last_ms += row.last_ms;
 
-            // Update the running average: (old_total + new_value) / (count + 1)
-            let new_average_total =
-                self.prompt_processing_total_average_ms * (self.prompt_processing_average_samples as f64) + row.average_ms;
-            self.prompt_processing_average_samples += 1;
-            self.prompt_processing_total_average_ms = new_average_total / (self.prompt_processing_average_samples as f64);
+            // Find or create the "Prompt Processing" metric and update it
+            let metric = match self
+                .latency_tree
+                .iter_mut()
+                .find(|metric| metric.label == PROMPT_PROCESSING_LABEL)
+            {
+                Some(metric) => metric,
+                None => {
+                    self.latency_tree.push(crate::tui::app::HierarchicalMetric::new(
+                        PROMPT_PROCESSING_LABEL.to_string(),
+                        0.0,
+                    ));
+                    self.latency_tree
+                        .last_mut()
+                        .expect("latency_tree cannot be empty after push")
+                }
+            };
 
-            // Update the Prompt Processing entry with the accumulated time
-            self.update_prompt_processing_entry();
-
-            // Don't add sub-items for prompt processing - this keeps it as a single line
+            metric.last_ms = self.prompt_processing_total_last_ms;
+            // Here, we record the accumulated time. This is not a perfect solution
+            // as it records intermediate values, but it's an improvement.
+            metric.running_average.record(self.prompt_processing_total_last_ms);
         } else {
             // For non-prompt processing metrics, add normally
-            self.upsert_latency_path(&segments, row.last_ms, row.average_ms);
+            self.upsert_latency_path(&segments, row.last_ms);
         }
 
         // Recalculate max depth for latency metrics since the tree structure may have changed
         self.latency_collapse_depth.calculate_max_depth(&self.latency_tree);
     }
 
-    fn update_prompt_processing_entry(&mut self) {
-        const PROMPT_PROCESSING_LABEL: &str = "Prompt Processing";
 
-        // Find if there's already a root-level "Prompt Processing" entry and update it
-        // This is a simplified approach that creates "Prompt Processing" at the root level
-        // with the aggregated time
-        match self.latency_tree.iter_mut().find(|metric| metric.label == PROMPT_PROCESSING_LABEL) {
-            Some(metric) => {
-                // Update existing entry with accumulated time
-                metric.last_ms = self.prompt_processing_total_last_ms;
-                metric.average_ms = self.prompt_processing_total_average_ms;
-            }
-            None => {
-                // Create new "Prompt Processing" entry at root level with accumulated time
-                self.latency_tree.push(crate::tui::app::HierarchicalMetric::new(
-                    PROMPT_PROCESSING_LABEL.to_string(),
-                    self.prompt_processing_total_last_ms,
-                    self.prompt_processing_total_average_ms,
-                ));
-            }
-        }
-    }
 
-    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64) {
+    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64) {
         if path.is_empty() {
             return;
         }
@@ -434,7 +423,7 @@ impl App {
             &mut self.latency_tree[idx]
         } else {
             self.latency_tree
-                .push(crate::tui::app::HierarchicalMetric::new(label.to_string(), 0.0, 0.0));
+                .push(crate::tui::app::HierarchicalMetric::new(label.to_string(), 0.0));
             self.latency_tree
                 .last_mut()
                 .expect("latency_tree cannot be empty immediately after push")
@@ -442,10 +431,10 @@ impl App {
 
         if path.len() == 1 {
             metric.last_ms = last_ms;
-            metric.average_ms = average_ms;
+            metric.running_average.record(last_ms);
             return;
         }
 
-        metric.upsert_path(&path[1..], last_ms, average_ms);
+        metric.upsert_path(&path[1..], last_ms);
     }
 }

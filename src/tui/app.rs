@@ -29,8 +29,6 @@ pub struct App {
     pub active_alert: Option<Alert>,
     // Track prompt processing metrics separately for aggregation
     pub prompt_processing_total_last_ms: f64,
-    pub prompt_processing_total_average_ms: f64,
-    pub prompt_processing_average_samples: usize,
     pub generation_config: GenerationConfig,
 }
 
@@ -58,8 +56,6 @@ impl App {
             alert_queue: std::collections::VecDeque::new(),
             active_alert: None,
             prompt_processing_total_last_ms: 0.0,
-            prompt_processing_total_average_ms: 0.0,
-            prompt_processing_average_samples: 0,
             generation_config,
         }
     }
@@ -226,16 +222,18 @@ impl RunningAverage {
 pub struct HierarchicalMetric {
     pub label: String,
     pub last_ms: f64,
-    pub average_ms: f64,
+    pub running_average: RunningAverage,
     pub children: Vec<HierarchicalMetric>,
 }
 
 impl HierarchicalMetric {
-    pub fn new(label: String, last_ms: f64, average_ms: f64) -> Self {
+    pub fn new(label: String, last_ms: f64) -> Self {
+        let mut running_average = RunningAverage::default();
+        running_average.record(last_ms);
         Self {
             label,
             last_ms,
-            average_ms,
+            running_average,
             children: Vec::new(),
         }
     }
@@ -244,14 +242,14 @@ impl HierarchicalMetric {
         if let Some(position) = self.children.iter().position(|child| child.label == label) {
             &mut self.children[position]
         } else {
-            self.children.push(HierarchicalMetric::new(label.to_string(), 0.0, 0.0));
+            self.children.push(HierarchicalMetric::new(label.to_string(), 0.0));
             self.children
                 .last_mut()
                 .expect("children vector cannot be empty immediately after push")
         }
     }
 
-    pub fn upsert_path(&mut self, path: &[&str], last_ms: f64, average_ms: f64) {
+    pub fn upsert_path(&mut self, path: &[&str], last_ms: f64) {
         if path.is_empty() {
             return;
         }
@@ -261,9 +259,9 @@ impl HierarchicalMetric {
 
         if path.len() == 1 {
             child.last_ms = last_ms;
-            child.average_ms = average_ms;
+            child.running_average.record(last_ms);
         } else {
-            child.upsert_path(&path[1..], last_ms, average_ms);
+            child.upsert_path(&path[1..], last_ms);
         }
     }
 
@@ -271,7 +269,7 @@ impl HierarchicalMetric {
     // without modifying the stored values
     pub fn get_inclusive_timing(&self) -> (f64, f64) {
         let mut last_ms_total = self.last_ms;
-        let mut average_ms_total = self.average_ms;
+        let mut average_ms_total = self.running_average.average();
 
         for child in &self.children {
             let (child_last, child_avg) = child.get_inclusive_timing();
