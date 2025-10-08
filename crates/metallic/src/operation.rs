@@ -1,5 +1,6 @@
 use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
 use metallic_instrumentation::gpu_profiler::{CommandBufferCompletionHandler, GpuProfiler, ProfiledCommandBuffer};
+use tracing::trace;
 
 use crate::{
     TensorElement,
@@ -212,6 +213,21 @@ impl CommandBuffer {
     /// call sites may attempt to commit the same wrapper.
     pub fn commit(&self) {
         if !self.inner.committed.swap(true, Ordering::AcqRel) {
+            // If a profiler is attached, note the CPU commit instant for fallback timing
+            if let Ok(guard) = self.inner.profiler.lock()
+                && let Some(prof) = guard.as_ref()
+            {
+                prof.note_cpu_commit();
+            }
+            trace!(
+                "CB_COMMIT profiler_present={} ",
+                self.inner
+                    .profiler
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(|_| true))
+                    .unwrap_or(false)
+            );
             self.inner.buffer.commit();
         }
     }

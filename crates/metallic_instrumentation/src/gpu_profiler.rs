@@ -17,14 +17,14 @@ use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLComputeCommandEnco
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
-use tracing::Dispatch;
 use tracing::{self, dispatcher};
+use tracing::{Dispatch, trace};
 
 #[derive(Clone)]
 pub struct GpuProfiler {
     // Keep the profiler state alive for the lifetime of this handle so scopes
     // may continue to resolve even if the handle is dropped early.
-    _state: Arc<GpuProfilerState>,
+    state: Arc<GpuProfilerState>,
 }
 
 pub struct GpuProfilerScope {
@@ -74,6 +74,9 @@ struct GpuProfilerState {
     sequence: Mutex<u64>,
     command_buffer_timing: Mutex<Option<CommandBufferTiming>>,
     record_command_buffer_timing: bool,
+    cpu_commit_instant: Mutex<Option<Instant>>,
+    cpu_scope_begin: Mutex<Option<Instant>>,
+    use_cpu_scope: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -117,6 +120,9 @@ impl GpuProfilerState {
             sequence: Mutex::new(0),
             command_buffer_timing: Mutex::new(None),
             record_command_buffer_timing,
+            cpu_commit_instant: Mutex::new(None),
+            cpu_scope_begin: Mutex::new(None),
+            use_cpu_scope: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -150,37 +156,119 @@ impl GpuProfilerState {
             return;
         }
 
-        let command_buffer_duration = self.command_buffer_runtime();
-        for record in records {
-            let mut duration = if let Some(fallback) = command_buffer_duration {
-                fallback
+        // Group records by (base op_name without '#sequence', backend) and aggregate CPU durations for weighting
+        // This collapses multiple encoder dispatches for the same logical op into a single group
+        let mut groups: std::collections::HashMap<(String, String), Vec<Duration>> = std::collections::HashMap::new();
+        for rec in records {
+            let base_name = rec.op_name.split('#').next().unwrap_or(&rec.op_name).to_string();
+            groups.entry((base_name, rec.backend)).or_default().push(rec.cpu_duration);
+        }
+
+        let mut command_buffer_duration = self.command_buffer_runtime();
+        // If Metal reports an unrealistically small GPU time but we have a CPU commit->complete elapsed,
+        // use the CPU elapsed as a fallback approximation of the true kernel time (common when heavy work runs
+        // in an internal CB not visible to our profiler).
+        if let Some(best) = command_buffer_duration {
+            let tiny = best < Duration::from_micros(100);
+            if tiny
+                && let Ok(mut instant_guard) = self.cpu_commit_instant.lock()
+                && let Some(committed_at) = instant_guard.take()
+            {
+                let elapsed = committed_at.elapsed();
+                // If elapsed is meaningfully larger than the tiny reported GPU time, prefer it.
+                if elapsed > best.saturating_mul(5) {
+                    command_buffer_duration = Some(elapsed);
+                }
+            }
+        }
+        trace!(
+            "CB_COMPLETE gpu_or_kernel_timing_present={} groups_len={}",
+            command_buffer_duration.is_some(),
+            groups.len()
+        );
+
+        // If we have GPU timing and multiple logical ops, attribute the entire duration to the op
+        // with the largest CPU encode time. This approximates the dominant kernel and avoids tiny splits.
+        // Optional CPU-side timing override for latency mode: measure from first scope creation to completion
+        let cpu_scope_elapsed = if self.record_command_buffer_timing {
+            if let Ok(mut begin) = self.cpu_scope_begin.lock() {
+                begin.take().map(|start| start.elapsed())
             } else {
-                record.cpu_duration
+                None
+            }
+        } else {
+            None
+        };
+
+        let dominant_index: Option<usize> = if command_buffer_duration.is_some() && groups.len() > 1 {
+            let mut max_cpu = Duration::from_micros(0);
+            let mut idx = 0usize;
+            for (i, (_k, cpu_durations)) in groups.iter().enumerate() {
+                let cpu_total: Duration = cpu_durations
+                    .iter()
+                    .copied()
+                    .fold(Duration::from_micros(0), |acc, d| acc.saturating_add(d));
+                if cpu_total > max_cpu {
+                    max_cpu = cpu_total;
+                    idx = i;
+                }
+            }
+            Some(idx)
+        } else {
+            None
+        };
+
+        let groups_len = groups.len();
+        for (i, ((op_name, backend), cpu_durations)) in groups.into_iter().enumerate() {
+            let cpu_total: Duration = cpu_durations
+                .iter()
+                .copied()
+                .fold(Duration::from_micros(0), |acc, d| acc.saturating_add(d));
+
+            // Decide timing source:
+            // - If this CB/op was marked as MPS-based, prefer CPU scope elapsed; else
+            // - If CPU scope elapsed is available (latency mode), use it; else
+            // - If GPU CB timing is available, use it (with dominant heuristic); else
+            // - Fallback to aggregated CPU encode duration.
+            let use_cpu_scope = self.use_cpu_scope.load(std::sync::atomic::Ordering::Relaxed);
+            let duration = if use_cpu_scope {
+                if let Some(cpu_elapsed) = cpu_scope_elapsed {
+                    cpu_elapsed
+                } else if let Some(cb_total) = command_buffer_duration {
+                    cb_total
+                } else {
+                    cpu_total
+                }
+            } else if let Some(cpu_elapsed) = cpu_scope_elapsed {
+                cpu_elapsed
+            } else if let Some(cb_total) = command_buffer_duration {
+                trace!(
+                    "CB_OP op={} backend={} cb_total_us={} dominant={}",
+                    op_name,
+                    backend,
+                    (cb_total.as_secs_f64() * 1e6) as u64,
+                    Some(i) == dominant_index
+                );
+                if groups_len == 1 || Some(i) == dominant_index {
+                    cb_total
+                } else {
+                    // Non-dominant ops get a minimal placeholder to show activity
+                    Duration::from_micros(1)
+                }
+            } else {
+                // No GPU timing, fallback to aggregated CPU duration
+                cpu_total
             };
+
+            let mut duration = duration;
             if duration.is_zero() {
                 duration = Duration::from_micros(1);
             }
 
-            if command_buffer_duration.is_some() {
-                tracing::debug!(
-                    target: "instrument",
-                    op = %record.op_name,
-                    backend = %record.backend,
-                    "falling back to command buffer timing for GPU profiler scope"
-                );
-            } else {
-                tracing::debug!(
-                    target: "instrument",
-                    op = %record.op_name,
-                    backend = %record.backend,
-                    "falling back to CPU timing for GPU profiler scope"
-                );
-            }
-
             let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
             record_metric!(MetricEvent::GpuOpCompleted {
-                op_name: record.op_name,
-                backend: record.backend,
+                op_name,
+                backend,
                 duration_us,
             });
         }
@@ -206,6 +294,35 @@ impl GpuProfilerState {
 
         if let Ok(mut slot) = self.command_buffer_timing.lock() {
             *slot = Some(timing);
+        }
+    }
+
+    fn note_cpu_commit(&self) {
+        if let Ok(mut slot) = self.cpu_commit_instant.lock() {
+            *slot = Some(Instant::now());
+        }
+    }
+
+    fn record_cpu_fallback_if_missing(&self) {
+        if !self.record_command_buffer_timing {
+            return;
+        }
+        let mut timing_guard = match self.command_buffer_timing.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        let has_best = timing_guard.as_ref().and_then(CommandBufferTiming::best_duration).is_some();
+        if has_best {
+            return;
+        }
+        if let Ok(mut instant_guard) = self.cpu_commit_instant.lock() 
+            && let Some(committed_at) = instant_guard.take() {
+                let elapsed = committed_at.elapsed();
+                *timing_guard = Some(CommandBufferTiming {
+                    gpu: Some(elapsed),
+                    kernel: None,
+                });
+            
         }
     }
 }
@@ -234,6 +351,16 @@ fn buffer_key<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C) -> usize {
 }
 
 impl GpuProfiler {
+    pub fn mark_use_cpu_scope_for_cb(command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>) {
+        if let Some(state) = Self::from_command_buffer(command_buffer) {
+            state.use_cpu_scope.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pub fn note_cpu_commit(&self) {
+        self.state.note_cpu_commit();
+    }
+
     pub fn attach<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C, record_command_buffer_timing: bool) -> Option<Self> {
         let key = buffer_key(command_buffer);
         let dispatch = dispatcher::get_default(|dispatch| dispatch.clone());
@@ -247,13 +374,28 @@ impl GpuProfiler {
         let completion_state = Arc::clone(&state);
         command_buffer.on_completed(Box::new(move |completed_buffer| {
             completion_state.record_command_buffer_timing(CommandBufferTiming::from_command_buffer(completed_buffer));
+            completion_state.record_cpu_fallback_if_missing();
             completion_state.process_completion();
         }));
 
-        Some(Self { _state: state })
+        Some(Self { state })
     }
 
     fn scope_for_encoder(state: Arc<GpuProfilerState>, op_name: String, backend: String) -> Option<GpuProfilerScope> {
+        // Mark the CPU scope begin time the first time we create a scope for this CB
+        if let Ok(mut begin) = state.cpu_scope_begin.lock() 
+            && begin.is_none() {
+                *begin = Some(Instant::now());
+            
+        }
+
+        // Mark the CPU scope begin time the first time we create a scope for this CB
+        if let Ok(mut begin) = state.cpu_scope_begin.lock() 
+            && begin.is_none() {
+                *begin = Some(Instant::now());
+            
+        }
+
         Some(GpuProfilerScope {
             inner: Some(GpuProfilerScopeInner {
                 state,

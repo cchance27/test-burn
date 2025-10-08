@@ -27,3 +27,4 @@ The following are design goals and rules for our Agents and Developers for the p
 - Please remember to context.synchronize() as needed to make sure that tensors are settled in the gpu memory when created or used.
 - If updating code that has comments that reference it make sure the comments are updated to match the new changes.
 - Use ideomatic rust always
+- DO NOT edit cargo.toml and cargo.lock, to add or modify crates use cargo add/remove etc.

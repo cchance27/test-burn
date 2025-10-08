@@ -224,6 +224,8 @@ impl Operation for MatMul {
         let result = mps_matrix_from_buffer(&self.result_buf, self.result_offset, &self.result_desc);
 
         // Encode the MPS matrix multiplication
+        // MPS-backed op: ensure CPU-scope timing is used in latency mode for exact attribution
+        GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer);
         let _scope = {
             let label = &self.profiler_label;
             GpuProfiler::profile_command_buffer(command_buffer, label.op_name.clone(), label.backend.clone())

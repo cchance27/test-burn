@@ -151,6 +151,8 @@ impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
         _cache: &mut ResourceCache,
     ) -> Result<(), MetalError> {
+        // MPS-backed op: ensure CPU-scope timing is used in latency mode for exact attribution
+        GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer);
         let attn_matrix = mps_matrix_from_buffer(&self.attn.buf, self.attn.offset, &self.descriptor);
         unsafe {
             self.softmax.setBatchStart(0 as NSUInteger);
