@@ -187,10 +187,22 @@ fn render_metric(metric: &crate::tui::app::HierarchicalMetric, depth: usize, max
     let level = u8::try_from(depth).unwrap_or(u8::MAX);
     // Use inclusive timing for display (parent + all descendants) to show total impact
     let (inclusive_last_ms, inclusive_average_ms) = metric.get_inclusive_timing();
+    let (child_last_sum, child_average_sum) = metric.children.iter().fold((0.0, 0.0), |(last_acc, avg_acc), child| {
+        let (child_last, child_avg) = child.get_inclusive_timing();
+        (last_acc + child_last, avg_acc + child_avg)
+    });
+    let residual_last = (inclusive_last_ms - child_last_sum).max(0.0);
+    let residual_avg = (inclusive_average_ms - child_average_sum).max(0.0);
     lines.push(format_latency_line(level, &metric.label, inclusive_last_ms, inclusive_average_ms));
 
     if depth == max_depth {
         return;
+    }
+
+    const RESIDUAL_THRESHOLD_MS: f64 = 0.05;
+    if (residual_last > RESIDUAL_THRESHOLD_MS || residual_avg > RESIDUAL_THRESHOLD_MS) && !metric.children.is_empty() {
+        let residual_level = level.saturating_add(1);
+        lines.push(format_latency_line(residual_level, "Other", residual_last, residual_avg));
     }
 
     for child in &metric.children {
@@ -379,20 +391,12 @@ impl App {
             self.prompt_processing_total_last_ms += row.last_ms;
 
             // Find or create the "Prompt Processing" metric and update it
-            let metric = match self
-                .latency_tree
-                .iter_mut()
-                .find(|metric| metric.label == PROMPT_PROCESSING_LABEL)
-            {
+            let metric = match self.latency_tree.iter_mut().find(|metric| metric.label == PROMPT_PROCESSING_LABEL) {
                 Some(metric) => metric,
                 None => {
-                    self.latency_tree.push(crate::tui::app::HierarchicalMetric::new(
-                        PROMPT_PROCESSING_LABEL.to_string(),
-                        0.0,
-                    ));
                     self.latency_tree
-                        .last_mut()
-                        .expect("latency_tree cannot be empty after push")
+                        .push(crate::tui::app::HierarchicalMetric::new(PROMPT_PROCESSING_LABEL.to_string(), 0.0));
+                    self.latency_tree.last_mut().expect("latency_tree cannot be empty after push")
                 }
             };
 
@@ -408,8 +412,6 @@ impl App {
         // Recalculate max depth for latency metrics since the tree structure may have changed
         self.latency_collapse_depth.calculate_max_depth(&self.latency_tree);
     }
-
-
 
     fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64) {
         if path.is_empty() {

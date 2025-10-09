@@ -268,14 +268,28 @@ impl HierarchicalMetric {
     // Calculate inclusive timing (the time for this node plus all its descendants)
     // without modifying the stored values
     pub fn get_inclusive_timing(&self) -> (f64, f64) {
-        let mut last_ms_total = self.last_ms;
-        let mut average_ms_total = self.running_average.average();
+        let mut child_last_total = 0.0;
+        let mut child_average_total = 0.0;
 
         for child in &self.children {
             let (child_last, child_avg) = child.get_inclusive_timing();
-            last_ms_total += child_last;
-            average_ms_total += child_avg;
+            child_last_total += child_last;
+            child_average_total += child_avg;
         }
+
+        let self_avg = self.running_average.average();
+
+        let last_ms_total = if self.last_ms > 0.0 {
+            self.last_ms.max(child_last_total)
+        } else {
+            child_last_total
+        };
+
+        let average_ms_total = if self_avg > 0.0 {
+            self_avg.max(child_average_total)
+        } else {
+            child_average_total
+        };
 
         (last_ms_total, average_ms_total)
     }

@@ -315,14 +315,14 @@ impl GpuProfilerState {
         if has_best {
             return;
         }
-        if let Ok(mut instant_guard) = self.cpu_commit_instant.lock() 
-            && let Some(committed_at) = instant_guard.take() {
-                let elapsed = committed_at.elapsed();
-                *timing_guard = Some(CommandBufferTiming {
-                    gpu: Some(elapsed),
-                    kernel: None,
-                });
-            
+        if let Ok(mut instant_guard) = self.cpu_commit_instant.lock()
+            && let Some(committed_at) = instant_guard.take()
+        {
+            let elapsed = committed_at.elapsed();
+            *timing_guard = Some(CommandBufferTiming {
+                gpu: Some(elapsed),
+                kernel: None,
+            });
         }
     }
 }
@@ -383,17 +383,17 @@ impl GpuProfiler {
 
     fn scope_for_encoder(state: Arc<GpuProfilerState>, op_name: String, backend: String) -> Option<GpuProfilerScope> {
         // Mark the CPU scope begin time the first time we create a scope for this CB
-        if let Ok(mut begin) = state.cpu_scope_begin.lock() 
-            && begin.is_none() {
-                *begin = Some(Instant::now());
-            
+        if let Ok(mut begin) = state.cpu_scope_begin.lock()
+            && begin.is_none()
+        {
+            *begin = Some(Instant::now());
         }
 
         // Mark the CPU scope begin time the first time we create a scope for this CB
-        if let Ok(mut begin) = state.cpu_scope_begin.lock() 
-            && begin.is_none() {
-                *begin = Some(Instant::now());
-            
+        if let Ok(mut begin) = state.cpu_scope_begin.lock()
+            && begin.is_none()
+        {
+            *begin = Some(Instant::now());
         }
 
         Some(GpuProfilerScope {

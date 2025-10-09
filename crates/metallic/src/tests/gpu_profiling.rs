@@ -117,19 +117,18 @@ fn context_call_attaches_gpu_profiler() {
         let mut observed = None;
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if let Ok(enriched) = receiver.recv_timeout(Duration::from_millis(100)) 
+            if let Ok(enriched) = receiver.recv_timeout(Duration::from_millis(100))
                 && let MetricEvent::GpuOpCompleted {
                     op_name,
                     backend,
                     duration_us,
                 } = enriched.event
-                && backend == "Metal" 
-                && op_name.starts_with("elemwise_add_op") {
-                        assert!(duration_us > 0, "duration must be positive");
-                        observed = Some((op_name, duration_us));
-                        break;
-                    
-                
+                && backend == "Metal"
+                && op_name.starts_with("elemwise_add_op")
+            {
+                assert!(duration_us > 0, "duration must be positive");
+                observed = Some((op_name, duration_us));
+                break;
             }
         }
 
@@ -168,18 +167,18 @@ fn matmul_mps_emits_gpu_event() {
         let mut observed = None;
         let deadline = Instant::now() + Duration::from_secs(2);
         while Instant::now() < deadline {
-            if let Ok(enriched) = receiver.recv_timeout(Duration::from_millis(100)) 
+            if let Ok(enriched) = receiver.recv_timeout(Duration::from_millis(100))
                 && let MetricEvent::GpuOpCompleted {
                     op_name,
                     backend,
                     duration_us,
                 } = enriched.event
-                && backend == "Metal" && op_name.starts_with("matmul_test_scope") {
-                        assert!(duration_us > 0, "duration must be positive");
-                        observed = Some((op_name, duration_us));
-                        break;
-                    
-                
+                && backend == "Metal"
+                && op_name.starts_with("matmul_test_scope")
+            {
+                assert!(duration_us > 0, "duration must be positive");
+                observed = Some((op_name, duration_us));
+                break;
             }
         }
 

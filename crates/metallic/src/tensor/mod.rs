@@ -1,4 +1,4 @@
-use super::{Context, MetalError, operation::CommandBuffer};
+use super::{Context, MetalError, context::GPU_PROFILER_BACKEND, operation::CommandBuffer};
 use crate::encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::kernels::elemwise_add::ElemwiseAddOp;
 use crate::kernels::elemwise_div::ElemwiseDivOp;
@@ -6,6 +6,7 @@ use crate::kernels::elemwise_mul::ElemwiseMulOp;
 use crate::kernels::elemwise_sub::ElemwiseSubOp;
 use crate::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
 pub use dtypes::*;
+use metallic_instrumentation::{config::AppConfig, gpu_profiler::GpuProfiler};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLDevice, MTLResourceOptions, MTLSize,
@@ -50,6 +51,9 @@ impl Deref for ThreadSafeBuffer {
 
 // CPU fill threshold in MB
 const DEFAULT_CPU_FILL_THRESHOLD_MB: usize = 1;
+const TENSOR_STAGING_READ_OP: &str = "tensor_staging_read";
+const TENSOR_STAGING_PREP_OP: &str = "tensor_staging_prepare";
+const TENSOR_STAGING_FLUSH_OP: &str = "tensor_staging_flush";
 
 #[derive(Clone)]
 struct HostAccessState {
@@ -399,15 +403,28 @@ impl<T: TensorElement> Tensor<T> {
         }
 
         let command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+        if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
+            command_buffer.retain_profiler(profiler);
+        }
         let encoder = command_buffer
             .raw()
             .blitCommandEncoder()
             .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+        let profiler_scope = GpuProfiler::profile_blit(
+            command_buffer.raw(),
+            &encoder,
+            TENSOR_STAGING_READ_OP.to_string(),
+            GPU_PROFILER_BACKEND.to_string(),
+        );
 
         unsafe {
             encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
         }
         encoder.endEncoding();
+        if let Some(scope) = profiler_scope {
+            scope.finish();
+        }
         command_buffer.commit();
         command_buffer.wait();
 
@@ -440,15 +457,28 @@ impl<T: TensorElement> Tensor<T> {
 
         if needs_copy && region_len != 0 {
             let command_buffer = CommandBuffer::new(&self.command_queue)?;
+            let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+            if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
+                command_buffer.retain_profiler(profiler);
+            }
             let encoder = command_buffer
                 .raw()
                 .blitCommandEncoder()
                 .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+            let profiler_scope = GpuProfiler::profile_blit(
+                command_buffer.raw(),
+                &encoder,
+                TENSOR_STAGING_PREP_OP.to_string(),
+                GPU_PROFILER_BACKEND.to_string(),
+            );
 
             unsafe {
                 encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
             }
             encoder.endEncoding();
+            if let Some(scope) = profiler_scope {
+                scope.finish();
+            }
             command_buffer.commit();
             command_buffer.wait();
 
@@ -495,15 +525,28 @@ impl<T: TensorElement> Tensor<T> {
         drop(state);
 
         let command_buffer = CommandBuffer::new(&self.command_queue)?;
+        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+        if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
+            command_buffer.retain_profiler(profiler);
+        }
         let encoder = command_buffer
             .raw()
             .blitCommandEncoder()
             .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+        let profiler_scope = GpuProfiler::profile_blit(
+            command_buffer.raw(),
+            &encoder,
+            TENSOR_STAGING_FLUSH_OP.to_string(),
+            GPU_PROFILER_BACKEND.to_string(),
+        );
 
         unsafe {
             encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &self.buf, base_offset, region_len);
         }
         encoder.endEncoding();
+        if let Some(scope) = profiler_scope {
+            scope.finish();
+        }
         command_buffer.commit();
         command_buffer.wait();
 
