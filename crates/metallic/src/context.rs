@@ -12,7 +12,8 @@ use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp};
 use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
-use metallic_instrumentation::{MetricEvent, config::AppConfig, gpu_profiler::GpuProfiler, record_metric};
+use metallic_instrumentation::record_metric_async;
+use metallic_instrumentation::{MetricEvent, config::AppConfig, gpu_profiler::GpuProfiler};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
@@ -237,13 +238,13 @@ impl<T: TensorElement> Context<T> {
             if !waited.is_zero() {
                 if let Some(label) = self.current_gpu_scope_label() {
                     let path = label.op_name;
-                    record_metric!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: format!("{}/cb_wait", path),
                         backend: label.backend,
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
                     });
                 } else {
-                    record_metric!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: "Generation Loop/cb_wait".to_string(),
                         backend: GPU_PROFILER_BACKEND.to_string(),
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
@@ -262,13 +263,13 @@ impl<T: TensorElement> Context<T> {
             if !waited.is_zero() {
                 if let Some(label) = self.current_gpu_scope_label() {
                     let path = label.op_name;
-                    record_metric!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: format!("{}/cb_wait", path),
                         backend: label.backend,
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
                     });
                 } else {
-                    record_metric!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: "Generation Loop/cb_wait".to_string(),
                         backend: GPU_PROFILER_BACKEND.to_string(),
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
@@ -384,13 +385,13 @@ impl<T: TensorElement> Context<T> {
             let waited = wait_start.elapsed();
             if !waited.is_zero() {
                 if let Some(label) = self.current_gpu_scope_label() {
-                    record_metric!(MetricEvent::GpuOpCompleted {
+                    record_metric_async!(MetricEvent::GpuOpCompleted {
                         op_name: format!("{}/cb_wait", label.op_name),
                         backend: label.backend,
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
                     });
                 } else {
-                    record_metric!(MetricEvent::GpuOpCompleted {
+                    record_metric_async!(MetricEvent::GpuOpCompleted {
                         op_name: "Generation Loop/cb_wait".to_string(),
                         backend: GPU_PROFILER_BACKEND.to_string(),
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
@@ -1201,7 +1202,7 @@ impl<T: TensorElement> Context<T> {
         match self.call::<KvCacheWriteOp>((k_src.clone(), v_src.clone(), k_cache.clone(), v_cache.clone(), config.clone())) {
             Ok(_) => {
                 // Record metric for successful KV cache kernel dispatch using new instrumentation
-                record_metric!(MetricEvent::GpuKernelDispatched {
+                record_metric_async!(MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_write".to_string(),
                     op_name: format!("kv_cache_write_step_{}_layer_{}", step, layer_idx),
                     thread_groups: (config.total_threads, 1, 1),
@@ -1209,7 +1210,7 @@ impl<T: TensorElement> Context<T> {
             }
             Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
                 // Record metric for fallback blit operation using new instrumentation
-                record_metric!(MetricEvent::GpuKernelDispatched {
+                record_metric_async!(MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_fallback_blit".to_string(),
                     op_name: format!("kv_cache_blit_step_{}_layer_{}", step, layer_idx),
                     thread_groups: (1, 1, 1), // Placeholder - actual thread groups would be computed differently for blit
@@ -1581,13 +1582,13 @@ impl<T: TensorElement> Context<T> {
             if !waited.is_zero() {
                 if let Some(label) = self.current_gpu_scope_label() {
                     let path = label.op_name;
-                    record_metric!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: format!("{}/dep_wait", path),
                         backend: label.backend,
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
                     });
                 } else {
-                    record_metric!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: "Generation Loop/dep_wait".to_string(),
                         backend: GPU_PROFILER_BACKEND.to_string(),
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,

@@ -3,7 +3,7 @@ use crate::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::kernels::rmsnorm::RMSNormOp;
 use crate::kernels::rope::RoPEOp;
 use crate::{Context, MetalError, Tensor, TensorElement};
-use metallic_instrumentation::{record_metric, MetricEvent};
+use metallic_instrumentation::{MetricEvent, record_metric_async};
 use std::time::{Duration, Instant};
 
 mod qwen25_tests;
@@ -523,12 +523,12 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.set_pending_gpu_scope(format!("mlp_residual_block_{}_op", layer_idx));
                 cpu_accum += cpu_chk.elapsed();
                 let x = resid_mlp.add_elem(&ffn_output, ctx)?;
-                cpu_chk = Instant::now();
+                //cpu_chk = Instant::now(); // Not needed as we've finished accumulation of cpu ops i believe
 
                 // Record per-block CPU overhead outside GPU calls
                 let cpu_us = cpu_accum.as_micros() as u64;
                 if cpu_us > 0 {
-                    record_metric!(MetricEvent::InternalKernelCompleted {
+                    record_metric_async!(MetricEvent::InternalKernelCompleted {
                         parent_op_name: "generation_loop".to_string(),
                         internal_kernel_name: format!("forward_cpu_block_{}", layer_idx),
                         duration_us: cpu_us,
@@ -538,7 +538,7 @@ impl<T: TensorElement> Qwen25<T> {
             })?;
             let block_duration = block_start.elapsed();
             if !block_duration.is_zero() {
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: format!("block_{}_total", layer_idx),
                     duration_us: block_duration.as_micros() as u64,

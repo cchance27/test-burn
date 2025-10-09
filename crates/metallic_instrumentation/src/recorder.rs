@@ -44,7 +44,7 @@ impl MetricsLayer {
         }
     }
 
-    fn dispatch(&self, event: &EnrichedMetricEvent) {
+    pub fn dispatch(&self, event: &EnrichedMetricEvent) {
         for exporter in self.exporters.iter() {
             exporter.export(event);
         }

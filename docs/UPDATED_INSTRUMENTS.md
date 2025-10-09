@@ -31,7 +31,7 @@ The new instrumentation system will reside entirely within a new module in the `
 │   ├── event.rs        # The canonical `MetricEvent` enum.
 │   ├── recorder.rs     # The `MetricsLayer` and `MetricExporter` trait.
 │   ├── exporters.rs    # Concrete exporter implementations (e.g., Jsonl).
-│   └── macros.rs       # All developer-facing macros (`record_metric!`, etc.).
+│   └── macros.rs       # All developer-facing macros (`record_metric_async!`, etc.).
 └── ... (other metallic modules)
 ```
 
@@ -121,7 +121,7 @@ This profiler will be the sole entry point for timing GPU work. It will manage t
 2.  **Encapsulation**: It will contain the `MTLCounterSampleBuffer` and all state needed for timing. All `unsafe` code and `msg_send!` calls are hidden within its methods.
 3.  **RAII for Custom Kernels**: It will provide a `timed_scope` method that returns a RAII guard. The guard's creation and destruction will trigger the `msg_send!` calls to sample the GPU counters, making timing your own kernels trivial.
 4.  **MPS Internal Timing**: It will have a dedicated method for timing MPS operations, which internally uses your established `MpsRecorder` logic (via `objc` calls) to capture and report internal kernel timings.
-5.  **Automated Reporting**: The `GpuProfiler` will attach a completion handler to the command buffer at creation time. This handler will automatically process the sample buffer and report all recorded timings via the `record_metric!` macro when the GPU work is finished.
+5.  **Automated Reporting**: The `GpuProfiler` will attach a completion handler to the command buffer at creation time. This handler will automatically process the sample buffer and report all recorded timings via the `record_metric_async!` macro when the GPU work is finished.
 
 ### B. Implementation Sketch
 
@@ -181,7 +181,7 @@ impl GpuProfiler {
                 let end_ts = ...;   // get from data
                 let duration_us = ...; // calculate
 
-                record_metric!(MetricEvent::GpuOpCompleted {
+                record_metric_async!(MetricEvent::GpuOpCompleted {
                     op_name: record.op_name,
                     backend: record.backend,
                     duration_us,
@@ -521,4 +521,4 @@ This channel-based approach provides a clean, safe, and highly performant way fo
 
 ## 7. Conclusion
 
-By channelling both your hand-written kernel timings and your internal MPS kernel timings into `record_metric!`, all performance data ends up in the same structured, flexible, and extensible system. This achieves the goal of unification while respecting and reusing the critical, low-level work you have already successfully implemented.
+By channelling both your hand-written kernel timings and your internal MPS kernel timings into `record_metric_async!`, all performance data ends up in the same structured, flexible, and extensible system. This achieves the goal of unification while respecting and reusing the critical, low-level work you have already successfully implemented.

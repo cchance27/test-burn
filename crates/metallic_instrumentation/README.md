@@ -25,7 +25,7 @@ The system is founded on a few key principles:
     -   `ConsoleExporter`: Prints metrics to `stdout` for easy debugging.
     -   `ChannelExporter`: Sends metrics over a standard `mpsc::channel` for real-time, in-process consumption (e.g., by a UI).
 -   **Environment-Based Configuration**: Easily configure logging and metrics without changing code.
--   **Ergonomic API**: Use simple macros (`record_metric!`) and RAII guards for clean and safe instrumentation.
+-   **Ergonomic API**: Use simple macros (`record_metric_async!`) and RAII guards for clean and safe instrumentation.
 -   **Latency-Oriented GPU Command Buffers**: When latency emission is enabled (the default), every kernel executes in its own
     Metal command buffer so we can capture accurate scheduling and execution timings even without GPU counter support.
 
@@ -64,14 +64,14 @@ fn main() {
 
 ### 2. Emitting Metrics
 
-Use the `record_metric!` macro to emit `MetricEvent` instances.
+Use the `record_metric_async!` macro to emit `MetricEvent` instances.
 
 ```rust
 use metallic_instrumentation::prelude::*;
 
 // This code assumes a subscriber has been initialized.
 fn do_work() {
-    record_metric!(MetricEvent::ResourceCacheAccess {
+    record_metric_async!(MetricEvent::ResourceCacheAccess {
         cache_key: "model_weights".to_string(),
         hit: true,
         bytes: 1024 * 1024,
@@ -91,7 +91,7 @@ fn run_transformer_block() {
     let _block_span = info_span!("transformer_block", block_id = 5).entered();
 
     // This metric will be associated with the "transformer_block" span.
-    record_metric!(MetricEvent::GpuKernelDispatched {
+    record_metric_async!(MetricEvent::GpuKernelDispatched {
         kernel_name: "attention_matmul".to_string(),
         op_name: "attention_matmul_op".to_string(),
         thread_groups: (16, 1, 1),
@@ -174,7 +174,7 @@ environment variables is desired.
 ### Adding a New Metric Type
 
 1.  Add a new variant to the `MetricEvent` enum in `src/event.rs`.
-2.  Use the `record_metric!` macro with your new event type where needed.
+2.  Use the `record_metric_async!` macro with your new event type where needed.
 
 ### Creating a Custom Exporter
 

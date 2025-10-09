@@ -25,45 +25,22 @@ use ratatui::{
 };
 use tui::{App, AppResult};
 
-const GENERATION_LOOP_LABEL: &str = "Generation Loop";
-const PROMPT_PROCESSING_LABEL: &str = "Prompt Processing";
-
 fn main() -> AppResult<()> {
     // Parse command line arguments using CLAP
     let cli_config = cli::CliConfig::parse();
 
-    // Set up tracing based on verbosity level and output format
-    use tracing_subscriber::{EnvFilter, layer::SubscriberExt};
-
-    // In JSON mode, only show errors by default to avoid interfering with JSON output
-    let filter = if matches!(cli_config.output_format, cli::config::OutputFormat::Json) {
-        match cli_config.verbose {
-            0 => EnvFilter::new("metallic=error,metallic_cli=error,tui=error,metallic_instrumentation=error,metrics=info"),
-            1 => EnvFilter::new("metallic=warn,metallic_cli=warn,tui=warn,metallic_instrumentation=warn,metrics=info"),
-            2 => EnvFilter::new("metallic=info,metallic_cli=info,tui=info,metallic_instrumentation=info,metrics=info"),
-            _ => EnvFilter::new("metallic=debug,metallic_cli=debug,tui=debug,metallic_instrumentation=debug,metrics=info"),
-        }
-    } else {
-        // For TUI and text modes, use normal verbosity levels
-        match cli_config.verbose {
-            0 => EnvFilter::new("metallic=warn,metallic_cli=warn,tui=warn,metallic_instrumentation=warn,metrics=info"),
-            1 => EnvFilter::new("metallic=info,metallic_cli=info,tui=info,metallic_instrumentation=info,metrics=info"),
-            2 => EnvFilter::new("metallic=debug,metallic_cli=debug,tui=debug,metallic_instrumentation=debug,metrics=info"),
-            _ => EnvFilter::new("metallic=trace,metallic_cli=trace,tui=trace,metallic_instrumentation=trace,metrics=info"),
-        }
-    };
-
-    // Initialize instrumentation system with tracing subscriber and metrics layer
+    // Initialize instrumentation system with async recorder for zero-overhead metrics
     let (sender, receiver) = mpsc::channel();
     let channel_exporter = Box::new(ChannelExporter::new(sender));
     //let console_exporter = Box::new(ConsoleExporter::new());
 
     let exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter]; //console_exporter];
 
-    let metrics_layer = MetricsLayer::new(exporters);
-    let subscriber = tracing_subscriber::registry().with(filter).with(metrics_layer);
+    let async_recorder = AsyncMetricRecorder::new(exporters);
+    let metric_queue = async_recorder.queue.clone();
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting global default subscriber failed");
+    // Initialize the global metric queue for the async macro
+    metallic_instrumentation::macros::init_metric_queue(metric_queue);
 
     alert::init_error_logging();
     let gguf_path = cli_config.gguf_path.clone();
@@ -151,7 +128,7 @@ fn run_tui_mode(
     generation_handle: thread::JoinHandle<Result<()>>,
 ) -> AppResult<()> {
     let mut terminal = setup_terminal()?;
-    let mut app = App::new(cli::config::GenerationConfig::default());
+    let mut app = App::new();
 
     while !app.should_quit {
         // Handle crossterm events
@@ -159,7 +136,12 @@ fn run_tui_mode(
             && let crossterm::event::Event::Key(key) = crossterm::event::read()?
         {
             match key.code {
-                crossterm::event::KeyCode::Char('q') => app.should_quit = true,
+                crossterm::event::KeyCode::Char('q') => app.quit(),
+                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Esc => {
+                    if app.has_active_alert() {
+                        app.dismiss_active_alert();
+                    }
+                }
                 crossterm::event::KeyCode::Char('m') => {
                     app.metrics_view = tui::app::MetricsView::Memory;
                     app.reset_metrics_scroll();
@@ -187,7 +169,9 @@ fn run_tui_mode(
 
         // Process metric events from the instrumentation system and convert them to AppEvents
         while let Ok(enriched_event) = receiver.try_recv() {
-            let rows = metric_event_to_latency_rows(&enriched_event.event);
+            tracing::debug!("Main thread received enriched event: {:?}", enriched_event);
+            let rows = tui::metrics::metric_event_to_latency_rows(&enriched_event.event);
+            tracing::debug!("Converted to {} latency rows", rows.len());
             if !rows.is_empty() {
                 // Send the rows as an AppEvent so they get processed like before
                 handle_app_event(&mut app, AppEvent::LatencyUpdate(rows));
@@ -374,267 +358,6 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
             app.push_alert(alert);
         }
     }
-}
-
-const BLOCK_STAGE_PREFIXES: &[(&str, &str)] = &[
-    ("attn_residual_clone_block_", "attn_residual_clone"),
-    ("attn_norm_block_", "attn_norm"),
-    ("qkv_proj_block_", "attn_qkv_proj"),
-    ("attn_rearrange_block_", "attn_rearrange"),
-    ("rope_block_", "Rope"),
-    ("kv_cache_block_", "kv_cache"),
-    ("kv_repeat_block_", "kv_repeat"),
-    ("sdpa_block_", "Sdpa"),
-    ("attn_reassembly_block_", "attn_reassembly"),
-    ("attn_output_block_", "attn_output"),
-    ("attn_residual_block_", "attn_residual"),
-    ("mlp_residual_clone_block_", "mlp_residual_clone"),
-    ("mlp_norm_block_", "mlp_norm"),
-    ("mlp_swiglu_block_", "mlp_swiglu"),
-    ("mlp_reshape_block_", "mlp_reshape"),
-    ("mlp_residual_block_", "mlp_residual"),
-    ("mlp_output_block_", "mlp_output"),
-];
-
-fn metric_event_to_latency_rows(event: &MetricEvent) -> Vec<metallic_cli_helpers::app_event::LatencyRow> {
-    match event {
-        MetricEvent::GpuOpCompleted { op_name, duration_us, .. } => map_gpu_op_completed(op_name)
-            .into_iter()
-            .map(|segments| build_latency_row(segments, *duration_us))
-            .collect(),
-        MetricEvent::InternalKernelCompleted {
-            parent_op_name,
-            internal_kernel_name,
-            duration_us,
-        } => map_internal_kernel(parent_op_name, internal_kernel_name)
-            .into_iter()
-            .map(|segments| build_latency_row(segments, *duration_us))
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
-fn map_internal_kernel(parent: &str, kernel: &str) -> Option<Vec<String>> {
-    let base_parent = parent.to_ascii_lowercase();
-    match base_parent.as_str() {
-        "sampling" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Sampling".to_string()]),
-        "decoding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Decode".to_string()]),
-        "generation_loop" => match kernel {
-            k if k.starts_with("block_") && k.ends_with("_total") => {
-                let idx_str = k.strip_prefix("block_").unwrap().strip_suffix("_total").unwrap();
-                let idx = idx_str.parse::<usize>().ok()?;
-                Some(vec![
-                    GENERATION_LOOP_LABEL.to_string(),
-                    "Forward Step".to_string(),
-                    format!("Block {}", idx),
-                ])
-            }
-            "pool_reset" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Pool Reset".to_string()]),
-            "embedding" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Embedding".to_string()]),
-            "forward_step_total" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Forward Step".to_string()]),
-            "token_push" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Token Push".to_string()]),
-            "cache_logging" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Cache Logging".to_string()]),
-            "token_callback" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Token Callback".to_string()]),
-            "eos_check" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "EOS Check".to_string()]),
-            "metric_recording_overhead" => Some(vec![GENERATION_LOOP_LABEL.to_string(), "Metric Recording Overhead".to_string()]),
-            "logits_sync" => Some(vec![
-                GENERATION_LOOP_LABEL.to_string(),
-                "Forward Step".to_string(),
-                "Logits Sync".to_string(),
-            ]),
-            "iteration_total" => Some(vec![GENERATION_LOOP_LABEL.to_string()]),
-            _ => None,
-        },
-        "prompt_processing" => match kernel {
-            "logits_sync" => Some(vec![PROMPT_PROCESSING_LABEL.to_string(), "Logits Sync".to_string()]),
-            _ => None,
-        },
-        _ => None,
-    }
-}
-
-fn map_gpu_op_completed(op_name: &str) -> Option<Vec<String>> {
-    let base_name = op_name.split('#').next().unwrap_or(op_name);
-
-    // New: handle hierarchical op names produced by Context::with_gpu_scope which uses '/' separators
-    if base_name.contains('/')
-        && let Some(segments) = map_hierarchical_gpu_op(base_name)
-    {
-        return Some(segments);
-    }
-
-    if let Some(segments) = map_generation_stage(base_name) {
-        return Some(segments);
-    }
-    if let Some(segments) = map_block_stage(base_name) {
-        return Some(segments);
-    }
-    map_prompt_stage(base_name)
-}
-
-fn map_hierarchical_gpu_op(path: &str) -> Option<Vec<String>> {
-    // Parse the '/'-separated path and reconstruct a canonical hierarchical label path
-    // Default to Generation Loop context. Insert Forward Step when we have block/stage context
-    // or an inner label that is part of the forward pass. Plain waits (cb_wait/dep_wait) without
-    // a block/stage should live directly under Generation Loop.
-    let mut has_generation = false;
-    let mut block_label: Option<String> = None;
-    let mut stage_label: Option<String> = None;
-    let mut inner_label: Option<String> = None;
-
-    for seg in path.split('/') {
-        if seg.eq_ignore_ascii_case("generation loop") {
-            has_generation = true;
-            continue;
-        }
-        if seg.eq_ignore_ascii_case(PROMPT_PROCESSING_LABEL) {
-            // Collapse prompt processing into a single line summary
-            return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
-        }
-        if let Some(rest) = seg.strip_prefix("block_")
-            && let Ok(idx) = rest.parse::<usize>()
-        {
-            block_label = Some(format!("Block {}", idx));
-            continue;
-        }
-        if seg.eq_ignore_ascii_case("generation_step_output") {
-            inner_label = Some("Output".to_string());
-            continue;
-        }
-        // Explicitly surface wait segments as visible leaves
-        if seg.eq_ignore_ascii_case("cb_wait") {
-            inner_label = Some("CB Wait".to_string());
-            continue;
-        }
-        if seg.eq_ignore_ascii_case("dep_wait") {
-            inner_label = Some("Dep Wait".to_string());
-            continue;
-        }
-        if let Some(stage) = map_block_stage(seg) {
-            // Expect [Generation Loop, Forward Step, Block N, Stage]; capture Block and Stage
-            if stage.len() >= 3 {
-                block_label = Some(stage[2].clone());
-            }
-            if let Some(last) = stage.last() {
-                stage_label = Some(last.clone());
-            }
-            continue;
-        }
-        // Map inner op friendly names
-        let inner = seg.trim_end_matches("_op");
-        let friendly = match inner {
-            s if s.starts_with("sdpa_matmul_qk") => Some("QK MatMul"),
-            s if s.starts_with("sdpa_softmax") => Some("Softmax"),
-            s if s.starts_with("sdpa_matmul_av") => Some("AV MatMul"),
-            s if s.starts_with("attn_qkv_proj") => Some("QKV Proj"),
-            s if s.starts_with("attn_rearrange") => Some("Rearrange"),
-            s if s.starts_with("attn_output") => Some("Attn Output"),
-            s if s.starts_with("mlp_swiglu") => Some("SwiGLU"),
-            s if s.starts_with("mlp_norm") => Some("MLP Norm"),
-            s if s.starts_with("mlp_output") => Some("MLP Output"),
-            s if s.starts_with("rope_block") || s == "rope" => Some("Rope"),
-            "generation_step_output" => Some("Output"),
-            _ => None,
-        };
-        if let Some(name) = friendly {
-            inner_label = Some(name.to_string());
-            continue;
-        }
-    }
-
-    // Build final path
-    let mut out: Vec<String> = Vec::new();
-    if has_generation {
-        out.push(GENERATION_LOOP_LABEL.to_string());
-    } else {
-        // If not explicitly present, inject it for generation-related scopes
-        out.push(GENERATION_LOOP_LABEL.to_string());
-    }
-
-    // Decide whether to insert "Forward Step" as an intermediate node.
-    let is_plain_wait = matches!(inner_label.as_deref(), Some("CB Wait") | Some("Dep Wait"));
-    let has_block_or_stage = block_label.is_some() || stage_label.is_some();
-    if has_block_or_stage || !is_plain_wait {
-        out.push("Forward Step".to_string());
-    }
-
-    if let Some(block) = block_label {
-        out.push(block);
-    }
-    if let Some(stage) = stage_label {
-        out.push(stage);
-    }
-    if let Some(inner) = inner_label {
-        out.push(inner);
-    }
-
-    if out.is_empty() { None } else { Some(out) }
-}
-
-fn map_generation_stage(name: &str) -> Option<Vec<String>> {
-    if let Some(rest) = name.strip_prefix("generation_step_")
-        && rest.ends_with("_output")
-    {
-        return Some(vec![GENERATION_LOOP_LABEL.to_string(), "Output".to_string()]);
-    }
-
-    if let Some(_idx) = name.strip_prefix("iteration_") {
-        return Some(vec![GENERATION_LOOP_LABEL.to_string()]);
-    }
-
-    if name == "forward_step" {
-        return Some(vec![GENERATION_LOOP_LABEL.to_string(), "Forward Step".to_string()]);
-    }
-
-    if let Some(idx_str) = name.strip_prefix("block_")
-        && let Ok(idx) = idx_str.parse::<usize>()
-    {
-        return Some(vec![
-            GENERATION_LOOP_LABEL.to_string(),
-            "Forward Step".to_string(),
-            format!("Block {}", idx),
-        ]);
-    }
-
-    None
-}
-
-fn map_block_stage(name: &str) -> Option<Vec<String>> {
-    let base = name.strip_suffix("_op").unwrap_or(name);
-    for (prefix, display) in BLOCK_STAGE_PREFIXES {
-        if let Some(rest) = base.strip_prefix(prefix)
-            && let Ok(idx) = rest.parse::<usize>()
-        {
-            return Some(vec![
-                GENERATION_LOOP_LABEL.to_string(),
-                "Forward Step".to_string(),
-                format!("Block {}", idx),
-                (*display).to_string(),
-            ]);
-        }
-    }
-    None
-}
-
-fn build_latency_row(segments: Vec<String>, duration_us: u64) -> metallic_cli_helpers::app_event::LatencyRow {
-    let level = segments.len().saturating_sub(1) as u8;
-    let label = segments.join("::");
-    let duration_ms = duration_us as f64 / 1000.0;
-    metallic_cli_helpers::app_event::LatencyRow {
-        label,
-        last_ms: duration_ms,
-        average_ms: duration_ms,
-        level,
-    }
-}
-
-fn map_prompt_stage(name: &str) -> Option<Vec<String>> {
-    if let Some(rest) = name.strip_prefix("prompt_step_")
-        && rest.parse::<usize>().is_ok()
-    {
-        return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
-    }
-    None
 }
 
 fn emit_startup_memory_update(tx: &mpsc::Sender<AppEvent>) -> Result<(), mpsc::SendError<AppEvent>> {

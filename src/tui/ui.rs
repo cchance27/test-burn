@@ -5,7 +5,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::tui::app::{App, FocusArea, MetricsView};
+use crate::tui::{app::{App, FocusArea, MetricsView}, metrics::HierarchicalMetric};
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let main_layout = Layout::default()
@@ -166,7 +166,7 @@ fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], co
         .join("\n")
 }
 
-fn render_hierarchical_latency_metrics(metrics: &[crate::tui::app::HierarchicalMetric], max_depth: usize) -> String {
+fn render_hierarchical_latency_metrics(metrics: &[HierarchicalMetric], max_depth: usize) -> String {
     if metrics.is_empty() {
         return "Collecting data...".to_string();
     }
@@ -179,7 +179,7 @@ fn render_hierarchical_latency_metrics(metrics: &[crate::tui::app::HierarchicalM
     lines.join("\n")
 }
 
-fn render_metric(metric: &crate::tui::app::HierarchicalMetric, depth: usize, max_depth: usize, lines: &mut Vec<String>) {
+fn render_metric(metric: &HierarchicalMetric, depth: usize, max_depth: usize, lines: &mut Vec<String>) {
     if depth > max_depth {
         return;
     }
@@ -395,7 +395,7 @@ impl App {
                 Some(metric) => metric,
                 None => {
                     self.latency_tree
-                        .push(crate::tui::app::HierarchicalMetric::new(PROMPT_PROCESSING_LABEL.to_string(), 0.0));
+                        .push(HierarchicalMetric::new(PROMPT_PROCESSING_LABEL.to_string(), 0.0));
                     self.latency_tree.last_mut().expect("latency_tree cannot be empty after push")
                 }
             };
@@ -425,7 +425,7 @@ impl App {
             &mut self.latency_tree[idx]
         } else {
             self.latency_tree
-                .push(crate::tui::app::HierarchicalMetric::new(label.to_string(), 0.0));
+                .push(HierarchicalMetric::new(label.to_string(), 0.0));
             self.latency_tree
                 .last_mut()
                 .expect("latency_tree cannot be empty immediately after push")

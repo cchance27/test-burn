@@ -11,6 +11,7 @@ name = "metallic_cli"
 version = "0.1.0"
 edition = "2024"
 
+
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
 objc2 = "0.6.2"
@@ -48,9 +49,9 @@ crossterm = "0.29.0"
 anyhow = "1.0.100"
 sysinfo = "0.37.2"
 chrono = { version = "0.4", features = ["clock", "serde"] }
-half = { version = "2.6.0", features = ["zerocopy", "bytemuck", "num-traits", "use-intrinsics"] }
+half = { version = "2.7.0", features = ["zerocopy", "bytemuck", "num-traits", "use-intrinsics"] }
 num-traits = "0.2.19"
-libc = { version = "0.2.176", optional = false }
+libc = { version = "0.2.177", optional = false }
 mach2 = "0.5"
 metallic_env = { path = "crates/metallic_env" }
 metallic_instrumentation = { path = "crates/metallic_instrumentation" }

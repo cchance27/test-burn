@@ -3,7 +3,7 @@
 
 pub mod app;
 pub mod components;
-pub mod event;
+pub mod metrics;
 pub mod ui;
 
 pub use app::App;

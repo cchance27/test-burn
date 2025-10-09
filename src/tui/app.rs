@@ -1,4 +1,4 @@
-use crate::cli::config::GenerationConfig;
+use crate::{tui::metrics::{HierarchicalMetric, RunningAverage}};
 use metallic_cli_helpers::prelude::*;
 use std::time::Duration;
 
@@ -29,11 +29,10 @@ pub struct App {
     pub active_alert: Option<Alert>,
     // Track prompt processing metrics separately for aggregation
     pub prompt_processing_total_last_ms: f64,
-    pub generation_config: GenerationConfig,
 }
 
 impl App {
-    pub fn new(generation_config: GenerationConfig) -> Self {
+    pub fn new() -> Self {
         Self {
             generated_text: String::new(),
             iteration_latency: RunningAverage::default(),
@@ -56,7 +55,6 @@ impl App {
             alert_queue: std::collections::VecDeque::new(),
             active_alert: None,
             prompt_processing_total_last_ms: 0.0,
-            generation_config,
         }
     }
 
@@ -128,14 +126,6 @@ impl App {
         };
     }
 
-    pub fn handle_click(&mut self, column: u16, row: u16) {
-        if rect_contains(self.text_area, column, row) {
-            self.focus = FocusArea::GeneratedText;
-        } else if rect_contains(self.metrics_area, column, row) {
-            self.focus = FocusArea::Metrics;
-        }
-    }
-
     pub fn push_alert(&mut self, alert: Alert) {
         if self.active_alert.is_some() {
             self.alert_queue.push_back(alert);
@@ -162,136 +152,6 @@ impl App {
 
     pub fn pending_alert_count(&self) -> usize {
         self.alert_queue.len()
-    }
-}
-
-/// Running average calculator for latency metrics
-const RUNNING_AVERAGE_WINDOW: usize = 10;
-
-#[derive(Clone)]
-pub struct RunningAverage {
-    values: [f64; RUNNING_AVERAGE_WINDOW],
-    next_index: usize,
-    initialized: bool,
-}
-
-impl Default for RunningAverage {
-    fn default() -> Self {
-        Self {
-            values: [0.0; RUNNING_AVERAGE_WINDOW],
-            next_index: 0,
-            initialized: false,
-        }
-    }
-}
-
-impl RunningAverage {
-    pub fn record(&mut self, value: f64) {
-        if !value.is_finite() {
-            return;
-        }
-
-        if !self.initialized {
-            self.values = [value; RUNNING_AVERAGE_WINDOW];
-            self.initialized = true;
-            self.next_index = 1 % RUNNING_AVERAGE_WINDOW;
-        } else {
-            self.values[self.next_index] = value;
-            self.next_index = (self.next_index + 1) % RUNNING_AVERAGE_WINDOW;
-        }
-    }
-
-    pub fn average(&self) -> f64 {
-        if !self.initialized {
-            0.0
-        } else {
-            self.values.iter().sum::<f64>() / RUNNING_AVERAGE_WINDOW as f64
-        }
-    }
-
-    pub fn has_samples(&self) -> bool {
-        self.initialized
-    }
-
-    pub fn reset(&mut self) {
-        *self = Self::default();
-    }
-}
-
-#[derive(Clone)]
-pub struct HierarchicalMetric {
-    pub label: String,
-    pub last_ms: f64,
-    pub running_average: RunningAverage,
-    pub children: Vec<HierarchicalMetric>,
-}
-
-impl HierarchicalMetric {
-    pub fn new(label: String, last_ms: f64) -> Self {
-        let mut running_average = RunningAverage::default();
-        running_average.record(last_ms);
-        Self {
-            label,
-            last_ms,
-            running_average,
-            children: Vec::new(),
-        }
-    }
-
-    pub fn ensure_child(&mut self, label: &str) -> &mut HierarchicalMetric {
-        if let Some(position) = self.children.iter().position(|child| child.label == label) {
-            &mut self.children[position]
-        } else {
-            self.children.push(HierarchicalMetric::new(label.to_string(), 0.0));
-            self.children
-                .last_mut()
-                .expect("children vector cannot be empty immediately after push")
-        }
-    }
-
-    pub fn upsert_path(&mut self, path: &[&str], last_ms: f64) {
-        if path.is_empty() {
-            return;
-        }
-
-        let label = path[0];
-        let child = self.ensure_child(label);
-
-        if path.len() == 1 {
-            child.last_ms = last_ms;
-            child.running_average.record(last_ms);
-        } else {
-            child.upsert_path(&path[1..], last_ms);
-        }
-    }
-
-    // Calculate inclusive timing (the time for this node plus all its descendants)
-    // without modifying the stored values
-    pub fn get_inclusive_timing(&self) -> (f64, f64) {
-        let mut child_last_total = 0.0;
-        let mut child_average_total = 0.0;
-
-        for child in &self.children {
-            let (child_last, child_avg) = child.get_inclusive_timing();
-            child_last_total += child_last;
-            child_average_total += child_avg;
-        }
-
-        let self_avg = self.running_average.average();
-
-        let last_ms_total = if self.last_ms > 0.0 {
-            self.last_ms.max(child_last_total)
-        } else {
-            child_last_total
-        };
-
-        let average_ms_total = if self_avg > 0.0 {
-            self_avg.max(child_average_total)
-        } else {
-            child_average_total
-        };
-
-        (last_ms_total, average_ms_total)
     }
 }
 
@@ -444,8 +304,4 @@ impl MemoryCollapseDepth {
 pub enum FocusArea {
     GeneratedText,
     Metrics,
-}
-
-fn rect_contains(rect: ratatui::layout::Rect, x: u16, y: u16) -> bool {
-    x >= rect.x && x < rect.x.saturating_add(rect.width) && y >= rect.y && y < rect.y.saturating_add(rect.height)
 }

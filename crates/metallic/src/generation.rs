@@ -2,7 +2,8 @@ use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMe
 use crate::models::qwen25::Qwen25;
 use crate::{TensorElement, Tokenizer};
 use metallic_cli_helpers::app_event::AppEvent;
-use metallic_instrumentation::{MetricEvent, record_metric};
+use metallic_instrumentation::record_metric_async;
+use metallic_instrumentation::MetricEvent;
 use rand::prelude::*;
 use std::{
     env,
@@ -449,7 +450,7 @@ where
         let logits_download_start = Instant::now();
         let logits = logits_tensor.to_vec();
         let logits_download_duration = logits_download_start.elapsed();
-        record_metric!(MetricEvent::InternalKernelCompleted {
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
             parent_op_name: "prompt_processing".to_string(),
             internal_kernel_name: "logits_sync".to_string(),
             duration_us: logits_download_duration.as_micros().max(1) as u64,
@@ -459,7 +460,7 @@ where
         let sample_start = Instant::now();
         next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
         let sample_duration = sample_start.elapsed();
-        record_metric!(MetricEvent::InternalKernelCompleted {
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
             parent_op_name: "sampling".to_string(),
             internal_kernel_name: "top_k_top_p".to_string(),
             duration_us: sample_duration.as_micros().max(1) as u64,
@@ -472,7 +473,7 @@ where
     let decode_start = Instant::now();
     let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
     let decode_duration = decode_start.elapsed();
-    record_metric!(MetricEvent::InternalKernelCompleted {
+    record_metric_async!(MetricEvent::InternalKernelCompleted {
         parent_op_name: "decoding".to_string(),
         internal_kernel_name: "token_decode".to_string(),
         duration_us: decode_duration.as_micros().max(1) as u64,
@@ -498,7 +499,7 @@ where
             let reset_duration = reset_start.elapsed();
             if !reset_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "pool_reset".to_string(),
                     duration_us: reset_duration.as_micros() as u64,
@@ -514,7 +515,7 @@ where
             let embed_duration = embed_start.elapsed();
             if !embed_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "embedding".to_string(),
                     duration_us: embed_duration.as_micros() as u64,
@@ -527,7 +528,7 @@ where
             let forward_step_duration = forward_step_start.elapsed();
             if !forward_step_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "forward_step_total".to_string(),
                     duration_us: forward_step_duration.as_micros() as u64,
@@ -541,7 +542,7 @@ where
             let logits = logits_tensor.to_vec();
             let logits_download_duration = logits_download_start.elapsed();
             let metric_start = Instant::now();
-            record_metric!(MetricEvent::InternalKernelCompleted {
+            record_metric_async!(MetricEvent::InternalKernelCompleted {
                 parent_op_name: "generation_loop".to_string(),
                 internal_kernel_name: "logits_sync".to_string(),
                 duration_us: logits_download_duration.as_micros().max(1) as u64,
@@ -553,7 +554,7 @@ where
             next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
             let sample_duration = sample_start.elapsed();
             let metric_start = Instant::now();
-            record_metric!(MetricEvent::InternalKernelCompleted {
+            record_metric_async!(MetricEvent::InternalKernelCompleted {
                 parent_op_name: "sampling".to_string(),
                 internal_kernel_name: "top_k_top_p".to_string(),
                 duration_us: sample_duration.as_micros().max(1) as u64,
@@ -564,7 +565,7 @@ where
             let core_iteration_duration = iteration_start.elapsed();
             if !core_iteration_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "iteration_total".to_string(),
                     duration_us: core_iteration_duration.as_micros() as u64,
@@ -578,7 +579,7 @@ where
             let push_duration = push_start.elapsed();
             if !push_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "token_push".to_string(),
                     duration_us: push_duration.as_micros() as u64,
@@ -590,7 +591,7 @@ where
             let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
             let decode_duration = decode_start.elapsed();
             let metric_start = Instant::now();
-            record_metric!(MetricEvent::InternalKernelCompleted {
+            record_metric_async!(MetricEvent::InternalKernelCompleted {
                 parent_op_name: "decoding".to_string(),
                 internal_kernel_name: "token_decode".to_string(),
                 duration_us: decode_duration.as_micros().max(1) as u64,
@@ -602,7 +603,7 @@ where
             let cache_log_duration = cache_log_start.elapsed();
             if !cache_log_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "cache_logging".to_string(),
                     duration_us: cache_log_duration.as_micros() as u64,
@@ -619,7 +620,7 @@ where
             let callback_duration = callback_start.elapsed();
             if !callback_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "token_callback".to_string(),
                     duration_us: callback_duration.as_micros() as u64,
@@ -637,7 +638,7 @@ where
             let eos_check_duration = eos_check_start.elapsed();
             if !eos_check_duration.is_zero() {
                 let metric_start = Instant::now();
-                record_metric!(MetricEvent::InternalKernelCompleted {
+                record_metric_async!(MetricEvent::InternalKernelCompleted {
                     parent_op_name: "generation_loop".to_string(),
                     internal_kernel_name: "eos_check".to_string(),
                     duration_us: eos_check_duration.as_micros() as u64,
@@ -652,7 +653,7 @@ where
 
         // Record the total metric recording overhead
         if !metric_recording_overhead.is_zero() {
-            record_metric!(MetricEvent::InternalKernelCompleted {
+            record_metric_async!(MetricEvent::InternalKernelCompleted {
                 parent_op_name: "generation_loop".to_string(),
                 internal_kernel_name: "metric_recording_overhead".to_string(),
                 duration_us: metric_recording_overhead.as_micros() as u64,

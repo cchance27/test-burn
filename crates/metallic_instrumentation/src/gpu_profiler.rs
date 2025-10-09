@@ -1,8 +1,7 @@
 //! GPU command-buffer profiler emitting per-operation metrics.
 
 use crate::event::MetricEvent;
-use crate::record_metric;
-
+use crate::record_metric_async;
 pub type CommandBufferCompletionHandler = Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>;
 
 pub trait ProfiledCommandBuffer {
@@ -266,7 +265,7 @@ impl GpuProfilerState {
             }
 
             let duration_us = (duration.as_secs_f64() * 1e6).max(1.0).round() as u64;
-            record_metric!(MetricEvent::GpuOpCompleted {
+            record_metric_async!(MetricEvent::GpuOpCompleted {
                 op_name,
                 backend,
                 duration_us,

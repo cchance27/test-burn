@@ -1,4 +1,4 @@
-use crate::prelude::*;
+use crate::{prelude::*, record_metric_async};
 
 use std::sync::mpsc;
 use std::time::Duration;
@@ -25,7 +25,7 @@ fn metrics_layer_enriches_span_context() {
         let child_id = child_span.id().map(|id| id.into_u64()).expect("child span should be active");
         let _child_guard = child_span.enter();
 
-        record_metric!(metric_event.clone());
+        record_metric_async!(metric_event.clone());
         (Some(parent_id), Some(child_id))
     });
 
