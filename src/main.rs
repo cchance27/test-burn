@@ -24,8 +24,11 @@ use clap::Parser;
 use ratatui::{
     Terminal,
     backend::{Backend, CrosstermBackend},
+    layout::Position,
 };
+use crossterm::event::{self, Event as CrosstermEvent, MouseEvent, MouseButton};
 use tui::{App, AppResult};
+use tui::app::FocusArea;
 
 fn main() -> AppResult<()> {
     // Parse command line arguments using CLAP
@@ -234,37 +237,43 @@ fn run_tui_mode(
 
     while !app.should_quit {
         // Handle crossterm events
-        if crossterm::event::poll(std::time::Duration::from_millis(50))?
-            && let crossterm::event::Event::Key(key) = crossterm::event::read()?
-        {
-            match key.code {
-                crossterm::event::KeyCode::Char('q') => app.quit(),
-                crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Esc => {
-                    if app.has_active_alert() {
-                        app.dismiss_active_alert();
+        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
+            match crossterm::event::read()? {
+                CrosstermEvent::Key(key) => {
+                    match key.code {
+                        crossterm::event::KeyCode::Char('q') => app.quit(),
+                        crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Esc => {
+                            if app.has_active_alert() {
+                                app.dismiss_active_alert();
+                            }
+                        }
+                        crossterm::event::KeyCode::Char('m') => {
+                            app.metrics_view = tui::app::MetricsView::Memory;
+                            app.reset_metrics_scroll();
+                        }
+                        crossterm::event::KeyCode::Char('l') => {
+                            app.metrics_view = tui::app::MetricsView::Latency;
+                            app.reset_metrics_scroll();
+                        }
+                        crossterm::event::KeyCode::Char('c') => {
+                            app.toggle_collapse();
+                        }
+                        crossterm::event::KeyCode::Tab => {
+                            app.focus_next();
+                            app.reset_metrics_scroll();
+                        }
+                        crossterm::event::KeyCode::Up => app.scroll_active(-1),
+                        crossterm::event::KeyCode::Down => app.scroll_active(1),
+                        crossterm::event::KeyCode::PageUp => app.scroll_active(-10),
+                        crossterm::event::KeyCode::PageDown => app.scroll_active(10),
+                        crossterm::event::KeyCode::Home => app.scroll_active_to_start(),
+                        crossterm::event::KeyCode::End => app.scroll_active_to_end(),
+                        _ => {}
                     }
                 }
-                crossterm::event::KeyCode::Char('m') => {
-                    app.metrics_view = tui::app::MetricsView::Memory;
-                    app.reset_metrics_scroll();
+                CrosstermEvent::Mouse(mouse_event) => {
+                    handle_mouse_event(mouse_event, &mut app);
                 }
-                crossterm::event::KeyCode::Char('l') => {
-                    app.metrics_view = tui::app::MetricsView::Latency;
-                    app.reset_metrics_scroll();
-                }
-                crossterm::event::KeyCode::Char('c') => {
-                    app.toggle_collapse();
-                }
-                crossterm::event::KeyCode::Tab => {
-                    app.focus_next();
-                    app.reset_metrics_scroll();
-                }
-                crossterm::event::KeyCode::Up => app.scroll_active(-1),
-                crossterm::event::KeyCode::Down => app.scroll_active(1),
-                crossterm::event::KeyCode::PageUp => app.scroll_active(-10),
-                crossterm::event::KeyCode::PageDown => app.scroll_active(10),
-                crossterm::event::KeyCode::Home => app.scroll_active_to_start(),
-                crossterm::event::KeyCode::End => app.scroll_active_to_end(),
                 _ => {}
             }
         }
@@ -272,6 +281,13 @@ fn run_tui_mode(
         // Process metric events from the instrumentation system and convert them to AppEvents
         while let Ok(enriched_event) = receiver.try_recv() {
             tracing::debug!("Main thread received enriched event: {:?}", enriched_event);
+            
+            // Log the metric event to the log box
+            if let Ok(serialised) = serde_json::to_string(&enriched_event.event) {
+                let log_message = format!("METRIC: {}", serialised);
+                handle_app_event(&mut app, AppEvent::LogMessage(log_message));
+            }
+            
             let latency_rows = tui::metrics::metric_event_to_latency_rows(&enriched_event.event);
             tracing::debug!("Converted to {} latency rows", latency_rows.len());
             if !latency_rows.is_empty() {
@@ -412,6 +428,14 @@ fn run_json_mode(
                     });
                     logs.push(log_entry);
                 }
+                AppEvent::LogMessage(message) => {
+                    let log_entry = serde_json::json!({
+                        "type": "log_message",
+                        "message": message,
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    logs.push(log_entry);
+                }
             }
         }
     }
@@ -481,6 +505,9 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
         AppEvent::Alert(alert) => {
             app.push_alert(alert);
         }
+        AppEvent::LogMessage(message) => {
+            app.add_log_message(&message);
+        }
     }
 }
 
@@ -495,7 +522,7 @@ fn setup_terminal() -> Result<Terminal<impl Backend>> {
     crossterm::execute!(
         stdout(),
         crossterm::terminal::EnterAlternateScreen,
-        //crossterm::event::EnableMouseCapture
+        crossterm::event::EnableMouseCapture
     )?;
     terminal.clear()?;
     Ok(terminal)
@@ -505,10 +532,135 @@ fn restore_terminal() -> Result<()> {
     crossterm::execute!(
         stdout(),
         crossterm::terminal::LeaveAlternateScreen,
-        //crossterm::event::DisableMouseCapture
+        crossterm::event::DisableMouseCapture
     )?;
     crossterm::terminal::disable_raw_mode()?;
     Ok(())
+}
+
+fn handle_mouse_event(event: MouseEvent, app: &mut App) {
+    let position = (event.column, event.row).into();
+    
+    match event.kind {
+        event::MouseEventKind::Down(MouseButton::Left) => {
+            // Check if the click is in one of the main focus areas
+            if app.text_area.contains(position) {
+                app.focus = FocusArea::GeneratedText;
+                
+                // Start text selection, converting screen coordinates to text content coordinates
+                // Account for text wrapping and borders
+                let relative_x = event.column.saturating_sub(app.text_area.x);
+                let relative_y = event.row.saturating_sub(app.text_area.y);
+                
+                // Subtract 1 from relative_y to account for the border/title at the top of the text area
+                let adjusted_y = relative_y.saturating_sub(1);
+                
+                // Convert visual coordinates to content coordinates considering text wrapping
+                let wrap_width = if app.text_area.width > 2 {
+                    app.text_area.width.saturating_sub(2) // width accounting for left/right borders
+                } else {
+                    1 // minimum width of 1 to avoid issues
+                };
+                let (content_row, content_col) = app.get_content_position_from_visual(
+                    adjusted_y,           // visual row (relative to text area after removing border)
+                    relative_x,           // visual column
+                    app.text_scroll,      // scroll offset
+                    &app.generated_text,
+                    wrap_width
+                );
+                
+                let relative_pos = Position::new(content_col as u16, content_row as u16);
+                app.start_text_selection(relative_pos);
+            } else if app.metrics_area.contains(position) {
+                app.focus = FocusArea::Metrics;
+            } else if app.log_area.contains(position) {
+                app.focus = FocusArea::LogBox;
+            }
+        }
+        event::MouseEventKind::Drag(MouseButton::Left) => {
+            // Update text selection - allow dragging even if slightly outside the text area if we started inside
+            if app.focus == FocusArea::GeneratedText && app.is_selecting {
+                let relative_x = event.column.saturating_sub(app.text_area.x);
+                let relative_y = event.row.saturating_sub(app.text_area.y);
+                
+                // Calculate if we're beyond the content area
+                let lines: Vec<&str> = app.generated_text.lines().collect();
+                if lines.is_empty() {
+                    // If no content, just return early
+                    return;
+                }
+                
+                // Check if we're dragging beyond the bottom of content
+                let wrap_width = if app.text_area.width > 2 {
+                    app.text_area.width.saturating_sub(2) // width accounting for left/right borders
+                } else {
+                    1 // minimum width of 1 to avoid issues
+                };
+                
+                // Calculate total visual lines for all content
+                let mut total_visual_lines = 0u16;
+                for line in &lines {
+                    let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width);
+                    total_visual_lines += visual_lines as u16;
+                }
+                
+                // If we're dragging beyond the content vertically, clamp to the end
+                let adjusted_y = relative_y.saturating_sub(1);
+                let absolute_visual_y = adjusted_y.saturating_add(app.text_scroll);
+                
+                if (absolute_visual_y as usize) >= total_visual_lines as usize {
+                    // We're dragging beyond the content, set to the end position
+                    if let Some(last_line) = lines.last() {
+                        let last_line_chars: Vec<char> = last_line.chars().collect();
+                        let last_line_idx = lines.len() - 1;
+                        let relative_pos = Position::new(last_line_chars.len() as u16, last_line_idx as u16);
+                        app.update_text_selection(relative_pos);
+                    }
+                } else {
+                    // Normal case: convert visual coordinates to content coordinates considering text wrapping
+                    let (content_row, content_col) = app.get_content_position_from_visual(
+                        adjusted_y,           // visual row
+                        relative_x,           // visual column
+                        app.text_scroll,      // scroll offset
+                        &app.generated_text,
+                        wrap_width
+                    );
+                    
+                    let relative_pos = Position::new(content_col as u16, content_row as u16);
+                    app.update_text_selection(relative_pos);
+                }
+            }
+        }
+        event::MouseEventKind::Up(MouseButton::Left) => {
+            // End text selection and copy to clipboard if there's a selection
+            if app.focus == FocusArea::GeneratedText && app.is_selecting {
+                app.end_text_selection();
+                
+                // Copy selected text to clipboard if there's a selection
+                let selected_text = app.get_selected_text(&app.generated_text);
+                if !selected_text.trim().is_empty() {
+                    copy_text_to_clipboard(&selected_text);
+                }
+            }
+        }
+        event::MouseEventKind::ScrollUp => {
+            app.scroll_active(-1);
+        }
+        event::MouseEventKind::ScrollDown => {
+            app.scroll_active(1);
+        }
+        _ => {}
+    }
+}
+
+fn copy_text_to_clipboard(text: &str) {
+    // Attempt to copy text to clipboard using arboard - copy the text to avoid lifetime issues
+    let text = text.to_string();
+    std::thread::spawn(move || {
+        if let Ok(mut clipboard) = arboard::Clipboard::new() {
+            let _ = clipboard.set_text(text);
+        }
+    });
 }
 
 fn panic_payload_message(payload: Box<dyn Any + Send>) -> String {

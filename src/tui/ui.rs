@@ -1,8 +1,9 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    style::{Color, Style, Modifier},
+    text::Text,
+    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
 };
 
 use crate::tui::{
@@ -13,7 +14,7 @@ use crate::tui::{
 pub fn render(app: &mut App, frame: &mut Frame) {
     let main_layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .constraints([Constraint::Min(0), Constraint::Length(1)]) // Body area + status bar
         .split(frame.area());
 
     let body_layout = Layout::default()
@@ -21,11 +22,22 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
         .split(main_layout[0]);
 
+    // Split the main text area to have generation text and log box
+    let text_area_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(10)]) // Generation area + log box
+        .split(body_layout[0]);
+
+    let log_area = text_area_layout[1]; // Log box below generation area
+
     let text_block = Block::default()
         .title("Generated Text (q to quit)")
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == FocusArea::GeneratedText));
-    let text_area_widget = Paragraph::new(app.generated_text.clone())
+    
+    // Create text with selections highlighted
+    let text_with_selection = create_text_with_selection(&app.generated_text, app, text_area_layout[0]);
+    let text_area_widget = Paragraph::new(text_with_selection)
         .block(text_block)
         .wrap(Wrap { trim: false })
         .scroll((app.text_scroll, 0));
@@ -78,10 +90,21 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .wrap(Wrap { trim: false })
         .scroll((app.metrics_scroll, 0));
 
+    // Log Box
+    let log_block = Block::default()
+        .title("Logs")
+        .borders(Borders::ALL)
+        .border_style(border_style(app.focus == FocusArea::LogBox));
+    let log_text = app.log_messages.join("\n");
+    let log_widget = Paragraph::new(log_text)
+        .block(log_block)
+        .wrap(Wrap { trim: false })
+        .scroll((app.log_scroll, 0));
+
     let status_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(70), Constraint::Percentage(30)])
-        .split(main_layout[1]);
+        .split(main_layout[1]); // Status bar at the bottom
 
     let status_text = Paragraph::new(app.status.clone()).style(Style::default().fg(Color::White).bg(Color::Blue));
 
@@ -89,15 +112,17 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .style(Style::default().fg(Color::White).bg(Color::Blue))
         .alignment(Alignment::Right);
 
-    frame.render_widget(text_area_widget, body_layout[0]);
+    frame.render_widget(text_area_widget, text_area_layout[0]); // Render text in the top part of the split
+    frame.render_widget(log_widget, log_area);
     frame.render_widget(sidebar_block, sidebar_area);
     frame.render_widget(prompt_section, sidebar_sections[0]);
     frame.render_widget(metrics_section, sidebar_sections[1]);
     frame.render_widget(status_text, status_layout[0]);
     frame.render_widget(throughput_text, status_layout[1]);
 
-    app.text_area = body_layout[0];
+    app.text_area = text_area_layout[0]; // Update app.text_area to refer to the actual text area, not the full column
     app.metrics_area = sidebar_sections[1];
+    app.log_area = log_area;
 
     if let Some(alert) = app.active_alert() {
         render_alert_modal(frame, alert, app.pending_alert_count());
@@ -111,6 +136,76 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             app.text_scroll = baseline;
         }
         app.request_follow_text = false;
+    }
+    
+    // Render scrollbars for widgets that need them
+    
+    // Text area scrollbar
+    let wrap_width = text_area_layout[0].width.saturating_sub(2); // Subtract 2 for borders
+    let mut total_visual_lines = 0u16;
+    for line in app.generated_text.lines() {
+        let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width) as u16;
+        total_visual_lines = total_visual_lines.saturating_add(visual_lines);
+    }
+    
+    let text_visible_lines = text_area_layout[0].height.saturating_sub(2); // Subtract 2 for borders
+    
+    if total_visual_lines > text_visible_lines && text_visible_lines > 0 {
+        let text_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        // Calculate the maximum scroll position (total visual lines - visible lines)
+        let max_scroll = (total_visual_lines - text_visible_lines) as usize;
+        let current_scroll = (app.text_scroll as usize).min(max_scroll);
+        
+        let text_scrollbar_state = ScrollbarState::new(max_scroll)
+            .position(current_scroll);
+        
+        frame.render_stateful_widget(text_scrollbar, text_area_layout[0], &mut text_scrollbar_state.clone());
+    }
+    
+    // Metrics area scrollbar
+    let metrics_text = match app.metrics_view {
+        MetricsView::Memory => render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth()),
+        MetricsView::Latency => render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth()),
+    };
+    let metrics_content = format!("{}\n\n{}", metrics_help, metrics_text);
+    let metrics_content_lines = metrics_content.lines().count();
+    let metrics_visible_lines = sidebar_sections[1].height.saturating_sub(2) as usize; // Subtract 2 for borders
+    
+    if metrics_content_lines > metrics_visible_lines && metrics_visible_lines > 0 {
+        let metrics_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        // Calculate the maximum scroll position (content lines - visible lines)
+        let max_scroll = (metrics_content_lines - metrics_visible_lines).max(0);
+        let current_scroll = (app.metrics_scroll as usize).min(max_scroll);
+        
+        let metrics_scrollbar_state = ScrollbarState::new(max_scroll)
+            .position(current_scroll);
+        
+        frame.render_stateful_widget(metrics_scrollbar, sidebar_sections[1], &mut metrics_scrollbar_state.clone());
+    }
+    
+    // Log area scrollbar
+    let log_content_lines = app.log_messages.len();
+    let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
+    
+    if log_content_lines > log_visible_lines && log_visible_lines > 0 {
+        let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("↑"))
+            .end_symbol(Some("↓"));
+        
+        // Calculate the maximum scroll position (content lines - visible lines)
+        let max_scroll = (log_content_lines - log_visible_lines).max(0);
+        let current_scroll = (app.log_scroll as usize).min(max_scroll);
+        
+        let log_scrollbar_state = ScrollbarState::new(max_scroll)
+            .position(current_scroll);
+        
+        frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
     }
 }
 
@@ -476,5 +571,97 @@ impl App {
         }
 
         metric.upsert_path(&path[1..], last_ms);
+    }
+}
+
+fn create_text_with_selection(text: &str, app: &App, _area: Rect) -> ratatui::text::Text<'static> {
+    use ratatui::text::{Line, Span};
+    
+    // If there's no selection, return the text as is
+    if !app.is_selecting || app.text_selection_start.is_none() || app.text_selection_end.is_none() {
+        return Text::from(text.to_string());
+    }
+    
+    let lines: Vec<&str> = text.lines().collect();
+    
+    if let (Some(start_pos), Some(end_pos)) = (app.text_selection_start, app.text_selection_end) {
+        // Selection coordinates are in content space (after accounting for scroll in mouse events)
+        let (start_row, start_col) = (start_pos.y as usize, start_pos.x as usize);
+        let (end_row, end_col) = (end_pos.y as usize, end_pos.x as usize);
+        
+        // Ensure we don't exceed the number of available lines
+        let max_line_idx = lines.len().saturating_sub(1);
+        let start_row = std::cmp::min(start_row, max_line_idx);
+        let end_row = std::cmp::min(end_row, max_line_idx);
+        
+        // Sort start and end to ensure start <= end
+        let (actual_start_row, actual_start_col, actual_end_row, actual_end_col) = 
+            if start_row > end_row || (start_row == end_row && start_col > end_col) {
+                (end_row, end_col, start_row, start_col)
+            } else {
+                (start_row, start_col, end_row, end_col)
+            };
+        
+        // Build the result lines for the text content
+        let result_lines: Vec<Line> = lines
+            .iter()
+            .enumerate()
+            .map(|(line_idx, line)| {
+                let line_chars: Vec<char> = line.chars().collect();
+                
+                if line_idx >= actual_start_row && line_idx <= actual_end_row {
+                    // This line is within the selection range
+                    let start_char_idx = if line_idx == actual_start_row { 
+                        std::cmp::min(actual_start_col, line_chars.len()) 
+                    } else { 
+                        0 
+                    };
+                    let end_char_idx = if line_idx == actual_end_row { 
+                        std::cmp::min(actual_end_col, line_chars.len()) 
+                    } else { 
+                        line_chars.len() 
+                    };
+                    
+                    let mut spans = Vec::new();
+                    
+                    // Case 1: Line is entirely within selection (not the start or end line of selection)
+                    if line_idx != actual_start_row && line_idx != actual_end_row {
+                        // The entire line is selected
+                        let entire_line: String = line_chars.iter().collect();
+                        spans.push(Span::styled(entire_line, Style::default().add_modifier(Modifier::REVERSED)));
+                    }
+                    // Case 2: Line is partially selected (start line, end line, or both are same line)
+                    else {
+                        // Add unselected text before the selection (if any) - only for start line
+                        if line_idx == actual_start_row && start_char_idx > 0 && start_char_idx < line_chars.len() {
+                            let before_text: String = line_chars[0..start_char_idx].iter().collect();
+                            spans.push(Span::raw(before_text));
+                        }
+                        
+                        // Add selected text with REVERSED modifier
+                        if start_char_idx < line_chars.len() && end_char_idx <= line_chars.len() && start_char_idx < end_char_idx {
+                            let selected_text: String = line_chars[start_char_idx..end_char_idx].iter().collect();
+                            spans.push(Span::styled(selected_text, Style::default().add_modifier(Modifier::REVERSED)));
+                        }
+                        
+                        // Add unselected text after the selection (if any) - only for end line
+                        if line_idx == actual_end_row && end_char_idx < line_chars.len() {
+                            let after_text: String = line_chars[end_char_idx..].iter().collect();
+                            spans.push(Span::raw(after_text));
+                        }
+                    }
+                    
+                    Line::from(spans)
+                } else {
+                    // This line is not in the selection range
+                    Line::from(line.to_string())
+                }
+            })
+            .collect();
+        
+        Text::from(result_lines)
+    } else {
+        // No active selection, return text as is
+        Text::from(text.to_string())
     }
 }

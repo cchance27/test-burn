@@ -27,7 +27,6 @@ pub struct MemoryPool {
     pub pooled_allocations: usize,
     pub pool_resets: usize,
     max_pool_size: usize,
-    exact_mode: bool, // TODO: implement the exact mode behavior so we can have kv_pool initial reservation match what we actually need based on our KV size to not waste
 }
 
 /// Metadata describing an allocation made from the memory pool.
@@ -92,7 +91,7 @@ impl MemoryPool {
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
     ) -> Result<Self, MetalError> {
-        Self::with_limit(device, command_queue, DEFAULT_MAX_POOL_SIZE, false)
+        Self::with_limit(device, command_queue, DEFAULT_MAX_POOL_SIZE)
     }
 
     /// Creates a new memory pool with a caller-provided maximum capacity.
@@ -100,7 +99,6 @@ impl MemoryPool {
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         max_pool_size: usize,
-        exact_mode: bool,
     ) -> Result<Self, MetalError> {
         let mut pool = Self {
             chunks: Vec::new(),
@@ -111,7 +109,6 @@ impl MemoryPool {
             pooled_allocations: 0,
             pool_resets: 0,
             max_pool_size,
-            exact_mode,
         };
 
         if max_pool_size == 0 {

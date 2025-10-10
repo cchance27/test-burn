@@ -283,7 +283,7 @@ impl<T: TensorElement> Context<T> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
-        let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES, true)?;
+        let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
         let enable_profiling = match AppConfig::get_or_init_from_env() {
             Ok(cfg) => cfg.enable_profiling,

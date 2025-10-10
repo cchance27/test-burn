@@ -1,5 +1,6 @@
 use crate::tui::metrics::{HierarchicalMetric, RunningAverage};
 use metallic_cli_helpers::prelude::*;
+use ratatui::layout::Position;
 use std::time::Duration;
 
 /// Result type used throughout the TUI application
@@ -25,10 +26,19 @@ pub struct App {
     pub request_follow_text: bool,
     pub text_area: ratatui::layout::Rect,
     pub metrics_area: ratatui::layout::Rect,
+    pub log_area: ratatui::layout::Rect,
     pub alert_queue: std::collections::VecDeque<Alert>,
     pub active_alert: Option<Alert>,
     // Track prompt processing metrics separately for aggregation
     pub prompt_processing_total_last_ms: f64,
+    // Log box functionality
+    pub log_messages: Vec<String>,
+    pub log_scroll: u16,
+    pub log_capacity: usize,
+    // Text selection functionality
+    pub text_selection_start: Option<Position>,
+    pub text_selection_end: Option<Position>,
+    pub is_selecting: bool,
 }
 
 impl App {
@@ -52,9 +62,16 @@ impl App {
             request_follow_text: false,
             text_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             metrics_area: ratatui::layout::Rect::new(0, 0, 0, 0),
+            log_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             alert_queue: std::collections::VecDeque::new(),
             active_alert: None,
             prompt_processing_total_last_ms: 0.0,
+            log_messages: Vec::new(),
+            log_scroll: 0,
+            log_capacity: 1000, // Keep only the last 1000 log messages
+            text_selection_start: None,
+            text_selection_end: None,
+            is_selecting: false,
         }
     }
 
@@ -80,21 +97,127 @@ impl App {
                 if delta != 0 {
                     self.text_follow_bottom = false;
                 }
-                Self::adjust_scroll(&mut self.text_scroll, delta);
+                self.adjust_text_scroll(delta);
                 if self.text_scroll == 0 && delta <= 0 {
                     self.text_follow_bottom = true;
                 }
             }
             FocusArea::Metrics => {
-                Self::adjust_scroll(&mut self.metrics_scroll, delta);
+                self.adjust_metrics_scroll(delta);
+            }
+            FocusArea::LogBox => {
+                self.adjust_log_scroll(delta);
             }
         }
     }
 
-    fn adjust_scroll(value: &mut u16, delta: i32) {
-        let current = i32::from(*value);
-        let next = (current + delta).clamp(0, u16::MAX as i32);
-        *value = next as u16;
+    fn adjust_text_scroll(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+
+        // Calculate total visual lines based on text content and text area width
+        let wrap_width = self.text_area.width.saturating_sub(2); // Subtract 2 for borders
+        let mut total_visual_lines = 0u16;
+        for line in self.generated_text.lines() {
+            let visual_lines = self.count_visual_lines_for_content_line(line, wrap_width) as u16;
+            total_visual_lines = total_visual_lines.saturating_add(visual_lines);
+        }
+
+        // Calculate visible lines in the text area (subtract 3: 2 for borders + 1 for title)
+        let visible_lines = self.text_area.height.saturating_sub(3);
+
+        // Calculate the maximum scroll position
+        let max_scroll = total_visual_lines.saturating_sub(visible_lines);
+
+        // Calculate the new scroll position, ensuring it's within bounds
+        let current_scroll = self.text_scroll as i32;
+        let new_scroll = (current_scroll + delta).clamp(0, max_scroll as i32);
+        self.text_scroll = new_scroll as u16;
+    }
+
+    fn adjust_metrics_scroll(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+
+        // Calculate metrics content lines based on the current view and data
+        let metrics_content_lines = match self.metrics_view {
+            MetricsView::Memory => self.calculate_memory_metrics_lines(),
+            MetricsView::Latency => self.calculate_latency_metrics_lines(),
+        } as u16;
+
+        // Calculate visible lines in the metrics area (subtract 3: 2 for borders + 1 for title)
+        let visible_lines = self.metrics_area.height.saturating_sub(3);
+
+        // Calculate the maximum scroll position
+        let max_scroll = metrics_content_lines.saturating_sub(visible_lines);
+
+        // Calculate the new scroll position, ensuring it's within bounds
+        let current_scroll = self.metrics_scroll as i32;
+        let new_scroll = (current_scroll + delta).clamp(0, max_scroll as i32);
+        self.metrics_scroll = new_scroll as u16;
+    }
+
+    fn calculate_memory_metrics_lines(&self) -> usize {
+        if self.memory_rows.is_empty() {
+            return 1; // "Collecting data..." line
+        }
+
+        // Calculate lines for help text and memory rows
+        let help_lines = 2; // "[m] Memory [l] Latency [c] Collapse (...)" + blank line
+        let memory_lines = self.memory_rows
+            .iter()
+            .filter(|row| row.level <= self.memory_collapse_depth.get_current_depth())
+            .count();
+        
+        help_lines + memory_lines
+    }
+
+    fn calculate_latency_metrics_lines(&self) -> usize {
+        if self.latency_tree.is_empty() {
+            return 1; // "Collecting data..." line
+        }
+
+        // Calculate lines for help text and latency tree
+        let help_lines = 2; // "[m] Memory [l] Latency [c] Collapse (...)" + blank line
+        let latency_lines = self.count_latency_tree_lines(&self.latency_tree, 0, self.latency_collapse_depth.get_current_depth());
+        
+        help_lines + latency_lines
+    }
+
+    fn count_latency_tree_lines(&self, metrics: &[crate::tui::metrics::HierarchicalMetric], depth: usize, max_depth: usize) -> usize {
+        if depth > max_depth || metrics.is_empty() {
+            return 0;
+        }
+
+        let mut count = 0;
+        for metric in metrics {
+            count += 1; // The metric line itself
+            // Add children if we haven't reached max depth
+            if depth < max_depth {
+                count += self.count_latency_tree_lines(&metric.children, depth + 1, max_depth);
+            }
+        }
+        count
+    }
+
+    fn adjust_log_scroll(&mut self, delta: i32) {
+        if delta == 0 {
+            return;
+        }
+
+        // Calculate visible lines in the log area (subtract 3: 2 for borders + 1 for title)
+        let visible_lines = self.log_area.height.saturating_sub(3);
+        let log_content_lines = self.log_messages.len() as u16;
+
+        // Calculate the maximum scroll position
+        let max_scroll = log_content_lines.saturating_sub(visible_lines);
+
+        // Calculate the new scroll position, ensuring it's within bounds
+        let current_scroll = self.log_scroll as i32;
+        let new_scroll = (current_scroll + delta).clamp(0, max_scroll as i32);
+        self.log_scroll = new_scroll as u16;
     }
 
     pub fn scroll_active_to_start(&mut self) {
@@ -104,6 +227,7 @@ impl App {
                 self.text_follow_bottom = false;
             }
             FocusArea::Metrics => self.metrics_scroll = 0,
+            FocusArea::LogBox => self.log_scroll = 0,
         }
     }
 
@@ -116,13 +240,24 @@ impl App {
             FocusArea::Metrics => {
                 self.metrics_scroll = u16::MAX;
             }
+            FocusArea::LogBox => {
+                // Calculate max scroll based on content
+                let max_messages = self.log_messages.len();
+                let visible_lines = self.log_area.height as usize;
+                if max_messages > visible_lines {
+                    self.log_scroll = (max_messages - visible_lines) as u16;
+                } else {
+                    self.log_scroll = 0;
+                }
+            }
         }
     }
 
     pub fn focus_next(&mut self) {
         self.focus = match self.focus {
             FocusArea::GeneratedText => FocusArea::Metrics,
-            FocusArea::Metrics => FocusArea::GeneratedText,
+            FocusArea::Metrics => FocusArea::LogBox,
+            FocusArea::LogBox => FocusArea::GeneratedText,
         };
     }
 
@@ -153,6 +288,314 @@ impl App {
     pub fn pending_alert_count(&self) -> usize {
         self.alert_queue.len()
     }
+
+    pub fn add_log_message(&mut self, message: &str) {
+        // Add timestamp to the log message
+        let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
+        let formatted_message = format!("[{}] {}", timestamp, message);
+        
+        self.log_messages.push(formatted_message);
+        
+        // Keep only the last N messages to prevent memory issues
+        if self.log_messages.len() > self.log_capacity {
+            let start = self.log_messages.len() - self.log_capacity;
+            self.log_messages.drain(0..start);
+        }
+        
+        // Auto-scroll to bottom if we were already at the bottom
+        if self.focus != FocusArea::LogBox || (self.log_area.height > 0 && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)) {
+            self.scroll_to_log_end();
+        }
+    }
+
+    fn scroll_to_log_end(&mut self) {
+        if self.log_area.height > 0 && self.log_messages.len() > self.log_area.height as usize {
+            self.log_scroll = (self.log_messages.len() - self.log_area.height as usize) as u16;
+        } else {
+            self.log_scroll = 0;
+        }
+    }
+
+    // Text selection methods
+    pub fn start_text_selection(&mut self, pos: Position) {
+        self.text_selection_start = Some(pos);
+        self.text_selection_end = Some(pos);
+        self.is_selecting = true;
+    }
+
+    pub fn update_text_selection(&mut self, pos: Position) {
+        if self.is_selecting {
+            self.text_selection_end = Some(pos);
+        }
+    }
+
+    pub fn end_text_selection(&mut self) {
+        self.is_selecting = false;
+    }
+
+
+
+    pub fn get_selected_text(&self, text_content: &str) -> String {
+        if let (Some(start), Some(end)) = (self.text_selection_start, self.text_selection_end) {
+            // Convert position to line and character indices for text selection
+            let start_row = start.y as usize;
+            let start_col = start.x as usize;
+            let end_row = end.y as usize;
+            let end_col = end.x as usize;
+
+            let lines: Vec<&str> = text_content.lines().collect();
+            
+            // Ensure we're within bounds
+            if lines.is_empty() {
+                return String::new();
+            }
+            
+            // Adjust row indices to not exceed available lines
+            let max_row = lines.len().saturating_sub(1);
+            let start_row = std::cmp::min(start_row, max_row);
+            let end_row = std::cmp::min(end_row, max_row);
+            
+            // Sort the selection to ensure start <= end
+            let (actual_start_row, actual_start_col, actual_end_row, actual_end_col) = 
+                if start_row > end_row || (start_row == end_row && start_col > end_col) {
+                    (end_row, end_col, start_row, start_col)
+                } else {
+                    (start_row, start_col, end_row, end_col)
+                };
+
+            // Handle single line selection
+            if actual_start_row == actual_end_row {
+                let line = lines[actual_start_row];
+                let line_chars: Vec<char> = line.chars().collect();
+                
+                if line_chars.is_empty() {
+                    // If the line is empty, return empty string
+                    return String::new();
+                }
+                
+                // Adjust column indices to not exceed line length
+                let actual_start_col = std::cmp::min(actual_start_col, line_chars.len());
+                let actual_end_col = std::cmp::min(actual_end_col, line_chars.len());
+                
+                if actual_start_col < line_chars.len() {
+                    let (start_idx, end_idx) = if actual_start_col <= actual_end_col {
+                        (actual_start_col, actual_end_col)
+                    } else {
+                        (actual_end_col, actual_start_col)
+                    };
+                    return line_chars[start_idx..end_idx].iter().collect();
+                } else {
+                    // If start_col exceeds line length, return empty selection
+                    return String::new();
+                }
+            } else {
+                // Multi-line selection
+                let mut result = String::new();
+                for row in actual_start_row..=actual_end_row {
+                    if row >= lines.len() {
+                        continue; // Skip if we're beyond the available lines
+                    }
+                    
+                    let line = lines[row];
+                    let line_chars: Vec<char> = line.chars().collect();
+                    
+                    if row == actual_start_row {
+                        // First line: from start_col to end of line
+                        if actual_start_col < line_chars.len() {
+                            let start_idx = std::cmp::min(actual_start_col, line_chars.len());
+                            result.push_str(&line_chars[start_idx..].iter().collect::<String>());
+                        }
+                    } else if row == actual_end_row {
+                        // Last line: from beginning to end_col
+                        if actual_end_col <= line_chars.len() {
+                            let end_idx = std::cmp::min(actual_end_col, line_chars.len());
+                            result.push_str(&line_chars[..end_idx].iter().collect::<String>());
+                        }
+                    } else {
+                        // Middle lines: entire line
+                        result.push_str(line);
+                    }
+                    
+                    if row < actual_end_row {
+                        result.push('\n');
+                    }
+                }
+                return result;
+            }
+        }
+        String::new()
+    }
+    
+    // Helper functions for handling wrapped text
+    pub fn get_content_position_from_visual(&self, visual_row: u16, visual_col: u16, scroll_offset: u16, text_content: &str, wrap_width: u16) -> (usize, usize) {
+        // This function maps visual coordinates to content coordinates considering text wrapping and scroll
+        // visual_row is the row relative to the viewport (including scrolling effect)
+        // scroll_offset is how many lines the user has scrolled down
+        // We need to find the actual content line and column
+        let absolute_visual_row = visual_row.saturating_add(scroll_offset);
+        
+        let lines: Vec<&str> = text_content.lines().collect();
+        let mut current_visual_row: u32 = 0; // Use u32 to prevent overflow issues
+        
+        for (idx, line) in lines.iter().enumerate() {
+            // Simulate how ratatui wraps this line to count visual lines it would create
+            let visual_line_count = self.count_visual_lines_for_content_line(line, wrap_width);
+            
+            // Check if the target visual row is within this content line's range
+            if (current_visual_row as u16) <= absolute_visual_row && 
+               absolute_visual_row < (current_visual_row as u16 + visual_line_count as u16) {
+                // The target is within this content line
+                let row_in_content_line = absolute_visual_row.saturating_sub(current_visual_row as u16) as usize;
+                
+                // Calculate the content column position within this line, considering how ratatui would wrap
+                let actual_content_col = self.visual_position_to_content_position(
+                    line, 
+                    row_in_content_line, 
+                    visual_col as usize, 
+                    wrap_width as usize
+                );
+                
+                return (idx, actual_content_col);
+            }
+            
+            current_visual_row += visual_line_count as u32;
+        }
+        
+        // If we reach here, we're beyond the content, return last position
+        if !lines.is_empty() {
+            // Return the last line with the calculated column
+            let last_line_idx = lines.len() - 1;
+            let last_line = lines.last().unwrap();
+            let last_line_chars: Vec<char> = last_line.chars().collect();
+            let clamped_col = std::cmp::min(visual_col as usize, last_line_chars.len());
+            (last_line_idx, clamped_col)
+        } else {
+            (0, 0) // No content, return (0,0)
+        }
+    }
+    
+    /// Count how many visual lines a content line would produce when wrapped
+    pub fn count_visual_lines_for_content_line(&self, line: &str, wrap_width: u16) -> usize {
+        if wrap_width == 0 || wrap_width as usize == 0 {
+            return 1; // Minimum 1 visual line
+        }
+        
+        // Use the same logic as create_visual_lines_for_content_line to match ratatui behavior
+        let visual_lines = self.create_visual_lines_for_content_line(line, wrap_width as usize);
+        visual_lines.len()
+    }
+    
+    /// Convert visual position within a wrapped line to content position
+    /// This method properly handles word-aware wrapping to match ratatui's behavior
+    fn visual_position_to_content_position(&self, line: &str, visual_row_in_line: usize, visual_col_in_row: usize, wrap_width: usize) -> usize {
+        if wrap_width == 0 {
+            return 0;
+        }
+        
+        // Create visual lines by simulating word-aware wrapping
+        let visual_lines = self.create_visual_lines_for_content_line(line, wrap_width);
+        
+        // Get the target visual line 
+        if visual_row_in_line < visual_lines.len() {
+            let target_visual_line = &visual_lines[visual_row_in_line];
+            
+            // Make sure visual_col_in_row doesn't exceed the length of this visual line
+            let safe_visual_col = std::cmp::min(visual_col_in_row, target_visual_line.len());
+            
+            // The content position is the start of this visual line in the original content
+            // plus the column within this visual line
+            let mut content_pos = 0;
+            (0..visual_row_in_line).for_each(|i| {
+                content_pos += visual_lines[i].len();
+            });
+            
+            // Add the column offset within the current visual line
+            content_pos += safe_visual_col;
+            
+            // Ensure it doesn't exceed the total length of the original line
+            std::cmp::min(content_pos, line.len())
+        } else {
+            // If visual row is beyond the available visual lines, return end of content
+            line.len()
+        }
+    }
+    
+    /// Split a content line into visual lines according to word-aware wrapping
+    fn create_visual_lines_for_content_line(&self, line: &str, wrap_width: usize) -> Vec<String> {
+        if wrap_width == 0 || line.is_empty() {
+            return vec![line.to_string()];
+        }
+        
+        let mut visual_lines = Vec::new();
+        let mut current_line = String::new();
+        let words: Vec<&str> = line.split_inclusive(' ').collect(); // Split on spaces, keeping the space
+        
+        for word in words {
+            // If adding this word would exceed the wrap width, start a new line
+            if !current_line.is_empty() && current_line.len() + word.len() > wrap_width && !current_line.is_empty() {
+                visual_lines.push(current_line);
+                current_line = word.to_string();
+            } else {
+                // If the word itself is longer than wrap width, we need to break it
+                if word.len() > wrap_width {
+                    // Break long word into chunks
+                    let word_chars: Vec<char> = word.chars().collect();
+                    let mut word_pos = 0;
+                    
+                    // If current line has content, finish it first
+                    if !current_line.is_empty() {
+                        visual_lines.push(current_line);
+                        current_line = String::new();
+                    }
+                    
+                    // Add chunks of the long word to new lines
+                    while word_pos < word_chars.len() {
+                        let end_pos = std::cmp::min(word_pos + wrap_width, word_chars.len());
+                        let chunk: String = word_chars[word_pos..end_pos].iter().collect();
+                        
+                        if current_line.is_empty() {
+                            current_line = chunk;
+                        } else {
+                            current_line.push_str(&chunk);
+                        }
+                        
+                        // If we've filled this line or reached the end of the word
+                        if current_line.len() >= wrap_width || end_pos >= word_chars.len() {
+                            visual_lines.push(current_line);
+                            current_line = String::new();
+                        }
+                        
+                        word_pos = end_pos;
+                    }
+                } else {
+                    // Add the word to the current line
+                    current_line.push_str(word);
+                }
+            }
+            
+            // If current line has reached wrap width, start a new line
+            if current_line.len() >= wrap_width {
+                visual_lines.push(current_line);
+                current_line = String::new();
+            }
+        }
+        
+        // Add the last line if it has content
+        if !current_line.is_empty() {
+            visual_lines.push(current_line);
+        }
+        
+        // If no visual lines were created but the line isn't empty, it means the line is shorter than wrap width
+        if visual_lines.is_empty() && !line.is_empty() {
+            visual_lines.push(line.to_string());
+        } else if visual_lines.is_empty() {
+            visual_lines.push(String::new());
+        }
+        
+        visual_lines
+    }
+    
+
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -304,4 +747,5 @@ impl MemoryCollapseDepth {
 pub enum FocusArea {
     GeneratedText,
     Metrics,
+    LogBox,
 }

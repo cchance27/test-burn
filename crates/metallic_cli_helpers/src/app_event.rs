@@ -86,4 +86,5 @@ pub enum AppEvent {
     MemoryUpdate(Vec<MemoryRow>),
     LatencyUpdate(Vec<LatencyRow>),
     Alert(Alert),
+    LogMessage(String),
 }
