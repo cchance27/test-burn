@@ -13,6 +13,7 @@ use objc2::msg_send;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLComputeCommandEncoder};
+use rustc_hash::FxHashMap;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -157,7 +158,7 @@ impl GpuProfilerState {
 
         // Group records by (base op_name without '#sequence', backend) and aggregate CPU durations for weighting
         // This collapses multiple encoder dispatches for the same logical op into a single group
-        let mut groups: std::collections::HashMap<(String, String), Vec<Duration>> = std::collections::HashMap::new();
+        let mut groups: FxHashMap<(String, String), Vec<Duration>> = FxHashMap::default();
         for rec in records {
             let base_name = rec.op_name.split('#').next().unwrap_or(&rec.op_name).to_string();
             groups.entry((base_name, rec.backend)).or_default().push(rec.cpu_duration);
@@ -340,9 +341,9 @@ unsafe impl Send for GpuOpRecord {}
 // SAFETY: See `Send` rationale.
 unsafe impl Sync for GpuOpRecord {}
 
-fn registry() -> &'static Mutex<std::collections::HashMap<usize, Weak<GpuProfilerState>>> {
-    static REGISTRY: OnceLock<Mutex<std::collections::HashMap<usize, Weak<GpuProfilerState>>>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+fn registry() -> &'static Mutex<FxHashMap<usize, Weak<GpuProfilerState>>> {
+    static REGISTRY: OnceLock<Mutex<FxHashMap<usize, Weak<GpuProfilerState>>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 fn buffer_key<C: ProfiledCommandBuffer + ?Sized>(command_buffer: &C) -> usize {

@@ -5,7 +5,6 @@ use metal::{
     Buffer, CompileOptions, ComputeCommandEncoderRef, ComputePipelineState, Device, Function,
     FunctionConstantValues, Library, MTLDataType, MTLSize, NSUInteger,
 };
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::RwLock;
 

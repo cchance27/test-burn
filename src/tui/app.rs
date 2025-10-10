@@ -1,4 +1,4 @@
-use crate::{tui::metrics::{HierarchicalMetric, RunningAverage}};
+use crate::tui::metrics::{HierarchicalMetric, RunningAverage};
 use metallic_cli_helpers::prelude::*;
 use std::time::Duration;
 

@@ -2,10 +2,11 @@ use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMe
 use crate::models::qwen25::Qwen25;
 use crate::{TensorElement, Tokenizer};
 use metallic_cli_helpers::app_event::AppEvent;
-use metallic_instrumentation::record_metric_async;
-use metallic_instrumentation::MetricEvent;
+use metallic_instrumentation::{MetricEvent, global_cached_memory_profiler, record_metric_async};
 use rand::prelude::*;
+use rustc_hash::FxHashMap;
 use std::{
+    collections::BTreeMap,
     env,
     fs::OpenOptions,
     io::Write,
@@ -129,6 +130,10 @@ pub struct GenerationConfig {
     pub temperature: f32,
     pub top_p: f32,
     pub top_k: usize,
+    /// Initial KV cache headroom in tokens beyond the current prompt length.
+    /// This lets us avoid over-allocating the KV pool when typical generations are short.
+    /// If generation exceeds this, we currently do not grow the KV cache mid-run.
+    pub kv_initial_headroom_tokens: usize,
 }
 
 impl Default for GenerationConfig {
@@ -138,6 +143,7 @@ impl Default for GenerationConfig {
             temperature: 1.0,
             top_p: 0.95,
             top_k: 40,
+            kv_initial_headroom_tokens: 256,
         }
     }
 }
@@ -389,6 +395,8 @@ where
     let kv_dim = d_model * n_kv_heads / n_heads;
     let kv_head_dim = kv_dim / n_kv_heads;
     let batch_size = 1; // Assuming batch size of 1 for now
+    // Default: allocate KV capacity up to prompt_len + max_tokens.
+    // We still report pool capacity precisely, so total pool size will reflect bytes actually needed, not a fixed chunk like 640MB.
     let kv_capacity = (input_ids.len().max(1) + cfg.max_tokens).min(seq_len);
 
     // Determine whether existing cache-backed descriptors must be invalidated because
@@ -417,6 +425,37 @@ where
     ctx.clear_kv_caches();
     ctx.kv_cache_pool.reset();
 
+    // Pre-reserve KV cache pool exactly to avoid chunk overshoot
+    let bytes_per_element = std::mem::size_of::<T>();
+    let per_layer_bytes = (batch_size * n_heads) * kv_capacity * kv_head_dim * bytes_per_element;
+    let total_bytes = per_layer_bytes
+        .checked_mul(2) // K + V
+        .and_then(|b| b.checked_mul(n_layers))
+        .ok_or(MetalError::OutOfMemory)?;
+    ctx.kv_cache_pool.reserve_exact(total_bytes)?;
+
+    // Report KV cache allocation - only if metrics are enabled
+    let kv_cache_size = kv_capacity * batch_size * n_heads * kv_head_dim * std::mem::size_of::<T>();
+
+    let mut forward_pass_breakdown = BTreeMap::new();
+
+    // Only perform memory profiling if we've enabled profiling (meaning metrics are enabled)
+    if let Ok(config) = metallic_instrumentation::config::AppConfig::get_or_init_from_env()
+        && config.enable_profiling
+    {
+        // Get current process memory usage using the cached profiler
+        let process_memory_bytes = global_cached_memory_profiler().get_process_memory_usage();
+
+        record_metric_async!(MetricEvent::HostMemory {
+            total_bytes: process_memory_bytes,
+            tensor_pool_reserved_bytes: ctx.pool.total_capacity() as u64,
+            tensor_pool_used_bytes: ctx.pool.used_bytes() as u64,
+            kv_pool_reserved_bytes: ctx.kv_cache_pool.total_capacity() as u64,
+            kv_pool_used_bytes: 0,
+            forward_pass_breakdown: forward_pass_breakdown.clone(),
+        });
+    }
+
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_heads, kv_head_dim)?;
     }
@@ -431,7 +470,8 @@ where
         ctx.with_gpu_scope("Prompt Processing", |ctx| {
             for (i, &token_id) in input_ids.iter().enumerate() {
                 let input_tensor = qwen.embed(&[token_id], ctx)?;
-                let hidden_states = qwen.forward_step(&input_tensor, i, ctx)?;
+                let (hidden_states, breakdown) = qwen.forward_step(&input_tensor, i, ctx)?;
+                forward_pass_breakdown.extend(breakdown);
                 logits_tensor = Some(ctx.with_gpu_scope("generation_step_output", |ctx| qwen.output(&hidden_states, ctx))?);
                 log_cache_stats(ctx, "prompt", i + 1);
             }
@@ -490,6 +530,8 @@ where
     // --- Autoregressive Generation Loop ---
     ctx.with_gpu_scope("Generation Loop", |ctx| {
         let mut metric_recording_overhead = Duration::ZERO;
+        let mut last_memory_profiling = Instant::now();
+        let memory_profiling_interval = Duration::from_millis(100); // Only profile every 100ms
 
         for i in 0..cfg.max_tokens - 1 {
             let iteration_start = Instant::now();
@@ -524,7 +566,8 @@ where
             }
 
             let forward_step_start = Instant::now();
-            let hidden_states = qwen.forward_step(&input_tensor, current_pos, ctx)?;
+            let (hidden_states, breakdown) = qwen.forward_step(&input_tensor, current_pos, ctx)?;
+            forward_pass_breakdown.extend(breakdown);
             let forward_step_duration = forward_step_start.elapsed();
             if !forward_step_duration.is_zero() {
                 let metric_start = Instant::now();
@@ -536,9 +579,56 @@ where
                 metric_recording_overhead += metric_start.elapsed();
             }
 
-            let logits_tensor = ctx.with_gpu_scope("generation_step_output", |ctx| qwen.output(&hidden_states, ctx))?;
+            // Only perform memory profiling if profiling is enabled (meaning metrics are enabled)
+            // and only periodically to reduce performance impact
+            if let Ok(config) = metallic_instrumentation::config::AppConfig::get_or_init_from_env()
+                && config.enable_profiling
+                && last_memory_profiling.elapsed() >= memory_profiling_interval
+            {
+                // Report updated host memory usage during generation (only when it changes significantly)
+                let tensor_pool_used = ctx.pool.used_bytes();
+                let kv_cache_used = kv_cache_size; // For now, assume all KV cache is used
+                let _total_memory_used = tensor_pool_used + kv_cache_used;
+
+                // Get current process memory usage using the cached profiler
+                let process_memory_bytes = global_cached_memory_profiler().get_process_memory_usage();
+                last_memory_profiling = Instant::now();
+
+                // Only record if memory usage changed significantly (>1MB) or this is the first generation step
+                if process_memory_bytes > 1_048_576 || generated_ids.is_empty() {
+                    record_metric_async!(MetricEvent::HostMemory {
+                        total_bytes: process_memory_bytes,
+                        tensor_pool_reserved_bytes: ctx.pool.total_capacity() as u64,
+                        tensor_pool_used_bytes: ctx.pool.used_bytes() as u64,
+                        kv_pool_reserved_bytes: ctx.kv_cache_pool.total_capacity() as u64,
+                        kv_pool_used_bytes: ctx.kv_cache_pool.used_bytes() as u64,
+                        forward_pass_breakdown: forward_pass_breakdown.clone(),
+                    });
+                }
+            }
 
             let logits_download_start = Instant::now();
+            let logits_tensor = ctx.with_gpu_scope("generation_step_output", |ctx| qwen.output(&hidden_states, ctx))?;
+
+            // Report forward step memory usage (only once per generation step)
+            if i == 0 {
+                let bytes_per_element = T::DTYPE.size_bytes();
+                let mut breakdown = FxHashMap::default();
+
+                let embedding_size = (input_tensor.len() * bytes_per_element) as u64;
+                breakdown.insert("Embedding".to_string(), embedding_size);
+
+                let output_size = (logits_tensor.len() * bytes_per_element) as u64;
+                breakdown.insert("Output".to_string(), output_size);
+
+                let total_size = embedding_size + output_size;
+
+                record_metric_async!(MetricEvent::ForwardStep {
+                    total_bytes: total_size,
+                    breakdown,
+                });
+            }
+
             let logits = logits_tensor.to_vec();
             let logits_download_duration = logits_download_start.elapsed();
             let metric_start = Instant::now();

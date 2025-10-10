@@ -160,7 +160,7 @@ The instrumentation system is configured via environment variables:
     -   Default: `false`
 -   **`METALLIC_METRICS_JSONL_PATH`**: If set, enables the `JsonlExporter` and writes metrics to the specified file path.
     -   Example: `/tmp/metrics.jsonl`
--   **`METALLIC_EMIT_LATENCY`**: Controls whether GPU kernels execute in dedicated command buffers to
+-   **`METALLIC_ENABLE_PROFILING`**: Controls whether GPU kernels execute in dedicated command buffers to
     surface precise `kernelStartTime`/`GPUEndTime` measurements. Defaults to `true`. Set to `false` to
     reuse command buffers when prioritising throughput over latency observability.
 

@@ -6,6 +6,9 @@ pub mod event;
 pub mod exporters;
 pub mod gpu_profiler;
 pub mod macros;
+pub mod memory_collector;
+pub mod memory_profiler;
+pub mod memory_reporter;
 pub mod prelude;
 pub mod recorder;
 
@@ -13,5 +16,8 @@ pub use async_recorder::{AsyncMetricRecorder, MetricQueue};
 pub use event::MetricEvent;
 pub use gpu_profiler::GpuProfiler;
 pub use macros::METRIC_QUEUE;
+pub use memory_collector::{MemoryCollector, global_memory_collector};
+pub use memory_profiler::{CachedMemoryProfiler, global_cached_memory_profiler};
+pub use memory_reporter::MemoryReporter;
 
 mod tests;

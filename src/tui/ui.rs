@@ -5,7 +5,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
-use crate::tui::{app::{App, FocusArea, MetricsView}, metrics::HierarchicalMetric};
+use crate::tui::{
+    app::{App, FocusArea, MetricsView},
+    metrics::HierarchicalMetric,
+};
 
 pub fn render(app: &mut App, frame: &mut Frame) {
     let main_layout = Layout::default()
@@ -126,6 +129,42 @@ fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], co
                 row.label,
                 format_current_and_peak(row.current_total_mb, row.peak_total_mb)
             );
+
+            // Consolidated pool/kv display: show used / reserved (percent)
+            if row.label.trim() == "Tensor Pool" {
+                let used = row.current_total_mb;
+                let reserved = row.absolute_pool_mb;
+                let pct = if reserved > 0.0 {
+                    (used / reserved * 100.0).clamp(0.0, 9999.0)
+                } else {
+                    0.0
+                };
+                line = format!(
+                    "{}{}: {} / {} ({:.2}%)",
+                    indent,
+                    row.label,
+                    format_memory_amount(used),
+                    format_memory_amount(reserved),
+                    pct
+                );
+            }
+            if row.label.trim() == "KV Pool" {
+                let used = row.current_total_mb;
+                let reserved = row.absolute_kv_mb;
+                let pct = if reserved > 0.0 {
+                    (used / reserved * 100.0).clamp(0.0, 9999.0)
+                } else {
+                    0.0
+                };
+                line = format!(
+                    "{}{}: {} / {} ({:.2}%)",
+                    indent,
+                    row.label,
+                    format_memory_amount(used),
+                    format_memory_amount(reserved),
+                    pct
+                );
+            }
 
             let mut deltas = Vec::new();
             if row.current_pool_mb > 0.0 || row.peak_pool_mb > 0.0 {
@@ -424,8 +463,7 @@ impl App {
         let metric = if let Some(idx) = entry {
             &mut self.latency_tree[idx]
         } else {
-            self.latency_tree
-                .push(HierarchicalMetric::new(label.to_string(), 0.0));
+            self.latency_tree.push(HierarchicalMetric::new(label.to_string(), 0.0));
             self.latency_tree
                 .last_mut()
                 .expect("latency_tree cannot be empty immediately after push")

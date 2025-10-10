@@ -126,7 +126,7 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
     for i in tmp {
         let token_embedding = model.embed(&[prompt_tokens[i]], &mut ctx)?;
         let hidden_state = model.forward_step(&token_embedding, i, &mut ctx)?;
-        let logits_tensor = model.output(&hidden_state, &mut ctx)?;
+        let logits_tensor = model.output(&hidden_state.0, &mut ctx)?;
         kv_cache_logits_history.push(logits_tensor.to_vec());
 
         // Validate that the KV cache grows with each token and exposes the expected repeated layout.

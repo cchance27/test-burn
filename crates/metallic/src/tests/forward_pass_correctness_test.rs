@@ -1532,7 +1532,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::Meta
 
         let token_embedding = model.embed(&[token_id], &mut ctx)?;
         let hidden_state = model.forward_step(&token_embedding, pos, &mut ctx)?;
-        let logits_tensor = model.output(&hidden_state, &mut ctx)?;
+        let logits_tensor = model.output(&hidden_state.0, &mut ctx)?;
         let kv_logits = logits_tensor.to_f32_vec();
 
         assert_eq!(kv_logits.len(), vocab_size, "forward_step logits should be a single vocab slice");

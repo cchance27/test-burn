@@ -11,8 +11,8 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{
     MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLDevice, MTLResourceOptions, MTLSize,
 };
+use rustc_hash::FxHashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::ops::Deref;
@@ -80,11 +80,11 @@ impl HostAccessState {
     }
 }
 
-type HostAccessRegistry = HashMap<usize, Vec<Weak<Mutex<HostAccessState>>>>;
+type HostAccessRegistry = FxHashMap<usize, Vec<Weak<Mutex<HostAccessState>>>>;
 
 fn host_access_registry() -> &'static Mutex<HostAccessRegistry> {
     static REGISTRY: OnceLock<Mutex<HostAccessRegistry>> = OnceLock::new();
-    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+    REGISTRY.get_or_init(|| Mutex::new(FxHashMap::default()))
 }
 
 fn buffer_registry_key(buffer: &RetainedBuffer) -> usize {
@@ -403,7 +403,7 @@ impl<T: TensorElement> Tensor<T> {
         }
 
         let command_buffer = CommandBuffer::new(&self.command_queue)?;
-        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
         if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
             command_buffer.retain_profiler(profiler);
         }
@@ -457,7 +457,7 @@ impl<T: TensorElement> Tensor<T> {
 
         if needs_copy && region_len != 0 {
             let command_buffer = CommandBuffer::new(&self.command_queue)?;
-            let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+            let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
             if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
                 command_buffer.retain_profiler(profiler);
             }
@@ -525,7 +525,7 @@ impl<T: TensorElement> Tensor<T> {
         drop(state);
 
         let command_buffer = CommandBuffer::new(&self.command_queue)?;
-        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.emit_latency).unwrap_or(true);
+        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
         if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
             command_buffer.retain_profiler(profiler);
         }

@@ -1,11 +1,13 @@
 use anyhow::Result;
 use metallic::{
-    Context, F16Element, Tokenizer,
+    Context, F16Element, TensorElement, Tokenizer,
     generation::generate_streaming,
     gguf::{GGUFFile, model_loader::GGUFModelLoader},
 };
 use metallic_cli_helpers::prelude::*;
 use metallic_instrumentation::prelude::*;
+use metallic_instrumentation::{MetricEvent, record_metric_async};
+use rustc_hash::FxHashMap;
 use std::{
     any::Any,
     io::{Write, stdout},
@@ -57,6 +59,13 @@ fn main() -> AppResult<()> {
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
                 let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
+
+                // Report GGUF file MMAP usage
+                let gguf_file_size = std::fs::metadata(&gguf_path)?.len();
+                record_metric_async!(MetricEvent::GgufFileMmap {
+                    size_bytes: gguf_file_size
+                });
+
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
@@ -70,7 +79,99 @@ fn main() -> AppResult<()> {
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
-                let mut qwen = gguf_model.instantiate(&mut ctx)?;
+                let mut qwen: metallic::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
+
+                // Report model weights breakdown
+                let mut breakdown = FxHashMap::default();
+                let mut total_weights_size = 0u64;
+                let bytes_per_element = F16Element::DTYPE.size_bytes();
+
+                // Token Embeddings
+                let embed_size = (qwen.embed_weight.len() * bytes_per_element) as u64;
+                breakdown.insert("Token Embeddings".to_string(), embed_size);
+                total_weights_size += embed_size;
+
+                // Output Projection
+                let output_size = (qwen.output_weight.len() * bytes_per_element) as u64;
+                breakdown.insert("Output Projection".to_string(), output_size);
+                total_weights_size += output_size;
+
+                // Final Layer Norm
+                let norm_size = (qwen.final_norm_gamma.len() * bytes_per_element) as u64;
+                breakdown.insert("Final Layer Norm".to_string(), norm_size);
+                total_weights_size += norm_size;
+
+                // RoPE Cache
+                let rope_cache_size =
+                    (qwen.rope_cos_cache.len() * bytes_per_element + qwen.rope_sin_cache.len() * bytes_per_element) as u64;
+                breakdown.insert("RoPE Cache".to_string(), rope_cache_size);
+                total_weights_size += rope_cache_size;
+
+                // Transformer Blocks
+                let mut total_transformer_blocks_size = 0u64;
+                for (i, block) in qwen.blocks.iter().enumerate() {
+                    let block_base_key = format!("Transformer Blocks.Weight Block {}", i + 1);
+
+                    // Attention Projections
+                    let fused_qkv_weight_size = (block.attn_qkv_weight.len() * bytes_per_element) as u64;
+                    breakdown.insert(
+                        format!("{}.Attention Projections.Fused QKV weight", block_base_key),
+                        fused_qkv_weight_size,
+                    );
+                    let output_weight_size = (block.attn_out_weight.len() * bytes_per_element) as u64;
+                    breakdown.insert(
+                        format!("{}.Attention Projections.Output weight", block_base_key),
+                        output_weight_size,
+                    );
+                    let total_attn_proj_size = fused_qkv_weight_size + output_weight_size;
+                    breakdown.insert(format!("{}.Attention Projections", block_base_key), total_attn_proj_size);
+
+                    // Attention Biases
+                    let fused_qkv_bias_size = (block.attn_qkv_bias.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Attention Biases.Fused QKV bias", block_base_key), fused_qkv_bias_size);
+                    breakdown.insert(format!("{}.Attention Biases", block_base_key), fused_qkv_bias_size);
+
+                    // Feedforward Projections
+                    let gate_weight_size = (block.ffn_gate.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Feedforward Projections.Gate weight", block_base_key), gate_weight_size);
+                    let up_weight_size = (block.ffn_up.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Feedforward Projections.Up weight", block_base_key), up_weight_size);
+                    let down_weight_size = (block.ffn_down.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Feedforward Projections.Down weight", block_base_key), down_weight_size);
+                    let total_ffn_proj_size = gate_weight_size + up_weight_size + down_weight_size;
+                    breakdown.insert(format!("{}.Feedforward Projections", block_base_key), total_ffn_proj_size);
+
+                    // Feedforward Biases
+                    let gate_bias_size = (block.ffn_gate_bias.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Feedforward Biases.Gate bias", block_base_key), gate_bias_size);
+                    let up_bias_size = (block.ffn_up_bias.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Feedforward Biases.Up bias", block_base_key), up_bias_size);
+                    let down_bias_size = (block.ffn_down_bias.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Feedforward Biases.Down bias", block_base_key), down_bias_size);
+                    let total_ffn_bias_size = gate_bias_size + up_bias_size + down_bias_size;
+                    breakdown.insert(format!("{}.Feedforward Biases", block_base_key), total_ffn_bias_size);
+
+                    // Norm Parameters
+                    let attn_norm_size = (block.attn_norm_gamma.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Norm Parameters.Attention norm", block_base_key), attn_norm_size);
+                    let ffn_norm_size = (block.ffn_norm_gamma.len() * bytes_per_element) as u64;
+                    breakdown.insert(format!("{}.Norm Parameters.FFN norm", block_base_key), ffn_norm_size);
+                    let total_norm_param_size = attn_norm_size + ffn_norm_size;
+                    breakdown.insert(format!("{}.Norm Parameters", block_base_key), total_norm_param_size);
+
+                    let total_block_size =
+                        total_attn_proj_size + fused_qkv_bias_size + total_ffn_proj_size + total_ffn_bias_size + total_norm_param_size;
+                    breakdown.insert(block_base_key, total_block_size);
+                    total_transformer_blocks_size += total_block_size;
+                }
+                breakdown.insert("Transformer Blocks".to_string(), total_transformer_blocks_size);
+                total_weights_size += total_transformer_blocks_size;
+
+                record_metric_async!(MetricEvent::ModelWeights {
+                    total_bytes: total_weights_size,
+                    breakdown,
+                });
+
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
@@ -87,6 +188,7 @@ fn main() -> AppResult<()> {
                     temperature: cli_config.generation.temperature as f32,
                     top_p: cli_config.generation.top_p as f32,
                     top_k: cli_config.generation.top_k,
+                    kv_initial_headroom_tokens: (cli_config.generation.max_tokens / 4).max(32),
                 };
 
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
@@ -170,11 +272,18 @@ fn run_tui_mode(
         // Process metric events from the instrumentation system and convert them to AppEvents
         while let Ok(enriched_event) = receiver.try_recv() {
             tracing::debug!("Main thread received enriched event: {:?}", enriched_event);
-            let rows = tui::metrics::metric_event_to_latency_rows(&enriched_event.event);
-            tracing::debug!("Converted to {} latency rows", rows.len());
-            if !rows.is_empty() {
+            let latency_rows = tui::metrics::metric_event_to_latency_rows(&enriched_event.event);
+            tracing::debug!("Converted to {} latency rows", latency_rows.len());
+            if !latency_rows.is_empty() {
                 // Send the rows as an AppEvent so they get processed like before
-                handle_app_event(&mut app, AppEvent::LatencyUpdate(rows));
+                handle_app_event(&mut app, AppEvent::LatencyUpdate(latency_rows));
+            }
+
+            // Process memory events
+            let memory_rows = tui::metrics::metric_event_to_memory_rows(&enriched_event.event);
+            tracing::debug!("Converted to {} memory rows", memory_rows.len());
+            if !memory_rows.is_empty() {
+                handle_app_event(&mut app, AppEvent::MemoryUpdate(memory_rows));
             }
         }
 
@@ -344,7 +453,22 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
             app.status = status;
         }
         AppEvent::MemoryUpdate(memory_rows) => {
-            app.memory_rows = memory_rows;
+            // Replace existing memory rows of the same type instead of accumulating
+            // This prevents duplicate entries for the same memory metric
+            let mut merged_rows = app.memory_rows.clone();
+
+            for new_row in memory_rows {
+                // Check if a row with the same label already exists
+                if let Some(existing_index) = merged_rows.iter().position(|row| row.label == new_row.label) {
+                    // Replace the existing row with the new one
+                    merged_rows[existing_index] = new_row;
+                } else {
+                    // Add as a new row if it doesn't exist
+                    merged_rows.push(new_row);
+                }
+            }
+
+            app.memory_rows = merged_rows;
             // Recalculate max depth for memory metrics since the rows may have changed
             app.memory_collapse_depth.calculate_max_depth(&app.memory_rows);
         }

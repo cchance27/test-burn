@@ -1,6 +1,6 @@
 //! Metrics mapping utilities for converting metric events to latency rows for TUI display
 
-use metallic_cli_helpers::app_event::LatencyRow;
+use metallic_cli_helpers::app_event::{LatencyRow, MemoryRow};
 use metallic_instrumentation::MetricEvent;
 
 /// Label for the generation loop in the metrics hierarchy
@@ -275,4 +275,324 @@ pub fn map_prompt_stage(name: &str) -> Option<Vec<String>> {
         return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
     }
     None
+}
+
+/// Convert a metric event to memory rows for display in the TUI
+pub fn metric_event_to_memory_rows(event: &MetricEvent) -> Vec<MemoryRow> {
+    match event {
+        MetricEvent::GgufFileMmap { size_bytes } => {
+            vec![MemoryRow {
+                label: "GGUF File MMAP".to_string(),
+                level: 0,
+                current_total_mb: (*size_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*size_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                absolute_pool_mb: 0.0,
+                absolute_kv_mb: 0.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            }]
+        }
+        MetricEvent::ModelWeights { total_bytes, breakdown } => {
+            let mut rows = vec![MemoryRow {
+                label: "Model Weights".to_string(),
+                level: 0,
+                current_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                absolute_pool_mb: 0.0,
+                absolute_kv_mb: 0.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            }];
+
+            #[derive(Debug)]
+            struct Node {
+                name: String,
+                value: u64,
+                children: std::collections::BTreeMap<String, Node>, // BTreeMap to keep order
+            }
+
+            impl Node {
+                fn new(name: &str, value: u64) -> Self {
+                    Self {
+                        name: name.to_string(),
+                        value,
+                        children: std::collections::BTreeMap::new(),
+                    }
+                }
+            }
+
+            let mut root = Node::new("", 0);
+
+            for (key, &value) in breakdown {
+                let mut current_node = &mut root;
+                for part in key.split('.') {
+                    current_node = current_node.children.entry(part.to_string()).or_insert_with(|| Node::new(part, 0));
+                }
+                current_node.value = value;
+            }
+
+            fn build_rows(node: &Node, level: u8, rows: &mut Vec<MemoryRow>) {
+                let mut children_to_process: Vec<_> = node.children.iter().collect();
+
+                if node.name == "Transformer Blocks" {
+                    children_to_process.sort_by_key(|(name, _)| {
+                        name.strip_prefix("Weight Block ")
+                            .and_then(|s| s.parse::<usize>().ok())
+                            .unwrap_or(0)
+                    });
+                }
+
+                for (name, child) in children_to_process {
+                    rows.push(MemoryRow {
+                        label: format!("{}{}", "  ".repeat(level as usize), name),
+                        level,
+                        current_total_mb: (child.value as f64) / 1_048_576.0,
+                        peak_total_mb: (child.value as f64) / 1_048_576.0,
+                        current_pool_mb: 0.0,
+                        peak_pool_mb: 0.0,
+                        current_kv_mb: 0.0,
+                        peak_kv_mb: 0.0,
+                        current_kv_cache_mb: 0.0,
+                        peak_kv_cache_mb: 0.0,
+                        absolute_pool_mb: 0.0,
+                        absolute_kv_mb: 0.0,
+                        absolute_kv_cache_mb: 0.0,
+                        show_absolute: false,
+                    });
+                    build_rows(child, level + 1, rows);
+                }
+            }
+
+            build_rows(&root, 1, &mut rows);
+
+            rows
+        }
+        MetricEvent::HostMemory {
+            total_bytes,
+            tensor_pool_reserved_bytes,
+            tensor_pool_used_bytes,
+            kv_pool_reserved_bytes,
+            kv_pool_used_bytes,
+            forward_pass_breakdown,
+        } => {
+            let mut rows = vec![MemoryRow {
+                label: "Host Memory (MB)".to_string(),
+                level: 0,
+                current_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                absolute_pool_mb: 0.0,
+                absolute_kv_mb: 0.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            }];
+
+            // Consolidated one-liners for pool information
+            rows.push(MemoryRow {
+                label: "  Tensor Pool".to_string(),
+                level: 1,
+                // current_total_mb holds the USED amount for the consolidated display
+                current_total_mb: (*tensor_pool_used_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*tensor_pool_used_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                // absolute_pool_mb holds the RESERVED amount for consolidated formatting
+                absolute_pool_mb: (*tensor_pool_reserved_bytes as f64) / 1_048_576.0,
+                absolute_kv_mb: 0.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            });
+
+            rows.push(MemoryRow {
+                label: "  KV Pool".to_string(),
+                level: 1,
+                // current_total_mb holds the USED amount for the consolidated display
+                current_total_mb: (*kv_pool_used_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*kv_pool_used_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                absolute_pool_mb: 0.0,
+                // absolute_kv_mb holds the RESERVED amount for consolidated formatting
+                absolute_kv_mb: (*kv_pool_reserved_bytes as f64) / 1_048_576.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            });
+
+            if !forward_pass_breakdown.is_empty() {
+                let total_blocks_bytes: u64 = forward_pass_breakdown
+                    .values()
+                    .map(|(_, breakdown)| breakdown.values().sum::<u64>())
+                    .sum();
+
+                rows.push(MemoryRow {
+                    label: "  Activations".to_string(),
+                    level: 1,
+                    current_total_mb: (total_blocks_bytes as f64) / 1_048_576.0,
+                    peak_total_mb: (total_blocks_bytes as f64) / 1_048_576.0,
+                    current_pool_mb: 0.0,
+                    peak_pool_mb: 0.0,
+                    current_kv_mb: 0.0,
+                    peak_kv_mb: 0.0,
+                    current_kv_cache_mb: 0.0,
+                    peak_kv_cache_mb: 0.0,
+                    absolute_pool_mb: 0.0,
+                    absolute_kv_mb: 0.0,
+                    absolute_kv_cache_mb: 0.0,
+                    show_absolute: false,
+                });
+
+                for (_, (block_name, breakdown)) in forward_pass_breakdown.iter() {
+                    let total_block_bytes: u64 = breakdown.values().sum();
+                    rows.push(MemoryRow {
+                        label: format!("    {}", block_name),
+                        level: 2,
+                        current_total_mb: (total_block_bytes as f64) / 1_048_576.0,
+                        peak_total_mb: (total_block_bytes as f64) / 1_048_576.0,
+                        current_pool_mb: 0.0,
+                        peak_pool_mb: 0.0,
+                        current_kv_mb: 0.0,
+                        peak_kv_mb: 0.0,
+                        current_kv_cache_mb: 0.0,
+                        peak_kv_cache_mb: 0.0,
+                        absolute_pool_mb: 0.0,
+                        absolute_kv_mb: 0.0,
+                        absolute_kv_cache_mb: 0.0,
+                        show_absolute: false,
+                    });
+
+                    let mut sorted_breakdown: Vec<_> = breakdown.iter().collect();
+                    sorted_breakdown.sort_by_key(|(k, _)| *k);
+
+                    for (component, bytes) in sorted_breakdown {
+                        rows.push(MemoryRow {
+                            label: format!("       {}", component),
+                            level: 3,
+                            current_total_mb: (*bytes as f64) / 1_048_576.0,
+                            peak_total_mb: (*bytes as f64) / 1_048_576.0,
+                            current_pool_mb: 0.0,
+                            peak_pool_mb: 0.0,
+                            current_kv_mb: 0.0,
+                            peak_kv_mb: 0.0,
+                            current_kv_cache_mb: 0.0,
+                            peak_kv_cache_mb: 0.0,
+                            absolute_pool_mb: 0.0,
+                            absolute_kv_mb: 0.0,
+                            absolute_kv_cache_mb: 0.0,
+                            show_absolute: false,
+                        });
+                    }
+                }
+            }
+
+            rows
+        }
+        MetricEvent::ForwardStep { total_bytes, breakdown } => {
+            let mut rows = vec![MemoryRow {
+                label: "Forward Step".to_string(),
+                level: 0,
+                current_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                absolute_pool_mb: 0.0,
+                absolute_kv_mb: 0.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            }];
+
+            for (component, bytes) in breakdown {
+                rows.push(MemoryRow {
+                    label: format!("  {}", component),
+                    level: 1,
+                    current_total_mb: (*bytes as f64) / 1_048_576.0,
+                    peak_total_mb: (*bytes as f64) / 1_048_576.0,
+                    current_pool_mb: 0.0,
+                    peak_pool_mb: 0.0,
+                    current_kv_mb: 0.0,
+                    peak_kv_mb: 0.0,
+                    current_kv_cache_mb: 0.0,
+                    peak_kv_cache_mb: 0.0,
+                    absolute_pool_mb: 0.0,
+                    absolute_kv_mb: 0.0,
+                    absolute_kv_cache_mb: 0.0,
+                    show_absolute: false,
+                });
+            }
+
+            rows
+        }
+        MetricEvent::TensorMemory {
+            total_bytes,
+            tensor_count: _,
+            breakdown,
+        } => {
+            let mut rows = vec![MemoryRow {
+                label: "Tensors".to_string(),
+                level: 0,
+                current_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                peak_total_mb: (*total_bytes as f64) / 1_048_576.0,
+                current_pool_mb: 0.0,
+                peak_pool_mb: 0.0,
+                current_kv_mb: 0.0,
+                peak_kv_mb: 0.0,
+                current_kv_cache_mb: 0.0,
+                peak_kv_cache_mb: 0.0,
+                absolute_pool_mb: 0.0,
+                absolute_kv_mb: 0.0,
+                absolute_kv_cache_mb: 0.0,
+                show_absolute: false,
+            }];
+
+            for (category, bytes) in breakdown {
+                rows.push(MemoryRow {
+                    label: format!("  {}", category),
+                    level: 1,
+                    current_total_mb: (*bytes as f64) / 1_048_576.0,
+                    peak_total_mb: (*bytes as f64) / 1_048_576.0,
+                    current_pool_mb: 0.0,
+                    peak_pool_mb: 0.0,
+                    current_kv_mb: 0.0,
+                    peak_kv_mb: 0.0,
+                    current_kv_cache_mb: 0.0,
+                    peak_kv_cache_mb: 0.0,
+                    absolute_pool_mb: 0.0,
+                    absolute_kv_mb: 0.0,
+                    absolute_kv_cache_mb: 0.0,
+                    show_absolute: false,
+                });
+            }
+
+            rows
+        }
+        _ => Vec::new(),
+    }
 }

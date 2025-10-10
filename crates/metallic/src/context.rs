@@ -192,7 +192,7 @@ pub struct Context<T: TensorElement> {
     sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
     pending_gpu_scope: Option<GpuProfilerLabel>,
     gpu_scope_stack: Vec<GpuProfilerLabel>,
-    emit_latency: bool,
+    enable_profiling: bool,
 }
 
 struct GpuScopeGuard<T: TensorElement> {
@@ -283,14 +283,14 @@ impl<T: TensorElement> Context<T> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
-        let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
+        let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES, true)?;
         let forced_backend = detect_forced_matmul_backend();
-        let emit_latency = match AppConfig::get_or_init_from_env() {
-            Ok(cfg) => cfg.emit_latency,
+        let enable_profiling = match AppConfig::get_or_init_from_env() {
+            Ok(cfg) => cfg.enable_profiling,
             Err(err) => {
                 warn!(
                     error = ?err,
-                    "failed to initialise instrumentation config from environment; defaulting to emit_latency=true"
+                    "failed to initialise instrumentation config from environment; defaulting to enable_profiling=true"
                 );
                 true
             }
@@ -316,7 +316,7 @@ impl<T: TensorElement> Context<T> {
             sdpa_workspaces: FxHashMap::default(),
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
-            emit_latency,
+            enable_profiling,
         })
     }
 
@@ -375,7 +375,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
-        if self.emit_latency
+        if self.enable_profiling
             && let Some(cmd_buf) = self.active_cmd_buffer.take()
         {
             // Attribute CB finalize commit/wait to the current scope to avoid 'Other'
@@ -1484,7 +1484,7 @@ impl<T: TensorElement> Context<T> {
 
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
-            if let Some(profiler) = GpuProfiler::attach(&cmd_buf, self.emit_latency) {
+            if let Some(profiler) = GpuProfiler::attach(&cmd_buf, self.enable_profiling) {
                 cmd_buf.retain_profiler(profiler);
             }
             self.active_cmd_buffer = Some(cmd_buf);

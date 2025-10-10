@@ -16,8 +16,8 @@ pub enum InstrumentEnvVar {
     MetricsJsonlPath,
     /// Enables console metrics emission when set to a truthy value.
     MetricsConsole,
-    /// Enables per-command-buffer GPU latency emission.
-    EmitLatency,
+    /// Enables per-command-buffer GPU latency emission and more detailed profiling instrumentation (costly to performance.)
+    EnableProfiling,
 }
 
 impl InstrumentEnvVar {
@@ -27,7 +27,7 @@ impl InstrumentEnvVar {
             InstrumentEnvVar::LogLevel => "METALLIC_LOG_LEVEL",
             InstrumentEnvVar::MetricsJsonlPath => "METALLIC_METRICS_JSONL_PATH",
             InstrumentEnvVar::MetricsConsole => "METALLIC_METRICS_CONSOLE",
-            InstrumentEnvVar::EmitLatency => "METALLIC_EMIT_LATENCY",
+            InstrumentEnvVar::EnableProfiling => "METALLIC_ENABLE_PROFILING",
         }
     }
 
@@ -48,7 +48,7 @@ pub const METRICS_JSONL_PATH: TypedEnvVar<PathBuf> =
 pub const METRICS_CONSOLE: TypedEnvVar<bool> = TypedEnvVar::new(InstrumentEnvVar::MetricsConsole.into_env(), parse_bool, format_bool);
 
 /// Typed descriptor for the per-command-buffer latency emission toggle.
-pub const EMIT_LATENCY: TypedEnvVar<bool> = TypedEnvVar::new(InstrumentEnvVar::EmitLatency.into_env(), parse_bool, format_bool);
+pub const ENABLE_PROFILING: TypedEnvVar<bool> = TypedEnvVar::new(InstrumentEnvVar::EnableProfiling.into_env(), parse_bool, format_bool);
 
 /// Shim exposing ergonomic helpers for the log level variable.
 pub struct InstrumentLogLevel;
@@ -171,42 +171,42 @@ impl InstrumentMetricsConsole {
 }
 
 /// Shim exposing ergonomic helpers for the per-command-buffer latency toggle.
-pub struct InstrumentEmitLatency;
+pub struct InstrumentEnableProfiling;
 
-impl InstrumentEmitLatency {
+impl InstrumentEnableProfiling {
     /// Retrieve the descriptor associated with the latency toggle.
     pub const fn descriptor(&self) -> TypedEnvVar<bool> {
-        EMIT_LATENCY
+        ENABLE_PROFILING
     }
 
     /// Canonical key for the environment variable.
     pub const fn key(&self) -> &'static str {
-        EMIT_LATENCY.key()
+        ENABLE_PROFILING.key()
     }
 
     /// Retrieve the typed value, if set.
     pub fn get(&self) -> Result<Option<bool>, EnvVarError> {
-        EMIT_LATENCY.get()
+        ENABLE_PROFILING.get()
     }
 
     /// Set the environment variable to the provided toggle state.
     pub fn set(&self, value: bool) -> Result<(), EnvVarError> {
-        EMIT_LATENCY.set(value)
+        ENABLE_PROFILING.set(value)
     }
 
     /// Set the environment variable for the guard's lifetime.
     pub fn set_guard(&self, value: bool) -> Result<TypedEnvVarGuard<'_, bool>, EnvVarError> {
-        EMIT_LATENCY.set_guard(value)
+        ENABLE_PROFILING.set_guard(value)
     }
 
     /// Remove the environment variable from the process environment.
     pub fn unset(&self) {
-        EMIT_LATENCY.unset()
+        ENABLE_PROFILING.unset()
     }
 
     /// Unset the environment variable for the guard's lifetime.
     pub fn unset_guard(&self) -> EnvVarGuard<'_> {
-        EMIT_LATENCY.unset_guard()
+        ENABLE_PROFILING.unset_guard()
     }
 }
 
@@ -217,7 +217,7 @@ pub const METRICS_JSONL_PATH_VAR: InstrumentMetricsJsonlPath = InstrumentMetrics
 /// Ergonomic constant exposing the console-toggle helper methods.
 pub const METRICS_CONSOLE_VAR: InstrumentMetricsConsole = InstrumentMetricsConsole;
 /// Ergonomic constant exposing the latency-toggle helper methods.
-pub const EMIT_LATENCY_VAR: InstrumentEmitLatency = InstrumentEmitLatency;
+pub const ENABLE_PROFILING_VAR: InstrumentEnableProfiling = InstrumentEnableProfiling;
 
 fn parse_log_level(value: &str) -> Result<Level, EnvVarParseError> {
     value.parse::<Level>().map_err(|_| EnvVarParseError::new("invalid tracing level"))

@@ -4,6 +4,7 @@ use crate::kernels::rmsnorm::RMSNormOp;
 use crate::kernels::rope::RoPEOp;
 use crate::{Context, MetalError, Tensor, TensorElement};
 use metallic_instrumentation::{MetricEvent, record_metric_async};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 mod qwen25_tests;
@@ -335,8 +336,15 @@ impl<T: TensorElement> Qwen25<T> {
         Ok(final_normed)
     }
 
+    #[allow(clippy::type_complexity)]
     /// Step-forward for autoregressive generation with KV caching.
-    pub fn forward_step(&self, input: &Tensor<T>, pos: usize, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
+    pub fn forward_step(
+        &self,
+        input: &Tensor<T>,
+        pos: usize,
+        ctx: &mut Context<T>,
+    ) -> Result<(Tensor<T>, BTreeMap<usize, (String, BTreeMap<String, u64>)>), MetalError> {
+        // TODO: we really should move tuple structs to proper zero size types
         // Validate input shape: expect [batch, 1, d_model]
         let dims = input.dims();
         if dims.len() != 3 || dims[1] != 1 {
@@ -350,9 +358,13 @@ impl<T: TensorElement> Qwen25<T> {
         let d_model = dims[2];
 
         let mut x = input.clone();
+        let mut forward_pass_breakdown = BTreeMap::new();
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             let block_start = Instant::now();
+            let mut breakdown = BTreeMap::new();
+            let bytes_per_element = T::DTYPE.size_bytes();
+
             x = ctx.with_gpu_scope(format!("block_{}", layer_idx), |ctx| -> Result<Tensor<T>, MetalError> {
                 // Accumulate CPU time between GPU calls in this block
                 let mut cpu_accum = Duration::ZERO;
@@ -364,6 +376,7 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
                 cpu_accum += cpu_chk.elapsed();
                 let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
+                breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
 
                 // QKV GEMMs for the single token
@@ -375,6 +388,10 @@ impl<T: TensorElement> Qwen25<T> {
                 let (q_mat, k_mat, v_mat) = ctx.with_gpu_scope(format!("attn_qkv_proj_block_{}_op", layer_idx), |ctx| {
                     ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)
                 })?;
+                breakdown.insert(
+                    "attn_qkv_proj".to_string(),
+                    (q_mat.len() * bytes_per_element + k_mat.len() * bytes_per_element + v_mat.len() * bytes_per_element) as u64,
+                );
                 cpu_chk = Instant::now();
 
                 // KV Head Rearrangement
@@ -414,6 +431,10 @@ impl<T: TensorElement> Qwen25<T> {
                     ))?;
                     Ok::<_, MetalError>((q_heads, k_heads, v_heads))
                 })?;
+                breakdown.insert(
+                    "attn_rearrange".to_string(),
+                    (q_heads.len() * bytes_per_element + k_heads.len() * bytes_per_element + v_heads.len() * bytes_per_element) as u64,
+                );
                 cpu_chk = Instant::now();
 
                 // Apply RoPE using the pre-computed cache for the current position
@@ -438,6 +459,10 @@ impl<T: TensorElement> Qwen25<T> {
                     ))?;
                     Ok::<_, MetalError>((q_heads_after_rope, k_heads_after_rope))
                 })?;
+                breakdown.insert(
+                    "rope".to_string(),
+                    (q_heads_after_rope.len() * bytes_per_element + k_heads_after_rope.len() * bytes_per_element) as u64,
+                );
                 cpu_chk = Instant::now();
 
                 // Update the KV cache with the new K and V values
@@ -446,6 +471,10 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.with_gpu_scope(format!("kv_cache_block_{}_op", layer_idx), |ctx| {
                     ctx.write_kv_step(layer_idx, pos, group_size, &k_heads_after_rope, &v_heads)
                 })?;
+                breakdown.insert(
+                    "kv_cache".to_string(),
+                    (k_heads_after_rope.len() * bytes_per_element + v_heads.len() * bytes_per_element) as u64,
+                );
                 cpu_chk = Instant::now();
 
                 // Create a view over the repeated KV cache for attention
@@ -464,6 +493,10 @@ impl<T: TensorElement> Qwen25<T> {
                         Qwen25::repeat_kv_heads(&v_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
                     Ok::<_, MetalError>((k_repeated, v_repeated))
                 })?;
+                breakdown.insert(
+                    "kv_repeat".to_string(),
+                    (k_repeated.len() * bytes_per_element + v_repeated.len() * bytes_per_element) as u64,
+                );
                 cpu_chk = Instant::now();
 
                 // SDPA (causal mask enabled)
@@ -471,6 +504,7 @@ impl<T: TensorElement> Qwen25<T> {
                 let attn_out_heads = ctx.with_gpu_scope(format!("sdpa_block_{}_op", layer_idx), |ctx| {
                     ctx.scaled_dot_product_attention_with_offset(&q_heads_after_rope, &k_repeated, &v_repeated, true, pos)
                 })?;
+                breakdown.insert("sdpa".to_string(), (attn_out_heads.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
 
                 // Attention Output Reassembly
@@ -485,6 +519,7 @@ impl<T: TensorElement> Qwen25<T> {
                         ctx.matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)
                     })?
                     .reshape(vec![batch, seq, d_model])?;
+                breakdown.insert("attn_output".to_string(), (attn_out.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
 
                 // Residual Add
@@ -515,6 +550,7 @@ impl<T: TensorElement> Qwen25<T> {
                         Some(&block.ffn_gate_up_weight),
                     )
                 })?;
+                breakdown.insert("mlp_swiglu".to_string(), (ffn_output_flat.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
                 ctx.set_pending_gpu_scope(format!("mlp_reshape_block_{}_op", layer_idx));
                 let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
@@ -523,7 +559,7 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.set_pending_gpu_scope(format!("mlp_residual_block_{}_op", layer_idx));
                 cpu_accum += cpu_chk.elapsed();
                 let x = resid_mlp.add_elem(&ffn_output, ctx)?;
-                //cpu_chk = Instant::now(); // Not needed as we've finished accumulation of cpu ops i believe
+                breakdown.insert("mlp_output".to_string(), (x.len() * bytes_per_element) as u64);
 
                 // Record per-block CPU overhead outside GPU calls
                 let cpu_us = cpu_accum.as_micros() as u64;
@@ -544,12 +580,14 @@ impl<T: TensorElement> Qwen25<T> {
                     duration_us: block_duration.as_micros() as u64,
                 });
             }
+
+            forward_pass_breakdown.insert(layer_idx, (format!("Block {}", layer_idx + 1), breakdown));
         }
 
         // Final RMSNorm after all blocks
         let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
 
-        Ok(final_normed)
+        Ok((final_normed, forward_pass_breakdown))
     }
 
     /// Repeat KV heads for GQA to match Q head count

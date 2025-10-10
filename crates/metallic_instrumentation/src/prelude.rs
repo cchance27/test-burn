@@ -12,7 +12,7 @@ pub use crate::{
     record_metric,
 };
 
-pub use metallic_env::environment::instrument::{EMIT_LATENCY_VAR, LOG_LEVEL_VAR, METRICS_CONSOLE_VAR, METRICS_JSONL_PATH_VAR};
+pub use metallic_env::environment::instrument::{ENABLE_PROFILING_VAR, LOG_LEVEL_VAR, METRICS_CONSOLE_VAR, METRICS_JSONL_PATH_VAR};
 pub use metallic_env::{EnvVar, EnvVarError, EnvVarGuard, Environment, InstrumentEnvVar};
 
 pub use chrono::{DateTime, Utc};

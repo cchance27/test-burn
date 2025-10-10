@@ -27,6 +27,7 @@ pub struct MemoryPool {
     pub pooled_allocations: usize,
     pub pool_resets: usize,
     max_pool_size: usize,
+    exact_mode: bool, // TODO: implement the exact mode behavior so we can have kv_pool initial reservation match what we actually need based on our KV size to not waste
 }
 
 /// Metadata describing an allocation made from the memory pool.
@@ -52,12 +53,46 @@ impl<T: TensorElement> PooledAllocation<T> {
 }
 
 impl MemoryPool {
+    /// Reserve a single backing chunk with exact size. If a chunk already exists, no-op when `size` <= remaining capacity
+    /// Otherwise allocate an additional chunk exactly sized to fit `size` bytes.
+    pub fn reserve_exact(&mut self, size: usize) -> Result<(), MetalError> {
+        let remaining: usize = self
+            .chunks
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                if i == self.current_chunk {
+                    c.capacity.saturating_sub(c.cursor)
+                } else {
+                    0
+                }
+            })
+            .sum();
+        if remaining >= size {
+            return Ok(());
+        }
+        // If no chunks yet, allocate exactly `size` (clamped to max_pool_size)
+        if self.chunks.is_empty() {
+            let initial = size.min(self.max_pool_size);
+            self.allocate_new_chunk(initial)
+        } else {
+            // Allocate a new chunk sized exactly to the shortfall (bounded by remaining pool capacity)
+            let current_total_size: usize = self.chunks.iter().map(|c| c.capacity).sum();
+            let remaining_capacity = self.max_pool_size.checked_sub(current_total_size).ok_or(MetalError::OutOfMemory)?;
+            let need = size.saturating_sub(remaining);
+            let chunk_size = need.min(remaining_capacity);
+            if chunk_size == 0 {
+                return Err(MetalError::OutOfMemory);
+            }
+            self.allocate_new_chunk(chunk_size)
+        }
+    }
     /// Creates a new memory pool with an initial chunk.
     pub fn new(
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
     ) -> Result<Self, MetalError> {
-        Self::with_limit(device, command_queue, DEFAULT_MAX_POOL_SIZE)
+        Self::with_limit(device, command_queue, DEFAULT_MAX_POOL_SIZE, false)
     }
 
     /// Creates a new memory pool with a caller-provided maximum capacity.
@@ -65,6 +100,7 @@ impl MemoryPool {
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
         command_queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
         max_pool_size: usize,
+        exact_mode: bool,
     ) -> Result<Self, MetalError> {
         let mut pool = Self {
             chunks: Vec::new(),
@@ -75,6 +111,7 @@ impl MemoryPool {
             pooled_allocations: 0,
             pool_resets: 0,
             max_pool_size,
+            exact_mode,
         };
 
         if max_pool_size == 0 {

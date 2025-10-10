@@ -42,6 +42,7 @@ fn test_generation_pipeline() {
         temperature: 1.0,
         top_p: 0.95,
         top_k: 40,
+        kv_initial_headroom_tokens: 256,
     };
 
     // This test just verifies that the generation pipeline can be called
@@ -91,6 +92,7 @@ fn test_full_generation_correctness() -> Result<(), crate::MetalError> {
         temperature: 0.0, // Use 0 for deterministic greedy sampling
         top_p: 1.0,
         top_k: 1,
+        kv_initial_headroom_tokens: 256,
     };
 
     // --- Run 1: No-Cache Reference Implementation ---

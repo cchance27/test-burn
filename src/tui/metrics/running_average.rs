@@ -1,4 +1,3 @@
-
 /// Running average calculator for latency metrics
 const RUNNING_AVERAGE_WINDOW: usize = 10;
 

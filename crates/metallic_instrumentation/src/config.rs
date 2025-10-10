@@ -6,7 +6,7 @@ use std::sync::OnceLock;
 use tracing::Level;
 
 use metallic_env::EnvVarError;
-use metallic_env::environment::instrument::{EMIT_LATENCY, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
+use metallic_env::environment::instrument::{ENABLE_PROFILING, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
@@ -38,7 +38,7 @@ pub struct AppConfig {
     /// Whether console metrics should be emitted.
     pub enable_console_metrics: bool,
     /// Whether GPU latency metrics should emit per-command-buffer timings.
-    pub emit_latency: bool,
+    pub enable_profiling: bool,
 }
 
 static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
@@ -67,12 +67,12 @@ impl AppConfig {
             Err(err) => return Err(err.into()),
         };
 
-        let emit_latency = match EMIT_LATENCY.get() {
+        let enable_profiling = match ENABLE_PROFILING.get() {
             Ok(Some(value)) => value,
             Ok(None) => true,
             Err(EnvVarError::Parse { value, .. }) => {
                 return Err(AppConfigError::InvalidBoolean {
-                    name: EMIT_LATENCY.key(),
+                    name: ENABLE_PROFILING.key(),
                     value,
                 });
             }
@@ -83,7 +83,7 @@ impl AppConfig {
             log_level,
             metrics_jsonl_path,
             enable_console_metrics,
-            emit_latency,
+            enable_profiling,
         })
     }
 
