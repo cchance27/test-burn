@@ -10,11 +10,9 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::MTLCommandBuffer;
+use metallic_env::SOFTMAX_BACKEND_VAR;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
-use std::env;
 use std::sync::OnceLock;
-
-pub const METALLIC_SOFTMAX_BACKEND_ENV: &str = "METALLIC_SOFTMAX_BACKEND";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoftmaxBackendPreference {
@@ -33,15 +31,16 @@ static BACKEND_PREFERENCE: OnceLock<SoftmaxBackendPreference> = OnceLock::new();
 
 pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
     *BACKEND_PREFERENCE.get_or_init(|| {
-        let raw = env::var(METALLIC_SOFTMAX_BACKEND_ENV)
-            .unwrap_or_else(|_| "auto".to_string())
+        let raw = SOFTMAX_BACKEND_VAR.get()
+            .unwrap_or(None)
+            .unwrap_or_else(|| "auto".to_string())
             .to_lowercase();
         match raw.trim() {
             "kernel" | "compute" | "pipeline" => SoftmaxBackendPreference::KernelOnly,
             "mps" | "metal" => SoftmaxBackendPreference::MpsOnly,
             "auto" | "" | "default" => SoftmaxBackendPreference::Auto,
             other => {
-                eprintln!("Unknown {METALLIC_SOFTMAX_BACKEND_ENV} value '{other}', falling back to auto");
+                eprintln!("Unknown {} value '{other}', falling back to auto", SOFTMAX_BACKEND_VAR.key());
                 SoftmaxBackendPreference::Auto
             }
         }

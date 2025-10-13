@@ -1,4 +1,5 @@
 use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
 fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Result<Tensor<F32Element>, MetalError> {
     Tensor::new(dims.to_vec(), TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(data))
@@ -6,10 +7,7 @@ fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Resu
 
 #[test]
 fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
-    let previous_backend = std::env::var("FORCE_MATMUL_BACKEND").ok();
-    unsafe {
-        std::env::set_var("FORCE_MATMUL_BACKEND", "mps");
-    }
+    let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard("mps".to_string()).unwrap();
 
     let mut ctx = Context::<F32Element>::new()?;
 
@@ -48,16 +46,6 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
         stats_before.sdpa.size, stats_after.sdpa.size,
         "SDPA cache entries should survive a command buffer flush",
     );
-
-    if let Some(value) = previous_backend {
-        unsafe {
-            std::env::set_var("FORCE_MATMUL_BACKEND", value);
-        }
-    } else {
-        unsafe {
-            std::env::remove_var("FORCE_MATMUL_BACKEND");
-        }
-    }
 
     Ok(())
 }

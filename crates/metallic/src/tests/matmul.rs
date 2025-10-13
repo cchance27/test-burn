@@ -1,46 +1,25 @@
 use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
-use std::sync::{Mutex, OnceLock};
+use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
-const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
 
-fn backend_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-fn set_backend_env_var(value: &str) {
-    // SAFETY: Environment mutations are guarded by `backend_env_lock`, ensuring
-    // the process environment is only modified while the mutex is held.
-    unsafe {
-        std::env::set_var(FORCE_MATMUL_BACKEND_ENV, value);
-    }
-}
-
-fn restore_backend_env_var(previous: Option<String>) {
-    // SAFETY: See `set_backend_env_var` for synchronization guarantees.
-    unsafe {
-        if let Some(prev) = previous {
-            std::env::set_var(FORCE_MATMUL_BACKEND_ENV, prev);
-        } else {
-            std::env::remove_var(FORCE_MATMUL_BACKEND_ENV);
-        }
-    }
-}
 
 fn new_context_for_backend(backend: &str) -> Result<Context<F32Element>, MetalError> {
-    let guard = backend_env_lock().lock().expect("env mutex poisoned");
-    let previous = std::env::var(FORCE_MATMUL_BACKEND_ENV).ok();
+    let previous = FORCE_MATMUL_BACKEND_VAR.get().unwrap_or(None);
+
     if backend == "auto" {
-        // SAFETY: See `set_backend_env_var` for synchronization guarantees.
-        unsafe {
-            std::env::remove_var(FORCE_MATMUL_BACKEND_ENV);
-        }
+        FORCE_MATMUL_BACKEND_VAR.unset();
     } else {
-        set_backend_env_var(backend);
+        FORCE_MATMUL_BACKEND_VAR.set(backend.to_string()).unwrap();
     }
+
     let ctx_result = Context::<F32Element>::new();
-    restore_backend_env_var(previous);
-    drop(guard);
+
+    if let Some(prev) = previous {
+        FORCE_MATMUL_BACKEND_VAR.set(prev).unwrap();
+    } else {
+        FORCE_MATMUL_BACKEND_VAR.unset();
+    }
+
     ctx_result
 }
 

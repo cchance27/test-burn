@@ -1,4 +1,5 @@
 use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
+use metallic_env::ENABLE_PROFILING_VAR;
 
 use crate::{
     context::Context,
@@ -18,10 +19,7 @@ use tracing::subscriber;
 // Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]
 fn gpu_profiler_emits_individual_kernel_events() {
-    reset_app_config_for_tests();
-    unsafe {
-        std::env::set_var("METALLIC_ENABLE_PROFILING", "true");
-    }
+    let _guard = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
     let _profiling_guard = AppConfig::force_enable_profiling_guard();
     let (sender, receiver) = mpsc::channel();
     let exporters: Vec<Box<dyn MetricExporter>> = vec![Box::new(ChannelExporter::new(sender))];
@@ -105,9 +103,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
 // Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]
 fn context_call_attaches_gpu_profiler() {
-    unsafe {
-        std::env::set_var("METALLIC_ENABLE_PROFILING", "true");
-    }
+    let _guard = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
     reset_app_config_for_tests();
     let _profiling_guard = AppConfig::force_enable_profiling_guard();
     let (sender, receiver) = mpsc::channel();
@@ -165,9 +161,7 @@ fn context_call_attaches_gpu_profiler() {
 // Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]
 fn matmul_mps_emits_gpu_event() {
-    unsafe {
-        std::env::set_var("METALLIC_ENABLE_PROFILING", "true");
-    }
+    let _guard = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
     reset_app_config_for_tests();
     let _profiling_guard = AppConfig::force_enable_profiling_guard();
     let (sender, receiver) = mpsc::channel();

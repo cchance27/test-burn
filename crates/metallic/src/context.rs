@@ -21,8 +21,8 @@ use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
+use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 use rustc_hash::FxHashMap;
-use std::env;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryUsage {
@@ -60,7 +60,6 @@ impl GpuProfilerLabel {
     }
 }
 
-const FORCE_MATMUL_BACKEND_ENV: &str = "FORCE_MATMUL_BACKEND";
 pub(crate) const GPU_PROFILER_BACKEND: &str = "Metal";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -71,8 +70,8 @@ enum MatMulBackendOverride {
 }
 
 fn detect_forced_matmul_backend() -> MatMulBackendOverride {
-    match env::var(FORCE_MATMUL_BACKEND_ENV) {
-        Ok(value) => {
+    match FORCE_MATMUL_BACKEND_VAR.get() {
+        Ok(Some(value)) => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
                 MatMulBackendOverride::Default
@@ -86,8 +85,7 @@ fn detect_forced_matmul_backend() -> MatMulBackendOverride {
                 }
             }
         }
-        Err(env::VarError::NotPresent) => MatMulBackendOverride::Default,
-        Err(env::VarError::NotUnicode(_)) => MatMulBackendOverride::Default,
+        _ => MatMulBackendOverride::Default,
     }
 }
 
