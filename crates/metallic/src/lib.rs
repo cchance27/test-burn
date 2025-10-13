@@ -18,6 +18,7 @@ pub mod gguf;
 pub mod models;
 pub mod operation;
 pub mod pool;
+pub mod profiling_state;
 pub mod resource_cache;
 pub mod tensor;
 pub mod tokenizer;

@@ -1,10 +1,53 @@
 //! Developer-facing macros for emitting structured metric events with async support.
 use crate::MetricQueue;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global queue for async metric recording.
 /// This is set during initialization and allows the macro to be zero-cost.
 pub static METRIC_QUEUE: OnceLock<MetricQueue> = OnceLock::new();
+
+static METRIC_QUEUE_BYPASS_COUNT: AtomicUsize = AtomicUsize::new(0);
+
+/// Guard that routes `record_metric_async!` through the synchronous fallback on the current thread.
+pub struct MetricQueueBypassGuard;
+
+impl Default for MetricQueueBypassGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MetricQueueBypassGuard {
+    /// Engage the bypass for the current thread.
+    pub fn new() -> Self {
+        METRIC_QUEUE_BYPASS_COUNT.fetch_add(1, Ordering::AcqRel);
+        Self
+    }
+}
+
+impl Drop for MetricQueueBypassGuard {
+    fn drop(&mut self) {
+        let result = METRIC_QUEUE_BYPASS_COUNT.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| count.checked_sub(1));
+        debug_assert!(result.is_ok(), "MetricQueueBypassGuard underflow detected");
+    }
+}
+
+/// Execute `f` with the metric queue bypass enabled on the current thread.
+pub fn with_metric_queue_bypass<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let guard = MetricQueueBypassGuard::new();
+    let result = f();
+    drop(guard);
+    result
+}
+
+#[doc(hidden)]
+pub fn metric_queue_bypass_active() -> bool {
+    METRIC_QUEUE_BYPASS_COUNT.load(Ordering::Acquire) > 0
+}
 
 #[macro_export]
 macro_rules! record_metric {
@@ -25,10 +68,16 @@ macro_rules! record_metric {
 macro_rules! record_metric_async {
     ($event:expr) => {{
         use $crate::METRIC_QUEUE;
-        // This is a compile-time check - if METRIC_QUEUE is not set, this becomes a no-op
-        if let Some(queue) = METRIC_QUEUE.get() {
-            // Lock-free push - this is extremely fast and doesn't block
-            queue.push($event);
+        let __event = $event;
+        if !$crate::macros::metric_queue_bypass_active() {
+            if let Some(queue) = METRIC_QUEUE.get() {
+                queue.push(__event);
+            } else {
+                // Fall back to synchronous emission so tests and lightweight setups continue to observe metrics.
+                $crate::record_metric!(__event);
+            }
+        } else {
+            $crate::record_metric!(__event);
         }
     }};
 }

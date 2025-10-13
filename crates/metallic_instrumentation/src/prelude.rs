@@ -1,14 +1,12 @@
 //! Convenience re-exports for instrumentation consumers.
 
 pub use crate::async_recorder::{AsyncMetricRecorder, MetricQueue};
-#[cfg(test)]
-pub use crate::config::reset_app_config_for_tests;
-pub use crate::config::{AppConfig, AppConfigError};
+pub use crate::config::{AppConfig, AppConfigError, ProfilingOverrideGuard, reset_app_config_for_tests};
 pub use crate::event::MetricEvent;
 pub use crate::exporters::{ChannelExporter, ConsoleExporter, JsonlExporter};
 pub use crate::recorder::{EnrichedMetricEvent, MetricExporter, MetricsLayer};
 pub use crate::{
-    macros::{get_metric_queue, init_metric_queue},
+    macros::{MetricQueueBypassGuard, get_metric_queue, init_metric_queue, metric_queue_bypass_active, with_metric_queue_bypass},
     record_metric,
 };
 

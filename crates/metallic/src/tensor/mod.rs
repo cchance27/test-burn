@@ -403,7 +403,7 @@ impl<T: TensorElement> Tensor<T> {
         }
 
         let command_buffer = CommandBuffer::new(&self.command_queue)?;
-        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
+        let record_cb_timing = AppConfig::profiling_forced() || AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
         if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
             command_buffer.retain_profiler(profiler);
         }
@@ -457,7 +457,7 @@ impl<T: TensorElement> Tensor<T> {
 
         if needs_copy && region_len != 0 {
             let command_buffer = CommandBuffer::new(&self.command_queue)?;
-            let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
+            let record_cb_timing = AppConfig::profiling_forced() || AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
             if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
                 command_buffer.retain_profiler(profiler);
             }
@@ -525,7 +525,7 @@ impl<T: TensorElement> Tensor<T> {
         drop(state);
 
         let command_buffer = CommandBuffer::new(&self.command_queue)?;
-        let record_cb_timing = AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
+        let record_cb_timing = AppConfig::profiling_forced() || AppConfig::try_global().map(|cfg| cfg.enable_profiling).unwrap_or(true);
         if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
             command_buffer.retain_profiler(profiler);
         }

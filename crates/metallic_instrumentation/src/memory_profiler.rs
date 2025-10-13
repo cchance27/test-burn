@@ -54,12 +54,12 @@ impl CachedMemoryProfiler {
     /// Uses caching to avoid expensive system calls on every invocation.
     pub fn get_process_memory_usage(&self) -> u64 {
         let now = Instant::now();
-        
+
         // Check if cached value is still valid
         let last_cache_time = self.last_cache_time.lock().expect("Failed to lock cache time");
         let is_cache_valid = now.duration_since(*last_cache_time) < MEMORY_CACHE_DURATION;
         drop(last_cache_time); // Release the lock early
-        
+
         if is_cache_valid {
             return *self.cached_memory_bytes.lock().expect("Failed to lock cached memory");
         }
@@ -82,7 +82,7 @@ impl CachedMemoryProfiler {
         // Update the cached values
         *self.cached_memory_bytes.lock().expect("Failed to lock cached memory") = memory;
         *self.last_cache_time.lock().expect("Failed to lock cache time") = now;
-        
+
         memory
     }
 

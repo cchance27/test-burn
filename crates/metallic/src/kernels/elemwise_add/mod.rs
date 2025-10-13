@@ -73,7 +73,7 @@ impl<T: TensorElement> Operation for ElemwiseAdd<T> {
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {
@@ -95,6 +95,7 @@ impl<T: TensorElement> Operation for ElemwiseAdd<T> {
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
         encoder.endEncoding();
+        drop(scope);
         Ok(())
     }
 }

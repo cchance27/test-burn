@@ -3,6 +3,7 @@ use metallic::{
     Context, F16Element, TensorElement, Tokenizer,
     generation::generate_streaming,
     gguf::{GGUFFile, model_loader::GGUFModelLoader},
+    profiling_state,
 };
 use metallic_cli_helpers::prelude::*;
 use metallic_instrumentation::prelude::*;
@@ -21,25 +22,29 @@ mod cli;
 mod tui;
 
 use clap::Parser;
+use crossterm::event::{self, Event as CrosstermEvent, MouseButton, MouseEvent};
 use ratatui::{
     Terminal,
     backend::{Backend, CrosstermBackend},
     layout::Position,
 };
-use crossterm::event::{self, Event as CrosstermEvent, MouseEvent, MouseButton};
-use tui::{App, AppResult};
 use tui::app::FocusArea;
+use tui::{App, AppResult};
 
 fn main() -> AppResult<()> {
+    // Ensure profiling state is initialized from the environment before anything else.
+    // This avoids a race condition where the TUI might read the state before the
+    // generation thread initializes it.
+    profiling_state::initialize_profiling_state_from_env();
+
     // Parse command line arguments using CLAP
     let cli_config = cli::CliConfig::parse();
 
     // Initialize instrumentation system with async recorder for zero-overhead metrics
     let (sender, receiver) = mpsc::channel();
     let channel_exporter = Box::new(ChannelExporter::new(sender));
-    //let console_exporter = Box::new(ConsoleExporter::new());
 
-    let exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter]; //console_exporter];
+    let exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter];
 
     let async_recorder = AsyncMetricRecorder::new(exporters);
     let metric_queue = async_recorder.queue.clone();
@@ -85,96 +90,7 @@ fn main() -> AppResult<()> {
                 let mut qwen: metallic::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
 
                 // Report model weights breakdown
-                let mut breakdown = FxHashMap::default();
-                let mut total_weights_size = 0u64;
-                let bytes_per_element = F16Element::DTYPE.size_bytes();
-
-                // Token Embeddings
-                let embed_size = (qwen.embed_weight.len() * bytes_per_element) as u64;
-                breakdown.insert("Token Embeddings".to_string(), embed_size);
-                total_weights_size += embed_size;
-
-                // Output Projection
-                let output_size = (qwen.output_weight.len() * bytes_per_element) as u64;
-                breakdown.insert("Output Projection".to_string(), output_size);
-                total_weights_size += output_size;
-
-                // Final Layer Norm
-                let norm_size = (qwen.final_norm_gamma.len() * bytes_per_element) as u64;
-                breakdown.insert("Final Layer Norm".to_string(), norm_size);
-                total_weights_size += norm_size;
-
-                // RoPE Cache
-                let rope_cache_size =
-                    (qwen.rope_cos_cache.len() * bytes_per_element + qwen.rope_sin_cache.len() * bytes_per_element) as u64;
-                breakdown.insert("RoPE Cache".to_string(), rope_cache_size);
-                total_weights_size += rope_cache_size;
-
-                // Transformer Blocks
-                let mut total_transformer_blocks_size = 0u64;
-                for (i, block) in qwen.blocks.iter().enumerate() {
-                    let block_base_key = format!("Transformer Blocks.Weight Block {}", i + 1);
-
-                    // Attention Projections
-                    let fused_qkv_weight_size = (block.attn_qkv_weight.len() * bytes_per_element) as u64;
-                    breakdown.insert(
-                        format!("{}.Attention Projections.Fused QKV weight", block_base_key),
-                        fused_qkv_weight_size,
-                    );
-                    let output_weight_size = (block.attn_out_weight.len() * bytes_per_element) as u64;
-                    breakdown.insert(
-                        format!("{}.Attention Projections.Output weight", block_base_key),
-                        output_weight_size,
-                    );
-                    let total_attn_proj_size = fused_qkv_weight_size + output_weight_size;
-                    breakdown.insert(format!("{}.Attention Projections", block_base_key), total_attn_proj_size);
-
-                    // Attention Biases
-                    let fused_qkv_bias_size = (block.attn_qkv_bias.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Attention Biases.Fused QKV bias", block_base_key), fused_qkv_bias_size);
-                    breakdown.insert(format!("{}.Attention Biases", block_base_key), fused_qkv_bias_size);
-
-                    // Feedforward Projections
-                    let gate_weight_size = (block.ffn_gate.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Feedforward Projections.Gate weight", block_base_key), gate_weight_size);
-                    let up_weight_size = (block.ffn_up.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Feedforward Projections.Up weight", block_base_key), up_weight_size);
-                    let down_weight_size = (block.ffn_down.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Feedforward Projections.Down weight", block_base_key), down_weight_size);
-                    let total_ffn_proj_size = gate_weight_size + up_weight_size + down_weight_size;
-                    breakdown.insert(format!("{}.Feedforward Projections", block_base_key), total_ffn_proj_size);
-
-                    // Feedforward Biases
-                    let gate_bias_size = (block.ffn_gate_bias.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Feedforward Biases.Gate bias", block_base_key), gate_bias_size);
-                    let up_bias_size = (block.ffn_up_bias.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Feedforward Biases.Up bias", block_base_key), up_bias_size);
-                    let down_bias_size = (block.ffn_down_bias.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Feedforward Biases.Down bias", block_base_key), down_bias_size);
-                    let total_ffn_bias_size = gate_bias_size + up_bias_size + down_bias_size;
-                    breakdown.insert(format!("{}.Feedforward Biases", block_base_key), total_ffn_bias_size);
-
-                    // Norm Parameters
-                    let attn_norm_size = (block.attn_norm_gamma.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Norm Parameters.Attention norm", block_base_key), attn_norm_size);
-                    let ffn_norm_size = (block.ffn_norm_gamma.len() * bytes_per_element) as u64;
-                    breakdown.insert(format!("{}.Norm Parameters.FFN norm", block_base_key), ffn_norm_size);
-                    let total_norm_param_size = attn_norm_size + ffn_norm_size;
-                    breakdown.insert(format!("{}.Norm Parameters", block_base_key), total_norm_param_size);
-
-                    let total_block_size =
-                        total_attn_proj_size + fused_qkv_bias_size + total_ffn_proj_size + total_ffn_bias_size + total_norm_param_size;
-                    breakdown.insert(block_base_key, total_block_size);
-                    total_transformer_blocks_size += total_block_size;
-                }
-                breakdown.insert("Transformer Blocks".to_string(), total_transformer_blocks_size);
-                total_weights_size += total_transformer_blocks_size;
-
-                record_metric_async!(MetricEvent::ModelWeights {
-                    total_bytes: total_weights_size,
-                    breakdown,
-                });
-
+                report_model_weight_breakdown(&qwen);
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
@@ -196,6 +112,7 @@ fn main() -> AppResult<()> {
 
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
                 generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx)?;
+
                 worker_tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
                 Ok(())
             };
@@ -227,6 +144,98 @@ fn main() -> AppResult<()> {
     Ok(())
 }
 
+fn report_model_weight_breakdown(qwen: &metallic::models::Qwen25<F16Element>) {
+    // Report model weights breakdown
+    let mut breakdown = FxHashMap::default();
+    let mut total_weights_size = 0u64;
+    let bytes_per_element = F16Element::DTYPE.size_bytes();
+
+    // Token Embeddings
+    let embed_size = (qwen.embed_weight.len() * bytes_per_element) as u64;
+    breakdown.insert("Token Embeddings".to_string(), embed_size);
+    total_weights_size += embed_size;
+
+    // Output Projection
+    let output_size = (qwen.output_weight.len() * bytes_per_element) as u64;
+    breakdown.insert("Output Projection".to_string(), output_size);
+    total_weights_size += output_size;
+
+    // Final Layer Norm
+    let norm_size = (qwen.final_norm_gamma.len() * bytes_per_element) as u64;
+    breakdown.insert("Final Layer Norm".to_string(), norm_size);
+    total_weights_size += norm_size;
+
+    // RoPE Cache
+    let rope_cache_size = (qwen.rope_cos_cache.len() * bytes_per_element + qwen.rope_sin_cache.len() * bytes_per_element) as u64;
+    breakdown.insert("RoPE Cache".to_string(), rope_cache_size);
+    total_weights_size += rope_cache_size;
+
+    // Transformer Blocks
+    let mut total_transformer_blocks_size = 0u64;
+    for (i, block) in qwen.blocks.iter().enumerate() {
+        let block_base_key = format!("Transformer Blocks.Weight Block {}", i + 1);
+
+        // Attention Projections
+        let fused_qkv_weight_size = (block.attn_qkv_weight.len() * bytes_per_element) as u64;
+        breakdown.insert(
+            format!("{}.Attention Projections.Fused QKV weight", block_base_key),
+            fused_qkv_weight_size,
+        );
+        let output_weight_size = (block.attn_out_weight.len() * bytes_per_element) as u64;
+        breakdown.insert(
+            format!("{}.Attention Projections.Output weight", block_base_key),
+            output_weight_size,
+        );
+        let total_attn_proj_size = fused_qkv_weight_size + output_weight_size;
+        breakdown.insert(format!("{}.Attention Projections", block_base_key), total_attn_proj_size);
+
+        // Attention Biases
+        let fused_qkv_bias_size = (block.attn_qkv_bias.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Attention Biases.Fused QKV bias", block_base_key), fused_qkv_bias_size);
+        breakdown.insert(format!("{}.Attention Biases", block_base_key), fused_qkv_bias_size);
+
+        // Feedforward Projections
+        let gate_weight_size = (block.ffn_gate.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Feedforward Projections.Gate weight", block_base_key), gate_weight_size);
+        let up_weight_size = (block.ffn_up.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Feedforward Projections.Up weight", block_base_key), up_weight_size);
+        let down_weight_size = (block.ffn_down.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Feedforward Projections.Down weight", block_base_key), down_weight_size);
+        let total_ffn_proj_size = gate_weight_size + up_weight_size + down_weight_size;
+        breakdown.insert(format!("{}.Feedforward Projections", block_base_key), total_ffn_proj_size);
+
+        // Feedforward Biases
+        let gate_bias_size = (block.ffn_gate_bias.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Feedforward Biases.Gate bias", block_base_key), gate_bias_size);
+        let up_bias_size = (block.ffn_up_bias.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Feedforward Biases.Up bias", block_base_key), up_bias_size);
+        let down_bias_size = (block.ffn_down_bias.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Feedforward Biases.Down bias", block_base_key), down_bias_size);
+        let total_ffn_bias_size = gate_bias_size + up_bias_size + down_bias_size;
+        breakdown.insert(format!("{}.Feedforward Biases", block_base_key), total_ffn_bias_size);
+
+        // Norm Parameters
+        let attn_norm_size = (block.attn_norm_gamma.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Norm Parameters.Attention norm", block_base_key), attn_norm_size);
+        let ffn_norm_size = (block.ffn_norm_gamma.len() * bytes_per_element) as u64;
+        breakdown.insert(format!("{}.Norm Parameters.FFN norm", block_base_key), ffn_norm_size);
+        let total_norm_param_size = attn_norm_size + ffn_norm_size;
+        breakdown.insert(format!("{}.Norm Parameters", block_base_key), total_norm_param_size);
+
+        let total_block_size =
+            total_attn_proj_size + fused_qkv_bias_size + total_ffn_proj_size + total_ffn_bias_size + total_norm_param_size;
+        breakdown.insert(block_base_key, total_block_size);
+        total_transformer_blocks_size += total_block_size;
+    }
+    breakdown.insert("Transformer Blocks".to_string(), total_transformer_blocks_size);
+    total_weights_size += total_transformer_blocks_size;
+
+    record_metric_async!(MetricEvent::ModelWeights {
+        total_bytes: total_weights_size,
+        breakdown,
+    });
+}
+
 fn run_tui_mode(
     receiver: &std::sync::mpsc::Receiver<EnrichedMetricEvent>,
     rx: &std::sync::mpsc::Receiver<AppEvent>,
@@ -235,40 +244,51 @@ fn run_tui_mode(
     let mut terminal = setup_terminal()?;
     let mut app = App::new();
 
+    // Get the initial profiling state and set it in the app
+    let initial_profiling_state = profiling_state::get_profiling_state();
+    app.set_profiling_active(initial_profiling_state);
+
     while !app.should_quit {
         // Handle crossterm events
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             match crossterm::event::read()? {
                 CrosstermEvent::Key(key) => {
-                    match key.code {
-                        crossterm::event::KeyCode::Char('q') => app.quit(),
-                        crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Esc => {
-                            if app.has_active_alert() {
-                                app.dismiss_active_alert();
+                    if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                        // Toggle the state, then get the new state
+                        profiling_state::toggle_profiling_state();
+                        let new_state = profiling_state::get_profiling_state();
+                        app.set_profiling_active(new_state);
+                    } else {
+                        match key.code {
+                            crossterm::event::KeyCode::Char('q') => app.quit(),
+                            crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Esc => {
+                                if app.has_active_alert() {
+                                    app.dismiss_active_alert();
+                                }
                             }
+                            crossterm::event::KeyCode::Char('m') => {
+                                app.metrics_view = tui::app::MetricsView::Memory;
+                                app.reset_metrics_scroll();
+                            }
+                            crossterm::event::KeyCode::Char('l') => {
+                                app.metrics_view = tui::app::MetricsView::Latency;
+                                app.reset_metrics_scroll();
+                            }
+                            crossterm::event::KeyCode::Char('c') => {
+                                app.toggle_collapse();
+                            }
+                            crossterm::event::KeyCode::Tab => {
+                                app.focus_next();
+                                app.reset_metrics_scroll();
+                            }
+                            crossterm::event::KeyCode::Up => app.scroll_active(-1),
+                            crossterm::event::KeyCode::Down => app.scroll_active(1),
+                            crossterm::event::KeyCode::PageUp => app.scroll_active(-10),
+                            crossterm::event::KeyCode::PageDown => app.scroll_active(10),
+                            crossterm::event::KeyCode::Home => app.scroll_active_to_start(),
+                            crossterm::event::KeyCode::End => app.scroll_active_to_end(),
+                            _ => {}
                         }
-                        crossterm::event::KeyCode::Char('m') => {
-                            app.metrics_view = tui::app::MetricsView::Memory;
-                            app.reset_metrics_scroll();
-                        }
-                        crossterm::event::KeyCode::Char('l') => {
-                            app.metrics_view = tui::app::MetricsView::Latency;
-                            app.reset_metrics_scroll();
-                        }
-                        crossterm::event::KeyCode::Char('c') => {
-                            app.toggle_collapse();
-                        }
-                        crossterm::event::KeyCode::Tab => {
-                            app.focus_next();
-                            app.reset_metrics_scroll();
-                        }
-                        crossterm::event::KeyCode::Up => app.scroll_active(-1),
-                        crossterm::event::KeyCode::Down => app.scroll_active(1),
-                        crossterm::event::KeyCode::PageUp => app.scroll_active(-10),
-                        crossterm::event::KeyCode::PageDown => app.scroll_active(10),
-                        crossterm::event::KeyCode::Home => app.scroll_active_to_start(),
-                        crossterm::event::KeyCode::End => app.scroll_active_to_end(),
-                        _ => {}
                     }
                 }
                 CrosstermEvent::Mouse(mouse_event) => {
@@ -281,13 +301,13 @@ fn run_tui_mode(
         // Process metric events from the instrumentation system and convert them to AppEvents
         while let Ok(enriched_event) = receiver.try_recv() {
             tracing::debug!("Main thread received enriched event: {:?}", enriched_event);
-            
+
             // Log the metric event to the log box
             if let Ok(serialised) = serde_json::to_string(&enriched_event.event) {
                 let log_message = format!("METRIC: {}", serialised);
                 handle_app_event(&mut app, AppEvent::LogMessage(log_message));
             }
-            
+
             let latency_rows = tui::metrics::metric_event_to_latency_rows(&enriched_event.event);
             tracing::debug!("Converted to {} latency rows", latency_rows.len());
             if !latency_rows.is_empty() {
@@ -540,21 +560,21 @@ fn restore_terminal() -> Result<()> {
 
 fn handle_mouse_event(event: MouseEvent, app: &mut App) {
     let position = (event.column, event.row).into();
-    
+
     match event.kind {
         event::MouseEventKind::Down(MouseButton::Left) => {
             // Check if the click is in one of the main focus areas
             if app.text_area.contains(position) {
                 app.focus = FocusArea::GeneratedText;
-                
+
                 // Start text selection, converting screen coordinates to text content coordinates
                 // Account for text wrapping and borders
                 let relative_x = event.column.saturating_sub(app.text_area.x);
                 let relative_y = event.row.saturating_sub(app.text_area.y);
-                
+
                 // Subtract 1 from relative_y to account for the border/title at the top of the text area
                 let adjusted_y = relative_y.saturating_sub(1);
-                
+
                 // Convert visual coordinates to content coordinates considering text wrapping
                 let wrap_width = if app.text_area.width > 2 {
                     app.text_area.width.saturating_sub(2) // width accounting for left/right borders
@@ -562,13 +582,13 @@ fn handle_mouse_event(event: MouseEvent, app: &mut App) {
                     1 // minimum width of 1 to avoid issues
                 };
                 let (content_row, content_col) = app.get_content_position_from_visual(
-                    adjusted_y,           // visual row (relative to text area after removing border)
-                    relative_x,           // visual column
-                    app.text_scroll,      // scroll offset
+                    adjusted_y,      // visual row (relative to text area after removing border)
+                    relative_x,      // visual column
+                    app.text_scroll, // scroll offset
                     &app.generated_text,
-                    wrap_width
+                    wrap_width,
                 );
-                
+
                 let relative_pos = Position::new(content_col as u16, content_row as u16);
                 app.start_text_selection(relative_pos);
             } else if app.metrics_area.contains(position) {
@@ -582,32 +602,32 @@ fn handle_mouse_event(event: MouseEvent, app: &mut App) {
             if app.focus == FocusArea::GeneratedText && app.is_selecting {
                 let relative_x = event.column.saturating_sub(app.text_area.x);
                 let relative_y = event.row.saturating_sub(app.text_area.y);
-                
+
                 // Calculate if we're beyond the content area
                 let lines: Vec<&str> = app.generated_text.lines().collect();
                 if lines.is_empty() {
                     // If no content, just return early
                     return;
                 }
-                
+
                 // Check if we're dragging beyond the bottom of content
                 let wrap_width = if app.text_area.width > 2 {
                     app.text_area.width.saturating_sub(2) // width accounting for left/right borders
                 } else {
                     1 // minimum width of 1 to avoid issues
                 };
-                
+
                 // Calculate total visual lines for all content
                 let mut total_visual_lines = 0u16;
                 for line in &lines {
                     let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width);
                     total_visual_lines += visual_lines as u16;
                 }
-                
+
                 // If we're dragging beyond the content vertically, clamp to the end
                 let adjusted_y = relative_y.saturating_sub(1);
                 let absolute_visual_y = adjusted_y.saturating_add(app.text_scroll);
-                
+
                 if (absolute_visual_y as usize) >= total_visual_lines as usize {
                     // We're dragging beyond the content, set to the end position
                     if let Some(last_line) = lines.last() {
@@ -619,13 +639,13 @@ fn handle_mouse_event(event: MouseEvent, app: &mut App) {
                 } else {
                     // Normal case: convert visual coordinates to content coordinates considering text wrapping
                     let (content_row, content_col) = app.get_content_position_from_visual(
-                        adjusted_y,           // visual row
-                        relative_x,           // visual column
-                        app.text_scroll,      // scroll offset
+                        adjusted_y,      // visual row
+                        relative_x,      // visual column
+                        app.text_scroll, // scroll offset
                         &app.generated_text,
-                        wrap_width
+                        wrap_width,
                     );
-                    
+
                     let relative_pos = Position::new(content_col as u16, content_row as u16);
                     app.update_text_selection(relative_pos);
                 }
@@ -635,7 +655,7 @@ fn handle_mouse_event(event: MouseEvent, app: &mut App) {
             // End text selection and copy to clipboard if there's a selection
             if app.focus == FocusArea::GeneratedText && app.is_selecting {
                 app.end_text_selection();
-                
+
                 // Copy selected text to clipboard if there's a selection
                 let selected_text = app.get_selected_text(&app.generated_text);
                 if !selected_text.trim().is_empty() {

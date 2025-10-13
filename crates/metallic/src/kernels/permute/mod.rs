@@ -1,14 +1,19 @@
 use super::*;
-use crate::{TensorElement, TensorInit, TensorStorage};
-use objc2_metal::MTLResource;
+use crate::{TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
+use metallic_instrumentation::GpuProfiler;
+use objc2_metal::{MTLBuffer, MTLResourceOptions};
 
 pub struct PermuteOp;
 
 struct Permute<T: TensorElement> {
     src: Tensor<T>,
     dst: Tensor<T>,
-    permute: Vec<u32>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
+    src_strides_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    dst_strides_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    dims_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
+    permute_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
 
 impl KernelInvocable for PermuteOp {
@@ -62,12 +67,59 @@ impl KernelInvocable for PermuteOp {
             )));
         }
 
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("permute_op"));
+
+        // Create buffers for strides, dims, and permute indices
+        let src_strides: Vec<u32> = src.strides.iter().map(|&x| x as u32).collect();
+        let dst_strides: Vec<u32> = dst.strides.iter().map(|&x| x as u32).collect();
+        let dims: Vec<u32> = src.dims.iter().map(|&x| x as u32).collect();
+
+        let src_strides_buf = unsafe {
+            src.device.newBufferWithBytes_length_options(
+                std::ptr::NonNull::new(src_strides.as_ptr() as *mut u32).unwrap().cast(),
+                src_strides.len() * std::mem::size_of::<u32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+
+        let dst_strides_buf = unsafe {
+            src.device.newBufferWithBytes_length_options(
+                std::ptr::NonNull::new(dst_strides.as_ptr() as *mut u32).unwrap().cast(),
+                dst_strides.len() * std::mem::size_of::<u32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+
+        let dims_buf = unsafe {
+            src.device.newBufferWithBytes_length_options(
+                std::ptr::NonNull::new(dims.as_ptr() as *mut u32).unwrap().cast(),
+                dims.len() * std::mem::size_of::<u32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+
+        let permute_buf = unsafe {
+            src.device.newBufferWithBytes_length_options(
+                std::ptr::NonNull::new(permute.as_ptr() as *mut u32).unwrap().cast(),
+                permute.len() * std::mem::size_of::<u32>(),
+                MTLResourceOptions::StorageModeShared,
+            )
+        }
+        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+
         // Create the internal operation struct
         let op = Permute {
             src,
             dst: dst.clone(),
-            permute,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
+            src_strides_buf,
+            dst_strides_buf,
+            dims_buf,
+            permute_buf,
         };
 
         // Return the boxed operation and the output tensor
@@ -85,72 +137,19 @@ impl<T: TensorElement> Operation for Permute<T> {
             .computeCommandEncoder()
             .ok_or(MetalError::ComputeEncoderCreationFailed)?;
 
+        let label = self.profiler_label.clone();
+        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+
         let rank = self.src.dims.len() as u32;
         let num_elements = self.src.len() as u32;
-
-        // Create buffers for the arrays
-        // NOTE: We must create actual MTLBuffers for the arrays because set_bytes only works
-        // for small scalar values, not arrays. The Metal kernel expects these as constant buffers.
-        let src_strides: Vec<u32> = self.src.strides.iter().map(|&x| x as u32).collect();
-        let dst_strides: Vec<u32> = self.dst.strides.iter().map(|&x| x as u32).collect();
-        let dims: Vec<u32> = self.src.dims.iter().map(|&x| x as u32).collect();
-
-        // Convert to byte slices and create NonNull pointers
-        let src_strides_ptr = std::ptr::NonNull::new(src_strides.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let dst_strides_ptr = std::ptr::NonNull::new(dst_strides.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let dims_ptr = std::ptr::NonNull::new(dims.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let permute_ptr = std::ptr::NonNull::new(self.permute.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-
-        let src_strides_len = src_strides.len() * std::mem::size_of::<u32>();
-        let dst_strides_len = dst_strides.len() * std::mem::size_of::<u32>();
-        let dims_len = dims.len() * std::mem::size_of::<u32>();
-        let permute_len = self.permute.len() * std::mem::size_of::<u32>();
-
-        // Create temporary buffers
-        // DEBT: These buffers are created on-demand for each permute operation and not reused.
-        // This could be optimized by using a buffer pool or caching mechanism.
-        let src_strides_buf = unsafe {
-            self.src.buf.device().newBufferWithBytes_length_options(
-                src_strides_ptr,
-                src_strides_len,
-                objc2_metal::MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
-
-        let dst_strides_buf = unsafe {
-            self.src.buf.device().newBufferWithBytes_length_options(
-                dst_strides_ptr,
-                dst_strides_len,
-                objc2_metal::MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
-
-        let dims_buf = unsafe {
-            self.src
-                .buf
-                .device()
-                .newBufferWithBytes_length_options(dims_ptr, dims_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
-
-        let permute_buf = unsafe {
-            self.src.buf.device().newBufferWithBytes_length_options(
-                permute_ptr,
-                permute_len,
-                objc2_metal::MTLResourceOptions::StorageModeShared,
-            )
-        }
-        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.src.buf, self.src.offset);
         set_buffer(&encoder, 1, &self.dst.buf, self.dst.offset);
-        set_buffer(&encoder, 2, &src_strides_buf, 0);
-        set_buffer(&encoder, 3, &dst_strides_buf, 0);
-        set_buffer(&encoder, 4, &dims_buf, 0);
-        set_buffer(&encoder, 5, &permute_buf, 0);
+        set_buffer(&encoder, 2, &self.src_strides_buf, 0);
+        set_buffer(&encoder, 3, &self.dst_strides_buf, 0);
+        set_buffer(&encoder, 4, &self.dims_buf, 0);
+        set_buffer(&encoder, 5, &self.permute_buf, 0);
         set_bytes(&encoder, 6, &rank);
         set_bytes(&encoder, 7, &num_elements);
 

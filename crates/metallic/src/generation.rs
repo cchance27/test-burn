@@ -311,7 +311,7 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     input_ids: &[u32],
     cfg: &GenerationConfig,
 ) -> Result<Vec<u32>, MetalError> {
-    let mut generated_ids = input_ids.to_vec();
+    let mut generated_ids = vec![];
 
     // Create a dummy sender for the streaming function since we don't actually want to stream
     let (tx, _rx) = mpsc::channel();

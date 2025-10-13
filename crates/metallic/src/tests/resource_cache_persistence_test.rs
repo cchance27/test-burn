@@ -6,6 +6,11 @@ fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Resu
 
 #[test]
 fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
+    let previous_backend = std::env::var("FORCE_MATMUL_BACKEND").ok();
+    unsafe {
+        std::env::set_var("FORCE_MATMUL_BACKEND", "mps");
+    }
+
     let mut ctx = Context::<F32Element>::new()?;
 
     let a_data: Vec<f32> = (0..6).map(|idx| idx as f32 + 1.0).collect();
@@ -43,6 +48,16 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
         stats_before.sdpa.size, stats_after.sdpa.size,
         "SDPA cache entries should survive a command buffer flush",
     );
+
+    if let Some(value) = previous_backend {
+        unsafe {
+            std::env::set_var("FORCE_MATMUL_BACKEND", value);
+        }
+    } else {
+        unsafe {
+            std::env::remove_var("FORCE_MATMUL_BACKEND");
+        }
+    }
 
     Ok(())
 }

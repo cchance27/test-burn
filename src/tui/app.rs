@@ -1,3 +1,4 @@
+use crate::tui::components::{AlertedState, StatusBar, StatusBarState};
 use crate::tui::metrics::{HierarchicalMetric, RunningAverage};
 use metallic_cli_helpers::prelude::*;
 use ratatui::layout::Position;
@@ -39,6 +40,9 @@ pub struct App {
     pub text_selection_start: Option<Position>,
     pub text_selection_end: Option<Position>,
     pub is_selecting: bool,
+
+    // Status bar
+    pub status_bar: StatusBar,
 }
 
 impl App {
@@ -72,6 +76,7 @@ impl App {
             text_selection_start: None,
             text_selection_end: None,
             is_selecting: false,
+            status_bar: StatusBar::new(StatusBarState::Normal),
         }
     }
 
@@ -166,11 +171,12 @@ impl App {
 
         // Calculate lines for help text and memory rows
         let help_lines = 2; // "[m] Memory [l] Latency [c] Collapse (...)" + blank line
-        let memory_lines = self.memory_rows
+        let memory_lines = self
+            .memory_rows
             .iter()
             .filter(|row| row.level <= self.memory_collapse_depth.get_current_depth())
             .count();
-        
+
         help_lines + memory_lines
     }
 
@@ -181,12 +187,12 @@ impl App {
 
         // Calculate lines for help text and latency tree
         let help_lines = 2; // "[m] Memory [l] Latency [c] Collapse (...)" + blank line
-        let latency_lines = self.count_latency_tree_lines(&self.latency_tree, 0, self.latency_collapse_depth.get_current_depth());
-        
+        let latency_lines = Self::count_latency_tree_lines(&self.latency_tree, 0, self.latency_collapse_depth.get_current_depth());
+
         help_lines + latency_lines
     }
 
-    fn count_latency_tree_lines(&self, metrics: &[crate::tui::metrics::HierarchicalMetric], depth: usize, max_depth: usize) -> usize {
+    fn count_latency_tree_lines(metrics: &[crate::tui::metrics::HierarchicalMetric], depth: usize, max_depth: usize) -> usize {
         if depth > max_depth || metrics.is_empty() {
             return 0;
         }
@@ -196,7 +202,7 @@ impl App {
             count += 1; // The metric line itself
             // Add children if we haven't reached max depth
             if depth < max_depth {
-                count += self.count_latency_tree_lines(&metric.children, depth + 1, max_depth);
+                count += Self::count_latency_tree_lines(&metric.children, depth + 1, max_depth);
             }
         }
         count
@@ -293,17 +299,20 @@ impl App {
         // Add timestamp to the log message
         let timestamp = chrono::Utc::now().format("%H:%M:%S").to_string();
         let formatted_message = format!("[{}] {}", timestamp, message);
-        
+
         self.log_messages.push(formatted_message);
-        
+
         // Keep only the last N messages to prevent memory issues
         if self.log_messages.len() > self.log_capacity {
             let start = self.log_messages.len() - self.log_capacity;
             self.log_messages.drain(0..start);
         }
-        
+
         // Auto-scroll to bottom if we were already at the bottom
-        if self.focus != FocusArea::LogBox || (self.log_area.height > 0 && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)) {
+        if self.focus != FocusArea::LogBox
+            || (self.log_area.height > 0
+                && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize))
+        {
             self.scroll_to_log_end();
         }
     }
@@ -333,8 +342,6 @@ impl App {
         self.is_selecting = false;
     }
 
-
-
     pub fn get_selected_text(&self, text_content: &str) -> String {
         if let (Some(start), Some(end)) = (self.text_selection_start, self.text_selection_end) {
             // Convert position to line and character indices for text selection
@@ -344,19 +351,19 @@ impl App {
             let end_col = end.x as usize;
 
             let lines: Vec<&str> = text_content.lines().collect();
-            
+
             // Ensure we're within bounds
             if lines.is_empty() {
                 return String::new();
             }
-            
+
             // Adjust row indices to not exceed available lines
             let max_row = lines.len().saturating_sub(1);
             let start_row = std::cmp::min(start_row, max_row);
             let end_row = std::cmp::min(end_row, max_row);
-            
+
             // Sort the selection to ensure start <= end
-            let (actual_start_row, actual_start_col, actual_end_row, actual_end_col) = 
+            let (actual_start_row, actual_start_col, actual_end_row, actual_end_col) =
                 if start_row > end_row || (start_row == end_row && start_col > end_col) {
                     (end_row, end_col, start_row, start_col)
                 } else {
@@ -367,16 +374,16 @@ impl App {
             if actual_start_row == actual_end_row {
                 let line = lines[actual_start_row];
                 let line_chars: Vec<char> = line.chars().collect();
-                
+
                 if line_chars.is_empty() {
                     // If the line is empty, return empty string
                     return String::new();
                 }
-                
+
                 // Adjust column indices to not exceed line length
                 let actual_start_col = std::cmp::min(actual_start_col, line_chars.len());
                 let actual_end_col = std::cmp::min(actual_end_col, line_chars.len());
-                
+
                 if actual_start_col < line_chars.len() {
                     let (start_idx, end_idx) = if actual_start_col <= actual_end_col {
                         (actual_start_col, actual_end_col)
@@ -395,10 +402,10 @@ impl App {
                     if row >= lines.len() {
                         continue; // Skip if we're beyond the available lines
                     }
-                    
+
                     let line = lines[row];
                     let line_chars: Vec<char> = line.chars().collect();
-                    
+
                     if row == actual_start_row {
                         // First line: from start_col to end of line
                         if actual_start_col < line_chars.len() {
@@ -415,7 +422,7 @@ impl App {
                         // Middle lines: entire line
                         result.push_str(line);
                     }
-                    
+
                     if row < actual_end_row {
                         result.push('\n');
                     }
@@ -425,42 +432,46 @@ impl App {
         }
         String::new()
     }
-    
+
     // Helper functions for handling wrapped text
-    pub fn get_content_position_from_visual(&self, visual_row: u16, visual_col: u16, scroll_offset: u16, text_content: &str, wrap_width: u16) -> (usize, usize) {
+    pub fn get_content_position_from_visual(
+        &self,
+        visual_row: u16,
+        visual_col: u16,
+        scroll_offset: u16,
+        text_content: &str,
+        wrap_width: u16,
+    ) -> (usize, usize) {
         // This function maps visual coordinates to content coordinates considering text wrapping and scroll
         // visual_row is the row relative to the viewport (including scrolling effect)
         // scroll_offset is how many lines the user has scrolled down
         // We need to find the actual content line and column
         let absolute_visual_row = visual_row.saturating_add(scroll_offset);
-        
+
         let lines: Vec<&str> = text_content.lines().collect();
         let mut current_visual_row: u32 = 0; // Use u32 to prevent overflow issues
-        
+
         for (idx, line) in lines.iter().enumerate() {
             // Simulate how ratatui wraps this line to count visual lines it would create
             let visual_line_count = self.count_visual_lines_for_content_line(line, wrap_width);
-            
+
             // Check if the target visual row is within this content line's range
-            if (current_visual_row as u16) <= absolute_visual_row && 
-               absolute_visual_row < (current_visual_row as u16 + visual_line_count as u16) {
+            if (current_visual_row as u16) <= absolute_visual_row
+                && absolute_visual_row < (current_visual_row as u16 + visual_line_count as u16)
+            {
                 // The target is within this content line
                 let row_in_content_line = absolute_visual_row.saturating_sub(current_visual_row as u16) as usize;
-                
+
                 // Calculate the content column position within this line, considering how ratatui would wrap
-                let actual_content_col = self.visual_position_to_content_position(
-                    line, 
-                    row_in_content_line, 
-                    visual_col as usize, 
-                    wrap_width as usize
-                );
-                
+                let actual_content_col =
+                    self.visual_position_to_content_position(line, row_in_content_line, visual_col as usize, wrap_width as usize);
+
                 return (idx, actual_content_col);
             }
-            
+
             current_visual_row += visual_line_count as u32;
         }
-        
+
         // If we reach here, we're beyond the content, return last position
         if !lines.is_empty() {
             // Return the last line with the calculated column
@@ -473,45 +484,51 @@ impl App {
             (0, 0) // No content, return (0,0)
         }
     }
-    
+
     /// Count how many visual lines a content line would produce when wrapped
     pub fn count_visual_lines_for_content_line(&self, line: &str, wrap_width: u16) -> usize {
         if wrap_width == 0 || wrap_width as usize == 0 {
             return 1; // Minimum 1 visual line
         }
-        
+
         // Use the same logic as create_visual_lines_for_content_line to match ratatui behavior
         let visual_lines = self.create_visual_lines_for_content_line(line, wrap_width as usize);
         visual_lines.len()
     }
-    
+
     /// Convert visual position within a wrapped line to content position
     /// This method properly handles word-aware wrapping to match ratatui's behavior
-    fn visual_position_to_content_position(&self, line: &str, visual_row_in_line: usize, visual_col_in_row: usize, wrap_width: usize) -> usize {
+    fn visual_position_to_content_position(
+        &self,
+        line: &str,
+        visual_row_in_line: usize,
+        visual_col_in_row: usize,
+        wrap_width: usize,
+    ) -> usize {
         if wrap_width == 0 {
             return 0;
         }
-        
+
         // Create visual lines by simulating word-aware wrapping
         let visual_lines = self.create_visual_lines_for_content_line(line, wrap_width);
-        
-        // Get the target visual line 
+
+        // Get the target visual line
         if visual_row_in_line < visual_lines.len() {
             let target_visual_line = &visual_lines[visual_row_in_line];
-            
+
             // Make sure visual_col_in_row doesn't exceed the length of this visual line
             let safe_visual_col = std::cmp::min(visual_col_in_row, target_visual_line.len());
-            
+
             // The content position is the start of this visual line in the original content
             // plus the column within this visual line
             let mut content_pos = 0;
             (0..visual_row_in_line).for_each(|i| {
                 content_pos += visual_lines[i].len();
             });
-            
+
             // Add the column offset within the current visual line
             content_pos += safe_visual_col;
-            
+
             // Ensure it doesn't exceed the total length of the original line
             std::cmp::min(content_pos, line.len())
         } else {
@@ -519,17 +536,17 @@ impl App {
             line.len()
         }
     }
-    
+
     /// Split a content line into visual lines according to word-aware wrapping
     fn create_visual_lines_for_content_line(&self, line: &str, wrap_width: usize) -> Vec<String> {
         if wrap_width == 0 || line.is_empty() {
             return vec![line.to_string()];
         }
-        
+
         let mut visual_lines = Vec::new();
         let mut current_line = String::new();
         let words: Vec<&str> = line.split_inclusive(' ').collect(); // Split on spaces, keeping the space
-        
+
         for word in words {
             // If adding this word would exceed the wrap width, start a new line
             if !current_line.is_empty() && current_line.len() + word.len() > wrap_width && !current_line.is_empty() {
@@ -541,30 +558,30 @@ impl App {
                     // Break long word into chunks
                     let word_chars: Vec<char> = word.chars().collect();
                     let mut word_pos = 0;
-                    
+
                     // If current line has content, finish it first
                     if !current_line.is_empty() {
                         visual_lines.push(current_line);
                         current_line = String::new();
                     }
-                    
+
                     // Add chunks of the long word to new lines
                     while word_pos < word_chars.len() {
                         let end_pos = std::cmp::min(word_pos + wrap_width, word_chars.len());
                         let chunk: String = word_chars[word_pos..end_pos].iter().collect();
-                        
+
                         if current_line.is_empty() {
                             current_line = chunk;
                         } else {
                             current_line.push_str(&chunk);
                         }
-                        
+
                         // If we've filled this line or reached the end of the word
                         if current_line.len() >= wrap_width || end_pos >= word_chars.len() {
                             visual_lines.push(current_line);
                             current_line = String::new();
                         }
-                        
+
                         word_pos = end_pos;
                     }
                 } else {
@@ -572,30 +589,39 @@ impl App {
                     current_line.push_str(word);
                 }
             }
-            
+
             // If current line has reached wrap width, start a new line
             if current_line.len() >= wrap_width {
                 visual_lines.push(current_line);
                 current_line = String::new();
             }
         }
-        
+
         // Add the last line if it has content
         if !current_line.is_empty() {
             visual_lines.push(current_line);
         }
-        
+
         // If no visual lines were created but the line isn't empty, it means the line is shorter than wrap width
         if visual_lines.is_empty() && !line.is_empty() {
             visual_lines.push(line.to_string());
         } else if visual_lines.is_empty() {
             visual_lines.push(String::new());
         }
-        
+
         visual_lines
     }
-    
+}
 
+impl App {
+    pub fn set_profiling_active(&mut self, active: bool) {
+        let state = if active {
+            StatusBarState::Alerted(AlertedState::ProfilingEnabled)
+        } else {
+            StatusBarState::Normal
+        };
+        self.status_bar.set_state(state);
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

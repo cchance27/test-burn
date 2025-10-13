@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 use std::sync::OnceLock;
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tracing::Level;
 
@@ -42,6 +45,9 @@ pub struct AppConfig {
 }
 
 static APP_CONFIG: OnceLock<AppConfig> = OnceLock::new();
+#[cfg(test)]
+static RESET_PENDING: AtomicBool = AtomicBool::new(false);
+static PROFILING_OVERRIDE_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 impl AppConfig {
     /// Load configuration from the process environment.
@@ -95,14 +101,30 @@ impl AppConfig {
 
     /// Store the provided configuration as the global instance.
     pub fn initialise(config: AppConfig) -> Result<&'static Self, AppConfigError> {
+        if APP_CONFIG.get().is_some() {
+            #[cfg(test)]
+            {
+                if RESET_PENDING.swap(false, Ordering::SeqCst) {
+                    Self::overwrite_for_tests(config);
+                    return Ok(APP_CONFIG.get().expect("configuration overwritten after reset"));
+                }
+            }
+            return Err(AppConfigError::AlreadyInitialised);
+        }
+
         APP_CONFIG.set(config).map_err(|_| AppConfigError::AlreadyInitialised)?;
         Ok(APP_CONFIG.get().expect("configuration just initialised"))
     }
 
     /// Retrieve the global configuration, initialising it from the environment when absent.
     pub fn get_or_init_from_env() -> Result<&'static Self, AppConfigError> {
-        if let Some(config) = APP_CONFIG.get() {
-            return Ok(config);
+        if APP_CONFIG.get().is_some() {
+            #[cfg(test)]
+            {
+                let updated = Self::from_env()?;
+                Self::overwrite_for_tests(updated);
+            }
+            return Ok(APP_CONFIG.get().expect("AppConfig already initialised"));
         }
 
         let config = Self::from_env()?;
@@ -122,14 +144,73 @@ impl AppConfig {
     pub fn try_global() -> Option<&'static Self> {
         APP_CONFIG.get()
     }
+
+    /// Returns true when profiling has been forced on (typically by tests).
+    pub fn profiling_forced() -> bool {
+        PROFILING_OVERRIDE_COUNT.load(Ordering::Acquire) > 0
+    }
+
+    pub fn force_enable_profiling_guard() -> ProfilingOverrideGuard {
+        ProfilingOverrideGuard::enable()
+    }
+
+    #[cfg(test)]
+    fn default_config() -> Self {
+        Self::from_env().unwrap_or_else(|_| Self {
+            log_level: Level::INFO,
+            metrics_jsonl_path: None,
+            enable_console_metrics: false,
+            enable_profiling: true,
+        })
+    }
+
+    #[cfg(test)]
+    fn overwrite_for_tests(config: AppConfig) {
+        if let Some(existing) = APP_CONFIG.get() {
+            unsafe {
+                let ptr: *const AppConfig = existing;
+                ptr.cast_mut().write(config);
+            }
+        } else {
+            let _ = APP_CONFIG.set(config);
+        }
+    }
+
+    #[cfg(test)]
+    fn ensure_profiling_enabled() {
+        if let Some(existing) = APP_CONFIG.get() {
+            if !existing.enable_profiling {
+                let mut updated = existing.clone();
+                updated.enable_profiling = true;
+                Self::overwrite_for_tests(updated);
+            }
+        }
+    }
 }
 
-#[cfg(test)]
 pub fn reset_app_config_for_tests() {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    // A flag to indicate that tests should reset config state if needed
-    // Since OnceLock can't be reset, we'll use a different mechanism for tests
-    // In a real testing scenario, we'd likely avoid global state in tests altogether
-    static TEST_RESET_FLAG: AtomicBool = AtomicBool::new(false);
-    TEST_RESET_FLAG.store(true, Ordering::SeqCst);
+    #[cfg(test)]
+    {
+        RESET_PENDING.store(true, Ordering::SeqCst);
+        AppConfig::overwrite_for_tests(AppConfig::default_config());
+        PROFILING_OVERRIDE_COUNT.store(0, Ordering::SeqCst);
+    }
+}
+
+/// RAII guard that forces profiling on for the lifetime of the guard.
+pub struct ProfilingOverrideGuard;
+
+impl ProfilingOverrideGuard {
+    pub fn enable() -> Self {
+        PROFILING_OVERRIDE_COUNT.fetch_add(1, Ordering::AcqRel);
+        #[cfg(test)]
+        AppConfig::ensure_profiling_enabled();
+        Self
+    }
+}
+
+impl Drop for ProfilingOverrideGuard {
+    fn drop(&mut self) {
+        let _ = PROFILING_OVERRIDE_COUNT.fetch_update(Ordering::AcqRel, Ordering::Relaxed, |count| count.checked_sub(1));
+    }
 }

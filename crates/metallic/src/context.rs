@@ -1,6 +1,7 @@
 use super::error::MetalError;
 use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
+use super::profiling_state;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::kernels::swiglu::SwiGLUOp;
@@ -22,7 +23,6 @@ use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 use std::env;
-use tracing::warn;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MemoryUsage {
@@ -192,7 +192,6 @@ pub struct Context<T: TensorElement> {
     sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
     pending_gpu_scope: Option<GpuProfilerLabel>,
     gpu_scope_stack: Vec<GpuProfilerLabel>,
-    enable_profiling: bool,
 }
 
 struct GpuScopeGuard<T: TensorElement> {
@@ -285,16 +284,12 @@ impl<T: TensorElement> Context<T> {
         let pool = MemoryPool::new(&device, &command_queue)?;
         let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
-        let enable_profiling = match AppConfig::get_or_init_from_env() {
-            Ok(cfg) => cfg.enable_profiling,
-            Err(err) => {
-                warn!(
-                    error = ?err,
-                    "failed to initialise instrumentation config from environment; defaulting to enable_profiling=true"
-                );
-                true
-            }
-        };
+        // Initialize the global profiling state based on environment configuration
+        profiling_state::initialize_profiling_state_from_env();
+
+        if AppConfig::profiling_forced() {
+            profiling_state::set_profiling_state(true);
+        }
 
         Ok(Context::<T> {
             device,
@@ -316,7 +311,6 @@ impl<T: TensorElement> Context<T> {
             sdpa_workspaces: FxHashMap::default(),
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
-            enable_profiling,
         })
     }
 
@@ -375,7 +369,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
-        if self.enable_profiling
+        if crate::profiling_state::get_profiling_state()
             && let Some(cmd_buf) = self.active_cmd_buffer.take()
         {
             // Attribute CB finalize commit/wait to the current scope to avoid 'Other'
@@ -1464,6 +1458,11 @@ impl<T: TensorElement> Context<T> {
         self.ensure_active_cmd_buffer_internal(true)
     }
 
+    #[cfg(test)]
+    pub(crate) fn force_enable_profiling_for_tests(&mut self) {
+        crate::profiling_state::set_profiling_state(true);
+    }
+
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
         let should_refresh = if let Some(active) = self.active_cmd_buffer.as_ref() {
             if active.is_committed() {
@@ -1484,7 +1483,7 @@ impl<T: TensorElement> Context<T> {
 
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
-            if let Some(profiler) = GpuProfiler::attach(&cmd_buf, self.enable_profiling) {
+            if let Some(profiler) = GpuProfiler::attach(&cmd_buf, crate::profiling_state::get_profiling_state()) {
                 cmd_buf.retain_profiler(profiler);
             }
             self.active_cmd_buffer = Some(cmd_buf);

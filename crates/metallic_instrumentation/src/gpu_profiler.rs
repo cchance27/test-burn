@@ -389,13 +389,6 @@ impl GpuProfiler {
             *begin = Some(Instant::now());
         }
 
-        // Mark the CPU scope begin time the first time we create a scope for this CB
-        if let Ok(mut begin) = state.cpu_scope_begin.lock()
-            && begin.is_none()
-        {
-            *begin = Some(Instant::now());
-        }
-
         Some(GpuProfilerScope {
             inner: Some(GpuProfilerScopeInner {
                 state,

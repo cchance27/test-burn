@@ -226,7 +226,7 @@ impl Operation for MatMul {
         // Encode the MPS matrix multiplication
         // MPS-backed op: ensure CPU-scope timing is used in latency mode for exact attribution
         GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer);
-        let _scope = {
+        let scope = {
             let label = &self.profiler_label;
             GpuProfiler::profile_command_buffer(command_buffer, label.op_name.clone(), label.backend.clone())
         };
@@ -236,6 +236,7 @@ impl Operation for MatMul {
         }
         encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
 
+        drop(scope);
         Ok(())
     }
 }
