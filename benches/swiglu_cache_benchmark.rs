@@ -4,9 +4,9 @@
 //! matmul and elementwise kernels that make up the composite implementation.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::kernels::swiglu::swiglu_with_optional_cache;
-use test_burn::metallic::resource_cache::ResourceCache;
-use test_burn::metallic::{Context, F32Element, Tensor};
+use metallic::kernels::swiglu::swiglu_with_optional_cache;
+use metallic::resource_cache::ResourceCache;
+use metallic::{Context, F32Element, Tensor};
 
 const BATCH: usize = 4;
 const SEQ: usize = 128;

@@ -1,0 +1,1 @@
+// This test has been moved to crates/metallic/src/tests/gpu_profiling.rs

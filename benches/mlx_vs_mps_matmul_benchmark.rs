@@ -1,13 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use test_burn::metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use test_burn::metallic::{Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
-
-use std::sync::{Mutex, OnceLock};
-
-fn env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
+use metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
+use metallic::{Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
 fn bytes_for_shape<T: TensorElement>(m: usize, k: usize, n: usize) -> usize {
     let es = T::DTYPE.size_bytes();
@@ -64,15 +58,8 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
         for &(alpha, beta, case_name) in &alpha_beta_cases {
             let label = format!("{shape_label}_{case_name}");
 
-            // Benchmark MPS
             group.bench_with_input(BenchmarkId::new("MPS", &label), &label, |bi, _| {
-                // Create context and tensors once per backend/shape (reuse in b.iter)
-                let _guard = env_lock().lock().unwrap();
-                let prev = std::env::var("FORCE_MATMUL_BACKEND").ok();
-                unsafe {
-                    std::env::set_var("FORCE_MATMUL_BACKEND", "mps");
-                }
-                drop(_guard);
+                let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard("mps".to_string()).unwrap();
 
                 let mut ctx = Context::<T>::new().expect("ctx mps");
                 let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("A");
@@ -90,26 +77,11 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                     _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                     ctx.synchronize();
                 });
-
-                // Restore env
-                let _guard = env_lock().lock().unwrap();
-                unsafe {
-                    if let Some(prev) = prev {
-                        std::env::set_var("FORCE_MATMUL_BACKEND", prev);
-                    } else {
-                        std::env::remove_var("FORCE_MATMUL_BACKEND");
-                    }
-                }
             });
 
             // Benchmark MLX
             group.bench_with_input(BenchmarkId::new("MLX", &label), &label, |bi, _| {
-                let _guard = env_lock().lock().unwrap();
-                let prev = std::env::var("FORCE_MATMUL_BACKEND").ok();
-                unsafe {
-                    std::env::set_var("FORCE_MATMUL_BACKEND", "mlx");
-                }
-                drop(_guard);
+                let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard("mlx".to_string()).unwrap();
 
                 let mut ctx = Context::<T>::new().expect("ctx mlx");
                 let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("A");
@@ -127,15 +99,6 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                     _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                     ctx.synchronize();
                 });
-
-                let _guard = env_lock().lock().unwrap();
-                unsafe {
-                    if let Some(prev) = prev {
-                        std::env::set_var("FORCE_MATMUL_BACKEND", prev);
-                    } else {
-                        std::env::remove_var("FORCE_MATMUL_BACKEND");
-                    }
-                }
             });
         }
     }
@@ -145,12 +108,7 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
         let label = format!("{m}x{k}x{n}_bias");
 
         group.bench_with_input(BenchmarkId::new("MPS-bias", &label), &label, |bi, _| {
-            let _guard = env_lock().lock().unwrap();
-            let prev = std::env::var("FORCE_MATMUL_BACKEND").ok();
-            unsafe {
-                std::env::set_var("FORCE_MATMUL_BACKEND", "mps");
-            }
-            drop(_guard);
+            let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard("mps".to_string()).unwrap();
 
             let mut ctx = Context::<T>::new().expect("ctx mps bias");
             let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("A");
@@ -164,24 +122,10 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                 let _ = ctx.matmul_bias_add(&a, &b, &bias, false, false).unwrap();
                 ctx.synchronize();
             });
-
-            let _guard = env_lock().lock().unwrap();
-            unsafe {
-                if let Some(prev) = prev {
-                    std::env::set_var("FORCE_MATMUL_BACKEND", prev);
-                } else {
-                    std::env::remove_var("FORCE_MATMUL_BACKEND");
-                }
-            }
         });
 
         group.bench_with_input(BenchmarkId::new("MLX-bias", &label), &label, |bi, _| {
-            let _guard = env_lock().lock().unwrap();
-            let prev = std::env::var("FORCE_MATMUL_BACKEND").ok();
-            unsafe {
-                std::env::set_var("FORCE_MATMUL_BACKEND", "mlx");
-            }
-            drop(_guard);
+            let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard("mlx".to_string()).unwrap();
 
             let mut ctx = Context::<T>::new().expect("ctx mlx bias");
             let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("A");
@@ -195,15 +139,6 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                 let _ = ctx.matmul_bias_add(&a, &b, &bias, false, false).unwrap();
                 ctx.synchronize();
             });
-
-            let _guard = env_lock().lock().unwrap();
-            unsafe {
-                if let Some(prev) = prev {
-                    std::env::set_var("FORCE_MATMUL_BACKEND", prev);
-                } else {
-                    std::env::remove_var("FORCE_MATMUL_BACKEND");
-                }
-            }
         });
     }
 
@@ -319,12 +254,7 @@ fn bench_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
         let bench_id = |backend: &str| BenchmarkId::new(backend, case.name);
 
         let run_case = |backend: &str, bencher: &mut criterion::Bencher<'_>| {
-            let _guard = env_lock().lock().unwrap();
-            let prev = std::env::var("FORCE_MATMUL_BACKEND").ok();
-            unsafe {
-                std::env::set_var("FORCE_MATMUL_BACKEND", backend.to_lowercase());
-            }
-            drop(_guard);
+            let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard(backend.to_lowercase()).unwrap();
 
             let mut ctx = Context::<T>::new().expect("ctx setup");
             let a: Tensor<T> = Tensor::new(
@@ -360,15 +290,6 @@ fn bench_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                         let _ = ctx.matmul_bias_add(&a, &b, &bias, false, false).unwrap();
                         ctx.synchronize();
                     });
-                }
-            }
-
-            let _guard = env_lock().lock().unwrap();
-            unsafe {
-                if let Some(prev) = prev {
-                    std::env::set_var("FORCE_MATMUL_BACKEND", prev);
-                } else {
-                    std::env::remove_var("FORCE_MATMUL_BACKEND");
                 }
             }
         };

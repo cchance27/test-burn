@@ -1,0 +1,29 @@
+[package]
+name = "metallic_instrumentation"
+version = "0.1.0"
+edition = "2024"
+description = "Metallic instrumentation."
+license = "MIT OR Apache-2.0"
+publish = false
+
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+crossbeam = "0.8.4"
+metallic_env = { path = "../metallic_env" }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+mach2 = "0.5.0"
+objc2 = "0.6.3"
+objc2-metal = "0.3.2"
+objc2-foundation = { version = "0.3.1", features = ["NSData"] }
+tokio = { version = "1.47.1", features = ["rt-multi-thread", "macros"] }
+rustc-hash = "2.1.1"
+sysinfo = "0.37.1"

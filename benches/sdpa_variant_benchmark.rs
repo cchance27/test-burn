@@ -1,10 +1,10 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::kernels::KernelInvocable;
-use test_burn::metallic::kernels::scaled_dot_product_attention::{
+use metallic::kernels::KernelInvocable;
+use metallic::kernels::scaled_dot_product_attention::{
     ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp,
     ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp,
 };
-use test_burn::metallic::{Context, F32Element, Tensor};
+use metallic::{Context, F32Element, Tensor};
 
 const ITERATIONS: usize = 1;
 

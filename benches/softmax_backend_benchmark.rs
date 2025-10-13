@@ -1,7 +1,8 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use test_burn::metallic::kernels::softmax::{METALLIC_SOFTMAX_BACKEND_ENV, apply_softmax};
-use test_burn::metallic::resource_cache::ResourceCache;
-use test_burn::metallic::{Context, F32Element, Tensor};
+use metallic::kernels::softmax::apply_softmax;
+use metallic::resource_cache::ResourceCache;
+use metallic::{Context, F32Element, Tensor};
+use metallic_env::SOFTMAX_BACKEND_VAR;
 
 const ITERATIONS: usize = 5;
 const ROWS: usize = 512;
@@ -27,10 +28,7 @@ fn run_softmax(ctx: &mut Context<F32Element>, cache: Option<&mut ResourceCache>,
 }
 
 fn benchmark_softmax_backends(c: &mut Criterion) {
-    // Ensure the backend selector defaults to automatic behavior for the benchmark run.
-    unsafe {
-        std::env::set_var(METALLIC_SOFTMAX_BACKEND_ENV, "auto");
-    }
+    let _guard = SOFTMAX_BACKEND_VAR.set_guard("auto".to_string()).unwrap();
 
     let mut group = c.benchmark_group("softmax_backend_comparison");
     let mut context = Context::new().unwrap();

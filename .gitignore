@@ -1,13 +1,15 @@
 **/target
 *.gguf
 *.part
-pytorch/dumps
+**/pytorch/dumps
 debug_compare_out
 debug_dumps
-pytorch/*.json
+**/pytorch/*.json
 *.jsonl
+*.json
 *.log
 *.tsv
 .DS_Store
 test.py
 **/Cargo.lock
+experimental
