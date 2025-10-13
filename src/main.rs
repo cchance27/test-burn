@@ -29,7 +29,7 @@ use ratatui::{
     layout::Position,
 };
 use tui::app::FocusArea;
-use tui::{App, AppResult};
+use tui::{App, AppResult, ui};
 
 fn main() -> AppResult<()> {
     // Ensure profiling state is initialized from the environment before anything else.
@@ -253,7 +253,7 @@ fn run_tui_mode(
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             match crossterm::event::read()? {
                 CrosstermEvent::Key(key) => {
-                    if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+                    if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                         // Toggle the state, then get the new state
                         profiling_state::toggle_profiling_state();
                         let new_state = profiling_state::get_profiling_state();
@@ -271,8 +271,8 @@ fn run_tui_mode(
                                 app.reset_metrics_scroll();
                             }
                             crossterm::event::KeyCode::Char('l') => {
-                                // Check if it's Super+L for log toggle
-                                if key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+                                // Check if it's Control+L for log toggle
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                                     app.toggle_log_visibility();
                                 } else {
                                     // Regular 'l' key to switch to latency view
@@ -281,7 +281,32 @@ fn run_tui_mode(
                                 }
                             }
                             crossterm::event::KeyCode::Char('c') => {
-                                app.toggle_collapse();
+                                // Check if it's Control+C for copying all content from focused widget
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                    // Copy all content from the currently focused widget
+                                    let content_to_copy = match app.focus {
+                                        FocusArea::GeneratedText => app.generated_text.clone(),
+                                        FocusArea::Metrics => {
+                                            let metrics_help = match app.metrics_view {
+                                                tui::app::MetricsView::Memory => "[m] Memory [l] Latency [c] Collapse",
+                                                tui::app::MetricsView::Latency => "[m] Memory [l] Latency [c] Collapse",
+                                            };
+                                            let metrics_content = match app.metrics_view {
+                                                tui::app::MetricsView::Memory => {
+                                                    ui::render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth())
+                                                },
+                                                tui::app::MetricsView::Latency => {
+                                                    ui::render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth())
+                                                },
+                                            };
+                                            format!("{}\n\n{}", metrics_help, metrics_content)
+                                        },
+                                        FocusArea::LogBox => app.log_messages.join("\n"),
+                                    };
+                                    copy_text_to_clipboard(&content_to_copy);
+                                } else {
+                                    app.toggle_collapse();
+                                }
                             }
                             crossterm::event::KeyCode::Tab => {
                                 app.focus_next();

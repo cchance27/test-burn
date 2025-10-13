@@ -226,7 +226,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 }
 
-fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], collapse_depth: u8) -> String {
+pub fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], collapse_depth: u8) -> String {
     if rows.is_empty() {
         return "Collecting data...".to_string();
     }
@@ -317,7 +317,7 @@ fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], co
         .join("\n")
 }
 
-fn render_hierarchical_latency_metrics(metrics: &[HierarchicalMetric], max_depth: usize) -> String {
+pub fn render_hierarchical_latency_metrics(metrics: &[HierarchicalMetric], max_depth: usize) -> String {
     if metrics.is_empty() {
         return "Collecting data...".to_string();
     }
