@@ -22,13 +22,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
         .split(main_layout[0]);
 
-    // Split the main text area to have generation text and log box
-    let text_area_layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(10)]) // Generation area + log box
-        .split(body_layout[0]);
-
-    let log_area = text_area_layout[1]; // Log box below generation area
+    // Conditionally split the main text area to have generation text and log box
+    let (text_area, log_area) = if app.log_visible {
+        let areas = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(0), Constraint::Length(10)]) // Generation area + log box
+            .split(body_layout[0]);
+        (areas[0], Some(areas[1]))
+    } else {
+        (body_layout[0], None)
+    };
 
     let text_block = Block::default()
         .title("Generated Text (q to quit)")
@@ -36,7 +39,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .border_style(border_style(app.focus == FocusArea::GeneratedText));
 
     // Create text with selections highlighted
-    let text_with_selection = create_text_with_selection(&app.generated_text, app, text_area_layout[0]);
+    let text_with_selection = create_text_with_selection(&app.generated_text, app, text_area);
     let text_area_widget = Paragraph::new(text_with_selection)
         .block(text_block)
         .wrap(Wrap { trim: false })
@@ -101,8 +104,10 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .wrap(Wrap { trim: false })
         .scroll((app.log_scroll, 0));
 
-    frame.render_widget(text_area_widget, text_area_layout[0]); // Render text in the top part of the split
-    frame.render_widget(log_widget, log_area);
+    frame.render_widget(text_area_widget, text_area); // Render text in the appropriate area
+    if let Some(log_area) = log_area {
+        frame.render_widget(log_widget, log_area);
+    }
     frame.render_widget(sidebar_block, sidebar_area);
     frame.render_widget(prompt_section, sidebar_sections[0]);
     frame.render_widget(metrics_section, sidebar_sections[1]);
@@ -121,9 +126,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // Render the status bar using the component
     app.status_bar.render(frame, main_layout[1]);
 
-    app.text_area = text_area_layout[0]; // Update app.text_area to refer to the actual text area, not the full column
+    app.text_area = text_area; // Update app.text_area to refer to the actual text area
     app.metrics_area = sidebar_sections[1];
-    app.log_area = log_area;
+    app.log_area = log_area.unwrap_or_default();
 
     if let Some(alert) = app.active_alert() {
         render_alert_modal(frame, alert, app.pending_alert_count());
@@ -139,17 +144,27 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         app.request_follow_text = false;
     }
 
+    // Handle request to scroll log to end (when log is made visible)
+    if app.request_scroll_to_log_end && app.log_visible {
+        if app.log_area.height > 0 && app.log_messages.len() > app.log_area.height as usize {
+            app.log_scroll = (app.log_messages.len() - app.log_area.height as usize) as u16;
+        } else {
+            app.log_scroll = 0;
+        }
+        app.request_scroll_to_log_end = false;
+    }
+
     // Render scrollbars for widgets that need them
 
     // Text area scrollbar
-    let wrap_width = text_area_layout[0].width.saturating_sub(2); // Subtract 2 for borders
+    let wrap_width = text_area.width.saturating_sub(2); // Subtract 2 for borders
     let mut total_visual_lines = 0u16;
     for line in app.generated_text.lines() {
         let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width) as u16;
         total_visual_lines = total_visual_lines.saturating_add(visual_lines);
     }
 
-    let text_visible_lines = text_area_layout[0].height.saturating_sub(2); // Subtract 2 for borders
+    let text_visible_lines = text_area.height.saturating_sub(2); // Subtract 2 for borders
 
     if total_visual_lines > text_visible_lines && text_visible_lines > 0 {
         let text_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
@@ -162,7 +177,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
         let text_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
 
-        frame.render_stateful_widget(text_scrollbar, text_area_layout[0], &mut text_scrollbar_state.clone());
+        frame.render_stateful_widget(text_scrollbar, text_area, &mut text_scrollbar_state.clone());
     }
 
     // Metrics area scrollbar
@@ -189,21 +204,25 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 
     // Log area scrollbar
-    let log_content_lines = app.log_messages.len();
-    let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
+    if app.log_visible {
+        if let Some(log_area) = log_area {
+            let log_content_lines = app.log_messages.len();
+            let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
 
-    if log_content_lines > log_visible_lines && log_visible_lines > 0 {
-        let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("↑"))
-            .end_symbol(Some("↓"));
+            if log_content_lines > log_visible_lines && log_visible_lines > 0 {
+                let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓"));
 
-        // Calculate the maximum scroll position (content lines - visible lines)
-        let max_scroll = (log_content_lines - log_visible_lines).max(0);
-        let current_scroll = (app.log_scroll as usize).min(max_scroll);
+                // Calculate the maximum scroll position (content lines - visible lines)
+                let max_scroll = (log_content_lines - log_visible_lines).max(0);
+                let current_scroll = (app.log_scroll as usize).min(max_scroll);
 
-        let log_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
+                let log_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
 
-        frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
+                frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
+            }
+        }
     }
 }
 

@@ -253,7 +253,7 @@ fn run_tui_mode(
         if crossterm::event::poll(std::time::Duration::from_millis(50))? {
             match crossterm::event::read()? {
                 CrosstermEvent::Key(key) => {
-                    if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                    if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
                         // Toggle the state, then get the new state
                         profiling_state::toggle_profiling_state();
                         let new_state = profiling_state::get_profiling_state();
@@ -271,8 +271,14 @@ fn run_tui_mode(
                                 app.reset_metrics_scroll();
                             }
                             crossterm::event::KeyCode::Char('l') => {
-                                app.metrics_view = tui::app::MetricsView::Latency;
-                                app.reset_metrics_scroll();
+                                // Check if it's Super+L for log toggle
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::SUPER) {
+                                    app.toggle_log_visibility();
+                                } else {
+                                    // Regular 'l' key to switch to latency view
+                                    app.metrics_view = tui::app::MetricsView::Latency;
+                                    app.reset_metrics_scroll();
+                                }
                             }
                             crossterm::event::KeyCode::Char('c') => {
                                 app.toggle_collapse();
@@ -325,7 +331,15 @@ fn run_tui_mode(
 
         // Process app events
         while let Ok(event) = rx.try_recv() {
-            handle_app_event(&mut app, event);
+            match event {
+                AppEvent::LogMessage(message) => {
+                    // Only add log message to UI if log view is visible (for performance)
+                    if app.log_visible {
+                        app.add_log_message(&message);
+                    }
+                }
+                _ => handle_app_event(&mut app, event),
+            }
         }
 
         terminal.draw(|frame| tui::ui::render(&mut app, frame))?;
@@ -593,7 +607,7 @@ fn handle_mouse_event(event: MouseEvent, app: &mut App) {
                 app.start_text_selection(relative_pos);
             } else if app.metrics_area.contains(position) {
                 app.focus = FocusArea::Metrics;
-            } else if app.log_area.contains(position) {
+            } else if app.log_visible && app.log_area.contains(position) {
                 app.focus = FocusArea::LogBox;
             }
         }

@@ -36,6 +36,8 @@ pub struct App {
     pub log_messages: Vec<String>,
     pub log_scroll: u16,
     pub log_capacity: usize,
+    pub log_visible: bool,
+    pub request_scroll_to_log_end: bool,
     // Text selection functionality
     pub text_selection_start: Option<Position>,
     pub text_selection_end: Option<Position>,
@@ -73,6 +75,8 @@ impl App {
             log_messages: Vec::new(),
             log_scroll: 0,
             log_capacity: 1000, // Keep only the last 1000 log messages
+            log_visible: false, // Default to hidden
+            request_scroll_to_log_end: false,
             text_selection_start: None,
             text_selection_end: None,
             is_selecting: false,
@@ -291,6 +295,16 @@ impl App {
         }
     }
 
+    pub fn toggle_log_visibility(&mut self) {
+        let was_visible = self.log_visible;
+        self.log_visible = !self.log_visible;
+        
+        // Set flag to scroll to bottom on next render when making the log visible
+        if self.log_visible && !was_visible {
+            self.request_scroll_to_log_end = true;
+        }
+    }
+
     pub fn pending_alert_count(&self) -> usize {
         self.alert_queue.len()
     }
@@ -308,21 +322,28 @@ impl App {
             self.log_messages.drain(0..start);
         }
 
-        // Auto-scroll to bottom if we were already at the bottom
-        if self.focus != FocusArea::LogBox
+        // Auto-scroll to bottom if we were already at the bottom and log is visible
+        if self.log_visible && 
+           (self.focus != FocusArea::LogBox
             || (self.log_area.height > 0
-                && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize))
+                && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)))
         {
             self.scroll_to_log_end();
         }
     }
 
     fn scroll_to_log_end(&mut self) {
-        if self.log_area.height > 0 && self.log_messages.len() > self.log_area.height as usize {
-            self.log_scroll = (self.log_messages.len() - self.log_area.height as usize) as u16;
+        // Scroll to end of log messages
+        // When log_area isn't fully calculated yet, use the message count to determine max scroll
+        let max_scroll = if self.log_area.height > 0 && self.log_messages.len() > self.log_area.height as usize {
+            (self.log_messages.len() - self.log_area.height as usize) as u16
         } else {
-            self.log_scroll = 0;
-        }
+            0
+        };
+        
+        self.log_scroll = max_scroll;
+        // Clear the request flag if it was set
+        self.request_scroll_to_log_end = false;
     }
 
     // Text selection methods
