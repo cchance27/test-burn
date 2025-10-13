@@ -7,12 +7,13 @@ use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::kernels::swiglu::SwiGLUOp;
 use crate::tensor::Dtype;
 use crate::{Tensor, TensorElement, cache_keys::SdpaKey, kernels};
-use kernels::gemv::GemvOp;
+use kernels::matmul_gemv::MatmulGemvOp;
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
-use kernels::matmul::{MatMulAlphaBetaOp, MatMulBackend, MatMulOp};
-use kernels::mlxmatmul::{MatMulMlxOp, MlxKernelCache};
+use kernels::matmul_mps::{MatMulMpsAlphaBetaOp, MatMulBackend, MatMulMpsOp};
+use kernels::matmul_mlx::{MatMulMlxOp, MlxKernelCache};
 use kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
 use kernels::{KernelInvocable, KernelManager};
+use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 use metallic_instrumentation::record_metric_async;
 use metallic_instrumentation::{MetricEvent, config::AppConfig, gpu_profiler::GpuProfiler};
 use objc2::rc::Retained;
@@ -21,7 +22,6 @@ use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
-use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 use rustc_hash::FxHashMap;
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -564,13 +564,13 @@ impl<T: TensorElement> Context<T> {
         match self.forced_matmul_backend {
             MatMulBackendOverride::Force(backend) => match backend {
                 MatMulBackend::Mlx => self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0)),
-                MatMulBackend::Mps => self.call::<MatMulOp>((a, b, transpose_a, transpose_b)),
+                MatMulBackend::Mps => self.call::<MatMulMpsOp>((a, b, transpose_a, transpose_b)),
                 MatMulBackend::Gemv => {
                     let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
                     match dims_result {
                         Ok(dimensions) => {
                             if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
-                                self.call::<GemvOp>((a, b))
+                                self.call::<MatmulGemvOp>((a, b))
                             } else {
                                 self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                             }
@@ -585,7 +585,7 @@ impl<T: TensorElement> Context<T> {
                 match dims_result {
                     Ok(dimensions) => {
                         if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
-                            return self.call::<GemvOp>((a, b));
+                            return self.call::<MatmulGemvOp>((a, b));
                         }
 
                         let has_strided_batch = self.has_strided_mps_batch(&[a, b]);
@@ -594,7 +594,7 @@ impl<T: TensorElement> Context<T> {
                         if use_mlx {
                             self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                         } else {
-                            self.call::<MatMulOp>((a, b, transpose_a, transpose_b))
+                            self.call::<MatMulMpsOp>((a, b, transpose_a, transpose_b))
                         }
                     }
                     Err(_) => self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0)),
@@ -615,13 +615,13 @@ impl<T: TensorElement> Context<T> {
         match self.forced_matmul_backend {
             MatMulBackendOverride::Force(backend) => match backend {
                 MatMulBackend::Mlx => self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0)),
-                MatMulBackend::Mps => self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache),
+                MatMulBackend::Mps => self.call_with_cache::<MatMulMpsOp>((a, b, transpose_a, transpose_b), cache),
                 MatMulBackend::Gemv => {
                     let dims_result = self.compute_matmul_dims(a, b, transpose_a, transpose_b);
                     match dims_result {
                         Ok(dimensions) => {
                             if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
-                                self.call_with_cache::<GemvOp>((a, b), cache)
+                                self.call_with_cache::<MatmulGemvOp>((a, b), cache)
                             } else {
                                 self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                             }
@@ -636,7 +636,7 @@ impl<T: TensorElement> Context<T> {
                 match dims_result {
                     Ok(dimensions) => {
                         if self.can_use_gemv(&dimensions, transpose_a, transpose_b) {
-                            return self.call_with_cache::<GemvOp>((a, b), cache);
+                            return self.call_with_cache::<MatmulGemvOp>((a, b), cache);
                         }
 
                         let has_strided_batch = self.has_strided_mps_batch(&[a, b]);
@@ -645,7 +645,7 @@ impl<T: TensorElement> Context<T> {
                         if use_mlx {
                             self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0))
                         } else {
-                            self.call_with_cache::<MatMulOp>((a, b, transpose_a, transpose_b), cache)
+                            self.call_with_cache::<MatMulMpsOp>((a, b, transpose_a, transpose_b), cache)
                         }
                     }
                     Err(_) => self.call::<MatMulMlxOp>((a, b, None, None, transpose_a, transpose_b, 1.0, 0.0)),
@@ -730,12 +730,12 @@ impl<T: TensorElement> Context<T> {
             MatMulBackendOverride::Force(backend) => match backend {
                 MatMulBackend::Mlx => self.call::<MatMulMlxOp>((a, b, Some(bias), None, transpose_a, transpose_b, 1.0, 0.0)),
                 MatMulBackend::Mps => {
-                    let mut linear = self.call::<MatMulOp>((a, b, transpose_a, transpose_b))?;
+                    let mut linear = self.call::<MatMulMpsOp>((a, b, transpose_a, transpose_b))?;
                     linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, bias.clone()))?;
                     Ok(linear)
                 }
                 MatMulBackend::Gemv => {
-                    let mut linear = self.call::<GemvOp>((a, b))?;
+                    let mut linear = self.call::<MatmulGemvOp>((a, b))?;
                     linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, bias.clone()))?;
                     Ok(linear)
                 }
@@ -750,13 +750,13 @@ impl<T: TensorElement> Context<T> {
                         if use_mlx {
                             self.call::<MatMulMlxOp>((a, b, Some(bias), None, transpose_a, transpose_b, 1.0, 0.0))
                         } else {
-                            let mut linear = self.call::<MatMulOp>((a, b, transpose_a, transpose_b))?;
+                            let mut linear = self.call::<MatMulMpsOp>((a, b, transpose_a, transpose_b))?;
                             linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, bias.clone()))?;
                             Ok(linear)
                         }
                     }
                     Err(_) => {
-                        let mut linear = self.call::<MatMulOp>((a, b, transpose_a, transpose_b))?;
+                        let mut linear = self.call::<MatMulMpsOp>((a, b, transpose_a, transpose_b))?;
                         linear = self.call::<BroadcastElemwiseAddInplaceOp>((linear, bias.clone()))?;
                         Ok(linear)
                     }
@@ -781,7 +781,7 @@ impl<T: TensorElement> Context<T> {
             MatMulBackendOverride::Force(backend) => match backend {
                 MatMulBackend::Mlx => self.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta)),
 
-                MatMulBackend::Mps => self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta)),
+                MatMulBackend::Mps => self.call::<MatMulMpsAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta)),
 
                 MatMulBackend::Gemv => self.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta)),
             },
@@ -799,7 +799,7 @@ impl<T: TensorElement> Context<T> {
                 if use_mlx {
                     self.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
                 } else {
-                    self.call::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
+                    self.call::<MatMulMpsAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta))
                 }
             }
         }
@@ -849,7 +849,7 @@ impl<T: TensorElement> Context<T> {
             MatMulBackendOverride::Force(backend) => match backend {
                 MatMulBackend::Mlx => self.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta)),
                 MatMulBackend::Mps => {
-                    self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
+                    self.call_with_cache::<MatMulMpsAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
                 }
                 MatMulBackend::Gemv => self.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta)),
             },
@@ -867,7 +867,7 @@ impl<T: TensorElement> Context<T> {
                 if use_mlx {
                     self.call::<MatMulMlxOp>((a, b, None, Some(result), transpose_a, transpose_b, alpha, beta))
                 } else {
-                    self.call_with_cache::<MatMulAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
+                    self.call_with_cache::<MatMulMpsAlphaBetaOp>((a, b, result, transpose_a, transpose_b, alpha, beta), cache)
                 }
             }
         }

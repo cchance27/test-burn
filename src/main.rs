@@ -292,15 +292,17 @@ fn run_tui_mode(
                                                 tui::app::MetricsView::Latency => "[m] Memory [l] Latency [c] Collapse",
                                             };
                                             let metrics_content = match app.metrics_view {
-                                                tui::app::MetricsView::Memory => {
-                                                    ui::render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth())
-                                                },
-                                                tui::app::MetricsView::Latency => {
-                                                    ui::render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth())
-                                                },
+                                                tui::app::MetricsView::Memory => ui::render_memory_metrics(
+                                                    &app.memory_rows,
+                                                    app.memory_collapse_depth.get_current_depth(),
+                                                ),
+                                                tui::app::MetricsView::Latency => ui::render_hierarchical_latency_metrics(
+                                                    &app.latency_tree,
+                                                    app.latency_collapse_depth.get_current_depth(),
+                                                ),
                                             };
                                             format!("{}\n\n{}", metrics_help, metrics_content)
-                                        },
+                                        }
                                         FocusArea::LogBox => app.log_messages.join("\n"),
                                     };
                                     copy_text_to_clipboard(&content_to_copy);

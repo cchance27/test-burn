@@ -4,7 +4,7 @@ This document summarizes where GGML’s Metal backend currently outperforms our 
 
 References in this repo:
 - Metallic kernels and backends:
-  - Matmul: `crates/metallic/src/kernels/matmul/` and `crates/metallic/src/kernels/mlxmatmul/`
+  - Matmul: `crates/metallic/src/kernels/matmul_mps/`, `crates/metallic/src/kernels/matmul_mlx/`, `crates/metallic/src/kernels/matmul_gemv/`, and dispatcher in `crates/metallic/src/kernels/matmul_dispatcher/`
   - SDPA: `crates/metallic/src/kernels/scaled_dot_product_attention/`, softmax: `crates/metallic/src/kernels/softmax/`
   - Kernel manager/cache: `crates/metallic/src/kernels/`
 - GGML Metal backend (reference):
@@ -240,7 +240,7 @@ This plan is structured as Quick Wins, Medium Term, and Larger Tasks. Each item 
 ## 8) Implementation breadcrumbs (paths and ownership)
 
 - Matmul dispatcher and small-N GEMV:
-  - Code: `crates/metallic/src/kernels/matmul/` + `crates/metallic/src/kernels/mlxmatmul/`
+  - Code: dispatcher in `crates/metallic/src/kernels/matmul_dispatcher/` with backends in `matmul_mps/`, `matmul_mlx/`, and `matmul_gemv/`
   - Tests/benches: `crates/metallic/src/tests/matmul.rs`, `benches/tensor_benchmark.rs` (add new), `benches/gguf_quant_benchmark.rs` (if reusing infra)
 - SDPA + softmax variants:
   - Code: `crates/metallic/src/kernels/scaled_dot_product_attention/`, `crates/metallic/src/kernels/softmax/`

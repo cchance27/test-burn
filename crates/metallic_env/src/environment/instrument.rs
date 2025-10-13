@@ -61,8 +61,7 @@ pub const FORCE_MATMUL_BACKEND: TypedEnvVar<String> =
     TypedEnvVar::new(InstrumentEnvVar::ForceMatmulBackend.into_env(), parse_string, format_string);
 
 /// Typed descriptor for forcing the softmax backend.
-pub const SOFTMAX_BACKEND: TypedEnvVar<String> =
-    TypedEnvVar::new(InstrumentEnvVar::SoftmaxBackend.into_env(), parse_string, format_string);
+pub const SOFTMAX_BACKEND: TypedEnvVar<String> = TypedEnvVar::new(InstrumentEnvVar::SoftmaxBackend.into_env(), parse_string, format_string);
 
 /// Shim exposing ergonomic helpers for the log level variable.
 pub struct InstrumentLogLevel;

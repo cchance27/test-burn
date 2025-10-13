@@ -19,9 +19,9 @@ struct GemvParams {
 const THREADGROUP_WIDTH: usize = 256;
 const TILE_N: usize = THREADGROUP_WIDTH;
 
-pub struct GemvOp;
+pub struct MatmulGemvOp;
 
-struct Gemv<T: TensorElement> {
+struct MatMulGemv<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     a: Tensor<T>,
     x: Tensor<T>,
@@ -32,7 +32,7 @@ struct Gemv<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl<T: TensorElement> Operation for Gemv<T> {
+impl<T: TensorElement> Operation for MatMulGemv<T> {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -58,11 +58,11 @@ impl<T: TensorElement> Operation for Gemv<T> {
     }
 }
 
-impl KernelInvocable for GemvOp {
+impl KernelInvocable for MatmulGemvOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>); // (x, A)
 
     fn function_id() -> Option<KernelFunction> {
-        Some(KernelFunction::Gemv)
+        Some(KernelFunction::MatmulGemv)
     }
 
     fn new<'a, T: TensorElement>(
@@ -115,7 +115,7 @@ impl KernelInvocable for GemvOp {
 
         let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("gemv_op"));
 
-        let op = Gemv {
+        let op = MatMulGemv {
             pipeline,
             a: a.clone(),
             x: x.clone(),

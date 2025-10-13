@@ -1,16 +1,16 @@
 use super::*;
 use crate::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
 use crate::context::GpuProfilerLabel;
-use crate::kernels::matmul::mps_matrix_from_buffer;
+use crate::kernels::matmul_mps::mps_matrix_from_buffer;
 use crate::resource_cache::ResourceCache;
 use crate::tensor::MpsMatrixBatchView;
 use crate::{Dtype, TensorElement};
+use metallic_env::SOFTMAX_BACKEND_VAR;
 use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::MTLCommandBuffer;
-use metallic_env::SOFTMAX_BACKEND_VAR;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::sync::OnceLock;
 
@@ -31,7 +31,8 @@ static BACKEND_PREFERENCE: OnceLock<SoftmaxBackendPreference> = OnceLock::new();
 
 pub fn softmax_backend_preference() -> SoftmaxBackendPreference {
     *BACKEND_PREFERENCE.get_or_init(|| {
-        let raw = SOFTMAX_BACKEND_VAR.get()
+        let raw = SOFTMAX_BACKEND_VAR
+            .get()
             .unwrap_or(None)
             .unwrap_or_else(|| "auto".to_string())
             .to_lowercase();

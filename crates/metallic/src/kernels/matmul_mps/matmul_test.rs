@@ -1,4 +1,4 @@
-use crate::kernels::matmul::{MatMulAlphaBetaOp, MatMulOp, mps_matrix_from_buffer};
+use crate::kernels::matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp, mps_matrix_from_buffer};
 use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 // Helpers
@@ -155,7 +155,7 @@ fn test_matmul_correctness_small_int() -> Result<(), MetalError> {
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 3, 2, false, false);
 
     // Use the new kernel system
-    let result_tensor = context.call::<MatMulOp>((&a_tensor, &b_tensor, false, false))?;
+    let result_tensor = context.call::<MatMulMpsOp>((&a_tensor, &b_tensor, false, false))?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -181,7 +181,7 @@ fn test_matmul_correctness_asymmetric_float() -> Result<(), MetalError> {
     let cpu_output = cpu_matmul(&a_data, 5, 4, &b_data, 4, 7, false, false);
 
     // Use the new kernel system
-    let result_tensor = context.call::<MatMulOp>((&a_tensor, &b_tensor, false, false))?;
+    let result_tensor = context.call::<MatMulMpsOp>((&a_tensor, &b_tensor, false, false))?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -224,7 +224,7 @@ fn test_matmul_transpose_right() -> Result<(), MetalError> {
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, false, true);
 
     // Use the new kernel system
-    let result_tensor = context.call::<MatMulOp>((&a_tensor, &b_tensor, false, true))?; // transpose right only
+    let result_tensor = context.call::<MatMulMpsOp>((&a_tensor, &b_tensor, false, true))?; // transpose right only
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -267,7 +267,7 @@ fn test_matmul_transpose_left() -> Result<(), MetalError> {
     let cpu_output = cpu_matmul(&a_data, 2, 3, &b_data, 2, 3, true, false);
 
     // Use the new kernel system
-    let result_tensor = context.call::<MatMulOp>((&a_tensor, &b_tensor, true, false))?; // transpose left only
+    let result_tensor = context.call::<MatMulMpsOp>((&a_tensor, &b_tensor, true, false))?; // transpose left only
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -320,7 +320,7 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
     let expected_result = [15.625, 9.875, 43.125, 28.375];
 
     // Use the new kernel system with alpha/beta scaling
-    let result_tensor = context.call::<MatMulAlphaBetaOp>((&a_tensor, &b_tensor, &c_tensor, false, false, alpha, beta))?;
+    let result_tensor = context.call::<MatMulMpsAlphaBetaOp>((&a_tensor, &b_tensor, &c_tensor, false, false, alpha, beta))?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();

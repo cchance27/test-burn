@@ -1,23 +1,55 @@
-use super::*;
+use objc2::AnyThread;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
+use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
+use std::time::Duration;
 
+use super::{KernelFunction, KernelInvocable};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement,
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     context::GpuProfilerLabel,
     resource_cache::ResourceCache,
 };
 use metallic_instrumentation::gpu_profiler::GpuProfiler;
 
-// Public struct for matmul with alpha/beta scaling
-pub struct MatMulAlphaBetaOp;
+#[cfg(test)]
+mod matmul_test;
 
-// Internal struct that holds data for the alpha/beta `Operation` trait.
-struct MatMulAlphaBeta {
+#[cfg(test)]
+mod mlx_test;
+
+// Include additional mps kernels
+mod matmul_alpha_beta;
+#[cfg(test)]
+mod matmul_alpha_beta_test;
+pub use matmul_alpha_beta::MatMulMpsAlphaBetaOp;
+
+// Dispatcher moved to `matmul_dispatcher` module
+
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+// TODO: This enum seems redundant with matmul_dispatcher::types::MatmulBackend; consider removal in a later refactor.
+pub enum MatMulBackend {
+    Mps,
+    Mlx,
+    Gemv,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct MatMulMpsSample {
+    pub backend: MatMulBackend,
+    pub duration: Duration,
+    // instrumentation removed: dims/handle no longer tracked
+}
+
+// Public, user-facing, zero-sized struct for the matmul operation with transpose options.
+pub struct MatMulMpsOp;
+
+// Internal struct that holds data for the regular `Operation` trait.
+struct MatMulMps {
     pub left_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
     pub left_offset: usize,
     pub right_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
@@ -29,14 +61,14 @@ struct MatMulAlphaBeta {
     pub result_desc: Retained<MPSMatrixDescriptor>,
     pub gemm: Retained<MPSMatrixMultiplication>,
     pub batch_size: usize,
-    // profiling handled externally
+    // profiling scope is handled at a higher level
     pub profiler_label: GpuProfilerLabel,
 }
 
 // Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for MatMulAlphaBetaOp {
-    // Input arguments for the call - two input tensors + transpose options + alpha/beta
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, bool, f32, f32);
+impl KernelInvocable for MatMulMpsOp {
+    // Input arguments for the call - two input tensors + transpose options
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, bool, bool); // (left, right, transpose_left, transpose_right)
     // The output type
 
     // For MPS operations, return None since they don't use KernelFunction
@@ -52,13 +84,12 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>, // MPS doesn't use this
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (left, right, result, transpose_left, transpose_right, alpha, beta) = args;
+        let (left, right, transpose_left, transpose_right) = args;
 
         let (left_tensor, left_view) = left.ensure_mps_contiguous_batch(ctx)?;
         let (right_tensor, right_view) = right.ensure_mps_contiguous_batch(ctx)?;
-        let result_view = result.as_mps_matrix_batch_view()?;
 
-        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor, result])?;
+        ctx.prepare_tensors_for_active_cmd(&[&left_tensor, &right_tensor])?;
 
         // Calculate effective dimensions based on transpose
         let (eff_left_rows, eff_left_cols) = if transpose_left {
@@ -79,23 +110,26 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             )));
         }
 
-        if left_view.batch != right_view.batch || left_view.batch != result_view.batch {
+        if left_view.batch != right_view.batch {
             return Err(MetalError::InvalidOperation(
-                "Batched matmul requires consistent batch dimensions".to_string(),
+                "Batched matmul requires operands to share the same batch size".to_string(),
             ));
         }
 
-        // Validate result tensor dimensions match expected output dimensions
-        if result_view.rows != eff_left_rows || result_view.columns != eff_right_cols {
-            return Err(MetalError::InvalidOperation(format!(
-                "Result tensor dimensions ({}, {}) do not match expected output dimensions ({}, {})",
-                result_view.rows, result_view.columns, eff_left_rows, eff_right_cols
-            )));
-        }
-
+        // Create the output tensor (eff_left_rows x eff_right_cols)
+        let out_dims = if left_view.batch > 1 {
+            vec![left_view.batch, eff_left_rows, eff_right_cols]
+        } else {
+            vec![eff_left_rows, eff_right_cols]
+        };
+        let out = Tensor::new(out_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+        let result_view = out.as_mps_matrix_batch_view()?;
         let left_dtype = left_tensor.dtype;
         let right_dtype = right_tensor.dtype;
-        let result_dtype = result.dtype;
+        let result_dtype = out.dtype;
+
+        debug_assert_eq!(left_dtype, right_dtype);
+        debug_assert_eq!(left_dtype, result_dtype);
 
         let matmul_left_view = left_view;
         let matmul_right_view = right_view;
@@ -105,8 +139,8 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let matmul_left_offset = left_tensor.offset;
         let matmul_right_buf = right_tensor.buf.clone();
         let matmul_right_offset = right_tensor.offset;
-        let matmul_result_buf = result.buf.clone();
-        let matmul_result_offset = result.offset;
+        let matmul_result_buf = out.buf.clone();
+        let matmul_result_offset = out.offset;
 
         let left_desc_dtype = left_dtype;
         let right_desc_dtype = right_dtype;
@@ -120,8 +154,8 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
             batch_size: matmul_result_view.batch,
-            alpha,
-            beta,
+            alpha: 1.0,
+            beta: 0.0,
         };
 
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
@@ -159,11 +193,9 @@ impl KernelInvocable for MatMulAlphaBetaOp {
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
         // Create the internal operation struct.
-        let profiler_label = ctx
-            .take_gpu_scope()
-            .unwrap_or_else(|| GpuProfilerLabel::fallback("matmul_mps_alpha_beta_op"));
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul_mps_op"));
 
-        let op = MatMulAlphaBeta {
+        let op = MatMulMps {
             left_buf: matmul_left_buf,
             left_offset: matmul_left_offset,
             right_buf: matmul_right_buf,
@@ -178,14 +210,14 @@ impl KernelInvocable for MatMulAlphaBetaOp {
             profiler_label,
         };
 
-        // Return the boxed operation and the result tensor (already provided)
-        Ok((Box::new(op), result.clone()))
+        // Return the boxed operation and the output tensor.
+        Ok((Box::new(op), out))
     }
 }
 
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for MatMulAlphaBeta {
+impl Operation for MatMulMps {
     fn encode(
         &self,
         command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
@@ -212,4 +244,49 @@ impl Operation for MatMulAlphaBeta {
         drop(scope);
         Ok(())
     }
+}
+
+/// Create an `MPSMatrix` view into an existing `MTLBuffer`.
+///
+/// # Arguments
+///
+/// * `buffer` - The retained Metal buffer containing f32 elements.
+/// * `offset` - A byte offset into the buffer where the matrix data begins.
+/// * `descriptor` - Describes the matrix layout (rows, columns, rowBytes).
+pub fn mps_matrix_from_buffer(
+    buffer: &Retained<ProtocolObject<dyn MTLBuffer>>,
+    offset: usize,
+    descriptor: &Retained<MPSMatrixDescriptor>,
+) -> Retained<MPSMatrix> {
+    let rows = unsafe { descriptor.rows() };
+    let row_bytes = unsafe { descriptor.rowBytes() };
+    let matrices = unsafe { descriptor.matrices() };
+    let total_bytes = if matrices <= 1 {
+        row_bytes * rows
+    } else {
+        let matrix_bytes = unsafe { descriptor.matrixBytes() };
+        (matrices - 1) * matrix_bytes + rows * row_bytes
+    };
+    let size = total_bytes;
+    debug_assert!(offset + size <= buffer.length(), "matrix dimensions exceed buffer length");
+    unsafe { MPSMatrix::initWithBuffer_offset_descriptor(MPSMatrix::alloc(), buffer, offset, descriptor) }
+}
+
+/// Encodes a matrix multiplication operation to a command buffer.
+///
+/// # Arguments
+///
+/// * `op` - The `MPSMatrixMultiplication` operation to encode.
+/// * `command_buffer` - The command buffer to encode the operation into.
+/// * `left` - The left matrix operand.
+/// * `right` - The right matrix operand.
+/// * `result` - The result matrix.
+pub fn encode_mps_matrix_multiplication(
+    op: &Retained<MPSMatrixMultiplication>,
+    command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
+    left: &Retained<MPSMatrix>,
+    right: &Retained<MPSMatrix>,
+    result: &Retained<MPSMatrix>,
+) {
+    unsafe { op.encodeToCommandBuffer_leftMatrix_rightMatrix_resultMatrix(command_buffer, left, right, result) }
 }

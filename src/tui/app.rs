@@ -298,7 +298,7 @@ impl App {
     pub fn toggle_log_visibility(&mut self) {
         let was_visible = self.log_visible;
         self.log_visible = !self.log_visible;
-        
+
         // Set flag to scroll to bottom on next render when making the log visible
         if self.log_visible && !was_visible {
             self.request_scroll_to_log_end = true;
@@ -323,10 +323,10 @@ impl App {
         }
 
         // Auto-scroll to bottom if we were already at the bottom and log is visible
-        if self.log_visible && 
-           (self.focus != FocusArea::LogBox
-            || (self.log_area.height > 0
-                && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)))
+        if self.log_visible
+            && (self.focus != FocusArea::LogBox
+                || (self.log_area.height > 0
+                    && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)))
         {
             self.scroll_to_log_end();
         }
@@ -340,7 +340,7 @@ impl App {
         } else {
             0
         };
-        
+
         self.log_scroll = max_scroll;
         // Clear the request flag if it was set
         self.request_scroll_to_log_end = false;

@@ -1,5 +1,5 @@
-use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
 use metallic_env::ENABLE_PROFILING_VAR;
+use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
 
 use crate::{
     context::Context,

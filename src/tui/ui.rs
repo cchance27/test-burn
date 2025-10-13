@@ -204,8 +204,8 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 
     // Log area scrollbar
-    if app.log_visible {
-        if let Some(log_area) = log_area {
+    if app.log_visible
+        && let Some(log_area) = log_area {
             let log_content_lines = app.log_messages.len();
             let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
 
@@ -223,7 +223,6 @@ pub fn render(app: &mut App, frame: &mut Frame) {
                 frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
             }
         }
-    }
 }
 
 pub fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], collapse_depth: u8) -> String {
