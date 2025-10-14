@@ -415,6 +415,21 @@ impl<T: TensorElement> Context<T> {
         self.pending_gpu_scope = None;
     }
 
+    // Device capability hints used by dispatcher heuristics. These are conservative defaults
+    // and should be updated to query real device/feature sets.
+    #[inline]
+    pub fn device_has_simdgroup_mm(&self) -> bool {
+        // TODO(DEBT): Detect simdgroup matrix multiply support via Metal feature sets / GPU family.
+        // For now, return false; dispatcher thresholds can be tuned via env.
+        false
+    }
+
+    #[inline]
+    pub fn max_threads_per_threadgroup(&self) -> usize {
+        // TODO(DEBT): Provide a pipeline-aware value; fall back to a conservative upper bound.
+        1024
+    }
+
     /// Build the current hierarchical GPU scope label without consuming the pending scope.
     /// This mirrors `take_gpu_scope` but returns a label even when called from pre-encode phases
     /// such as tensor preparation, so we can attribute CPU-side work (e.g. dependency waits)

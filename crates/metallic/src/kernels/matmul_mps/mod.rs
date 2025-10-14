@@ -146,7 +146,6 @@ impl KernelInvocable for MatMulMpsOp {
         let right_desc_dtype = right_dtype;
         let result_desc_dtype = result_dtype;
 
-        // Get or create MPSMatrixMultiplication operation from cache
         let gemm_key = MpsGemmKey {
             transpose_left,
             transpose_right,
@@ -154,10 +153,11 @@ impl KernelInvocable for MatMulMpsOp {
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
             batch_size: matmul_result_view.batch,
-            alpha: 1.0,
-            beta: 0.0,
+            alpha: 1.0, // alpha
+            beta: 0.0,  // beta
+            beta_nonzero: false, // Set based on actual beta value (false since beta = 0.0)
+            dtype: left_dtype,   // Use dtype for caching
         };
-
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 

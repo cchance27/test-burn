@@ -41,7 +41,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 ndarray-npy = "0.9.1"
 ndarray = "0.16.1"
-regex = "1.11.3"
+regex = "1.12.2"
 unicode-normalization = "0.1.22"
 fancy-regex = "0.16.2"
 ratatui = { version = "0.29.0", features = ["crossterm"] }
@@ -57,7 +57,7 @@ metallic_env = { path = "crates/metallic_env" }
 metallic_instrumentation = { path = "crates/metallic_instrumentation" }
 metallic = { path = "crates/metallic" }
 metallic_cli_helpers = { path = "crates/metallic_cli_helpers" }
-clap = { version = "4.5.48", features = ["derive"] }
+clap = { version = "4.5.49", features = ["derive"] }
 
 [dev-dependencies]
 approx = "0.5.1"
@@ -93,4 +93,12 @@ harness = false
 
 [[bench]]
 name = "mlx_vs_mps_matmul_benchmark"
+harness = false
+
+[[bench]]
+name = "matmul_dispatcher_bench"
+harness = false
+
+[[bench]]
+name = "softmax_dispatcher_bench"
 harness = false

@@ -124,6 +124,8 @@ fn test_matmul_invalid_shapes() {
         batch_size: 1,
         alpha: 1.0,
         beta: 0.0,
+        beta_nonzero: false,
+        dtype: crate::tensor::dtypes::Dtype::F32,
     };
 
     // This might not fail at the Rust level, but would fail at the Metal level

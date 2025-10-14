@@ -2,17 +2,25 @@ use super::*;
 
 #[test]
 fn test_cacheable_trait() {
+    use crate::cache_keys::SeqKBucket;
+
     // Test CacheableSdpa since it doesn't require complex objects
     let key = SdpaKey {
         batch: 2,
         dim: 64,
         dtype: crate::tensor::dtypes::Dtype::F32,
+        causal: false,
+        seq_k_bucket: SeqKBucket::from(64),
+        transpose_k: false,
     };
     let sdpa = CacheableSdpa::from_key(&key, None).unwrap();
     let expected_key = SdpaKey {
         batch: 2,
         dim: 64,
         dtype: crate::tensor::dtypes::Dtype::F32,
+        causal: false,
+        seq_k_bucket: SeqKBucket::from(64),
+        transpose_k: false,
     };
     assert_eq!(sdpa.cache_key(), expected_key);
 }
@@ -26,7 +34,7 @@ fn sdpa_cache_hits_increase_for_repeated_requests() {
     let dtype = Dtype::F32;
 
     // Initial miss populates the cache.
-    let _ = cache.get_or_create_sdpa(8, 64, dtype);
+    let _ = cache.get_or_create_sdpa_full(8, 64, dtype, false, 64, false);
     let stats_after_miss = cache.get_stats();
     assert_eq!(stats_after_miss.sdpa.misses, 1);
     assert_eq!(stats_after_miss.sdpa.hits, 0);
@@ -34,7 +42,7 @@ fn sdpa_cache_hits_increase_for_repeated_requests() {
     // Subsequent lookups with the same stable key should hit regardless of
     // external sequence growth.
     for _ in 0..3 {
-        let _ = cache.get_or_create_sdpa(8, 64, dtype);
+        let _ = cache.get_or_create_sdpa_full(8, 64, dtype, false, 64, false);
     }
 
     let stats_after_hits = cache.get_stats();

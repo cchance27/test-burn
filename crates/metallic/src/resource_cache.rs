@@ -1,5 +1,5 @@
 use super::{
-    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey, MpsSoftMaxKey, SdpaKey},
+    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey, MpsSoftMaxKey, SdpaKey, SeqKBucket},
     cacheable::Cacheable,
     cacheable_resources::{CacheableMpsGemm, CacheableMpsMatrixDescriptor, CacheableMpsSoftMax},
     cacheable_sdpa::CacheableSdpa,
@@ -117,13 +117,53 @@ impl ResourceCache {
         Ok(cacheable_descriptor.descriptor.clone())
     }
 
-    /// Get or create an MPS softmax operation.
+    /// Get or create an MPS softmax operation with individual parameters.
     #[inline]
     pub fn get_or_create_softmax(
         &mut self,
-        key: MpsSoftMaxKey,
+        rows: usize,
+        columns: usize,
+        dtype: Dtype,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,
     ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixSoftMax>, MetalError> {
+        // For backward compatibility, use default causal value
+        let seq_k_bucket = SeqKBucket::from(columns); // columns is typically seq_k in softmax
+        let key = MpsSoftMaxKey {
+            rows,
+            columns,
+            seq_k_bucket,
+            causal: false, // Default value for backward compatibility
+            dtype,
+        };
+        let cacheable_softmax = Self::get_or_create_resource(
+            &mut self.softmax_cache,
+            key,
+            Some(device),
+            self.default_device.as_ref(),
+            &mut self.softmax_counters,
+            "softmax",
+        )?;
+        Ok(cacheable_softmax.softmax.clone())
+    }
+    
+    /// Get or create an MPS softmax operation with all parameters including causal flag.
+    #[inline]
+    pub fn get_or_create_softmax_full(
+        &mut self,
+        rows: usize,
+        columns: usize,
+        dtype: Dtype,
+        causal: bool,
+        device: &Retained<ProtocolObject<dyn MTLDevice>>,
+    ) -> Result<Retained<objc2_metal_performance_shaders::MPSMatrixSoftMax>, MetalError> {
+        let seq_k_bucket = SeqKBucket::from(columns); // columns is typically seq_k in softmax
+        let key = MpsSoftMaxKey {
+            rows,
+            columns,
+            seq_k_bucket,
+            causal,
+            dtype,
+        };
         let cacheable_softmax = Self::get_or_create_resource(
             &mut self.softmax_cache,
             key,
@@ -138,7 +178,41 @@ impl ResourceCache {
     /// Get or create an SDPA operation.
     #[inline]
     pub fn get_or_create_sdpa(&mut self, batch: usize, dim: usize, dtype: Dtype) -> CacheableSdpa {
-        let key = SdpaKey { batch, dim, dtype };
+        // For backward compatibility, create with default values for new fields
+        // This is called when cache.as_mut() is Some() in SDPA
+        let key = SdpaKey {
+            batch,
+            dim,
+            dtype,
+            causal: false,        // Default value - will be overridden when needed
+            seq_k_bucket: SeqKBucket::Other,  // Default value - will be overridden when needed
+            transpose_k: false,   // Default value - will be overridden when needed
+        };
+        // SDPA creation should never fail, so we unwrap.
+        Self::get_or_create_resource(
+            &mut self.sdpa_cache,
+            key,
+            None,
+            self.default_device.as_ref(),
+            &mut self.sdpa_counters,
+            "sdpa",
+        )
+        .unwrap()
+        .clone()
+    }
+    
+    /// Get or create an SDPA operation with all specialization parameters.
+    #[inline]
+    pub fn get_or_create_sdpa_full(&mut self, batch: usize, dim: usize, dtype: Dtype, causal: bool, seq_k: usize, transpose_k: bool) -> CacheableSdpa {
+        let seq_k_bucket = SeqKBucket::from(seq_k);
+        let key = SdpaKey {
+            batch,
+            dim,
+            dtype,
+            causal,
+            seq_k_bucket,
+            transpose_k,
+        };
         // SDPA creation should never fail, so we unwrap.
         Self::get_or_create_resource(
             &mut self.sdpa_cache,

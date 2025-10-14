@@ -3,6 +3,12 @@ use std::hash::{Hash, Hasher};
 
 use crate::tensor::dtypes::Dtype;
 
+// Re-export dispatcher-specific cache keys
+pub mod matmul_dispatcher_key;
+pub mod softmax_dispatcher_key;
+pub use matmul_dispatcher_key::*;
+pub use softmax_dispatcher_key::*;
+
 /// Key for MPS matrix multiplication operations.
 ///
 /// This key uniquely identifies an MPS matrix multiplication operation
@@ -17,6 +23,9 @@ pub struct MpsGemmKey {
     pub batch_size: usize,
     pub alpha: f32,
     pub beta: f32,
+    /// Additional specialization factors
+    pub beta_nonzero: bool,  // Group by beta==0 vs !=0 instead of exact value
+    pub dtype: Dtype, // Include dtype for more precise caching
 }
 
 impl PartialEq for MpsGemmKey {
@@ -29,6 +38,8 @@ impl PartialEq for MpsGemmKey {
             && self.batch_size == other.batch_size
             && self.alpha == other.alpha
             && self.beta == other.beta
+            && self.beta_nonzero == other.beta_nonzero
+            && self.dtype == other.dtype
     }
 }
 
@@ -46,6 +57,8 @@ impl Hash for MpsGemmKey {
         // We'll use the bit representation for hashing
         self.alpha.to_bits().hash(state);
         self.beta.to_bits().hash(state);
+        self.beta_nonzero.hash(state);
+        self.dtype.hash(state);
     }
 }
 
@@ -91,12 +104,14 @@ impl Hash for MpsMatrixDescriptorKey {
 pub struct MpsSoftMaxKey {
     pub rows: usize,
     pub columns: usize,
+    pub seq_k_bucket: SeqKBucket, // Bounded sequence length for TG sizing
+    pub causal: bool, // Causal mask flag
     pub dtype: Dtype,
 }
 
 impl PartialEq for MpsSoftMaxKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows && self.columns == other.columns && self.dtype == other.dtype
+        self.rows == other.rows && self.columns == other.columns && self.seq_k_bucket == other.seq_k_bucket && self.causal == other.causal && self.dtype == other.dtype
     }
 }
 
@@ -106,6 +121,8 @@ impl Hash for MpsSoftMaxKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.rows.hash(state);
         self.columns.hash(state);
+        self.seq_k_bucket.hash(state);
+        self.causal.hash(state);
         self.dtype.hash(state);
     }
 }
@@ -120,11 +137,17 @@ pub struct SdpaKey {
     pub batch: usize,
     pub dim: usize,
     pub dtype: Dtype,
+    /// Additional specialization factors for SDPA
+    pub causal: bool, // Causal mask flag
+    pub seq_k_bucket: SeqKBucket, // Sequence length bucket for softmax specialization
+    pub transpose_k: bool, // Logical transpose preference flag
 }
 
 impl PartialEq for SdpaKey {
     fn eq(&self, other: &Self) -> bool {
         self.batch == other.batch && self.dim == other.dim && self.dtype == other.dtype
+            && self.causal == other.causal && self.seq_k_bucket == other.seq_k_bucket
+            && self.transpose_k == other.transpose_k
     }
 }
 
@@ -135,5 +158,8 @@ impl Hash for SdpaKey {
         self.batch.hash(state);
         self.dim.hash(state);
         self.dtype.hash(state);
+        self.causal.hash(state);
+        self.seq_k_bucket.hash(state);
+        self.transpose_k.hash(state);
     }
 }

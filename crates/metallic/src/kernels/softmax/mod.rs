@@ -1,5 +1,5 @@
 use super::*;
-use crate::cache_keys::{MpsMatrixDescriptorKey, MpsSoftMaxKey};
+use crate::cache_keys::MpsMatrixDescriptorKey;
 use crate::context::GpuProfilerLabel;
 use crate::kernels::matmul_mps::mps_matrix_from_buffer;
 use crate::resource_cache::ResourceCache;
@@ -13,6 +13,9 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 use std::sync::OnceLock;
+
+// TODO: This kernel file is very confusing with SoftmaxOp, SoftmaxOperation, SoftmaxMpsOp SoftmaxMpsOperation etc... and direct callers like apply_softmax and try_apply_mps_softmax
+// we need to clean this up and if we have MPS and kernel versions move them to different kernel folders and use them properly with the new dispatcher
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoftmaxBackendPreference {
@@ -86,7 +89,7 @@ pub fn apply_softmax<T: TensorElement>(
     let can_use_mps = allow_mps && supports_mps_dtype && !causal && query_offset == 0 && !preference.forces_kernel();
     if can_use_mps && let Some(cache_slot) = cache.as_mut() {
         let cache_ref: &mut ResourceCache = cache_slot;
-        try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns, dtype)?;
+        try_apply_mps_softmax(ctx, cache_ref, attn, &view, batch, rows, columns, dtype, causal)?;
         return Ok(attn.clone());
     }
 
@@ -110,6 +113,7 @@ fn try_apply_mps_softmax<T: TensorElement>(
     rows: usize,
     columns: usize,
     dtype: Dtype,
+    causal: bool,
 ) -> Result<(), MetalError> {
     ctx.prepare_tensors_for_active_cmd(&[attn])?;
 
@@ -122,8 +126,7 @@ fn try_apply_mps_softmax<T: TensorElement>(
         dtype,
     };
     let descriptor = cache.get_or_create_descriptor(descriptor_key, &ctx.device)?;
-    let softmax_key = MpsSoftMaxKey { rows, columns, dtype };
-    let softmax = cache.get_or_create_softmax(softmax_key, &ctx.device)?;
+    let softmax = cache.get_or_create_softmax_full(rows, columns, dtype, causal, &ctx.device)?;
 
     let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
     let op = SoftmaxMpsOperation {

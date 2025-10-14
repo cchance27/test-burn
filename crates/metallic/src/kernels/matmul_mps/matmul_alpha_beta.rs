@@ -122,8 +122,9 @@ impl KernelInvocable for MatMulMpsAlphaBetaOp {
             batch_size: matmul_result_view.batch,
             alpha,
             beta,
+            beta_nonzero: beta != 0.0, // Set based on actual beta value
+            dtype: left_dtype,   // Use dtype for caching
         };
-
         let cache = cache.ok_or_else(|| MetalError::InvalidOperation("Resource cache required for matmul".to_string()))?;
         let gemm = cache.get_or_create_gemm(gemm_key, &ctx.device)?;
 

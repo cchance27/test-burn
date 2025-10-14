@@ -14,5 +14,7 @@ mod forward_pass_correctness_test;
 mod generation_test;
 mod gpu_profiling;
 mod matmul;
+mod matmul_dispatch_test;
+mod matmul_alpha_beta_parity_test;
 mod resource_cache_persistence_test;
 mod tensor_test;

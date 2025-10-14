@@ -4,7 +4,7 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{SdpaKey, SeqKBucket}, resource_cache::ResourceCache,
 };
 
 #[cfg(test)]
@@ -19,13 +19,13 @@ struct SdpaConfig {
 
 impl SdpaConfig {
     const BASELINE: Self = Self {
-        transpose_k: false,
+        transpose_k: true,  // Prefer logical transpose by default to avoid materialized permutes
         reuse_workspace: false,
         use_mps_softmax: false,
     };
 
     const NO_PERMUTE: Self = Self {
-        transpose_k: true,
+        transpose_k: true,  // Same as baseline now - both prefer logical transpose
         reuse_workspace: false,
         use_mps_softmax: false,
     };
@@ -131,10 +131,13 @@ fn create_sdpa_operation<T: TensorElement>(
         batch: b,
         dim: d,
         dtype: q.dtype,
+        causal,
+        seq_k_bucket: SeqKBucket::from(s_k),
+        transpose_k: config.transpose_k,
     };
     let scale = if let Some(cache_ref) = cache.as_mut() {
         cache_ref
-            .get_or_create_sdpa(sdpa_descriptor.batch, sdpa_descriptor.dim, sdpa_descriptor.dtype)
+            .get_or_create_sdpa_full(sdpa_descriptor.batch, sdpa_descriptor.dim, sdpa_descriptor.dtype, sdpa_descriptor.causal, s_k, sdpa_descriptor.transpose_k)
             .scale
     } else {
         compute_sdpa_scale(d)
@@ -180,9 +183,13 @@ fn create_sdpa_operation<T: TensorElement>(
 
     ctx.prepare_tensors_for_active_cmd(&[&attention])?;
 
+    // For the QK^T matmul, prefer logical transpose via stride manipulation over materialized permute
+    // when the backend supports it (MLX does, MPS does, etc.)
     let (k_operand, transpose_b) = if config.transpose_k {
+        // Use logical transpose by swapping dimensions and strides - no data movement
         (k.clone(), true)
     } else {
+        // Fallback to materialized transpose - requires copying data
         (k.permute(&[0, 2, 1], ctx)?, false)
     };
 

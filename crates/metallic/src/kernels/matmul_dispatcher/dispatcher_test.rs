@@ -19,7 +19,7 @@ fn auto_smalln_prefers_custom_smalln() {
     };
     let plan = select_policy(shape, Dtype::F16, &caps(true), &prefs);
     match plan {
-        DispatchPlan::UseCustom(MatmulVariant::SmallN(SmallNBucket::N4)) => {}
+        DispatchPlan::UseLegacyGemv(MatmulVariant::SmallN(SmallNBucket::N4)) => {}
         _ => panic!("unexpected plan: {:?}", plan),
     }
 }
@@ -33,7 +33,7 @@ fn auto_simdgroup_prefers_gemm_simd_when_large() {
     };
     let plan = select_policy(shape, Dtype::F16, &caps(true), &prefs);
     match plan {
-        DispatchPlan::UseCustom(MatmulVariant::GemmSimd(_)) => {}
+        DispatchPlan::UseLegacyGemv(MatmulVariant::GemmSimd(_)) => {}
         _ => panic!("unexpected plan: {:?}", plan),
     }
 }

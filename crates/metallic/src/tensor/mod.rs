@@ -1343,4 +1343,25 @@ impl<T: TensorElement> Tensor<T> {
         }
         Ok(())
     }
+
+    /// Element-wise scalar multiplication
+    pub fn mul_scalar(&self, scalar: f32, ctx: &mut Context<T>) -> Result<Self, MetalError> {
+        let mut scalar_tensor = Self::zeros_like(self, ctx)?;
+        scalar_tensor.fill(scalar);
+        self.mul_elem(&scalar_tensor, ctx)
+    }
+
+    /// Element-wise absolute value
+    pub fn abs(&self, ctx: &mut Context<T>) -> Result<Self, MetalError> {
+        use crate::kernels::elemwise_abs::ElemwiseAbsOp;
+        ctx.call::<ElemwiseAbsOp>((self.clone(),))
+    }
+
+    /// Find the maximum scalar value in the tensor
+    pub fn max_scalar(&self) -> f32 {
+        let data = self.as_slice();
+        data.iter()
+            .map(|&val| T::to_f32(val))
+            .fold(f32::NEG_INFINITY, |a, b| a.max(b))
+    }
 }

@@ -16,16 +16,19 @@ pub use kernel_manager::{KernelInvocable, KernelManager};
 
 // Export our kernels
 pub mod elemwise_add;
+pub mod elemwise_abs;
 pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
 pub mod gelu;
 pub mod matmul_gemv;
+pub mod matmul_dispatcher;
 pub mod kv_cache_write;
 pub mod kv_rearrange;
 pub mod layernorm;
 pub mod matmul_mps;
 pub mod matmul_mlx;
+pub use matmul_dispatcher::dispatch_op::MatmulDispatchOp;
 pub mod permute;
 pub mod repeat_kv_heads;
 pub mod rmsnorm;
@@ -34,6 +37,8 @@ pub mod scaled_dot_product_attention;
 pub mod silu;
 pub mod softmax;
 pub mod swiglu;
+pub mod softmax_dispatcher;
+pub use softmax_dispatcher::SoftmaxDispatchOp;
 pub mod tensors;
 
 /// Uniquely identifies a compiled Metal library.
@@ -41,6 +46,7 @@ pub mod tensors;
 pub enum KernelLibrary {
     Cast,
     ElemwiseAdd,
+    ElemwiseAbs,
     ElemwiseDiv,
     ElemwiseMul,
     ElemwiseSub,
@@ -64,6 +70,7 @@ impl KernelLibrary {
         match self {
             KernelLibrary::Cast => include_str!("cast/kernel.metal"),
             KernelLibrary::ElemwiseAdd => include_str!("elemwise_add/kernel.metal"),
+            KernelLibrary::ElemwiseAbs => include_str!("elemwise_abs/kernel.metal"),
             KernelLibrary::ElemwiseDiv => include_str!("elemwise_div/kernel.metal"),
             KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
             KernelLibrary::ElemwiseSub => include_str!("elemwise_sub/kernel.metal"),
@@ -92,6 +99,7 @@ pub enum KernelFunction {
     CastToF32,
     CastFromF32,
     ElemwiseAdd,
+    ElemwiseAbs,
     ElemwiseBroadcastAdd,
     ElemwiseDiv,
     ElemwiseMul,
@@ -120,6 +128,7 @@ impl KernelFunction {
                 KernelLibrary::Cast
             }
             KernelFunction::ElemwiseAdd | KernelFunction::ElemwiseBroadcastAdd => KernelLibrary::ElemwiseAdd,
+            KernelFunction::ElemwiseAbs => KernelLibrary::ElemwiseAbs,
             KernelFunction::ElemwiseDiv => KernelLibrary::ElemwiseDiv,
             KernelFunction::ElemwiseMul => KernelLibrary::ElemwiseMul,
             KernelFunction::ElemwiseSub => KernelLibrary::ElemwiseSub,
@@ -153,6 +162,8 @@ impl KernelFunction {
             (KernelFunction::CastFromF32, F16) => "cast_from_f32_kernel_f16",
             (KernelFunction::ElemwiseAdd, F32) => "add_kernel_f32",
             (KernelFunction::ElemwiseAdd, F16) => "add_kernel_f16",
+            (KernelFunction::ElemwiseAbs, F32) => "abs_kernel_f32",
+            (KernelFunction::ElemwiseAbs, F16) => "abs_kernel_f16",
             (KernelFunction::ElemwiseBroadcastAdd, F32) => "broadcast_add_kernel_f32",
             (KernelFunction::ElemwiseBroadcastAdd, F16) => "broadcast_add_kernel_f16",
             (KernelFunction::ElemwiseDiv, F32) => "div_kernel_f32",
