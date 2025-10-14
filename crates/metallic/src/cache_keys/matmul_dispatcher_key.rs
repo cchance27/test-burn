@@ -1,21 +1,21 @@
 use serde::{Deserialize, Serialize};
 
-use crate::tensor::dtypes::Dtype;
 use crate::kernels::matmul_dispatcher::types::{MatmulVariant, SmallNBucket};
+use crate::tensor::dtypes::Dtype;
 
 /// Key for matmul dispatcher operations
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MatmulDispatcherKey {
     pub transpose_left: bool,
     pub transpose_right: bool,
-    pub result_rows: usize,  // m
-    pub result_columns: usize,  // n
-    pub interior_columns: usize,  // k
+    pub result_rows: usize,      // m
+    pub result_columns: usize,   // n
+    pub interior_columns: usize, // k
     pub batch_size: usize,
     pub alpha: f32,
     pub beta: f32,
     /// Additional specialization factors for dispatcher
-    pub beta_nonzero: bool,  // Group by beta==0 vs !=0 instead of exact value
+    pub beta_nonzero: bool, // Group by beta==0 vs !=0 instead of exact value
     pub n_bucket: SmallNBucket, // Small-N specialization
     pub variant: MatmulVariant, // Specific variant for dispatch
     pub dtype: Dtype,

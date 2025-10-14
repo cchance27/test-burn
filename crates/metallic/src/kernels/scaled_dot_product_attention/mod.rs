@@ -4,7 +4,9 @@ use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
 
 use super::{KernelFunction, KernelInvocable};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{SdpaKey, SeqKBucket}, resource_cache::ResourceCache,
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    cache_keys::{SdpaKey, SeqKBucket},
+    resource_cache::ResourceCache,
 };
 
 #[cfg(test)]
@@ -14,38 +16,33 @@ mod scaled_dot_product_attention_test;
 struct SdpaConfig {
     transpose_k: bool,
     reuse_workspace: bool,
-    use_mps_softmax: bool,
 }
 
 impl SdpaConfig {
     const BASELINE: Self = Self {
-        transpose_k: true,  // Prefer logical transpose by default to avoid materialized permutes
+        transpose_k: true, // Prefer logical transpose by default to avoid materialized permutes
         reuse_workspace: false,
-        use_mps_softmax: false,
     };
 
     const NO_PERMUTE: Self = Self {
-        transpose_k: true,  // Same as baseline now - both prefer logical transpose
+        transpose_k: true, // Same as baseline now - both prefer logical transpose
         reuse_workspace: false,
-        use_mps_softmax: false,
     };
 
     const WORKSPACE: Self = Self {
         transpose_k: false,
         reuse_workspace: true,
-        use_mps_softmax: false,
     };
 
+    // Note: This configuration is now handled by the new softmax dispatcher
     const MPS_SOFTMAX: Self = Self {
         transpose_k: false,
         reuse_workspace: false,
-        use_mps_softmax: true,
     };
 
     const ALL: Self = Self {
         transpose_k: true,
         reuse_workspace: true,
-        use_mps_softmax: true,
     };
 }
 
@@ -137,7 +134,14 @@ fn create_sdpa_operation<T: TensorElement>(
     };
     let scale = if let Some(cache_ref) = cache.as_mut() {
         cache_ref
-            .get_or_create_sdpa_full(sdpa_descriptor.batch, sdpa_descriptor.dim, sdpa_descriptor.dtype, sdpa_descriptor.causal, s_k, sdpa_descriptor.transpose_k)
+            .get_or_create_sdpa_full(
+                sdpa_descriptor.batch,
+                sdpa_descriptor.dim,
+                sdpa_descriptor.dtype,
+                sdpa_descriptor.causal,
+                s_k,
+                sdpa_descriptor.transpose_k,
+            )
             .scale
     } else {
         compute_sdpa_scale(d)
@@ -211,18 +215,17 @@ fn create_sdpa_operation<T: TensorElement>(
 
     ctx.set_pending_gpu_scope("sdpa_softmax_op");
     let softmax_result = {
-        let cache_opt = cache.as_deref_mut();
-        crate::kernels::softmax::apply_softmax(
-            ctx,
-            cache_opt,
-            &qk_scaled_result,
-            b,
-            rows_to_process,
-            s_k,
-            causal,
-            adjusted_query_offset,
-            config.use_mps_softmax,
-        )?
+        // Use the softmax dispatcher to select optimal backend/variant
+        if let Some(cache_ref) = cache.as_mut() {
+            ctx.call_with_cache::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>(
+                (&qk_scaled_result, causal, adjusted_query_offset),
+                cache_ref,
+            )?
+        } else {
+            ctx.call::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>(
+                (&qk_scaled_result, causal, adjusted_query_offset)
+            )?
+        }
     };
 
     ctx.set_pending_gpu_scope("sdpa_matmul_av_op");

@@ -5,14 +5,19 @@ fn parse_backend(s: &str) -> MatmulBackend {
     match s.to_ascii_lowercase().as_str() {
         "mlx" => MatmulBackend::Mlx,
         "mps" => MatmulBackend::Mps,
-        "gemv" | "legacy_gemv" => MatmulBackend::LegacyGemv,
+        "gemv" => MatmulBackend::Gemv,
         "auto" => MatmulBackend::Auto,
         _ => MatmulBackend::Auto,
     }
 }
 
 pub fn load_prefs_from_env() -> Prefs {
-    let backend = FORCE_MATMUL_BACKEND.get().ok().flatten().map(|s| parse_backend(&s)).unwrap_or(MatmulBackend::Auto);
+    let backend = FORCE_MATMUL_BACKEND
+        .get()
+        .ok()
+        .flatten()
+        .map(|s| parse_backend(&s))
+        .unwrap_or(MatmulBackend::Auto);
     // For now, keep smallN force via raw env until a typed var is added
     let force_smalln = std::env::var("METALLIC_MATMUL_FORCE_SMALLN")
         .ok()

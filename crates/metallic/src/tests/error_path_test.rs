@@ -265,7 +265,8 @@ fn test_softmax_invalid_dimensions() {
     // This might fail at tensor creation time
     if let Ok(attn_tensor) = result {
         let rows_total = if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 };
-        let result = context.call::<SoftmaxOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0));
+        let result =
+            context.call::<crate::kernels::softmax_kernel::SoftmaxKernelOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0));
         // Should not panic, but might return an error
         assert!(result.is_ok() || result.is_err());
     }

@@ -236,6 +236,19 @@ impl KernelInvocable for MatMulMlxOp {
         let n = b_cols;
         let k = a_cols;
 
+        if std::env::var("METALLIC_DEBUG_MLX_MATMUL").is_ok() {
+            println!(
+                "[MLX] m={}, n={}, k={}, transpose_left={}, transpose_right={}, layout_a_base=({},{}) layout_b_base=({},{})",
+                m, n, k, transpose_left, transpose_right, a_rows_base, a_cols_base, b_rows_base, b_cols_base
+            );
+            println!(
+                "[MLX] strides left={:?}, right={:?}, dtype={:?}",
+                left_tensor.strides,
+                right_tensor.strides,
+                T::DTYPE
+            );
+        }
+
         if m == 0 || n == 0 || k == 0 {
             return Err(MetalError::InvalidOperation("MatMul dimensions must be non-zero".to_string()));
         }

@@ -145,7 +145,7 @@ impl ResourceCache {
         )?;
         Ok(cacheable_softmax.softmax.clone())
     }
-    
+
     /// Get or create an MPS softmax operation with all parameters including causal flag.
     #[inline]
     pub fn get_or_create_softmax_full(
@@ -184,9 +184,9 @@ impl ResourceCache {
             batch,
             dim,
             dtype,
-            causal: false,        // Default value - will be overridden when needed
-            seq_k_bucket: SeqKBucket::Other,  // Default value - will be overridden when needed
-            transpose_k: false,   // Default value - will be overridden when needed
+            causal: false,                   // Default value - will be overridden when needed
+            seq_k_bucket: SeqKBucket::Other, // Default value - will be overridden when needed
+            transpose_k: false,              // Default value - will be overridden when needed
         };
         // SDPA creation should never fail, so we unwrap.
         Self::get_or_create_resource(
@@ -200,10 +200,18 @@ impl ResourceCache {
         .unwrap()
         .clone()
     }
-    
+
     /// Get or create an SDPA operation with all specialization parameters.
     #[inline]
-    pub fn get_or_create_sdpa_full(&mut self, batch: usize, dim: usize, dtype: Dtype, causal: bool, seq_k: usize, transpose_k: bool) -> CacheableSdpa {
+    pub fn get_or_create_sdpa_full(
+        &mut self,
+        batch: usize,
+        dim: usize,
+        dtype: Dtype,
+        causal: bool,
+        seq_k: usize,
+        transpose_k: bool,
+    ) -> CacheableSdpa {
         let seq_k_bucket = SeqKBucket::from(seq_k);
         let key = SdpaKey {
             batch,

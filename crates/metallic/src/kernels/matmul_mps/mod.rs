@@ -29,7 +29,6 @@ pub use matmul_alpha_beta::MatMulMpsAlphaBetaOp;
 
 // Dispatcher moved to `matmul_dispatcher` module
 
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 // TODO: This enum seems redundant with matmul_dispatcher::types::MatmulBackend; consider removal in a later refactor.
 pub enum MatMulBackend {
@@ -153,8 +152,8 @@ impl KernelInvocable for MatMulMpsOp {
             result_columns: eff_right_cols,
             interior_columns: eff_left_cols, // This is the "k" dimension after applying transpose
             batch_size: matmul_result_view.batch,
-            alpha: 1.0, // alpha
-            beta: 0.0,  // beta
+            alpha: 1.0,          // alpha
+            beta: 0.0,           // beta
             beta_nonzero: false, // Set based on actual beta value (false since beta = 0.0)
             dtype: left_dtype,   // Use dtype for caching
         };

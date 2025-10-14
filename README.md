@@ -24,7 +24,7 @@ The Metallic framework supports various environment variables to control behavio
   - `auto` (default): Use dispatcher to select optimal backend
   - `mlx`: Force MLX-based implementation
   - `mps`: Force MPS-based implementation 
-  - `gemv` or `legacy_gemv`: Force legacy GEMV implementation
+  - `gemv` or `gemv`: Force legacy GEMV implementation
 
 - `METALLIC_MATMUL_SMALLN_MAX_N`: Maximum N dimension for small-N optimization (default: 8). Matmuls with N ≤ this value may use specialized kernels.
 

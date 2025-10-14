@@ -1227,119 +1227,101 @@ fn sdpa_determinism_check() {
 #[test]
 fn sdpa_logical_transpose_correctness() -> Result<(), MetalError> {
     use crate::{Context, Tensor, TensorInit, TensorStorage};
-    
+
     let batch = 1;
     let seq = 4;
     let dim = 4;
-    
+
     // Create simple test data
     let q_data: Vec<f32> = vec![
-        1.0, 0.0, 0.0, 0.0,  // query 0
-        0.0, 1.0, 0.0, 0.0,  // query 1
-        0.0, 0.0, 1.0, 0.0,  // query 2
-        0.0, 0.0, 0.0, 1.0,  // query 3
+        1.0, 0.0, 0.0, 0.0, // query 0
+        0.0, 1.0, 0.0, 0.0, // query 1
+        0.0, 0.0, 1.0, 0.0, // query 2
+        0.0, 0.0, 0.0, 1.0, // query 3
     ];
-    
+
     let k_data: Vec<f32> = vec![
-        1.0, 0.5, 0.2, 0.1,  // key 0
-        0.5, 1.0, 0.3, 0.2,  // key 1
-        0.2, 0.3, 1.0, 0.4,  // key 2
-        0.1, 0.2, 0.4, 1.0,  // key 3
+        1.0, 0.5, 0.2, 0.1, // key 0
+        0.5, 1.0, 0.3, 0.2, // key 1
+        0.2, 0.3, 1.0, 0.4, // key 2
+        0.1, 0.2, 0.4, 1.0, // key 3
     ];
-    
+
     let v_data: Vec<f32> = vec![
-        1.0, 0.0, 0.0, 0.0,  // value 0
-        0.0, 1.0, 0.0, 0.0,  // value 1
-        0.0, 0.0, 1.0, 0.0,  // value 2
-        0.0, 0.0, 0.0, 1.0,  // value 3
+        1.0, 0.0, 0.0, 0.0, // value 0
+        0.0, 1.0, 0.0, 0.0, // value 1
+        0.0, 0.0, 1.0, 0.0, // value 2
+        0.0, 0.0, 0.0, 1.0, // value 3
     ];
-    
+
     let mut ctx = Context::<F32Element>::new()?;
-    
+
     // Create tensors
-    let q_tensor = Tensor::new(
-        vec![batch, seq, dim],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&q_data),
-    )?;
-    let k_tensor = Tensor::new(
-        vec![batch, seq, dim],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&k_data),
-    )?;
-    let v_tensor = Tensor::new(
-        vec![batch, seq, dim],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&v_data),
-    )?;
-    
+    let q_tensor = Tensor::new(vec![batch, seq, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data))?;
+
     // Run SDPA normally (with materialized permute)
     let result_with_permute = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?;
-    
+
     // Now test if we call SDPA with logical transpose preference, it should work the same
     // This test specifically checks that logical transpose functionality works correctly
     let result_with_logical_transpose = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?;
-    
+
     // Both should have the same shape
     assert_eq!(result_with_permute.dims(), &[batch, seq, dim]);
     assert_eq!(result_with_logical_transpose.dims(), &[batch, seq, dim]);
-    
+
     // The results should be identical within tolerance due to both using same approach
     let result_permute_slice = result_with_permute.as_slice();
     let result_logical_slice = result_with_logical_transpose.as_slice();
-    
+
     for (i, (val_permute, val_logical)) in result_permute_slice.iter().zip(result_logical_slice.iter()).enumerate() {
         let diff = (val_permute - val_logical).abs();
-        assert!(diff < 1e-5, "Mismatch at index {}: permute={} vs logical={}, diff={}", 
-               i, val_permute, val_logical, diff);
+        assert!(
+            diff < 1e-5,
+            "Mismatch at index {}: permute={} vs logical={}, diff={}",
+            i,
+            val_permute,
+            val_logical,
+            diff
+        );
     }
-    
+
     Ok(())
 }
 
 #[test]
 fn sdpa_logical_transpose_vs_permute_equivalence() -> Result<(), MetalError> {
     use crate::{Context, Tensor, TensorInit, TensorStorage};
-    
+
     let batch = 1;
     let seq = 3;
     let dim = 2;
-    
+
     // Create simple test data
     let q_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]; // [1, 3, 2]
     let k_data: Vec<f32> = vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]; // [1, 3, 2] 
     let v_data: Vec<f32> = vec![1.0, 0.0, 0.0, 1.0, 0.5, 0.5]; // [1, 3, 2]
-    
+
     let mut ctx = Context::<F32Element>::new()?;
-    
+
     // Create tensors
-    let q_tensor = Tensor::new(
-        vec![batch, seq, dim],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&q_data),
-    )?;
-    let k_tensor = Tensor::new(
-        vec![batch, seq, dim],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&k_data),
-    )?;
-    let v_tensor = Tensor::new(
-        vec![batch, seq, dim],
-        TensorStorage::Dedicated(&ctx),
-        TensorInit::CopyFrom(&v_data),
-    )?;
-    
+    let q_tensor = Tensor::new(vec![batch, seq, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&q_data))?;
+    let k_tensor = Tensor::new(vec![batch, seq, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&k_data))?;
+    let v_tensor = Tensor::new(vec![batch, seq, dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&v_data))?;
+
     // Get result using the standard SDPA approach (which now prefers logical transpose)
     let result = ctx.scaled_dot_product_attention(&q_tensor, &k_tensor, &v_tensor, false)?;
-    
+
     // Verify the result has correct shape
     assert_eq!(result.dims(), &[batch, seq, dim]);
-    
+
     // Check for finite values (no NaN or infinity)
     let result_slice = result.as_slice();
     for (i, &val) in result_slice.iter().enumerate() {
         assert!(val.is_finite(), "Non-finite value at index {}: {}", i, val);
     }
-    
+
     Ok(())
 }

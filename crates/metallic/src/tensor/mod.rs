@@ -1360,8 +1360,6 @@ impl<T: TensorElement> Tensor<T> {
     /// Find the maximum scalar value in the tensor
     pub fn max_scalar(&self) -> f32 {
         let data = self.as_slice();
-        data.iter()
-            .map(|&val| T::to_f32(val))
-            .fold(f32::NEG_INFINITY, |a, b| a.max(b))
+        data.iter().map(|&val| T::to_f32(val)).fold(f32::NEG_INFINITY, |a, b| a.max(b))
     }
 }

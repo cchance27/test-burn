@@ -68,6 +68,19 @@ DEFINE_ONES_KERNEL(SCALAR, SUFFIX)
 
 FOR_EACH_FLOAT_TYPE(INSTANTIATE_TENSOR_KERNELS)
 
+// Explicit NOOP kernels (avoid macro expansion issues)
+kernel void noop_kernel_f32(
+    uint thread_id [[thread_position_in_grid]]
+) {
+    // Intentionally empty: does no work.
+}
+
+kernel void noop_kernel_f16(
+    uint thread_id [[thread_position_in_grid]]
+) {
+    // Intentionally empty: does no work.
+}
+
 #undef INSTANTIATE_TENSOR_KERNELS
 #undef DEFINE_ONES_KERNEL
 #undef DEFINE_ARANGE_KERNEL

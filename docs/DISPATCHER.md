@@ -41,6 +41,9 @@ The softmax implementation provides adaptive selection based on sequence length 
 - **Parameterized threadgroup sizing**: Threadgroup size adapts to sequence length (nearest power of 2, bounded by device limits)
 - **Vector vs Block variants**: Short sequences use vectorized approach, long sequences use block approach
 - **SIMDgroup reductions**: Optional simdgroup reduction path for improved performance
+- **Defensive fallbacks**: When a kernel does not yet support features (e.g., causal masks), the dispatcher must fall back to the legacy implementation instead of emitting incorrect results
+
+> **Current limitation:** `vec-softmax` is only enabled for non-causal rows with zero `query_offset` in FP16. The dispatcher automatically routes other cases back to the legacy softmax until masking support is implemented. Developers adding new kernels must explicitly gate unsupported modes to avoid silent accuracy bugs.
 
 ## Environment Variables
 
@@ -50,7 +53,7 @@ The softmax implementation provides adaptive selection based on sequence length 
   - `auto` (default): Use dispatcher to select optimal backend
   - `mlx`: Force MLX-based implementation
   - `mps`: Force MPS-based implementation 
-  - `gemv` or `legacy_gemv`: Force legacy GEMV implementation
+  - `gemv` or `gemv`: Force legacy GEMV implementation
 
 - `METALLIC_MATMUL_SMALLN_MAX_N`: Maximum N dimension for small-N optimization (default: 8)
 

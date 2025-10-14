@@ -252,6 +252,9 @@ fn execute_swiglu_logic<T: TensorElement>(
     }
 
     let (gate_temp, gate_leading_stride, up_temp, up_leading_stride) = if let Some(fused_weight) = fused_gate_up {
+        if std::env::var("METALLIC_DEBUG_SWIGLU").is_ok() {
+            println!("[SWIGLU] Using fused gate/up weight dims {:?}", fused_weight.dims());
+        }
         let fused_dims = fused_weight.dims();
         if fused_dims.len() != 2 {
             return Err(MetalError::InvalidShape(format!(
@@ -283,6 +286,9 @@ fn execute_swiglu_logic<T: TensorElement>(
         let up_stride = leading_stride_as_u32(&up_view)?;
         (gate_view, gate_stride, up_view, up_stride)
     } else {
+        if std::env::var("METALLIC_DEBUG_SWIGLU").is_ok() {
+            println!("[SWIGLU] Using separate gate/up weights");
+        }
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;
         let gate_dims = ffn_gate.dims();

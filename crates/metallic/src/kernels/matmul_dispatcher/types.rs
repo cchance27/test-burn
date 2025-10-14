@@ -7,7 +7,7 @@ pub enum MatmulBackend {
     Auto,
     Mps,
     Mlx,
-    LegacyGemv,
+    Gemv,
 }
 
 impl fmt::Display for MatmulBackend {
@@ -16,7 +16,7 @@ impl fmt::Display for MatmulBackend {
             MatmulBackend::Auto => write!(f, "auto"),
             MatmulBackend::Mps => write!(f, "mps"),
             MatmulBackend::Mlx => write!(f, "mlx"),
-            MatmulBackend::LegacyGemv => write!(f, "legacy_gemv"),
+            MatmulBackend::Gemv => write!(f, "gemv"),
         }
     }
 }
@@ -74,6 +74,8 @@ impl fmt::Display for GemmTile {
     }
 }
 
+use crate::kernels::KernelFunction;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MatmulVariant {
     SmallN(SmallNBucket),
@@ -87,6 +89,16 @@ impl fmt::Display for MatmulVariant {
             MatmulVariant::SmallN(bucket) => write!(f, "smalln_{}", bucket),
             MatmulVariant::GemmSimd(tile) => write!(f, "gemm_simd_{}", tile),
             MatmulVariant::GemmGeneric => write!(f, "gemm_generic"),
+        }
+    }
+}
+
+impl MatmulVariant {
+    pub fn kernel_function(&self) -> Option<KernelFunction> {
+        match self {
+            MatmulVariant::SmallN(SmallNBucket::N8) => Some(KernelFunction::MatmulGemvSmallN8),
+            MatmulVariant::SmallN(SmallNBucket::N4) => Some(KernelFunction::MatmulGemvSmallN4),
+            _ => None,
         }
     }
 }
@@ -108,7 +120,7 @@ pub struct MatShape {
 pub enum DispatchPlan {
     UseMLX(MatmulVariant),
     UseMPS(MatmulVariant),
-    UseLegacyGemv(MatmulVariant),
+    Gemv(MatmulVariant),
 }
 
 impl fmt::Display for DispatchPlan {
@@ -116,7 +128,7 @@ impl fmt::Display for DispatchPlan {
         match self {
             DispatchPlan::UseMLX(variant) => write!(f, "mlx_{}", variant),
             DispatchPlan::UseMPS(variant) => write!(f, "mps_{}", variant),
-            DispatchPlan::UseLegacyGemv(variant) => write!(f, "legacy_gemv_{}", variant),
+            DispatchPlan::Gemv(variant) => write!(f, "gemv_{}", variant),
         }
     }
 }

@@ -15,19 +15,24 @@ mod kernel_manager;
 pub use kernel_manager::{KernelInvocable, KernelManager};
 
 // Export our kernels
-pub mod elemwise_add;
 pub mod elemwise_abs;
+pub mod elemwise_add;
 pub mod elemwise_div;
 pub mod elemwise_mul;
 pub mod elemwise_sub;
 pub mod gelu;
-pub mod matmul_gemv;
-pub mod matmul_dispatcher;
 pub mod kv_cache_write;
 pub mod kv_rearrange;
 pub mod layernorm;
-pub mod matmul_mps;
+pub mod matmul_dispatcher;
+pub mod matmul_gemv;
+pub mod matmul_gemv_smalln;
 pub mod matmul_mlx;
+pub mod matmul_mps;
+pub mod softmax_block;
+pub mod softmax_kernel;
+pub mod softmax_mps;
+pub mod softmax_vec;
 pub use matmul_dispatcher::dispatch_op::MatmulDispatchOp;
 pub mod permute;
 pub mod repeat_kv_heads;
@@ -35,9 +40,9 @@ pub mod rmsnorm;
 pub mod rope;
 pub mod scaled_dot_product_attention;
 pub mod silu;
-pub mod softmax;
-pub mod swiglu;
+
 pub mod softmax_dispatcher;
+pub mod swiglu;
 pub use softmax_dispatcher::SoftmaxDispatchOp;
 pub mod tensors;
 
@@ -59,10 +64,14 @@ pub enum KernelLibrary {
     Rope,
     RMSNorm,
     Silu,
-    Softmax,
+    SoftmaxKernel,
+    SoftmaxMps,
     Swiglu,
     Tensors,
     MatmulGemv,
+    MatmulGemvSmalln,
+    SoftmaxBlock,
+    SoftmaxVec,
 }
 
 impl KernelLibrary {
@@ -83,10 +92,14 @@ impl KernelLibrary {
             KernelLibrary::Rope => include_str!("rope/kernel.metal"),
             KernelLibrary::RMSNorm => include_str!("rmsnorm/kernel.metal"),
             KernelLibrary::Silu => include_str!("silu/kernel.metal"),
-            KernelLibrary::Softmax => include_str!("softmax/kernel.metal"),
+            KernelLibrary::SoftmaxKernel => include_str!("softmax_kernel/kernel.metal"),
+            KernelLibrary::SoftmaxMps => include_str!("softmax_mps/kernel.metal"),
             KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
             KernelLibrary::MatmulGemv => include_str!("matmul_gemv/kernel.metal"),
+            KernelLibrary::MatmulGemvSmalln => include_str!("matmul_gemv_smalln/kernel.metal"),
+            KernelLibrary::SoftmaxBlock => include_str!("softmax_block/kernel.metal"),
+            KernelLibrary::SoftmaxVec => include_str!("softmax_vec/kernel.metal"),
         }
     }
 }
@@ -94,6 +107,8 @@ impl KernelLibrary {
 /// Uniquely identifies a function within a Metal library.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KernelFunction {
+    // Utility
+    Noop,
     CastToF16,
     CastFromF16,
     CastToF32,
@@ -119,11 +134,19 @@ pub enum KernelFunction {
     Ones,
     RandomUniform,
     MatmulGemv,
+    MatmulGemvSmallN1,
+    MatmulGemvSmallN2,
+    MatmulGemvSmallN4,
+    MatmulGemvSmallN8,
+    MatmulGemvSmallN16,
+    SoftmaxBlock,
+    SoftmaxVec,
 }
 
 impl KernelFunction {
     fn library(&self) -> KernelLibrary {
         match self {
+            KernelFunction::Noop => KernelLibrary::Tensors,
             KernelFunction::CastToF16 | KernelFunction::CastFromF16 | KernelFunction::CastToF32 | KernelFunction::CastFromF32 => {
                 KernelLibrary::Cast
             }
@@ -141,10 +164,17 @@ impl KernelFunction {
             KernelFunction::Rope => KernelLibrary::Rope,
             KernelFunction::RMSNorm => KernelLibrary::RMSNorm,
             KernelFunction::Silu => KernelLibrary::Silu,
-            KernelFunction::FusedSoftmax => KernelLibrary::Softmax,
+            KernelFunction::FusedSoftmax => KernelLibrary::SoftmaxKernel,
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::MatmulGemv => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvSmallN1 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemvSmallN2 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::SoftmaxBlock => KernelLibrary::SoftmaxBlock,
+            KernelFunction::SoftmaxVec => KernelLibrary::SoftmaxVec,
         }
     }
 
@@ -152,6 +182,8 @@ impl KernelFunction {
         use Dtype::*;
 
         let name = match (self, dtype) {
+            (KernelFunction::Noop, F32) => "noop_kernel_f32",
+            (KernelFunction::Noop, F16) => "noop_kernel_f16",
             (KernelFunction::CastToF16, F32) => "cast_to_f16_kernel_f32",
             (KernelFunction::CastToF16, F16) => "cast_to_f16_kernel_f16",
             (KernelFunction::CastFromF16, F32) => "cast_from_f16_kernel_f32",
@@ -202,6 +234,45 @@ impl KernelFunction {
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
             (KernelFunction::MatmulGemv, F32) => "gemv_f32",
             (KernelFunction::MatmulGemv, F16) => "gemv_f16",
+            (KernelFunction::MatmulGemvSmallN1, F16) => "gemv_n1_f16",
+            (KernelFunction::MatmulGemvSmallN1, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvSmallN1",
+                });
+            }
+            (KernelFunction::MatmulGemvSmallN2, F16) => "gemv_n2_f16",
+            (KernelFunction::MatmulGemvSmallN2, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvSmallN2",
+                });
+            }
+            (KernelFunction::MatmulGemvSmallN4, F16) => "gemv_n4_f16",
+            (KernelFunction::MatmulGemvSmallN4, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvSmallN4",
+                });
+            }
+            (KernelFunction::MatmulGemvSmallN8, F16) => "gemv_n8_f16",
+            (KernelFunction::MatmulGemvSmallN8, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvSmallN8",
+                });
+            }
+            (KernelFunction::MatmulGemvSmallN16, F16) => "gemv_n16_f16",
+            (KernelFunction::MatmulGemvSmallN16, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvSmallN16",
+                });
+            }
+            (KernelFunction::SoftmaxBlock, F16) => "block_softmax_f16",
+            (KernelFunction::SoftmaxBlock, F32) => "block_softmax_f32",
+            (KernelFunction::SoftmaxVec, F16) => "vec_softmax_f16",
+            (KernelFunction::SoftmaxVec, F32) => "vec_softmax_f32",
         };
 
         Ok(name)

@@ -38,6 +38,8 @@ pub enum MetalError {
     InvalidOperation(String),
     #[error("Unsupported dtype {dtype:?} for {operation}")]
     UnsupportedDtype { operation: &'static str, dtype: Dtype },
+    #[error("Resource cache is required but not provided")]
+    ResourceCacheRequired,
     #[error("Tokenizer error: {0}")]
     TokenizerError(Box<crate::tokenizer::TokenizerError>),
     #[error("Regex Error: {0}")]

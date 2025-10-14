@@ -1,4 +1,3 @@
-#![cfg(test)]
 use crate::kernels::matmul_dispatcher::dispatcher::select_policy;
 use crate::kernels::matmul_dispatcher::types::*;
 use crate::tensor::dtypes::Dtype;
@@ -19,7 +18,7 @@ fn auto_smalln_prefers_custom_smalln() {
     };
     let plan = select_policy(shape, Dtype::F16, &caps(true), &prefs);
     match plan {
-        DispatchPlan::UseLegacyGemv(MatmulVariant::SmallN(SmallNBucket::N4)) => {}
+        DispatchPlan::Gemv(MatmulVariant::SmallN(SmallNBucket::N4)) => {}
         _ => panic!("unexpected plan: {:?}", plan),
     }
 }
@@ -33,7 +32,7 @@ fn auto_simdgroup_prefers_gemm_simd_when_large() {
     };
     let plan = select_policy(shape, Dtype::F16, &caps(true), &prefs);
     match plan {
-        DispatchPlan::UseLegacyGemv(MatmulVariant::GemmSimd(_)) => {}
+        DispatchPlan::Gemv(MatmulVariant::GemmSimd(_)) => {}
         _ => panic!("unexpected plan: {:?}", plan),
     }
 }

@@ -73,13 +73,16 @@ pub const FORCE_MATMUL_BACKEND: TypedEnvVar<String> =
 pub const SOFTMAX_BACKEND: TypedEnvVar<String> = TypedEnvVar::new(InstrumentEnvVar::SoftmaxBackend.into_env(), parse_string, format_string);
 
 /// Typed descriptor for matmul small-N maximum N threshold.
-pub const MATMUL_SMALLN_MAX_N: TypedEnvVar<String> = TypedEnvVar::new(InstrumentEnvVar::MatmulSmallnMaxN.into_env(), parse_string, format_string);
+pub const MATMUL_SMALLN_MAX_N: TypedEnvVar<String> =
+    TypedEnvVar::new(InstrumentEnvVar::MatmulSmallnMaxN.into_env(), parse_string, format_string);
 
 /// Typed descriptor for matmul SIMD M minimum threshold.
-pub const MATMUL_SIMD_M_MIN: TypedEnvVar<String> = TypedEnvVar::new(InstrumentEnvVar::MatmulSimdMMin.into_env(), parse_string, format_string);
+pub const MATMUL_SIMD_M_MIN: TypedEnvVar<String> =
+    TypedEnvVar::new(InstrumentEnvVar::MatmulSimdMMin.into_env(), parse_string, format_string);
 
 /// Typed descriptor for matmul SIMD N minimum threshold.
-pub const MATMUL_SIMD_N_MIN: TypedEnvVar<String> = TypedEnvVar::new(InstrumentEnvVar::MatmulSimdNMin.into_env(), parse_string, format_string);
+pub const MATMUL_SIMD_N_MIN: TypedEnvVar<String> =
+    TypedEnvVar::new(InstrumentEnvVar::MatmulSimdNMin.into_env(), parse_string, format_string);
 
 /// Shim exposing ergonomic helpers for the log level variable.
 pub struct InstrumentLogLevel;

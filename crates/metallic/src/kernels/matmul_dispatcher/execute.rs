@@ -1,9 +1,14 @@
-use crate::{Context, MetalError, Operation, Tensor, TensorElement};
-use crate::kernels::{KernelInvocable};
+use super::types::*;
+use crate::kernels::{KernelFunction, KernelInvocable};
+use crate::kernels::{
+    matmul_gemv::MatmulGemvOp,
+    matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
+    matmul_mlx::MatMulMlxOp,
+    matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp},
+};
 use crate::resource_cache::ResourceCache;
 use crate::tensor::Dtype;
-use super::types::*;
-use crate::kernels::{matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulMpsOp, MatMulMpsAlphaBetaOp}, matmul_gemv::MatmulGemvOp};
+use crate::{Context, MetalError, Operation, Tensor, TensorElement};
 
 #[derive(Clone, Copy)]
 pub struct MatmulDispatchArgs<'a, T: TensorElement> {
@@ -25,7 +30,7 @@ pub fn execute<'a, T: TensorElement>(
     mut cache: Option<&mut ResourceCache>,
 ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
     let scope_label = format!("matmul_{}", plan);
-    
+
     ctx.with_gpu_scope(scope_label, |ctx| {
         match plan {
             DispatchPlan::UseMLX(_variant) => {
@@ -50,24 +55,155 @@ pub fn execute<'a, T: TensorElement>(
                 } else {
                     // MPS alpha/beta path requires an existing output tensor as C
                     // If none provided and beta==0, we can allocate zeroed output and treat it as C
-                    let out_tensor = if let Some(o) = args.out { o.clone() } else {
+                    let out_tensor = if let Some(o) = args.out {
+                        o.clone()
+                    } else {
                         // Create output dims by introspecting left/right and transposes via MPS view
                         // Reuse MPS mod logic: create a temporary out by calling the base MPS op first
                         // Simpler: call MatMulMpsOp to get an output, then use it as C (it will be overwritten accordingly)
-                        let tmp = MatMulMpsOp::new(ctx, (args.left, args.right, args.transpose_left, args.transpose_right), None, cache.as_deref_mut())?;
+                        let tmp = MatMulMpsOp::new(
+                            ctx,
+                            (args.left, args.right, args.transpose_left, args.transpose_right),
+                            None,
+                            cache.as_deref_mut(),
+                        )?;
                         tmp.1
                     };
-                    let mps_ab_args = (args.left, args.right, &out_tensor, args.transpose_left, args.transpose_right, args.alpha, args.beta);
+                    let mps_ab_args = (
+                        args.left,
+                        args.right,
+                        &out_tensor,
+                        args.transpose_left,
+                        args.transpose_right,
+                        args.alpha,
+                        args.beta,
+                    );
                     MatMulMpsAlphaBetaOp::new(ctx, mps_ab_args, None, cache.as_deref_mut())
                 }
             }
-            DispatchPlan::UseLegacyGemv(_variant) => {
-                // Legacy GEMV expects (x, A) with x as (1, K) and A as (K, N)
-                // We only support transpose_right=false here; more variants may be added later
+            DispatchPlan::Gemv(variant) => {
+                // Legacy GEMV path currently only handles non-transposed inputs.
                 if args.transpose_left || args.transpose_right {
-                    return Err(MetalError::InvalidOperation("Legacy GEMV does not support transpose flags".to_string()));
+                    return Err(MetalError::InvalidOperation(
+                        "GEMV dispatch does not support transpose flags".to_string(),
+                    ));
                 }
-                MatmulGemvOp::new(ctx, (args.left, args.right), None, cache)
+
+                let left_dims = args.left.dims();
+                let right_dims = args.right.dims();
+                if left_dims.len() != 2 || right_dims.len() != 2 {
+                    return Err(MetalError::InvalidShape(format!(
+                        "GEMV dispatch expects rank-2 tensors, got left {:?}, right {:?}",
+                        left_dims, right_dims
+                    )));
+                }
+
+                if left_dims[1] != right_dims[0] {
+                    return Err(MetalError::InvalidShape(format!(
+                        "Incompatible shapes for GEMV dispatch: left {:?}, right {:?}",
+                        left_dims, right_dims
+                    )));
+                }
+
+                let is_vector_shape = left_dims[0] == 1;
+                let gemm_args = (
+                    args.left,
+                    args.right,
+                    args.bias,
+                    args.out,
+                    args.transpose_left,
+                    args.transpose_right,
+                    args.alpha,
+                    args.beta,
+                );
+
+                match variant {
+                    MatmulVariant::SmallN(SmallNBucket::N8) => {
+                        if args.dtype == crate::Dtype::F16 {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemvSmallN8, args.dtype, &ctx.device)?;
+                            MatmulGemvSmallN8Op::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else if is_vector_shape {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
+                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else {
+                            MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
+                        }
+                    }
+                    MatmulVariant::SmallN(SmallNBucket::N1) => {
+                        if args.dtype == crate::Dtype::F16 {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemvSmallN1, args.dtype, &ctx.device)?;
+                            MatmulGemvSmallN1Op::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else if is_vector_shape {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
+                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else {
+                            MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
+                        }
+                    }
+                    MatmulVariant::SmallN(SmallNBucket::N2) => {
+                        if args.dtype == crate::Dtype::F16 {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemvSmallN2, args.dtype, &ctx.device)?;
+                            MatmulGemvSmallN2Op::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else if is_vector_shape {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
+                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else {
+                            MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
+                        }
+                    }
+                    MatmulVariant::SmallN(SmallNBucket::N4) => {
+                        if args.dtype == crate::Dtype::F16 {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemvSmallN4, args.dtype, &ctx.device)?;
+                            MatmulGemvSmallN4Op::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else if is_vector_shape {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
+                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else {
+                            MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
+                        }
+                    }
+                    MatmulVariant::SmallN(SmallNBucket::N16) => {
+                        if args.dtype == crate::Dtype::F16 {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemvSmallN16, args.dtype, &ctx.device)?;
+                            MatmulGemvSmallN16Op::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else if is_vector_shape {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
+                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else {
+                            MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
+                        }
+                    }
+                    MatmulVariant::SmallN(_) | MatmulVariant::GemmSimd(_) | MatmulVariant::GemmGeneric => {
+                        if is_vector_shape {
+                            let pipeline = ctx
+                                .kernel_manager
+                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
+                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                        } else {
+                            MatMulMlxOp::new(ctx, gemm_args, None, cache)
+                        }
+                    }
+                }
             }
         }
     })

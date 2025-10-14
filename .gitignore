@@ -13,3 +13,7 @@ debug_dumps
 test.py
 **/Cargo.lock
 experimental
+.venv
+.vscode
+venv
+*.png

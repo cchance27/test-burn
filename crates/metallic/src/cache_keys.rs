@@ -24,7 +24,7 @@ pub struct MpsGemmKey {
     pub alpha: f32,
     pub beta: f32,
     /// Additional specialization factors
-    pub beta_nonzero: bool,  // Group by beta==0 vs !=0 instead of exact value
+    pub beta_nonzero: bool, // Group by beta==0 vs !=0 instead of exact value
     pub dtype: Dtype, // Include dtype for more precise caching
 }
 
@@ -105,13 +105,17 @@ pub struct MpsSoftMaxKey {
     pub rows: usize,
     pub columns: usize,
     pub seq_k_bucket: SeqKBucket, // Bounded sequence length for TG sizing
-    pub causal: bool, // Causal mask flag
+    pub causal: bool,             // Causal mask flag
     pub dtype: Dtype,
 }
 
 impl PartialEq for MpsSoftMaxKey {
     fn eq(&self, other: &Self) -> bool {
-        self.rows == other.rows && self.columns == other.columns && self.seq_k_bucket == other.seq_k_bucket && self.causal == other.causal && self.dtype == other.dtype
+        self.rows == other.rows
+            && self.columns == other.columns
+            && self.seq_k_bucket == other.seq_k_bucket
+            && self.causal == other.causal
+            && self.dtype == other.dtype
     }
 }
 
@@ -140,13 +144,16 @@ pub struct SdpaKey {
     /// Additional specialization factors for SDPA
     pub causal: bool, // Causal mask flag
     pub seq_k_bucket: SeqKBucket, // Sequence length bucket for softmax specialization
-    pub transpose_k: bool, // Logical transpose preference flag
+    pub transpose_k: bool,        // Logical transpose preference flag
 }
 
 impl PartialEq for SdpaKey {
     fn eq(&self, other: &Self) -> bool {
-        self.batch == other.batch && self.dim == other.dim && self.dtype == other.dtype
-            && self.causal == other.causal && self.seq_k_bucket == other.seq_k_bucket
+        self.batch == other.batch
+            && self.dim == other.dim
+            && self.dtype == other.dtype
+            && self.causal == other.causal
+            && self.seq_k_bucket == other.seq_k_bucket
             && self.transpose_k == other.transpose_k
     }
 }

@@ -1623,7 +1623,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::Meta
                 println!("      {:>6} | {:>12.6} | {:>12.6} | {:>10.3e}", idx, kv_val, fw_val, diff);
             }
 
-            dump_kv_snapshot(&mut ctx, pos);
+            //dump_kv_snapshot(&mut ctx, pos);
         }
 
         assert!(
@@ -1762,6 +1762,8 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
     Ok(())
 }
 
+// For dumping all the kv info its very noisy so we have it disabled
+#[allow(dead_code)]
 fn dump_kv_snapshot<T: TensorElement>(ctx: &mut Context<T>, step: usize) {
     ctx.synchronize();
 

@@ -156,7 +156,7 @@ impl AppConfig {
 
     #[cfg(test)]
     fn default_config() -> Self {
-        Self::from_env().unwrap_or_else(|_| Self {
+        Self::from_env().unwrap_or(Self {
             log_level: Level::INFO,
             metrics_jsonl_path: None,
             enable_console_metrics: false,

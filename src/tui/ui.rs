@@ -205,24 +205,25 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Log area scrollbar
     if app.log_visible
-        && let Some(log_area) = log_area {
-            let log_content_lines = app.log_messages.len();
-            let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
+        && let Some(log_area) = log_area
+    {
+        let log_content_lines = app.log_messages.len();
+        let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
 
-            if log_content_lines > log_visible_lines && log_visible_lines > 0 {
-                let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(Some("↑"))
-                    .end_symbol(Some("↓"));
+        if log_content_lines > log_visible_lines && log_visible_lines > 0 {
+            let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
 
-                // Calculate the maximum scroll position (content lines - visible lines)
-                let max_scroll = (log_content_lines - log_visible_lines).max(0);
-                let current_scroll = (app.log_scroll as usize).min(max_scroll);
+            // Calculate the maximum scroll position (content lines - visible lines)
+            let max_scroll = (log_content_lines - log_visible_lines).max(0);
+            let current_scroll = (app.log_scroll as usize).min(max_scroll);
 
-                let log_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
+            let log_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
 
-                frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
-            }
+            frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
         }
+    }
 }
 
 pub fn render_memory_metrics(rows: &[metallic_cli_helpers::app_event::MemoryRow], collapse_depth: u8) -> String {

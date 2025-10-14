@@ -97,8 +97,15 @@ harness = false
 
 [[bench]]
 name = "matmul_dispatcher_bench"
+path = "benches/tuning_kernels/matmul_dispatcher_bench.rs"
 harness = false
 
 [[bench]]
 name = "softmax_dispatcher_bench"
+path = "benches/tuning_kernels/softmax_dispatcher_bench.rs"
+harness = false
+
+[[bench]]
+name = "direct_kernel_bench"
+path = "benches/tuning_kernels/direct_kernel_bench.rs"
 harness = false

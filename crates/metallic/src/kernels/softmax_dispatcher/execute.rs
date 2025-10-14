@@ -1,12 +1,7 @@
-
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLCommandBuffer;
 
-use crate::{
-    error::MetalError,
-    kernels::Operation,
-    resource_cache::ResourceCache,
-};
+use crate::{context::GpuProfilerLabel, error::MetalError, kernels::Operation, resource_cache::ResourceCache};
 
 use super::types::SoftmaxPolicy;
 
@@ -16,21 +11,23 @@ pub struct SoftmaxDispatch {
     _policy: SoftmaxPolicy,
     /// The underlying operation created based on the policy.
     op: Box<dyn Operation>,
+    _profiler_label: GpuProfilerLabel,
 }
 
 impl SoftmaxDispatch {
-    pub fn new(policy: SoftmaxPolicy, op: Box<dyn Operation>) -> Self {
-        Self { _policy: policy, op }
+    pub fn new_with_label(policy: SoftmaxPolicy, op: Box<dyn Operation>, profiler_label: GpuProfilerLabel) -> Self {
+        Self {
+            _policy: policy,
+            op,
+            _profiler_label: profiler_label,
+        }
     }
 }
 
 impl Operation for SoftmaxDispatch {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        // TODO: Add with_gpu_scope! with labels for backend, variant, etc.
+    fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError> {
+        // Simply execute the underlying operation without creating an encoder here
+        // The underlying operation will handle its own encoder and profiling
         self.op.encode(command_buffer, cache)
     }
 }
