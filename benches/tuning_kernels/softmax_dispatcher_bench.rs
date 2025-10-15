@@ -1,7 +1,5 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use metallic::{
-    Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::softmax_dispatcher::SoftmaxDispatchOp,
-};
+use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::softmax_dispatcher::SoftmaxDispatchOp};
 use metallic_env::SOFTMAX_BACKEND_VAR;
 
 fn bench_softmax_dispatcher_seq_lengths<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
@@ -39,24 +37,20 @@ fn bench_softmax_dispatcher_seq_lengths<T: TensorElement>(c: &mut Criterion, dty
                     let mut ctx = Context::<T>::new().expect("ctx setup");
                     // Reset pool before creating tensors to ensure clean state
                     ctx.reset_pool();
-                    
+
                     // Shape: [rows_total, seq_k] (vary seq_k on last axis)
                     let input: Tensor<T> =
                         Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                     // Warmup
-                    let _warmup_out = ctx
-                        .call::<SoftmaxDispatchOp>((&input, false, 0))
-                        .expect("warmup");
+                    let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
                     ctx.synchronize();
 
                     bi.iter(|| {
-                        let _iter_out = ctx
-                            .call::<SoftmaxDispatchOp>((&input, false, 0))
-                            .unwrap();
+                        let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
                         ctx.synchronize();
                     });
-                    
+
                     // Reset pool to free memory after each iteration
                     ctx.reset_pool();
                 });
@@ -90,7 +84,7 @@ fn bench_softmax_dispatcher_batch_variants<T: TensorElement>(c: &mut Criterion, 
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state
             ctx.reset_pool();
-            
+
             let input: Tensor<T> = Tensor::new(
                 vec![batch_size, seq_q, seq_k],
                 TensorStorage::Pooled(&mut ctx),
@@ -99,16 +93,14 @@ fn bench_softmax_dispatcher_batch_variants<T: TensorElement>(c: &mut Criterion, 
             .expect("input");
 
             // Warmup
-            let _warmup_out = ctx
-                .call::<SoftmaxDispatchOp>((&input, false, 0))
-                .expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -136,21 +128,19 @@ fn bench_softmax_dispatcher_causal_vs_normal<T: TensorElement>(c: &mut Criterion
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state
             ctx.reset_pool();
-            
+
             let input: Tensor<T> =
                 Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
             // Warmup
-            let _warmup_out = ctx
-                .call::<SoftmaxDispatchOp>((&input, false, 0))
-                .expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -160,21 +150,19 @@ fn bench_softmax_dispatcher_causal_vs_normal<T: TensorElement>(c: &mut Criterion
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state
             ctx.reset_pool();
-            
+
             let input: Tensor<T> =
                 Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
             // Warmup
-            let _warmup_out = ctx
-                .call::<SoftmaxDispatchOp>((&input, true, 0))
-                .expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, true, 0)).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, true, 0)).unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -213,20 +201,19 @@ fn bench_softmax_dispatcher_variant_selection<T: TensorElement>(c: &mut Criterio
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
                 ctx.reset_pool();
-                
-                let input: Tensor<T> = Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
+
+                let input: Tensor<T> =
+                    Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                 // Warmup
-                let _warmup_out = ctx
-                    .call::<SoftmaxDispatchOp>((&input, false, 0))
-                    .expect("warmup");
+                let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
                     let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
                     ctx.synchronize();
                 });
-                
+
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });
@@ -241,13 +228,13 @@ fn bench_softmax_dispatcher_crossover_analysis<T: TensorElement>(c: &mut Criteri
 
     // Focus on the crossover region around 1024 to find optimal seq_k threshold
     let crossover_seqk = [
-        512,   // Well within vec territory
-        768,   // Approaching crossover
-        896,   // Near crossover
-        1024,  // At current threshold
-        1152,  // Just past crossover
-        1280,  // Well within block territory
-        1536,  // Further into block territory
+        512,  // Well within vec territory
+        768,  // Approaching crossover
+        896,  // Near crossover
+        1024, // At current threshold
+        1152, // Just past crossover
+        1280, // Well within block territory
+        1536, // Further into block territory
     ];
 
     let rows_total = 128;
@@ -265,20 +252,19 @@ fn bench_softmax_dispatcher_crossover_analysis<T: TensorElement>(c: &mut Criteri
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
                 ctx.reset_pool();
-                
-                let input: Tensor<T> = Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
+
+                let input: Tensor<T> =
+                    Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                 // Warmup
-                let _warmup_out = ctx
-                    .call::<SoftmaxDispatchOp>((&input, false, 0))
-                    .expect("warmup");
+                let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
                     let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
                     ctx.synchronize();
                 });
-                
+
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });

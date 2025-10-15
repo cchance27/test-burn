@@ -9,7 +9,9 @@ use crate::{
 use block2::RcBlock;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputePipelineState, MTLSize};
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize,
+};
 use std::{
     ptr::NonNull,
     rc::Rc,
@@ -22,7 +24,7 @@ use std::{
 /// A generic GPU operation that can encode itself into a Metal command buffer.
 pub trait Operation {
     /// Encode this operation into the provided command buffer.
-    fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError>;
+    fn encode(&self, command_buffer: &CommandBuffer, cache: &mut ResourceCache) -> Result<(), MetalError>;
 }
 
 //TODO: Aren't these operations supposed to be in kernels?
@@ -35,16 +37,12 @@ pub struct FillConstant<T: TensorElement> {
 }
 
 impl<T: TensorElement> Operation for FillConstant<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         if self.value == 0.0 {
             // Encode blit fill for zeros
-            let encoder = command_buffer.blitCommandEncoder().unwrap();
+            let encoder = command_buffer.get_blit_encoder()?;
             let profiler_scope = GpuProfiler::profile_blit(
-                command_buffer,
+                command_buffer.raw(),
                 &encoder,
                 format!("FillConstantZero@{:p}", self),
                 "Metal".to_string(),
@@ -53,14 +51,13 @@ impl<T: TensorElement> Operation for FillConstant<T> {
             if let Some(scope) = profiler_scope {
                 scope.finish();
             }
-            encoder.endEncoding();
             Ok(())
         } else if self.value == 1.0 {
             // Encode compute kernel for ones
             if let Some(pipeline) = &self.ones_pipeline {
-                let encoder = command_buffer.computeCommandEncoder().unwrap();
+                let encoder = command_buffer.get_compute_encoder()?;
                 let profiler_scope = GpuProfiler::profile_compute(
-                    command_buffer,
+                    command_buffer.raw(),
                     &encoder,
                     format!("FillConstantOnes@{:p}", self),
                     "Metal".to_string(),
@@ -87,7 +84,6 @@ impl<T: TensorElement> Operation for FillConstant<T> {
                 if let Some(scope) = profiler_scope {
                     scope.finish();
                 }
-                encoder.endEncoding();
                 Ok(())
             } else {
                 Err(MetalError::OperationNotSupported("Ones pipeline not available".to_string()))
@@ -108,12 +104,8 @@ pub struct Arange<T: TensorElement> {
 }
 
 impl<T: TensorElement> Operation for Arange<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer.computeCommandEncoder().unwrap();
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
         let threads_per_threadgroup = self.pipeline.maxTotalThreadsPerThreadgroup();
@@ -128,7 +120,6 @@ impl<T: TensorElement> Operation for Arange<T> {
             depth: 1,
         };
         dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
         Ok(())
     }
 }
@@ -141,12 +132,8 @@ pub struct RandomUniform<T: TensorElement> {
 }
 
 impl<T: TensorElement> Operation for RandomUniform<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer.computeCommandEncoder().unwrap();
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
         set_bytes(&encoder, 1, &(self.seed as u32));
@@ -163,7 +150,6 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
             depth: 1,
         };
         dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
         Ok(())
     }
 }
@@ -175,11 +161,17 @@ pub struct CommandBuffer {
     inner: Rc<CommandBufferInner>,
 }
 
+enum ActiveEncoder {
+    Blit(Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>),
+    Compute(Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
+}
+
 struct CommandBufferInner {
     buffer: Retained<ProtocolObject<dyn MTLCommandBuffer>>,
     committed: AtomicBool,
     completed: AtomicBool,
     profiler: Mutex<Option<GpuProfiler>>,
+    active_encoder: Mutex<Option<ActiveEncoder>>,
 }
 
 impl CommandBuffer {
@@ -192,18 +184,23 @@ impl CommandBuffer {
                 committed: AtomicBool::new(false),
                 completed: AtomicBool::new(false),
                 profiler: Mutex::new(None),
+                active_encoder: Mutex::new(None),
             }),
         })
     }
 
     /// Record an operation on this command buffer.
-    pub fn record(&mut self, operation: &dyn Operation, cache: &mut ResourceCache) -> Result<(), MetalError> {
+    pub fn record(&self, operation: &dyn Operation, cache: &mut ResourceCache) -> Result<(), MetalError> {
         if self.inner.committed.load(Ordering::Acquire) {
             return Err(MetalError::InvalidOperation(
                 "Attempted to record on a committed command buffer".to_string(),
             ));
         }
-        operation.encode(&self.inner.buffer, cache)
+        let result = operation.encode(self, cache);
+        // Always end the current encoder after an operation completes to ensure proper
+        // encoder lifecycle management, especially when profiling is disabled
+        self.end_current_encoder();
+        result
     }
 
     /// Commit the command buffer for execution.
@@ -212,6 +209,7 @@ impl CommandBuffer {
     /// This avoids "commit an already committed command buffer" errors when multiple
     /// call sites may attempt to commit the same wrapper.
     pub fn commit(&self) {
+        self.end_current_encoder();
         if !self.inner.committed.swap(true, Ordering::AcqRel) {
             // If a profiler is attached, note the CPU commit instant for fallback timing
             if let Ok(guard) = self.inner.profiler.lock()
@@ -229,6 +227,63 @@ impl CommandBuffer {
                     .unwrap_or(false)
             );
             self.inner.buffer.commit();
+        }
+    }
+
+    pub fn get_blit_encoder(&self) -> Result<Retained<ProtocolObject<dyn MTLBlitCommandEncoder>>, MetalError> {
+        let mut active_encoder_guard = self.inner.active_encoder.lock().unwrap();
+
+        if let Some(ActiveEncoder::Blit(encoder)) = active_encoder_guard.as_ref() {
+            return Ok(encoder.clone());
+        }
+
+        if let Some(encoder) = active_encoder_guard.take() {
+            match encoder {
+                ActiveEncoder::Compute(e) => e.endEncoding(),
+                ActiveEncoder::Blit(e) => e.endEncoding(),
+            }
+        }
+
+        let encoder = self
+            .inner
+            .buffer
+            .blitCommandEncoder()
+            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+        *active_encoder_guard = Some(ActiveEncoder::Blit(encoder.clone()));
+
+        Ok(encoder)
+    }
+
+    pub fn get_compute_encoder(&self) -> Result<Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>, MetalError> {
+        let mut active_encoder_guard = self.inner.active_encoder.lock().unwrap();
+
+        if let Some(ActiveEncoder::Compute(encoder)) = active_encoder_guard.as_ref() {
+            return Ok(encoder.clone());
+        }
+
+        if let Some(encoder) = active_encoder_guard.take() {
+            match encoder {
+                ActiveEncoder::Compute(e) => e.endEncoding(),
+                ActiveEncoder::Blit(e) => e.endEncoding(),
+            }
+        }
+
+        let encoder = self
+            .inner
+            .buffer
+            .computeCommandEncoder()
+            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+        *active_encoder_guard = Some(ActiveEncoder::Compute(encoder.clone()));
+
+        Ok(encoder)
+    }
+
+    pub fn end_current_encoder(&self) {
+        if let Some(encoder) = self.inner.active_encoder.lock().unwrap().take() {
+            match encoder {
+                ActiveEncoder::Blit(e) => e.endEncoding(),
+                ActiveEncoder::Compute(e) => e.endEncoding(),
+            }
         }
     }
 

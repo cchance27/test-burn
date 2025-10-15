@@ -178,12 +178,12 @@ impl AppConfig {
 
     #[cfg(test)]
     fn ensure_profiling_enabled() {
-        if let Some(existing) = APP_CONFIG.get() {
-            if !existing.enable_profiling {
-                let mut updated = existing.clone();
-                updated.enable_profiling = true;
-                Self::overwrite_for_tests(updated);
-            }
+        if let Some(existing) = APP_CONFIG.get()
+            && !existing.enable_profiling
+        {
+            let mut updated = existing.clone();
+            updated.enable_profiling = true;
+            Self::overwrite_for_tests(updated);
         }
     }
 }

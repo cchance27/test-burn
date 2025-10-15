@@ -1,6 +1,6 @@
 use super::*;
 use crate::encoder::{dispatch_threadgroups, set_buffer, set_compute_pipeline_state};
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct ArangeOp;
@@ -49,14 +49,8 @@ impl KernelInvocable for ArangeOp {
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl<T: TensorElement> Operation for Arange<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.out.buf, self.out.offset);
@@ -74,8 +68,6 @@ impl<T: TensorElement> Operation for Arange<T> {
         };
 
         dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
-
-        encoder.endEncoding();
 
         Ok(())
     }

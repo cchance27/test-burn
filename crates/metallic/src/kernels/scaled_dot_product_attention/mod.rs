@@ -1,10 +1,10 @@
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::MTLComputePipelineState;
 
 use super::{KernelFunction, KernelInvocable};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     cache_keys::{SdpaKey, SeqKBucket},
     resource_cache::ResourceCache,
 };
@@ -222,9 +222,11 @@ fn create_sdpa_operation<T: TensorElement>(
                 cache_ref,
             )?
         } else {
-            ctx.call::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>(
-                (&qk_scaled_result, causal, adjusted_query_offset)
-            )?
+            ctx.call::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>((
+                &qk_scaled_result,
+                causal,
+                adjusted_query_offset,
+            ))?
         }
     };
 
@@ -359,11 +361,7 @@ impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
 
 // Implement `Operation` for the internal struct.
 impl<T: TensorElement> Operation for ScaledDotProductAttention<T> {
-    fn encode(
-        &self,
-        _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    fn encode(&self, _command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         // Since all computation was done in the `new` method of KernelInvocable,
         // this method just returns Ok(())
         Ok(())

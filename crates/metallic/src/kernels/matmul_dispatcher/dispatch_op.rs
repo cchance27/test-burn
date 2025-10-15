@@ -5,7 +5,7 @@ use crate::kernels::matmul_dispatcher::{
     types::{MatShape, MatmulCaps},
 };
 use crate::resource_cache::ResourceCache;
-use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorStorage, TensorInit};
+use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLComputePipelineState;
@@ -75,7 +75,9 @@ impl KernelInvocable for MatmulDispatchOp {
                 let function_id = crate::kernels::KernelFunction::Noop;
                 let pipeline = ctx.kernel_manager.get_pipeline(function_id, ctx.tensor_dtype(), &ctx.device)?;
                 // Reuse provided out if present, otherwise allocate appropriately sized output.
-                let out_tensor = if let Some(existing) = out { existing.clone() } else {
+                let out_tensor = if let Some(existing) = out {
+                    existing.clone()
+                } else {
                     Tensor::new(vec![shape.m, shape.n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
                 };
                 return crate::kernels::tensors::NoopOp::new(ctx, out_tensor, Some(pipeline), cache);

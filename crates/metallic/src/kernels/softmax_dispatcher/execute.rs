@@ -1,7 +1,4 @@
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLCommandBuffer;
-
-use crate::{context::GpuProfilerLabel, error::MetalError, kernels::Operation, resource_cache::ResourceCache};
+use crate::{CommandBuffer, context::GpuProfilerLabel, error::MetalError, kernels::Operation, resource_cache::ResourceCache};
 
 use super::types::SoftmaxPolicy;
 
@@ -25,7 +22,7 @@ impl SoftmaxDispatch {
 }
 
 impl Operation for SoftmaxDispatch {
-    fn encode(&self, command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>, cache: &mut ResourceCache) -> Result<(), MetalError> {
+    fn encode(&self, command_buffer: &CommandBuffer, cache: &mut ResourceCache) -> Result<(), MetalError> {
         // Simply execute the underlying operation without creating an encoder here
         // The underlying operation will handle its own encoder and profiling
         self.op.encode(command_buffer, cache)

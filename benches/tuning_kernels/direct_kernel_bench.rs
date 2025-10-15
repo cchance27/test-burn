@@ -2,18 +2,17 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use metallic::{
     Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage,
     kernels::{
-        matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
-        softmax_vec::SoftmaxVecOp,
-        softmax_block::SoftmaxBlockOp,
         matmul_dispatcher::MatmulDispatchOp,
+        matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
         matmul_mlx::MatMulMlxOp,
         matmul_mps::MatMulMpsOp,
+        softmax_block::SoftmaxBlockOp,
+        softmax_vec::SoftmaxVecOp,
     },
 };
 
 /// Direct kernel benchmarks that test raw kernel performance without dispatcher overhead.
 /// This helps identify optimal crossover points between different kernel variants.
-
 fn bench_smalln_gemv_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
     let mut group = c.benchmark_group(format!("smalln_gemv_direct_{dtype_name}"));
 
@@ -71,7 +70,7 @@ fn bench_smalln_gemv_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype
                 };
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -85,13 +84,7 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
     let mut group = c.benchmark_group(format!("gemm_kernels_direct_{dtype_name}"));
 
     // Reuse M,K from small-N shapes, use N values that trigger GEMM paths
-    let mk_pairs = [
-        (128, 1024),
-        (512, 2048),
-        (2048, 4096),
-        (1024, 2048),
-        (512, 1024),
-    ];
+    let mk_pairs = [(128, 1024), (512, 2048), (2048, 4096), (1024, 2048), (512, 1024)];
     let n_values = [32usize, 64usize];
 
     for &(m, k) in &mk_pairs {
@@ -105,7 +98,7 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
                 ctx.reset_pool();
-                
+
                 let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
                 let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
 
@@ -116,12 +109,10 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let _iter_out = ctx
-                        .call::<MatMulMlxOp>((&a, &b, None, None, false, false, 1.0f32, 0.0f32))
-                        .unwrap();
+                    let _iter_out = ctx.call::<MatMulMlxOp>((&a, &b, None, None, false, false, 1.0f32, 0.0f32)).unwrap();
                     ctx.synchronize();
                 });
-                
+
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });
@@ -131,7 +122,7 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
                 ctx.reset_pool();
-                
+
                 let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
                 let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
 
@@ -143,7 +134,7 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                     let _iter_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false)).unwrap();
                     ctx.synchronize();
                 });
-                
+
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });
@@ -180,24 +171,23 @@ fn bench_softmax_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_nam
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state
             ctx.reset_pool();
-            
-            let input: Tensor<T> = Tensor::new(vec![seq_q, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
+
+            let input: Tensor<T> =
+                Tensor::new(vec![seq_q, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
             let rows_total = seq_q as u32;
             let seq_q = seq_q as u32;
             let seq_k = seq_k as u32;
 
             // Warmup
-            let _warmup_out = ctx
-                .call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0))
-                .expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0)).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx.call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0)).unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -208,8 +198,9 @@ fn bench_softmax_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_nam
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
                 ctx.reset_pool();
-                
-                let input: Tensor<T> = Tensor::new(vec![seq_q, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
+
+                let input: Tensor<T> =
+                    Tensor::new(vec![seq_q, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                 let rows_total = seq_q as u32;
                 let seq_q = seq_q as u32;
@@ -225,7 +216,7 @@ fn bench_softmax_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_nam
                     let _iter_out = ctx.call::<SoftmaxBlockOp>((&input, rows_total, seq_q, seq_k, 0, 0, 0)).unwrap();
                     ctx.synchronize();
                 });
-                
+
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });
@@ -275,7 +266,7 @@ fn bench_smalln_vs_dispatcher_comparison<T: TensorElement>(c: &mut Criterion, dt
                 };
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -288,21 +279,21 @@ fn bench_smalln_vs_dispatcher_comparison<T: TensorElement>(c: &mut Criterion, dt
 
             let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor A");
             let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor B");
-            let mut c: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor C");
+            let c: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor C");
 
             // Warmup - use dispatcher with correct signature
             let _warmup_out = ctx
-                .call::<MatmulDispatchOp>((&a, &b, None, Some(&mut c), false, false, 1.0f32, 0.0f32))
+                .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32))
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&mut c), false, false, 1.0f32, 0.0f32))
+                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32))
                     .unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });

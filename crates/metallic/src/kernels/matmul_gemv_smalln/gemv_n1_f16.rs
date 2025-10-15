@@ -2,13 +2,13 @@ use crate::context::GpuProfilerLabel;
 use crate::kernels::{
     KernelFunction, KernelInvocable, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state,
 };
-use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
 use half::f16;
 use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 // Public, user-facing, zero-sized struct for the operation.
 pub struct MatmulGemvSmallN1Op;
@@ -64,17 +64,11 @@ impl KernelInvocable for MatmulGemvSmallN1Op {
 }
 
 impl<T: TensorElement> Operation for MatmulGemvSmallN1<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let (m, k) = (self.a.dims()[0] as u32, self.a.dims()[1] as u32);
         let _n = self.b.dims()[1] as u32;
@@ -108,7 +102,6 @@ impl<T: TensorElement> Operation for MatmulGemvSmallN1<T> {
         }
 
         dispatch_threadgroups(&encoder, threadgroups, threads_per_threadgroup);
-        encoder.endEncoding();
         Ok(())
     }
 }

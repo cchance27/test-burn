@@ -1,6 +1,6 @@
 use super::*;
 use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct RandomUniformOp;
@@ -64,14 +64,8 @@ impl KernelInvocable for RandomUniformOp {
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl<T: TensorElement> Operation for RandomUniform<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         // Calculate total elements
         let total_elements: usize = self.dims.iter().product();
@@ -100,8 +94,6 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
         };
 
         dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
-
-        encoder.endEncoding();
 
         Ok(())
     }

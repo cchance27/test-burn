@@ -1,4 +1,5 @@
 use super::*;
+use crate::CommandBuffer;
 use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
@@ -48,17 +49,11 @@ impl KernelInvocable for ElemwiseAbsOp {
 }
 
 impl<T: TensorElement> Operation for ElemwiseAbs<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {
@@ -78,7 +73,6 @@ impl<T: TensorElement> Operation for ElemwiseAbs<T> {
         set_bytes(&encoder, 2, &total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         drop(scope);
         Ok(())
     }

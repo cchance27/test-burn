@@ -1,4 +1,5 @@
 use super::*;
+use crate::CommandBuffer;
 use crate::context::GpuProfilerLabel;
 use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 use crate::{
@@ -8,7 +9,7 @@ use crate::{
 use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 #[repr(C)]
 struct GemvParams {
@@ -33,17 +34,11 @@ struct MatMulGemv<T: TensorElement> {
 }
 
 impl<T: TensorElement> Operation for MatMulGemv<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
@@ -53,7 +48,6 @@ impl<T: TensorElement> Operation for MatMulGemv<T> {
 
         dispatch_threadgroups(&encoder, self.grid_size, self.threadgroup_size);
 
-        encoder.endEncoding();
         Ok(())
     }
 }

@@ -27,17 +27,11 @@ fn parse_variant(s: &str) -> Option<SoftmaxVariant> {
 }
 
 pub fn load_prefs_from_env() -> Prefs {
-    let backend = std::env::var("METALLIC_SOFTMAX_BACKEND")
-        .ok()
-        .and_then(|s| parse_backend(&s));
+    let backend = std::env::var("METALLIC_SOFTMAX_BACKEND").ok().and_then(|s| parse_backend(&s));
 
-    let variant = std::env::var("METALLIC_SOFTMAX_VARIANT")
-        .ok()
-        .and_then(|s| parse_variant(&s));
+    let variant = std::env::var("METALLIC_SOFTMAX_VARIANT").ok().and_then(|s| parse_variant(&s));
 
-    let tg_size = std::env::var("METALLIC_SOFTMAX_TG_SIZE")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok());
+    let tg_size = std::env::var("METALLIC_SOFTMAX_TG_SIZE").ok().and_then(|s| s.parse::<usize>().ok());
 
     Prefs {
         forced_backend: backend,

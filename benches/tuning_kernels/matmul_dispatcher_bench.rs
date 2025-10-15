@@ -39,7 +39,7 @@ fn bench_matmul_dispatcher_smalln<T: TensorElement>(c: &mut Criterion, dtype_nam
                     let mut ctx = Context::<T>::new().expect("ctx setup");
                     // Reset pool before creating tensors to ensure clean state
                     ctx.reset_pool();
-                    
+
                     let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
                     let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
                     let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
@@ -59,7 +59,7 @@ fn bench_matmul_dispatcher_smalln<T: TensorElement>(c: &mut Criterion, dtype_nam
                         _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                         ctx.synchronize();
                     });
-                    
+
                     // Reset pool to free memory after each iteration
                     ctx.reset_pool();
                 });
@@ -104,7 +104,7 @@ fn bench_matmul_dispatcher_dispatcher_tuning<T: TensorElement>(c: &mut Criterion
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
                 ctx.reset_pool();
-                
+
                 let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
                 let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
                 let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
@@ -121,7 +121,7 @@ fn bench_matmul_dispatcher_dispatcher_tuning<T: TensorElement>(c: &mut Criterion
                         .unwrap();
                     ctx.synchronize();
                 });
-                
+
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });
@@ -161,7 +161,7 @@ fn bench_matmul_dispatcher_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtyp
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state
             ctx.reset_pool();
-            
+
             let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
             let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
             let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
@@ -178,7 +178,7 @@ fn bench_matmul_dispatcher_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtyp
                     .unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -196,7 +196,7 @@ fn bench_matmul_dispatcher_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtyp
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state
             ctx.reset_pool();
-            
+
             let a: Tensor<T> = Tensor::new(vec![batch, m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
             let b: Tensor<T> = Tensor::new(vec![batch, k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
             let out: Tensor<T> = Tensor::new(vec![batch, m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
@@ -213,7 +213,7 @@ fn bench_matmul_dispatcher_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtyp
                     .unwrap();
                 ctx.synchronize();
             });
-            
+
             // Reset pool to free memory after each iteration
             ctx.reset_pool();
         });
@@ -226,13 +226,7 @@ fn bench_matmul_dispatcher_gemm_shapes<T: TensorElement>(c: &mut Criterion, dtyp
     let mut group = c.benchmark_group(format!("matmul_dispatcher_gemm_{dtype_name}"));
 
     // Match M,K pairs used in direct GEMM benches; sweep non-small-N values
-    let mk_pairs = [
-        (128, 1024),
-        (512, 2048),
-        (2048, 4096),
-        (1024, 2048),
-        (512, 1024),
-    ];
+    let mk_pairs = [(128, 1024), (512, 2048), (2048, 4096), (1024, 2048), (512, 1024)];
     let n_values = [32usize, 64usize];
 
     for &(m, k) in &mk_pairs {
@@ -249,7 +243,7 @@ fn bench_matmul_dispatcher_gemm_shapes<T: TensorElement>(c: &mut Criterion, dtyp
                     let mut ctx = Context::<T>::new().expect("ctx setup");
                     // Reset pool before creating tensors to ensure clean state
                     ctx.reset_pool();
-                    
+
                     let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
                     let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
                     let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
@@ -266,7 +260,7 @@ fn bench_matmul_dispatcher_gemm_shapes<T: TensorElement>(c: &mut Criterion, dtyp
                             .unwrap();
                         ctx.synchronize();
                     });
-                    
+
                     // Reset pool to free memory after each iteration
                     ctx.reset_pool();
                 });

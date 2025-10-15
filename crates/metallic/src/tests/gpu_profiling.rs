@@ -32,7 +32,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
         let queue = device.newCommandQueue().expect("command queue");
 
         let mut cache = ResourceCache::with_device(device.clone());
-        let mut command_buffer = CommandBuffer::new(&queue).expect("command buffer");
+        let command_buffer = CommandBuffer::new(&queue).expect("command buffer");
         let profiler = GpuProfiler::attach(&command_buffer, true).expect("gpu profiler support");
 
         let element_count = 16usize;

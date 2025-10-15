@@ -1,10 +1,12 @@
 use super::*;
 use crate::context::GpuProfilerLabel;
-use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache};
+use crate::{
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache,
+};
 use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
 
@@ -104,17 +106,11 @@ impl KernelInvocable for RoPEOp {
 }
 
 impl<T: TensorElement> Operation for RoPE<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let total_elements = self.input.len() as u32;
         let threads_per_tg = MTLSize {
@@ -139,7 +135,6 @@ impl<T: TensorElement> Operation for RoPE<T> {
         set_bytes(&encoder, 7, &total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

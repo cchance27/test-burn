@@ -1,5 +1,5 @@
 use super::*;
-use crate::{TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
 use metallic_instrumentation::GpuProfiler;
 use objc2_metal::{MTLBuffer, MTLResourceOptions};
 
@@ -128,17 +128,11 @@ impl KernelInvocable for PermuteOp {
 }
 
 impl<T: TensorElement> Operation for Permute<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let rank = self.src.dims.len() as u32;
         let num_elements = self.src.len() as u32;
@@ -165,7 +159,6 @@ impl<T: TensorElement> Operation for Permute<T> {
         };
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

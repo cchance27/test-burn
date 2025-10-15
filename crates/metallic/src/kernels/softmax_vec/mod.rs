@@ -2,11 +2,11 @@ use crate::context::GpuProfilerLabel;
 use crate::kernels::{
     KernelFunction, KernelInvocable, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state,
 };
-use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 // Public, user-facing, zero-sized struct for the operation.
 pub struct SoftmaxVecOp;
@@ -70,22 +70,24 @@ impl KernelInvocable for SoftmaxVecOp {
 }
 
 impl<T: TensorElement> Operation for SoftmaxVec<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
         // Match legacy behavior: use native execution width (min 32) and dispatch rows on Y
         let native = self.pipeline.threadExecutionWidth();
         let width = if native < 32 { 32 } else { native };
-        let threads_per_threadgroup = MTLSize { width, height: 1, depth: 1 };
-        let threadgroups = MTLSize { width: 1, height: self.rows_total as usize, depth: 1 };
+        let threads_per_threadgroup = MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = MTLSize {
+            width: 1,
+            height: self.rows_total as usize,
+            depth: 1,
+        };
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.input.buf, self.input.offset);
@@ -97,7 +99,6 @@ impl<T: TensorElement> Operation for SoftmaxVec<T> {
         set_bytes(&encoder, 5, &self.query_offset);
 
         dispatch_threadgroups(&encoder, threadgroups, threads_per_threadgroup);
-        encoder.endEncoding();
         Ok(())
     }
 }

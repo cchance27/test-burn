@@ -3,12 +3,11 @@ use crate::cache_keys::MpsMatrixDescriptorKey;
 
 use crate::kernels::matmul_mps::mps_matrix_from_buffer;
 use crate::resource_cache::ResourceCache;
-use crate::{Dtype, TensorElement};
+use crate::{CommandBuffer, Dtype, TensorElement};
 use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::MTLCommandBuffer;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 // Public, user-facing, zero-sized struct for the MPS Softmax operation.
@@ -23,20 +22,16 @@ pub struct SoftmaxMpsOperation<T: TensorElement> {
 }
 
 impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         // MPS-backed op: ensure CPU-scope timing is used in latency mode for exact attribution
-        GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer);
+        GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer.raw());
 
         let attn_matrix = mps_matrix_from_buffer(&self.attn.buf, self.attn.offset, &self.descriptor);
         unsafe {
             self.softmax.setBatchStart(0 as NSUInteger);
             self.softmax.setBatchSize(self.batch as NSUInteger);
             self.softmax
-                .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer, &attn_matrix, &attn_matrix);
+                .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer.raw(), &attn_matrix, &attn_matrix);
         }
         Ok(())
     }

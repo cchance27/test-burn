@@ -1,6 +1,6 @@
 use super::*;
 use crate::encoder::{dispatch_threadgroups, set_compute_pipeline_state};
-use crate::{TensorElement};
+use crate::{CommandBuffer, TensorElement};
 
 /// Public, user-facing, zero-sized struct for a NOOP operation.
 /// This runs a minimal compute kernel that does nothing and returns the provided tensor unchanged.
@@ -39,23 +39,23 @@ impl KernelInvocable for NoopOp {
 }
 
 impl<T: TensorElement> Operation for Noop<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
 
         // Minimal threadgroup dispatch: 1 thread, no buffers.
-        let threadgroup_size = MTLSize { width: 1, height: 1, depth: 1 };
-        let threadgroups = MTLSize { width: 1, height: 1, depth: 1 };
+        let threadgroup_size = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let threadgroups = MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
         dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
-
-        encoder.endEncoding();
 
         Ok(())
     }

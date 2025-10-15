@@ -1,7 +1,7 @@
 use crate::context::GpuProfilerLabel;
 use crate::kernels::{KernelFunction, KernelInvocable};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
     encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
     tensor::Dtype,
 };
@@ -9,10 +9,7 @@ use metallic_instrumentation::GpuProfiler;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
-use objc2_metal::{
-    MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary,
-    MTLSize,
-};
+use objc2_metal::{MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
 use std::convert::{TryFrom, TryInto};
 use std::ffi::c_void;
@@ -422,17 +419,11 @@ impl KernelInvocable for MatMulMlxOp {
 }
 
 impl<T: TensorElement> Operation for MatMulMlx<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.left.buf, self.left.offset);
@@ -468,7 +459,6 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         }
 
         dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

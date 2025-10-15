@@ -6,7 +6,7 @@ use crate::{
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSString;
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder as _, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputePipelineState, MTLSize};
 use objc2_metal::{MTLDevice, MTLLibrary};
 use rustc_hash::FxHashMap;
 

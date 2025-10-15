@@ -483,8 +483,8 @@ fn parse_string(value: &str) -> Result<String, EnvVarParseError> {
     Ok(value.to_string())
 }
 
-fn format_string(value: &String) -> Result<String, EnvVarFormatError> {
-    Ok(value.clone())
+fn format_string(value: &impl ToString) -> Result<String, EnvVarFormatError> {
+    Ok(value.to_string())
 }
 
 fn parse_bool(value: &str) -> Result<bool, EnvVarParseError> {

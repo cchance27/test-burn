@@ -4,14 +4,10 @@
 //! identical results to the original SoftmaxKernelOp for the same inputs.
 
 use crate::{
-    context::Context,
-    kernels::{
-        softmax_block::SoftmaxBlockOp,
-        softmax_kernel::SoftmaxKernelOp,
-        softmax_vec::SoftmaxVecOp,
-    },
-    tensor::{Tensor, TensorElement, TensorInit, TensorStorage},
     F16Element, F32Element,
+    context::Context,
+    kernels::{softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp},
+    tensor::{Tensor, TensorElement, TensorInit, TensorStorage},
 };
 
 /// Test element type for numerical consistency verification
@@ -43,28 +39,54 @@ fn test_softmax_kernel_numerical_consistency() {
     ];
 
     for (batch_size, seq_len, head_dim, causal) in test_configs {
-        println!("Testing config: batch={}, seq_len={}, head_dim={}, causal={}",
-                 batch_size, seq_len, head_dim, causal);
+        println!(
+            "Testing config: batch={}, seq_len={}, head_dim={}, causal={}",
+            batch_size, seq_len, head_dim, causal
+        );
 
         // Create test input with deterministic pattern
         let total_elements = batch_size * seq_len * head_dim;
-                let input_data: Vec<half::f16> = (0..total_elements)
+        let input_data: Vec<half::f16> = (0..total_elements)
             .map(|i| TestElement::from_f32((i as f32 - total_elements as f32 / 2.0) / 100.0))
             .collect();
 
-        let input_orig = Tensor::new(vec![batch_size, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-        let input_vec = Tensor::new(vec![batch_size, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
+        let input_orig = Tensor::new(
+            vec![batch_size, seq_len, head_dim],
+            TensorStorage::Dedicated(&ctx),
+            TensorInit::CopyFrom(&input_data),
+        )
+        .unwrap();
+        let input_vec = Tensor::new(
+            vec![batch_size, seq_len, head_dim],
+            TensorStorage::Dedicated(&ctx),
+            TensorInit::CopyFrom(&input_data),
+        )
+        .unwrap();
 
         // Test original softmax kernel
-        let original_result = ctx.call::<SoftmaxKernelOp>(
-            (&input_orig, (batch_size * seq_len) as u32, seq_len as u32, head_dim as u32, causal as u32, 0u32)
-        ).unwrap();
+        let original_result = ctx
+            .call::<SoftmaxKernelOp>((
+                &input_orig,
+                (batch_size * seq_len) as u32,
+                seq_len as u32,
+                head_dim as u32,
+                causal as u32,
+                0u32,
+            ))
+            .unwrap();
 
         // Test vec-softmax (for seq_len <= 1024)
         if seq_len <= 1024 {
-            let vec_result = ctx.call::<SoftmaxVecOp>(
-                (&input_vec, (batch_size * seq_len) as u32, seq_len as u32, head_dim as u32, causal as u32, 0u32)
-            ).unwrap();
+            let vec_result = ctx
+                .call::<SoftmaxVecOp>((
+                    &input_vec,
+                    (batch_size * seq_len) as u32,
+                    seq_len as u32,
+                    head_dim as u32,
+                    causal as u32,
+                    0u32,
+                ))
+                .unwrap();
 
             // Row width is the last dimension (seq_k/head_dim)
             compare_softmax_results(&original_result, &vec_result, "vec-softmax", head_dim);
@@ -72,10 +94,23 @@ fn test_softmax_kernel_numerical_consistency() {
 
         // Test block-softmax (for seq_len > 1024)
         if seq_len > 1024 {
-            let input_block = Tensor::new(vec![batch_size, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-            let block_result = ctx.call::<SoftmaxBlockOp>(
-                (&input_block, (batch_size * seq_len) as u32, seq_len as u32, head_dim as u32, 32u32, causal as u32, 0u32)
-            ).unwrap();
+            let input_block = Tensor::new(
+                vec![batch_size, seq_len, head_dim],
+                TensorStorage::Dedicated(&ctx),
+                TensorInit::CopyFrom(&input_data),
+            )
+            .unwrap();
+            let block_result = ctx
+                .call::<SoftmaxBlockOp>((
+                    &input_block,
+                    (batch_size * seq_len) as u32,
+                    seq_len as u32,
+                    head_dim as u32,
+                    32u32,
+                    causal as u32,
+                    0u32,
+                ))
+                .unwrap();
 
             // Row width is the last dimension (seq_k/head_dim)
             compare_softmax_results(&original_result, &block_result, "block-softmax", head_dim);
@@ -121,13 +156,9 @@ fn test_softmax_kernel_edge_cases() {
         let input_vec = Tensor::new(vec![1, 128, 1], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
 
         // Test original vs vec-softmax
-        let original_result = ctx.call::<SoftmaxKernelOp>(
-            (&input_orig, 128, 128, 1, false as u32, 0)
-        ).unwrap();
+        let original_result = ctx.call::<SoftmaxKernelOp>((&input_orig, 128, 128, 1, false as u32, 0)).unwrap();
 
-        let vec_result = ctx.call::<SoftmaxVecOp>(
-            (&input_vec, 128u32, 128u32, 1u32, 0u32, 0u32)
-        ).unwrap();
+        let vec_result = ctx.call::<SoftmaxVecOp>((&input_vec, 128u32, 128u32, 1u32, 0u32, 0u32)).unwrap();
 
         // Row width is the last dimension (seq_k = 1)
         compare_softmax_results(&original_result, &vec_result, &format!("edge_case_{}", i), 1);
@@ -153,31 +184,51 @@ fn test_softmax_causal_masking_consistency() {
         }
     }
 
-    let input_nc_orig = Tensor::new(vec![1, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let input_nc_vec = Tensor::new(vec![1, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
+    let input_nc_orig = Tensor::new(
+        vec![1, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let input_nc_vec = Tensor::new(
+        vec![1, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
 
     // Test non-causal case
-    let non_causal_original = ctx.call::<SoftmaxKernelOp>(
-        (&input_nc_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0)
-    ).unwrap();
+    let non_causal_original = ctx
+        .call::<SoftmaxKernelOp>((&input_nc_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0))
+        .unwrap();
 
-    let non_causal_vec = ctx.call::<SoftmaxVecOp>(
-        (&input_nc_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32)
-    ).unwrap();
+    let non_causal_vec = ctx
+        .call::<SoftmaxVecOp>((&input_nc_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32))
+        .unwrap();
 
     // Row width is the last dimension (seq_k = 1)
     compare_softmax_results(&non_causal_original, &non_causal_vec, "non_causal", head_dim);
 
     // Test causal case
-    let input_c_orig = Tensor::new(vec![1, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let causal_original = ctx.call::<SoftmaxKernelOp>(
-        (&input_c_orig, seq_len as u32, seq_len as u32, head_dim as u32, true as u32, 0)
-    ).unwrap();
+    let input_c_orig = Tensor::new(
+        vec![1, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let causal_original = ctx
+        .call::<SoftmaxKernelOp>((&input_c_orig, seq_len as u32, seq_len as u32, head_dim as u32, true as u32, 0))
+        .unwrap();
 
-    let input_c_vec = Tensor::new(vec![1, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let causal_vec = ctx.call::<SoftmaxVecOp>(
-        (&input_c_vec, seq_len as u32, seq_len as u32, head_dim as u32, 1u32, 0u32)
-    ).unwrap();
+    let input_c_vec = Tensor::new(
+        vec![1, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let causal_vec = ctx
+        .call::<SoftmaxVecOp>((&input_c_vec, seq_len as u32, seq_len as u32, head_dim as u32, 1u32, 0u32))
+        .unwrap();
 
     // Row width is the last dimension (seq_k = 1)
     compare_softmax_results(&causal_original, &causal_vec, "causal", head_dim);
@@ -209,12 +260,7 @@ fn test_softmax_causal_masking_consistency() {
 }
 
 /// Helper function to compare two softmax results
-fn compare_softmax_results(
-    original: &Tensor<F16Element>,
-    new_kernel: &Tensor<F16Element>,
-    kernel_name: &str,
-    row_width: usize,
-) {
+fn compare_softmax_results(original: &Tensor<F16Element>, new_kernel: &Tensor<F16Element>, kernel_name: &str, row_width: usize) {
     let original_data = original.as_slice();
     let new_data = new_kernel.as_slice();
 
@@ -305,22 +351,16 @@ fn test_softmax_kernel_dtype_consistency() {
 
     let mut ctx = Context::<TestElement>::new().unwrap();
 
-    let input_data: Vec<half::f16> = (0..256)
-        .map(|i| TestElement::from_f32((i as f32 - 128.0) / 10.0))
-        .collect();
+    let input_data: Vec<half::f16> = (0..256).map(|i| TestElement::from_f32((i as f32 - 128.0) / 10.0)).collect();
 
     let input_orig = Tensor::new(vec![1, 128, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
     let input_vec = Tensor::new(vec![1, 128, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
 
     // Test original kernel
-    let original_result = ctx.call::<SoftmaxKernelOp>(
-        (&input_orig, 128, 128, 2, false as u32, 0)
-    ).unwrap();
+    let original_result = ctx.call::<SoftmaxKernelOp>((&input_orig, 128, 128, 2, false as u32, 0)).unwrap();
 
     // Test vec kernel
-    let vec_result = ctx.call::<SoftmaxVecOp>(
-        (&input_vec, 128u32, 128u32, 2u32, 0u32, 0u32)
-    ).unwrap();
+    let vec_result = ctx.call::<SoftmaxVecOp>((&input_vec, 128u32, 128u32, 2u32, 0u32, 0u32)).unwrap();
 
     // Row width is the last dimension (seq_k = 2)
     compare_softmax_results(&original_result, &vec_result, "vec-softmax-dtype", 2);
@@ -342,17 +382,27 @@ fn test_softmax_f32_dtypes() {
         .map(|i| (i as f32 - (seq_len * head_dim) as f32 / 2.0) / 100.0)
         .collect();
 
-    let input_orig = Tensor::new(vec![1, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let input_vec = Tensor::new(vec![1, seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
+    let input_orig = Tensor::new(
+        vec![1, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let input_vec = Tensor::new(
+        vec![1, seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
 
     // Test original vs vec-softmax for F32
-    let original_result = ctx.call::<SoftmaxKernelOp>(
-        (&input_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0)
-    ).unwrap();
+    let original_result = ctx
+        .call::<SoftmaxKernelOp>((&input_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0))
+        .unwrap();
 
-    let vec_result = ctx.call::<SoftmaxVecOp>(
-        (&input_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32)
-    ).unwrap();
+    let vec_result = ctx
+        .call::<SoftmaxVecOp>((&input_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32))
+        .unwrap();
 
     compare_softmax_results_f32(&original_result, &vec_result, "vec-softmax-f32", head_dim);
 
@@ -363,17 +413,42 @@ fn test_softmax_f32_dtypes() {
         .map(|i| (i as f32 - (long_seq_len * head_dim) as f32 / 2.0) / 100.0)
         .collect();
 
-    let input_orig_long = Tensor::new(vec![1, long_seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&long_input_data)).unwrap();
-    let input_block = Tensor::new(vec![1, long_seq_len, head_dim], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&long_input_data)).unwrap();
+    let input_orig_long = Tensor::new(
+        vec![1, long_seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&long_input_data),
+    )
+    .unwrap();
+    let input_block = Tensor::new(
+        vec![1, long_seq_len, head_dim],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&long_input_data),
+    )
+    .unwrap();
 
     // Test original vs block-softmax for F32
-    let original_long_result = ctx.call::<SoftmaxKernelOp>(
-        (&input_orig_long, long_seq_len as u32, long_seq_len as u32, head_dim as u32, false as u32, 0)
-    ).unwrap();
+    let original_long_result = ctx
+        .call::<SoftmaxKernelOp>((
+            &input_orig_long,
+            long_seq_len as u32,
+            long_seq_len as u32,
+            head_dim as u32,
+            false as u32,
+            0,
+        ))
+        .unwrap();
 
-    let block_result = ctx.call::<SoftmaxBlockOp>(
-        (&input_block, long_seq_len as u32, long_seq_len as u32, head_dim as u32, 1024u32, 0u32, 0u32)
-    ).unwrap();
+    let block_result = ctx
+        .call::<SoftmaxBlockOp>((
+            &input_block,
+            long_seq_len as u32,
+            long_seq_len as u32,
+            head_dim as u32,
+            1024u32,
+            0u32,
+            0u32,
+        ))
+        .unwrap();
 
     compare_softmax_results_f32(&original_long_result, &block_result, "block-softmax-f32", head_dim);
 
@@ -381,12 +456,7 @@ fn test_softmax_f32_dtypes() {
 }
 
 /// Helper function to compare F32 softmax results
-fn compare_softmax_results_f32(
-    original: &Tensor<F32Element>,
-    new_kernel: &Tensor<F32Element>,
-    kernel_name: &str,
-    row_width: usize,
-) {
+fn compare_softmax_results_f32(original: &Tensor<F32Element>, new_kernel: &Tensor<F32Element>, kernel_name: &str, row_width: usize) {
     let original_data = original.as_slice();
     let new_data = new_kernel.as_slice();
 
@@ -450,34 +520,52 @@ fn test_softmax_block_causal_masking_consistency() {
 
     // Use longer sequence to trigger block-softmax (seq_len > 1024)
     let batch = 1usize;
-    let seq_q = 16usize;  // Number of query rows
+    let seq_q = 16usize; // Number of query rows
     let seq_k = 2048usize; // Number of key columns (this should trigger block-softmax)
     let causal = true;
 
     // Deterministic input pattern for causal testing
     let total = batch * seq_q * seq_k;
     let mut input_data = vec![TestElement::from_f32(0.0); total];
-    for i in 0..total {
-        let r = (i / seq_k) % seq_q;  // row index (query position)
-        let c = i % seq_k;             // column index (key position)
-        
+    (0..total).for_each(|i| {
+        let r = (i / seq_k) % seq_q; // row index (query position)
+        let c = i % seq_k; // column index (key position)
+
         // Create a pattern where causal masking should make a clear difference
         // Each query position should only see keys up to its own position
         let v = ((c as f32) - (r as f32)) / 10.0; // Create a gradient that varies by position
         input_data[i] = TestElement::from_f32(v);
-    }
+    });
 
     // Test with original kernel
-    let input_orig = Tensor::new(vec![batch, seq_q, seq_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let original = ctx.call::<SoftmaxKernelOp>(
-        (&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0)
-    ).unwrap();
+    let input_orig = Tensor::new(
+        vec![batch, seq_q, seq_k],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let original = ctx
+        .call::<SoftmaxKernelOp>((&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0))
+        .unwrap();
 
     // Test with block-softmax kernel
-    let input_block = Tensor::new(vec![batch, seq_q, seq_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let block = ctx.call::<SoftmaxBlockOp>(
-        (&input_block, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, 1024u32, causal as u32, 0)
-    ).unwrap();
+    let input_block = Tensor::new(
+        vec![batch, seq_q, seq_k],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let block = ctx
+        .call::<SoftmaxBlockOp>((
+            &input_block,
+            (batch * seq_q) as u32,
+            seq_q as u32,
+            seq_k as u32,
+            1024u32,
+            causal as u32,
+            0,
+        ))
+        .unwrap();
 
     // Compare results
     let original_data = original.as_slice();
@@ -503,7 +591,8 @@ fn test_softmax_block_causal_masking_consistency() {
             max_diff_idx = i;
         }
 
-        if diff > 1e-4 {  // Slightly relaxed tolerance for block-softmax
+        if diff > 1e-4 {
+            // Slightly relaxed tolerance for block-softmax
             diff_count += 1;
         }
     }
@@ -517,7 +606,7 @@ fn test_softmax_block_causal_masking_consistency() {
     );
 
     // Allow slightly more tolerance for block-softmax due to segmented reduction differences and f16 precision
-    let epsilon = 1e-4;  // Increased tolerance to account for segmented reduction precision differences
+    let epsilon = 1e-4; // Increased tolerance to account for segmented reduction precision differences
 
     assert!(
         max_diff < epsilon,
@@ -557,12 +646,26 @@ fn test_softmax_vec_debug_small() {
         })
         .collect();
 
-    let input_orig = Tensor::new(vec![batch, seq_q, seq_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
-    let input_vec = Tensor::new(vec![batch, seq_q, seq_k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
+    let input_orig = Tensor::new(
+        vec![batch, seq_q, seq_k],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
+    let input_vec = Tensor::new(
+        vec![batch, seq_q, seq_k],
+        TensorStorage::Dedicated(&ctx),
+        TensorInit::CopyFrom(&input_data),
+    )
+    .unwrap();
 
     // Run original and vec-softmax
-    let original = ctx.call::<SoftmaxKernelOp>((&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0)).unwrap();
-    let vec = ctx.call::<SoftmaxVecOp>((&input_vec, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0)).unwrap();
+    let original = ctx
+        .call::<SoftmaxKernelOp>((&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0))
+        .unwrap();
+    let vec = ctx
+        .call::<SoftmaxVecOp>((&input_vec, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0))
+        .unwrap();
 
     let o = original.as_slice();
     let v = vec.as_slice();
@@ -596,8 +699,12 @@ fn test_softmax_vec_debug_small() {
                 count_v += 1;
             }
         }
-        if count_o > 0 { est_max_o /= count_o as f32; }
-        if count_v > 0 { est_max_v /= count_v as f32; }
+        if count_o > 0 {
+            est_max_o /= count_o as f32;
+        }
+        if count_v > 0 {
+            est_max_v /= count_v as f32;
+        }
 
         let mut max_diff = 0.0f32;
         let mut max_idx = 0usize;

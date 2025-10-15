@@ -2,11 +2,11 @@ use super::*;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement,
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement,
     cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
     context::GpuProfilerLabel,
     resource_cache::ResourceCache,
@@ -187,11 +187,7 @@ impl KernelInvocable for MatMulMpsAlphaBetaOp {
 // Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl Operation for MatMulMpsAlphaBeta {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);
@@ -199,16 +195,16 @@ impl Operation for MatMulMpsAlphaBeta {
 
         // Encode the MPS matrix multiplication
         // MPS-backed op: ensure CPU-scope timing is used in latency mode for exact attribution
-        GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer);
+        GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer.raw());
         let scope = {
             let label = &self.profiler_label;
-            GpuProfiler::profile_command_buffer(command_buffer, label.op_name.clone(), label.backend.clone())
+            GpuProfiler::profile_command_buffer(command_buffer.raw(), label.op_name.clone(), label.backend.clone())
         };
         unsafe {
             self.gemm.setBatchStart(0 as NSUInteger);
             self.gemm.setBatchSize(self.batch_size as NSUInteger);
         }
-        encode_mps_matrix_multiplication(&self.gemm, command_buffer, &left, &right, &result);
+        encode_mps_matrix_multiplication(&self.gemm, command_buffer.raw(), &left, &right, &result);
 
         drop(scope);
         Ok(())

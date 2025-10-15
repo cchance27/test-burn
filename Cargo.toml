@@ -109,3 +109,8 @@ harness = false
 name = "direct_kernel_bench"
 path = "benches/tuning_kernels/direct_kernel_bench.rs"
 harness = false
+
+[[bench]]
+name = "pipeline_bench"
+path = "benches/tuning_kernels/pipeline_bench.rs"
+harness = false

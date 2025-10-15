@@ -12,8 +12,8 @@ use crate::{
 use super::{
     dispatcher::{SoftmaxCaps, SoftmaxPrefs, select_policy},
     execute::SoftmaxDispatch,
-    types::{SoftmaxBackend, SoftmaxShape, SoftmaxVariant},
     prefs,
+    types::{SoftmaxBackend, SoftmaxShape, SoftmaxVariant},
 };
 
 /// A public, zero-sized struct that acts as the entry point for the softmax dispatcher.
@@ -40,8 +40,12 @@ impl KernelInvocable for SoftmaxDispatchOp {
 
         // Environment-gated NOOP path for measuring dispatcher overhead.
         // Triggered by setting METALLIC_SOFTMAX_BACKEND=noop or METALLIC_SOFTMAX_VARIANT=noop.
-        let force_noop = std::env::var("METALLIC_SOFTMAX_BACKEND").map(|s| s.eq_ignore_ascii_case("noop")).unwrap_or(false)
-            || std::env::var("METALLIC_SOFTMAX_VARIANT").map(|s| s.eq_ignore_ascii_case("noop")).unwrap_or(false);
+        let force_noop = std::env::var("METALLIC_SOFTMAX_BACKEND")
+            .map(|s| s.eq_ignore_ascii_case("noop"))
+            .unwrap_or(false)
+            || std::env::var("METALLIC_SOFTMAX_VARIANT")
+                .map(|s| s.eq_ignore_ascii_case("noop"))
+                .unwrap_or(false);
         if force_noop {
             let function_id = crate::kernels::KernelFunction::Noop;
             let pipeline = ctx.kernel_manager.get_pipeline(function_id, ctx.tensor_dtype(), &ctx.device)?;

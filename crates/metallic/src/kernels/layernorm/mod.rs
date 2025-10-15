@@ -1,4 +1,5 @@
 use super::*;
+use crate::CommandBuffer;
 use crate::{TensorElement, TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the LayerNorm operation.
@@ -70,14 +71,8 @@ impl KernelInvocable for LayerNormOp {
 }
 
 impl<T: TensorElement> Operation for LayerNorm<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let total_elements = self.input.len() as u32;
         let threads_per_tg = MTLSize {
@@ -100,7 +95,6 @@ impl<T: TensorElement> Operation for LayerNorm<T> {
         set_bytes(&encoder, 5, &total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

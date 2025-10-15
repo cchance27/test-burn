@@ -1,6 +1,6 @@
 use super::*;
 use crate::context::GpuProfilerLabel;
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
 
 // User-facing struct for the broadcast element-wise add operation.
@@ -103,17 +103,11 @@ impl KernelInvocable for BroadcastElemwiseAddInplaceOp {
 }
 
 impl<T: TensorElement> Operation for BroadcastElemwiseAdd<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {
@@ -135,7 +129,6 @@ impl<T: TensorElement> Operation for BroadcastElemwiseAdd<T> {
         set_bytes(&encoder, 4, &(self.b_len as u32));
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }
@@ -149,17 +142,11 @@ struct BroadcastElemwiseAddInplace<T: TensorElement> {
 }
 
 impl<T: TensorElement> Operation for BroadcastElemwiseAddInplace<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let total_elements = self.a.len() as u32;
         let threads_per_tg = MTLSize {
@@ -181,7 +168,6 @@ impl<T: TensorElement> Operation for BroadcastElemwiseAddInplace<T> {
         set_bytes(&encoder, 4, &(self.b_len as u32));
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

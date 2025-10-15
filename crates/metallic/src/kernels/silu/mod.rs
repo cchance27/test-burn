@@ -1,5 +1,5 @@
 use super::*;
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 mod silu_test;
 
 /// Public, user-facing, zero-sized struct for the SiLU operation.
@@ -40,14 +40,8 @@ impl KernelInvocable for SiluOp {
 }
 
 impl<T: TensorElement> Operation for Silu<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let total_elements = self.input.len() as u32;
         let threads_per_tg = MTLSize {
@@ -67,7 +61,6 @@ impl<T: TensorElement> Operation for Silu<T> {
         set_bytes(&encoder, 2, &total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

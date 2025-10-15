@@ -1,4 +1,5 @@
 use super::*;
+use crate::CommandBuffer;
 use crate::context::GpuProfilerLabel;
 use crate::{TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
@@ -128,17 +129,11 @@ impl KernelInvocable for RepeatKvHeadsOp {
 }
 
 impl<T: TensorElement> Operation for RepeatKvHeads<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let threads_per_tg = MTLSize {
             width: 256,
@@ -164,7 +159,6 @@ impl<T: TensorElement> Operation for RepeatKvHeads<T> {
         set_bytes(&encoder, 9, &self.total_elements);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
     }
 }

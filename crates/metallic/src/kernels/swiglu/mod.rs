@@ -1,5 +1,6 @@
 use super::*;
 
+use crate::CommandBuffer;
 use crate::Context;
 use crate::Dtype;
 use crate::MetalError;
@@ -122,17 +123,11 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
 }
 
 impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
+        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
 
         let vector_width = std::cmp::max(self.vector_width as usize, 1);
         let base_threads = 256usize;
@@ -168,7 +163,6 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
         set_bytes(&encoder, 8, &self.up_leading_stride);
 
         dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
 
         Ok(())
     }
@@ -442,11 +436,7 @@ pub fn swiglu_with_optional_cache<T: TensorElement>(
 
 // Implement `Operation` for the internal struct.
 impl<T: TensorElement> Operation for SwiGLU<T> {
-    fn encode(
-        &self,
-        _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
+    fn encode(&self, _command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         // Since all computation was done in the `new` method of KernelInvocable,
         // this method just returns Ok(())
         Ok(())
