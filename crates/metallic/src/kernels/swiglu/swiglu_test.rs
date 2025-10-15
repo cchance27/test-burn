@@ -1,4 +1,4 @@
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::swiglu::SwiGLUOp};
 use std::fs;
 
 use serde::{Deserialize, Serialize};
@@ -57,7 +57,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
         TensorStorage::Dedicated(&ctx),
         TensorInit::CopyFrom(&vec![0.0f32; d_model]),
     )?;
-    let output = ctx.SwiGLU(
+    let output = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -66,7 +66,7 @@ fn test_swiglu_small_uniform() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         None,
-    )?;
+    ))?;
     ctx.synchronize();
 
     // Expected approx 2.1196 (silu(0.8) ≈0.55198 * 1.6 * 0.3 * 8 ≈2.1196; slight FP diff OK)
@@ -138,7 +138,7 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
     let input_data: Vec<f32> = vec![0.0; m * d_model];
     let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
-    let output = ctx.SwiGLU(
+    let output = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -147,7 +147,7 @@ fn test_swiglu_zero_input() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         None,
-    )?;
+    ))?;
 
     let output_slice = output.as_slice();
     for &val in output_slice {
@@ -205,7 +205,7 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&vec![0.0f32; d_model]),
     )?;
 
-    let output = ctx.SwiGLU(
+    let output = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -214,7 +214,7 @@ fn test_swiglu_scalar_fallback_path() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         None,
-    )?;
+    ))?;
     ctx.synchronize();
 
     let expected = 1.5897012_f32;
@@ -288,7 +288,7 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&vec![-0.03f32; d_model]),
     )?;
 
-    let baseline = ctx.SwiGLU(
+    let baseline = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -297,11 +297,11 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         None,
-    )?;
+    ))?;
     ctx.synchronize();
     let baseline_vals = baseline.as_slice().to_vec();
 
-    let fused = ctx.SwiGLU(
+    let fused = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -310,7 +310,7 @@ fn test_swiglu_fused_matches_unfused() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         Some(&fused_gate_up),
-    )?;
+    ))?;
     ctx.synchronize();
     let fused_vals = fused.as_slice();
 
@@ -377,7 +377,7 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&vec![0.02f32; d_model]),
     )?;
 
-    let baseline = ctx.SwiGLU(
+    let baseline = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -386,11 +386,11 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         None,
-    )?;
+    ))?;
     ctx.synchronize();
     let baseline_vals = baseline.as_slice().to_vec();
 
-    let fused = ctx.SwiGLU(
+    let fused = ctx.call::<SwiGLUOp>((
         &x_normed_flat,
         &ffn_gate,
         &ffn_gate_bias,
@@ -399,7 +399,7 @@ fn test_swiglu_fused_scalar_path_matches_unfused() -> Result<(), MetalError> {
         &ffn_down,
         &ffn_down_bias,
         Some(&fused_gate_up),
-    )?;
+    ))?;
     ctx.synchronize();
     let fused_vals = fused.as_slice();
 
@@ -507,7 +507,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
         let x_normed_flat = Tensor::new(vec![m, d_model], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&case.input))?;
 
         // Run swiglu
-        let rust_output = ctx.SwiGLU(
+        let rust_output = ctx.call::<SwiGLUOp>((
             &x_normed_flat,
             &ffn_gate,
             &ffn_gate_bias,
@@ -516,7 +516,7 @@ fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
             &ffn_down,
             &ffn_down_bias,
             None,
-        )?;
+        ))?;
         ctx.synchronize(); // Sync to ensure GPU ops complete before CPU read
         let rust_output_flat = rust_output.as_slice().to_vec();
 

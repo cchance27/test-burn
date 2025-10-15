@@ -59,32 +59,6 @@ fn test_qwen25_embed() -> Result<(), MetalError> {
 }
 
 #[test]
-fn test_qwen25_forward_tokens() -> Result<(), MetalError> {
-    let mut ctx = Context::<F32Element>::new()?;
-    let cfg = Qwen25Config {
-        n_layers: 1,
-        d_model: 8,
-        ff_dim: 16,
-        n_heads: 2,
-        n_kv_heads: 1,
-        seq_len: 4,
-        vocab_size: 16,
-        rope_freq_base: 1e6,
-        rms_eps: 1e-6,
-    };
-    let model = Qwen25::new(cfg, &mut ctx)?;
-
-    // Test forward pass with tokens
-    let tokens = vec![1, 2, 3];
-    let logits = model.forward_tokens(&tokens, &mut ctx)?;
-
-    // Check the output shape - should be [batch, seq, vocab_size]
-    assert_eq!(logits.dims(), &[1, 3, 16]);
-
-    Ok(())
-}
-
-#[test]
 fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {

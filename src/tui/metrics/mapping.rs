@@ -109,102 +109,130 @@ pub fn map_gpu_op_completed(op_name: &str) -> Option<Vec<String>> {
 
 /// Map hierarchical GPU operation paths to display segments
 pub fn map_hierarchical_gpu_op(path: &str) -> Option<Vec<String>> {
-    // Parse the '/'-separated path and reconstruct a canonical hierarchical label path
-    // Default to Generation Loop context. Insert Forward Step when we have block/stage context
-    // or an inner label that is part of the forward pass. Plain waits (cb_wait/dep_wait) without
-    // a block/stage should live directly under Generation Loop.
-    let mut has_generation = false;
-    let mut block_label: Option<String> = None;
-    let mut stage_label: Option<String> = None;
-    let mut inner_label: Option<String> = None;
+    // Parse the '/'-separated path directly to build a hierarchical display path
+    let segments: Vec<&str> = path.split('/').collect();
 
-    for seg in path.split('/') {
+    if segments.is_empty() {
+        return None;
+    }
+
+    // Check for special cases first
+    if segments.iter().any(|&s| s.eq_ignore_ascii_case(PROMPT_PROCESSING_LABEL)) {
+        // Collapse prompt processing into a single line summary
+        return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
+    }
+
+    // Build the result path step by step
+    let mut result_path: Vec<String> = Vec::new();
+    result_path.push(GENERATION_LOOP_LABEL.to_string());
+
+    let mut has_forward_step = false;
+    let mut has_block = false;
+
+    for &seg in &segments {
+        // Skip generation loop if it appears in the path (we already added it)
         if seg.eq_ignore_ascii_case("generation loop") {
-            has_generation = true;
             continue;
         }
-        if seg.eq_ignore_ascii_case(PROMPT_PROCESSING_LABEL) {
-            // Collapse prompt processing into a single line summary
-            return Some(vec![PROMPT_PROCESSING_LABEL.to_string()]);
-        }
+
+        // Check if this segment is a block identifier
         if let Some(rest) = seg.strip_prefix("block_")
             && let Ok(idx) = rest.parse::<usize>()
         {
-            block_label = Some(format!("Block {}", idx));
-            continue;
-        }
-        if seg.eq_ignore_ascii_case("generation_step_output") {
-            inner_label = Some("Output".to_string());
-            continue;
-        }
-        // Explicitly surface wait segments as visible leaves
-        if seg.eq_ignore_ascii_case("cb_wait") {
-            inner_label = Some("CB Wait".to_string());
-            continue;
-        }
-        if seg.eq_ignore_ascii_case("dep_wait") {
-            inner_label = Some("Dep Wait".to_string());
-            continue;
-        }
-        if let Some(stage) = map_block_stage(seg) {
-            // Expect [Generation Loop, Forward Step, Block N, Stage]; capture Block and Stage
-            if stage.len() >= 3 {
-                block_label = Some(stage[2].clone());
-            }
-            if let Some(last) = stage.last() {
-                stage_label = Some(last.clone());
+            // Only add the block if we don't already have one in the path
+            if !has_block {
+                if !has_forward_step {
+                    result_path.push("Forward Step".to_string());
+                    has_forward_step = true;
+                }
+                result_path.push(format!("Block {}", idx));
+                has_block = true;
             }
             continue;
         }
-        // Map inner op friendly names
-        let inner = seg.trim_end_matches("_op");
-        let friendly = match inner {
-            s if s.starts_with("sdpa_matmul_qk") => Some("QK MatMul"),
-            s if s.starts_with("sdpa_softmax") => Some("Softmax"),
-            s if s.starts_with("sdpa_matmul_av") => Some("AV MatMul"),
-            s if s.starts_with("attn_qkv_proj") => Some("QKV Proj"),
-            s if s.starts_with("attn_rearrange") => Some("Rearrange"),
-            s if s.starts_with("attn_output") => Some("Attn Output"),
-            s if s.starts_with("mlp_swiglu") => Some("SwiGLU"),
-            s if s.starts_with("mlp_norm") => Some("MLP Norm"),
-            s if s.starts_with("mlp_output") => Some("MLP Output"),
-            s if s.starts_with("rope_block") || s == "rope" => Some("Rope"),
-            "generation_step_output" => Some("Output"),
-            _ => None,
-        };
-        if let Some(name) = friendly {
-            inner_label = Some(name.to_string());
-            continue;
+
+        // Special handling for some operations
+        match seg {
+            "generation_step_output" => {
+                if !has_forward_step && !has_block {
+                    result_path.push("Forward Step".to_string());
+                    has_forward_step = true;
+                }
+                result_path.push("Output".to_string());
+            }
+            "cb_wait" | "CB Wait" => {
+                if !has_forward_step && !has_block {
+                    result_path.push("Forward Step".to_string());
+                    has_forward_step = true;
+                }
+                result_path.push("CB Wait".to_string());
+            }
+            "dep_wait" | "Dep Wait" => {
+                if !has_forward_step && !has_block {
+                    result_path.push("Forward Step".to_string());
+                    has_forward_step = true;
+                }
+                result_path.push("Dep Wait".to_string());
+            }
+            _ => {
+                // Check if this segment matches a known block stage
+                if let Some(stage_segments) = map_block_stage(seg) {
+                    if !has_forward_step {
+                        result_path.push("Forward Step".to_string());
+                        has_forward_step = true;
+                    }
+                    // Add the stage parts that aren't already in the path
+                    for stage_part in &stage_segments {
+                        if !result_path.contains(stage_part) && stage_part != GENERATION_LOOP_LABEL {
+                            result_path.push(stage_part.clone());
+                        }
+                    }
+                } else {
+                    // For other segments, clean them and add to the path
+                    let clean_segment = if seg.contains("::") {
+                        // Extract the last part after the final :: (e.g., "...::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp" -> "SoftmaxDispatchOp")
+                        let seg = seg.split("::").last().unwrap_or(seg);
+                        format!("{} Kernel", seg)
+                    } else {
+                        seg.to_string()
+                    };
+
+                    // Map to friendly names for known operation types
+                    let display_name = match clean_segment.trim_end_matches("Op") {
+                        s if s.starts_with("sdpa_matmul_qk") => "QK MatMul".to_string(),
+                        s if s.starts_with("sdpa_softmax") => "Softmax".to_string(),
+                        s if s.starts_with("sdpa_matmul_av") => "AV MatMul".to_string(),
+                        s if s.starts_with("attn_qkv_proj") => "QKV Proj".to_string(),
+                        s if s.starts_with("attn_rearrange") => "Rearrange".to_string(),
+                        s if s.starts_with("attn_output") => "Attn Output".to_string(),
+                        s if s.starts_with("mlp_swiglu") => "SwiGLU".to_string(),
+                        s if s.starts_with("mlp_norm") => "MLP Norm".to_string(),
+                        s if s.starts_with("mlp_output") => "MLP Output".to_string(),
+                        s if s.starts_with("rope_block") || s == "rope" => "Rope".to_string(),
+                        s if s.starts_with("MatmulDispatch") => "MatMul".to_string(),
+                        s if s.starts_with("SoftmaxDispatch") => "Softmax".to_string(),
+                        s if s.starts_with("RMSNorm") => "RMS Norm".to_string(),
+                        s if s.starts_with("SwiGLU") => "SwiGLU".to_string(),
+                        s if s.starts_with("ScaledDotProductAttention") => "SDPA".to_string(),
+                        "generation_step_output" => "Output".to_string(),
+                        other => other.to_string(),
+                    };
+
+                    if !has_forward_step && !has_block && !display_name.contains("Wait") {
+                        result_path.push("Forward Step".to_string());
+                        has_forward_step = true;
+                    }
+
+                    // Only add if it's not already in the path
+                    if !result_path.contains(&display_name) {
+                        result_path.push(display_name);
+                    }
+                }
+            }
         }
     }
 
-    // Build final path
-    let mut out: Vec<String> = Vec::new();
-    if has_generation {
-        out.push(GENERATION_LOOP_LABEL.to_string());
-    } else {
-        // If not explicitly present, inject it for generation-related scopes
-        out.push(GENERATION_LOOP_LABEL.to_string());
-    }
-
-    // Decide whether to insert "Forward Step" as an intermediate node.
-    let is_plain_wait = matches!(inner_label.as_deref(), Some("CB Wait") | Some("Dep Wait"));
-    let has_block_or_stage = block_label.is_some() || stage_label.is_some();
-    if has_block_or_stage || !is_plain_wait {
-        out.push("Forward Step".to_string());
-    }
-
-    if let Some(block) = block_label {
-        out.push(block);
-    }
-    if let Some(stage) = stage_label {
-        out.push(stage);
-    }
-    if let Some(inner) = inner_label {
-        out.push(inner);
-    }
-
-    if out.is_empty() { None } else { Some(out) }
+    if result_path.len() <= 1 { None } else { Some(result_path) }
 }
 
 /// Map generation stage names to display segments

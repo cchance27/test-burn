@@ -4,7 +4,6 @@ use super::pool::MemoryPool;
 use super::profiling_state;
 use super::resource_cache::{CacheStats, ResourceCache};
 use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use crate::kernels::swiglu::SwiGLUOp;
 use crate::tensor::Dtype;
 use crate::{Tensor, TensorElement, cache_keys::SdpaKey, kernels};
 use kernels::kv_cache_write::{KvCacheWriteConfig, KvCacheWriteOp};
@@ -312,11 +311,33 @@ impl<T: TensorElement> Context<T> {
         })
     }
 
+    #[inline]
     pub fn tensor_dtype(&self) -> Dtype {
         T::DTYPE
     }
 
     pub fn call<K: KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
+        // Get the current scope path to potentially nest with the kernel being called
+        let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
+            Some(current_label.op_name)
+        } else {
+            None
+        };
+
+        // Add operation name to current scope if we're already in a scope, creating nested path
+        // Use the full type name in hot path - formatting to extract op name can be done in frontend
+        let op_type_name = std::any::type_name::<K>();
+
+        if let Some(mut current_path) = current_scope_path {
+            // Append operation name to current scope path to create nested structure
+            current_path.push('/');
+            current_path.push_str(op_type_name);
+            self.set_pending_gpu_scope(current_path);
+        } else {
+            // If not in any scope, just set the operation name as pending
+            self.set_pending_gpu_scope(op_type_name);
+        }
+
         self.ensure_active_cmd_buffer()?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -352,9 +373,13 @@ impl<T: TensorElement> Context<T> {
 
         command_buffer.record(&*operation, &mut cache)?;
 
+        // Consume any pending GPU scope that was set for this call, since operations
+        // may not always consume them (especially when nested scopes are created by call() itself)
+        let _profiler_label = self.take_gpu_scope();
+
         debug_assert!(
             self.pending_gpu_scope.is_none(),
-            "pending GPU scope should be consumed by kernel operation"
+            "pending GPU scope should be consumed by kernel operation or by us"
         );
 
         self.active_resource_cache = Some(cache);
@@ -393,10 +418,12 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
+    #[inline]
     pub fn set_pending_gpu_scope<S: Into<String>>(&mut self, op_name: S) {
         self.pending_gpu_scope = Some(GpuProfilerLabel::new(op_name.into(), GPU_PROFILER_BACKEND.to_string()));
     }
 
+    #[inline]
     pub fn with_gpu_scope<R, F>(&mut self, op_name: impl Into<String>, f: F) -> R
     where
         F: FnOnce(&mut Context<T>) -> R,
@@ -411,6 +438,7 @@ impl<T: TensorElement> Context<T> {
         result
     }
 
+    #[inline]
     pub fn clear_pending_gpu_scope(&mut self) {
         self.pending_gpu_scope = None;
     }
@@ -434,6 +462,7 @@ impl<T: TensorElement> Context<T> {
     /// This mirrors `take_gpu_scope` but returns a label even when called from pre-encode phases
     /// such as tensor preparation, so we can attribute CPU-side work (e.g. dependency waits)
     /// to the correct logical op path.
+    #[inline]
     pub(crate) fn current_gpu_scope_label(&self) -> Option<GpuProfilerLabel> {
         let mut path_segments = Vec::new();
         for scope in &self.gpu_scope_stack {
@@ -454,6 +483,7 @@ impl<T: TensorElement> Context<T> {
         Some(GpuProfilerLabel::new(op_name, backend))
     }
 
+    #[inline]
     pub(crate) fn take_gpu_scope(&mut self) -> Option<GpuProfilerLabel> {
         let mut path_segments = Vec::new();
         for scope in &self.gpu_scope_stack {
@@ -527,6 +557,7 @@ impl<T: TensorElement> Context<T> {
         false
     }
 
+    #[inline]
     fn has_strided_mps_batch(&self, tensors: &[&Tensor<T>]) -> bool {
         tensors.iter().any(|tensor| {
             tensor
@@ -825,6 +856,27 @@ impl<T: TensorElement> Context<T> {
         args: K::Args<'_, T>,
         cache: &mut ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
+        // Get the current scope path to potentially nest with the kernel being called
+        let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
+            Some(current_label.op_name)
+        } else {
+            None
+        };
+
+        // Add operation name to current scope if we're already in a scope, creating nested path
+        // Use the full type name in hot path - formatting to extract op name can be done in frontend
+        let op_type_name = std::any::type_name::<K>();
+
+        if let Some(mut current_path) = current_scope_path {
+            // Append operation name to current scope path to create nested structure
+            current_path.push('/');
+            current_path.push_str(op_type_name);
+            self.set_pending_gpu_scope(current_path);
+        } else {
+            // If not in any scope, just set the operation name as pending
+            self.set_pending_gpu_scope(op_type_name);
+        }
+
         self.ensure_active_cmd_buffer_internal(false)?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
@@ -837,9 +889,13 @@ impl<T: TensorElement> Context<T> {
 
         let command_buffer = self.active_command_buffer_mut_without_cache()?;
         command_buffer.record(&*operation, cache)?;
+        // Consume any pending GPU scope that was set for this call, since operations
+        // may not always consume them (especially when nested scopes are created by call() itself)
+        let _profiler_label = self.take_gpu_scope();
+
         debug_assert!(
             self.pending_gpu_scope.is_none(),
-            "pending GPU scope should be consumed by kernel operation"
+            "pending GPU scope should be consumed by kernel operation or by us"
         );
         self.mark_tensor_pending(&output);
 
@@ -1425,46 +1481,6 @@ impl<T: TensorElement> Context<T> {
     ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for SDPA
         self.call::<ScaledDotProductAttentionOptimizedOp>((q, k, v, causal, query_offset as u32))
-    }
-
-    /// SwiGLU implementation extracted from Qwen25 FFN block.
-    /// Computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
-    ///
-    /// # Arguments
-    /// * `x_normed_flat` - Flattened input [m, d_model] where m = batch * seq
-    /// * `ffn_gate` - Gate projection weight [ff_dim, d_model] (row-major; transpose if source stored as [d_model, ff_dim])
-    /// * `ffn_up` - Up projection weight [ff_dim, d_model] (row-major; transpose if source stored as [d_model, ff_dim])
-    /// * `ffn_down` - Down projection weight [d_model, ff_dim] (row-major; transpose if source stored as [ff_dim, d_model])
-    /// * `fused_gate_up_weight` - Optional fused gate/up weight storing both projections in a single matrix
-    /// * `ctx` - Metal context for operations
-    ///
-    /// # Returns
-    /// Flat output [m, d_model] (reshape externally to [batch, seq, d_model])
-    #[allow(clippy::too_many_arguments)]
-    #[allow(non_snake_case)]
-    #[inline]
-    pub fn SwiGLU(
-        &mut self,
-        x_normed_flat: &Tensor<T>,
-        ffn_gate: &Tensor<T>,
-        ffn_gate_bias: &Tensor<T>,
-        ffn_up: &Tensor<T>,
-        ffn_up_bias: &Tensor<T>,
-        ffn_down: &Tensor<T>,
-        ffn_down_bias: &Tensor<T>,
-        fused_gate_up_weight: Option<&Tensor<T>>,
-    ) -> Result<Tensor<T>, MetalError> {
-        // Use the kernel system to call the SwiGLU operation
-        self.call::<SwiGLUOp>((
-            x_normed_flat,
-            ffn_gate,
-            ffn_gate_bias,
-            ffn_up,
-            ffn_up_bias,
-            ffn_down,
-            ffn_down_bias,
-            fused_gate_up_weight,
-        ))
     }
 
     fn ensure_active_cmd_buffer(&mut self) -> Result<(), MetalError> {

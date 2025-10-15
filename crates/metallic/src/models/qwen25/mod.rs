@@ -2,6 +2,7 @@ use crate::kernels::kv_rearrange::KvRearrangeOp;
 use crate::kernels::repeat_kv_heads::RepeatKvHeadsOp;
 use crate::kernels::rmsnorm::RMSNormOp;
 use crate::kernels::rope::RoPEOp;
+use crate::kernels::swiglu::SwiGLUOp;
 use crate::{Context, MetalError, Tensor, TensorElement};
 use metallic_instrumentation::{MetricEvent, record_metric_async};
 use std::collections::BTreeMap;
@@ -103,37 +104,6 @@ impl<T: TensorElement> Qwen25<T> {
 
         // Reshape back to [batch, seq, vocab_size]
         let logits = logits_flat.reshape(vec![batch, seq, self.config.vocab_size])?;
-
-        Ok(logits)
-    }
-
-    /// Forward pass that takes tokens as input and returns logits
-    pub fn forward_tokens(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
-        // Embed tokens
-        let embedded = self.embed(tokens, ctx)?;
-
-        let embedded_slice = embedded.as_slice();
-        let embedded_max = embedded_slice.iter().map(|&v| T::to_f32(v)).fold(f32::NEG_INFINITY, f32::max);
-        let embedded_min = embedded_slice.iter().map(|&v| T::to_f32(v)).fold(f32::INFINITY, f32::min);
-        println!("Embedded stats - max: {:.4}, min: {:.4}", embedded_max, embedded_min);
-
-        // Additional debug: sample first few values
-        if embedded_slice.len() >= 5 {
-            println!(
-                "First 5 embedded values: {:.6}, {:.6}, {:.6}, {:.6}, {:.6}",
-                embedded_slice[0], embedded_slice[1], embedded_slice[2], embedded_slice[3], embedded_slice[4]
-            );
-        }
-
-        println!("Forward tokens: processing {} tokens", tokens.len());
-
-        // Run through transformer blocks
-        let hidden = self.forward(&embedded, ctx)?;
-
-        // Synchronize to ensure forward pass is complete before reading values
-
-        // Apply output projection
-        let logits = self.output(&hidden, ctx)?;
 
         Ok(logits)
     }
@@ -314,7 +284,7 @@ impl<T: TensorElement> Qwen25<T> {
             let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
             // FFN using extracted SwiGLU
-            let ffn_output_flat = ctx.SwiGLU(
+            let ffn_output_flat = ctx.call::<SwiGLUOp>((
                 &x_normed_mlp_flat,
                 &block.ffn_gate,
                 &block.ffn_gate_bias,
@@ -323,7 +293,7 @@ impl<T: TensorElement> Qwen25<T> {
                 &block.ffn_down,
                 &block.ffn_down_bias,
                 Some(&block.ffn_gate_up_weight),
-            )?;
+            ))?;
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
@@ -539,7 +509,7 @@ impl<T: TensorElement> Qwen25<T> {
 
                 cpu_accum += cpu_chk.elapsed();
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
-                    ctx.SwiGLU(
+                    ctx.call::<SwiGLUOp>((
                         &x_normed_mlp_flat,
                         &block.ffn_gate,
                         &block.ffn_gate_bias,
@@ -548,8 +518,9 @@ impl<T: TensorElement> Qwen25<T> {
                         &block.ffn_down,
                         &block.ffn_down_bias,
                         Some(&block.ffn_gate_up_weight),
-                    )
+                    ))
                 })?;
+
                 breakdown.insert("mlp_swiglu".to_string(), (ffn_output_flat.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
                 ctx.set_pending_gpu_scope(format!("mlp_reshape_block_{}_op", layer_idx));

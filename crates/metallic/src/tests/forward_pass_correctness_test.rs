@@ -4,6 +4,7 @@ use crate::kernels::elemwise_add::BroadcastElemwiseAddOp;
 use crate::kernels::kv_rearrange::KvRearrangeOp;
 use crate::kernels::rmsnorm::RMSNormOp;
 use crate::kernels::rope::RoPEOp;
+use crate::kernels::swiglu::SwiGLUOp;
 use crate::models::Qwen25;
 use crate::{Dtype, F16Element, TensorElement};
 use crate::{
@@ -258,7 +259,7 @@ fn run_blocks_up_to<T: TensorElement>(
         ctx.synchronize();
         let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
-        let ffn_output_flat = ctx.SwiGLU(
+        let ffn_output_flat = ctx.call::<SwiGLUOp>((
             &x_normed_mlp_flat,
             &block.ffn_gate,
             &block.ffn_gate_bias,
@@ -267,7 +268,7 @@ fn run_blocks_up_to<T: TensorElement>(
             &block.ffn_down,
             &block.ffn_down_bias,
             Some(&block.ffn_gate_up_weight),
-        )?;
+        ))?;
         ctx.synchronize();
         let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
@@ -1294,7 +1295,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     );
 
     let mlp_norm_flat_last = mlp_norm_last_view.reshape(vec![m, d_model])?;
-    let ffn_output_flat_last = ctx.SwiGLU(
+    let ffn_output_flat_last = ctx.call::<SwiGLUOp>((
         &mlp_norm_flat_last,
         &block_last.ffn_gate,
         &block_last.ffn_gate_bias,
@@ -1303,7 +1304,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         &block_last.ffn_down,
         &block_last.ffn_down_bias,
         Some(&block_last.ffn_gate_up_weight),
-    )?;
+    ))?;
     ctx.synchronize();
     let ffn_output_last = ffn_output_flat_last.reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
