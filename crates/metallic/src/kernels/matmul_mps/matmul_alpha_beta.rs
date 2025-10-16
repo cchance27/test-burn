@@ -188,7 +188,7 @@ impl KernelInvocable for MatMulMpsAlphaBetaOp {
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl Operation for MatMulMpsAlphaBeta {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Ensure no active encoder before MPS encodes 
+        // Ensure no active encoder before MPS encodes
         command_buffer.end_current_encoder();
 
         // Wrap buffers into MPSMatrix views

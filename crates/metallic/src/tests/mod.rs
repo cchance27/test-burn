@@ -5,6 +5,7 @@ use crate::cacheable_sdpa::CacheableSdpa;
 
 use crate::{Context, MetalError, Tensor};
 
+mod batch_record_test;
 mod cacheable_test;
 mod clamping_extreme_test;
 mod determinism_test;

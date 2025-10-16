@@ -150,6 +150,7 @@ impl SdpaWorkspaceState {
         }
     }
 
+    #[inline]
     fn reset(&mut self, descriptor: SdpaKey) {
         self.descriptor = descriptor;
         self.last_seq_q = 0;
@@ -214,6 +215,7 @@ pub(crate) struct KvCacheEntry<T: TensorElement> {
 }
 
 impl<T: TensorElement> KvCacheEntry<T> {
+    #[inline]
     fn total_bytes(&self) -> usize {
         self.k.size_bytes() + self.v.size_bytes()
     }
@@ -943,10 +945,12 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
+    #[inline]
     pub fn get_cache_stats(&self) -> Option<CacheStats> {
         self.active_resource_cache.as_ref().map(|cache| cache.get_stats())
     }
 
+    #[inline]
     pub fn clear_cache(&mut self) {
         if let Some(cache) = self.active_resource_cache.as_mut() {
             cache.clear();
@@ -954,10 +958,12 @@ impl<T: TensorElement> Context<T> {
         self.sdpa_workspaces.clear();
     }
 
+    #[inline]
     pub fn reset_pool(&mut self) {
         self.pool.reset();
     }
 
+    #[inline]
     pub(crate) fn clear_kv_caches(&mut self) {
         self.kv_caches.clear();
         self.kv_cache_total_bytes = 0;
@@ -1394,6 +1400,7 @@ impl<T: TensorElement> Context<T> {
         Ok(())
     }
 
+    #[inline]
     fn kv_cache_kernel_unavailable(err: &MetalError) -> bool {
         matches!(
             err,
@@ -1431,6 +1438,7 @@ impl<T: TensorElement> Context<T> {
         Ok((view, dims[1]))
     }
 
+    #[inline]
     pub(crate) fn sdpa_workspace_key_for(&self, tensor: &Tensor<T>) -> SdpaWorkspaceKey {
         SdpaWorkspaceKey::from_tensor(tensor)
     }
@@ -1480,16 +1488,12 @@ impl<T: TensorElement> Context<T> {
         self.ensure_active_cmd_buffer_internal(true)
     }
 
-    #[cfg(test)]
-    pub(crate) fn force_enable_profiling_for_tests(&mut self) {
-        crate::profiling_state::set_profiling_state(true);
-    }
-
     #[inline]
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
         // Check and refresh committed command buffer if needed
-        if let Some(active) = self.active_cmd_buffer.as_ref() 
-            && active.is_committed() {
+        if let Some(active) = self.active_cmd_buffer.as_ref()
+            && active.is_committed()
+        {
             if !active.is_completed() {
                 active.wait();
             }
@@ -1500,9 +1504,10 @@ impl<T: TensorElement> Context<T> {
         // Only create new buffer if truly needed
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
-            if crate::profiling_state::get_profiling_state() 
-                && let Some(profiler) = GpuProfiler::attach(&cmd_buf, true) {
-                    cmd_buf.retain_profiler(profiler);
+            if crate::profiling_state::get_profiling_state()
+                && let Some(profiler) = GpuProfiler::attach(&cmd_buf, true)
+            {
+                cmd_buf.retain_profiler(profiler);
             }
             self.active_cmd_buffer = Some(cmd_buf);
         }
@@ -1519,54 +1524,13 @@ impl<T: TensorElement> Context<T> {
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
     }
 
+    #[inline]
     pub(crate) fn active_command_buffer_mut_without_cache(&mut self) -> Result<&mut CommandBuffer, MetalError> {
         self.ensure_active_cmd_buffer_internal(false)?;
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
     }
 
-    #[cfg(test)]
-    pub(crate) fn materialize_contiguous_view(&mut self, view: Tensor<T>) -> Result<Tensor<T>, MetalError> {
-        use crate::{TensorInit, TensorStorage};
-
-        if view.strides == Tensor::<T>::compute_strides(view.dims()) {
-            return Ok(view);
-        }
-
-        let dims = view.dims().to_vec();
-        let contiguous = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
-
-        self.prepare_tensors_for_active_cmd(&[&view])?;
-
-        let source_view = view.as_mps_matrix_batch_view()?;
-        let dest_view = contiguous.as_mps_matrix_batch_view()?;
-        let elem_size = view.dtype.size_bytes();
-
-        let command_buffer = self.active_command_buffer_mut_without_cache()?;
-        let encoder = command_buffer.get_blit_encoder()?;
-
-        for batch_idx in 0..source_view.batch {
-            for row_idx in 0..source_view.rows {
-                let src_offset = view.offset + batch_idx * source_view.matrix_bytes + row_idx * source_view.row_bytes;
-                let dst_offset = contiguous.offset + batch_idx * dest_view.matrix_bytes + row_idx * dest_view.row_bytes;
-                let copy_bytes = dest_view.columns * elem_size;
-                unsafe {
-                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                        &view.buf,
-                        src_offset,
-                        &contiguous.buf,
-                        dst_offset,
-                        copy_bytes,
-                    );
-                }
-            }
-        }
-
-        self.mark_tensor_pending(&contiguous);
-        self.finalize_active_command_buffer_if_latency();
-
-        Ok(contiguous)
-    }
-
+    #[inline]
     pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor<T>) {
         tensor.mark_device_dirty();
         if let Some(active) = &self.active_cmd_buffer {
@@ -1614,10 +1578,59 @@ impl<T: TensorElement> Context<T> {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn prepare_tensors_for_active_cmd(&mut self, tensors: &[&Tensor<T>]) -> Result<(), MetalError> {
         for tensor in tensors {
             self.prepare_tensor_for_active_cmd(tensor)?;
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_enable_profiling_for_tests(&mut self) {
+        crate::profiling_state::set_profiling_state(true);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn materialize_contiguous_view(&mut self, view: Tensor<T>) -> Result<Tensor<T>, MetalError> {
+        use crate::{TensorInit, TensorStorage};
+
+        if view.strides == Tensor::<T>::compute_strides(view.dims()) {
+            return Ok(view);
+        }
+
+        let dims = view.dims().to_vec();
+        let contiguous = Tensor::new(dims, TensorStorage::Pooled(self), TensorInit::Uninitialized)?;
+
+        self.prepare_tensors_for_active_cmd(&[&view])?;
+
+        let source_view = view.as_mps_matrix_batch_view()?;
+        let dest_view = contiguous.as_mps_matrix_batch_view()?;
+        let elem_size = view.dtype.size_bytes();
+
+        let command_buffer = self.active_command_buffer_mut_without_cache()?;
+        let encoder = command_buffer.get_blit_encoder()?;
+
+        for batch_idx in 0..source_view.batch {
+            for row_idx in 0..source_view.rows {
+                let src_offset = view.offset + batch_idx * source_view.matrix_bytes + row_idx * source_view.row_bytes;
+                let dst_offset = contiguous.offset + batch_idx * dest_view.matrix_bytes + row_idx * dest_view.row_bytes;
+                let copy_bytes = dest_view.columns * elem_size;
+                unsafe {
+                    encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                        &view.buf,
+                        src_offset,
+                        &contiguous.buf,
+                        dst_offset,
+                        copy_bytes,
+                    );
+                }
+            }
+        }
+
+        self.mark_tensor_pending(&contiguous);
+        self.finalize_active_command_buffer_if_latency();
+
+        Ok(contiguous)
     }
 }

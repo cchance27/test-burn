@@ -23,8 +23,8 @@ pub struct SoftmaxMpsOperation<T: TensorElement> {
 
 impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Ensure no active encoder before MPS encodes 
-        command_buffer.end_current_encoder(); 
+        // Ensure no active encoder before MPS encodes
+        command_buffer.end_current_encoder();
 
         // MPS-backed op:  ensure CPU-scope timing is used in latency mode for exact attribution
         GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer.raw());

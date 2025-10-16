@@ -202,6 +202,26 @@ impl CommandBuffer {
         operation.encode(self, cache)
     }
 
+    /// Record a batch of operations, sharing encoders across them when possible.
+    ///
+    /// This avoids per-operation encoder churn by deferring encoder closure until
+    /// after all operations in the batch have been encoded. Profiling remains
+    /// per-op, as each Operation is responsible for its own profiling scope.
+    pub fn record_batch(&self, operations: &[&dyn Operation], cache: &mut ResourceCache) -> Result<(), MetalError> {
+        if self.inner.committed.load(Ordering::Acquire) {
+            return Err(MetalError::InvalidOperation(
+                "Attempted to record on a committed command buffer".to_string(),
+            ));
+        }
+        for &op in operations {
+            op.encode(self, cache)?;
+        }
+        // End the current encoder once after the batch to minimize overhead and
+        // ensure encoder state is flushed when callers expect a batch boundary.
+        self.end_current_encoder();
+        Ok(())
+    }
+
     /// Commit the command buffer for execution.
     ///
     /// This method is idempotent: repeated calls are ignored after the first commit.
