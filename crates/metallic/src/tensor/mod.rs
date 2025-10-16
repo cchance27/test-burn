@@ -8,9 +8,7 @@ use crate::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
 pub use dtypes::*;
 use metallic_instrumentation::{config::AppConfig, gpu_profiler::GpuProfiler};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder as _, MTLCommandQueue, MTLDevice, MTLResourceOptions, MTLSize,
-};
+use objc2_metal::{MTLBlitCommandEncoder, MTLBuffer, MTLCommandQueue, MTLDevice, MTLResourceOptions, MTLSize};
 use rustc_hash::FxHashMap;
 use std::cell::RefCell;
 use std::ffi::c_void;
@@ -407,10 +405,7 @@ impl<T: TensorElement> Tensor<T> {
         if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
             command_buffer.retain_profiler(profiler);
         }
-        let encoder = command_buffer
-            .raw()
-            .blitCommandEncoder()
-            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+        let encoder = command_buffer.get_blit_encoder()?;
         let profiler_scope = GpuProfiler::profile_blit(
             command_buffer.raw(),
             &encoder,
@@ -421,7 +416,6 @@ impl<T: TensorElement> Tensor<T> {
         unsafe {
             encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
         }
-        encoder.endEncoding();
         if let Some(scope) = profiler_scope {
             scope.finish();
         }
@@ -461,10 +455,7 @@ impl<T: TensorElement> Tensor<T> {
             if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
                 command_buffer.retain_profiler(profiler);
             }
-            let encoder = command_buffer
-                .raw()
-                .blitCommandEncoder()
-                .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+            let encoder = command_buffer.get_blit_encoder()?;
             let profiler_scope = GpuProfiler::profile_blit(
                 command_buffer.raw(),
                 &encoder,
@@ -475,7 +466,7 @@ impl<T: TensorElement> Tensor<T> {
             unsafe {
                 encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buf, base_offset, &staging, 0, region_len);
             }
-            encoder.endEncoding();
+            // Keep encoder open; CommandBuffer will end encoders on switch or commit
             if let Some(scope) = profiler_scope {
                 scope.finish();
             }
@@ -529,10 +520,7 @@ impl<T: TensorElement> Tensor<T> {
         if let Some(profiler) = GpuProfiler::attach(&command_buffer, record_cb_timing) {
             command_buffer.retain_profiler(profiler);
         }
-        let encoder = command_buffer
-            .raw()
-            .blitCommandEncoder()
-            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+        let encoder = command_buffer.get_blit_encoder()?;
         let profiler_scope = GpuProfiler::profile_blit(
             command_buffer.raw(),
             &encoder,
@@ -543,7 +531,6 @@ impl<T: TensorElement> Tensor<T> {
         unsafe {
             encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &self.buf, base_offset, region_len);
         }
-        encoder.endEncoding();
         if let Some(scope) = profiler_scope {
             scope.finish();
         }
@@ -601,15 +588,11 @@ impl<T: TensorElement> Tensor<T> {
                 };
 
                 let command_buffer = CommandBuffer::new(&context.command_queue)?;
-                let encoder = command_buffer
-                    .raw()
-                    .blitCommandEncoder()
-                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+                let encoder = command_buffer.get_blit_encoder()?;
 
                 unsafe {
                     encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging_buf, 0, &dest_buf, 0, byte_len);
                 }
-                encoder.endEncoding();
                 command_buffer.commit();
                 command_buffer.wait();
 
@@ -894,10 +877,7 @@ impl<T: TensorElement> Tensor<T> {
         ctx.prepare_tensors_for_active_cmd(&[self])?;
 
         let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
-        let encoder = command_buffer
-            .raw()
-            .blitCommandEncoder()
-            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+        let encoder = command_buffer.get_blit_encoder()?;
 
         let copy_bytes = view.rows * view.row_bytes;
         for batch_idx in 0..view.batch {
@@ -913,7 +893,6 @@ impl<T: TensorElement> Tensor<T> {
                 );
             }
         }
-        encoder.endEncoding();
 
         ctx.mark_tensor_pending(&compact);
         ctx.finalize_active_command_buffer_if_latency();
@@ -938,13 +917,9 @@ impl<T: TensorElement> Tensor<T> {
             // GPU fill path for large tensors encoded onto the active command buffer
             {
                 let cmd_buf = context.active_command_buffer_mut()?;
-                let encoder = cmd_buf
-                    .raw()
-                    .blitCommandEncoder()
-                    .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+                let encoder = cmd_buf.get_blit_encoder()?;
 
                 encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
-                encoder.endEncoding();
             }
             context.mark_tensor_pending(&tensor);
         }
@@ -1004,14 +979,12 @@ impl<T: TensorElement> Tensor<T> {
         if size <= Self::cpu_fill_threshold_bytes() {
             // CPU fill for small tensors - but since we're batching, this might not be ideal
             // For now, use GPU path for consistency
-            let encoder = command_buffer.raw().blitCommandEncoder().unwrap();
+            let encoder = command_buffer.get_blit_encoder()?;
             encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
-            encoder.endEncoding();
         } else {
             // GPU fill for large tensors
-            let encoder = command_buffer.raw().blitCommandEncoder().unwrap();
+            let encoder = command_buffer.get_blit_encoder()?;
             encoder.fillBuffer_range_value(&tensor.buf, (tensor.offset..tensor.offset + size).into(), 0);
-            encoder.endEncoding();
         }
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
@@ -1032,10 +1005,7 @@ impl<T: TensorElement> Tensor<T> {
             .kernel_manager
             .get_pipeline(crate::kernels::KernelFunction::Ones, T::DTYPE, &context.device)?;
 
-        let encoder = command_buffer
-            .raw()
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+        let encoder = command_buffer.get_compute_encoder()?;
 
         let total_elements_u32 = total_elements as u32;
 
@@ -1057,7 +1027,6 @@ impl<T: TensorElement> Tensor<T> {
         };
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
         tensor.mark_device_dirty();
@@ -1083,10 +1052,7 @@ impl<T: TensorElement> Tensor<T> {
             .kernel_manager
             .get_pipeline(crate::kernels::KernelFunction::Arange, T::DTYPE, &context.device)?;
 
-        let encoder = command_buffer
-            .raw()
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+        let encoder = command_buffer.get_compute_encoder()?;
 
         set_compute_pipeline_state(&encoder, &pipeline);
         set_buffer(&encoder, 0, &tensor.buf, tensor.offset);
@@ -1104,7 +1070,6 @@ impl<T: TensorElement> Tensor<T> {
         };
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
         tensor.mark_device_dirty();
@@ -1121,10 +1086,7 @@ impl<T: TensorElement> Tensor<T> {
             .kernel_manager
             .get_pipeline(crate::kernels::KernelFunction::RandomUniform, T::DTYPE, &context.device)?;
 
-        let encoder = command_buffer
-            .raw()
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
+        let encoder = command_buffer.get_compute_encoder()?;
 
         // Use rng_seed_counter for deterministic seeding and increment
         let seed = context.rng_seed_counter as u32;
@@ -1153,7 +1115,6 @@ impl<T: TensorElement> Tensor<T> {
         };
 
         dispatch_threads(&encoder, grid_size, threadgroup_size);
-        encoder.endEncoding();
 
         tensor.defining_cmd_buffer.borrow_mut().replace(command_buffer.clone());
         tensor.mark_device_dirty();

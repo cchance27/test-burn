@@ -19,7 +19,6 @@ use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2_metal::MTLBlitCommandEncoder as _;
 use objc2_metal::MTLCommandBuffer;
-use objc2_metal::MTLCommandEncoder as _;
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
@@ -993,12 +992,10 @@ impl<T: TensorElement> Context<T> {
 
         self.ensure_active_cmd_buffer()?;
         let cmd_buf = self.active_command_buffer_mut()?;
-        if let Some(encoder) = cmd_buf.raw().blitCommandEncoder() {
+        {
+            let encoder = cmd_buf.get_blit_encoder()?;
             encoder.fillBuffer_range_value(&k.buf, (k.offset..k.offset + k_size).into(), 0);
             encoder.fillBuffer_range_value(&v.buf, (v.offset..v.offset + v_size).into(), 0);
-            encoder.endEncoding();
-        } else {
-            return Err(MetalError::OperationNotSupported("Blit encoder not available".into()));
         }
 
         self.mark_tensor_pending(&k);
@@ -1331,9 +1328,7 @@ impl<T: TensorElement> Context<T> {
             .unwrap_or_else(|| GpuProfilerLabel::fallback("kv_cache_blit_op"));
         let cmd_buf = self.active_command_buffer_mut()?;
         let raw_cmd = cmd_buf.raw();
-        let encoder = raw_cmd
-            .blitCommandEncoder()
-            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".into()))?;
+        let encoder = cmd_buf.get_blit_encoder()?;
         let _scope = GpuProfiler::profile_blit(raw_cmd, &encoder, profiler_label.op_name, profiler_label.backend);
 
         let cache_stride_elems = capacity * head_dim;
@@ -1387,8 +1382,6 @@ impl<T: TensorElement> Context<T> {
                 }
             }
         }
-
-        encoder.endEncoding();
 
         self.mark_tensor_pending(k_cache);
         self.mark_tensor_pending(v_cache);
@@ -1553,10 +1546,7 @@ impl<T: TensorElement> Context<T> {
         let elem_size = view.dtype.size_bytes();
 
         let command_buffer = self.active_command_buffer_mut_without_cache()?;
-        let encoder = command_buffer
-            .raw()
-            .blitCommandEncoder()
-            .ok_or(MetalError::OperationNotSupported("Blit encoder not available".to_string()))?;
+        let encoder = command_buffer.get_blit_encoder()?;
 
         for batch_idx in 0..source_view.batch {
             for row_idx in 0..source_view.rows {
@@ -1575,7 +1565,6 @@ impl<T: TensorElement> Context<T> {
             }
         }
 
-        encoder.endEncoding();
         self.mark_tensor_pending(&contiguous);
         self.finalize_active_command_buffer_if_latency();
 

@@ -218,6 +218,9 @@ impl KernelInvocable for MatMulMpsOp {
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl Operation for MatMulMps {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        // Ensure no active encoder before MPS encodes
+        command_buffer.end_current_encoder(); 
+        
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);
         let right = mps_matrix_from_buffer(&self.right_buf, self.right_offset, &self.right_desc);

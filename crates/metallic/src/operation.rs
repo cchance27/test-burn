@@ -196,11 +196,10 @@ impl CommandBuffer {
                 "Attempted to record on a committed command buffer".to_string(),
             ));
         }
-        let result = operation.encode(self, cache);
-        // Always end the current encoder after an operation completes to ensure proper
-        // encoder lifecycle management, especially when profiling is disabled
-        self.end_current_encoder();
-        result
+        // Encode the operation. We intentionally keep the current encoder open
+        // to reduce encoder churn and improve latency. Encoders are ended when
+        // switching types (blit <-> compute) or on commit().
+        operation.encode(self, cache)
     }
 
     /// Commit the command buffer for execution.
