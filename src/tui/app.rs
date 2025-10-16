@@ -44,7 +44,6 @@ pub struct App {
     pub text_selection_end: Option<Position>,
     pub is_selecting: bool,
 
-
     // Stats metrics rows for the stats view
     pub stats_rows: Vec<metallic_cli_helpers::app_event::StatsRow>,
 

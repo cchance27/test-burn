@@ -81,6 +81,7 @@ pub enum MatmulVariant {
     SmallN(SmallNBucket),
     GemmSimd(GemmTile),
     GemmGeneric,
+    GemmTiled(GemmTile),
 }
 
 impl fmt::Display for MatmulVariant {
@@ -89,6 +90,7 @@ impl fmt::Display for MatmulVariant {
             MatmulVariant::SmallN(bucket) => write!(f, "smalln_{}", bucket),
             MatmulVariant::GemmSimd(tile) => write!(f, "gemm_simd_{}", tile),
             MatmulVariant::GemmGeneric => write!(f, "gemm_generic"),
+            MatmulVariant::GemmTiled(tile) => write!(f, "gemm_tiled_{}", tile),
         }
     }
 }
@@ -98,6 +100,7 @@ impl MatmulVariant {
         match self {
             MatmulVariant::SmallN(SmallNBucket::N8) => Some(KernelFunction::MatmulGemvSmallN8),
             MatmulVariant::SmallN(SmallNBucket::N4) => Some(KernelFunction::MatmulGemvSmallN4),
+            MatmulVariant::GemmTiled(_) => Some(KernelFunction::MatmulGemmTiled),
             _ => None,
         }
     }

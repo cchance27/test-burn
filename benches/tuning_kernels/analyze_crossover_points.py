@@ -124,7 +124,7 @@ def analyze_softmax_crossover(df):
             block_time = block_time.iloc[0]
 
             if block_time < vec_time:
-                crossover_points.append(seq_len)
+                crossover_points.append(int(seq_len))
 
     # Find optimal crossover point (where the difference is most significant)
     optimal_crossover = None
@@ -138,16 +138,50 @@ def analyze_softmax_crossover(df):
         improvement = (vec_time - block_time) / vec_time
         if improvement > max_improvement:
             max_improvement = improvement
-            optimal_crossover = seq_len
+            optimal_crossover = int(seq_len)
 
-    print(f"Found {len(crossover_points)} potential crossover points: {crossover_points}")
+    best_variants = (
+        crossover_df.sort_values('mean_time')
+        .drop_duplicates('seq_len', keep='first')
+        .sort_values('seq_len')
+    )
+
+    if len(best_variants) > 0:
+        print("\n[Softmax] Best variant per sequence length:")
+        for _, row in best_variants.iterrows():
+            print(f"  seq_len={int(row['seq_len'])}: {row['variant']} ({row['mean_time']/1000.0:.1f} µs)")
+
+    transitions = []
+    if len(best_variants) > 0:
+        prev_variant = None
+        for _, row in best_variants.iterrows():
+            variant = row['variant']
+            seq_len = int(row['seq_len'])
+            if variant != prev_variant:
+                transitions.append({'start': seq_len, 'variant': variant})
+                prev_variant = variant
+
+        if transitions:
+            print("\n[Softmax] Suggested dispatcher regions:")
+            for idx, entry in enumerate(transitions):
+                start = entry['start']
+                variant = entry['variant']
+                if idx + 1 < len(transitions):
+                    end = transitions[idx + 1]['start'] - 1
+                    print(f"  {variant}: seq_len ∈ [{start}, {end}]")
+                else:
+                    print(f"  {variant}: seq_len ≥ {start}")
+
+    print(f"\nFound {len(crossover_points)} potential crossover points: {crossover_points}")
     print(f"Optimal crossover point: {optimal_crossover} (improvement: {max_improvement:.2%})")
 
     return {
         'optimal_crossover': optimal_crossover,
         'crossover_points': crossover_points,
         'data': crossover_df,
-        'modes': modes_df
+        'modes': modes_df,
+        'best_variants': best_variants.to_dict('records'),
+        'transitions': transitions,
     }
 
 def analyze_smalln_gemv_crossover(df):
@@ -166,16 +200,18 @@ def analyze_smalln_gemv_crossover(df):
         return None
 
     # Extract dimensions from parameters; support legacy 'nN' and extended 'MxKxN_case'
-    smalln_df['n_dim'] = smalln_df['parameters'].str.extract(r'n(\d+)')
+    n_primary = pd.to_numeric(smalln_df['parameters'].str.extract(r'n(\d+)')[0], errors='coerce')
     dims = smalln_df['parameters'].str.extract(r'(?P<m_dim>\d+)x(?P<k_dim>\d+)x(?P<n_dim_mkn>\d+)')
     # Use MxKxN parse if available
     smalln_df['m_dim'] = pd.to_numeric(dims['m_dim'], errors='coerce')
     smalln_df['k_dim'] = pd.to_numeric(dims['k_dim'], errors='coerce')
-    smalln_df['n_dim_fallback'] = pd.to_numeric(dims['n_dim_mkn'], errors='coerce')
-    smalln_df['n_dim'] = pd.to_numeric(smalln_df['n_dim'].fillna(smalln_df['n_dim_fallback']), errors='coerce')
+    n_fallback = pd.to_numeric(dims['n_dim_mkn'], errors='coerce')
+    smalln_df['n_dim'] = n_primary
+    mask_missing = smalln_df['n_dim'].isna()
+    smalln_df.loc[mask_missing, 'n_dim'] = n_fallback[mask_missing]
+    smalln_df['n_dim'] = pd.to_numeric(smalln_df['n_dim'], errors='coerce')
     smalln_df = smalln_df.dropna(subset=['n_dim'])
     smalln_df['n_dim'] = smalln_df['n_dim'].astype(int)
-    smalln_df.drop(columns=['n_dim_fallback'], inplace=True)
     # Parse alpha/beta case labels if present, default to a1_b0
     smalln_df['case'] = smalln_df['parameters'].str.extract(r'_(a\d+_b\d+)')
     smalln_df['case'] = smalln_df['case'].fillna('a1_b0')
@@ -185,7 +221,7 @@ def analyze_smalln_gemv_crossover(df):
     # Normalize variant labels for plotting clarity
     def norm_variant(v):
         if isinstance(v, str):
-            lv = v.lower()
+            lv = v.strip().lower()
             if lv == 'gemv':
                 return 'gemv'
             if v.startswith('SmallN_Direct_N'):
@@ -193,7 +229,25 @@ def analyze_smalln_gemv_crossover(df):
                 return f"gemv_direct_{v.split('_')[-1].lower()}"  # e.g., gemv_direct_n8
             if v == 'SmallN_Direct':
                 return 'gemv_direct'
-            return v
+            if lv == 'direct_kernel':
+                return 'direct_kernel'
+            if lv == 'via_dispatcher':
+                return 'via_dispatcher'
+            if lv == 'gemm_tiled':
+                return 'gemm_tiled'
+            if lv == 'mlx':
+                return 'mlx'
+            if lv == 'mps':
+                return 'mps'
+            if lv == 'noop':
+                return 'noop'
+            if lv == 'auto':
+                return 'auto'
+            if lv == 'gemv_direct':
+                return 'gemv_direct'
+            if lv.startswith('gemm_direct_tiled'):
+                return 'gemm_direct_tiled'
+            return lv
         return v
     perf_rows = []
     for case in sorted(smalln_df['case'].unique()):
@@ -231,40 +285,65 @@ def analyze_smalln_gemv_crossover(df):
         return {
             'data': perf_df,
             'optimal_thresholds': [],
-            'backends': backend_variants
+            'backends': backend_variants,
+            'best_variants': [],
+            'transitions': [],
         }
 
-    # Threshold analysis uses 'auto' backend if present, otherwise averages per N
-    if 'auto' in perf_df['variant'].unique():
-        auto_df = perf_df[perf_df['variant'] == 'auto'].sort_values('n_dim')
-        series_df = auto_df[['n_dim', 'mean_time']].drop_duplicates()
-    else:
-        series_df = (
-            perf_df.groupby('n_dim', as_index=False)['mean_time']
-                   .mean()
-                   .sort_values('n_dim')
-        )
+    perf_df = perf_df[perf_df['variant'] != 'noop']
+    backend_variants = sorted(perf_df['variant'].unique())
+    # Aggregate per N across variants
+    avg_perf = (
+        perf_df.groupby(['n_dim', 'variant'], as_index=False)['mean_time']
+        .mean()
+        .sort_values(['n_dim', 'mean_time'])
+    )
+    best_per_n = (
+        avg_perf.sort_values('mean_time')
+        .drop_duplicates('n_dim', keep='first')
+        .sort_values('n_dim')
+    )
 
-    # Find where performance improvements diminish
-    optimal_thresholds = []
-    for i in range(1, len(series_df)):
-        current = series_df.iloc[i]
-        previous = series_df.iloc[i-1]
+    if len(best_per_n) > 0:
+        print("\n[Small-N] Best backend per N:")
+        for _, row in best_per_n.iterrows():
+            print(f"  N={int(row['n_dim'])}: {row['variant']} ({row['mean_time']/1000.0:.1f} µs)")
 
-        if previous['mean_time'] > 0:
-            improvement = (previous['mean_time'] - current['mean_time']) / previous['mean_time']
-            if improvement < 0.05:
-                optimal_thresholds.append(int(current['n_dim']))
+    smalln_transitions = []
+    if len(best_per_n) > 0:
+        prev_variant = None
+        for _, row in best_per_n.iterrows():
+            variant = row['variant']
+            n_dim = int(row['n_dim'])
+            if variant != prev_variant:
+                smalln_transitions.append({'start': n_dim, 'variant': variant})
+                prev_variant = variant
 
-    print(f"Small-N entries: {len(smalln_df)} rows; N values: {sorted(smalln_df['n_dim'].unique().tolist())}")
+        if smalln_transitions:
+            print("\n[Small-N] Suggested dispatcher regions:")
+            for idx, entry in enumerate(smalln_transitions):
+                start = entry['start']
+                variant = entry['variant']
+                if idx + 1 < len(smalln_transitions):
+                    end = smalln_transitions[idx + 1]['start'] - 1
+                    print(f"  {variant}: N ∈ [{start}, {end}]")
+                else:
+                    print(f"  {variant}: N ≥ {start}")
+
+    threshold_breaks = [entry['start'] for entry in smalln_transitions[1:]]
+
+    print(f"\nSmall-N entries: {len(smalln_df)} rows; N values: {sorted(smalln_df['n_dim'].unique().tolist())}")
     if backend_variants:
         print(f"Backends found: {backend_variants}")
-    print(f"Potential optimal thresholds (using 'auto' if available): {optimal_thresholds}")
+    if threshold_breaks:
+        print(f"Proposed Small-N thresholds: {threshold_breaks}")
 
     return {
         'data': perf_df,
-        'optimal_thresholds': optimal_thresholds,
-        'backends': backend_variants
+        'optimal_thresholds': threshold_breaks,
+        'backends': backend_variants,
+        'best_variants': best_per_n.to_dict('records'),
+        'transitions': smalln_transitions,
     }
 
 def generate_recommendations(softmax_analysis, smalln_analysis):
@@ -276,19 +355,47 @@ def generate_recommendations(softmax_analysis, smalln_analysis):
     recommendations = []
 
     if softmax_analysis:
-        optimal = softmax_analysis['optimal_crossover']
-        if optimal:
-            recommendations.append(f"Set METALLIC_SOFTMAX_VEC_BLOCK_THRESHOLD={optimal}")
-            recommendations.append(f"Current threshold (1024) -> Recommended threshold ({optimal})")
+        transitions = softmax_analysis.get('transitions', []) or []
+        if len(transitions) > 1:
+            threshold = int(transitions[1]['start'])
+            recommendations.append(f"Set METALLIC_SOFTMAX_VEC_BLOCK_THRESHOLD={threshold}")
+            recommendations.append(f"Use {transitions[0]['variant']} below {threshold}, switch to {transitions[1]['variant']} at ≥{threshold}")
         else:
-            recommendations.append("Keep current softmax threshold (1024) - no clear optimal found")
+            optimal = softmax_analysis.get('optimal_crossover')
+            if optimal:
+                recommendations.append(f"Set METALLIC_SOFTMAX_VEC_BLOCK_THRESHOLD={int(optimal)}")
+            else:
+                recommendations.append("Keep current softmax threshold (1024) - no clear optimal found")
+        if transitions:
+            regions = []
+            for idx, entry in enumerate(transitions):
+                start = entry['start']
+                variant = entry['variant']
+                if idx + 1 < len(transitions):
+                    end = transitions[idx + 1]['start'] - 1
+                    regions.append(f"{variant}: seq_len ∈ [{start}, {end}]")
+                else:
+                    regions.append(f"{variant}: seq_len ≥ {start}")
+            recommendations.append("Softmax backend regions → " + "; ".join(regions))
 
     if smalln_analysis:
-        thresholds = smalln_analysis['optimal_thresholds']
+        thresholds = smalln_analysis.get('optimal_thresholds', []) or []
+        transitions = smalln_analysis.get('transitions', []) or []
         if thresholds:
             recommendations.append(f"Consider Small-N thresholds at: {thresholds}")
         else:
             recommendations.append("Keep current Small-N threshold (8) - good performance across N values")
+        if transitions:
+            segments = []
+            for idx, entry in enumerate(transitions):
+                start = entry['start']
+                variant = entry['variant']
+                if idx + 1 < len(transitions):
+                    end = transitions[idx + 1]['start'] - 1
+                    segments.append(f"{variant}: N ∈ [{start}, {end}]")
+                else:
+                    segments.append(f"{variant}: N ≥ {start}")
+            recommendations.append("Small-N backend regions → " + "; ".join(segments))
 
     recommendations.append("Run benchmarks on target hardware for precise tuning")
     recommendations.append("Consider different thresholds for different GPU families (M1/M2/M3)")
@@ -525,7 +632,7 @@ def create_visualization(softmax_analysis, smalln_analysis, gemm_analysis=None, 
                 plt.plot(vdf['n_dim'], vdf['mean_time'] / 1000.0, marker='o', linewidth=2, label=label)
             plt.xlabel('N Dimension')
             plt.ylabel('Mean Time (µs)')
-            plt.title('Direct GEMM Kernels (MLX vs MPS) on matching shapes')
+            plt.title('Direct GEMM Kernels on matching shapes')
             plt.legend(ncol=2)
             plt.grid(True, alpha=0.3)
             plt.ticklabel_format(style='plain', axis='y')
@@ -541,6 +648,7 @@ def create_visualization(softmax_analysis, smalln_analysis, gemm_analysis=None, 
             variant_pairs = {
                 'gemm_direct_mlx': 'mlx',
                 'gemm_direct_mps': 'mps',
+                'gemm_direct_tiled': 'gemm_tiled',
             }
 
             # Iterate per (m_dim, k_dim) to produce focused comparisons
@@ -609,12 +717,59 @@ def analyze_gemm_direct(df):
             return 'gemm_direct_mlx'
         if 'gemm_direct_mps' in lv:
             return 'gemm_direct_mps'
+        if 'gemm_direct_tiled' in lv:
+            return 'gemm_direct_tiled'
         return lv
 
     gemm_df['variant'] = gemm_df['variant'].apply(norm_variant)
 
     agg = gemm_df.groupby(['variant', 'm_dim', 'k_dim', 'n_dim'], as_index=False)['mean_time'].mean()
-    return {'data': agg, 'variants': sorted(agg['variant'].unique())}
+
+    best_per_shape = []
+    transitions = {}
+    if len(agg) > 0:
+        print("\n[GEMM Direct] Best backend per (M,K,N):")
+        for (m_dim, k_dim), grp in agg.groupby(['m_dim', 'k_dim']):
+            best = (
+                grp.sort_values('mean_time')
+                .drop_duplicates('n_dim', keep='first')
+                .sort_values('n_dim')
+            )
+            for _, row in best.iterrows():
+                best_per_shape.append({
+                    'm_dim': int(row['m_dim']),
+                    'k_dim': int(row['k_dim']),
+                    'n_dim': int(row['n_dim']),
+                    'variant': row['variant'],
+                    'mean_time': row['mean_time'],
+                })
+            trans = []
+            prev_variant = None
+            for _, row in best.iterrows():
+                variant = row['variant']
+                n_dim = int(row['n_dim'])
+                if variant != prev_variant:
+                    trans.append({'start': n_dim, 'variant': variant})
+                    prev_variant = variant
+            if trans:
+                transitions[(int(m_dim), int(k_dim))] = trans
+                segments = []
+                for idx, entry in enumerate(trans):
+                    start = entry['start']
+                    variant = entry['variant']
+                    if idx + 1 < len(trans):
+                        end = trans[idx + 1]['start'] - 1
+                        segments.append(f"{variant}: N ∈ [{start}, {end}]")
+                    else:
+                        segments.append(f"{variant}: N ≥ {start}")
+                print(f"  {m_dim}x{k_dim}: " + "; ".join(segments))
+
+    return {
+        'data': agg,
+        'variants': sorted(agg['variant'].unique()),
+        'best_per_shape': best_per_shape,
+        'transitions': transitions,
+    }
 
 def analyze_gemm_dispatcher(df):
     """Analyze dispatcher GEMM benchmarks with matching shapes.
@@ -637,13 +792,59 @@ def analyze_gemm_dispatcher(df):
     # Normalize variant names
     def norm(v):
         lv = v.lower() if isinstance(v, str) else ''
-        if lv in ['mlx', 'mps', 'gemv', 'auto']:
+        if lv in ['mlx', 'mps', 'gemv', 'gemm_tiled', 'auto']:
             return lv
         return lv
     disp_df['variant'] = disp_df['variant'].apply(norm)
 
     agg = disp_df.groupby(['variant', 'm_dim', 'k_dim', 'n_dim'], as_index=False)['mean_time'].mean()
-    return {'data': agg, 'variants': sorted(agg['variant'].unique())}
+    agg = agg[agg['variant'] != 'noop']
+
+    best_per_shape = []
+    transitions = {}
+    if len(agg) > 0:
+        print("\n[GEMM Dispatcher] Best backend per (M,K,N):")
+        for (m_dim, k_dim), grp in agg.groupby(['m_dim', 'k_dim']):
+            best = (
+                grp.sort_values('mean_time')
+                .drop_duplicates('n_dim', keep='first')
+                .sort_values('n_dim')
+            )
+            for _, row in best.iterrows():
+                best_per_shape.append({
+                    'm_dim': int(row['m_dim']),
+                    'k_dim': int(row['k_dim']),
+                    'n_dim': int(row['n_dim']),
+                    'variant': row['variant'],
+                    'mean_time': row['mean_time'],
+                })
+            trans = []
+            prev_variant = None
+            for _, row in best.iterrows():
+                variant = row['variant']
+                n_dim = int(row['n_dim'])
+                if variant != prev_variant:
+                    trans.append({'start': n_dim, 'variant': variant})
+                    prev_variant = variant
+            if trans:
+                transitions[(int(m_dim), int(k_dim))] = trans
+                segments = []
+                for idx, entry in enumerate(trans):
+                    start = entry['start']
+                    variant = entry['variant']
+                    if idx + 1 < len(trans):
+                        end = trans[idx + 1]['start'] - 1
+                        segments.append(f"{variant}: N ∈ [{start}, {end}]")
+                    else:
+                        segments.append(f"{variant}: N ≥ {start}")
+                print(f"  {m_dim}x{k_dim}: " + "; ".join(segments))
+
+    return {
+        'data': agg,
+        'variants': sorted(agg['variant'].unique()),
+        'best_per_shape': best_per_shape,
+        'transitions': transitions,
+    }
 
 def main():
     parser = argparse.ArgumentParser(description='Analyze benchmark results for optimal kernel crossover points')

@@ -1,6 +1,7 @@
 use super::types::*;
 use crate::kernels::{KernelFunction, KernelInvocable};
 use crate::kernels::{
+    matmul_gemm_tiled::MatmulGemmTiledOp,
     matmul_gemv::MatmulGemvOp,
     matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
     matmul_mlx::MatMulMlxOp,
@@ -192,6 +193,10 @@ pub fn execute<'a, T: TensorElement>(
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
+                    }
+                    MatmulVariant::GemmTiled(_) => {
+                        // Use the new tiled GEMM kernel
+                        MatmulGemmTiledOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                     }
                     MatmulVariant::SmallN(_) | MatmulVariant::GemmSimd(_) | MatmulVariant::GemmGeneric => {
                         if is_vector_shape {

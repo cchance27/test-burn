@@ -3,6 +3,7 @@ use metallic::{
     Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage,
     kernels::{
         matmul_dispatcher::MatmulDispatchOp,
+        matmul_gemm_tiled::MatmulGemmTiledOp,
         matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
         matmul_mlx::MatMulMlxOp,
         matmul_mps::MatMulMpsOp,
@@ -136,6 +137,30 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 });
 
                 // Reset pool to free memory after each iteration
+                ctx.reset_pool();
+            });
+
+            // Gemm Tiled direct
+            group.bench_with_input(BenchmarkId::new("Gemm_Direct_Tiled", &label), &label, |bi, _| {
+                let mut ctx = Context::<T>::new().expect("ctx setup");
+                ctx.reset_pool();
+
+                let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
+                let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
+                let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
+
+                let _warmup_out = ctx
+                    .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32))
+                    .expect("warmup");
+                ctx.synchronize();
+
+                bi.iter(|| {
+                    let _iter_out = ctx
+                        .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32))
+                        .unwrap();
+                    ctx.synchronize();
+                });
+
                 ctx.reset_pool();
             });
         }

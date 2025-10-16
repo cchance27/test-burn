@@ -4,6 +4,8 @@ use metallic::kernels::matmul_dispatcher::MatmulDispatchOp;
 use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage};
 use metallic_env::{FORCE_MATMUL_BACKEND_VAR, MATMUL_SMALLN_MAX_N_VAR};
 
+const DISPATCH_BACKENDS: &[&str] = &["mlx", "mps", "gemv", "gemm_tiled", "auto", "noop"];
+
 fn bench_matmul_dispatcher_smalln<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
     let mut group = c.benchmark_group(format!("matmul_dispatcher_smalln_{dtype_name}"));
 
@@ -32,7 +34,7 @@ fn bench_matmul_dispatcher_smalln<T: TensorElement>(c: &mut Criterion, dtype_nam
             let label = format!("{shape_label}_{case_name}");
 
             // Benchmark each backend for comparison (include custom GEMV and 'noop')
-            for backend in ["mlx", "mps", "gemv", "auto", "noop"] {
+            for &backend in DISPATCH_BACKENDS {
                 group.bench_with_input(BenchmarkId::new(backend, &label), &label, |bi, _| {
                     let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard(backend.to_string()).unwrap();
 
@@ -236,7 +238,7 @@ fn bench_matmul_dispatcher_gemm_shapes<T: TensorElement>(c: &mut Criterion, dtyp
             let shape_label = format!("{}x{}x{}_a1_b0", m, k, n);
 
             // Benchmark each backend for comparison (dispatcher path, include 'noop')
-            for backend in ["mlx", "mps", "gemv", "auto", "noop"] {
+            for &backend in DISPATCH_BACKENDS {
                 group.bench_with_input(BenchmarkId::new(backend, &shape_label), &shape_label, |bi, _| {
                     let _guard = FORCE_MATMUL_BACKEND_VAR.set_guard(backend.to_string()).unwrap();
 

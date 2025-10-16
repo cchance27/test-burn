@@ -25,6 +25,7 @@ pub mod kv_cache_write;
 pub mod kv_rearrange;
 pub mod layernorm;
 pub mod matmul_dispatcher;
+pub mod matmul_gemm_tiled;
 pub mod matmul_gemv;
 pub mod matmul_gemv_smalln;
 pub mod matmul_mlx;
@@ -70,6 +71,7 @@ pub enum KernelLibrary {
     Tensors,
     MatmulGemv,
     MatmulGemvSmalln,
+    MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
 }
@@ -98,6 +100,7 @@ impl KernelLibrary {
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
             KernelLibrary::MatmulGemv => include_str!("matmul_gemv/kernel.metal"),
             KernelLibrary::MatmulGemvSmalln => include_str!("matmul_gemv_smalln/kernel.metal"),
+            KernelLibrary::MatmulGemmTiled => include_str!("matmul_gemm_tiled/kernel.metal"),
             KernelLibrary::SoftmaxBlock => include_str!("softmax_block/kernel.metal"),
             KernelLibrary::SoftmaxVec => include_str!("softmax_vec/kernel.metal"),
         }
@@ -139,6 +142,7 @@ pub enum KernelFunction {
     MatmulGemvSmallN4,
     MatmulGemvSmallN8,
     MatmulGemvSmallN16,
+    MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
 }
@@ -173,6 +177,7 @@ impl KernelFunction {
             KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemvSmalln,
             KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemvSmalln,
             KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemmTiled => KernelLibrary::MatmulGemmTiled,
             KernelFunction::SoftmaxBlock => KernelLibrary::SoftmaxBlock,
             KernelFunction::SoftmaxVec => KernelLibrary::SoftmaxVec,
         }
@@ -199,7 +204,7 @@ impl KernelFunction {
             (KernelFunction::ElemwiseBroadcastAdd, F32) => "broadcast_add_kernel_f32",
             (KernelFunction::ElemwiseBroadcastAdd, F16) => "broadcast_add_kernel_f16",
             (KernelFunction::ElemwiseDiv, F32) => "div_kernel_f32",
-            (KernelFunction::ElemwiseDiv, F16) => "div_kernel_f16",
+            (KernelFunction::ElemwiseDiv, F16) => "div_kernel_f32",
             (KernelFunction::ElemwiseMul, F32) => "mul_kernel_f32",
             (KernelFunction::ElemwiseMul, F16) => "mul_kernel_f16",
             (KernelFunction::ElemwiseSub, F32) => "sub_kernel_f32",
@@ -267,6 +272,13 @@ impl KernelFunction {
                 return Err(MetalError::UnsupportedDtype {
                     dtype: Dtype::F32,
                     operation: "MatmulGemvSmallN16",
+                });
+            }
+            (KernelFunction::MatmulGemmTiled, F16) => "gemm_tiled_f16",
+            (KernelFunction::MatmulGemmTiled, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemmTiled",
                 });
             }
             (KernelFunction::SoftmaxBlock, F16) => "block_softmax_f16",

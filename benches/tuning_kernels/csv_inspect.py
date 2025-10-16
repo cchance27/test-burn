@@ -25,7 +25,7 @@ def parse_mkn(s: str):
 def norm_variant(v: str):
     lv = v.lower() if isinstance(v, str) else ''
     lv = lv.replace(' ', '_')
-    if lv in {'mps', 'mlx', 'gemv', 'auto', 'noop'}:
+    if lv in {'mps', 'mlx', 'gemv', 'gemm_tiled', 'auto', 'noop'}:
         return lv
     if 'via_dispatcher' in lv:
         return 'via_dispatcher'
@@ -37,6 +37,8 @@ def norm_variant(v: str):
         return 'gemm_direct_mps'
     if 'gemm_direct_mlx' in lv:
         return 'gemm_direct_mlx'
+    if 'gemm_direct_tiled' in lv:
+        return 'gemm_direct_tiled'
     return lv
 
 
@@ -53,6 +55,7 @@ def inspect_smalln(df):
         print("[Small-N] No rows found")
         return
     sdf['variant'] = sdf['variant'].apply(norm_variant)
+    sdf = sdf[sdf['variant'] != 'noop']
     dims = sdf['parameters'].apply(parse_mkn)
     sdf[['m_dim', 'k_dim', 'n_dim']] = pd.DataFrame(dims.tolist(), index=sdf.index)
     sdf = sdf.dropna(subset=['m_dim', 'k_dim', 'n_dim'])
@@ -84,6 +87,7 @@ def inspect_dispatcher_overhead(df):
         print("\n[Dispatcher Overhead] No comparison rows found")
         return
     vs['variant'] = vs['variant'].apply(norm_variant)
+    vs = vs[vs['variant'] != 'noop']
     dims = vs['parameters'].apply(parse_mkn)
     vs[['m_dim', 'k_dim', 'n_dim']] = pd.DataFrame(dims.tolist(), index=vs.index)
 
@@ -109,16 +113,17 @@ def inspect_gemm_direct(df):
         print("\n[Direct GEMM] No rows found")
         return
     gdf['variant'] = gdf['variant'].apply(norm_variant)
+    gdf = gdf[gdf['variant'] != 'noop']
     dims = gdf['parameters'].apply(parse_mkn)
     gdf[['m_dim', 'k_dim', 'n_dim']] = pd.DataFrame(dims.tolist(), index=gdf.index)
 
-    print("\n[Direct GEMM] MPS vs MLX on matched shapes (µs and ratio):")
+    print("\n[Direct GEMM] Matched-shape backend ranking (µs):")
     for (m, k, n), grp in gdf.groupby(['m_dim', 'k_dim', 'n_dim']):
-        mps = grp[grp['variant'] == 'gemm_direct_mps']['mean_time'].mean()
-        mlx = grp[grp['variant'] == 'gemm_direct_mlx']['mean_time'].mean()
-        if not np.isnan(mps) and not np.isnan(mlx) and mlx > 0:
-            ratio = mps / mlx
-            print(f"  {m}x{k}x{n}: MPS={mps/1000.0:.1f} µs, MLX={mlx/1000.0:.1f} µs, MPS/MLX={ratio:.2f}")
+        agg = grp.groupby('variant', as_index=False)['mean_time'].mean()
+        agg['mean_us'] = agg['mean_time'] / 1000.0
+        rank = agg.sort_values('mean_us')
+        entries = ", ".join([f"{v}: {t:.1f}" for v, t in zip(rank['variant'], rank['mean_us'])])
+        print(f"  {m}x{k}x{n} -> {entries}")
 
 
 def parse_softmax_params(s: str):
@@ -162,6 +167,7 @@ def inspect_softmax(df):
             return 'normal'
         return v
     sdf['variant'] = sdf['variant'].apply(norm_softmax_variant)
+    sdf = sdf[sdf['variant'] != 'noop']
     dims = sdf['parameters'].apply(parse_softmax_params)
     sdf[['rows_total', 'seq_k']] = pd.DataFrame(dims.tolist(), index=sdf.index)
     sdf = sdf.dropna(subset=['rows_total', 'seq_k'])

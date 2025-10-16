@@ -50,7 +50,7 @@ def collect_rows(criterion_dir: Path):
                 if re.search(r"Softmax_(auto|kernel|mps)", p):
                     variant = p
                     break
-                if p in {"mlx", "mps", "gemv", "auto"}:
+                if p in {"mlx", "mps", "gemv", "gemm_tiled", "auto"}:
                     variant = p
                     break
 
@@ -107,9 +107,24 @@ def collect_rows(criterion_dir: Path):
             if m and elems == 0:
                 B, S, H = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 elems = B * S * H
+            # Softmax direct kernels: seqq{Q}_seqk{K}
+            m = re.match(r"^seqq(\d+)_seqk(\d+)$", params_label)
+            if m and elems == 0:
+                Q, K = int(m.group(1)), int(m.group(2))
+                elems = Q * K
 
             # Matmul: MxKxN_a*
             m = re.match(r"^(\d+)x(\d+)x(\d+)_a.*$", params_label)
+            if m and elems == 0:
+                M, K, N = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                elems = M * K * N
+            # Matmul tuning with threshold suffix
+            m = re.match(r"^(\d+)x(\d+)x(\d+)thresh(\d+)$", params_label)
+            if m and elems == 0:
+                M, K, N = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                elems = M * K * N
+            # Matmul simple MxKxN (no suffix)
+            m = re.match(r"^(\d+)x(\d+)x(\d+)$", params_label)
             if m and elems == 0:
                 M, K, N = int(m.group(1)), int(m.group(2)), int(m.group(3))
                 elems = M * K * N

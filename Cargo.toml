@@ -119,3 +119,7 @@ harness = false
 name = "pipeline_bench"
 path = "benches/tuning_kernels/pipeline_bench.rs"
 harness = false
+
+[[bench]]
+name = "gemm_tiled_benchmark"
+harness = false

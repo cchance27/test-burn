@@ -1,5 +1,7 @@
 # Batch Recording of GPU Operations
 
+NOTE: We tested using this and it seemed to be less efficient due to cpu overhead implementing batched ops..
+
 We added a batched API on the `CommandBuffer` that allows encoding multiple operations while sharing encoders.
 This reduces encoder churn (creation/teardown) when recording sequences of operations.
 
