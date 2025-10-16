@@ -1485,28 +1485,24 @@ impl<T: TensorElement> Context<T> {
         crate::profiling_state::set_profiling_state(true);
     }
 
+    #[inline]
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
-        let should_refresh = if let Some(active) = self.active_cmd_buffer.as_ref() {
-            if active.is_committed() {
-                if !active.is_completed() {
-                    active.wait();
-                }
-                true
-            } else {
-                false
+        // Check and refresh committed command buffer if needed
+        if let Some(active) = self.active_cmd_buffer.as_ref() 
+            && active.is_committed() {
+            if !active.is_completed() {
+                active.wait();
             }
-        } else {
-            false
-        };
-
-        if should_refresh {
+            // Buffer is committed, clear it to create a fresh one
             self.active_cmd_buffer = None;
         }
 
+        // Only create new buffer if truly needed
         if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
-            if let Some(profiler) = GpuProfiler::attach(&cmd_buf, crate::profiling_state::get_profiling_state()) {
-                cmd_buf.retain_profiler(profiler);
+            if crate::profiling_state::get_profiling_state() 
+                && let Some(profiler) = GpuProfiler::attach(&cmd_buf, true) {
+                    cmd_buf.retain_profiler(profiler);
             }
             self.active_cmd_buffer = Some(cmd_buf);
         }
