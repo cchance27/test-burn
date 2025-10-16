@@ -342,6 +342,7 @@ pub fn generate_streaming<T: TensorElement>(
         "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
     );
 
+    let generation_start = Instant::now();
     let prompt_start = Instant::now();
 
     // Encode the full prompt
@@ -368,6 +369,10 @@ pub fn generate_streaming<T: TensorElement>(
 
     // Generate tokens using the new KV cache approach with streaming
     generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx)?;
+
+    // Send generation completion event with total generation time
+    let total_generation_time = generation_start.elapsed();
+    let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
 
     Ok(())
 }

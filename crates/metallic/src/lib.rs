@@ -22,6 +22,7 @@ pub mod profiling_state;
 pub mod resource_cache;
 pub mod softmax_utils;
 pub mod tensor;
+pub mod tensor_preparation_cache;
 pub mod tokenizer;
 
 pub mod kernels;

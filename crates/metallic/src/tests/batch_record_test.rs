@@ -66,17 +66,16 @@ fn batch_profiler_emits_individual_kernel_events() {
                 panic!("metric event: Timeout");
             }
             let wait = std::cmp::min(Duration::from_millis(500), deadline.saturating_duration_since(now));
-            if let Ok(enriched) = receiver.recv_timeout(wait) {
-                if let MetricEvent::GpuOpCompleted {
+            if let Ok(enriched) = receiver.recv_timeout(wait)
+                && let MetricEvent::GpuOpCompleted {
                     op_name,
                     backend,
                     duration_us,
                 } = enriched.event
-                    && backend == "Metal"
-                    && op_name.starts_with("FillConstantZero")
-                {
-                    gpu_events.push((op_name, duration_us));
-                }
+                && backend == "Metal"
+                && op_name.starts_with("FillConstantZero")
+            {
+                gpu_events.push((op_name, duration_us));
             }
         }
         assert_eq!(gpu_events.len(), 2, "expected two kernel events");

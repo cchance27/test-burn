@@ -73,4 +73,17 @@ pub enum MetricEvent {
         /// Memory usage by tensor category.
         breakdown: FxHashMap<String, u64>,
     },
+    /// Tensor preparation cache statistics.
+    TensorPreparationStats {
+        /// Number of times tensor preparation was skipped due to cache hit
+        cache_hits: u64,
+        /// Number of times tensor preparation was performed (cache miss)
+        cache_misses: u64,
+        /// Total time spent in preparation operations (microseconds)
+        total_preparation_time_us: u64,
+        /// Estimated time saved by cache hits (microseconds)
+        estimated_time_saved_us: u64,
+        /// Hit rate as a percentage (0-100)
+        hit_rate: f64,
+    },
 }

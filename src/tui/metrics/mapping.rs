@@ -624,3 +624,57 @@ pub fn metric_event_to_memory_rows(event: &MetricEvent) -> Vec<MemoryRow> {
         _ => Vec::new(),
     }
 }
+
+/// Convert a metric event to stats rows for display in the TUI
+pub fn metric_event_to_stats_rows(event: &MetricEvent) -> Vec<metallic_cli_helpers::app_event::StatsRow> {
+    match event {
+        MetricEvent::TensorPreparationStats {
+            cache_hits,
+            cache_misses,
+            total_preparation_time_us,
+            estimated_time_saved_us,
+            hit_rate,
+        } => {
+            use metallic_cli_helpers::app_event::StatsRow;
+            vec![
+                StatsRow {
+                    label: "Tensor Preparation Cache".to_string(),
+                    value: String::new(), // Empty for section header
+                    level: 0,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Cache Hits".to_string(),
+                    value: format!("{}", cache_hits),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Cache Misses".to_string(),
+                    value: format!("{}", cache_misses),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Total Prep Time".to_string(),
+                    value: format!("{:.2} ms", *total_preparation_time_us as f64 / 1000.0),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Estimated Time Saved".to_string(),
+                    value: format!("{:.2} ms", *estimated_time_saved_us as f64 / 1000.0),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Hit Rate".to_string(),
+                    value: format!("{:.2}%", hit_rate),
+                    level: 1,
+                    description: String::new(),
+                },
+            ]
+        }
+        _ => Vec::new(),
+    }
+}

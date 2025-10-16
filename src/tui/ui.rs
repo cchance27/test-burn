@@ -55,22 +55,28 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .split(sidebar_inner);
 
     let prompt_section = Paragraph::new(format!(
-        "Prompt Tokens: {}\nProcessing Time: {}",
+        "Prompt Tokens: {}\nPre-processing Time: {}\nGeneration Time: {}",
         app.prompt_token_count,
-        format_duration(app.prompt_processing_time)
+        format_duration(app.prompt_processing_time),
+        format_duration(app.generation_time)
     ))
     .block(Block::default().title("Prompt").borders(Borders::ALL));
 
     let metrics_block_title = match app.metrics_view {
         MetricsView::Memory => "Memory Usage",
         MetricsView::Latency => "Latency",
+        MetricsView::Stats => "Statistics",
     };
 
     let collapse_label = match app.metrics_view {
         MetricsView::Memory => app.memory_collapse_depth.label(),
         MetricsView::Latency => app.latency_collapse_depth.label(),
+        MetricsView::Stats => "N/A".to_string(), // Stats view doesn't use collapse depths
     };
-    let metrics_help = format!("[m] Memory [l] Latency [c] Collapse ({})", collapse_label);
+    let metrics_help = match app.metrics_view {
+        MetricsView::Memory | MetricsView::Latency => format!("[m] Memory [l] Latency [c] Collapse ({})", collapse_label),
+        MetricsView::Stats => format!("[m] Memory [l] Latency [s] Stats ({})", collapse_label),
+    };
 
     // Always calculate and update max depths before rendering to account for dynamic changes
     if matches!(app.metrics_view, MetricsView::Memory) && !app.memory_rows.is_empty() {
@@ -82,6 +88,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let metrics_text = match app.metrics_view {
         MetricsView::Memory => render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth()),
         MetricsView::Latency => render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth()),
+        MetricsView::Stats => render_stats_metrics_from_app(app),
     };
 
     let metrics_block = Block::default()
@@ -184,6 +191,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let metrics_text = match app.metrics_view {
         MetricsView::Memory => render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth()),
         MetricsView::Latency => render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth()),
+        MetricsView::Stats => render_stats_metrics_from_app(app),
     };
     let metrics_content = format!("{}\n\n{}", metrics_help, metrics_text);
     let metrics_content_lines = metrics_content.lines().count();
@@ -667,4 +675,32 @@ fn create_text_with_selection(text: &str, app: &App, _area: Rect) -> ratatui::te
         // No active selection, return text as is
         Text::from(text.to_string())
     }
+}
+
+/// Render statistics metrics with actual data from app
+pub fn render_stats_metrics_from_app(app: &App) -> String {
+    if app.stats_rows.is_empty() {
+        return "No statistics metrics available yet. Metrics will appear once tensor operations begin.".to_string();
+    }
+
+    let mut result = String::new();
+    result.push_str("Statistics Metrics:\n\n");
+
+    for row in &app.stats_rows {
+        let indent = "  ".repeat(row.level as usize);
+        if !row.value.is_empty() {
+            result.push_str(&format!("{}{}: {}\n", indent, row.label.trim_start(), row.value));
+        } else {
+            // If value is empty, this is likely a section header
+            result.push_str(&format!("{}{}\n", indent, row.label.trim_start()));
+        }
+
+        // Add description if available
+        if !row.description.is_empty() {
+            let desc_indent = "  ".repeat((row.level + 1) as usize);
+            result.push_str(&format!("{}({})\n", desc_indent, row.description));
+        }
+    }
+
+    result
 }

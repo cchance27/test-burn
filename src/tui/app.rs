@@ -16,6 +16,7 @@ pub struct App {
     pub status: String,
     pub memory_rows: Vec<MemoryRow>,
     pub prompt_processing_time: Duration,
+    pub generation_time: Duration,
     pub latency_tree: Vec<HierarchicalMetric>,
     pub metrics_view: MetricsView,
     pub latency_collapse_depth: CollapseDepth,
@@ -43,6 +44,10 @@ pub struct App {
     pub text_selection_end: Option<Position>,
     pub is_selecting: bool,
 
+
+    // Stats metrics rows for the stats view
+    pub stats_rows: Vec<metallic_cli_helpers::app_event::StatsRow>,
+
     // Status bar
     pub status_bar: StatusBar,
 }
@@ -57,6 +62,7 @@ impl App {
             status: "Initializing...".to_string(),
             memory_rows: Vec::new(),
             prompt_processing_time: Duration::default(),
+            generation_time: Duration::default(),
             latency_tree: Vec::new(),
             metrics_view: MetricsView::Memory,
             latency_collapse_depth: CollapseDepth::new(),
@@ -80,6 +86,7 @@ impl App {
             text_selection_start: None,
             text_selection_end: None,
             is_selecting: false,
+            stats_rows: Vec::new(),
             status_bar: StatusBar::new(StatusBarState::Normal),
         }
     }
@@ -92,6 +99,9 @@ impl App {
         match self.metrics_view {
             MetricsView::Latency => self.latency_collapse_depth.next(),
             MetricsView::Memory => self.memory_collapse_depth.next(),
+            MetricsView::Stats => {
+                // Stats view doesn't use collapse depths, so just reset scroll
+            }
         }
         self.reset_metrics_scroll();
     }
@@ -154,6 +164,7 @@ impl App {
         let metrics_content_lines = match self.metrics_view {
             MetricsView::Memory => self.calculate_memory_metrics_lines(),
             MetricsView::Latency => self.calculate_latency_metrics_lines(),
+            MetricsView::Stats => self.calculate_stats_metrics_lines(),
         } as u16;
 
         // Calculate visible lines in the metrics area (subtract 3: 2 for borders + 1 for title)
@@ -210,6 +221,15 @@ impl App {
             }
         }
         count
+    }
+
+    fn calculate_stats_metrics_lines(&self) -> usize {
+        // For now, we'll show a simple "Statistics" view
+        // In the future, this can show tensor preparation metrics and other statistics
+        let help_lines = 2; // Help text and blank line
+        let stats_lines = 5; // Placeholder for stats content
+
+        help_lines + stats_lines
     }
 
     fn adjust_log_scroll(&mut self, delta: i32) {
@@ -649,6 +669,7 @@ impl App {
 pub enum MetricsView {
     Memory,
     Latency,
+    Stats,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

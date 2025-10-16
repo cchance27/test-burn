@@ -3,6 +3,7 @@ use super::operation::CommandBuffer;
 use super::pool::MemoryPool;
 use super::profiling_state;
 use super::resource_cache::{CacheStats, ResourceCache};
+use super::tensor_preparation_cache::TensorPreparationCache;
 use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
 use crate::tensor::Dtype;
 use crate::{Tensor, TensorElement, cache_keys::SdpaKey, kernels};
@@ -187,6 +188,7 @@ pub struct Context<T: TensorElement> {
     /// Cache of MLX compute pipelines keyed by kernel configuration.
     pub(crate) mlx_kernel_cache: MlxKernelCache,
     sdpa_workspaces: FxHashMap<SdpaWorkspaceKey, SdpaWorkspaceState>,
+    tensor_preparation_cache: TensorPreparationCache<T>,
     pending_gpu_scope: Option<GpuProfilerLabel>,
     gpu_scope_stack: Vec<GpuProfilerLabel>,
 }
@@ -248,6 +250,9 @@ impl<T: TensorElement> Context<T> {
                     });
                 }
             }
+
+            // Validate tensor preparation states after command buffer completion
+            self.tensor_preparation_cache.validate_states(&cmd_buf);
             return;
         }
 
@@ -273,6 +278,9 @@ impl<T: TensorElement> Context<T> {
                     });
                 }
             }
+
+            // Create a temporary command buffer reference to validate states (simplified)
+            // In practice, the cache validation would be more complex here
         }
     }
 
@@ -307,6 +315,7 @@ impl<T: TensorElement> Context<T> {
             forced_matmul_backend: forced_backend,
             mlx_kernel_cache: MlxKernelCache::default(),
             sdpa_workspaces: FxHashMap::default(),
+            tensor_preparation_cache: TensorPreparationCache::new(),
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
         })
@@ -416,6 +425,9 @@ impl<T: TensorElement> Context<T> {
                     });
                 }
             }
+
+            // Validate tensor preparation states after command buffer completion
+            self.tensor_preparation_cache.validate_states(&cmd_buf);
         }
     }
 
@@ -956,6 +968,18 @@ impl<T: TensorElement> Context<T> {
             cache.clear();
         }
         self.sdpa_workspaces.clear();
+        // Also clear tensor preparation cache when clearing other caches
+        self.tensor_preparation_cache.clear();
+    }
+
+    /// Get tensor preparation performance metrics
+    pub fn get_tensor_preparation_metrics(&self) -> crate::tensor_preparation_cache::TensorPreparationMetrics {
+        self.tensor_preparation_cache.get_metrics()
+    }
+
+    /// Report tensor preparation metrics to the instrumentation system
+    pub fn report_tensor_preparation_metrics(&self) {
+        self.tensor_preparation_cache.report_metrics();
     }
 
     #[inline]
@@ -1501,8 +1525,8 @@ impl<T: TensorElement> Context<T> {
             self.active_cmd_buffer = None;
         }
 
-        // Only create new buffer if truly needed
-        if self.active_cmd_buffer.is_none() {
+        // Check if we need to create a new buffer
+        let new_buffer_created = if self.active_cmd_buffer.is_none() {
             let cmd_buf = CommandBuffer::new(&self.command_queue)?;
             if crate::profiling_state::get_profiling_state()
                 && let Some(profiler) = GpuProfiler::attach(&cmd_buf, true)
@@ -1510,10 +1534,20 @@ impl<T: TensorElement> Context<T> {
                 cmd_buf.retain_profiler(profiler);
             }
             self.active_cmd_buffer = Some(cmd_buf);
-        }
+            true
+        } else {
+            false
+        };
 
         if ensure_cache && self.active_resource_cache.is_none() {
             self.active_resource_cache = Some(ResourceCache::with_device(self.device.clone()));
+        }
+
+        // If a new command buffer was created, we need to clear preparation states
+        // for tensors prepared for the previous command buffer
+        if new_buffer_created {
+            // No need to explicitly clear preparation states here since the preparation
+            // cache will detect command buffer changes and handle invalidation appropriately
         }
 
         Ok(())
@@ -1533,48 +1567,124 @@ impl<T: TensorElement> Context<T> {
     #[inline]
     pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor<T>) {
         tensor.mark_device_dirty();
+        // Mark tensor as dirty in the preparation cache since it's now pending on GPU
+        self.tensor_preparation_cache.mark_dirty(tensor);
         if let Some(active) = &self.active_cmd_buffer {
             tensor.defining_cmd_buffer.borrow_mut().replace(active.clone());
         }
     }
 
     fn prepare_tensor_for_active_cmd(&mut self, tensor: &Tensor<T>) -> Result<(), MetalError> {
+        // Record start time for metrics
+        let start_time = std::time::Instant::now();
+
+        // Always flush host writes first so GPU sees the most recent data
         tensor.flush_host_writes()?;
+
+        // First, check if tensor is already prepared for current command buffer
+        if let Some(active_cmd_buffer) = self.active_cmd_buffer.as_ref()
+            && self.tensor_preparation_cache.is_prepared(tensor, active_cmd_buffer)
+        {
+            // Tensor is already prepared; record cache hit metrics and return
+            let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
+            self.tensor_preparation_cache.record_cache_hit(elapsed_us);
+            return Ok(());
+        }
+
+        // Run the original preparation logic to maintain correctness
         let maybe_dep = tensor.defining_cmd_buffer.borrow().clone();
         if let Some(dep) = maybe_dep {
-            if self.active_cmd_buffer.as_ref().map(|active| dep.ptr_eq(active)).unwrap_or(false) {
-                return Ok(());
-            }
+            if let Some(active_cmd_buffer) = self.active_cmd_buffer.as_ref() {
+                if self.active_cmd_buffer.as_ref().map(|active| dep.ptr_eq(active)).unwrap_or(false) {
+                    // If tensor is already pending on our active command buffer, we're done
+                    // Still mark in cache for tracking purposes
+                    self.tensor_preparation_cache.mark_prepared(tensor, active_cmd_buffer);
 
-            if dep.is_completed() {
-                tensor.defining_cmd_buffer.borrow_mut().take();
-                return Ok(());
-            }
-
-            // Attribute dependency wait to current logical GPU scope so it doesn't show up as Other
-            let wait_start = std::time::Instant::now();
-            dep.commit();
-            dep.wait();
-            let waited = wait_start.elapsed();
-            if !waited.is_zero() {
-                if let Some(label) = self.current_gpu_scope_label() {
-                    let path = label.op_name;
-                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
-                        op_name: format!("{}/dep_wait", path),
-                        backend: label.backend,
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                } else {
-                    record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
-                        op_name: "Generation Loop/dep_wait".to_string(),
-                        backend: GPU_PROFILER_BACKEND.to_string(),
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
+                    // Record timing for this preparation attempt
+                    let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
+                    self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+                    return Ok(());
                 }
-            }
 
-            tensor.defining_cmd_buffer.borrow_mut().take();
+                if dep.is_completed() {
+                    tensor.defining_cmd_buffer.borrow_mut().take();
+                    // Mark tensor as prepared for the current command buffer
+                    self.tensor_preparation_cache.mark_prepared(tensor, active_cmd_buffer);
+
+                    // Record timing for this preparation attempt
+                    let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
+                    self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+                    return Ok(());
+                }
+
+                // Attribute dependency wait to current logical GPU scope so it doesn't show up as Other
+                let wait_start = std::time::Instant::now();
+                dep.commit();
+                dep.wait();
+                let waited = wait_start.elapsed();
+                if !waited.is_zero() {
+                    if let Some(label) = self.current_gpu_scope_label() {
+                        let path = label.op_name;
+                        record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                            op_name: format!("{}/dep_wait", path),
+                            backend: label.backend,
+                            duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                        });
+                    } else {
+                        record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                            op_name: "Generation Loop/dep_wait".to_string(),
+                            backend: GPU_PROFILER_BACKEND.to_string(),
+                            duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                        });
+                    }
+                }
+
+                tensor.defining_cmd_buffer.borrow_mut().take();
+            } else {
+                // When no active command buffer exists, just run original preparation logic
+                if dep.is_completed() {
+                    tensor.defining_cmd_buffer.borrow_mut().take();
+                    // Record timing for this preparation attempt
+                    let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
+                    self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+                    return Ok(());
+                }
+
+                // Attribute dependency wait to current logical GPU scope so it doesn't show up as Other
+                let wait_start = std::time::Instant::now();
+                dep.commit();
+                dep.wait();
+                let waited = wait_start.elapsed();
+                if !waited.is_zero() {
+                    if let Some(label) = self.current_gpu_scope_label() {
+                        let path = label.op_name;
+                        record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                            op_name: format!("{}/dep_wait", path),
+                            backend: label.backend,
+                            duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                        });
+                    } else {
+                        record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                            op_name: "Generation Loop/dep_wait".to_string(),
+                            backend: GPU_PROFILER_BACKEND.to_string(),
+                            duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                        });
+                    }
+                }
+
+                tensor.defining_cmd_buffer.borrow_mut().take();
+            }
         }
+
+        // Mark tensor as prepared if we have an active command buffer
+        if let Some(active_cmd_buffer) = self.active_cmd_buffer.as_ref() {
+            self.tensor_preparation_cache.mark_prepared(tensor, active_cmd_buffer);
+        }
+
+        // Record timing for this preparation attempt
+        let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
+        self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+
         Ok(())
     }
 

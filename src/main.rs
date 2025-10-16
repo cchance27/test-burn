@@ -280,6 +280,10 @@ fn run_tui_mode(
                                     app.reset_metrics_scroll();
                                 }
                             }
+                            crossterm::event::KeyCode::Char('s') => {
+                                app.metrics_view = tui::app::MetricsView::Stats;
+                                app.reset_metrics_scroll();
+                            }
                             crossterm::event::KeyCode::Char('c') => {
                                 // Check if it's Control+C for copying all content from focused widget
                                 if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
@@ -288,8 +292,9 @@ fn run_tui_mode(
                                         FocusArea::GeneratedText => app.generated_text.clone(),
                                         FocusArea::Metrics => {
                                             let metrics_help = match app.metrics_view {
-                                                tui::app::MetricsView::Memory => "[m] Memory [l] Latency [c] Collapse",
-                                                tui::app::MetricsView::Latency => "[m] Memory [l] Latency [c] Collapse",
+                                                tui::app::MetricsView::Memory => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                tui::app::MetricsView::Latency => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                tui::app::MetricsView::Stats => "[m] Memory [l] Latency [s] Stats [c] Collapse",
                                             };
                                             let metrics_content = match app.metrics_view {
                                                 tui::app::MetricsView::Memory => ui::render_memory_metrics(
@@ -300,6 +305,7 @@ fn run_tui_mode(
                                                     &app.latency_tree,
                                                     app.latency_collapse_depth.get_current_depth(),
                                                 ),
+                                                tui::app::MetricsView::Stats => ui::render_stats_metrics_from_app(&app),
                                             };
                                             format!("{}\n\n{}", metrics_help, metrics_content)
                                         }
@@ -353,6 +359,13 @@ fn run_tui_mode(
             tracing::debug!("Converted to {} memory rows", memory_rows.len());
             if !memory_rows.is_empty() {
                 handle_app_event(&mut app, AppEvent::MemoryUpdate(memory_rows));
+            }
+
+            // Process stats events
+            let stats_rows = tui::metrics::metric_event_to_stats_rows(&enriched_event.event);
+            tracing::debug!("Converted to {} stats rows", stats_rows.len());
+            if !stats_rows.is_empty() {
+                handle_app_event(&mut app, AppEvent::StatsUpdate(stats_rows));
             }
         }
 
@@ -489,6 +502,22 @@ fn run_json_mode(
                     });
                     logs.push(log_entry);
                 }
+                AppEvent::StatsUpdate(stats_rows) => {
+                    let log_entry = serde_json::json!({
+                        "type": "stats_update",
+                        "rows": stats_rows
+                    });
+                    logs.push(log_entry);
+                }
+                AppEvent::GenerationComplete { total_generation_time: _ } => {
+                    // For JSON output mode, we just log that generation completed
+                    let log_entry = serde_json::json!({
+                        "type": "generation_complete",
+                        "message": "Generation completed successfully",
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    logs.push(log_entry);
+                }
                 AppEvent::LogMessage(message) => {
                     let log_entry = serde_json::json!({
                         "type": "log_message",
@@ -563,11 +592,18 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
                 app.add_latency_metric(row);
             }
         }
+        AppEvent::StatsUpdate(stats_rows) => {
+            // Update the stats rows in the app
+            app.stats_rows = stats_rows;
+        }
         AppEvent::Alert(alert) => {
             app.push_alert(alert);
         }
         AppEvent::LogMessage(message) => {
             app.add_log_message(&message);
+        }
+        AppEvent::GenerationComplete { total_generation_time } => {
+            app.generation_time = total_generation_time;
         }
     }
 }

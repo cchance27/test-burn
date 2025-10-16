@@ -30,6 +30,14 @@ pub struct MemoryRow {
 }
 
 #[derive(Clone, Debug, Serialize)]
+pub struct StatsRow {
+    pub label: String,
+    pub value: String, // Can be numeric or a formatted string
+    pub level: u8,
+    pub description: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub enum AlertLevel {
     Info,
     Warning,
@@ -81,10 +89,14 @@ pub enum AppEvent {
         prompt_processing: Duration,
         iteration: Option<Duration>,
     },
+    GenerationComplete {
+        total_generation_time: Duration,
+    },
     TokenCount(usize),
     StatusUpdate(String),
     MemoryUpdate(Vec<MemoryRow>),
     LatencyUpdate(Vec<LatencyRow>),
+    StatsUpdate(Vec<StatsRow>),
     Alert(Alert),
     LogMessage(String),
 }
