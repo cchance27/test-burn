@@ -1,11 +1,12 @@
 //! Instrumentation-specific environment variable identifiers and descriptors.
 
 use std::path::PathBuf;
+
 use tracing::Level;
 
-use super::EnvVar;
-use super::guard::EnvVarGuard;
-use super::value::{EnvVarError, EnvVarFormatError, EnvVarParseError, TypedEnvVar, TypedEnvVarGuard};
+use super::{
+    EnvVar, guard::EnvVarGuard, value::{EnvVarError, EnvVarFormatError, EnvVarParseError, TypedEnvVar, TypedEnvVarGuard}
+};
 
 /// Instrumentation-specific environment variables.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -22,6 +23,8 @@ pub enum InstrumentEnvVar {
     ForceMatmulBackend,
     /// Forces the softmax backend to a specific implementation for testing.
     SoftmaxBackend,
+    /// Forces the SDPA backend to a specific implementation for testing.
+    ForceSdpaBackend,
     /// Maximum N dimension for small-N optimization in matmul dispatcher.
     MatmulSmallnMaxN,
     /// Minimum M dimension to enable SIMD-optimized GEMM.
@@ -40,6 +43,7 @@ impl InstrumentEnvVar {
             InstrumentEnvVar::EnableProfiling => "METALLIC_ENABLE_PROFILING",
             InstrumentEnvVar::ForceMatmulBackend => "METALLIC_MATMUL_BACKEND",
             InstrumentEnvVar::SoftmaxBackend => "METALLIC_SOFTMAX_BACKEND",
+            InstrumentEnvVar::ForceSdpaBackend => "METALLIC_FORCE_SDPA_BACKEND",
             InstrumentEnvVar::MatmulSmallnMaxN => "METALLIC_MATMUL_SMALLN_MAX_N",
             InstrumentEnvVar::MatmulSimdMMin => "METALLIC_MATMUL_SIMD_M_MIN",
             InstrumentEnvVar::MatmulSimdNMin => "METALLIC_MATMUL_SIMD_N_MIN",
@@ -71,6 +75,10 @@ pub const FORCE_MATMUL_BACKEND: TypedEnvVar<String> =
 
 /// Typed descriptor for forcing the softmax backend.
 pub const SOFTMAX_BACKEND: TypedEnvVar<String> = TypedEnvVar::new(InstrumentEnvVar::SoftmaxBackend.into_env(), parse_string, format_string);
+
+/// Typed descriptor for forcing the SDPA backend.
+pub const FORCE_SDPA_BACKEND: TypedEnvVar<String> =
+    TypedEnvVar::new(InstrumentEnvVar::ForceSdpaBackend.into_env(), parse_string, format_string);
 
 /// Typed descriptor for matmul small-N maximum N threshold.
 pub const MATMUL_SMALLN_MAX_N: TypedEnvVar<String> =
@@ -284,6 +292,46 @@ impl InstrumentForceMatmulBackend {
     }
 }
 
+/// Shim exposing ergonomic helpers for the SDPA backend override.
+pub struct InstrumentForceSdpaBackend;
+
+impl InstrumentForceSdpaBackend {
+    /// Retrieve the descriptor associated with the SDPA backend variable.
+    pub const fn descriptor(&self) -> TypedEnvVar<String> {
+        FORCE_SDPA_BACKEND
+    }
+
+    /// Canonical key for the environment variable.
+    pub const fn key(&self) -> &'static str {
+        FORCE_SDPA_BACKEND.key()
+    }
+
+    /// Retrieve the typed value, if set.
+    pub fn get(&self) -> Result<Option<String>, EnvVarError> {
+        FORCE_SDPA_BACKEND.get()
+    }
+
+    /// Set the environment variable to the provided backend identifier.
+    pub fn set(&self, value: impl Into<String>) -> Result<(), EnvVarError> {
+        FORCE_SDPA_BACKEND.set(value.into())
+    }
+
+    /// Set the environment variable for the guard's lifetime.
+    pub fn set_guard(&self, value: impl Into<String>) -> Result<TypedEnvVarGuard<'_, String>, EnvVarError> {
+        FORCE_SDPA_BACKEND.set_guard(value.into())
+    }
+
+    /// Remove the environment variable from the process environment.
+    pub fn unset(&self) {
+        FORCE_SDPA_BACKEND.unset()
+    }
+
+    /// Unset the environment variable for the guard's lifetime.
+    pub fn unset_guard(&self) -> EnvVarGuard<'_> {
+        FORCE_SDPA_BACKEND.unset_guard()
+    }
+}
+
 /// Shim exposing ergonomic helpers for the softmax backend override.
 pub struct InstrumentSoftmaxBackend;
 
@@ -456,6 +504,8 @@ pub const ENABLE_PROFILING_VAR: InstrumentEnableProfiling = InstrumentEnableProf
 pub const FORCE_MATMUL_BACKEND_VAR: InstrumentForceMatmulBackend = InstrumentForceMatmulBackend;
 /// Ergonomic constant exposing the softmax-backend-override helper methods.
 pub const SOFTMAX_BACKEND_VAR: InstrumentSoftmaxBackend = InstrumentSoftmaxBackend;
+/// Ergonomic constant exposing the sdpa-backend-override helper methods.
+pub const FORCE_SDPA_BACKEND_VAR: InstrumentForceSdpaBackend = InstrumentForceSdpaBackend;
 /// Ergonomic constant exposing the matmul-smalln-max-n helper methods.
 pub const MATMUL_SMALLN_MAX_N_VAR: InstrumentMatmulSmallnMaxN = InstrumentMatmulSmallnMaxN;
 /// Ergonomic constant exposing the matmul-simd-m-min helper methods.

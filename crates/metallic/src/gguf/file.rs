@@ -1,12 +1,11 @@
-use crate::gguf::tensor_info::GGUTensorInfo;
+use std::{fs::File, io::Read, path::Path};
+
 use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
-use std::fs::File;
-use std::io::Read;
-use std::path::Path;
 
 use super::GGUFError;
+use crate::gguf::tensor_info::GGUTensorInfo;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GGUFDataType {

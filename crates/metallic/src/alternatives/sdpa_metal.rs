@@ -1,14 +1,10 @@
-use crate::F32Element;
-use crate::Tensor;
-use crate::tensor::Dtype;
-use objc2::AnyThread;
-use objc2::rc::autoreleasepool;
-use objc2_metal::MTLCommandBuffer;
-use objc2_metal::MTLCommandQueue;
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
+use std::{ffi::c_void, ptr::NonNull};
+
+use objc2::{AnyThread, rc::autoreleasepool};
+use objc2_metal::{MTLCommandBuffer, MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourceOptions};
 use objc2_metal_performance_shaders::{MPSDataType, MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
-use std::ffi::c_void;
-use std::ptr::NonNull;
+
+use crate::{F32Element, Tensor, tensor::Dtype};
 
 pub fn scaled_dot_product_attention_metal(
     query_ptr: NonNull<c_void>,

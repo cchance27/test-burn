@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::kernels::matmul_dispatcher::types::{MatmulVariant, SmallNBucket};
-use crate::tensor::dtypes::Dtype;
+use crate::{
+    kernels::matmul_dispatcher::types::{MatmulVariant, SmallNBucket}, tensor::dtypes::Dtype
+};
 
 /// Key for matmul dispatcher operations
 #[derive(Debug, Clone, Serialize, Deserialize)]

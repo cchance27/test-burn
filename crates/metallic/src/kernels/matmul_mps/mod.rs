@@ -1,19 +1,15 @@
-use objc2::AnyThread;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use std::time::Duration;
+
+use metallic_instrumentation::gpu_profiler::GpuProfiler;
+use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
-use std::time::Duration;
 
 use super::{KernelFunction, KernelInvocable};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
-    cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey},
-    context::GpuProfilerLabel,
-    resource_cache::ResourceCache,
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey}, context::GpuProfilerLabel, operation::EncoderType, resource_cache::ResourceCache
 };
-use metallic_instrumentation::gpu_profiler::GpuProfiler;
 
 #[cfg(test)]
 mod matmul_test;
@@ -218,8 +214,8 @@ impl KernelInvocable for MatMulMpsOp {
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl Operation for MatMulMps {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Ensure no active encoder before MPS encodes
-        command_buffer.end_current_encoder();
+        // Use smart encoder management - only terminate if there's an active Metal encoder
+        command_buffer.prepare_encoder_for_operation(EncoderType::MpsMatrix)?;
 
         // Wrap buffers into MPSMatrix views
         let left = mps_matrix_from_buffer(&self.left_buf, self.left_offset, &self.left_desc);

@@ -1,7 +1,9 @@
 //! Developer-facing macros for emitting structured metric events with async support.
+use std::sync::{
+    OnceLock, atomic::{AtomicUsize, Ordering}
+};
+
 use crate::MetricQueue;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Global queue for async metric recording.
 /// This is set during initialization and allows the macro to be zero-cost.

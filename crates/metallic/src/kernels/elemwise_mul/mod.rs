@@ -1,6 +1,5 @@
 use super::*;
-use crate::CommandBuffer;
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 
 pub struct ElemwiseMulOp;
 

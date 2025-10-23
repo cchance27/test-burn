@@ -1,24 +1,20 @@
-use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
+use std::{
+    ptr::NonNull, rc::Rc, sync::{
+        Mutex, atomic::{AtomicBool, Ordering}
+    }
+};
+
+use block2::RcBlock;
 use metallic_instrumentation::gpu_profiler::{CommandBufferCompletionHandler, GpuProfiler, ProfiledCommandBuffer};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize
+};
 use tracing::trace;
 
+use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
 use crate::{
-    TensorElement,
-    encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state},
-};
-use block2::RcBlock;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{
-    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize,
-};
-use std::{
-    ptr::NonNull,
-    rc::Rc,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    TensorElement, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}
 };
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
@@ -159,6 +155,14 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
 #[derive(Clone)]
 pub struct CommandBuffer {
     inner: Rc<CommandBufferInner>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderType {
+    MetalBlit,
+    MetalCompute,
+    MpsGraph,
+    MpsMatrix,
 }
 
 enum ActiveEncoder {
@@ -304,6 +308,42 @@ impl CommandBuffer {
                 ActiveEncoder::Compute(e) => e.endEncoding(),
             }
         }
+    }
+
+    /// Ensure encoder compatibility for the requested operation type.
+    /// Returns true if encoder state was changed, false if compatible state already exists.
+    pub fn ensure_encoder_compatibility(&self, requested_type: EncoderType) -> Result<bool, MetalError> {
+        let mut active_encoder_guard = self.inner.active_encoder.lock().unwrap();
+
+        match requested_type {
+            EncoderType::MetalBlit | EncoderType::MetalCompute => {
+                // Metal operations can reuse active encoders or create new ones
+                // No special termination required
+                Ok(false)
+            }
+            EncoderType::MpsGraph | EncoderType::MpsMatrix => {
+                // MPS operations require no active encoder for clean command buffer state
+                if active_encoder_guard.is_some() {
+                    // Terminate any active Metal encoder before MPS operations
+                    if let Some(encoder) = active_encoder_guard.take() {
+                        match encoder {
+                            ActiveEncoder::Blit(e) => e.endEncoding(),
+                            ActiveEncoder::Compute(e) => e.endEncoding(),
+                        }
+                    }
+                    Ok(true)
+                } else {
+                    // Command buffer is already clean, no change needed
+                    Ok(false)
+                }
+            }
+        }
+    }
+
+    /// Ensure encoder compatibility and return whether encoder was terminated.
+    /// This is a convenience method that calls ensure_encoder_compatibility with logging.
+    pub fn prepare_encoder_for_operation(&self, op_type: EncoderType) -> Result<bool, MetalError> {
+        self.ensure_encoder_compatibility(op_type)
     }
 
     /// Wait for the command buffer to complete.

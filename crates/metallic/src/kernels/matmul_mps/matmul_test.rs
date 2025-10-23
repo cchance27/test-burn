@@ -1,5 +1,6 @@
-use crate::kernels::matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp, mps_matrix_from_buffer};
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{
+    Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp, mps_matrix_from_buffer}
+};
 
 // Helpers
 

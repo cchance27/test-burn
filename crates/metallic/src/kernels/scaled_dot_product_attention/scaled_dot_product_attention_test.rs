@@ -1,8 +1,8 @@
 use rand::Rng as _;
 
-use crate::alternatives::sdpa_burn;
-use crate::kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{
+    Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, alternatives::sdpa_burn, kernels::scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp
+};
 
 #[test]
 fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
@@ -172,8 +172,9 @@ fn arange_sdpa_ours_vs_pytorch_noncausal() {
 
 #[test]
 fn large_sdpa_ours_vs_burn_causal() {
-    use burn::prelude::*;
-    use burn::tensor::{Int, Tensor as BurnTensor};
+    use burn::{
+        prelude::*, tensor::{Int, Tensor as BurnTensor}
+    };
     type MyBackend = burn::backend::Metal;
 
     let device = <MyBackend as Backend>::Device::default();
@@ -253,8 +254,9 @@ fn large_sdpa_ours_vs_burn_causal() {
 
 #[test]
 fn large_sdpa_ours_vs_burn_noncausal() {
-    use burn::prelude::*;
-    use burn::tensor::{Int, Tensor as BurnTensor};
+    use burn::{
+        prelude::*, tensor::{Int, Tensor as BurnTensor}
+    };
     type MyBackend = burn::backend::Metal;
 
     let device = <MyBackend as Backend>::Device::default();
@@ -334,8 +336,9 @@ fn large_sdpa_ours_vs_burn_noncausal() {
 
 // Helper function for SDPA tests using random data to compare Metallic against Burn.
 fn run_sdpa_test(batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool) {
-    use burn::prelude::*;
-    use burn::tensor::{Distribution, Tensor as BurnTensor};
+    use burn::{
+        prelude::*, tensor::{Distribution, Tensor as BurnTensor}
+    };
     type MyBackend = burn::backend::Metal;
 
     let device = <MyBackend as Backend>::Device::default();

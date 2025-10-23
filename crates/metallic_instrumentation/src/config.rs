@@ -1,15 +1,17 @@
 //! Centralised instrumentation configuration handling.
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    path::PathBuf, sync::{
+        OnceLock, atomic::{AtomicUsize, Ordering}
+    }
+};
 
+use metallic_env::{
+    EnvVarError, environment::instrument::{ENABLE_PROFILING, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH}
+};
 use tracing::Level;
-
-use metallic_env::EnvVarError;
-use metallic_env::environment::instrument::{ENABLE_PROFILING, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]

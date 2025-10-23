@@ -1,6 +1,5 @@
 use super::*;
-use crate::CommandBuffer;
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 
 /// Public, user-facing, zero-sized struct for the LayerNorm operation.
 pub struct LayerNormOp;
@@ -101,9 +100,8 @@ impl<T: TensorElement> Operation for LayerNorm<T> {
 
 #[cfg(test)]
 mod layernorm_test {
-    use crate::F32Element;
-
     use super::*;
+    use crate::F32Element;
 
     #[test]
     fn test_layernorm_logic() -> Result<(), MetalError> {

@@ -1,5 +1,4 @@
-use crate::tensor::Tensor;
-use crate::{Context, MetalError, TensorElement};
+use crate::{Context, MetalError, TensorElement, tensor::Tensor};
 
 pub struct TransformerBlock<T: TensorElement> {
     // Attention weights (placeholders matching GGUF shapes)

@@ -1,6 +1,6 @@
-use crate::kernels::matmul_dispatcher::prefs::load_prefs_from_env;
-use crate::kernels::matmul_dispatcher::types::MatmulBackend;
 use std::env;
+
+use crate::kernels::matmul_dispatcher::{prefs::load_prefs_from_env, types::MatmulBackend};
 
 #[test]
 fn env_backend_parsing() {

@@ -1,8 +1,7 @@
-use super::*;
-use crate::CommandBuffer;
-use crate::context::GpuProfilerLabel;
-use crate::{TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
 
 pub struct RMSNormOp;
 

@@ -1,15 +1,11 @@
-use super::*;
-
-use crate::CommandBuffer;
-use crate::Context;
-use crate::Dtype;
-use crate::MetalError;
-use crate::Tensor;
-use crate::TensorElement;
-use crate::context::GpuProfilerLabel;
-use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use metallic_instrumentation::GpuProfiler;
 use std::convert::TryFrom;
+
+use metallic_instrumentation::GpuProfiler;
+
+use super::*;
+use crate::{
+    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
+};
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;

@@ -1,22 +1,14 @@
+use std::{
+    any::Any, io::{Write, stdout}, panic::{self, AssertUnwindSafe}, sync::mpsc, thread, time::Duration
+};
+
 use anyhow::Result;
 use metallic::{
-    Context, F16Element, TensorElement, Tokenizer,
-    generation::generate_streaming,
-    gguf::{GGUFFile, model_loader::GGUFModelLoader},
-    profiling_state,
+    Context, F16Element, TensorElement, Tokenizer, generation::generate_streaming, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
 use metallic_cli_helpers::prelude::*;
-use metallic_instrumentation::prelude::*;
-use metallic_instrumentation::{MetricEvent, record_metric_async};
+use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
 use rustc_hash::FxHashMap;
-use std::{
-    any::Any,
-    io::{Write, stdout},
-    panic::{self, AssertUnwindSafe},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
 
 mod cli;
 mod tui;
@@ -24,12 +16,9 @@ mod tui;
 use clap::Parser;
 use crossterm::event::{self, Event as CrosstermEvent, MouseButton, MouseEvent};
 use ratatui::{
-    Terminal,
-    backend::{Backend, CrosstermBackend},
-    layout::Position,
+    Terminal, backend::{Backend, CrosstermBackend}, layout::Position
 };
-use tui::app::FocusArea;
-use tui::{App, AppResult, ui};
+use tui::{App, AppResult, app::FocusArea, ui};
 
 fn main() -> AppResult<()> {
     // Ensure profiling state is initialized from the environment before anything else.
@@ -40,11 +29,25 @@ fn main() -> AppResult<()> {
     // Parse command line arguments using CLAP
     let cli_config = cli::CliConfig::parse();
 
+    // Load instrumentation config from the environment so exporter selection honours CLI env vars.
+    let app_config = AppConfig::get_or_init_from_env().map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+
     // Initialize instrumentation system with async recorder for zero-overhead metrics
     let (sender, receiver) = mpsc::channel();
     let channel_exporter = Box::new(ChannelExporter::new(sender));
 
-    let exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter];
+    let mut exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter];
+
+    if let Some(path) = app_config.metrics_jsonl_path.clone() {
+        match JsonlExporter::new(&path) {
+            Ok(jsonl_exporter) => exporters.push(Box::new(jsonl_exporter)),
+            Err(error) => eprintln!("Failed to initialize JsonlExporter at {:?}: {}", path, error),
+        }
+    }
+
+    if app_config.enable_console_metrics {
+        exporters.push(Box::new(ConsoleExporter::new()));
+    }
 
     let async_recorder = AsyncMetricRecorder::new(exporters);
     let metric_queue = async_recorder.queue.clone();
@@ -78,6 +81,17 @@ fn main() -> AppResult<()> {
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
                 let mut ctx = Context::<F16Element>::new()?;
+
+                if let Some(choice) = cli_config.sdpa_backend {
+                    let override_policy = match choice {
+                        cli::config::SdpaBackendChoice::Auto => KernelBackendOverride::Auto,
+                        cli::config::SdpaBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
+                        cli::config::SdpaBackendChoice::Graph => KernelBackendOverride::Force(KernelBackendKind::Graph),
+                    };
+                    ctx.apply_backend_overrides(KernelBackendOverrides {
+                        sdpa: Some(override_policy),
+                    });
+                }
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
@@ -593,8 +607,19 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
             }
         }
         AppEvent::StatsUpdate(stats_rows) => {
-            // Update the stats rows in the app
-            app.stats_rows = stats_rows;
+            // Determine the type of stats and update the appropriate field
+            if !stats_rows.is_empty() {
+                // Check if these are resource cache stats or tensor preparation stats
+                if stats_rows[0].label.contains("Cache") && !stats_rows[0].label.contains("Tensor Preparation") {
+                    // This is a resource cache stat - we need to find the actual cache type
+                    // The first entry should be "{CacheType} Cache" at level 0 now (after our mapping change)
+                    let cache_type = stats_rows[0].label.trim_start().to_string();
+                    app.resource_cache_stats.insert(cache_type, stats_rows);
+                } else {
+                    // This is tensor preparation stats or other stats
+                    app.tensor_preparation_stats = stats_rows;
+                }
+            }
         }
         AppEvent::Alert(alert) => {
             app.push_alert(alert);

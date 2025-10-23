@@ -1,7 +1,6 @@
-use crate::{prelude::*, record_metric_async};
+use std::{sync::mpsc, time::Duration};
 
-use std::sync::mpsc;
-use std::time::Duration;
+use crate::{prelude::*, record_metric_async};
 
 #[test]
 fn metrics_layer_enriches_span_context() {

@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use crate::kernels::matmul_dispatcher::MatmulDispatchOp;
-    use crate::{Context, F16Element, MetalError, Tensor, TensorStorage};
     use metallic_env::FORCE_MATMUL_BACKEND_VAR;
+
+    use crate::{Context, F16Element, MetalError, Tensor, TensorStorage, kernels::matmul_dispatcher::MatmulDispatchOp};
 
     #[test]
     fn test_matmul_gemm_tiled_basic() -> Result<(), MetalError> {

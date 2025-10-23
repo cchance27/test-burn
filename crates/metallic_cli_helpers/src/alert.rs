@@ -1,11 +1,10 @@
-use crate::app_event::{Alert, AppEvent};
+use std::{
+    env, fs::OpenOptions, io::Write, path::PathBuf, sync::{Mutex, OnceLock, mpsc::Sender}
+};
+
 use chrono::SecondsFormat;
-use std::env;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::path::PathBuf;
-use std::sync::mpsc::Sender;
-use std::sync::{Mutex, OnceLock};
+
+use crate::app_event::{Alert, AppEvent};
 
 const ERROR_LOG_ENV: &str = "TEST_BURN_ERROR_LOG";
 const DEFAULT_ERROR_LOG: &str = "test-burn-error.log";

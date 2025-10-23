@@ -1,7 +1,7 @@
-use super::*;
-use crate::context::GpuProfilerLabel;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
 
 // User-facing struct for the broadcast element-wise add operation.
 pub struct BroadcastElemwiseAddOp;

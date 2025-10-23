@@ -1,9 +1,9 @@
-use super::*;
-use crate::CommandBuffer;
-use crate::context::GpuProfilerLabel;
-use crate::{TensorElement, TensorInit, TensorStorage};
-use metallic_instrumentation::GpuProfiler;
 use std::convert::TryFrom;
+
+use metallic_instrumentation::GpuProfiler;
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
 
 /// Public, user-facing, zero-sized struct for the KV rearrange operation.
 pub struct KvRearrangeOp;
@@ -153,9 +153,8 @@ fn cpu_reference_rearrange(
 
 #[cfg(test)]
 mod kv_rearrange_test {
-    use crate::F32Element;
-
     use super::*;
+    use crate::F32Element;
 
     #[test]
     fn test_kv_rearrange_logic() -> Result<(), MetalError> {

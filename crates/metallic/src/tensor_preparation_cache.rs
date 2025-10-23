@@ -1,9 +1,11 @@
-use super::{CommandBuffer, Tensor};
-use crate::TensorElement;
+use std::sync::{Arc, Mutex};
+
 use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::rc::Retained;
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, Mutex};
+
+use super::{CommandBuffer, Tensor};
+use crate::TensorElement;
 
 /// Cache key for identifying a tensor uniquely
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

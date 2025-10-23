@@ -1,6 +1,6 @@
-use crate::kernels::matmul_dispatcher::dispatcher::select_policy;
-use crate::kernels::matmul_dispatcher::types::*;
-use crate::tensor::dtypes::Dtype;
+use crate::{
+    kernels::matmul_dispatcher::{dispatcher::select_policy, types::*}, tensor::dtypes::Dtype
+};
 
 fn caps(simd: bool) -> MatmulCaps {
     MatmulCaps {

@@ -1,6 +1,7 @@
 use super::*;
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_compute_pipeline_state};
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
+use crate::{
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, encoder::{dispatch_threadgroups, set_buffer, set_compute_pipeline_state}
+};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct ArangeOp;
@@ -75,8 +76,7 @@ impl<T: TensorElement> Operation for Arange<T> {
 
 #[cfg(test)]
 mod arange_test {
-    use crate::kernels::tensors::ArangeOp;
-    use crate::{Context, F32Element, MetalError};
+    use crate::{Context, F32Element, MetalError, kernels::tensors::ArangeOp};
 
     #[test]
     fn test_arange() -> Result<(), MetalError> {

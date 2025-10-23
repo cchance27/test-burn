@@ -1,6 +1,6 @@
+use std::{fmt::Display, hash::Hash};
+
 use serde::{Deserialize, Serialize};
-use std::fmt::Display;
-use std::hash::Hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SoftmaxBackend {

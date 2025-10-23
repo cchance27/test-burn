@@ -1,5 +1,4 @@
-use crate::tensor::Dtype;
-use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage, tensor::Dtype};
 
 #[test]
 fn zeros_and_ones() {

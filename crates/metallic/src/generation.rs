@@ -1,19 +1,14 @@
-use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
-use crate::models::qwen25::Qwen25;
-use crate::{TensorElement, Tokenizer};
+use std::{
+    collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::mpsc, time::{Duration, Instant}
+};
+
 use metallic_cli_helpers::app_event::AppEvent;
 use metallic_instrumentation::{MetricEvent, global_cached_memory_profiler, record_metric_async};
 use rand::prelude::*;
 use rustc_hash::FxHashMap;
-use std::{
-    collections::BTreeMap,
-    env,
-    fs::OpenOptions,
-    io::Write,
-    path::PathBuf,
-    sync::mpsc,
-    time::{Duration, Instant},
-};
+
+use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
+use crate::{TensorElement, Tokenizer, models::qwen25::Qwen25};
 
 const IM_START: &str = "[:1]";
 const IM_END: &str = "[:2]";
@@ -118,10 +113,46 @@ fn describe_cache_metrics(name: &str, metrics: &CacheMetrics) -> String {
         0.0
     };
 
+    let oldest = format_duration(metrics.oldest_entry_age);
+    let newest = format_duration(metrics.newest_entry_age);
+    let lru_idle = format_duration(metrics.longest_idle_age);
+    let mru_idle = format_duration(metrics.shortest_idle_age);
+    let reuse = metrics
+        .max_entry_reuse_count
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "-".to_string());
+
     format!(
-        "{name}(size={} hits={} misses={} requests={} hit_rate={hit_rate:.1}% last={last})",
-        metrics.size, metrics.hits, metrics.misses, requests
+        "{name}(size={size} hits={hits} misses={misses} evict={evict} requests={requests} hit_rate={hit_rate:.1}% oldest={oldest} newest={newest} lru_idle={lru_idle} mru_idle={mru_idle} reuse_max={reuse} last={last})",
+        size = metrics.size,
+        hits = metrics.hits,
+        misses = metrics.misses,
+        evict = metrics.evictions,
+        requests = requests,
+        oldest = oldest,
+        newest = newest,
+        lru_idle = lru_idle,
+        mru_idle = mru_idle,
+        reuse = reuse,
+        last = last,
+        name = name,
+        hit_rate = hit_rate
     )
+}
+
+fn format_duration(duration: Option<Duration>) -> String {
+    match duration {
+        Some(value) => {
+            if value.as_secs_f64() >= 1.0 {
+                format!("{:.2}s", value.as_secs_f64())
+            } else if value.as_millis() >= 1 {
+                format!("{:.2}ms", value.as_secs_f64() * 1e3)
+            } else {
+                format!("{:.0}us", value.as_secs_f64() * 1e6)
+            }
+        }
+        None => "-".to_string(),
+    }
 }
 
 /// Generation configuration (defaults chosen by user)
@@ -493,14 +524,14 @@ where
 
     if let Some(logits_tensor) = logits_tensor {
         let logits_download_start = Instant::now();
-        let logits = logits_tensor.to_vec();
+        let logits_slice = logits_tensor.as_slice();
         let logits_download_duration = logits_download_start.elapsed();
         record_metric_async!(MetricEvent::InternalKernelCompleted {
             parent_op_name: "prompt_processing".to_string(),
             internal_kernel_name: "logits_sync".to_string(),
             duration_us: logits_download_duration.as_micros().max(1) as u64,
         });
-        let vocab_logits = &logits[..vocab_size];
+        let vocab_logits = &logits_slice[..vocab_size];
 
         let sample_start = Instant::now();
         next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
@@ -634,7 +665,7 @@ where
                 });
             }
 
-            let logits = logits_tensor.to_vec();
+            let logits_slice = logits_tensor.as_slice();
             let logits_download_duration = logits_download_start.elapsed();
             let metric_start = Instant::now();
             record_metric_async!(MetricEvent::InternalKernelCompleted {
@@ -643,7 +674,7 @@ where
                 duration_us: logits_download_duration.as_micros().max(1) as u64,
             });
             metric_recording_overhead += metric_start.elapsed();
-            let vocab_logits = &logits[..vocab_size];
+            let vocab_logits = &logits_slice[..vocab_size];
 
             let sample_start = Instant::now();
             next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;

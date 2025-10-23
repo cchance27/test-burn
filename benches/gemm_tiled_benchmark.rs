@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use metallic::kernels::matmul_dispatcher::MatmulDispatchOp;
-use metallic::kernels::matmul_gemm_tiled::MatmulGemmTiledOp;
-use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use metallic::{
+    Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{matmul_dispatcher::MatmulDispatchOp, matmul_gemm_tiled::MatmulGemmTiledOp}
+};
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
 fn bench_gemm_tiled_configurations<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {

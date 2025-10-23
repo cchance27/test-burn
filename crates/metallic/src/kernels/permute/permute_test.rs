@@ -1,5 +1,4 @@
-use crate::kernels::permute::PermuteOp;
-use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage, kernels::permute::PermuteOp};
 
 #[test]
 fn test_permute_2d_transpose() -> Result<(), crate::MetalError> {

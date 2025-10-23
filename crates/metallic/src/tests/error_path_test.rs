@@ -1,6 +1,5 @@
 use super::*;
-use crate::tensor::Dtype;
-use crate::{F32Element, TensorInit, TensorStorage};
+use crate::{F32Element, TensorInit, TensorStorage, tensor::Dtype};
 
 #[test]
 fn test_sdpa_invalid_shapes() {
@@ -95,8 +94,7 @@ fn test_sdpa_invalid_batch_dimensions() {
 
 #[test]
 fn test_matmul_invalid_shapes() {
-    use crate::cache_keys::MpsGemmKey;
-    use crate::resource_cache::ResourceCache;
+    use crate::{cache_keys::MpsGemmKey, resource_cache::ResourceCache};
 
     let context = Context::<F32Element>::new().unwrap();
     let mut cache = ResourceCache::with_device(context.device.clone());

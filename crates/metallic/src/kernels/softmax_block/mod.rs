@@ -1,12 +1,10 @@
-use crate::context::GpuProfilerLabel;
-use crate::kernels::{
-    KernelFunction, KernelInvocable, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state,
-};
-use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
 use metallic_instrumentation::GpuProfiler;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputePipelineState, MTLSize};
+
+use crate::{
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{KernelFunction, KernelInvocable, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+};
 
 // Public, user-facing, zero-sized struct for the operation.
 pub struct SoftmaxBlockOp;

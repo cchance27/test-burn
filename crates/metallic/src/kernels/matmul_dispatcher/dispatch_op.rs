@@ -1,14 +1,13 @@
-use crate::kernels::KernelInvocable;
-use crate::kernels::matmul_dispatcher::{
-    dispatcher::select_policy,
-    execute::{MatmulDispatchArgs, execute},
-    types::{MatShape, MatmulCaps},
-};
-use crate::resource_cache::ResourceCache;
-use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
+
+use crate::{
+    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
+        KernelInvocable, matmul_dispatcher::{
+            dispatcher::select_policy, execute::{MatmulDispatchArgs, execute}, types::{MatShape, MatmulCaps}
+        }
+    }, resource_cache::ResourceCache
+};
 
 pub struct MatmulDispatchOp;
 

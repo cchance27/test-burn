@@ -1,5 +1,4 @@
-use crate::kernels::gelu::GeluOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::gelu::GeluOp};
 
 #[test]
 fn test_gelu_logic() -> Result<(), MetalError> {

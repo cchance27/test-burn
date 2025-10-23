@@ -1,6 +1,7 @@
 use super::*;
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
+use crate::{
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct RandomUniformOp;
@@ -101,8 +102,7 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
 
 #[cfg(test)]
 mod random_uniform_test {
-    use crate::kernels::tensors::RandomUniformOp;
-    use crate::{Context, F32Element, MetalError};
+    use crate::{Context, F32Element, MetalError, kernels::tensors::RandomUniformOp};
 
     #[test]
     fn test_random_uniform() -> Result<(), MetalError> {

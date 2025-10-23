@@ -1,13 +1,14 @@
+use std::sync::Arc;
+
+use half::f16;
 use rustc_hash::FxHashMap;
 
 use super::{GGUFDataType, GGUFError, GGUFFile};
-use crate::gguf::file::GGUFMetadata;
-use crate::gguf::tensor_info::{GGUFRawTensor, GGUTensorInfo};
-use crate::tensor::TensorInit;
-use crate::{Context, TensorStorage, gguf::GGUFValue};
-use crate::{Tensor, TensorElement};
-use half::f16;
-use std::sync::Arc;
+use crate::{
+    Context, Tensor, TensorElement, TensorStorage, gguf::{
+        GGUFValue, file::GGUFMetadata, tensor_info::{GGUFRawTensor, GGUTensorInfo}
+    }, tensor::TensorInit
+};
 
 fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     if !raw.len().is_multiple_of(8) {

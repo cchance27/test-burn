@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use metallic::kernels::matmul_dispatcher::MatmulDispatchOp;
-use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use metallic::{
+    Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_dispatcher::MatmulDispatchOp}
+};
 use metallic_env::{FORCE_MATMUL_BACKEND_VAR, MATMUL_SMALLN_MAX_N_VAR};
 
 const DISPATCH_BACKENDS: &[&str] = &["mlx", "mps", "gemv", "gemm_tiled", "auto", "noop"];

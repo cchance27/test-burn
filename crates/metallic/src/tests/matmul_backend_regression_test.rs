@@ -1,10 +1,10 @@
-use crate::kernels::elemwise_add::BroadcastElemwiseAddOp;
-use crate::kernels::matmul_gemv::MatmulGemvOp;
-use crate::kernels::matmul_gemv_smalln::MatmulGemvSmallN8Op;
-use crate::kernels::matmul_mlx::MatMulMlxOp;
-use crate::kernels::matmul_mps::MatMulMpsOp;
-use crate::{Context, F16Element, MetalError, Tensor, TensorElement, TensorInit, TensorStorage};
 use half::f16;
+
+use crate::{
+    Context, F16Element, MetalError, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
+        elemwise_add::BroadcastElemwiseAddOp, matmul_gemv::MatmulGemvOp, matmul_gemv_smalln::MatmulGemvSmallN8Op, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp
+    }
+};
 
 fn make_tensor<T: TensorElement>(ctx: &mut Context<T>, dims: Vec<usize>, data: Vec<T::Scalar>) -> Result<Tensor<T>, MetalError> {
     Tensor::new(dims, TensorStorage::Dedicated(&*ctx), TensorInit::CopyFrom(&data))

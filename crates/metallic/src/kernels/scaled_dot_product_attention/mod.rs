@@ -1,12 +1,10 @@
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use metallic_instrumentation::{MetricEvent, record_metric_async};
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
 
-use super::{KernelFunction, KernelInvocable};
+use super::{KernelBackendKind, KernelFunction, KernelInvocable};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
-    cache_keys::{SdpaKey, SeqKBucket},
-    resource_cache::ResourceCache,
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{SdpaKey, SeqKBucket}, kernels::sdpa_mps_graph::SdpaMpsGraphOp, resource_cache::ResourceCache
 };
 
 #[cfg(test)]
@@ -60,6 +58,9 @@ pub struct ScaledDotProductAttentionMpsSoftmaxOp;
 
 /// Variant that combines all optimizations.
 pub struct ScaledDotProductAttentionOptimizedOp;
+
+/// Dispatches between legacy and graph-backed SDPA implementations.
+pub struct ScaledDotProductAttentionDispatchOp;
 
 // Internal struct that holds the operation - we'll use existing kernels to implement it
 #[allow(dead_code)]
@@ -353,6 +354,42 @@ impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::ALL)
+    }
+}
+
+impl KernelInvocable for ScaledDotProductAttentionDispatchOp {
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+
+    fn function_id() -> Option<KernelFunction> {
+        None
+    }
+
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
+        _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+        cache: Option<&mut ResourceCache>,
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
+        let selection = ctx.backend_registry().select_sdpa(KernelBackendKind::Legacy);
+
+        let profiler_backend = match selection.backend {
+            KernelBackendKind::Legacy => "Metal",
+            KernelBackendKind::Graph => "MPSGraph",
+        };
+        ctx.override_pending_gpu_backend(profiler_backend);
+
+        let result = match selection.backend {
+            KernelBackendKind::Legacy => ScaledDotProductAttentionOptimizedOp::new(ctx, args, None, cache),
+            KernelBackendKind::Graph => SdpaMpsGraphOp::new(ctx, args, None, cache),
+        }?;
+
+        record_metric_async!(MetricEvent::KernelBackendSelected {
+            op_name: "sdpa".to_string(),
+            backend: selection.backend.as_str().to_string(),
+            reason: selection.reason.as_str().to_string(),
+        });
+
+        Ok(result)
     }
 }
 

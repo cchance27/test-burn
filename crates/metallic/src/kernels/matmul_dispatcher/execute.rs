@@ -1,15 +1,9 @@
 use super::types::*;
-use crate::kernels::{KernelFunction, KernelInvocable};
-use crate::kernels::{
-    matmul_gemm_tiled::MatmulGemmTiledOp,
-    matmul_gemv::MatmulGemvOp,
-    matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
-    matmul_mlx::MatMulMlxOp,
-    matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp},
+use crate::{
+    Context, MetalError, Operation, Tensor, TensorElement, kernels::{
+        KernelFunction, KernelInvocable, matmul_gemm_tiled::MatmulGemmTiledOp, matmul_gemv::MatmulGemvOp, matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp}
+    }, resource_cache::ResourceCache, tensor::Dtype
 };
-use crate::resource_cache::ResourceCache;
-use crate::tensor::Dtype;
-use crate::{Context, MetalError, Operation, Tensor, TensorElement};
 
 #[derive(Clone, Copy)]
 pub struct MatmulDispatchArgs<'a, T: TensorElement> {

@@ -1,7 +1,8 @@
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::swiglu::SwiGLUOp};
 use std::fs;
 
 use serde::{Deserialize, Serialize};
+
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::swiglu::SwiGLUOp};
 
 #[test]
 fn test_swiglu_small_uniform() -> Result<(), MetalError> {

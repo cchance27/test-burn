@@ -1,15 +1,11 @@
-use super::*;
-use crate::CommandBuffer;
-use crate::context::GpuProfilerLabel;
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::{
-    TensorElement, TensorInit, TensorStorage,
-    kernels::{KernelFunction, KernelInvocable},
-};
 use metallic_instrumentation::GpuProfiler;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputePipelineState, MTLSize};
+
+use super::*;
+use crate::{
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{KernelFunction, KernelInvocable}
+};
 
 #[repr(C)]
 struct GemvParams {

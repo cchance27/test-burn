@@ -3,10 +3,11 @@
 //! This module provides BPE (Byte Pair Encoding) tokenization capabilities
 //! that can work with GGUF metadata or other sources of vocabulary and merges.
 
+use std::sync::{Arc, RwLock};
+
 use fancy_regex::Regex;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, RwLock};
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 

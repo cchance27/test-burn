@@ -123,3 +123,7 @@ harness = false
 [[bench]]
 name = "gemm_tiled_benchmark"
 harness = false
+
+[[bench]]
+name = "sdpa_mpsgraph_vs_current_benchmark"
+harness = false

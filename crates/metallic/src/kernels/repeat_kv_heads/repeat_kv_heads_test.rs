@@ -1,6 +1,5 @@
-use crate::{F32Element, TensorInit, TensorStorage};
-
 use super::*;
+use crate::{F32Element, TensorInit, TensorStorage, context::RepeatKvWorkspaceKind};
 
 fn cpu_repeat_kv_heads(
     input: &[f32],
@@ -60,6 +59,9 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
         seq as u32,
         head_dim as u32,
         cache_capacity as u32,
+        0u32,
+        RepeatKvWorkspaceKind::Key,
+        false,
     ))?;
     ctx.synchronize();
 
@@ -145,6 +147,9 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         seq as u32,
         head_dim as u32,
         seq as u32,
+        layer_idx as u32,
+        RepeatKvWorkspaceKind::Key,
+        false,
     ))?;
     let expected_v = ctx.call::<RepeatKvHeadsOp>((
         canonical_v_tensor.clone(),
@@ -155,6 +160,9 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         seq as u32,
         head_dim as u32,
         seq as u32,
+        layer_idx as u32,
+        RepeatKvWorkspaceKind::Value,
+        false,
     ))?;
 
     ctx.synchronize();

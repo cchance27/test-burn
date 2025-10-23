@@ -1,21 +1,16 @@
-use crate::context::GpuProfilerLabel;
-use crate::kernels::{KernelFunction, KernelInvocable};
-use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage,
-    encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
-    tensor::Dtype,
+use std::{
+    convert::{TryFrom, TryInto}, ffi::c_void, ptr::NonNull
 };
+
 use metallic_instrumentation::GpuProfiler;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
 use objc2_metal::{MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
-use std::convert::{TryFrom, TryInto};
-use std::ffi::c_void;
-use std::ptr::NonNull;
 
-use crate::resource_cache::ResourceCache;
+use crate::{
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{KernelFunction, KernelInvocable}, resource_cache::ResourceCache, tensor::Dtype
+};
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]

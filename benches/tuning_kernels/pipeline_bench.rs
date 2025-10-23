@@ -1,6 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use metallic::kernels::tensors::NoopOp;
-use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::tensors::NoopOp};
 
 fn benchmark_noop<T: TensorElement>(c: &mut Criterion) {
     let mut group = c.benchmark_group("pipeline_testing");

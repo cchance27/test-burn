@@ -1,20 +1,15 @@
+use std::{
+    sync::mpsc, time::{Duration, Instant}
+};
+
 use metallic_env::ENABLE_PROFILING_VAR;
 use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
+use tracing::subscriber;
 
 use crate::{
-    context::Context,
-    kernels::elemwise_add::ElemwiseAddOp,
-    operation::{CommandBuffer, FillConstant},
-    resource_cache::ResourceCache,
-    tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage},
+    context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, FillConstant}, resource_cache::ResourceCache, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage}
 };
-
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
-use std::{
-    sync::mpsc,
-    time::{Duration, Instant},
-};
-use tracing::subscriber;
 
 // Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]

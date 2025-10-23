@@ -1,10 +1,11 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use metallic::kernels::KernelInvocable;
-use metallic::kernels::scaled_dot_product_attention::{
-    ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp,
-    ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp,
+use metallic::{
+    Context, F32Element, Tensor, kernels::{
+        KernelInvocable, scaled_dot_product_attention::{
+            ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp, ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp
+        }
+    }
 };
-use metallic::{Context, F32Element, Tensor};
 
 const ITERATIONS: usize = 1;
 

@@ -1,7 +1,8 @@
-use super::*;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
 use metallic_instrumentation::GpuProfiler;
 use objc2_metal::{MTLBuffer, MTLResourceOptions};
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
 
 pub struct PermuteOp;
 

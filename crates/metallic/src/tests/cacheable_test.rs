@@ -27,8 +27,7 @@ fn test_cacheable_trait() {
 
 #[test]
 fn sdpa_cache_hits_increase_for_repeated_requests() {
-    use crate::resource_cache::ResourceCache;
-    use crate::tensor::dtypes::Dtype;
+    use crate::{resource_cache::ResourceCache, tensor::dtypes::Dtype};
 
     let mut cache = ResourceCache::new();
     let dtype = Dtype::F32;
@@ -52,8 +51,7 @@ fn sdpa_cache_hits_increase_for_repeated_requests() {
 
 #[test]
 fn sdpa_incremental_decode_hits_cache_and_matches_full_attention() -> Result<(), MetalError> {
-    use crate::tensor::TensorStorage;
-    use crate::tensor::dtypes::F32Element;
+    use crate::tensor::{F32Element, TensorStorage};
 
     let mut ctx = Context::<F32Element>::new()?;
     let batch = 1;

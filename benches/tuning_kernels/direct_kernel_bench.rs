@@ -1,15 +1,8 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use metallic::{
-    Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage,
-    kernels::{
-        matmul_dispatcher::MatmulDispatchOp,
-        matmul_gemm_tiled::MatmulGemmTiledOp,
-        matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op},
-        matmul_mlx::MatMulMlxOp,
-        matmul_mps::MatMulMpsOp,
-        softmax_block::SoftmaxBlockOp,
-        softmax_vec::SoftmaxVecOp,
-    },
+    Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
+        matmul_dispatcher::MatmulDispatchOp, matmul_gemm_tiled::MatmulGemmTiledOp, matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp, softmax_block::SoftmaxBlockOp, softmax_vec::SoftmaxVecOp
+    }
 };
 
 /// Direct kernel benchmarks that test raw kernel performance without dispatcher overhead.

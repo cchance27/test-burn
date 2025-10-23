@@ -2,6 +2,5 @@ pub mod alert;
 pub mod app_event;
 
 pub mod prelude {
-    pub use crate::alert;
-    pub use crate::app_event::*;
+    pub use crate::{alert, app_event::*};
 }

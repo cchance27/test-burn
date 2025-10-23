@@ -1,6 +1,6 @@
-use burn::prelude::*;
-use burn::tensor::activation::softmax;
-use burn::tensor::{Bool, Float, Shape, Tensor};
+use burn::{
+    prelude::*, tensor::{Bool, Float, Shape, Tensor, activation::softmax}
+};
 
 pub fn scaled_dot_product_attention_burn<B: Backend>(
     query: Tensor<B, 3, Float>,

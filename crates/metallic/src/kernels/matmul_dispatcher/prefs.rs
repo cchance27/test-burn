@@ -1,5 +1,6 @@
-use crate::kernels::matmul_dispatcher::types::{MatmulBackend, Prefs};
 use metallic_env::FORCE_MATMUL_BACKEND;
+
+use crate::kernels::matmul_dispatcher::types::{MatmulBackend, Prefs};
 
 fn parse_backend(s: &str) -> MatmulBackend {
     match s.to_ascii_lowercase().as_str() {

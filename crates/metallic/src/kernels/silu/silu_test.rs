@@ -1,6 +1,5 @@
 #![cfg(test)]
-use crate::kernels::silu::SiluOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::silu::SiluOp};
 
 // CPU SiLU
 fn cpu_silu(input: &[f32]) -> Vec<f32> {

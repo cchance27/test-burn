@@ -1,15 +1,15 @@
 //! Asynchronous metric recording system using lock-free queues for zero-overhead metric collection.
 
-use std::sync::{Arc, mpsc};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::{
+    sync::{Arc, mpsc}, thread::{self, JoinHandle}, time::Duration
+};
 
 use crossbeam::queue::SegQueue;
 use tracing_subscriber::layer::SubscriberExt as _;
 
-use crate::event::MetricEvent;
-use crate::exporters::ChannelExporter;
-use crate::recorder::{EnrichedMetricEvent, MetricExporter, MetricsLayer};
+use crate::{
+    event::MetricEvent, exporters::ChannelExporter, recorder::{EnrichedMetricEvent, MetricExporter, MetricsLayer}
+};
 
 /// Lock-free queue for sending metrics from the recording thread to the processing thread.
 pub type MetricQueue = Arc<SegQueue<MetricEvent>>;

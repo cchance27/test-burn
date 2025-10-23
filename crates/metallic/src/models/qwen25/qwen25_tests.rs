@@ -1,8 +1,8 @@
 #![cfg(test)]
-use crate::models::{Qwen25, Qwen25Config};
-use crate::{F32Element, TensorInit, TensorStorage};
-
 use super::*;
+use crate::{
+    F32Element, TensorInit, TensorStorage, context::RepeatKvWorkspaceKind, models::{Qwen25, Qwen25Config}
+};
 
 #[test]
 fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
@@ -190,7 +190,17 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
         out
     };
 
-    let output = Qwen25::repeat_kv_heads(&history, group_size, batch, n_kv_heads, n_heads, head_dim, &mut ctx)?;
+    let output = Qwen25::repeat_kv_heads(
+        &history,
+        group_size,
+        batch,
+        n_kv_heads,
+        n_heads,
+        head_dim,
+        0,
+        RepeatKvWorkspaceKind::Key,
+        &mut ctx,
+    )?;
     ctx.synchronize();
 
     assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);

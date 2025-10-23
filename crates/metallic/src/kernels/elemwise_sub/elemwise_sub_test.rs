@@ -1,5 +1,4 @@
-use crate::kernels::elemwise_sub::ElemwiseSubOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::elemwise_sub::ElemwiseSubOp};
 
 fn cpu_elemwise_sub(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b.iter()).map(|(x, y)| x - y).collect()

@@ -675,6 +675,57 @@ pub fn metric_event_to_stats_rows(event: &MetricEvent) -> Vec<metallic_cli_helpe
                 },
             ]
         }
+        MetricEvent::ResourceCacheSummary {
+            cache,
+            hits,
+            misses,
+            hit_rate,
+            size,
+        } => {
+            use metallic_cli_helpers::app_event::StatsRow;
+            // Create a cache-specific entry without the Resource Cache header since it will be grouped
+            vec![
+                StatsRow {
+                    label: format!("{} Cache", capitalize_first(cache)).to_string(),
+                    value: String::new(), // Empty for section header
+                    level: 0,             // This is now the top level for this cache type
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Size".to_string(),
+                    value: format!("{}", size),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Hits".to_string(),
+                    value: format!("{}", hits),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Misses".to_string(),
+                    value: format!("{}", misses),
+                    level: 1,
+                    description: String::new(),
+                },
+                StatsRow {
+                    label: "  Hit Rate".to_string(),
+                    value: format!("{:.2}%", hit_rate),
+                    level: 1,
+                    description: String::new(),
+                },
+            ]
+        }
         _ => Vec::new(),
+    }
+}
+
+/// Helper function to capitalize the first letter of a string
+fn capitalize_first(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
     }
 }

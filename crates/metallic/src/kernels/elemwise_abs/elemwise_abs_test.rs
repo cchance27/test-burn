@@ -1,5 +1,4 @@
-use crate::kernels::elemwise_abs::ElemwiseAbsOp;
-use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage, kernels::elemwise_abs::ElemwiseAbsOp};
 
 #[test]
 fn test_elemwise_abs() {

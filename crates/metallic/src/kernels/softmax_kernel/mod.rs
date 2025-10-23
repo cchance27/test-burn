@@ -1,12 +1,8 @@
-use super::*;
-use crate::CommandBuffer;
-use crate::context::GpuProfilerLabel;
-use crate::resource_cache::ResourceCache;
-
-use crate::TensorElement;
 use metallic_instrumentation::GpuProfiler;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel, resource_cache::ResourceCache};
 
 /// Public, user-facing, zero-sized struct for the legacy Softmax operation.
 pub struct SoftmaxKernelOp;

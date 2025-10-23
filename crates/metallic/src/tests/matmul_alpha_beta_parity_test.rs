@@ -1,7 +1,7 @@
 #![cfg(test)]
-use crate::kernels::matmul_dispatcher::dispatch_op::MatmulDispatchOp;
-use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage};
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
+
+use crate::{Context, F32Element, Tensor, TensorInit, TensorStorage, kernels::matmul_dispatcher::dispatch_op::MatmulDispatchOp};
 
 fn make_tensor_f32(ctx: &Context<F32Element>, data: &[f32], dims: &[usize]) -> Tensor<F32Element> {
     Tensor::new(dims.to_vec(), TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(data)).unwrap()

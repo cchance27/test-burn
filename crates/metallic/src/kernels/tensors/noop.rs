@@ -1,6 +1,7 @@
 use super::*;
-use crate::encoder::{dispatch_threadgroups, set_compute_pipeline_state};
-use crate::{CommandBuffer, TensorElement};
+use crate::{
+    CommandBuffer, TensorElement, encoder::{dispatch_threadgroups, set_compute_pipeline_state}
+};
 
 /// Public, user-facing, zero-sized struct for a NOOP operation.
 /// This runs a minimal compute kernel that does nothing and returns the provided tensor unchanged.

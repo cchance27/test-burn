@@ -1,8 +1,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use metallic::kernels::{KernelFunction, KernelManager};
-use metallic::operation::{CommandBuffer, FillConstant, Operation, RandomUniform};
-use metallic::resource_cache::ResourceCache;
-use metallic::tensor::{Dtype, F32Element, Tensor};
+use metallic::{
+    kernels::{KernelFunction, KernelManager}, operation::{CommandBuffer, FillConstant, Operation, RandomUniform}, resource_cache::ResourceCache, tensor::{Dtype, F32Element, Tensor}
+};
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
 
 fn bench_individual_vs_batched(c: &mut Criterion) {

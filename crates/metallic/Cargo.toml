@@ -50,3 +50,7 @@ mach2 = "0.5"
 metallic_env = { path = "../metallic_env" }
 metallic_instrumentation = { path = "../metallic_instrumentation" }
 metallic_cli_helpers = { path = "../metallic_cli_helpers" }
+objc2-metal-performance-shaders-graph = "0.3.2"
+
+[dev-dependencies]
+serial_test = "3.2.0"

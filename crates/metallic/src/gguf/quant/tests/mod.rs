@@ -1,10 +1,10 @@
 #![cfg(test)]
 //! Benchmark for Q8 quantization operations
-use crate::gguf::GGUFDataType;
-use crate::gguf::quant::q8;
+use std::time::Instant;
+
 #[cfg(target_arch = "aarch64")]
 use crate::gguf::quant::q8_simd;
-use std::time::Instant;
+use crate::gguf::{GGUFDataType, quant::q8};
 
 mod benchmark;
 mod large_benchmark;

@@ -46,6 +46,8 @@ pub enum MetalError {
     RegexError(Box<fancy_regex::Error>),
     #[error("Tensor dtype mismatch: expected {expected:?}, got {actual:?}")]
     DtypeMismatch { expected: Dtype, actual: Dtype },
+    #[error("Operation failed: {0}")]
+    OperationFailed(String),
 }
 
 impl From<crate::tokenizer::TokenizerError> for MetalError {

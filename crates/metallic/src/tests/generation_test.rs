@@ -1,7 +1,8 @@
-use crate::generation::{GenerationConfig, generate, sample_top_k_top_p};
-use crate::models::{Qwen25, Qwen25Config};
-use crate::{Context, F32Element, MetalError, SamplerBuffers, TensorElement, Tokenizer};
 use rustc_hash::FxHashMap;
+
+use crate::{
+    Context, F32Element, MetalError, SamplerBuffers, TensorElement, Tokenizer, generation::{GenerationConfig, generate, sample_top_k_top_p}, models::{Qwen25, Qwen25Config}
+};
 
 #[test]
 fn test_generation_pipeline() {

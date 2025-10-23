@@ -1,5 +1,4 @@
-use crate::kernels::rope::RoPEOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::rope::RoPEOp};
 
 // CPU RoPE reference implementation for testing (pairs elements dim/2 apart)
 fn cpu_rope(input: &[f32], batch: usize, seq_len: usize, dim: usize, cos: &[f32], sin: &[f32]) -> Vec<f32> {

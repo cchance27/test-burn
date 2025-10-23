@@ -1,0 +1,22 @@
+rm *.jsonl
+
+METALLIC_FORCE_SDPA_BACKEND=mpsgraph \
+     METALLIC_ENABLE_PROFILING=0 \
+     METALLIC_METRICS_JSONL_PATH=/Volumes/2TB/test-burn/graph-noprof.jsonl cargo run -q --message-format=short --release -- ./models/qwen2.5-coder-0.5b-instruct-fp16.gguf "create a short js fibonacci function" \
+     --output-format=text --sdpa-backend graph --max-tokens=40
+
+METALLIC_FORCE_SDPA_BACKEND=mpsgraph \
+     METALLIC_ENABLE_PROFILING=1 \
+     METALLIC_METRICS_JSONL_PATH=/Volumes/2TB/test-burn/graph.jsonl cargo run -q --message-format=short --release -- ./models/qwen2.5-coder-0.5b-instruct-fp16.gguf "create a short js fibonacci function" \
+     --output-format=text --sdpa-backend graph --max-tokens=40
+
+METALLIC_FORCE_SDPA_BACKEND=legacy \
+     METALLIC_ENABLE_PROFILING=0 \
+     METALLIC_METRICS_JSONL_PATH=/Volumes/2TB/test-burn/legacy-noprof.jsonl cargo run -q --message-format=short --release -- ./models/qwen2.5-coder-0.5b-instruct-fp16.gguf "create a short js fibonacci function" \
+     --output-format=text --sdpa-backend legacy --max-tokens=40
+
+METALLIC_FORCE_SDPA_BACKEND=legacy \
+     METALLIC_ENABLE_PROFILING=1 \
+     METALLIC_METRICS_JSONL_PATH=/Volumes/2TB/test-burn/legacy.jsonl cargo run -q --message-format=short --release -- ./models/qwen2.5-coder-0.5b-instruct-fp16.gguf "create a short js fibonacci function" \
+     --output-format=text --sdpa-backend legacy --max-tokens=40
+

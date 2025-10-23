@@ -1,7 +1,7 @@
+use std::{sync::Arc, time::Duration};
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LatencyRow {

@@ -1,9 +1,5 @@
 #![cfg(test)]
-use crate::cache_keys::SdpaKey;
-use crate::cacheable::Cacheable as _;
-use crate::cacheable_sdpa::CacheableSdpa;
-
-use crate::{Context, MetalError, Tensor};
+use crate::{Context, MetalError, Tensor, cache_keys::SdpaKey, cacheable::Cacheable as _, cacheable_sdpa::CacheableSdpa};
 
 mod batch_record_test;
 mod cacheable_test;

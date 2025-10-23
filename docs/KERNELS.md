@@ -221,3 +221,32 @@ fn some_function(ctx: &mut Context, tensor_a: Tensor, tensor_b: Tensor) -> Resul
     Ok(result)
 }
 ```
+
+## Graph-backed Kernels
+
+Several kernels now have MPSGraph-backed implementations that sit alongside the legacy Metal
+paths. When promoting a kernel to run through MPSGraph, follow this checklist to keep performance
+and telemetry consistent:
+
+- **Implement `GraphKernel`**: create a zero-sized type that implements both `KernelInvocable` and
+  the new `GraphKernel` trait. Encode storage and accumulator precision through
+  `GraphKernelDtypePolicy` (e.g., f16 storage with fp32 accumulators) so cache keys remain stable.
+- **Publish signatures**: override `GraphKernel::signature()` so axis semantics, optional bindings,
+  and notes are discoverable by tooling and future kernel ports.
+- **Dispatch via the registry**: introduce a `*DispatchOp` that queries `KernelBackendRegistry` and
+  selects the appropriate backend. The dispatcher automatically honors
+  `METALLIC_FORCE_SDPA_BACKEND=legacy|mpsgraph|auto` so developers can toggle behaviour without
+  code changes.
+- **Expose overrides**: surface CLI/config toggles (e.g., `--sdpa-backend`) that map onto the
+  registry, enabling per-run backend selection without mutating global environment variables.
+- **Use shared caches**: request executables through `ResourceCache::get_or_create_mpsgraph_*`.
+  The underlying `GraphExecutableCache` and `MaskArena` abstractions handle instrumentation and
+  reuse; avoid ad-hoc maps for graph resources.
+- **Add parity coverage**: extend `metallic::tests` with fixtures that compare graph vs. legacy
+  outputs and assert that env overrides flip the dispatcher as expected.
+- **Document invariants**: note any graph-specific constraints (mask semantics, stride
+  requirements, accumulator modes) directly alongside the kernel so future ports stay aligned.
+
+Following this pattern keeps DX uniform: every kernel exposes a single entry point, reports backend
+selection through `KernelBackendSelected` events, and shares graph executables through the reusable
+cache layers introduced in Milestone C.

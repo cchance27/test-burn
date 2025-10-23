@@ -1,19 +1,11 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
 
-use crate::{
-    context::Context,
-    error::MetalError,
-    kernels::{KernelInvocable, Operation, softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp},
-    resource_cache::ResourceCache,
-    tensor::{Dtype, Tensor, TensorElement},
-};
-
 use super::{
-    dispatcher::{SoftmaxCaps, SoftmaxPrefs, select_policy},
-    execute::SoftmaxDispatch,
-    prefs,
-    types::{SoftmaxBackend, SoftmaxShape, SoftmaxVariant},
+    dispatcher::{SoftmaxCaps, SoftmaxPrefs, select_policy}, execute::SoftmaxDispatch, prefs, types::{SoftmaxBackend, SoftmaxShape, SoftmaxVariant}
+};
+use crate::{
+    context::Context, error::MetalError, kernels::{KernelInvocable, Operation, softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp}, resource_cache::ResourceCache, tensor::{Dtype, Tensor, TensorElement}
 };
 
 /// A public, zero-sized struct that acts as the entry point for the softmax dispatcher.

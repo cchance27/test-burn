@@ -1,5 +1,6 @@
-use serde::{Deserialize, Serialize};
 use std::hash::{Hash, Hasher};
+
+use serde::{Deserialize, Serialize};
 
 use crate::tensor::dtypes::Dtype;
 
@@ -169,4 +170,148 @@ impl Hash for SdpaKey {
         self.seq_k_bucket.hash(state);
         self.transpose_k.hash(state);
     }
+}
+
+/// Key for MPSGraph SDPA operations.
+///
+/// This key uniquely identifies an MPSGraph SDPA operation based on its dimensions
+/// and parameters for proper caching of compiled graphs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphSdpaKey {
+    pub batch: usize,
+    pub dim: usize,
+    pub causal: bool,
+    pub dtype: Dtype,
+    pub accumulator_dtype: Option<Dtype>,
+}
+
+impl PartialEq for MpsGraphSdpaKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.batch == other.batch
+            && self.dim == other.dim
+            && self.causal == other.causal
+            && self.dtype == other.dtype
+            && self.accumulator_dtype == other.accumulator_dtype
+    }
+}
+
+impl Eq for MpsGraphSdpaKey {}
+
+impl Hash for MpsGraphSdpaKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.batch.hash(state);
+        self.dim.hash(state);
+        self.causal.hash(state);
+        self.dtype.hash(state);
+        self.accumulator_dtype.hash(state);
+    }
+}
+
+/// Bucketing for mask sizes to enable reuse across different sequence lengths
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum MaskSizeBucket {
+    XSmall,   // 1-32
+    Small,    // 33-128
+    Medium,   // 129-512
+    Large,    // 513-1024
+    XLarge,   // 1025-2048
+    XXLarge,  // 2049-4096
+    XXXLarge, // >4096
+}
+
+impl From<usize> for MaskSizeBucket {
+    fn from(seq_len: usize) -> Self {
+        match seq_len {
+            0..=32 => MaskSizeBucket::XSmall,
+            33..=128 => MaskSizeBucket::Small,
+            129..=512 => MaskSizeBucket::Medium,
+            513..=1024 => MaskSizeBucket::Large,
+            1025..=2048 => MaskSizeBucket::XLarge,
+            2049..=4096 => MaskSizeBucket::XXLarge,
+            _ => MaskSizeBucket::XXXLarge,
+        }
+    }
+}
+
+/// Key for reusable mask buffers in MPSGraph SDPA.
+/// This enables mask reuse across different sequence lengths that fit within the same bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphSdpaMaskKey {
+    pub causal: bool,
+    pub dtype: Dtype,
+    pub head_dim: usize,
+    pub seq_q_bucket: MaskSizeBucket,
+    pub seq_k_bucket: MaskSizeBucket,
+}
+
+impl PartialEq for MpsGraphSdpaMaskKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.causal == other.causal
+            && self.dtype == other.dtype
+            && self.head_dim == other.head_dim
+            && self.seq_q_bucket == other.seq_q_bucket
+            && self.seq_k_bucket == other.seq_k_bucket
+    }
+}
+
+impl Eq for MpsGraphSdpaMaskKey {}
+
+impl Hash for MpsGraphSdpaMaskKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.causal.hash(state);
+        self.dtype.hash(state);
+        self.head_dim.hash(state);
+        self.seq_q_bucket.hash(state);
+        self.seq_k_bucket.hash(state);
+    }
+}
+
+/// Key for MPSGraph fused operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphFusedKey {
+    pub batch: usize,
+    pub seq_q: usize,
+    pub seq_k: usize,
+    pub dim: usize,
+    pub output_dim: usize,
+    pub causal: bool,
+    pub dtype: Dtype,
+    pub operation_type: FusedOperationType,
+    pub accumulator_dtype: Option<Dtype>,
+}
+
+impl PartialEq for MpsGraphFusedKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.batch == other.batch
+            && self.seq_q == other.seq_q
+            && self.seq_k == other.seq_k
+            && self.dim == other.dim
+            && self.output_dim == other.output_dim
+            && self.causal == other.causal
+            && self.dtype == other.dtype
+            && self.operation_type == other.operation_type
+            && self.accumulator_dtype == other.accumulator_dtype
+    }
+}
+
+impl Eq for MpsGraphFusedKey {}
+
+impl Hash for MpsGraphFusedKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.batch.hash(state);
+        self.seq_q.hash(state);
+        self.seq_k.hash(state);
+        self.dim.hash(state);
+        self.output_dim.hash(state);
+        self.causal.hash(state);
+        self.dtype.hash(state);
+        self.operation_type.hash(state);
+        self.accumulator_dtype.hash(state);
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FusedOperationType {
+    SdpaProjection,
+    // Additional fused operations can be added here
 }

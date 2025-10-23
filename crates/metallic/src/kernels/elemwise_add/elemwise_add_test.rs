@@ -1,5 +1,4 @@
-use crate::kernels::elemwise_add::elemwise_add::ElemwiseAddOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::elemwise_add::elemwise_add::ElemwiseAddOp};
 
 fn cpu_elemwise_add(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().zip(b.iter()).map(|(x, y)| x + y).collect()

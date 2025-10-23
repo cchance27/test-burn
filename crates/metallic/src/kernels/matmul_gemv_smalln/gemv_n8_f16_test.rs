@@ -1,7 +1,8 @@
-use super::*;
-use crate::{Context, F16Element, Tensor, TensorInit, TensorStorage};
 use anyhow::Result;
 use half::f16;
+
+use super::*;
+use crate::{Context, F16Element, Tensor, TensorInit, TensorStorage};
 
 fn matmul_cpu(a: &[f16], b: &[f16], m: usize, k: usize, n: usize) -> Vec<f16> {
     let mut c = vec![f16::from_f32(0.0); m * n];

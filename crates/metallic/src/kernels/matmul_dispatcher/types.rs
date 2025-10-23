@@ -1,6 +1,8 @@
-use crate::tensor::dtypes::Dtype;
-use serde::{Deserialize, Serialize};
 use std::fmt;
+
+use serde::{Deserialize, Serialize};
+
+use crate::tensor::dtypes::Dtype;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MatmulBackend {

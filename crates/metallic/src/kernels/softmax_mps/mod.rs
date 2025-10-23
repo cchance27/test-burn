@@ -1,14 +1,12 @@
-use super::*;
-use crate::cache_keys::MpsMatrixDescriptorKey;
-
-use crate::kernels::matmul_mps::mps_matrix_from_buffer;
-use crate::resource_cache::ResourceCache;
-use crate::{CommandBuffer, Dtype, TensorElement};
 use metallic_instrumentation::GpuProfiler;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSUInteger;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
+
+use super::*;
+use crate::{
+    CommandBuffer, Dtype, TensorElement, cache_keys::MpsMatrixDescriptorKey, kernels::matmul_mps::mps_matrix_from_buffer, operation::EncoderType, resource_cache::ResourceCache
+};
 
 // Public, user-facing, zero-sized struct for the MPS Softmax operation.
 pub struct SoftmaxMpsOp;
@@ -23,8 +21,8 @@ pub struct SoftmaxMpsOperation<T: TensorElement> {
 
 impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Ensure no active encoder before MPS encodes
-        command_buffer.end_current_encoder();
+        // Use smart encoder management - only terminate if there's an active Metal encoder
+        command_buffer.prepare_encoder_for_operation(EncoderType::MpsMatrix)?;
 
         // MPS-backed op:  ensure CPU-scope timing is used in latency mode for exact attribution
         GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer.raw());

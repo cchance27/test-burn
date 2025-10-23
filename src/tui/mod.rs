@@ -6,5 +6,4 @@ pub mod components;
 pub mod metrics;
 pub mod ui;
 
-pub use app::App;
-pub use app::AppResult;
+pub use app::{App, AppResult};

@@ -1,9 +1,8 @@
-use crate::gguf::{GGUFValue, model_loader::GGUFModel};
-use crate::{
-    Context, Dtype, MetalError, Tensor, TensorElement,
-    models::{LoadableModel, Qwen25, Qwen25Config},
-};
 use std::{any::TypeId, borrow::Cow};
+
+use crate::{
+    Context, Dtype, MetalError, Tensor, TensorElement, gguf::{GGUFValue, model_loader::GGUFModel}, models::{LoadableModel, Qwen25, Qwen25Config}
+};
 
 fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f32]> {
     if T::DTYPE == Dtype::F32 {

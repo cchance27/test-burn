@@ -1,8 +1,8 @@
-use serde::{Deserialize, Serialize};
 use std::hash::Hash;
 
-use crate::kernels::softmax_dispatcher::types::SoftmaxVariant;
-use crate::tensor::dtypes::Dtype;
+use serde::{Deserialize, Serialize};
+
+use crate::{kernels::softmax_dispatcher::types::SoftmaxVariant, tensor::dtypes::Dtype};
 
 /// Key for softmax dispatcher operations
 #[derive(Debug, Clone, Serialize, Deserialize)]

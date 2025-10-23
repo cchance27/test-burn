@@ -1,13 +1,10 @@
-use crate::{
-    cache_keys::MpsMatrixDescriptorKey,
-    context::Context,
-    error::MetalError,
-    kernels::softmax_kernel::SoftmaxKernelOp,
-    resource_cache::ResourceCache,
-    tensor::{Dtype, MpsMatrixBatchView, Tensor, TensorElement},
-};
-use metallic_env::SOFTMAX_BACKEND_VAR;
 use std::sync::OnceLock;
+
+use metallic_env::SOFTMAX_BACKEND_VAR;
+
+use crate::{
+    cache_keys::MpsMatrixDescriptorKey, context::Context, error::MetalError, kernels::softmax_kernel::SoftmaxKernelOp, resource_cache::ResourceCache, tensor::{Dtype, MpsMatrixBatchView, Tensor, TensorElement}
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SoftmaxBackendPreference {

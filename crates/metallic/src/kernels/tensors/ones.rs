@@ -1,6 +1,7 @@
 use super::*;
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage};
+use crate::{
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct OnesOp;
@@ -83,8 +84,7 @@ impl<T: TensorElement> Operation for Ones<T> {
 
 #[cfg(test)]
 mod ones_test {
-    use crate::kernels::tensors::OnesOp;
-    use crate::{Context, F32Element, MetalError};
+    use crate::{Context, F32Element, MetalError, kernels::tensors::OnesOp};
 
     #[test]
     fn test_ones() -> Result<(), MetalError> {

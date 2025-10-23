@@ -24,6 +24,10 @@ pub struct CliConfig {
     /// Output format (json, text, tui)
     #[arg(long, value_enum, default_value_t = OutputFormat::Tui)]
     pub output_format: OutputFormat,
+
+    /// Override the SDPA backend (defaults to environment-driven auto selection)
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    pub sdpa_backend: Option<SdpaBackendChoice>,
 }
 
 /// Generation configuration options
@@ -55,6 +59,17 @@ pub enum OutputFormat {
     Text,
     /// JSON output mode
     Json,
+}
+
+/// Available SDPA backend overrides exposed via the CLI.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum SdpaBackendChoice {
+    /// Allow the dispatcher to choose the backend automatically.
+    Auto,
+    /// Force the legacy Metal implementation.
+    Legacy,
+    /// Force the graph-backed implementation.
+    Graph,
 }
 
 impl CliConfig {
@@ -89,6 +104,7 @@ mod tests {
             generation: GenerationConfig::default(),
             verbose: 0,
             output_format: OutputFormat::Tui,
+            sdpa_backend: None,
         };
 
         assert_eq!(config.get_prompt(), "Create a short javascript hello world app.");
@@ -102,6 +118,7 @@ mod tests {
             generation: GenerationConfig::default(),
             verbose: 0,
             output_format: OutputFormat::Tui,
+            sdpa_backend: None,
         };
 
         assert_eq!(config.get_prompt(), "Hello, world!");

@@ -1,14 +1,9 @@
 use ratatui::{
-    Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::Text,
-    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    Frame, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style}, text::Text, widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap}
 };
 
 use crate::tui::{
-    app::{App, FocusArea, MetricsView},
-    metrics::HierarchicalMetric,
+    app::{App, FocusArea, MetricsView}, metrics::HierarchicalMetric
 };
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -679,26 +674,65 @@ fn create_text_with_selection(text: &str, app: &App, _area: Rect) -> ratatui::te
 
 /// Render statistics metrics with actual data from app
 pub fn render_stats_metrics_from_app(app: &App) -> String {
-    if app.stats_rows.is_empty() {
+    let mut has_any_stats = false;
+
+    // Check if we have any stats at all
+    if !app.tensor_preparation_stats.is_empty() || !app.resource_cache_stats.is_empty() {
+        has_any_stats = true;
+    }
+
+    if !has_any_stats {
         return "No statistics metrics available yet. Metrics will appear once tensor operations begin.".to_string();
     }
 
     let mut result = String::new();
     result.push_str("Statistics Metrics:\n\n");
 
-    for row in &app.stats_rows {
-        let indent = "  ".repeat(row.level as usize);
-        if !row.value.is_empty() {
-            result.push_str(&format!("{}{}: {}\n", indent, row.label.trim_start(), row.value));
-        } else {
-            // If value is empty, this is likely a section header
-            result.push_str(&format!("{}{}\n", indent, row.label.trim_start()));
-        }
+    // Add tensor preparation stats first if available (at the top)
+    if !app.tensor_preparation_stats.is_empty() {
+        for row in &app.tensor_preparation_stats {
+            let indent = "  ".repeat(row.level as usize);
+            if !row.value.is_empty() {
+                result.push_str(&format!("{}{}: {}\n", indent, row.label.trim_start(), row.value));
+            } else {
+                // If value is empty, this is likely a section header
+                result.push_str(&format!("{}{}\n", indent, row.label.trim_start()));
+            }
 
-        // Add description if available
-        if !row.description.is_empty() {
-            let desc_indent = "  ".repeat((row.level + 1) as usize);
-            result.push_str(&format!("{}({})\n", desc_indent, row.description));
+            // Add description if available
+            if !row.description.is_empty() {
+                let desc_indent = "  ".repeat((row.level + 1) as usize);
+                result.push_str(&format!("{}({})\n", desc_indent, row.description));
+            }
+        }
+    }
+
+    // Add a separator if we have both types of stats
+    if !app.tensor_preparation_stats.is_empty() && !app.resource_cache_stats.is_empty() {
+        result.push('\n');
+    }
+
+    // Add resource cache stats if available
+    if !app.resource_cache_stats.is_empty() {
+        // Iterate through each cache type and display its stats
+        for rows in app.resource_cache_stats.values() {
+            for row in rows {
+                let indent = "  ".repeat(row.level as usize);
+                if !row.value.is_empty() {
+                    result.push_str(&format!("{}{}: {}\n", indent, row.label.trim_start(), row.value));
+                } else {
+                    // If value is empty, this is likely a section header
+                    result.push_str(&format!("{}{}\n", indent, row.label.trim_start()));
+                }
+
+                // Add description if available
+                if !row.description.is_empty() {
+                    let desc_indent = "  ".repeat((row.level + 1) as usize);
+                    result.push_str(&format!("{}({})\n", desc_indent, row.description));
+                }
+            }
+            // Add a blank line between different cache types for readability
+            result.push('\n');
         }
     }
 

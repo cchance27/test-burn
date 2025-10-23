@@ -1,5 +1,6 @@
-use crate::kernels::elemwise_add::elemwise_broadcast_add::{BroadcastElemwiseAddInplaceOp, BroadcastElemwiseAddOp};
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{
+    Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::elemwise_add::elemwise_broadcast_add::{BroadcastElemwiseAddInplaceOp, BroadcastElemwiseAddOp}
+};
 
 fn cpu_broadcast_add(a: &[f32], b: &[f32]) -> Vec<f32> {
     a.iter().enumerate().map(|(i, x)| x + b[i % b.len()]).collect()

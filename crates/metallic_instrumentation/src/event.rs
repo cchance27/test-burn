@@ -1,8 +1,9 @@
 //! Canonical metric event definitions for the unified instrumentation system.
 
+use std::collections::BTreeMap;
+
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Structured, type-safe metric events emitted by the instrumentation layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,8 +29,18 @@ pub enum MetricEvent {
         internal_kernel_name: String,
         duration_us: u64,
     },
+    /// Records which backend executed a kernel when multiple options are available.
+    KernelBackendSelected { op_name: String, backend: String, reason: String },
     /// Captures resource cache utilisation metrics.
     ResourceCacheAccess { cache_key: String, hit: bool, bytes: u64 },
+    /// Periodic summary of a resource cache (e.g., mpsgraph_sdpa) for dashboards.
+    ResourceCacheSummary {
+        cache: String,
+        hits: u64,
+        misses: u64,
+        hit_rate: f64,
+        size: u64,
+    },
     /// Memory-mapped file usage for GGUF models.
     GgufFileMmap {
         /// Size of the memory-mapped file in bytes.

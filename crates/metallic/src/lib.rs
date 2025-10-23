@@ -20,10 +20,13 @@ pub mod operation;
 pub mod pool;
 pub mod profiling_state;
 pub mod resource_cache;
+pub mod resource_cache_metrics;
 pub mod softmax_utils;
 pub mod tensor;
 pub mod tensor_preparation_cache;
 pub mod tokenizer;
+
+pub mod mps_graph;
 
 pub mod kernels;
 

@@ -3,8 +3,9 @@
 //! We run multiple iterations of each operation within each benchmark measurement
 //! to reduce the impact of benchmark framework overhead and get more stable measurements.
 //! This is especially important for faster operations like SDPA on smaller tensors.
-use burn::prelude::Backend;
-use burn::tensor::{Distribution, Float, Int, Tensor as BurnTensor};
+use burn::{
+    prelude::Backend, tensor::{Distribution, Float, Int, Tensor as BurnTensor}
+};
 use criterion::{Criterion, criterion_group, criterion_main};
 use metallic::{Context, F32Element, Tensor};
 

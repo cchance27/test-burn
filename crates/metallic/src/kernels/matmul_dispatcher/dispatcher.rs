@@ -1,8 +1,8 @@
-use crate::kernels::matmul_dispatcher::{
-    constants::{simd_m_min, simd_n_min},
-    types::*,
+use crate::{
+    kernels::matmul_dispatcher::{
+        constants::{simd_m_min, simd_n_min}, types::*
+    }, tensor::dtypes::Dtype
 };
-use crate::tensor::dtypes::Dtype;
 
 pub fn select_policy(shape: MatShape, _dtype: Dtype, caps: &MatmulCaps, prefs: &Prefs) -> DispatchPlan {
     use super::constants::{simd_m_min, simd_n_min, smalln_max_n};

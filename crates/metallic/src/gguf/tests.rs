@@ -1,7 +1,6 @@
 #![cfg(test)]
 use crate::{
-    F32Element,
-    gguf::{GGUFFile, GGUFValue, tensor_info::GGUTensorInfo},
+    F32Element, gguf::{GGUFFile, GGUFValue, tensor_info::GGUTensorInfo}
 };
 
 #[test]

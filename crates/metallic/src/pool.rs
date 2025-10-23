@@ -1,8 +1,8 @@
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLDevice, MTLResourceOptions};
+
 use super::MetalError;
 use crate::tensor::{Dtype, Tensor, TensorElement};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLBuffer, MTLCommandQueue, MTLDevice, MTLResourceOptions};
 
 const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
 const GROWTH_FACTOR: f32 = 1.5;

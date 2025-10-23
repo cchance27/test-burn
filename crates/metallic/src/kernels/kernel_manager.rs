@@ -1,6 +1,5 @@
-use crate::{Dtype, TensorElement};
-
 use super::*;
+use crate::{Dtype, TensorElement};
 
 /// A trait for kernel operations that can be invoked via `Context::call`.
 pub trait KernelInvocable {

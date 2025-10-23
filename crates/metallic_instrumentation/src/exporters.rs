@@ -1,10 +1,8 @@
 //! Concrete metric exporter implementations.
 
-use std::fs::{File, OpenOptions};
-use std::io::{BufWriter, Write};
-use std::path::Path;
-use std::sync::Mutex;
-use std::sync::mpsc::Sender;
+use std::{
+    fs::{File, OpenOptions}, io::{BufWriter, Write}, path::Path, sync::{Mutex, mpsc::Sender}
+};
 
 use serde_json::to_string;
 

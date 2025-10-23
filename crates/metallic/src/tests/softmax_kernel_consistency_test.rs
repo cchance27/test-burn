@@ -4,10 +4,7 @@
 //! identical results to the original SoftmaxKernelOp for the same inputs.
 
 use crate::{
-    F16Element, F32Element,
-    context::Context,
-    kernels::{softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp},
-    tensor::{Tensor, TensorElement, TensorInit, TensorStorage},
+    F16Element, F32Element, context::Context, kernels::{softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp}, tensor::{Tensor, TensorElement, TensorInit, TensorStorage}
 };
 
 /// Test element type for numerical consistency verification

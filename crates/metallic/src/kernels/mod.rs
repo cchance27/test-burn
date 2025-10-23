@@ -1,18 +1,25 @@
-use crate::{
-    Context, Dtype, MetalError, Operation, Tensor,
-    encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state},
-    resource_cache::ResourceCache,
-};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
-use objc2_metal::{MTLComputePipelineState, MTLSize};
-use objc2_metal::{MTLDevice, MTLLibrary};
+use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
+
+use crate::{
+    Context, Dtype, MetalError, Operation, Tensor, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, resource_cache::ResourceCache
+};
 
 // Rexport KernelManager and Invocable
 mod kernel_manager;
 pub use kernel_manager::{KernelInvocable, KernelManager};
+
+pub mod graph_kernel;
+pub use graph_kernel::{
+    GraphKernel, GraphKernelAccumulator, GraphKernelAxis, GraphKernelDtypePolicy, GraphKernelSignature, GraphKernelTensorDescriptor
+};
+
+pub mod backend_registry;
+pub use backend_registry::{
+    BackendSelection, BackendSelectionReason, KernelBackendKind, KernelBackendOverride, KernelBackendOverrides, KernelBackendRegistry
+};
 
 // Export our kernels
 pub mod elemwise_abs;
@@ -30,6 +37,7 @@ pub mod matmul_gemv;
 pub mod matmul_gemv_smalln;
 pub mod matmul_mlx;
 pub mod matmul_mps;
+pub mod sdpa_mps_graph;
 pub mod softmax_block;
 pub mod softmax_kernel;
 pub mod softmax_mps;

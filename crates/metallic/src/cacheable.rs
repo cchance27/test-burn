@@ -1,7 +1,7 @@
-use super::error::MetalError;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLDevice;
+
+use super::error::MetalError;
 
 /// A trait for types that can be cached in the resource cache.
 ///

@@ -1,8 +1,7 @@
-use super::*;
-use crate::CommandBuffer;
-use crate::TensorElement;
-use crate::context::GpuProfilerLabel;
 use metallic_instrumentation::GpuProfiler;
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel};
 
 pub struct KvCacheWriteOp;
 

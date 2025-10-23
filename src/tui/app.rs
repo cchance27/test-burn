@@ -1,8 +1,12 @@
-use crate::tui::components::{AlertedState, StatusBar, StatusBarState};
-use crate::tui::metrics::{HierarchicalMetric, RunningAverage};
+use std::time::Duration;
+
 use metallic_cli_helpers::prelude::*;
 use ratatui::layout::Position;
-use std::time::Duration;
+use rustc_hash::FxHashMap;
+
+use crate::tui::{
+    components::{AlertedState, StatusBar, StatusBarState}, metrics::{HierarchicalMetric, RunningAverage}
+};
 
 /// Result type used throughout the TUI application
 pub type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -45,7 +49,8 @@ pub struct App {
     pub is_selecting: bool,
 
     // Stats metrics rows for the stats view
-    pub stats_rows: Vec<metallic_cli_helpers::app_event::StatsRow>,
+    pub tensor_preparation_stats: Vec<metallic_cli_helpers::app_event::StatsRow>,
+    pub resource_cache_stats: rustc_hash::FxHashMap<String, Vec<metallic_cli_helpers::app_event::StatsRow>>,
 
     // Status bar
     pub status_bar: StatusBar,
@@ -85,7 +90,8 @@ impl App {
             text_selection_start: None,
             text_selection_end: None,
             is_selecting: false,
-            stats_rows: Vec::new(),
+            tensor_preparation_stats: Vec::new(),
+            resource_cache_stats: FxHashMap::default(),
             status_bar: StatusBar::new(StatusBarState::Normal),
         }
     }
