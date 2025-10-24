@@ -36,9 +36,42 @@ impl KernelInvocable for RepeatKvHeadsOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: Option<&mut ResourceCache>,
+        cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, group_size, batch, n_kv_heads, n_heads, seq, head_dim, cache_stride, layer_idx, workspace_kind, prefer_shared) = args;
+
+        // Graph backend path: build and encode MPSGraph repeat to avoid compute kernel
+        let selection = ctx.backend_registry().select_sdpa(super::KernelBackendKind::Legacy);
+        if selection.backend == super::KernelBackendKind::Graph {
+            let repeated_heads = (batch as usize) * (n_heads as usize);
+            let output = ctx.acquire_repeat_kv_workspace(
+                layer_idx as usize,
+                workspace_kind,
+                repeated_heads,
+                seq as usize,
+                cache_stride as usize,
+                head_dim as usize,
+                true,
+            )?;
+            ctx.prepare_tensors_for_active_cmd(&[&input, &output])?;
+            let (op, result) = super::repeat_kv_heads_graph::RepeatKvHeadsGraphOp::new(
+                ctx,
+                (
+                    input.clone(),
+                    output.clone(),
+                    group_size,
+                    batch,
+                    n_kv_heads,
+                    n_heads,
+                    seq,
+                    head_dim,
+                    cache_stride,
+                ),
+                None,
+                cache,
+            )?;
+            return Ok((op, result));
+        }
 
         if group_size == 0 {
             return Err(MetalError::InvalidShape(

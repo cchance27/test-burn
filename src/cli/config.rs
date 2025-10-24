@@ -17,6 +17,10 @@ pub struct CliConfig {
     #[command(flatten)]
     pub generation: GenerationConfig,
 
+    /// Global backend override for all kernels (defaults to environment-driven auto selection)
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    pub backend: Option<GlobalBackendChoice>,
+
     /// Enable verbose output
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
@@ -61,6 +65,17 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Global backend override that applies to all kernels when supported.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum GlobalBackendChoice {
+    /// Allow the dispatcher to choose the backend automatically.
+    Auto,
+    /// Force the legacy Metal implementation.
+    Legacy,
+    /// Force the graph-backed implementation.
+    Graph,
+}
+
 /// Available SDPA backend overrides exposed via the CLI.
 #[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
 pub enum SdpaBackendChoice {
@@ -102,6 +117,7 @@ mod tests {
             gguf_path: "test.gguf".to_string(),
             prompt: None,
             generation: GenerationConfig::default(),
+            backend: None,
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
@@ -116,6 +132,7 @@ mod tests {
             gguf_path: "test.gguf".to_string(),
             prompt: Some("Hello, world!".to_string()),
             generation: GenerationConfig::default(),
+            backend: None,
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,

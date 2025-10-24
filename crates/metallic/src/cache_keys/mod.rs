@@ -1,14 +1,15 @@
+pub mod matmul_dispatcher_key;
+pub mod mps_graph_kv_write_key;
+pub mod softmax_dispatcher_key;
+
 use std::hash::{Hash, Hasher};
 
+pub use matmul_dispatcher_key::*;
+pub use mps_graph_kv_write_key::*;
 use serde::{Deserialize, Serialize};
+pub use softmax_dispatcher_key::*;
 
 use crate::tensor::dtypes::Dtype;
-
-// Re-export dispatcher-specific cache keys
-pub mod matmul_dispatcher_key;
-pub mod softmax_dispatcher_key;
-pub use matmul_dispatcher_key::*;
-pub use softmax_dispatcher_key::*;
 
 /// Key for MPS matrix multiplication operations.
 ///

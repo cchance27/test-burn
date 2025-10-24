@@ -82,6 +82,17 @@ fn main() -> AppResult<()> {
                 worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
                 let mut ctx = Context::<F16Element>::new()?;
 
+                // Apply global backend override first (affects all kernels that consult the registry)
+                if let Some(choice) = cli_config.backend {
+                    let override_policy = match choice {
+                        cli::config::GlobalBackendChoice::Auto => KernelBackendOverride::Auto,
+                        cli::config::GlobalBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
+                        cli::config::GlobalBackendChoice::Graph => KernelBackendOverride::Force(KernelBackendKind::Graph),
+                    };
+                    ctx.set_global_backend_override(override_policy);
+                }
+
+                // Then apply per-op SDPA override if provided (takes precedence for sdpa)
                 if let Some(choice) = cli_config.sdpa_backend {
                     let override_policy = match choice {
                         cli::config::SdpaBackendChoice::Auto => KernelBackendOverride::Auto,

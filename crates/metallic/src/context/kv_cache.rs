@@ -1,4 +1,5 @@
-use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice, MTLResource, MTLStorageMode};
+use objc2::rc::Retained;
+use objc2_metal::{MTLBlitCommandEncoder as _, MTLBuffer, MTLDevice, MTLResource, MTLStorageMode};
 
 use super::{main::Context, utils::tier_up_capacity};
 use crate::{
@@ -308,6 +309,139 @@ impl<T: TensorElement> Context<T> {
                 .map_err(|_| MetalError::InvalidShape("repeated head count exceeds u32::MAX".into()))?,
         };
 
+        if self
+            .backend_registry()
+            .select_sdpa(crate::kernels::KernelBackendKind::Legacy)
+            .backend
+            == crate::kernels::KernelBackendKind::Graph
+        {
+            let seq_bucket = super::utils::tier_up_capacity(seq_in_src);
+            // Get the executable from cache with minimal borrow
+            let (executable, data_type) = {
+                let cached_kv_write = self.active_resource_cache.as_mut().unwrap().get_or_create_mpsgraph_kv_write(
+                    canonical_heads,
+                    seq_bucket,
+                    head_dim,
+                    T::DTYPE,
+                )?;
+                // Clone just the parts we need to avoid holding the resource cache borrow
+                (cached_kv_write.executable.clone(), cached_kv_write.data_type)
+            };
+
+            let k_dst_offset = k_cache.offset + step * (dst_seq_stride as usize) * element_size;
+            let v_dst_offset = v_cache.offset + step * (dst_seq_stride as usize) * element_size;
+
+            let mut k_dst_view = k_cache.clone();
+            k_dst_view.offset = k_dst_offset;
+            k_dst_view.dims = vec![canonical_heads, seq_in_src, head_dim];
+            k_dst_view.strides = vec![k_cache.strides[0], k_cache.strides[1], k_cache.strides[2]];
+
+            let mut v_dst_view = v_cache.clone();
+            v_dst_view.offset = v_dst_offset;
+            v_dst_view.dims = vec![canonical_heads, seq_in_src, head_dim];
+            v_dst_view.strides = vec![v_cache.strides[0], v_cache.strides[1], v_cache.strides[2]];
+
+            self.prepare_tensors_for_active_cmd(&[&k_src, &v_src, &k_dst_view, &v_dst_view])?;
+
+            use objc2_foundation::{NSMutableArray, NSNumber};
+            use objc2_metal_performance_shaders::MPSCommandBuffer;
+
+            use crate::{
+                mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder}, operation::EncoderType
+            };
+
+            // Use the bucketed sequence length when creating the expected shape for the graph
+            // This matches what the graph executable was compiled with
+            let expected_shape_array: Retained<objc2_foundation::NSArray<NSNumber>> = {
+                let arr = NSMutableArray::array();
+                arr.addObject(&*NSNumber::numberWithUnsignedInteger(canonical_heads));
+                arr.addObject(&*NSNumber::numberWithUnsignedInteger(seq_bucket));
+                arr.addObject(&*NSNumber::numberWithUnsignedInteger(head_dim));
+                unsafe { Retained::cast_unchecked(arr) }
+            };
+
+            // However, we need to ensure the actual tensor has enough buffer space for the expected shape
+            // by using NDArray view to allow for a sub-region of the buffer to be accessed as the larger shape
+
+            let spec = GraphBindingSpec {
+                expected_shape: &expected_shape_array,
+                data_type,
+            };
+
+            // The key insight: we need to create tensor bindings that match the expected graph shape
+            // But the actual tensor may have a smaller logical size. This requires careful buffer layout consideration.
+            // For now, let's ensure the buffer is large enough for the expected shape by checking if the
+            // source tensors have enough space
+
+            // For the actual implementation, we need to make sure the buffer has enough space
+            // to fit the bucketed shape, not just the actual shape.
+            // If the buffer is too small, we should fall back to the legacy implementation.
+
+            let element_size = core::mem::size_of::<T>();
+            let expected_elements = canonical_heads * seq_bucket * head_dim;
+            let expected_bytes = expected_elements * element_size;
+
+            // Check if the k_src buffer is large enough for the expected shape
+            if k_src.buf.length() < k_src.offset + expected_bytes {
+                // Skip graph execution if buffer is too small for bucketed shape
+                // Could record this as a GpuOpCompleted with high latency or other metric if needed
+                // TODO: record metric about this state
+            } else if v_src.buf.length() < v_src.offset + expected_bytes {
+                // Skip graph execution if buffer is too small for bucketed shape
+                // Could record this as a GpuOpCompleted with high latency or other metric if needed
+                // TODO: record metric about this state
+            } else if k_dst_view.buf.length() < k_dst_view.offset + expected_bytes {
+                // Skip graph execution if buffer is too small for bucketed shape
+                // Could record this as a GpuOpCompleted with high latency or other metric if needed
+                // TODO: record metric about this state
+            } else if v_dst_view.buf.length() < v_dst_view.offset + expected_bytes {
+                // Skip graph execution if buffer is too small for bucketed shape
+                // Could record this as a GpuOpCompleted with high latency or other metric if needed
+                // TODO: record metric about this state
+            } else if seq_in_src == seq_bucket {
+                // Only execute graph when actual sequence length matches bucketed size
+                // Otherwise, the tensor shape won't match what the graph expects
+                // TODO: record metric about this state
+                let k_in_desc = spec.try_from_tensor(&k_src)?;
+                let v_in_desc = spec.try_from_tensor(&v_src)?;
+                let k_out_desc = spec.try_from_tensor(&k_dst_view)?;
+                let v_out_desc = spec.try_from_tensor(&v_dst_view)?;
+
+                let inputs = {
+                    let builder = GraphTensorDataArrayBuilder::new();
+                    builder.push(&k_in_desc)?;
+                    builder.push(&v_in_desc)?;
+                    builder.finish()
+                };
+
+                let outputs = {
+                    let builder = GraphTensorDataArrayBuilder::new();
+                    builder.push(&k_out_desc)?;
+                    builder.push(&v_out_desc)?;
+                    builder.finish()
+                };
+
+                let cmd = self.active_command_buffer_mut_without_cache()?;
+                cmd.prepare_encoder_for_operation(EncoderType::MpsGraph)?;
+                let mps_cb = unsafe { MPSCommandBuffer::commandBufferWithCommandBuffer(cmd.raw()) };
+
+                unsafe {
+                    executable.encodeToCommandBuffer_inputsArray_resultsArray_executionDescriptor(&mps_cb, &inputs, Some(&outputs), None);
+                }
+
+                if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
+                    entry.zeroing_complete = false;
+                }
+                self.mark_tensor_pending(&k_cache);
+                self.mark_tensor_pending(&v_cache);
+                self.finalize_active_command_buffer_if_latency();
+                return Ok(());
+            } else {
+                // Fall back to legacy implementation when sequence length doesn't match bucket size
+                // Could record this as a GpuOpCompleted with high latency or other metric if needed
+            }
+        }
+
         match self.call::<crate::kernels::kv_cache_write::KvCacheWriteOp>((
             k_src.clone(),
             v_src.clone(),
@@ -316,7 +450,6 @@ impl<T: TensorElement> Context<T> {
             config.clone(),
         )) {
             Ok(_) => {
-                // Record metric for successful KV cache kernel dispatch using new instrumentation
                 metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_write".to_string(),
                     op_name: format!("kv_cache_write_step_{}_layer_{}", step, layer_idx),
@@ -324,11 +457,10 @@ impl<T: TensorElement> Context<T> {
                 });
             }
             Err(err) if Self::kv_cache_kernel_unavailable(&err) => {
-                // Record metric for fallback blit operation using new instrumentation
                 metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_fallback_blit".to_string(),
                     op_name: format!("kv_cache_blit_step_{}_layer_{}", step, layer_idx),
-                    thread_groups: (1, 1, 1), // Placeholder - actual thread groups would be computed differently for blit
+                    thread_groups: (1, 1, 1),
                 });
                 return self.blit_write_kv_step(
                     layer_idx,

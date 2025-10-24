@@ -109,7 +109,7 @@ pub struct Context<T: TensorElement> {
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     pub(crate) active_cmd_buffer: Option<CommandBuffer>,
     /// Resource cache associated with the active command buffer.
-    pub(crate) active_resource_cache: Option<ResourceCache>,
+    pub active_resource_cache: Option<ResourceCache>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
     pub sampler_buffers: SamplerBuffers,
     /// Optional override for the matmul backend chosen by this context.
@@ -184,6 +184,10 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[inline]
+    pub fn set_global_backend_override(&mut self, override_policy: KernelBackendOverride) {
+        self.backend_registry.set_global_override(override_policy);
+    }
+
     pub fn set_sdpa_backend_override(&mut self, override_policy: KernelBackendOverride) {
         self.backend_registry.set_sdpa_override(override_policy);
     }

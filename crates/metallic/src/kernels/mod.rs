@@ -45,6 +45,7 @@ pub mod softmax_vec;
 pub use matmul_dispatcher::dispatch_op::MatmulDispatchOp;
 pub mod permute;
 pub mod repeat_kv_heads;
+pub mod repeat_kv_heads_graph;
 pub mod rmsnorm;
 pub mod rope;
 pub mod scaled_dot_product_attention;

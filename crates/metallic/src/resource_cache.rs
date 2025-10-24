@@ -9,15 +9,14 @@ use rustc_hash::FxHashMap;
 
 use super::{
     cacheable::Cacheable, cacheable_resources::{
-        CacheableMpsGemm, CacheableMpsGraphFused, CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, CacheableMpsMatrixDescriptor, CacheableMpsSoftMax
+        CacheableMpsGraphFused, CacheableMpsGraphKvWrite, CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, CacheableMpsSoftMax
     }, cacheable_sdpa::CacheableSdpa, error::MetalError
 };
 use crate::{
     cache_keys::{
-        MpsGemmKey, MpsGraphFusedKey, MpsGraphSdpaKey, MpsGraphSdpaMaskKey, MpsMatrixDescriptorKey, MpsSoftMaxKey, SdpaKey, SeqKBucket
-    }, tensor::dtypes::Dtype
+        MpsGemmKey, MpsGraphFusedKey, MpsGraphKvWriteKey, MpsGraphSdpaKey, MpsGraphSdpaMaskKey, MpsMatrixDescriptorKey, MpsSoftMaxKey, SdpaKey, SeqKBucket
+    }, cacheable_resources::{CacheableMpsGemm, CacheableMpsMatrixDescriptor}, tensor::dtypes::Dtype
 };
-
 #[derive(Clone, Debug)]
 struct EntryMetadata {
     created_at: Instant,
@@ -113,6 +112,7 @@ pub struct ResourceCache {
     mpsgraph_sdpa_cache: GraphExecutableCache<MpsGraphSdpaKey, CacheableMpsGraphSdpa>,
     mpsgraph_mask_arena: MaskArena<MpsGraphSdpaMaskKey, CacheableMpsGraphSdpaMask>,
     mpsgraph_fused_cache: GraphExecutableCache<MpsGraphFusedKey, CacheableMpsGraphFused>,
+    mpsgraph_kv_write_cache: GraphExecutableCache<MpsGraphKvWriteKey, CacheableMpsGraphKvWrite>,
     gemm_counters: CacheCounters,
     descriptor_counters: CacheCounters,
     softmax_counters: CacheCounters,
@@ -142,6 +142,7 @@ impl ResourceCache {
             mpsgraph_sdpa_cache: GraphExecutableCache::new("mpsgraph_sdpa"),
             mpsgraph_mask_arena: MaskArena::new("mpsgraph_mask"),
             mpsgraph_fused_cache: GraphExecutableCache::new("mpsgraph_fused"),
+            mpsgraph_kv_write_cache: GraphExecutableCache::new("mpsgraph_kv_write"),
             gemm_counters: CacheCounters::default(),
             descriptor_counters: CacheCounters::default(),
             softmax_counters: CacheCounters::default(),
@@ -484,6 +485,23 @@ impl ResourceCache {
         self.mpsgraph_fused_cache.get_or_create(key, None, self.default_device.as_ref())
     }
 
+    #[inline]
+    pub fn get_or_create_mpsgraph_kv_write(
+        &mut self,
+        heads: usize,
+        seq_bucket: usize,
+        head_dim: usize,
+        dtype: Dtype,
+    ) -> Result<&mut CacheableMpsGraphKvWrite, MetalError> {
+        let key = MpsGraphKvWriteKey {
+            heads,
+            seq_bucket,
+            head_dim,
+            dtype,
+        };
+        self.mpsgraph_kv_write_cache.get_or_create(key, None, self.default_device.as_ref())
+    }
+
     /// Get statistics about the cache.
     #[inline]
     pub fn get_stats(&self) -> CacheStats {
@@ -495,6 +513,7 @@ impl ResourceCache {
             mpsgraph_sdpa: self.mpsgraph_sdpa_cache.metrics(),
             mpsgraph_mask: self.mpsgraph_mask_arena.metrics(),
             mpsgraph_fused: self.mpsgraph_fused_cache.metrics(),
+            mpsgraph_kv_write: self.mpsgraph_kv_write_cache.metrics(),
         }
     }
 
@@ -523,6 +542,7 @@ impl ResourceCache {
         self.mpsgraph_sdpa_cache.clear();
         self.mpsgraph_mask_arena.clear();
         self.mpsgraph_fused_cache.clear();
+        self.mpsgraph_kv_write_cache.clear();
     }
 }
 
@@ -593,6 +613,7 @@ pub struct CacheStats {
     pub mpsgraph_sdpa: CacheMetrics,
     pub mpsgraph_mask: CacheMetrics,
     pub mpsgraph_fused: CacheMetrics,
+    pub mpsgraph_kv_write: CacheMetrics,
 }
 
 /// The type of cache event that most recently occurred for a cache.
