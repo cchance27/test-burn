@@ -30,7 +30,7 @@ struct KvCacheWrite<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for KvCacheWriteOp {
+impl DefaultKernelInvocable for KvCacheWriteOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>, KvCacheWriteConfig);
 
     fn function_id() -> Option<KernelFunction> {

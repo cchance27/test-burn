@@ -1,6 +1,6 @@
 use criterion::{Criterion, criterion_group, criterion_main};
 use metallic::{
-    Context, F16Element, Tensor, kernels::{KernelInvocable, scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp, sdpa_mps_graph::SdpaMpsGraphOp}
+    Context, F16Element, Tensor, kernels::{DefaultKernelInvocable, scaled_dot_product_attention::ScaledDotProductAttentionOptimizedOp, sdpa_mps_graph::SdpaMpsGraphOp}
 };
 
 const ITERATIONS: usize = 1;
@@ -13,7 +13,9 @@ fn run_variant<O>(
     causal: bool,
 ) -> Tensor<F16Element>
 where
-    O: for<'a> KernelInvocable<Args<'a, F16Element> = (&'a Tensor<F16Element>, &'a Tensor<F16Element>, &'a Tensor<F16Element>, bool, u32)>,
+    O: for<'a> DefaultKernelInvocable<
+        Args<'a, F16Element> = (&'a Tensor<F16Element>, &'a Tensor<F16Element>, &'a Tensor<F16Element>, bool, u32),
+    >,
 {
     let mut last_output = None;
     for _ in 0..ITERATIONS {

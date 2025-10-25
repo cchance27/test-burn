@@ -19,7 +19,7 @@ struct SoftmaxKernelOperation<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for SoftmaxKernelOp {
+impl DefaultKernelInvocable for SoftmaxKernelOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, u32, u32, u32, u32, u32); // (attn, rows_total, seq_q, seq_k, causal, query_offset)
 
     fn function_id() -> Option<KernelFunction> {

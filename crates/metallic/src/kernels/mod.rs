@@ -9,7 +9,7 @@ use crate::{
 
 // Rexport KernelManager and Invocable
 mod kernel_manager;
-pub use kernel_manager::{KernelInvocable, KernelManager};
+pub use kernel_manager::{CustomKernelInvocable, DefaultKernelInvocable, KernelManager};
 
 pub mod graph_kernel;
 pub use graph_kernel::{
@@ -54,6 +54,7 @@ pub mod silu;
 pub mod softmax_dispatcher;
 pub mod swiglu;
 pub use softmax_dispatcher::SoftmaxDispatchOp;
+pub mod sample_topk_topp;
 pub mod tensors;
 
 /// Uniquely identifies a compiled Metal library.
@@ -75,7 +76,6 @@ pub enum KernelLibrary {
     RMSNorm,
     Silu,
     SoftmaxKernel,
-    SoftmaxMps,
     Swiglu,
     Tensors,
     MatmulGemv,
@@ -83,6 +83,7 @@ pub enum KernelLibrary {
     MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
+    SampleTopKTopP,
 }
 
 impl KernelLibrary {
@@ -104,7 +105,6 @@ impl KernelLibrary {
             KernelLibrary::RMSNorm => include_str!("rmsnorm/kernel.metal"),
             KernelLibrary::Silu => include_str!("silu/kernel.metal"),
             KernelLibrary::SoftmaxKernel => include_str!("softmax_kernel/kernel.metal"),
-            KernelLibrary::SoftmaxMps => include_str!("softmax_mps/kernel.metal"),
             KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
             KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
             KernelLibrary::MatmulGemv => include_str!("matmul_gemv/kernel.metal"),
@@ -112,6 +112,7 @@ impl KernelLibrary {
             KernelLibrary::MatmulGemmTiled => include_str!("matmul_gemm_tiled/kernel.metal"),
             KernelLibrary::SoftmaxBlock => include_str!("softmax_block/kernel.metal"),
             KernelLibrary::SoftmaxVec => include_str!("softmax_vec/kernel.metal"),
+            KernelLibrary::SampleTopKTopP => include_str!("sample_topk_topp/kernel.metal"),
         }
     }
 }
@@ -154,6 +155,8 @@ pub enum KernelFunction {
     MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
+    SampleTopKPartials,
+    SampleTopKMergeAndSample,
 }
 
 impl KernelFunction {
@@ -189,6 +192,8 @@ impl KernelFunction {
             KernelFunction::MatmulGemmTiled => KernelLibrary::MatmulGemmTiled,
             KernelFunction::SoftmaxBlock => KernelLibrary::SoftmaxBlock,
             KernelFunction::SoftmaxVec => KernelLibrary::SoftmaxVec,
+            KernelFunction::SampleTopKPartials => KernelLibrary::SampleTopKTopP,
+            KernelFunction::SampleTopKMergeAndSample => KernelLibrary::SampleTopKTopP,
         }
     }
 
@@ -213,7 +218,7 @@ impl KernelFunction {
             (KernelFunction::ElemwiseBroadcastAdd, F32) => "broadcast_add_kernel_f32",
             (KernelFunction::ElemwiseBroadcastAdd, F16) => "broadcast_add_kernel_f16",
             (KernelFunction::ElemwiseDiv, F32) => "div_kernel_f32",
-            (KernelFunction::ElemwiseDiv, F16) => "div_kernel_f32",
+            (KernelFunction::ElemwiseDiv, F16) => "div_kernel_f16",
             (KernelFunction::ElemwiseMul, F32) => "mul_kernel_f32",
             (KernelFunction::ElemwiseMul, F16) => "mul_kernel_f16",
             (KernelFunction::ElemwiseSub, F32) => "sub_kernel_f32",
@@ -294,6 +299,11 @@ impl KernelFunction {
             (KernelFunction::SoftmaxBlock, F32) => "block_softmax_f32",
             (KernelFunction::SoftmaxVec, F16) => "vec_softmax_f16",
             (KernelFunction::SoftmaxVec, F32) => "vec_softmax_f32",
+            (KernelFunction::SampleTopKPartials, F32) => "sample_topk_partials_f32",
+            (KernelFunction::SampleTopKPartials, F16) => "sample_topk_partials_f16",
+            (KernelFunction::SampleTopKMergeAndSample, F32) => "sample_topk_merge_and_sample_f32",
+            (KernelFunction::SampleTopKMergeAndSample, F16) => "sample_topk_merge_and_sample_f16",
+            _ => unimplemented!("Kernel function {:?} not implemented for dtype {:?}", self, dtype),
         };
 
         Ok(name)

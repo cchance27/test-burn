@@ -13,7 +13,7 @@ struct ElemwiseDiv<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl KernelInvocable for ElemwiseDivOp {
+impl DefaultKernelInvocable for ElemwiseDivOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {

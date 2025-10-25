@@ -23,7 +23,7 @@ struct RoPE<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for RoPEOp {
+impl DefaultKernelInvocable for RoPEOp {
     /// Input arguments for the call: (input, cos, sin, dim, seq_len, position_offset)
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, u32, u32, u32);
 

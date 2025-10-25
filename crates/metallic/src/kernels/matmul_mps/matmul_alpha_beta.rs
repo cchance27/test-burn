@@ -6,7 +6,7 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey}, context::GpuProfilerLabel, operation::EncoderType, resource_cache::ResourceCache
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey}, context::GpuProfilerLabel, kernels::DefaultKernelInvocable, operation::EncoderType, resource_cache::ResourceCache
 };
 
 // Public struct for matmul with alpha/beta scaling
@@ -30,7 +30,7 @@ struct MatMulMpsAlphaBeta {
 }
 
 // Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for MatMulMpsAlphaBetaOp {
+impl DefaultKernelInvocable for MatMulMpsAlphaBetaOp {
     // Input arguments for the call - two input tensors + transpose options + alpha/beta
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, bool, f32, f32);
     // The output type

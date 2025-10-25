@@ -12,7 +12,7 @@ struct Silu<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl KernelInvocable for SiluOp {
+impl DefaultKernelInvocable for SiluOp {
     type Args<'a, T: TensorElement> = Tensor<T>;
 
     fn function_id() -> Option<KernelFunction> {

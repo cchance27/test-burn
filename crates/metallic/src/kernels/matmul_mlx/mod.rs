@@ -9,7 +9,7 @@ use objc2_metal::{MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionCo
 use rustc_hash::FxHashMap;
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{KernelFunction, KernelInvocable}, resource_cache::ResourceCache, tensor::Dtype
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}, resource_cache::ResourceCache, tensor::Dtype
 };
 
 #[repr(C)]
@@ -163,7 +163,7 @@ struct MatMulMlx<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for MatMulMlxOp {
+impl DefaultKernelInvocable for MatMulMlxOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         &'a Tensor<T>,
@@ -533,6 +533,7 @@ fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool, m: usize, n: u
     let dtype_str = match dtype {
         Dtype::F32 => "f32",
         Dtype::F16 => "f16",
+        Dtype::U32 => "uint",
     };
 
     let a_tag = if a_trans { "t" } else { "n" };

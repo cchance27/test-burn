@@ -18,7 +18,7 @@ struct ElemwiseAbs<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for ElemwiseAbsOp {
+impl DefaultKernelInvocable for ElemwiseAbsOp {
     type Args<'a, T: TensorElement> = (Tensor<T>,);
 
     fn function_id() -> Option<KernelFunction> {

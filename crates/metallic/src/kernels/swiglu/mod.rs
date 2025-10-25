@@ -31,7 +31,7 @@ struct SwiGLUFusedActivation<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for SwiGLUFusedActivationOp {
+impl DefaultKernelInvocable for SwiGLUFusedActivationOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -164,7 +164,7 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
     }
 }
 
-impl KernelInvocable for SwiGLUOp {
+impl DefaultKernelInvocable for SwiGLUOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         &'a Tensor<T>,
@@ -433,7 +433,7 @@ pub fn swiglu_with_optional_cache<T: TensorElement>(
 // Implement `Operation` for the internal struct.
 impl<T: TensorElement> Operation for SwiGLU<T> {
     fn encode(&self, _command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Since all computation was done in the `new` method of KernelInvocable,
+        // Since all computation was done in the `new` method of DefaultKernelInvocable,
         // this method just returns Ok(())
         Ok(())
     }

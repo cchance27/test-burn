@@ -14,7 +14,7 @@ struct Ones<T: TensorElement> {
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for OnesOp {
+impl DefaultKernelInvocable for OnesOp {
     // Input arguments for the call.
     type Args<'a, T: TensorElement> = Vec<usize>;
     // The output type.

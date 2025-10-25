@@ -10,7 +10,7 @@ mod sdpa_mps_graph_test;
 
 use crate::{
     CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, cacheable_resources::{CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask}, kernels::{
-        GraphKernel, GraphKernelAccumulator, GraphKernelAxis, GraphKernelDtypePolicy, GraphKernelSignature, GraphKernelTensorDescriptor, KernelInvocable
+        DefaultKernelInvocable, GraphKernel, GraphKernelAccumulator, GraphKernelAxis, GraphKernelDtypePolicy, GraphKernelSignature, GraphKernelTensorDescriptor
     }, operation::EncoderType, resource_cache::ResourceCache
 };
 
@@ -107,7 +107,7 @@ impl<T: TensorElement> Operation for SdpaMpsGraphOperation<T> {
     }
 }
 
-impl KernelInvocable for SdpaMpsGraphOp {
+impl DefaultKernelInvocable for SdpaMpsGraphOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<crate::kernels::KernelFunction> {

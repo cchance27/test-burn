@@ -5,7 +5,7 @@ use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Tensor, TensorElement, context::detect_forced_matmul_backend, error::MetalError, kernels, operation::CommandBuffer, pool::MemoryPool, profiling_state, resource_cache::{CacheStats, ResourceCache}, tensor::Dtype, tensor_preparation_cache::TensorPreparationCache
+    Tensor, TensorElement, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable}, operation::CommandBuffer, pool::MemoryPool, profiling_state, resource_cache::{CacheStats, ResourceCache}, tensor::Dtype, tensor_preparation_cache::TensorPreparationCache
 };
 
 #[derive(Default)]
@@ -212,6 +212,12 @@ impl<T: TensorElement> Context<T> {
         self.pool.reset();
     }
 
+    /// Allocate a U32 tensor from the pool
+    pub fn alloc_u32_tensor(&mut self, dims: Vec<usize>) -> Result<crate::tensor::Tensor<crate::tensor::U32>, MetalError> {
+        let pooled_alloc = self.pool.alloc_tensor::<crate::tensor::U32>(dims)?;
+        Ok(pooled_alloc.into_tensor())
+    }
+
     #[inline]
     pub fn get_tensor_preparation_metrics(&self) -> crate::tensor_preparation_cache::TensorPreparationMetrics {
         self.tensor_preparation_cache.get_metrics()
@@ -284,7 +290,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[inline]
-    pub(crate) fn mark_tensor_pending(&self, tensor: &Tensor<T>) {
+    pub(crate) fn mark_tensor_pending<U: TensorElement>(&self, tensor: &Tensor<U>) {
         tensor.mark_device_dirty();
         // Mark tensor as dirty in the preparation cache since it's now pending on GPU
         self.tensor_preparation_cache.mark_dirty(tensor);
@@ -293,7 +299,7 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    pub(crate) fn call_with_cache<K: crate::kernels::KernelInvocable>(
+    pub(crate) fn call_with_cache<K: crate::kernels::DefaultKernelInvocable>(
         &mut self,
         args: K::Args<'_, T>,
         cache: &mut crate::resource_cache::ResourceCache,
@@ -346,7 +352,90 @@ impl<T: TensorElement> Context<T> {
         Ok(output)
     }
 
-    pub fn call<K: crate::kernels::KernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
+    pub fn call_custom<K: CustomKernelInvocable, O: TensorElement>(
+        &mut self,
+        args: K::Args<'_, T>,
+    ) -> Result<Tensor<K::OutputTensor<O>>, MetalError>
+    where
+        <K as CustomKernelInvocable>::OutputTensor<O>: TensorElement,
+    {
+        // Get the current scope path to potentially nest with the kernel being called
+        let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
+            Some(current_label.op_name)
+        } else {
+            None
+        };
+
+        // Add operation name to current scope if we're already in a scope, creating nested path
+        // Use the full type name in hot path - formatting to extract op name can be done in frontend
+        let op_type_name = std::any::type_name::<K>();
+
+        if let Some(mut current_path) = current_scope_path {
+            // Append operation name to current scope path to create nested structure
+            current_path.push('/');
+            current_path.push_str(op_type_name);
+            self.set_pending_gpu_scope(current_path);
+        } else {
+            // If not in any scope, just set the operation name as pending
+            self.set_pending_gpu_scope(op_type_name);
+        }
+
+        self.ensure_active_cmd_buffer()?;
+
+        let pipeline = if let Some(kernel_func) = K::function_id() {
+            // Use the input tensor dtype (T) for pipeline selection; output dtype (O)
+            // may differ (e.g., U32 token id), but the kernel specialization depends on input.
+            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
+        } else {
+            None // For MPS operations that don't need a pipeline
+        };
+
+        let mut cache = self
+            .active_resource_cache
+            .take()
+            .expect("active resource cache must be initialized");
+
+        let (operation, output) = K::new(self, args, pipeline, Some(&mut cache))?;
+
+        if self.active_cmd_buffer.as_ref().map(|cb| cb.is_committed()).unwrap_or(false) {
+            drop(cache);
+            self.ensure_active_cmd_buffer()?;
+            cache = self
+                .active_resource_cache
+                .take()
+                .expect("active resource cache must be initialized after refresh");
+        }
+
+        if self.active_cmd_buffer.is_none() {
+            // `K::new` may materialize resources that require a fresh command buffer,
+            // so ensure one is available without reinitializing the resource cache we
+            // already pulled above.
+            self.ensure_active_cmd_buffer_internal(false)?;
+        }
+
+        let command_buffer = self.active_cmd_buffer.as_mut().expect("active command buffer must exist");
+
+        command_buffer.record(&*operation, &mut cache)?;
+
+        // Consume any pending GPU scope that was set for this call, since operations
+        // may not always consume them (especially when nested scopes are created by call() itself)
+        let _profiler_label = self.take_gpu_scope();
+
+        debug_assert!(
+            self.pending_gpu_scope.is_none(),
+            "pending GPU scope should be consumed by kernel operation or by us"
+        );
+
+        self.active_resource_cache = Some(cache);
+
+        self.mark_tensor_pending(&output);
+
+        self.finalize_active_command_buffer_if_latency();
+
+        Ok(output)
+    }
+
+    pub fn call<K: DefaultKernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
         // Get the current scope path to potentially nest with the kernel being called
         let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
             Some(current_label.op_name)

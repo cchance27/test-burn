@@ -20,7 +20,7 @@ struct BroadcastElemwiseAdd<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for BroadcastElemwiseAddOp {
+impl DefaultKernelInvocable for BroadcastElemwiseAddOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {
@@ -60,7 +60,7 @@ impl KernelInvocable for BroadcastElemwiseAddOp {
     }
 }
 
-impl KernelInvocable for BroadcastElemwiseAddInplaceOp {
+impl DefaultKernelInvocable for BroadcastElemwiseAddInplaceOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {

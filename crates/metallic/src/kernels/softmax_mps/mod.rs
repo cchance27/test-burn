@@ -38,7 +38,7 @@ impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
     }
 }
 
-impl KernelInvocable for SoftmaxMpsOp {
+impl DefaultKernelInvocable for SoftmaxMpsOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, usize, usize, usize, Dtype); // (attn, batch, rows, columns, dtype)
 
     fn function_id() -> Option<KernelFunction> {

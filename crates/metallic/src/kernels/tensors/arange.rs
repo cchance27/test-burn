@@ -14,7 +14,7 @@ struct Arange<T: TensorElement> {
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for ArangeOp {
+impl DefaultKernelInvocable for ArangeOp {
     // Input arguments for the call.
     type Args<'a, T: TensorElement> = usize;
     // The output type.

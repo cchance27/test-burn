@@ -5,7 +5,9 @@ use super::{
     dispatcher::{SoftmaxCaps, SoftmaxPrefs, select_policy}, execute::SoftmaxDispatch, prefs, types::{SoftmaxBackend, SoftmaxShape, SoftmaxVariant}
 };
 use crate::{
-    context::Context, error::MetalError, kernels::{KernelInvocable, Operation, softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp}, resource_cache::ResourceCache, tensor::{Dtype, Tensor, TensorElement}
+    context::Context, error::MetalError, kernels::{
+        DefaultKernelInvocable, Operation, softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp
+    }, resource_cache::ResourceCache, tensor::{Dtype, Tensor, TensorElement}
 };
 
 /// A public, zero-sized struct that acts as the entry point for the softmax dispatcher.
@@ -13,7 +15,7 @@ use crate::{
 /// This can be called via `ctx.call::<SoftmaxDispatchOp>(...)`.
 pub struct SoftmaxDispatchOp;
 
-impl KernelInvocable for SoftmaxDispatchOp {
+impl DefaultKernelInvocable for SoftmaxDispatchOp {
     /// (input_tensor, causal_mask_flag, query_offset)
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, bool, u32);
 

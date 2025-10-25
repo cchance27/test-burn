@@ -25,7 +25,7 @@ struct RepeatKvHeads<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for RepeatKvHeadsOp {
+impl DefaultKernelInvocable for RepeatKvHeadsOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, u32, u32, u32, u32, u32, u32, RepeatKvWorkspaceKind, bool);
 
     fn function_id() -> Option<KernelFunction> {

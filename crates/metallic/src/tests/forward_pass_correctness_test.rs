@@ -64,6 +64,7 @@ fn dtype_threshold<T: TensorElement>(f32_value: f32, half_value: f32) -> f32 {
     match T::DTYPE {
         Dtype::F32 => f32_value,
         Dtype::F16 => half_value,
+        Dtype::U32 => unreachable!("dtype_threshold not implemented for U32"),
     }
 }
 

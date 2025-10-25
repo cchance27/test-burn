@@ -1,4 +1,4 @@
-use objc2_metal::{MTLBlitCommandEncoder as _, MTLSize};
+use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice as _, MTLResourceOptions, MTLSize};
 
 use crate::kernels::tensors::{ArangeOp, OnesOp, RandomUniformOp};
 
@@ -33,6 +33,29 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
             }
             context.mark_tensor_pending(&tensor);
         }
+
+        Ok(tensor)
+    }
+
+    /// Allocate and zero-initialize a tensor of a specific type, which can be different from the context type.
+    pub fn zeros_of_type<U: crate::tensor::TensorElement>(
+        dims: Vec<usize>,
+        context: &mut super::Context<T>,
+    ) -> Result<super::Tensor<U>, crate::MetalError> {
+        let num_elements = dims.iter().product::<usize>();
+        let size_bytes = num_elements * std::mem::size_of::<U::Scalar>();
+
+        let buf = context
+            .device
+            .newBufferWithLength_options(size_bytes, MTLResourceOptions::StorageModePrivate)
+            .ok_or(crate::MetalError::BufferCreationFailed(size_bytes))?;
+
+        let tensor = super::Tensor::<U>::from_existing_buffer(buf, dims, U::DTYPE, &context.device, &context.command_queue, 0, false)?;
+
+        let cmd_buf = context.active_command_buffer_mut()?;
+        let encoder = cmd_buf.get_blit_encoder()?;
+        encoder.fillBuffer_range_value(&tensor.buf, (0..size_bytes).into(), 0);
+        context.mark_tensor_pending(&tensor);
 
         Ok(tensor)
     }
@@ -299,7 +322,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
     /// Uses a fast path for zeros (write_bytes) and an exponential memcpy-based
     /// fill for other values to leverage memcpy/vectorized copies instead of
     /// a per-element scalar loop.
-    fn fast_fill_slice(slice: &mut [T::Scalar], value: T::Scalar) {
+    pub(crate) fn fast_fill_slice(slice: &mut [T::Scalar], value: T::Scalar) {
         if slice.is_empty() {
             return;
         }

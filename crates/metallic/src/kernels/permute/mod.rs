@@ -17,7 +17,7 @@ struct Permute<T: TensorElement> {
     permute_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
 
-impl KernelInvocable for PermuteOp {
+impl DefaultKernelInvocable for PermuteOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Vec<u32>);
 
     fn function_id() -> Option<KernelFunction> {

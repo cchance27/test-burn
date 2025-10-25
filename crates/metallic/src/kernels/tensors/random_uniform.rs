@@ -17,7 +17,7 @@ struct RandomUniform<T: TensorElement> {
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for RandomUniformOp {
+impl DefaultKernelInvocable for RandomUniformOp {
     // Input arguments for the call.
     type Args<'a, T: TensorElement> = (Vec<usize>, f32, f32, Option<u32>);
     // The output type.

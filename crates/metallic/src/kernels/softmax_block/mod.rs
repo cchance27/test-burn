@@ -3,7 +3,9 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{KernelFunction, KernelInvocable, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{
+        DefaultKernelInvocable, KernelFunction, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state
+    }
 };
 
 // Public, user-facing, zero-sized struct for the operation.
@@ -23,7 +25,7 @@ struct SoftmaxBlock<T: TensorElement> {
     query_offset: u32,
 }
 
-impl KernelInvocable for SoftmaxBlockOp {
+impl DefaultKernelInvocable for SoftmaxBlockOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, u32, u32, u32, u32, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {

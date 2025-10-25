@@ -2,8 +2,8 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
 
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
-        KernelInvocable, matmul_dispatcher::{
+    Context, MetalError, Operation, Tensor, TensorElement, kernels::{
+        DefaultKernelInvocable, matmul_dispatcher::{
             dispatcher::select_policy, execute::{MatmulDispatchArgs, execute}, types::{MatShape, MatmulCaps}
         }
     }, resource_cache::ResourceCache
@@ -11,7 +11,7 @@ use crate::{
 
 pub struct MatmulDispatchOp;
 
-impl KernelInvocable for MatmulDispatchOp {
+impl DefaultKernelInvocable for MatmulDispatchOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         &'a Tensor<T>,
@@ -64,23 +64,23 @@ impl KernelInvocable for MatmulDispatchOp {
 
             // Environment-gated NOOP path for dispatcher overhead measurement.
             // Triggered by setting FORCE_MATMUL_BACKEND=noop.
-            let force_noop = metallic_env::FORCE_MATMUL_BACKEND
-                .get()
-                .ok()
-                .flatten()
-                .map(|s| s.eq_ignore_ascii_case("noop"))
-                .unwrap_or(false);
-            if force_noop {
-                let function_id = crate::kernels::KernelFunction::Noop;
-                let pipeline = ctx.kernel_manager.get_pipeline(function_id, ctx.tensor_dtype(), &ctx.device)?;
-                // Reuse provided out if present, otherwise allocate appropriately sized output.
-                let out_tensor = if let Some(existing) = out {
-                    existing.clone()
-                } else {
-                    Tensor::new(vec![shape.m, shape.n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
-                };
-                return crate::kernels::tensors::NoopOp::new(ctx, out_tensor, Some(pipeline), cache);
-            }
+            //let force_noop = metallic_env::FORCE_MATMUL_BACKEND
+            //    .get()
+            //    .ok()
+            //    .flatten()
+            //    .map(|s| s.eq_ignore_ascii_case("noop"))
+            //    .unwrap_or(false);
+            //if force_noop {
+            //    let function_id = crate::kernels::KernelFunction::Noop;
+            //    let pipeline = ctx.kernel_manager.get_pipeline(function_id, ctx.tensor_dtype(), &ctx.device)?;
+            //    // Reuse provided out if present, otherwise allocate appropriately sized output.
+            //    let out_tensor = if let Some(existing) = out {
+            //        existing.clone()
+            //    } else {
+            //        Tensor::new(vec![shape.m, shape.n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
+            //    };
+            //    return crate::kernels::tensors::NoopOp::new::<T>(ctx, out_tensor, Some(pipeline), cache);
+            //}
 
             let plan = select_policy(shape, dtype, &caps, &prefs);
             let exec_args = MatmulDispatchArgs {

@@ -25,7 +25,7 @@ struct ElemwiseAdd<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for ElemwiseAddOp {
+impl DefaultKernelInvocable for ElemwiseAddOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {

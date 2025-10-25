@@ -105,7 +105,7 @@ impl<T: TensorElement> TensorPreparationCache<T> {
     }
 
     /// Clear the preparation state for a tensor (e.g., when it's modified)
-    pub fn mark_dirty(&self, tensor: &Tensor<T>) {
+    pub fn mark_dirty<U: TensorElement>(&self, tensor: &Tensor<U>) {
         let key = TensorCacheKey::from_tensor(tensor);
         let mut lock = self.tensor_states.lock().expect("Tensor preparation cache mutex poisoned");
         lock.remove(&key);

@@ -14,7 +14,7 @@ struct RMSNorm<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for RMSNormOp {
+impl DefaultKernelInvocable for RMSNormOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, u32); // (input, gamma, feature_dim)
 
     fn function_id() -> Option<KernelFunction> {

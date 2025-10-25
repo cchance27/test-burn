@@ -14,7 +14,7 @@ struct Noop<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl KernelInvocable for NoopOp {
+impl DefaultKernelInvocable for NoopOp {
     type Args<'a, T: TensorElement> = Tensor<T>;
 
     fn function_id() -> Option<KernelFunction> {

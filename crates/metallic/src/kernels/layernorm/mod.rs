@@ -14,7 +14,7 @@ struct LayerNorm<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl KernelInvocable for LayerNormOp {
+impl DefaultKernelInvocable for LayerNormOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, u32); // (input, gamma, beta, feature_dim)
 
     fn function_id() -> Option<KernelFunction> {

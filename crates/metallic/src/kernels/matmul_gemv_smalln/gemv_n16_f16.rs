@@ -5,7 +5,9 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{KernelFunction, KernelInvocable, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{
+        DefaultKernelInvocable, KernelFunction, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state
+    }
 };
 
 // Public, user-facing, zero-sized struct for the operation.
@@ -20,7 +22,7 @@ struct MatmulGemvSmallN16<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for MatmulGemvSmallN16Op {
+impl DefaultKernelInvocable for MatmulGemvSmallN16Op {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {

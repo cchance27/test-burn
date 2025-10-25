@@ -2,7 +2,7 @@ use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
 
-use super::{KernelBackendKind, KernelFunction, KernelInvocable};
+use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
 use crate::{
     CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{SdpaKey, SeqKBucket}, kernels::sdpa_mps_graph::SdpaMpsGraphOp, resource_cache::ResourceCache
 };
@@ -271,7 +271,7 @@ fn compute_sdpa_scale(dim: usize) -> f32 {
 }
 
 // Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for ScaledDotProductAttentionOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
@@ -289,7 +289,7 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionNoPermuteOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -306,7 +306,7 @@ impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionWorkspaceOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -323,7 +323,7 @@ impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -340,7 +340,7 @@ impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionOptimizedOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -357,7 +357,7 @@ impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionDispatchOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionDispatchOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -396,7 +396,7 @@ impl KernelInvocable for ScaledDotProductAttentionDispatchOp {
 // Implement `Operation` for the internal struct.
 impl<T: TensorElement> Operation for ScaledDotProductAttention<T> {
     fn encode(&self, _command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        // Since all computation was done in the `new` method of KernelInvocable,
+        // Since all computation was done in the `new` method of DefaultKernelInvocable,
         // this method just returns Ok(())
         Ok(())
     }

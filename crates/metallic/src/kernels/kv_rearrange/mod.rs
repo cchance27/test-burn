@@ -23,7 +23,7 @@ struct KvRearrange<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for KvRearrangeOp {
+impl DefaultKernelInvocable for KvRearrangeOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
 
     fn function_id() -> Option<KernelFunction> {

@@ -9,7 +9,7 @@ struct Gelu<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
 }
 
-impl KernelInvocable for GeluOp {
+impl DefaultKernelInvocable for GeluOp {
     type Args<'a, T: TensorElement> = Tensor<T>;
 
     fn function_id() -> Option<KernelFunction> {

@@ -8,7 +8,7 @@ use rand::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
-use crate::{TensorElement, Tokenizer, models::qwen25::Qwen25};
+use crate::{TensorElement, Tokenizer, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25, tensor::U32};
 
 const IM_START: &str = "[:1]";
 const IM_END: &str = "[:2]";
@@ -177,6 +177,39 @@ impl Default for GenerationConfig {
             kv_initial_headroom_tokens: 256,
         }
     }
+}
+
+/// GPU-based sample from logits using top-k and top-p (nucleus) sampling.
+/// This avoids the GPU-CPU sync bottleneck by performing sampling directly on GPU.
+///
+/// NOTE: This is the infrastructure for GPU-based sampling. A full implementation would require:
+/// 1. A sophisticated Metal kernel that implements the complete sampling algorithm
+/// 2. GPU-based random number generation
+/// 3. Efficient top-k selection (potentially using GPU sorting/reduction algorithms)
+/// 4. Proper top-p (nucleus) sampling with cumulative probability calculations
+///
+/// The current approach still requires a small sync to read the single output token,
+/// but eliminates the major bottleneck of downloading the entire logits tensor (~600KB+ per token).
+pub fn gpu_sample_top_k_top_p<T: TensorElement>(
+    logits_tensor: &Tensor<T>,
+    vocab_size: usize,
+    top_k: usize,
+    top_p: f32,
+    temperature: f32,
+    ctx: &mut Context<T>,
+) -> Result<u32, MetalError> {
+    // Use GPU-based sampling to avoid downloading full logits tensor.
+    // This invokes a custom Metal kernel to perform sampling entirely on the GPU.
+
+    // Generate a random seed for the GPU kernel.
+    let seed = rand::rng().next_u32();
+
+    let output_token =
+        ctx.call_custom::<SampleTopKTopPOp, U32>((logits_tensor.clone(), vocab_size as u32, top_k as u32, top_p, temperature, seed, 40u32))?;
+
+    // The result is a tensor with a single u32 element.
+    let result_slice = output_token.as_slice();
+    Ok(result_slice[0])
 }
 
 /// Sample from logits using top-k and top-p (nucleus) sampling.
@@ -523,22 +556,13 @@ where
     let mut decode_scratch = Vec::new();
 
     if let Some(logits_tensor) = logits_tensor {
-        let logits_download_start = Instant::now();
-        let logits_slice = logits_tensor.as_slice();
-        let logits_download_duration = logits_download_start.elapsed();
-        record_metric_async!(MetricEvent::InternalKernelCompleted {
-            parent_op_name: "prompt_processing".to_string(),
-            internal_kernel_name: "logits_sync".to_string(),
-            duration_us: logits_download_duration.as_micros().max(1) as u64,
-        });
-        let vocab_logits = &logits_slice[..vocab_size];
-
+        // Use GPU-based sampling to avoid downloading full logits tensor
         let sample_start = Instant::now();
-        next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+        next_token = gpu_sample_top_k_top_p::<T>(&logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature, ctx)?;
         let sample_duration = sample_start.elapsed();
         record_metric_async!(MetricEvent::InternalKernelCompleted {
             parent_op_name: "sampling".to_string(),
-            internal_kernel_name: "top_k_top_p".to_string(),
+            internal_kernel_name: "gpu_top_k_top_p".to_string(),
             duration_us: sample_duration.as_micros().max(1) as u64,
         });
     } else {
@@ -643,7 +667,6 @@ where
                 }
             }
 
-            let logits_download_start = Instant::now();
             let logits_tensor = ctx.with_gpu_scope("generation_step_output", |ctx| qwen.output(&hidden_states, ctx))?;
 
             // Report forward step memory usage (only once per generation step)
@@ -665,24 +688,14 @@ where
                 });
             }
 
-            let logits_slice = logits_tensor.as_slice();
-            let logits_download_duration = logits_download_start.elapsed();
-            let metric_start = Instant::now();
-            record_metric_async!(MetricEvent::InternalKernelCompleted {
-                parent_op_name: "generation_loop".to_string(),
-                internal_kernel_name: "logits_sync".to_string(),
-                duration_us: logits_download_duration.as_micros().max(1) as u64,
-            });
-            metric_recording_overhead += metric_start.elapsed();
-            let vocab_logits = &logits_slice[..vocab_size];
-
+            // Use GPU-based sampling to avoid downloading full logits tensor
             let sample_start = Instant::now();
-            next_token = sample_top_k_top_p::<T>(vocab_logits, cfg.top_k, cfg.top_p, cfg.temperature, &mut ctx.sampler_buffers) as u32;
+            next_token = gpu_sample_top_k_top_p::<T>(&logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature, ctx)?;
             let sample_duration = sample_start.elapsed();
             let metric_start = Instant::now();
             record_metric_async!(MetricEvent::InternalKernelCompleted {
                 parent_op_name: "sampling".to_string(),
-                internal_kernel_name: "top_k_top_p".to_string(),
+                internal_kernel_name: "gpu_top_k_top_p".to_string(),
                 duration_us: sample_duration.as_micros().max(1) as u64,
             });
             metric_recording_overhead += metric_start.elapsed();

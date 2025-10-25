@@ -6,7 +6,7 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 
-use super::{KernelFunction, KernelInvocable};
+use super::{DefaultKernelInvocable, KernelFunction};
 use crate::{
     CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey}, context::GpuProfilerLabel, operation::EncoderType, resource_cache::ResourceCache
 };
@@ -61,7 +61,7 @@ struct MatMulMps {
 }
 
 // Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for MatMulMpsOp {
+impl DefaultKernelInvocable for MatMulMpsOp {
     // Input arguments for the call - two input tensors + transpose options
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, bool, bool); // (left, right, transpose_left, transpose_right)
     // The output type

@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{KernelFunction, KernelInvocable}
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}
 };
 
 #[repr(C)]
@@ -48,7 +48,7 @@ impl<T: TensorElement> Operation for MatMulGemv<T> {
     }
 }
 
-impl KernelInvocable for MatmulGemvOp {
+impl DefaultKernelInvocable for MatmulGemvOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>); // (x, A)
 
     fn function_id() -> Option<KernelFunction> {

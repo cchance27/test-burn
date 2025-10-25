@@ -21,6 +21,7 @@ pub(crate) fn mps_data_type_for_dtype(dtype: Dtype) -> objc2_metal_performance_s
     match dtype {
         Dtype::F32 => MPSDataType::Float32,
         Dtype::F16 => MPSDataType::Float16,
+        Dtype::U32 => MPSDataType::UInt32,
     }
 }
 
@@ -358,6 +359,11 @@ impl Cacheable for CacheableMpsGraphSdpaMask {
                         .newBufferWithBytes_length_options(ptr, byte_len, options)
                         .ok_or(MetalError::BufferFromBytesCreationFailed)?
                 }
+            }
+            Dtype::U32 => {
+                // For U32 dtype, we'll panic since this doesn't make sense for causal masks
+                // This is for masks, not general tensors, so U32 isn't a valid type here
+                panic!("U32 dtype not supported for causal mask buffers");
             }
         };
 
