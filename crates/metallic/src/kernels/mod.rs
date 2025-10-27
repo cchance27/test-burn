@@ -9,7 +9,7 @@ use crate::{
 
 // Rexport KernelManager and Invocable
 mod kernel_manager;
-pub use kernel_manager::{CustomKernelInvocable, DefaultKernelInvocable, KernelManager};
+pub use kernel_manager::{CustomKernelInvocable, DefaultKernelInvocable, KernelManager, MultiTensorOutput};
 
 pub mod graph_kernel;
 pub use graph_kernel::{

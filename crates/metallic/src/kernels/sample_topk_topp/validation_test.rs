@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use crate::generation::{gpu_sample_top_k_top_p, sample_top_k_top_p};
 #[cfg(test)]
-use crate::{Context, F32Element, MetalError, SamplerBuffers, Tensor, TensorElement, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, SamplerBuffers, Tensor, TensorInit, TensorStorage};
 
 #[cfg(test)]
 fn create_test_logits<T: crate::TensorElement>(ctx: &mut Context<T>, size: usize) -> Result<Tensor<T>, MetalError> {
@@ -176,22 +176,34 @@ fn debug_gpu_sampler_issue() -> Result<(), MetalError> {
     // Test with a smaller vocab to debug
     let vocab_size = 1000;
     let test_logits = create_test_logits(&mut ctx, vocab_size)?;
-    
-    // Use parameters similar to the failing case
-    let k = 40;  // Default top-k
-    let top_p = 0.95;  // Default top-p
-    let temperature = 1.0;  // Default temperature
 
-    println!("Testing GPU sampling with vocab_size={}, k={}, top_p={}, temperature={}", 
-             vocab_size, k, top_p, temperature);
-    
+    // Use parameters similar to the failing case
+    let k = 40; // Default top-k
+    let top_p = 0.95; // Default top-p
+    let temperature = 1.0; // Default temperature
+
+    println!(
+        "Testing GPU sampling with vocab_size={}, k={}, top_p={}, temperature={}",
+        vocab_size, k, top_p, temperature
+    );
+
     // Multiple test runs to check for consistency
     for i in 0..10 {
         let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
-        println!("Run {}: GPU token = {}, token as char = {:?}", i, gpu_token, char::from_u32(gpu_token));
-        
+        println!(
+            "Run {}: GPU token = {}, token as char = {:?}",
+            i,
+            gpu_token,
+            char::from_u32(gpu_token)
+        );
+
         // Validate the token is within expected range
-        assert!(gpu_token < vocab_size as u32, "GPU token {} is out of range for vocab size {}", gpu_token, vocab_size);
+        assert!(
+            gpu_token < vocab_size as u32,
+            "GPU token {} is out of range for vocab size {}",
+            gpu_token,
+            vocab_size
+        );
     }
 
     Ok(())
@@ -205,29 +217,41 @@ fn compare_gpu_vs_cpu_sampling() -> Result<(), MetalError> {
     // Test with a smaller vocab to debug
     let vocab_size = 100;
     let test_logits = create_test_logits(&mut ctx, vocab_size)?;
-    
-    // Use parameters similar to the failing case
-    let k = 10;  // Smaller k for easier verification
-    let top_p = 0.9;  // Smaller top_p for focused sampling
-    let temperature = 1.0;  // Default temperature
 
-    println!("Comparing GPU vs CPU sampling with vocab_size={}, k={}, top_p={}, temperature={}", 
-             vocab_size, k, top_p, temperature);
-    
+    // Use parameters similar to the failing case
+    let k = 10; // Smaller k for easier verification
+    let top_p = 0.9; // Smaller top_p for focused sampling
+    let temperature = 1.0; // Default temperature
+
+    println!(
+        "Comparing GPU vs CPU sampling with vocab_size={}, k={}, top_p={}, temperature={}",
+        vocab_size, k, top_p, temperature
+    );
+
     // CPU sampling
     let logits_slice = test_logits.as_slice();
     let vocab_logits = &logits_slice[..vocab_size];
     let mut sampler_buffers = SamplerBuffers::default();
     let cpu_token = sample_top_k_top_p::<F32Element>(vocab_logits, k, top_p, temperature, &mut sampler_buffers) as u32;
-    
+
     // GPU sampling (multiple times to check consistency)
     for i in 0..5 {
         let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
         println!("Run {}: CPU token = {}, GPU token = {}", i, cpu_token, gpu_token);
-        
+
         // Both should be within range
-        assert!(cpu_token < vocab_size as u32, "CPU token {} is out of range for vocab size {}", cpu_token, vocab_size);
-        assert!(gpu_token < vocab_size as u32, "GPU token {} is out of range for vocab size {}", gpu_token, vocab_size);
+        assert!(
+            cpu_token < vocab_size as u32,
+            "CPU token {} is out of range for vocab size {}",
+            cpu_token,
+            vocab_size
+        );
+        assert!(
+            gpu_token < vocab_size as u32,
+            "GPU token {} is out of range for vocab size {}",
+            gpu_token,
+            vocab_size
+        );
     }
 
     Ok(())

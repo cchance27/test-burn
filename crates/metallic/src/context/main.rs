@@ -5,7 +5,7 @@ use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Tensor, TensorElement, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable}, operation::CommandBuffer, pool::MemoryPool, profiling_state, resource_cache::{CacheStats, ResourceCache}, tensor::Dtype, tensor_preparation_cache::TensorPreparationCache
+    Tensor, TensorElement, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable, MultiTensorOutput}, operation::CommandBuffer, pool::MemoryPool, profiling_state, resource_cache::{CacheStats, ResourceCache}, tensor::Dtype, tensor_preparation_cache::TensorPreparationCache
 };
 
 #[derive(Default)]
@@ -352,12 +352,12 @@ impl<T: TensorElement> Context<T> {
         Ok(output)
     }
 
-    pub fn call_custom<K: CustomKernelInvocable, O: TensorElement>(
+    pub fn call_custom<K: CustomKernelInvocable>(
         &mut self,
         args: K::Args<'_, T>,
-    ) -> Result<Tensor<K::OutputTensor<O>>, MetalError>
+    ) -> Result<<K::OutputTuple<T> as MultiTensorOutput<T>>::Tensors, MetalError>
     where
-        <K as CustomKernelInvocable>::OutputTensor<O>: TensorElement,
+        K::OutputTuple<T>: MultiTensorOutput<T>,
     {
         // Get the current scope path to potentially nest with the kernel being called
         let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
@@ -383,11 +383,10 @@ impl<T: TensorElement> Context<T> {
         self.ensure_active_cmd_buffer()?;
 
         let pipeline = if let Some(kernel_func) = K::function_id() {
-            // Use the input tensor dtype (T) for pipeline selection; output dtype (O)
-            // may differ (e.g., U32 token id), but the kernel specialization depends on input.
+            // Use the input tensor dtype (T) for pipeline selection
             Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
-            None // For MPS operations that don't need a pipeline
+            None // For operations that don't need a pipeline
         };
 
         let mut cache = self
@@ -428,7 +427,8 @@ impl<T: TensorElement> Context<T> {
 
         self.active_resource_cache = Some(cache);
 
-        self.mark_tensor_pending(&output);
+        // Mark all output tensors as pending
+        <K::OutputTuple<T> as MultiTensorOutput<T>>::mark_pending(self, &output);
 
         self.finalize_active_command_buffer_if_latency();
 

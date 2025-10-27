@@ -8,7 +8,7 @@ use rand::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
-use crate::{TensorElement, Tokenizer, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25, tensor::U32};
+use crate::{TensorElement, Tokenizer, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25};
 
 const IM_START: &str = "[:1]";
 const IM_END: &str = "[:2]";
@@ -204,8 +204,15 @@ pub fn gpu_sample_top_k_top_p<T: TensorElement>(
     // Generate a random seed for the GPU kernel.
     let seed = rand::rng().next_u32();
 
-    let output_token =
-        ctx.call_custom::<SampleTopKTopPOp, U32>((logits_tensor.clone(), vocab_size as u32, top_k as u32, top_p, temperature, seed, 40u32))?;
+    let (output_token,) = ctx.call_custom::<SampleTopKTopPOp>((
+        logits_tensor.clone(),
+        vocab_size as u32,
+        top_k as u32,
+        top_p,
+        temperature,
+        seed,
+        40u32,
+    ))?;
 
     // The result is a tensor with a single u32 element.
     let result_slice = output_token.as_slice();

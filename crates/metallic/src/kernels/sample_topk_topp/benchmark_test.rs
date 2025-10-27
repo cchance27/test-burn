@@ -1,9 +1,10 @@
 use std::time::Instant;
 
-use crate::{generation::{gpu_sample_top_k_top_p, sample_top_k_top_p}, F16Element};
-
 #[cfg(test)]
 use crate::{Context, MetalError, SamplerBuffers, Tensor, TensorInit, TensorStorage, kernels::elemwise_add::ElemwiseAddOp};
+use crate::{
+    F16Element, generation::{gpu_sample_top_k_top_p, sample_top_k_top_p}
+};
 
 #[cfg(test)]
 fn create_test_logits<T: crate::TensorElement>(ctx: &mut Context<T>, size: usize) -> Result<Tensor<T>, MetalError> {
@@ -56,10 +57,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
 
     // Perform a dummy GPU operation to ensure the tensor is truly GPU-resident
     // This simulates a real-world scenario where logits come from a GPU operation
-    let ones = Tensor::ones(
-        vec![vocab_size],
-        &mut ctx,
-    )?;
+    let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
 
     // Perform a dummy add operation using the kernels
     let new = ctx.call::<ElemwiseAddOp>((test_logits.clone(), ones.clone()))?;
@@ -86,10 +84,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
     // Benchmark CPU sampling WITH GPU->CPU sync overhead (real-world scenario)
     let cpu_iterations = 1000;
     let mut cpu_total_times = Vec::new();
-    let ones = Tensor::ones(
-        vec![vocab_size],
-        &mut ctx
-    )?;
+    let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
 
     let test_logits = create_test_logits(&mut ctx, vocab_size)?;
 
@@ -126,10 +121,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
     let gpu_iterations = 1000;
     let mut gpu_times = Vec::new();
 
-    let ones = Tensor::ones(
-        vec![vocab_size],
-        &mut ctx,
-    )?;
+    let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
 
     let test_logits = create_test_logits(&mut ctx, vocab_size)?;
 
