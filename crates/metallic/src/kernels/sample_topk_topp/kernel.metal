@@ -5,15 +5,14 @@ using namespace metal;
     OP(float, float, f32) \
     OP(half, float, f16)
 
-// ------------------------- Common structs -------------------------
 struct SampleParams {
     uint   vocab_size;
     uint   k;
     float  top_p;
     float  temperature;
     uint   seed;
-    uint   per_thread_m;     // set to 1 for lean path
-    uint   num_threadgroups; // filled by host for kernel1
+    uint   per_thread_m;
+    uint   num_threadgroups;
 };
 
 struct LogitPair { float value; uint index; };
@@ -23,215 +22,273 @@ struct RNG {
     inline void seed(uint s) { state = s ? s : 1u; }
     inline float next() {
         state = state * 1664525u + 1013904223u;
-        // Convert uint32 to float in [0, 1) with high precision
-        // by using the top 23 bits of the state for the mantissa.
-        union {
-            uint  u;
-            float f;
-        } temp;
-        temp.u = (state >> 9) | 0x3f800000u; // A float in [1.0, 2.0)
-        return temp.f - 1.0f; // A float in [0.0, 1.0)
+        union { uint u; float f; } temp;
+        temp.u = (state >> 9) | 0x3f800000u;
+        return temp.f - 1.0f;
     }
 };
 
 constant uint MAX_TPTG = 256;
+constant uint TG_OUTPUT_K = 256;
 
-inline void k_insert_sorted_dynamic(thread LogitPair* arr, uint M, float x, uint idx) {
-    if (M == 0u) return;
-    if (x <= arr[M - 1].value) return;
-    int pos = int(M) - 1;
-    while (pos > 0 && x > arr[pos - 1].value) {
-        arr[pos] = arr[pos - 1];
-        pos--;
+// Min-heap functions
+inline void heap_sift_down(thread LogitPair* heap, uint size, uint pos) {
+    while (true) {
+        uint left = 2 * pos + 1;
+        uint right = 2 * pos + 2;
+        uint smallest = pos;
+        
+        if (left < size && heap[left].value < heap[smallest].value) smallest = left;
+        if (right < size && heap[right].value < heap[smallest].value) smallest = right;
+        
+        if (smallest == pos) break;
+        
+        LogitPair temp = heap[pos];
+        heap[pos] = heap[smallest];
+        heap[smallest] = temp;
+        pos = smallest;
     }
-    arr[pos].value = x;
-    arr[pos].index = idx;
 }
 
-// ------------------------- Kernel templates -------------------------
+inline void heap_insert(thread LogitPair* heap, thread uint* heap_size, uint max_size, float val, uint idx) {
+    if (*heap_size < max_size) {
+        uint pos = (*heap_size)++;
+        heap[pos].value = val;
+        heap[pos].index = idx;
+        
+        while (pos > 0) {
+            uint parent = (pos - 1) / 2;
+            if (heap[parent].value <= heap[pos].value) break;
+            LogitPair temp = heap[pos];
+            heap[pos] = heap[parent];
+            heap[parent] = temp;
+            pos = parent;
+        }
+    } else if (val > heap[0].value) {
+        heap[0].value = val;
+        heap[0].index = idx;
+        heap_sift_down(heap, max_size, 0);
+    }
+}
+
+inline void heap_to_sorted(thread LogitPair* heap, uint size) {
+    // Convert min-heap into an array sorted in descending order (largest first)
+    for (uint i = size; i > 1; --i) {
+        LogitPair temp = heap[0];
+        heap[0] = heap[i - 1];
+        heap[i - 1] = temp;
+        heap_sift_down(heap, i - 1, 0);
+    }
+    // Note: no final reverse; result is descending order, suitable for assuming index 0 is the max
+}
+
+// Partials kernel - writes to separate buffers
 #define DEFINE_SAMPLE_TOPK_PARTIALS_KERNEL(SCALAR, ACCUM, SUFFIX) \
 kernel void sample_topk_partials_##SUFFIX( \
     const device SCALAR*  logits             [[buffer(0)]], \
-    device LogitPair*     partials           [[buffer(1)]], /* size: num_tgs * threads_per_tg * per_thread_m */ \
-    constant SampleParams& params           [[buffer(2)]], \
-    uint3 tid_tg_vec                        [[thread_position_in_threadgroup]], \
-    uint3 tg_size_vec                       [[threads_per_threadgroup]], \
-    uint3 tg_pos                            [[threadgroup_position_in_grid]], \
-    uint3 tg_cnt                            [[threadgroups_per_grid]] \
+    device float*         partials_values    [[buffer(1)]], \
+    device uint*          partials_indices   [[buffer(2)]], \
+    constant SampleParams& params            [[buffer(3)]], \
+    uint tid                                  [[thread_position_in_threadgroup]], \
+    uint tptg                                 [[threads_per_threadgroup]], \
+    uint tg_id                                [[threadgroup_position_in_grid]], \
+    uint num_tgs                              [[threadgroups_per_grid]] \
 ) { \
-    const uint tid   = tid_tg_vec.x; \
-    const uint tptg  = tg_size_vec.x; \
-    const uint tg_id = tg_pos.x; \
-    const uint num_tgs = tg_cnt.x; \
-\
     const uint V     = params.vocab_size; \
-    const ACCUM invT = (params.temperature > 0.f) ? (static_cast<ACCUM>(1.f) / static_cast<ACCUM>(params.temperature)) : static_cast<ACCUM>(0.f); \
-    const uint M     = params.per_thread_m; /* elements per thread - should be set to top_k or reasonable limit */ \
-\
-    /* Global thread id and total threads across ALL TGs */ \
-    const uint gtid     = tg_id * tptg + tid; \
-    const uint total_thr = tptg * num_tgs; \
-\
-    /* Per-thread top-M array */ \
-    constexpr uint MAX_M = 32; /* Reduce to fit TG memory on M1-class GPUs */ \
-    LogitPair thread_top[MAX_M]; \
+    const ACCUM invT = (params.temperature > 0.f) \
+        ? (static_cast<ACCUM>(1.f) / static_cast<ACCUM>(params.temperature)) \
+        : static_cast<ACCUM>(0.f); \
+    const uint M     = params.per_thread_m; \
     \
-    /* Initialize with -INFINITY */ \
-    for (uint i = 0; i < M && i < MAX_M; ++i) { \
-        thread_top[i].value = -INFINITY; \
-        thread_top[i].index = 0u; \
-    } \
-\
-    /* Process elements assigned to this thread */ \
-    for (uint i = gtid; i < V; i += total_thr) { \
+    constexpr uint MAX_M = 32; \
+    LogitPair heap[MAX_M]; \
+    const uint M_use = min(M, (uint)MAX_M); \
+    uint heap_size = 0; \
+    \
+    const uint items_per_tg = V / num_tgs + 1; \
+    const uint block_start = tg_id * items_per_tg; \
+    const uint block_end = min(block_start + items_per_tg, V); \
+    \
+    for (uint i = block_start + tid; i < block_end; i += tptg) { \
         ACCUM v = static_cast<ACCUM>(logits[i]); \
         if (invT > static_cast<ACCUM>(0.0f)) v *= invT; \
-        \
-        /* Insert into sorted array to maintain top-M */ \
-        if (M == 1) { \
-            /* Special case for efficiency */ \
-            if (v > thread_top[0].value) { \
-                thread_top[0].value = static_cast<float>(v); \
-                thread_top[0].index = i; \
-            } \
-        } else { \
-            /* Insert into sorted array to maintain top-M (clamped to buffer size) */ \
-            const uint M_use = (M < MAX_M) ? M : MAX_M; \
-            k_insert_sorted_dynamic(thread_top, M_use, static_cast<float>(v), i); \
+        heap_insert(heap, &heap_size, M_use, static_cast<float>(v), i); \
+    } \
+    \
+    heap_to_sorted(heap, heap_size); \
+    \
+    threadgroup LogitPair tg_shared[4096]; \
+    const uint max_per_thread = max((uint)1, 4096u / tptg); \
+    const uint write_count = min((uint)M_use, max_per_thread); \
+    for (uint m = 0; m < write_count; ++m) { \
+        const uint idx = tid * write_count + m; \
+        if (idx < 4096) { \
+            tg_shared[idx] = (m < heap_size) ? heap[m] : LogitPair{-INFINITY, 0u}; \
         } \
     } \
-\
-    /* Write M candidates per thread */ \
-    /* Layout: [gtid * M + m] for thread gtid, element m */ \
-    for (uint m = 0; m < M && m < MAX_M; ++m) { \
-        partials[gtid * M + m] = thread_top[m]; \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    const uint merge_threads = min(tptg, (uint)32); \
+    \
+    if (tid < merge_threads) { \
+        const uint out_k = min(params.k, TG_OUTPUT_K); \
+        LogitPair my_heap[TG_OUTPUT_K]; \
+        uint my_heap_size = 0; \
+        \
+        const uint total_items = min(tptg * write_count, (uint)4096); \
+        for (uint i = tid; i < total_items; i += merge_threads) { \
+            if (isfinite(tg_shared[i].value)) { \
+                heap_insert(my_heap, &my_heap_size, out_k, tg_shared[i].value, tg_shared[i].index); \
+            } \
+        } \
+        \
+        heap_to_sorted(my_heap, my_heap_size); \
+        \
+        const uint my_base = tid * out_k; \
+        for (uint i = 0; i < out_k; ++i) { \
+            const uint idx = my_base + i; \
+            if (idx < 4096) { \
+                tg_shared[idx] = (i < my_heap_size) ? my_heap[i] : LogitPair{-INFINITY, 0u}; \
+            } \
+        } \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    if (tid == 0) { \
+        const uint out_k = min(params.k, TG_OUTPUT_K); \
+        LogitPair final_heap[TG_OUTPUT_K]; \
+        uint final_heap_size = 0; \
+        \
+        const uint merge_items = min(merge_threads * out_k, (uint)4096); \
+        for (uint i = 0; i < merge_items; ++i) { \
+            if (isfinite(tg_shared[i].value)) { \
+                heap_insert(final_heap, &final_heap_size, out_k, tg_shared[i].value, tg_shared[i].index); \
+            } \
+        } \
+        \
+        heap_to_sorted(final_heap, final_heap_size); \
+        \
+        const uint output_base = tg_id * TG_OUTPUT_K; \
+        for (uint i = 0; i < TG_OUTPUT_K; ++i) { \
+            if (i < final_heap_size) { \
+                partials_values[output_base + i] = final_heap[i].value; \
+                partials_indices[output_base + i] = final_heap[i].index; \
+            } else { \
+                partials_values[output_base + i] = -INFINITY; \
+                partials_indices[output_base + i] = 0u; \
+            } \
+        } \
     } \
 }
 
-// ------------------------- Kernel 2: merge + sample -------------------------
+// Merge kernel - NO ENTROPY HASHING, use seed directly
 #define DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL(SCALAR, ACCUM, SUFFIX) \
 kernel void sample_topk_merge_and_sample_##SUFFIX( \
-    device LogitPair*     partials           [[buffer(0)]], \
-    device uint*          out_token          [[buffer(1)]], \
-    constant SampleParams& params            [[buffer(2)]], \
-    uint3 tid_tg_vec                         [[thread_position_in_threadgroup]], \
-    uint3 tg_size_vec                        [[threads_per_threadgroup]] \
+    device float*         partials_values    [[buffer(0)]], \
+    device uint*          partials_indices   [[buffer(1)]], \
+    device uint*          out_token          [[buffer(2)]], \
+    constant SampleParams& params            [[buffer(3)]], \
+    uint tid                                  [[thread_position_in_threadgroup]], \
+    uint tcount                               [[threads_per_threadgroup]] \
 ) { \
-    const uint tid_tg = tid_tg_vec.x; \
-    const uint tcount = tg_size_vec.x; \
-\
     const uint V       = params.vocab_size; \
     const uint K_req   = (params.k == 0u) ? 1u : params.k; \
-    const uint K       = (K_req <= V) ? K_req : V; \
+    const uint K       = min(K_req, V); \
     const ACCUM top_p  = clamp(static_cast<ACCUM>(params.top_p), static_cast<ACCUM>(0.0f), static_cast<ACCUM>(1.0f)); \
     const uint num_tgs = params.num_threadgroups; \
-    const uint M       = params.per_thread_m; /* Use the parameter passed from partials kernel */ \
-\
-    const uint N_cand = num_tgs * tcount * M; \
-\
-    constexpr uint KLOCAL_MAX = 12; \
-    const uint Klocal = (K <= KLOCAL_MAX) ? K : KLOCAL_MAX; \
-\
-    LogitPair local_top[KLOCAL_MAX]; \
-    for (uint i = 0; i < Klocal; ++i) { \
-        local_top[i].value = -INFINITY; \
-        local_top[i].index = 0u; \
-    } \
-\
-    for (uint i = tid_tg; i < N_cand; i += tcount) { \
-        const float v = partials[i].value; \
-        const uint  ix = partials[i].index; \
-        if (v > local_top[Klocal - 1].value) { \
-            k_insert_sorted_dynamic(local_top, Klocal, v, ix); \
+    const uint N_cand = num_tgs * TG_OUTPUT_K; \
+    \
+    constexpr uint PER_THREAD_K = 16; \
+    const uint local_k = min(K, (uint)PER_THREAD_K); \
+    LogitPair local_heap[PER_THREAD_K]; \
+    uint local_heap_size = 0; \
+    \
+    for (uint i = tid; i < N_cand; i += tcount) { \
+        float v = partials_values[i]; \
+        uint idx = partials_indices[i]; \
+        if (idx < V && isfinite(v)) { \
+            heap_insert(local_heap, &local_heap_size, local_k, v, idx); \
         } \
     } \
-\
-    /* Store per-thread local_top into threadgroup memory and merge from there */ \
-    threadgroup LogitPair tg_local[MAX_TPTG * KLOCAL_MAX]; \
-    const uint base = tid_tg * Klocal; \
-    for (uint i = 0; i < Klocal; ++i) { tg_local[base + i] = local_top[i]; } \
-\
-    threadgroup_barrier(mem_flags::mem_threadgroup); \
-\
-    /* Parallel pre-reduction within merge kernel */ \
-    constexpr uint K_MAX = 64; \
-    const uint K_use = (K <= K_MAX) ? K : K_MAX; \
-    constexpr uint L2 = 3; \
-\
-    LogitPair local2[L2]; \
-    for (uint i = 0; i < L2; ++i) { local2[i].value = -INFINITY; local2[i].index = 0u; } \
-    const uint total_small = tcount * Klocal; \
-    for (uint i = tid_tg; i < total_small; i += tcount) { \
-        const float v = tg_local[i].value; \
-        const uint ix = tg_local[i].index; \
-        if (v > local2[L2 - 1].value) { k_insert_sorted_dynamic(local2, L2, v, ix); } \
+    \
+    heap_to_sorted(local_heap, local_heap_size); \
+    \
+    threadgroup LogitPair tg_shared[4096]; \
+    for (uint i = 0; i < local_k; ++i) { \
+        const uint sidx = tid * local_k + i; \
+        if (sidx < 4096) { \
+            tg_shared[sidx] = (i < local_heap_size) ? local_heap[i] : LogitPair{-INFINITY, 0u}; \
+        } \
     } \
-\
-    threadgroup LogitPair tg_pre[L2 * MAX_TPTG]; \
-    const uint base2 = tid_tg * L2; \
-    for (uint i = 0; i < L2; ++i) { tg_pre[base2 + i] = local2[i]; } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
-\
-    if (tid_tg == 0) { \
-        LogitPair global_top[K_MAX]; \
-        for (uint i = 0; i < K_use; ++i) { global_top[i].value = -INFINITY; global_top[i].index = 0u; } \
-\
-        const uint reduced = tcount * L2; \
-        for (uint i = 0; i < reduced; ++i) { \
-            const float v = tg_pre[i].value; \
-            const uint  ix = tg_pre[i].index; \
-            if (v > global_top[K_use - 1].value) { \
-                k_insert_sorted_dynamic(global_top, K_use, v, ix); \
+    \
+    if (tid == 0) { \
+        constexpr uint FINAL_K = 256; \
+        const uint final_k = min((uint)FINAL_K, max(K, 2u * params.k)); \
+        LogitPair global_heap[FINAL_K]; \
+        uint global_heap_size = 0; \
+        \
+        const uint total = min(tcount * local_k, (uint)4096); \
+        for (uint i = 0; i < total; ++i) { \
+            if (isfinite(tg_shared[i].value)) { \
+                heap_insert(global_heap, &global_heap_size, final_k, tg_shared[i].value, tg_shared[i].index); \
             } \
         } \
-\
-        /* Softmax over K */ \
-        float maxv = global_top[0].value; \
-        float sum  = 0.0f; \
-        for (uint i = 0; i < K_use; ++i) { \
-            const float e = exp(global_top[i].value - maxv); \
-            global_top[i].value = e; \
+        \
+        heap_to_sorted(global_heap, global_heap_size); \
+        \
+        if (global_heap_size == 0) { \
+            out_token[0] = 0u; \
+            return; \
+        } \
+        \
+        float maxv = global_heap[0].value; \
+        float sum = 0.0f; \
+        for (uint i = 0; i < global_heap_size; ++i) { \
+            float e = exp(global_heap[i].value - maxv); \
+            global_heap[i].value = e; \
             sum += e; \
         } \
+        \
         if (sum <= 0.0f || !isfinite(sum)) { \
-            out_token[0] = global_top[0].index; \
+            out_token[0] = global_heap[0].index; \
             return; \
         } \
-        const float inv_sum = 1.0f / sum; \
-        for (uint i = 0; i < K_use; ++i) { \
-            global_top[i].value *= inv_sum; \
+        \
+        float inv_sum = 1.0f / sum; \
+        for (uint i = 0; i < global_heap_size; ++i) { \
+            global_heap[i].value *= inv_sum; \
         } \
-\
-        /* Top-p cutoff */ \
+        \
         float cumulative = 0.0f; \
-        uint cutoff = (K_use > 0u) ? (K_use - 1u) : 0u; \
-        for (uint i = 0; i < K_use; ++i) { \
-            cumulative += global_top[i].value; \
-            if (cumulative >= static_cast<float>(top_p)) { cutoff = i; break; } \
+        uint cutoff = global_heap_size - 1; \
+        for (uint i = 0; i < global_heap_size; ++i) { \
+            cumulative += global_heap[i].value; \
+            if (cumulative >= static_cast<float>(top_p)) { \
+                cutoff = i; \
+                break; \
+            } \
         } \
-        if (cumulative <= 0.0f) { \
-            out_token[0] = global_top[0].index; \
-            return; \
-        } \
-\
-        /* Sample */ \
-        RNG rng; rng.seed(params.seed); \
-        const float r = rng.next() * cumulative; \
-\
+        \
+        RNG rng; \
+        rng.seed(params.seed); \
+        float r = rng.next() * cumulative; \
+        \
         float acc = 0.0f; \
-        uint chosen = global_top[0].index; \
+        uint chosen = global_heap[0].index; \
         for (uint i = 0; i <= cutoff; ++i) { \
-            acc += global_top[i].value; \
-            if (r <= acc) { chosen = global_top[i].index; break; } \
+            acc += global_heap[i].value; \
+            if (r <= acc) { \
+                chosen = global_heap[i].index; \
+                break; \
+            } \
+        } \
+        if (chosen >= V) { \
+            chosen = V > 0 ? (V - 1) : 0; \
         } \
         out_token[0] = chosen; \
     } \
 }
 
-// Apply the template macros to generate kernels for each type
 FOR_EACH_FLOAT_TYPE(DEFINE_SAMPLE_TOPK_PARTIALS_KERNEL)
 FOR_EACH_FLOAT_TYPE(DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL)
-
-#undef DEFINE_SAMPLE_TOPK_PARTIALS_KERNEL
-#undef DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL
-#undef FOR_EACH_FLOAT_TYPE
