@@ -95,9 +95,8 @@ kernel void sample_topk_partials_##SUFFIX( \
     uint num_tgs                              [[threadgroups_per_grid]] \
 ) { \
     const uint V     = params.vocab_size; \
-    const ACCUM invT = (params.temperature > 0.f) \
-        ? (static_cast<ACCUM>(1.f) / static_cast<ACCUM>(params.temperature)) \
-        : static_cast<ACCUM>(0.f); \
+    const float denom = fmax(params.temperature, 1e-6f); \
+    const ACCUM invT = static_cast<ACCUM>(1.0f / denom); \
     const uint M     = params.per_thread_m; \
     \
     constexpr uint MAX_M = 32; \
@@ -111,7 +110,7 @@ kernel void sample_topk_partials_##SUFFIX( \
     \
     for (uint i = block_start + tid; i < block_end; i += tptg) { \
         ACCUM v = static_cast<ACCUM>(logits[i]); \
-        if (invT > static_cast<ACCUM>(0.0f)) v *= invT; \
+        v *= invT; \
         heap_insert(heap, &heap_size, M_use, static_cast<float>(v), i); \
     } \
     \
