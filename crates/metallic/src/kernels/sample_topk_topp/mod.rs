@@ -9,39 +9,8 @@ use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement
 // Global counter for seed variation
 static SEED_COUNTER: AtomicU32 = AtomicU32::new(0);
 
-pub fn calculate_threads_per_tg_and_num_threadgroups(
-    pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-    vocab_size: u32,
-) -> (usize, u32) {
-    let tew = pipeline.threadExecutionWidth() as usize;
-    let max_tptg = pipeline.maxTotalThreadsPerThreadgroup() as usize;
-
-    let override_tptg = std::env::var("METALLIC_SAMPLE_TPTG")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&v| v > 0 && v <= max_tptg)
-        .filter(|&v| v % tew == 0);
-
-    // Choose threads_per_tg as a multiple of TEW, capped at 256 and device max
-    let max_cap = 256usize.min(max_tptg);
-    let multiples = (max_cap / tew).max(1);
-    let fallback = (multiples * tew).min(max_cap);
-    let preferred = 128usize.min(max_cap);
-    let preferred_aligned = if preferred % tew == 0 { Some(preferred) } else { None };
-    let threads_per_tg = override_tptg.or(preferred_aligned).unwrap_or(fallback);
-
-    // Increase threadgroups for large vocabs to improve coverage and occupancy
-    let items_per_thread = 32u32; // moderate per-thread work to reduce divergence
-    let items_per_tg = (threads_per_tg as u32) * items_per_thread;
-    let num_tgs = vocab_size.div_ceil(items_per_tg).clamp(1, 128);
-
-    (threads_per_tg, num_tgs as u32)
-}
-
-mod sample_topk_merge_and_sample;
-mod sample_topk_partials;
-use sample_topk_merge_and_sample::SampleTopKMergeAndSampleOp;
-use sample_topk_partials::SampleTopKPartialsOp;
+mod sample_topk_fused;
+use sample_topk_fused::SampleTopKFusedOp;
 
 #[cfg(test)]
 mod benchmark_test;
@@ -84,22 +53,8 @@ impl CustomKernelInvocable for SampleTopKTopPOp {
         let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
         let varied_seed = base_seed.wrapping_add(counter);
 
-        let (partials_values, partials_indices) =
-            ctx.call_custom::<SampleTopKPartialsOp>((logits.clone(), vocab_size, k, top_p, temperature, varied_seed, per_thread_m_clamp))?;
-
-        let default_per_thread_m = k.min(4).max(1);
-        let params = SampleParams {
-            vocab_size,
-            k,
-            top_p,
-            temperature,
-            seed: varied_seed, // Use the varied seed
-            per_thread_m: default_per_thread_m.min(per_thread_m_clamp).max(1),
-            num_threadgroups: 0, // will be set in partials/merge ops consistently
-        };
-
-        let (output_token,) = ctx.call_custom::<SampleTopKMergeAndSampleOp>((partials_values, partials_indices, params))?;
-
+        let (output_token,) =
+            ctx.call_custom::<SampleTopKFusedOp>((logits.clone(), vocab_size, k, top_p, temperature, varied_seed, per_thread_m_clamp))?;
         let op = Box::new(SampleTopKWrapper);
         Ok((op, (output_token,)))
     }

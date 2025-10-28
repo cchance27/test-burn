@@ -4,40 +4,36 @@ use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, F32Element, MetalError, Operation, Tensor, TensorElement, context::GpuProfilerLabel, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, operation::EncoderType, resource_cache::ResourceCache, tensor::dtypes::U32
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, context::GpuProfilerLabel, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, operation::EncoderType, resource_cache::ResourceCache, tensor::dtypes::U32
 };
 
-pub struct SampleTopKPartialsOp;
+pub struct SampleTopKFusedOp;
 
-pub struct SampleTopKPartials<T: TensorElement> {
+pub struct SampleTopKFused<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     input_logits: Tensor<T>,
-    partials_values: Tensor<F32Element>,
-    partials_indices: Tensor<U32>,
+    output_token: Tensor<U32>,
     params: SampleParams,
     threads_per_tg: usize,
     profiler_label: GpuProfilerLabel,
 }
 
-impl<T: TensorElement> Operation for SampleTopKPartials<T> {
+impl<T: TensorElement> Operation for SampleTopKFused<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         command_buffer.prepare_encoder_for_operation(EncoderType::MetalCompute)?;
         let encoder = command_buffer.get_compute_encoder()?;
         let label = self.profiler_label.clone();
         let scope = GpuProfiler::profile_command_buffer(command_buffer.raw(), label.op_name.clone(), label.backend.clone());
 
-        assert_ne!(self.params.num_threadgroups, 0, "num_threadgroups must be non-zero");
         set_compute_pipeline_state(&encoder, &self.pipeline);
         set_buffer(&encoder, 0, &self.input_logits.buf, self.input_logits.offset);
-        set_buffer(&encoder, 1, &self.partials_values.buf, self.partials_values.offset);
-        set_buffer(&encoder, 2, &self.partials_indices.buf, self.partials_indices.offset);
-        set_bytes(&encoder, 3, &self.params);
+        set_buffer(&encoder, 1, &self.output_token.buf, self.output_token.offset);
+        set_bytes(&encoder, 2, &self.params);
 
         let tptg = self.threads_per_tg;
-        let num_tgs = self.params.num_threadgroups as usize;
 
         let grid = MTLSize {
-            width: (num_tgs * tptg),
+            width: tptg,
             height: 1,
             depth: 1,
         };
@@ -52,7 +48,7 @@ impl<T: TensorElement> Operation for SampleTopKPartials<T> {
             u32::try_from(grid.depth).unwrap_or(u32::MAX),
         );
         record_metric_async!(MetricEvent::GpuKernelDispatched {
-            kernel_name: "sample_topk_partials".to_string(),
+            kernel_name: "sample_topk_fused".to_string(),
             op_name: label.op_name.clone(),
             thread_groups,
         });
@@ -64,12 +60,56 @@ impl<T: TensorElement> Operation for SampleTopKPartials<T> {
     }
 }
 
-impl CustomKernelInvocable for SampleTopKPartialsOp {
+fn select_threads_per_tg(pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>) -> usize {
+    const PREFERRED_THREADGROUPS: &[usize] = &[1024, 896, 768, 640, 512, 384, 352, 320, 256, 192, 128];
+
+    let tew = pipeline.threadExecutionWidth().max(1);
+    let max_total = pipeline.maxTotalThreadsPerThreadgroup();
+    let max_tptg: usize = max_total.max(tew);
+    let override_tptg = std::env::var("METALLIC_SAMPLE_TPTG")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0 && v <= max_tptg)
+        .filter(|&v| v % tew == 0);
+
+    if let Some(v) = override_tptg {
+        return v;
+    }
+
+    for &candidate in PREFERRED_THREADGROUPS {
+        if candidate <= max_tptg && candidate % tew == 0 {
+            return candidate;
+        }
+    }
+
+    let fallback = (max_total / tew).max(1) * tew;
+    fallback.min(max_tptg)
+}
+
+fn select_default_per_thread_m(threads_per_tg: usize, k: u32, clamp: u32) -> u32 {
+    let recommended = if threads_per_tg >= 1024 {
+        6
+    } else if threads_per_tg >= 896 {
+        4
+    } else if threads_per_tg >= 320 {
+        6
+    } else if threads_per_tg >= 256 {
+        5
+    } else if threads_per_tg >= 192 {
+        4
+    } else {
+        3
+    };
+
+    recommended.min(k).min(clamp).max(1)
+}
+
+impl CustomKernelInvocable for SampleTopKFusedOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, f32, f32, u32, u32);
-    type OutputTuple<T: TensorElement> = (F32Element, U32); // Two separate buffers
+    type OutputTuple<T: TensorElement> = (U32,);
 
     fn function_id() -> Option<KernelFunction> {
-        Some(KernelFunction::SampleTopKPartials)
+        Some(KernelFunction::SampleTopKFused)
     }
 
     fn new<'a, T: TensorElement>(
@@ -81,14 +121,15 @@ impl CustomKernelInvocable for SampleTopKPartialsOp {
         let (input_logits, vocab, k, top_p, temperature, seed, per_thread_m_clamp) = args;
         let pipeline = pipeline.ok_or(MetalError::InvalidOperation("Pipeline not provided".into()))?;
 
-        let (threads_per_tg, num_tgs) = calculate_threads_per_tg_and_num_threadgroups(&pipeline, vocab);
+        let threads_per_tg = select_threads_per_tg(&pipeline);
 
         let override_m = std::env::var("METALLIC_SAMPLE_PER_THREAD_M")
             .ok()
             .and_then(|s| s.parse::<u32>().ok())
             .filter(|&v| v >= 1);
-        let default_m = k.min(4).max(1);
+        let default_m = select_default_per_thread_m(threads_per_tg, k, per_thread_m_clamp);
         let per_thread_m = override_m.unwrap_or(default_m).min(per_thread_m_clamp).max(1);
+
         let params = SampleParams {
             vocab_size: vocab,
             k,
@@ -96,27 +137,20 @@ impl CustomKernelInvocable for SampleTopKPartialsOp {
             temperature,
             seed,
             per_thread_m,
-            num_threadgroups: num_tgs,
+            num_threadgroups: 1,
         };
 
-        const TG_OUTPUT_K: u32 = 256;
-        // Guarantee the partials buffers scale exactly with num_tgs so merge can infer it
-        let total_elements = num_tgs * TG_OUTPUT_K;
+        let output_token = Tensor::zeros_of_type::<U32>(vec![1], ctx)?;
 
-        let partials_values = Tensor::zeros_of_type::<F32Element>(vec![total_elements as usize], ctx)?;
-
-        let partials_indices = Tensor::zeros_of_type::<U32>(vec![total_elements as usize], ctx)?;
-
-        let op = Box::new(SampleTopKPartials::<T> {
+        let op = Box::new(SampleTopKFused::<T> {
             pipeline,
             input_logits: input_logits.clone(),
-            partials_values: partials_values.clone(),
-            partials_indices: partials_indices.clone(),
+            output_token: output_token.clone(),
             params,
             threads_per_tg,
-            profiler_label: GpuProfilerLabel::new("sample_topk_partials".into(), "Custom".into()),
+            profiler_label: GpuProfilerLabel::new("sample_topk_fused".into(), "Custom".into()),
         });
 
-        Ok((op, (partials_values, partials_indices)))
+        Ok((op, (output_token,)))
     }
 }

@@ -157,6 +157,7 @@ pub enum KernelFunction {
     SoftmaxVec,
     SampleTopKPartials,
     SampleTopKMergeAndSample,
+    SampleTopKFused,
 }
 
 impl KernelFunction {
@@ -194,6 +195,7 @@ impl KernelFunction {
             KernelFunction::SoftmaxVec => KernelLibrary::SoftmaxVec,
             KernelFunction::SampleTopKPartials => KernelLibrary::SampleTopKTopP,
             KernelFunction::SampleTopKMergeAndSample => KernelLibrary::SampleTopKTopP,
+            KernelFunction::SampleTopKFused => KernelLibrary::SampleTopKTopP,
         }
     }
 
@@ -303,6 +305,8 @@ impl KernelFunction {
             (KernelFunction::SampleTopKPartials, F16) => "sample_topk_partials_f16",
             (KernelFunction::SampleTopKMergeAndSample, F32) => "sample_topk_merge_and_sample_f32",
             (KernelFunction::SampleTopKMergeAndSample, F16) => "sample_topk_merge_and_sample_f16",
+            (KernelFunction::SampleTopKFused, F32) => "sample_topk_fused_f32",
+            (KernelFunction::SampleTopKFused, F16) => "sample_topk_fused_f16",
             _ => unimplemented!("Kernel function {:?} not implemented for dtype {:?}", self, dtype),
         };
 

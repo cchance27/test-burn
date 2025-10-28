@@ -17,3 +17,5 @@ experimental
 .vscode
 venv
 *.png
+tools/metal_probes/*.air
+tools/metal_probes/.build

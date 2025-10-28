@@ -537,6 +537,197 @@ func runRegisterTopK(device: MTLDevice, buildDir: URL, queue: MTLCommandQueue) t
 
 // MARK: - Entry
 
+func runUnrolledReductions(device: MTLDevice, buildDir: URL, queue: MTLCommandQueue) throws -> ProbeResult {
+    let libName = "simdgroup_unrolled_reductions"
+    let sumPipeline = try loadPipeline(device: device, buildDir: buildDir, metallibName: libName, kernel: "simdgroup_unrolled_sum")
+    let argmaxPipeline = try loadPipeline(device: device, buildDir: buildDir, metallibName: libName, kernel: "simdgroup_unrolled_argmax")
+
+    let tew = sumPipeline.threadExecutionWidth
+    let maxThreads = min(sumPipeline.maxTotalThreadsPerThreadgroup, argmaxPipeline.maxTotalThreadsPerThreadgroup)
+    let groups = max(1, maxThreads / tew)
+
+    var details: [String] = []
+    var passed = true
+
+    // Sum test: values are lane_id + group*1000. Sum per group is sum_{i=0..tew-1} (i + group*1000)
+    var sumInput = [UInt32]()
+    sumInput.reserveCapacity(tew * groups)
+    var expectedSums = [UInt32](repeating: 0, count: groups)
+    for g in 0..<groups {
+        var acc: UInt32 = 0
+        for lane in 0..<tew {
+            let v = UInt32(g * 1000 + lane)
+            sumInput.append(v)
+            acc &+= v
+        }
+        expectedSums[g] = acc
+    }
+
+    let device = device
+    let queue = queue
+    let sumInBuf = makeBuffer(device: device, data: sumInput)
+    let sumOutBuf = makeZeroBuffer(device: device, count: groups, as: UInt32.self)
+
+    if let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
+        enc.setComputePipelineState(sumPipeline)
+        enc.setBuffer(sumInBuf, offset: 0, index: 0)
+        enc.setBuffer(sumOutBuf, offset: 0, index: 1)
+        let threads = MTLSize(width: tew * groups, height: 1, depth: 1)
+        let tgs = MTLSize(width: 1, height: 1, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: threads)
+        enc.endEncoding()
+        cb.commit(); cb.waitUntilCompleted()
+    } else {
+        throw ProbeHarnessError.commandQueueUnavailable
+    }
+
+    let gotSums: [UInt32] = bufferContents(sumOutBuf, count: groups)
+    for g in 0..<groups {
+        if gotSums[g] != expectedSums[g] {
+            passed = false
+            details.append("[sum] group \(g): expected \(expectedSums[g]), got \(gotSums[g])")
+        }
+    }
+
+    // Argmax test: Put a known max per group at a lane that varies modulo tew, with tie-breaker on index.
+    var argInput = [Float](repeating: -Float.infinity, count: tew * groups)
+    var expectedBestVal = [Float](repeating: 0, count: groups)
+    var expectedBestIdx = [UInt32](repeating: 0, count: groups)
+    var expectedBestLane = [UInt32](repeating: 0, count: groups)
+    for g in 0..<groups {
+        let bestLane = (3 * g + 5) % tew
+        let base = g * tew
+        for lane in 0..<tew {
+            argInput[base + lane] = Float(g * 10 + lane)
+        }
+        argInput[base + bestLane] = 9999.0 // guaranteed max
+        expectedBestVal[g] = 9999.0
+        expectedBestIdx[g] = UInt32(base + bestLane)
+        expectedBestLane[g] = UInt32(bestLane)
+    }
+
+    let argInBuf = makeBuffer(device: device, data: argInput)
+    let outBestVal = makeZeroBuffer(device: device, count: groups, as: Float.self)
+    let outBestIdx = makeZeroBuffer(device: device, count: groups, as: UInt32.self)
+    let outBestLane = makeZeroBuffer(device: device, count: groups, as: UInt32.self)
+
+    if let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
+        enc.setComputePipelineState(argmaxPipeline)
+        enc.setBuffer(argInBuf, offset: 0, index: 0)
+        enc.setBuffer(outBestVal, offset: 0, index: 1)
+        enc.setBuffer(outBestIdx, offset: 0, index: 2)
+        enc.setBuffer(outBestLane, offset: 0, index: 3)
+        let threads = MTLSize(width: tew * groups, height: 1, depth: 1)
+        let tgs = MTLSize(width: 1, height: 1, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: threads)
+        enc.endEncoding()
+        cb.commit(); cb.waitUntilCompleted()
+    } else {
+        throw ProbeHarnessError.commandQueueUnavailable
+    }
+
+    let gotBestVal: [Float] = bufferContents(outBestVal, count: groups)
+    let gotBestIdx: [UInt32] = bufferContents(outBestIdx, count: groups)
+    let gotBestLane: [UInt32] = bufferContents(outBestLane, count: groups)
+
+    for g in 0..<groups {
+        if relativeDiff(gotBestVal[g], expectedBestVal[g]) > 1e-6 || gotBestIdx[g] != expectedBestIdx[g] || gotBestLane[g] != expectedBestLane[g] {
+            passed = false
+            details.append("[argmax] group \(g): expected (\(expectedBestVal[g]), idx=\(expectedBestIdx[g]), lane=\(expectedBestLane[g])) got (\(gotBestVal[g]), idx=\(gotBestIdx[g]), lane=\(gotBestLane[g]))")
+        }
+    }
+
+    return ProbeResult(name: "simdgroup_unrolled_reductions", passed: passed, details: details)
+}
+
+func runQuadlaneReductions(device: MTLDevice, buildDir: URL, queue: MTLCommandQueue) throws -> ProbeResult {
+    let libName = "simdgroup_quadlane_reductions"
+    let sumPipeline = try loadPipeline(device: device, buildDir: buildDir, metallibName: libName, kernel: "simdgroup_quadlane_sum")
+    let argmaxPipeline = try loadPipeline(device: device, buildDir: buildDir, metallibName: libName, kernel: "simdgroup_quadlane_argmax")
+
+    let tew = sumPipeline.threadExecutionWidth
+    let maxThreads = min(sumPipeline.maxTotalThreadsPerThreadgroup, argmaxPipeline.maxTotalThreadsPerThreadgroup)
+    let groups = max(1, maxThreads / tew)
+
+    var details: [String] = []
+    var passed = true
+
+    // Sum test with patterned inputs to stress intra-quad and cross-quad paths.
+    var sumInput = [UInt32]()
+    sumInput.reserveCapacity(tew * groups)
+    var expectedSums = [UInt32](repeating: 0, count: groups)
+    for g in 0..<groups {
+        var acc: UInt32 = 0
+        for lane in 0..<tew {
+            let val: UInt32 = UInt32(((lane % 4) * 10) + (lane / 4) + g * 100)
+            sumInput.append(val)
+            acc &+= val
+        }
+        expectedSums[g] = acc
+    }
+
+    let sumInBuf = makeBuffer(device: device, data: sumInput)
+    let sumOutBuf = makeZeroBuffer(device: device, count: groups, as: UInt32.self)
+
+    if let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
+        enc.setComputePipelineState(sumPipeline)
+        enc.setBuffer(sumInBuf, offset: 0, index: 0)
+        enc.setBuffer(sumOutBuf, offset: 0, index: 1)
+        let threads = MTLSize(width: tew * groups, height: 1, depth: 1)
+        let tgs = MTLSize(width: 1, height: 1, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: threads)
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    } else { throw ProbeHarnessError.commandQueueUnavailable }
+
+    let gotSums: [UInt32] = bufferContents(sumOutBuf, count: groups)
+    for g in 0..<groups { if gotSums[g] != expectedSums[g] { passed = false; details.append("[sum] group \(g): expected \(expectedSums[g]) got \(gotSums[g])") } }
+
+    // Argmax test: Fix a very large value at a lane that cycles per group to force quad boundaries.
+    var argInput = [Float](repeating: -Float.infinity, count: tew * groups)
+    var expectedBestVal = [Float](repeating: 0, count: groups)
+    var expectedBestIdx = [UInt32](repeating: 0, count: groups)
+    var expectedBestLane = [UInt32](repeating: 0, count: groups)
+    for g in 0..<groups {
+        let bestLane = (g * 5 + 1) % tew
+        let base = g * tew
+        for lane in 0..<tew { argInput[base + lane] = Float(lane) + Float(g) * 0.01 }
+        argInput[base + bestLane] = 1e6
+        expectedBestVal[g] = 1e6
+        expectedBestIdx[g] = UInt32(base + bestLane)
+        expectedBestLane[g] = UInt32(bestLane)
+    }
+
+    let argInBuf = makeBuffer(device: device, data: argInput)
+    let outBestVal = makeZeroBuffer(device: device, count: groups, as: Float.self)
+    let outBestIdx = makeZeroBuffer(device: device, count: groups, as: UInt32.self)
+    let outBestLane = makeZeroBuffer(device: device, count: groups, as: UInt32.self)
+
+    if let cb = queue.makeCommandBuffer(), let enc = cb.makeComputeCommandEncoder() {
+        enc.setComputePipelineState(argmaxPipeline)
+        enc.setBuffer(argInBuf, offset: 0, index: 0)
+        enc.setBuffer(outBestVal, offset: 0, index: 1)
+        enc.setBuffer(outBestIdx, offset: 0, index: 2)
+        enc.setBuffer(outBestLane, offset: 0, index: 3)
+        let threads = MTLSize(width: tew * groups, height: 1, depth: 1)
+        let tgs = MTLSize(width: 1, height: 1, depth: 1)
+        enc.dispatchThreadgroups(tgs, threadsPerThreadgroup: threads)
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    } else { throw ProbeHarnessError.commandQueueUnavailable }
+
+    let gotBestVal: [Float] = bufferContents(outBestVal, count: groups)
+    let gotBestIdx: [UInt32] = bufferContents(outBestIdx, count: groups)
+    let gotBestLane: [UInt32] = bufferContents(outBestLane, count: groups)
+
+    for g in 0..<groups {
+        if relativeDiff(gotBestVal[g], expectedBestVal[g]) > 1e-6 || gotBestIdx[g] != expectedBestIdx[g] || gotBestLane[g] != expectedBestLane[g] {
+            passed = false
+            details.append("[argmax] group \(g): expected (\(expectedBestVal[g]), idx=\(expectedBestIdx[g]), lane=\(expectedBestLane[g])) got (\(gotBestVal[g]), idx=\(gotBestIdx[g]), lane=\(gotBestLane[g]))")
+        }
+    }
+
+    return ProbeResult(name: "simdgroup_quadlane_reductions", passed: passed, details: details)
+}
+
 func runHarness(buildDir: URL) throws -> [ProbeResult] {
     guard let device = MTLCreateSystemDefaultDevice() else {
         throw ProbeHarnessError.metalUnavailable
@@ -549,6 +740,8 @@ func runHarness(buildDir: URL) throws -> [ProbeResult] {
     results.append(try runReduceMax(device: device, buildDir: buildDir, queue: queue))
     results.append(try runBallotCompact(device: device, buildDir: buildDir, queue: queue))
     results.append(try runRegisterTopK(device: device, buildDir: buildDir, queue: queue))
+    results.append(try runUnrolledReductions(device: device, buildDir: buildDir, queue: queue))
+    results.append(try runQuadlaneReductions(device: device, buildDir: buildDir, queue: queue))
     return results
 }
 

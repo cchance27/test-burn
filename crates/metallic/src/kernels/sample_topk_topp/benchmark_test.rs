@@ -5,6 +5,7 @@ use std::{
 use metallic_instrumentation::{event::MetricEvent, prelude::*};
 use rustc_hash::FxHashSet;
 use serde::Serialize;
+use serial_test::serial;
 
 use crate::{
     Context, F16Element, MetalError, SamplerBuffers, Tensor, TensorInit, TensorStorage, generation::{gpu_sample_top_k_top_p, sample_top_k_top_p}, kernels::elemwise_add::ElemwiseAddOp
@@ -88,6 +89,13 @@ struct KernelDispatchRecord {
     thread_groups: (u32, u32, u32),
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct FailedGpuConfig {
+    threads_per_tg: usize,
+    per_thread_m: u32,
+    error: String,
+}
+
 #[derive(Debug, Serialize)]
 struct BenchmarkSnapshot {
     vocab_size: usize,
@@ -107,9 +115,11 @@ struct BenchmarkSnapshot {
     gpu_iterations: usize,
     metrics_jsonl_path: String,
     dispatch_records: Vec<KernelDispatchRecord>,
+    failed_gpu_configs: Vec<FailedGpuConfig>,
 }
 
 #[test]
+#[serial]
 fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
     let _profiling_env = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
     reset_app_config_for_tests();
@@ -137,6 +147,30 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         let _metric_bypass = MetricQueueBypassGuard::new();
         let mut ctx = Context::new()?;
         ctx.force_enable_profiling_for_tests();
+
+        struct EnvVarGuard {
+            key: &'static str,
+            previous: Option<String>,
+        }
+
+        impl EnvVarGuard {
+            fn set(key: &'static str, value: String) -> Self {
+                let previous = std::env::var(key).ok();
+                unsafe {
+                    std::env::set_var(key, value);
+                }
+                Self { key, previous }
+            }
+        }
+
+        impl Drop for EnvVarGuard {
+            fn drop(&mut self) {
+                match &self.previous {
+                    Some(value) => unsafe { std::env::set_var(self.key, value) },
+                    None => unsafe { std::env::remove_var(self.key) },
+                }
+            }
+        }
 
         let vocab_size = 100_000usize;
         let k = 50usize;
@@ -185,7 +219,6 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         for i in 0..cpu_iterations {
             let staged = ctx.call::<ElemwiseAddOp>((cpu_logits.clone(), ones.clone()))?;
             ctx.synchronize();
-
             let start = Instant::now();
             let logits_slice = staged.as_slice();
             let vocab_logits = &logits_slice[..vocab_size];
@@ -200,71 +233,113 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         let cpu_total_stats = DurationStats::from_slice(&cpu_total_times);
 
         println!("Starting GPU sampling benchmark (no GPU->CPU sync for logits)...");
-        let sweep_configs: &[(usize, u32)] = &[(128, 2), (128, 3), (128, 4), (256, 2), (256, 3), (256, 4)];
+        let max_threads_per_tg = ctx.max_threads_per_threadgroup().max(128);
+        let candidate_threadgroups = [128usize, 192, 256, 320, 352, 384, 448, 512, 640, 768, 896, 1024];
 
-        let gpu_iterations = 300;
-        let gpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
-        let mut best_gpu_stats = None;
-        let mut best_config = None;
-
-        for &(cfg_tptg, cfg_m) in sweep_configs {
-            unsafe { std::env::set_var("METALLIC_SAMPLE_TPTG", cfg_tptg.to_string()) };
-            unsafe { std::env::set_var("METALLIC_SAMPLE_PER_THREAD_M", cfg_m.to_string()) };
-
-            let mut gpu_times = Vec::with_capacity(gpu_iterations);
-            for i in 0..gpu_iterations {
-                let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()))?;
-                ctx.synchronize();
-
-                let start = Instant::now();
-                let _gpu_token = ctx.with_gpu_scope("sample_topk_topp_benchmark", |ctx| {
-                    gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, ctx)
-                })?;
-                gpu_times.push(start.elapsed());
-
-                if i % 25 == 0 {
-                    ctx.reset_pool();
-                }
+        let mut sweep_configs = Vec::new();
+        for &threads_per_tg in &candidate_threadgroups {
+            if threads_per_tg > max_threads_per_tg {
+                continue;
             }
 
-            let stats = DurationStats::from_slice(&gpu_times);
-            println!(
-                "GPU config tptg={} per_thread_m={} avg={:.3}µs p95={:.3}µs stddev={:.3}µs",
-                cfg_tptg, cfg_m, stats.avg_us, stats.p95_us, stats.stddev_us
-            );
+            let (min_m, max_m) = match threads_per_tg {
+                0..=128 => (2u32, 8u32),
+                129..=192 => (4, 8),
+                193..=256 => (2, 8),
+                257..=320 => (4, 8),
+                321..=352 => (4, 8),
+                353..=384 => (4, 7),
+                _ => (4, 6),
+            };
 
-            println!(
-                "GPU config JSON: {}",
-                serde_json::to_string(&serde_json::json!({
-                    "threads_per_tg": cfg_tptg,
-                    "per_thread_m": cfg_m,
-                    "stats": {
-                        "avg_us": stats.avg_us,
-                        "min_us": stats.min_us,
-                        "max_us": stats.max_us,
-                        "p50_us": stats.p50_us,
-                        "p95_us": stats.p95_us,
-                        "stddev_us": stats.stddev_us,
-                    }
-                }))
-                .unwrap()
-            );
-
-            if best_gpu_stats
-                .as_ref()
-                .map(|best: &DurationStats| stats.avg_us < best.avg_us)
-                .unwrap_or(true)
-            {
-                best_gpu_stats = Some(stats.clone());
-                best_config = Some((cfg_tptg, cfg_m));
+            for per_thread_m in min_m..=max_m {
+                sweep_configs.push((threads_per_tg, per_thread_m));
             }
         }
 
-        unsafe { std::env::remove_var("METALLIC_SAMPLE_TPTG") };
-        unsafe { std::env::remove_var("METALLIC_SAMPLE_PER_THREAD_M") };
+        if sweep_configs.is_empty() {
+            sweep_configs.extend([(128usize, 2u32), (128, 3), (128, 4)]);
+        }
 
-        let best_gpu_stats = best_gpu_stats.expect("sweep returned stats");
-        let (best_tptg, best_m) = best_config.expect("sweep returned config");
+        let gpu_iterations = 1000;
+        let gpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
+        let mut best_gpu_stats = None;
+        let mut best_config = None;
+        let mut failed_configs = Vec::new();
+
+        for (cfg_tptg, cfg_m) in sweep_configs.into_iter() {
+            let config_result = (|| -> Result<DurationStats, MetalError> {
+                let _tptg_guard = EnvVarGuard::set("METALLIC_SAMPLE_TPTG", cfg_tptg.to_string());
+                let _m_guard = EnvVarGuard::set("METALLIC_SAMPLE_PER_THREAD_M", cfg_m.to_string());
+
+                let mut gpu_times = Vec::with_capacity(gpu_iterations);
+                for i in 0..gpu_iterations {
+                    let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()))?;
+                    ctx.synchronize();
+
+                    let start = Instant::now();
+                    let _gpu_token = ctx.with_gpu_scope("sample_topk_topp_benchmark", |ctx| {
+                        gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, ctx)
+                    })?;
+                    gpu_times.push(start.elapsed());
+
+                    if i % 25 == 0 {
+                        ctx.reset_pool();
+                    }
+                }
+
+                Ok(DurationStats::from_slice(&gpu_times))
+            })();
+
+            match config_result {
+                Ok(stats) => {
+                    println!(
+                        "GPU config tptg={} per_thread_m={} avg={:.3}µs p95={:.3}µs stddev={:.3}µs",
+                        cfg_tptg, cfg_m, stats.avg_us, stats.p95_us, stats.stddev_us
+                    );
+
+                    println!(
+                        "GPU config JSON: {}",
+                        serde_json::to_string(&serde_json::json!({
+                            "threads_per_tg": cfg_tptg,
+                            "per_thread_m": cfg_m,
+                            "stats": {
+                                "avg_us": stats.avg_us,
+                                "min_us": stats.min_us,
+                                "max_us": stats.max_us,
+                                "p50_us": stats.p50_us,
+                                "p95_us": stats.p95_us,
+                                "stddev_us": stats.stddev_us,
+                            }
+                        }))
+                        .unwrap()
+                    );
+
+                    if best_gpu_stats
+                        .as_ref()
+                        .map(|best: &DurationStats| stats.avg_us < best.avg_us)
+                        .unwrap_or(true)
+                    {
+                        best_gpu_stats = Some(stats.clone());
+                        best_config = Some((cfg_tptg, cfg_m));
+                    }
+                }
+                Err(err) => {
+                    println!("GPU config tptg={} per_thread_m={} failed: {err}", cfg_tptg, cfg_m);
+                    failed_configs.push(FailedGpuConfig {
+                        threads_per_tg: cfg_tptg,
+                        per_thread_m: cfg_m,
+                        error: err.to_string(),
+                    });
+                }
+            }
+
+            ctx.reset_pool();
+        }
+
+        let best_gpu_stats =
+            best_gpu_stats.ok_or_else(|| MetalError::OperationFailed("GPU sweep returned no successful configurations".to_string()))?;
+        let (best_tptg, best_m) = best_config.expect("best config missing");
         println!(
             "Best GPU config tptg={} per_thread_m={} avg={:.3}µs",
             best_tptg, best_m, best_gpu_stats.avg_us
@@ -323,6 +398,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         let mut seen_dispatch = FxHashSet::default();
         let mut partial_count = 0usize;
         let mut merge_count = 0usize;
+        let mut fused_count = 0usize;
 
         for event in &metric_events {
             match &event.event {
@@ -344,6 +420,8 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
                         partial_count += 1;
                     } else if op_name.contains("sample_topk_merge_and_sample") {
                         merge_count += 1;
+                    } else if op_name.contains("sample_topk_fused") {
+                        fused_count += 1;
                     }
                 }
                 _ => {}
@@ -351,7 +429,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         }
 
         assert!(
-            partial_count > 0 && merge_count > 0,
+            (partial_count > 0 && merge_count > 0) || fused_count > 0,
             "expected sample_topk kernels to emit GPU completion metrics"
         );
 
@@ -373,6 +451,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
             gpu_iterations,
             metrics_jsonl_path: metrics_path_display,
             dispatch_records,
+            failed_gpu_configs: failed_configs,
         };
 
         println!("Benchmark snapshot (JSON):\n{}", serde_json::to_string_pretty(&snapshot).unwrap());

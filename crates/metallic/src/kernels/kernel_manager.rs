@@ -142,6 +142,10 @@ impl KernelManager {
             let source_ns = NSString::from_str(source);
             let options = MTLCompileOptions::new();
             options.setLanguageVersion(MTLLanguageVersion::Version4_0);
+
+            #[cfg(debug_assertions)]
+            options.setEnableLogging(true);
+
             let lib = device
                 .newLibraryWithSource_options_error(&source_ns, Some(&options))
                 .map_err(|err| MetalError::LibraryCompilationFailed(err.to_string()))?;
