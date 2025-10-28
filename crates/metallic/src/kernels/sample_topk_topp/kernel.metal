@@ -34,6 +34,7 @@ constant uint TG_OUTPUT_K = 256;
 constant uint MIN_SIMDGROUP_SIZE = 32;
 constant uint MAX_SIMDGROUP_SIZE = 64;
 constant uint MAX_SIMDGROUPS = MAX_TPTG / MIN_SIMDGROUP_SIZE;
+constant uint TG_MERGE_CAP = 4032;
 
 // Min-heap functions
 inline void heap_sift_down(thread LogitPair* heap, uint size, uint pos) {
@@ -108,9 +109,7 @@ kernel void sample_topk_partials_##SUFFIX( \
     \
     constexpr uint MAX_LANE_HEAP = 4; \
     constexpr uint SIMDGROUP_SHORTLIST = 64; \
-    constexpr uint SIMDGROUP_CANDIDATE_CAP = MAX_SIMDGROUP_SIZE * MAX_LANE_HEAP; \
     constexpr uint SIMDGROUP_SHORTLIST_CAP = MAX_SIMDGROUPS * SIMDGROUP_SHORTLIST; \
-    constexpr uint SIMDGROUP_CANDIDATE_CAP_TOTAL = MAX_SIMDGROUPS * SIMDGROUP_CANDIDATE_CAP; \
     \
     LogitPair lane_heap[MAX_LANE_HEAP]; \
     const uint lane_target = min(M, (uint)MAX_LANE_HEAP); \
@@ -162,48 +161,96 @@ kernel void sample_topk_partials_##SUFFIX( \
     const uint simd_group_id = simd_group_in_tg; \
     const uint simd_group_count = (tptg + simd_width - 1) / simd_width; \
     \
-    threadgroup LogitPair sg_candidates[SIMDGROUP_CANDIDATE_CAP_TOTAL]; \
     threadgroup LogitPair sg_shortlists[SIMDGROUP_SHORTLIST_CAP]; \
-    for (uint idx = tid; idx < SIMDGROUP_CANDIDATE_CAP_TOTAL; idx += tptg) { \
-        sg_candidates[idx] = LogitPair{-INFINITY, 0u}; \
+    threadgroup uint sg_counts[MAX_SIMDGROUPS]; \
+    threadgroup uint sg_offsets[MAX_SIMDGROUPS]; \
+    threadgroup uint shortlist_total_entries; \
+    if (tid < MAX_SIMDGROUPS) { \
+        sg_counts[tid] = 0u; \
+        sg_offsets[tid] = 0u; \
     } \
-    for (uint idx = tid; idx < SIMDGROUP_SHORTLIST_CAP; idx += tptg) { \
-        sg_shortlists[idx] = LogitPair{-INFINITY, 0u}; \
-    } \
-    threadgroup_barrier(mem_flags::mem_threadgroup); \
-    \
-    if (simd_group_id < MAX_SIMDGROUPS) { \
-        const uint lane_base = simd_group_id * SIMDGROUP_CANDIDATE_CAP + simd_lane * MAX_LANE_HEAP; \
-        for (uint m = 0; m < MAX_LANE_HEAP; ++m) { \
-            const uint idx = lane_base + m; \
-            if (idx < SIMDGROUP_CANDIDATE_CAP_TOTAL) { \
-                sg_candidates[idx] = (m < lane_heap_size) ? lane_heap[m] : LogitPair{-INFINITY, 0u}; \
-            } \
-        } \
+    if (tid == 0) { \
+        shortlist_total_entries = 0u; \
     } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
     \
-    if (simd_group_id < min(simd_group_count, (uint)MAX_SIMDGROUPS) && simd_lane == 0) { \
-        LogitPair sg_heap[SIMDGROUP_SHORTLIST]; \
-        uint sg_heap_size = 0; \
-        const uint shortlist_base = simd_group_id * SIMDGROUP_SHORTLIST; \
-        const uint candidate_base = simd_group_id * SIMDGROUP_CANDIDATE_CAP; \
-        const uint lanes_in_group = min(simd_width, tptg - simd_group_id * simd_width); \
-        const uint candidate_count = min(lanes_in_group * MAX_LANE_HEAP, (uint)SIMDGROUP_CANDIDATE_CAP); \
-        for (uint i = 0; i < candidate_count; ++i) { \
-            const uint idx = candidate_base + i; \
-            if (idx < SIMDGROUP_CANDIDATE_CAP_TOTAL) { \
-                const LogitPair cand = sg_candidates[idx]; \
-                if (isfinite(cand.value) && cand.index < V) { \
-                    heap_insert(sg_heap, &sg_heap_size, SIMDGROUP_SHORTLIST, cand.value, cand.index); \
-                } \
+    uint lane_count = lane_heap_size; \
+    for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+        lane_count += simd_shuffle_down(lane_count, offset); \
+    } \
+    const uint total_candidates = simd_broadcast_first(lane_count); \
+    const uint groups_active = min(simd_group_count, (uint)MAX_SIMDGROUPS); \
+    const uint per_group_quota = ((params.k + groups_active - 1u) / max(groups_active, 1u)) * 2u; \
+    const uint min_quota = max(max(lane_target, 1u), 16u); \
+    const uint shortlist_limit = clamp(max(per_group_quota, min_quota), min_quota, (uint)SIMDGROUP_SHORTLIST); \
+    const uint shortlist_target = min(shortlist_limit, total_candidates); \
+    \
+    uint lane_cursor = 0; \
+    LogitPair sg_local[SIMDGROUP_SHORTLIST]; \
+    uint sg_count = 0; \
+    \
+    for (uint iter = 0; iter < shortlist_target; ++iter) { \
+        const bool has_candidate = lane_cursor < lane_heap_size; \
+        float candidate_val = has_candidate ? lane_heap[lane_cursor].value : -INFINITY; \
+        uint candidate_idx = has_candidate ? lane_heap[lane_cursor].index : 0u; \
+        \
+        float best_val = candidate_val; \
+        uint best_idx = candidate_idx; \
+        uint best_lane = simd_lane; \
+        \
+        for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+            float other_val = simd_shuffle_down(best_val, offset); \
+            uint other_idx = simd_shuffle_down(best_idx, offset); \
+            uint other_lane = simd_shuffle_down(best_lane, offset); \
+            const bool take_other = (other_val > best_val) || ((other_val == best_val) && (other_idx < best_idx)); \
+            if (take_other) { \
+                best_val = other_val; \
+                best_idx = other_idx; \
+                best_lane = other_lane; \
             } \
         } \
-        heap_to_sorted(sg_heap, sg_heap_size); \
-        for (uint i = 0; i < SIMDGROUP_SHORTLIST; ++i) { \
-            const uint idx = shortlist_base + i; \
-            if (idx < SIMDGROUP_SHORTLIST_CAP) { \
-                sg_shortlists[idx] = (i < sg_heap_size) ? sg_heap[i] : LogitPair{-INFINITY, 0u}; \
+        \
+        best_val = simd_broadcast_first(best_val); \
+        best_idx = simd_broadcast_first(best_idx); \
+        best_lane = simd_broadcast_first(best_lane); \
+        \
+        if (!isfinite(best_val)) { \
+            break; \
+        } \
+        \
+        if (simd_lane == best_lane && has_candidate) { \
+            lane_cursor += 1; \
+        } \
+        \
+        if (simd_lane == 0 && sg_count < SIMDGROUP_SHORTLIST) { \
+            sg_local[sg_count] = LogitPair{best_val, best_idx}; \
+            sg_count += 1; \
+        } \
+    } \
+    \
+    const bool sg_is_valid = simd_group_id < groups_active; \
+    if (simd_lane == 0 && sg_is_valid) { \
+        sg_counts[simd_group_id] = sg_count; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    if (tid == 0) { \
+        uint offset = 0; \
+        for (uint sg = 0; sg < groups_active; ++sg) { \
+            const uint count = sg_counts[sg]; \
+            sg_offsets[sg] = offset; \
+            offset += count; \
+        } \
+        shortlist_total_entries = offset; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    if (simd_lane == 0 && sg_is_valid) { \
+        const uint base = sg_offsets[simd_group_id]; \
+        for (uint i = 0; i < sg_count; ++i) { \
+            const uint dst = base + i; \
+            if (dst < SIMDGROUP_SHORTLIST_CAP) { \
+                sg_shortlists[dst] = sg_local[i]; \
             } \
         } \
     } \
@@ -213,13 +260,11 @@ kernel void sample_topk_partials_##SUFFIX( \
         const uint out_k = min(params.k, TG_OUTPUT_K); \
         LogitPair final_heap[TG_OUTPUT_K]; \
         uint final_heap_size = 0; \
-        const uint shortlist_total = min(simd_group_count, (uint)MAX_SIMDGROUPS) * SIMDGROUP_SHORTLIST; \
+        const uint shortlist_total = min(shortlist_total_entries, (uint)SIMDGROUP_SHORTLIST_CAP); \
         for (uint i = 0; i < shortlist_total; ++i) { \
-            if (i < SIMDGROUP_SHORTLIST_CAP) { \
-                const LogitPair cand = sg_shortlists[i]; \
-                if (isfinite(cand.value) && cand.index < V) { \
-                    heap_insert(final_heap, &final_heap_size, out_k, cand.value, cand.index); \
-                } \
+            const LogitPair cand = sg_shortlists[i]; \
+            if (isfinite(cand.value) && cand.index < V) { \
+                heap_insert(final_heap, &final_heap_size, out_k, cand.value, cand.index); \
             } \
         } \
         heap_to_sorted(final_heap, final_heap_size); \
@@ -237,6 +282,7 @@ kernel void sample_topk_partials_##SUFFIX( \
 }
 
 // Merge kernel - NO ENTROPY HASHING, use seed directly
+
 #define DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL(SCALAR, ACCUM, SUFFIX) \
 kernel void sample_topk_merge_and_sample_##SUFFIX( \
     device float*         partials_values    [[buffer(0)]], \
@@ -244,7 +290,11 @@ kernel void sample_topk_merge_and_sample_##SUFFIX( \
     device uint*          out_token          [[buffer(2)]], \
     constant SampleParams& params            [[buffer(3)]], \
     uint tid                                  [[thread_position_in_threadgroup]], \
-    uint tcount                               [[threads_per_threadgroup]] \
+    uint tcount                               [[threads_per_threadgroup]], \
+    uint tg_id                                [[threadgroup_position_in_grid]], \
+    uint simd_lane_id                         [[thread_index_in_simdgroup]], \
+    uint simd_group_in_tg                     [[simdgroup_index_in_threadgroup]], \
+    uint simd_width_attr                      [[threads_per_simdgroup]] \
 ) { \
     const uint V       = params.vocab_size; \
     const uint K_req   = (params.k == 0u) ? 1u : params.k; \
@@ -254,7 +304,9 @@ kernel void sample_topk_merge_and_sample_##SUFFIX( \
     const uint N_cand = num_tgs * TG_OUTPUT_K; \
     \
     constexpr uint PER_THREAD_K = 16; \
-    const uint local_k = min(K, (uint)PER_THREAD_K); \
+    const uint requested_k = min(K, (uint)PER_THREAD_K); \
+    const uint max_slots_per_thread = max(1u, (uint)(TG_MERGE_CAP / tcount)); \
+    const uint heap_capacity = max(1u, min(requested_k, max_slots_per_thread)); \
     LogitPair local_heap[PER_THREAD_K]; \
     uint local_heap_size = 0; \
     \
@@ -262,96 +314,499 @@ kernel void sample_topk_merge_and_sample_##SUFFIX( \
         float v = partials_values[i]; \
         uint idx = partials_indices[i]; \
         if (idx < V && isfinite(v)) { \
-            heap_insert(local_heap, &local_heap_size, local_k, v, idx); \
+            heap_insert(local_heap, &local_heap_size, heap_capacity, v, idx); \
         } \
     } \
     \
     heap_to_sorted(local_heap, local_heap_size); \
     \
-    threadgroup LogitPair tg_shared[4096]; \
-    for (uint i = 0; i < local_k; ++i) { \
-        const uint sidx = tid * local_k + i; \
-        if (sidx < 4096) { \
+    threadgroup LogitPair tg_shared[TG_MERGE_CAP]; \
+    threadgroup LogitPair sg_best_vals[MAX_SIMDGROUPS]; \
+    threadgroup uint sg_best_slots[MAX_SIMDGROUPS]; \
+    threadgroup float sg_reduce_scalars[MAX_SIMDGROUPS]; \
+    threadgroup uint selection_count_shared; \
+    \
+    const uint output_base = tg_id * TG_OUTPUT_K; \
+    device float* shortlist_vals = partials_values + output_base; \
+    device uint*  shortlist_indices = partials_indices + output_base; \
+    \
+    for (uint i = 0; i < heap_capacity; ++i) { \
+        const uint sidx = tid * heap_capacity + i; \
+        if (sidx < TG_MERGE_CAP) { \
             tg_shared[sidx] = (i < local_heap_size) ? local_heap[i] : LogitPair{-INFINITY, 0u}; \
         } \
     } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
     \
+    const uint usable_candidates = min(tcount * heap_capacity, (uint)TG_MERGE_CAP); \
+    const uint simd_width = clamp(simd_width_attr, (uint)MIN_SIMDGROUP_SIZE, (uint)MAX_SIMDGROUP_SIZE); \
+    const uint simd_lane = simd_lane_id; \
+    const uint simd_group_id = simd_group_in_tg; \
+    const uint simd_group_count = (tcount + simd_width - 1) / simd_width; \
+    constexpr uint INVALID_SLOT = 0xffffffffu; \
+    \
     if (tid == 0) { \
-        constexpr uint FINAL_K = 256; \
-        const uint final_k = min((uint)FINAL_K, max(K, 2u * params.k)); \
-        LogitPair global_heap[FINAL_K]; \
-        uint global_heap_size = 0; \
-        \
-        const uint total = min(tcount * local_k, (uint)4096); \
-        for (uint i = 0; i < total; ++i) { \
-            if (isfinite(tg_shared[i].value)) { \
-                heap_insert(global_heap, &global_heap_size, final_k, tg_shared[i].value, tg_shared[i].index); \
+        selection_count_shared = 0u; \
+    } \
+    if (tid < simd_group_count && tid < MAX_SIMDGROUPS) { \
+        sg_best_slots[tid] = INVALID_SLOT; \
+        sg_best_vals[tid] = LogitPair{-INFINITY, 0u}; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    constexpr uint FINAL_K = 256; \
+    const uint selection_budget = min((uint)FINAL_K, max(K, 2u * params.k)); \
+    for (uint iter = 0; iter < selection_budget; ++iter) { \
+        float local_best_val = -INFINITY; \
+        uint local_best_idx = 0u; \
+        uint local_best_slot = INVALID_SLOT; \
+        for (uint slot = tid; slot < usable_candidates; slot += tcount) { \
+            const LogitPair cand = tg_shared[slot]; \
+            if (cand.index < V && isfinite(cand.value)) { \
+                const bool take = (local_best_slot == INVALID_SLOT) || \
+                                  (cand.value > local_best_val) || \
+                                  ((cand.value == local_best_val) && (cand.index < local_best_idx)); \
+                if (take) { \
+                    local_best_val = cand.value; \
+                    local_best_idx = cand.index; \
+                    local_best_slot = slot; \
+                } \
             } \
         } \
-        \
-        heap_to_sorted(global_heap, global_heap_size); \
-        \
-        if (global_heap_size == 0) { \
+        float sg_best_val = local_best_val; \
+        uint sg_best_idx = local_best_idx; \
+        uint sg_best_slot = local_best_slot; \
+        for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+            float other_val = simd_shuffle_down(sg_best_val, offset); \
+            uint other_idx = simd_shuffle_down(sg_best_idx, offset); \
+            uint other_slot = simd_shuffle_down(sg_best_slot, offset); \
+            const bool take_other = (other_slot != INVALID_SLOT) && \
+                                    ((sg_best_slot == INVALID_SLOT) || \
+                                     (other_val > sg_best_val) || \
+                                     ((other_val == sg_best_val) && (other_idx < sg_best_idx))); \
+            if (take_other) { \
+                sg_best_val = other_val; \
+                sg_best_idx = other_idx; \
+                sg_best_slot = other_slot; \
+            } \
+        } \
+        if (simd_lane == 0 && simd_group_id < MAX_SIMDGROUPS) { \
+            sg_best_vals[simd_group_id] = (sg_best_slot != INVALID_SLOT) ? LogitPair{sg_best_val, sg_best_idx} : LogitPair{-INFINITY, 0u}; \
+            sg_best_slots[simd_group_id] = sg_best_slot; \
+        } \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        if (tid == 0) { \
+            LogitPair chosen = LogitPair{-INFINITY, 0u}; \
+            uint chosen_slot = INVALID_SLOT; \
+            for (uint sg = 0; sg < simd_group_count && sg < MAX_SIMDGROUPS; ++sg) { \
+                const uint candidate_slot = sg_best_slots[sg]; \
+                const LogitPair candidate = sg_best_vals[sg]; \
+                const bool take_candidate = (candidate_slot != INVALID_SLOT) && \
+                                            ((chosen_slot == INVALID_SLOT) || \
+                                             (candidate.value > chosen.value) || \
+                                             ((candidate.value == chosen.value) && (candidate.index < chosen.index))); \
+                if (take_candidate) { \
+                    chosen = candidate; \
+                    chosen_slot = candidate_slot; \
+                } \
+            } \
+            if (chosen_slot == INVALID_SLOT) { \
+                break; \
+            } \
+            if (selection_count_shared < selection_budget) { \
+                shortlist_vals[selection_count_shared] = chosen.value; \
+                shortlist_indices[selection_count_shared] = chosen.index; \
+                selection_count_shared += 1; \
+            } \
+            if (chosen_slot < TG_MERGE_CAP) { \
+                tg_shared[chosen_slot].value = -INFINITY; \
+            } \
+        } \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    const uint selection_count = min(selection_count_shared, selection_budget); \
+    if (selection_count == 0) { \
+        if (tid == 0) { \
+            shortlist_vals[0] = -INFINITY; \
+            shortlist_indices[0] = 0u; \
             out_token[0] = 0u; \
-            return; \
+            for (uint i = 1; i < TG_OUTPUT_K; ++i) { \
+                shortlist_vals[i] = -INFINITY; \
+                shortlist_indices[i] = 0u; \
+            } \
         } \
-        \
-        float maxv = global_heap[0].value; \
-        float sum = 0.0f; \
-        for (uint i = 0; i < global_heap_size; ++i) { \
-            float e = exp(global_heap[i].value - maxv); \
-            global_heap[i].value = e; \
-            sum += e; \
+        return; \
+    } \
+    \
+    float local_max = -INFINITY; \
+    for (uint i = tid; i < selection_count; i += tcount) { \
+        local_max = fmax(local_max, shortlist_vals[i]); \
+    } \
+    float sg_max = local_max; \
+    for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+        sg_max = fmax(sg_max, simd_shuffle_down(sg_max, offset)); \
+    } \
+    if (simd_lane == 0 && simd_group_id < MAX_SIMDGROUPS) { \
+        sg_reduce_scalars[simd_group_id] = sg_max; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    float maxv = -INFINITY; \
+    if (tid == 0) { \
+        for (uint sg = 0; sg < simd_group_count && sg < MAX_SIMDGROUPS; ++sg) { \
+            maxv = fmax(maxv, sg_reduce_scalars[sg]); \
         } \
-        \
-        if (sum <= 0.0f || !isfinite(sum)) { \
-            out_token[0] = global_heap[0].index; \
-            return; \
+        sg_reduce_scalars[0] = maxv; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    maxv = sg_reduce_scalars[0]; \
+    \
+    float local_sum = 0.0f; \
+    for (uint i = tid; i < selection_count; i += tcount) { \
+        const float e = exp(shortlist_vals[i] - maxv); \
+        shortlist_vals[i] = e; \
+        local_sum += e; \
+    } \
+    float sg_sum = local_sum; \
+    for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+        sg_sum += simd_shuffle_down(sg_sum, offset); \
+    } \
+    if (simd_lane == 0 && simd_group_id < MAX_SIMDGROUPS) { \
+        sg_reduce_scalars[simd_group_id] = sg_sum; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    float total_sum = 0.0f; \
+    if (tid == 0) { \
+        for (uint sg = 0; sg < simd_group_count && sg < MAX_SIMDGROUPS; ++sg) { \
+            total_sum += sg_reduce_scalars[sg]; \
         } \
-        \
+        sg_reduce_scalars[0] = total_sum; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    total_sum = sg_reduce_scalars[0]; \
+    \
+    if (total_sum <= 0.0f || !isfinite(total_sum)) { \
+        if (tid == 0) { \
+            const uint fallback = shortlist_indices[0] < V ? shortlist_indices[0] : 0u; \
+            out_token[0] = fallback; \
+            shortlist_vals[0] = 1.0f; \
+            for (uint i = 1; i < TG_OUTPUT_K; ++i) { \
+                shortlist_vals[i] = 0.0f; \
+                shortlist_indices[i] = 0u; \
+            } \
+        } \
+        return; \
+    } \
+    \
+    if (tid == 0) { \
         float cumulative = 0.0f; \
-        uint cutoff = global_heap_size - 1; \
+        uint cutoff = selection_count - 1; \
         float cutoff_sum = 0.0f; \
-        for (uint i = 0; i < global_heap_size; ++i) { \
-            float prob = global_heap[i].value / sum; \
+        for (uint i = 0; i < selection_count; ++i) { \
+            float prob = shortlist_vals[i] / total_sum; \
             cumulative += prob; \
-            global_heap[i].value = prob; \
+            shortlist_vals[i] = prob; \
             if (cumulative >= static_cast<float>(top_p)) { \
                 cutoff = i; \
                 cutoff_sum = cumulative; \
                 break; \
             } \
         } \
-        if (cutoff == global_heap_size - 1 && cutoff_sum == 0.0f) { \
+        if (cutoff == selection_count - 1 && cutoff_sum == 0.0f) { \
             cutoff_sum = cumulative; \
         } \
         const float renorm = (cutoff_sum > 0.0f && isfinite(cutoff_sum)) ? (1.0f / cutoff_sum) : 1.0f; \
         for (uint i = 0; i <= cutoff; ++i) { \
-            global_heap[i].value *= renorm; \
+            shortlist_vals[i] *= renorm; \
         } \
-        \
         RNG rng; \
         rng.seed(params.seed); \
         float r = rng.next(); \
-        \
         float acc = 0.0f; \
-        uint chosen = global_heap[0].index; \
+        uint chosen = shortlist_indices[0]; \
         for (uint i = 0; i <= cutoff; ++i) { \
-            acc += global_heap[i].value; \
+            acc += shortlist_vals[i]; \
             if (r <= acc) { \
-                chosen = global_heap[i].index; \
+                chosen = shortlist_indices[i]; \
                 break; \
             } \
         } \
         if (chosen >= V) { \
-            chosen = V > 0 ? (V - 1) : 0; \
+            chosen = (V > 0) ? (V - 1) : 0; \
         } \
         out_token[0] = chosen; \
+        for (uint i = cutoff + 1; i < selection_count; ++i) { \
+            shortlist_vals[i] = 0.0f; \
+        } \
+        for (uint i = selection_count; i < TG_OUTPUT_K; ++i) { \
+            shortlist_vals[i] = -INFINITY; \
+            shortlist_indices[i] = 0u; \
+        } \
     } \
 }
 
 FOR_EACH_FLOAT_TYPE(DEFINE_SAMPLE_TOPK_PARTIALS_KERNEL)
 FOR_EACH_FLOAT_TYPE(DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL)
-#define SIMDGROUP_CANDIDATE_CAP (MAX_SIMDGROUP_SIZE * MAX_LANE_HEAP)
-#define SIMDGROUP_CANDIDATE_CAP_TOTAL (MAX_SIMDGROUPS * SIMDGROUP_CANDIDATE_CAP)
+#define DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL(SCALAR, ACCUM, SUFFIX) \
+kernel void sample_topk_merge_and_sample_##SUFFIX( \
+    device float*         partials_values    [[buffer(0)]], \
+    device uint*          partials_indices   [[buffer(1)]], \
+    device uint*          out_token          [[buffer(2)]], \
+    constant SampleParams& params            [[buffer(3)]], \
+    uint tid                                  [[thread_position_in_threadgroup]], \
+    uint tcount                               [[threads_per_threadgroup]], \
+    uint tg_id                                [[threadgroup_position_in_grid]], \
+    uint simd_lane_id                         [[thread_index_in_simdgroup]], \
+    uint simd_group_in_tg                     [[simdgroup_index_in_threadgroup]], \
+    uint simd_width_attr                      [[threads_per_simdgroup]] \
+) { \
+    const uint V       = params.vocab_size; \
+    const uint K_req   = (params.k == 0u) ? 1u : params.k; \
+    const uint K       = min(K_req, V); \
+    const ACCUM top_p  = clamp(static_cast<ACCUM>(params.top_p), static_cast<ACCUM>(0.0f), static_cast<ACCUM>(1.0f)); \
+    const uint num_tgs = params.num_threadgroups; \
+    const uint N_cand = num_tgs * TG_OUTPUT_K; \
+    \
+    constexpr uint PER_THREAD_K = 16; \
+    const uint requested_k = min(K, (uint)PER_THREAD_K); \
+    const uint max_slots_per_thread = max(1u, (uint)(TG_MERGE_CAP / tcount)); \
+    const uint heap_capacity = max(1u, min(requested_k, max_slots_per_thread)); \
+    LogitPair local_heap[PER_THREAD_K]; \
+    uint local_heap_size = 0; \
+    \
+    for (uint i = tid; i < N_cand; i += tcount) { \
+        float v = partials_values[i]; \
+        uint idx = partials_indices[i]; \
+        if (idx < V && isfinite(v)) { \
+            heap_insert(local_heap, &local_heap_size, heap_capacity, v, idx); \
+        } \
+    } \
+    \
+    heap_to_sorted(local_heap, local_heap_size); \
+    \
+    threadgroup LogitPair tg_shared[TG_MERGE_CAP]; \
+    threadgroup LogitPair sg_best_vals[MAX_SIMDGROUPS]; \
+    threadgroup uint sg_best_slots[MAX_SIMDGROUPS]; \
+    threadgroup float sg_reduce_scalars[MAX_SIMDGROUPS]; \
+    threadgroup uint selection_count_shared; \
+    \
+    const uint output_base = tg_id * TG_OUTPUT_K; \
+    device float* shortlist_vals = partials_values + output_base; \
+    device uint*  shortlist_indices = partials_indices + output_base; \
+    \
+    for (uint i = 0; i < heap_capacity; ++i) { \
+        const uint sidx = tid * heap_capacity + i; \
+        if (sidx < TG_MERGE_CAP) { \
+            tg_shared[sidx] = (i < local_heap_size) ? local_heap[i] : LogitPair{-INFINITY, 0u}; \
+        } \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    const uint usable_candidates = min(tcount * heap_capacity, (uint)TG_MERGE_CAP); \
+    const uint simd_width = clamp(simd_width_attr, (uint)MIN_SIMDGROUP_SIZE, (uint)MAX_SIMDGROUP_SIZE); \
+    const uint simd_lane = simd_lane_id; \
+    const uint simd_group_id = simd_group_in_tg; \
+    const uint simd_group_count = (tcount + simd_width - 1) / simd_width; \
+    constexpr uint INVALID_SLOT = 0xffffffffu; \
+    \
+    if (tid == 0) { \
+        selection_count_shared = 0u; \
+    } \
+    if (tid < simd_group_count && tid < MAX_SIMDGROUPS) { \
+        sg_best_slots[tid] = INVALID_SLOT; \
+        sg_best_vals[tid] = LogitPair{-INFINITY, 0u}; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    constexpr uint FINAL_K = 256; \
+    const uint selection_budget = min((uint)FINAL_K, max(K, 2u * params.k)); \
+    for (uint iter = 0; iter < selection_budget; ++iter) { \
+        float local_best_val = -INFINITY; \
+        uint local_best_idx = 0u; \
+        uint local_best_slot = INVALID_SLOT; \
+        for (uint slot = tid; slot < usable_candidates; slot += tcount) { \
+            const LogitPair cand = tg_shared[slot]; \
+            if (cand.index < V && isfinite(cand.value)) { \
+                const bool take = (local_best_slot == INVALID_SLOT) || \
+                                  (cand.value > local_best_val) || \
+                                  ((cand.value == local_best_val) && (cand.index < local_best_idx)); \
+                if (take) { \
+                    local_best_val = cand.value; \
+                    local_best_idx = cand.index; \
+                    local_best_slot = slot; \
+                } \
+            } \
+        } \
+        float sg_best_val = local_best_val; \
+        uint sg_best_idx = local_best_idx; \
+        uint sg_best_slot = local_best_slot; \
+        for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+            float other_val = simd_shuffle_down(sg_best_val, offset); \
+            uint other_idx = simd_shuffle_down(sg_best_idx, offset); \
+            uint other_slot = simd_shuffle_down(sg_best_slot, offset); \
+            const bool take_other = (other_slot != INVALID_SLOT) && \
+                                    ((sg_best_slot == INVALID_SLOT) || \
+                                     (other_val > sg_best_val) || \
+                                     ((other_val == sg_best_val) && (other_idx < sg_best_idx))); \
+            if (take_other) { \
+                sg_best_val = other_val; \
+                sg_best_idx = other_idx; \
+                sg_best_slot = other_slot; \
+            } \
+        } \
+        if (simd_lane == 0 && simd_group_id < MAX_SIMDGROUPS) { \
+            sg_best_vals[simd_group_id] = (sg_best_slot != INVALID_SLOT) ? LogitPair{sg_best_val, sg_best_idx} : LogitPair{-INFINITY, 0u}; \
+            sg_best_slots[simd_group_id] = sg_best_slot; \
+        } \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+        if (tid == 0) { \
+            LogitPair chosen = LogitPair{-INFINITY, 0u}; \
+            uint chosen_slot = INVALID_SLOT; \
+            for (uint sg = 0; sg < simd_group_count && sg < MAX_SIMDGROUPS; ++sg) { \
+                const uint candidate_slot = sg_best_slots[sg]; \
+                const LogitPair candidate = sg_best_vals[sg]; \
+                const bool take_candidate = (candidate_slot != INVALID_SLOT) && \
+                                            ((chosen_slot == INVALID_SLOT) || \
+                                             (candidate.value > chosen.value) || \
+                                             ((candidate.value == chosen.value) && (candidate.index < chosen.index))); \
+                if (take_candidate) { \
+                    chosen = candidate; \
+                    chosen_slot = candidate_slot; \
+                } \
+            } \
+            if (chosen_slot == INVALID_SLOT) { \
+                break; \
+            } \
+            if (selection_count_shared < selection_budget) { \
+                shortlist_vals[selection_count_shared] = chosen.value; \
+                shortlist_indices[selection_count_shared] = chosen.index; \
+                selection_count_shared += 1; \
+            } \
+            if (chosen_slot < TG_MERGE_CAP) { \
+                tg_shared[chosen_slot].value = -INFINITY; \
+            } \
+        } \
+        threadgroup_barrier(mem_flags::mem_threadgroup); \
+    } \
+    \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    const uint selection_count = min(selection_count_shared, selection_budget); \
+    if (selection_count == 0) { \
+        if (tid == 0) { \
+            shortlist_vals[0] = -INFINITY; \
+            shortlist_indices[0] = 0u; \
+            out_token[0] = 0u; \
+            for (uint i = 1; i < TG_OUTPUT_K; ++i) { \
+                shortlist_vals[i] = -INFINITY; \
+                shortlist_indices[i] = 0u; \
+            } \
+        } \
+        return; \
+    } \
+    \
+    float local_max = -INFINITY; \
+    for (uint i = tid; i < selection_count; i += tcount) { \
+        local_max = fmax(local_max, shortlist_vals[i]); \
+    } \
+    float sg_max = local_max; \
+    for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+        sg_max = fmax(sg_max, simd_shuffle_down(sg_max, offset)); \
+    } \
+    if (simd_lane == 0 && simd_group_id < MAX_SIMDGROUPS) { \
+        sg_reduce_scalars[simd_group_id] = sg_max; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    float maxv = -INFINITY; \
+    if (tid == 0) { \
+        for (uint sg = 0; sg < simd_group_count && sg < MAX_SIMDGROUPS; ++sg) { \
+            maxv = fmax(maxv, sg_reduce_scalars[sg]); \
+        } \
+        sg_reduce_scalars[0] = maxv; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    maxv = sg_reduce_scalars[0]; \
+    \
+    float local_sum = 0.0f; \
+    for (uint i = tid; i < selection_count; i += tcount) { \
+        const float e = exp(shortlist_vals[i] - maxv); \
+        shortlist_vals[i] = e; \
+        local_sum += e; \
+    } \
+    float sg_sum = local_sum; \
+    for (uint offset = simd_width >> 1; offset > 0; offset >>= 1) { \
+        sg_sum += simd_shuffle_down(sg_sum, offset); \
+    } \
+    if (simd_lane == 0 && simd_group_id < MAX_SIMDGROUPS) { \
+        sg_reduce_scalars[simd_group_id] = sg_sum; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    float total_sum = 0.0f; \
+    if (tid == 0) { \
+        for (uint sg = 0; sg < simd_group_count && sg < MAX_SIMDGROUPS; ++sg) { \
+            total_sum += sg_reduce_scalars[sg]; \
+        } \
+        sg_reduce_scalars[0] = total_sum; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    total_sum = sg_reduce_scalars[0]; \
+    \
+    if (total_sum <= 0.0f || !isfinite(total_sum)) { \
+        if (tid == 0) { \
+            const uint fallback = shortlist_indices[0] < V ? shortlist_indices[0] : 0u; \
+            out_token[0] = fallback; \
+            shortlist_vals[0] = 1.0f; \
+            for (uint i = 1; i < TG_OUTPUT_K; ++i) { \
+                shortlist_vals[i] = 0.0f; \
+                shortlist_indices[i] = 0u; \
+            } \
+        } \
+        return; \
+    } \
+    \
+    if (tid == 0) { \
+        float cumulative = 0.0f; \
+        uint cutoff = selection_count - 1; \
+        float cutoff_sum = 0.0f; \
+        for (uint i = 0; i < selection_count; ++i) { \
+            float prob = shortlist_vals[i] / total_sum; \
+            cumulative += prob; \
+            shortlist_vals[i] = prob; \
+            if (cumulative >= static_cast<float>(top_p)) { \
+                cutoff = i; \
+                cutoff_sum = cumulative; \
+                break; \
+            } \
+        } \
+        if (cutoff == selection_count - 1 && cutoff_sum == 0.0f) { \
+            cutoff_sum = cumulative; \
+        } \
+        const float renorm = (cutoff_sum > 0.0f && isfinite(cutoff_sum)) ? (1.0f / cutoff_sum) : 1.0f; \
+        for (uint i = 0; i <= cutoff; ++i) { \
+            shortlist_vals[i] *= renorm; \
+        } \
+        RNG rng; \
+        rng.seed(params.seed); \
+        float r = rng.next(); \
+        float acc = 0.0f; \
+        uint chosen = shortlist_indices[0]; \
+        for (uint i = 0; i <= cutoff; ++i) { \
+            acc += shortlist_vals[i]; \
+            if (r <= acc) { \
+                chosen = shortlist_indices[i]; \
+                break; \
+            } \
+        } \
+        if (chosen >= V) { \
+            chosen = (V > 0) ? (V - 1) : 0; \
+        } \
+        out_token[0] = chosen; \
+        for (uint i = cutoff + 1; i < selection_count; ++i) { \
+            shortlist_vals[i] = 0.0f; \
+        } \
+        for (uint i = selection_count; i < TG_OUTPUT_K; ++i) { \
+            shortlist_vals[i] = -INFINITY; \
+            shortlist_indices[i] = 0u; \
+        } \
+    } \
+}

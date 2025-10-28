@@ -88,10 +88,7 @@ impl CustomKernelInvocable for SampleTopKPartialsOp {
             .and_then(|s| s.parse::<u32>().ok())
             .filter(|&v| v >= 1);
         let default_m = k.min(4).max(1);
-        let per_thread_m = override_m
-            .unwrap_or(default_m)
-            .min(per_thread_m_clamp)
-            .max(1);
+        let per_thread_m = override_m.unwrap_or(default_m).min(per_thread_m_clamp).max(1);
         let params = SampleParams {
             vocab_size: vocab,
             k,

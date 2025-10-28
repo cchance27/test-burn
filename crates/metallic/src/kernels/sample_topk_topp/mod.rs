@@ -28,9 +28,7 @@ pub fn calculate_threads_per_tg_and_num_threadgroups(
     let fallback = (multiples * tew).min(max_cap);
     let preferred = 128usize.min(max_cap);
     let preferred_aligned = if preferred % tew == 0 { Some(preferred) } else { None };
-    let threads_per_tg = override_tptg
-        .or(preferred_aligned)
-        .unwrap_or(fallback);
+    let threads_per_tg = override_tptg.or(preferred_aligned).unwrap_or(fallback);
 
     // Increase threadgroups for large vocabs to improve coverage and occupancy
     let items_per_thread = 32u32; // moderate per-thread work to reduce divergence

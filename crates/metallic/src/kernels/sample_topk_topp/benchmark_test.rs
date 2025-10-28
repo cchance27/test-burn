@@ -199,91 +199,78 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         }
         let cpu_total_stats = DurationStats::from_slice(&cpu_total_times);
 
-    println!("Starting GPU sampling benchmark (no GPU->CPU sync for logits)...");
-    let sweep_configs: &[(usize, u32)] = &[
-        (128, 2),
-        (128, 3),
-        (128, 4),
-        (256, 2),
-        (256, 3),
-        (256, 4),
-    ];
+        println!("Starting GPU sampling benchmark (no GPU->CPU sync for logits)...");
+        let sweep_configs: &[(usize, u32)] = &[(128, 2), (128, 3), (128, 4), (256, 2), (256, 3), (256, 4)];
 
-    let gpu_iterations = 300;
-    let gpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
-    let mut best_gpu_stats = None;
-    let mut best_config = None;
+        let gpu_iterations = 300;
+        let gpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
+        let mut best_gpu_stats = None;
+        let mut best_config = None;
 
-    for &(cfg_tptg, cfg_m) in sweep_configs {
-        unsafe { std::env::set_var("METALLIC_SAMPLE_TPTG", cfg_tptg.to_string()) };
-        unsafe { std::env::set_var("METALLIC_SAMPLE_PER_THREAD_M", cfg_m.to_string()) };
+        for &(cfg_tptg, cfg_m) in sweep_configs {
+            unsafe { std::env::set_var("METALLIC_SAMPLE_TPTG", cfg_tptg.to_string()) };
+            unsafe { std::env::set_var("METALLIC_SAMPLE_PER_THREAD_M", cfg_m.to_string()) };
 
-        let mut gpu_times = Vec::with_capacity(gpu_iterations);
-        for i in 0..gpu_iterations {
-            let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()))?;
-            ctx.synchronize();
+            let mut gpu_times = Vec::with_capacity(gpu_iterations);
+            for i in 0..gpu_iterations {
+                let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()))?;
+                ctx.synchronize();
 
-            let start = Instant::now();
-            let _gpu_token = ctx.with_gpu_scope("sample_topk_topp_benchmark", |ctx| {
-                gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, ctx)
-            })?;
-            gpu_times.push(start.elapsed());
+                let start = Instant::now();
+                let _gpu_token = ctx.with_gpu_scope("sample_topk_topp_benchmark", |ctx| {
+                    gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, ctx)
+                })?;
+                gpu_times.push(start.elapsed());
 
-            if i % 25 == 0 {
-                ctx.reset_pool();
+                if i % 25 == 0 {
+                    ctx.reset_pool();
+                }
+            }
+
+            let stats = DurationStats::from_slice(&gpu_times);
+            println!(
+                "GPU config tptg={} per_thread_m={} avg={:.3}µs p95={:.3}µs stddev={:.3}µs",
+                cfg_tptg, cfg_m, stats.avg_us, stats.p95_us, stats.stddev_us
+            );
+
+            println!(
+                "GPU config JSON: {}",
+                serde_json::to_string(&serde_json::json!({
+                    "threads_per_tg": cfg_tptg,
+                    "per_thread_m": cfg_m,
+                    "stats": {
+                        "avg_us": stats.avg_us,
+                        "min_us": stats.min_us,
+                        "max_us": stats.max_us,
+                        "p50_us": stats.p50_us,
+                        "p95_us": stats.p95_us,
+                        "stddev_us": stats.stddev_us,
+                    }
+                }))
+                .unwrap()
+            );
+
+            if best_gpu_stats
+                .as_ref()
+                .map(|best: &DurationStats| stats.avg_us < best.avg_us)
+                .unwrap_or(true)
+            {
+                best_gpu_stats = Some(stats.clone());
+                best_config = Some((cfg_tptg, cfg_m));
             }
         }
 
-        let stats = DurationStats::from_slice(&gpu_times);
+        unsafe { std::env::remove_var("METALLIC_SAMPLE_TPTG") };
+        unsafe { std::env::remove_var("METALLIC_SAMPLE_PER_THREAD_M") };
+
+        let best_gpu_stats = best_gpu_stats.expect("sweep returned stats");
+        let (best_tptg, best_m) = best_config.expect("sweep returned config");
         println!(
-            "GPU config tptg={} per_thread_m={} avg={:.3}µs p95={:.3}µs stddev={:.3}µs",
-            cfg_tptg,
-            cfg_m,
-            stats.avg_us,
-            stats.p95_us,
-            stats.stddev_us
+            "Best GPU config tptg={} per_thread_m={} avg={:.3}µs",
+            best_tptg, best_m, best_gpu_stats.avg_us
         );
 
-        println!(
-            "GPU config JSON: {}",
-            serde_json::to_string(&serde_json::json!({
-                "threads_per_tg": cfg_tptg,
-                "per_thread_m": cfg_m,
-                "stats": {
-                    "avg_us": stats.avg_us,
-                    "min_us": stats.min_us,
-                    "max_us": stats.max_us,
-                    "p50_us": stats.p50_us,
-                    "p95_us": stats.p95_us,
-                    "stddev_us": stats.stddev_us,
-                }
-            }))
-            .unwrap()
-        );
-
-        if best_gpu_stats
-            .as_ref()
-            .map(|best: &DurationStats| stats.avg_us < best.avg_us)
-            .unwrap_or(true)
-        {
-            best_gpu_stats = Some(stats.clone());
-            best_config = Some((cfg_tptg, cfg_m));
-        }
-    }
-
-    unsafe { std::env::remove_var("METALLIC_SAMPLE_TPTG") };
-    unsafe { std::env::remove_var("METALLIC_SAMPLE_PER_THREAD_M") };
-
-    let best_gpu_stats = best_gpu_stats.expect("sweep returned stats");
-    let (best_tptg, best_m) = best_config.expect("sweep returned config");
-    println!(
-        "Best GPU config tptg={} per_thread_m={} avg={:.3}µs",
-        best_tptg,
-        best_m,
-        best_gpu_stats.avg_us
-    );
-
-    let gpu_stats = best_gpu_stats;
+        let gpu_stats = best_gpu_stats;
 
         ctx.synchronize();
         ctx.reset_pool();
