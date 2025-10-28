@@ -1,177 +1,406 @@
-use std::time::Instant;
-
-#[cfg(test)]
-use crate::{Context, MetalError, SamplerBuffers, Tensor, TensorInit, TensorStorage, kernels::elemwise_add::ElemwiseAddOp};
-use crate::{
-    F16Element, generation::{gpu_sample_top_k_top_p, sample_top_k_top_p}
+use std::{
+    fs, sync::mpsc::{self, RecvTimeoutError}, time::{Duration, Instant}
 };
 
-#[cfg(test)]
+use metallic_instrumentation::{event::MetricEvent, prelude::*};
+use rustc_hash::FxHashSet;
+use serde::Serialize;
+
+use crate::{
+    Context, F16Element, MetalError, SamplerBuffers, Tensor, TensorInit, TensorStorage, generation::{gpu_sample_top_k_top_p, sample_top_k_top_p}, kernels::elemwise_add::ElemwiseAddOp
+};
+
 fn create_test_logits<T: crate::TensorElement>(ctx: &mut Context<T>, size: usize) -> Result<Tensor<T>, MetalError> {
-    // Create test logits with known values for reproducible testing
     let mut logits_data = Vec::with_capacity(size);
     for i in 0..size {
-        // Create logits with decreasing values to have a clear top choice
-        let val = (size - i) as f32 * 0.1; // Values from 0.1*size down to 0.1
+        let val = (size - i) as f32 * 0.1;
         logits_data.push(T::from_f32(val));
     }
 
     Tensor::new(vec![size], TensorStorage::Pooled(ctx), TensorInit::CopyFrom(&logits_data))
 }
 
+#[derive(Debug, Clone, Serialize, Default)]
+struct DurationStats {
+    avg_us: f64,
+    min_us: f64,
+    max_us: f64,
+    p50_us: f64,
+    p95_us: f64,
+    stddev_us: f64,
+}
+
+impl DurationStats {
+    fn from_slice(samples: &[Duration]) -> Self {
+        if samples.is_empty() {
+            return Self::default();
+        }
+
+        let mut micros: Vec<f64> = samples.iter().map(|d| d.as_secs_f64() * 1e6).collect();
+        micros.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        let len = micros.len();
+        let sum: f64 = micros.iter().sum();
+        let mean = sum / len as f64;
+        let variance = if len > 1 {
+            let ss: f64 = micros
+                .iter()
+                .map(|v| {
+                    let diff = *v - mean;
+                    diff * diff
+                })
+                .sum();
+            ss / (len as f64 - 1.0)
+        } else {
+            0.0
+        };
+
+        let percentile = |p: f64| -> f64 {
+            if len == 1 {
+                return micros[0];
+            }
+            let rank = p * (len as f64 - 1.0);
+            let lower = rank.floor() as usize;
+            let upper = rank.ceil() as usize;
+            if lower == upper {
+                micros[lower]
+            } else {
+                let weight = rank - lower as f64;
+                micros[lower] * (1.0 - weight) + micros[upper] * weight
+            }
+        };
+
+        Self {
+            avg_us: mean,
+            min_us: *micros.first().unwrap(),
+            max_us: *micros.last().unwrap(),
+            p50_us: percentile(0.5),
+            p95_us: percentile(0.95),
+            stddev_us: variance.max(0.0).sqrt(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct KernelDispatchRecord {
+    kernel: String,
+    op_name: String,
+    thread_groups: (u32, u32, u32),
+}
+
+#[derive(Debug, Serialize)]
+struct BenchmarkSnapshot {
+    vocab_size: usize,
+    top_k: usize,
+    top_p: f32,
+    temperature: f32,
+    cpu_only: DurationStats,
+    sync_only: DurationStats,
+    cpu_with_sync: DurationStats,
+    gpu: DurationStats,
+    sync_overhead_us: f64,
+    cpu_vs_gpu_speedup: f64,
+    cpu_only_vs_gpu_speedup: f64,
+    cpu_only_iterations: usize,
+    sync_iterations: usize,
+    cpu_iterations: usize,
+    gpu_iterations: usize,
+    metrics_jsonl_path: String,
+    dispatch_records: Vec<KernelDispatchRecord>,
+}
+
 #[test]
 fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
+    let _profiling_env = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
+    reset_app_config_for_tests();
+    let _profiling_guard = AppConfig::force_enable_profiling_guard();
 
-    let vocab_size = 100000; // Similar to Qwen2.5 vocab size
+    let metrics_path = {
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        std::env::temp_dir().join(format!("sample_topk_topp_benchmark_{}_{}.jsonl", std::process::id(), timestamp,))
+    };
+    let metrics_path_guard = METRICS_JSONL_PATH_VAR.set_guard(metrics_path.clone()).unwrap();
 
-    // Set realistic sampling parameters
-    let k = 50;
-    let top_p = 0.9;
-    let temperature = 0.8;
+    let (sender, receiver) = mpsc::channel();
+    let mut exporters: Vec<Box<dyn MetricExporter>> =
+        vec![Box::new(JsonlExporter::new(&metrics_path).expect("jsonl exporter for benchmark"))];
+    exporters.push(Box::new(ChannelExporter::new(sender)));
+    let layer = MetricsLayer::new(exporters);
+    let subscriber = tracing_subscriber::registry().with(layer);
 
-    // Benchmark CPU sampling WITHOUT GPU operations (CPU-only baseline)
-    let cpu_only_iterations = 1000;
-    let mut cpu_only_times = Vec::new();
+    let metrics_path_display = metrics_path.display().to_string();
 
-    println!("Starting CPU-only sampling benchmark (no GPU operations)...");
-    // Create logits once in memory for CPU-only benchmark
-    let mut logits_data = Vec::<half::f16>::with_capacity(vocab_size);
-    for i in 0..vocab_size {
-        let val = (vocab_size - i) as f32 * 0.1; // Values from 0.1*vocab_size down to 0.1
-        logits_data.push(half::f16::from_f32(val));
-    }
+    let bench_result = subscriber::with_default(subscriber, move || -> Result<(), MetalError> {
+        let _metric_bypass = MetricQueueBypassGuard::new();
+        let mut ctx = Context::new()?;
+        ctx.force_enable_profiling_for_tests();
 
-    for _ in 0..cpu_only_iterations {
-        let start = Instant::now();
-        let mut sampler_buffers = SamplerBuffers::default();
-        let _cpu_token = sample_top_k_top_p::<F16Element>(&logits_data, k, top_p, temperature, &mut sampler_buffers) as u32;
-        let duration = start.elapsed();
-        cpu_only_times.push(duration);
-    }
+        let vocab_size = 100_000usize;
+        let k = 50usize;
+        let top_p = 0.9f32;
+        let temperature = 0.8f32;
 
-    let avg_cpu_only_time: std::time::Duration = cpu_only_times.iter().sum::<std::time::Duration>() / cpu_only_iterations as u32;
+        println!("Starting CPU-only sampling benchmark (no GPU operations)...");
+        let cpu_only_iterations = 1000;
+        let mut cpu_only_times = Vec::with_capacity(cpu_only_iterations);
+        let mut logits_data = Vec::<half::f16>::with_capacity(vocab_size);
+        for i in 0..vocab_size {
+            let val = (vocab_size - i) as f32 * 0.1;
+            logits_data.push(half::f16::from_f32(val));
+        }
 
-    // Create the test tensor once, do a GPU operation, then reuse it to better measure sync overhead
-    let test_logits = create_test_logits(&mut ctx, vocab_size)?;
+        for _ in 0..cpu_only_iterations {
+            let start = Instant::now();
+            let mut sampler_buffers = SamplerBuffers::default();
+            let _cpu_token = sample_top_k_top_p::<F16Element>(&logits_data, k, top_p, temperature, &mut sampler_buffers) as u32;
+            cpu_only_times.push(start.elapsed());
+        }
+        let cpu_only_stats = DurationStats::from_slice(&cpu_only_times);
 
-    // Perform a dummy GPU operation to ensure the tensor is truly GPU-resident
-    // This simulates a real-world scenario where logits come from a GPU operation
-    let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
+        let base_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
+        let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
+        let mut sync_tensor = ctx.call::<ElemwiseAddOp>((base_logits.clone(), ones.clone()))?;
+        ctx.synchronize();
 
-    // Perform a dummy add operation using the kernels
-    let new = ctx.call::<ElemwiseAddOp>((test_logits.clone(), ones.clone()))?;
-    ctx.synchronize(); // Ensure the add operation completes before measuring
+        println!("Measuring GPU->CPU sync times...");
+        let sync_iterations = 1000;
+        let mut sync_times = Vec::with_capacity(sync_iterations);
+        for _ in 0..sync_iterations {
+            sync_tensor = ctx.call::<ElemwiseAddOp>((sync_tensor.clone(), ones.clone()))?;
+            ctx.synchronize();
 
-    // Benchmark the sync operation separately to understand overhead
-    let sync_iterations = 1000;
-    let mut sync_times = Vec::new();
+            let sync_start = Instant::now();
+            let _ = sync_tensor.as_slice();
+            sync_times.push(sync_start.elapsed());
+        }
+        let sync_stats = DurationStats::from_slice(&sync_times);
 
-    println!("Measuring GPU->CPU sync times...");
-    for _ in 0..sync_iterations {
-        // Perform another GPU operation to make sure tensor is GPU-resident again
-        let new = ctx.call::<ElemwiseAddOp>((new.clone(), ones.clone()))?;
-        ctx.synchronize(); // Complete the operation
+        println!("Starting CPU sampling benchmark (including GPU->CPU sync)...");
+        let cpu_iterations = 1000;
+        let mut cpu_total_times = Vec::with_capacity(cpu_iterations);
+        let cpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
+        for i in 0..cpu_iterations {
+            let staged = ctx.call::<ElemwiseAddOp>((cpu_logits.clone(), ones.clone()))?;
+            ctx.synchronize();
 
-        let sync_start = Instant::now();
-        let _logits_slice = new.as_slice(); // This is where the sync happens
-        let duration = sync_start.elapsed();
-        sync_times.push(duration);
-    }
+            let start = Instant::now();
+            let logits_slice = staged.as_slice();
+            let vocab_logits = &logits_slice[..vocab_size];
+            let mut sampler_buffers = SamplerBuffers::default();
+            let _cpu_token = sample_top_k_top_p::<F16Element>(vocab_logits, k, top_p, temperature, &mut sampler_buffers) as u32;
+            cpu_total_times.push(start.elapsed());
 
-    let avg_sync_time: std::time::Duration = sync_times.iter().sum::<std::time::Duration>() / sync_iterations as u32;
+            if i % 25 == 0 {
+                ctx.reset_pool();
+            }
+        }
+        let cpu_total_stats = DurationStats::from_slice(&cpu_total_times);
 
-    // Benchmark CPU sampling WITH GPU->CPU sync overhead (real-world scenario)
-    let cpu_iterations = 1000;
-    let mut cpu_total_times = Vec::new();
-    let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
+    println!("Starting GPU sampling benchmark (no GPU->CPU sync for logits)...");
+    let sweep_configs: &[(usize, u32)] = &[
+        (128, 2),
+        (128, 3),
+        (128, 4),
+        (256, 2),
+        (256, 3),
+        (256, 4),
+    ];
 
-    let test_logits = create_test_logits(&mut ctx, vocab_size)?;
+    let gpu_iterations = 300;
+    let gpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
+    let mut best_gpu_stats = None;
+    let mut best_config = None;
 
-    println!("Starting CPU sampling benchmark (including GPU->CPU sync)...");
-    for i in 0..cpu_iterations {
-        // Perform a GPU operation to make sure tensor is GPU-resident
-        let new = ctx.call::<ElemwiseAddOp>((test_logits.clone(), ones.clone()))?;
-        ctx.synchronize(); // Complete the operation
+    for &(cfg_tptg, cfg_m) in sweep_configs {
+        unsafe { std::env::set_var("METALLIC_SAMPLE_TPTG", cfg_tptg.to_string()) };
+        unsafe { std::env::set_var("METALLIC_SAMPLE_PER_THREAD_M", cfg_m.to_string()) };
 
-        // Time the complete operation: GPU->CPU sync + CPU sampling
-        let start = Instant::now();
+        let mut gpu_times = Vec::with_capacity(gpu_iterations);
+        for i in 0..gpu_iterations {
+            let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()))?;
+            ctx.synchronize();
 
-        // This triggers GPU->CPU sync due to as_slice() call
-        let logits_slice = new.as_slice();
-        let vocab_logits = &logits_slice[..vocab_size];
+            let start = Instant::now();
+            let _gpu_token = ctx.with_gpu_scope("sample_topk_topp_benchmark", |ctx| {
+                gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, ctx)
+            })?;
+            gpu_times.push(start.elapsed());
 
-        let mut sampler_buffers = SamplerBuffers::default();
-        let _cpu_token = sample_top_k_top_p::<F16Element>(vocab_logits, k, top_p, temperature, &mut sampler_buffers) as u32;
+            if i % 25 == 0 {
+                ctx.reset_pool();
+            }
+        }
 
-        let duration = start.elapsed();
-        cpu_total_times.push(duration);
+        let stats = DurationStats::from_slice(&gpu_times);
+        println!(
+            "GPU config tptg={} per_thread_m={} avg={:.3}µs p95={:.3}µs stddev={:.3}µs",
+            cfg_tptg,
+            cfg_m,
+            stats.avg_us,
+            stats.p95_us,
+            stats.stddev_us
+        );
 
-        // Periodic resource cleanup to prevent GPU memory accumulation
-        if i % 25 == 0 {
-            // Every 25 iterations
-            ctx.reset_pool(); // Reset tensor pool to free temporary GPU memory
+        println!(
+            "GPU config JSON: {}",
+            serde_json::to_string(&serde_json::json!({
+                "threads_per_tg": cfg_tptg,
+                "per_thread_m": cfg_m,
+                "stats": {
+                    "avg_us": stats.avg_us,
+                    "min_us": stats.min_us,
+                    "max_us": stats.max_us,
+                    "p50_us": stats.p50_us,
+                    "p95_us": stats.p95_us,
+                    "stddev_us": stats.stddev_us,
+                }
+            }))
+            .unwrap()
+        );
+
+        if best_gpu_stats
+            .as_ref()
+            .map(|best: &DurationStats| stats.avg_us < best.avg_us)
+            .unwrap_or(true)
+        {
+            best_gpu_stats = Some(stats.clone());
+            best_config = Some((cfg_tptg, cfg_m));
         }
     }
 
-    let avg_cpu_total_time: std::time::Duration = cpu_total_times.iter().sum::<std::time::Duration>() / cpu_iterations as u32;
+    unsafe { std::env::remove_var("METALLIC_SAMPLE_TPTG") };
+    unsafe { std::env::remove_var("METALLIC_SAMPLE_PER_THREAD_M") };
 
-    // Benchmark GPU sampling (no GPU->CPU sync needed beyond result token)
-    println!("Starting GPU sampling benchmark (no GPU->CPU sync needed for logits)...");
-    let gpu_iterations = 1000;
-    let mut gpu_times = Vec::new();
+    let best_gpu_stats = best_gpu_stats.expect("sweep returned stats");
+    let (best_tptg, best_m) = best_config.expect("sweep returned config");
+    println!(
+        "Best GPU config tptg={} per_thread_m={} avg={:.3}µs",
+        best_tptg,
+        best_m,
+        best_gpu_stats.avg_us
+    );
 
-    let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
+    let gpu_stats = best_gpu_stats;
 
-    let test_logits = create_test_logits(&mut ctx, vocab_size)?;
+        ctx.synchronize();
+        ctx.reset_pool();
 
-    for i in 0..gpu_iterations {
-        // Perform a GPU operation to make sure tensor is GPU-resident
-        let new = ctx.call::<ElemwiseAddOp>((test_logits.clone(), ones.clone()))?;
-        ctx.synchronize(); // Complete the operation
+        println!("CPU Sampling (CPU-only baseline) - Average time: {:.3}µs", cpu_only_stats.avg_us);
+        println!("GPU->CPU sync only - Average time: {:.3}µs", sync_stats.avg_us);
+        println!("CPU Sampling (with GPU->CPU sync) - Average time: {:.3}µs", cpu_total_stats.avg_us);
+        println!(
+            "GPU Sampling (no GPU->CPU sync for logits) - Average time: {:.3}µs",
+            gpu_stats.avg_us
+        );
 
-        let start = Instant::now();
-        let _gpu_token = gpu_sample_top_k_top_p::<F16Element>(&new, vocab_size, k, top_p, temperature, &mut ctx)?;
-        let duration = start.elapsed();
-        gpu_times.push(duration);
+        let sync_overhead_us = sync_stats.avg_us;
+        let cpu_vs_gpu_speedup = if gpu_stats.avg_us > 0.0 {
+            cpu_total_stats.avg_us / gpu_stats.avg_us
+        } else {
+            0.0
+        };
+        let cpu_only_vs_gpu_speedup = if gpu_stats.avg_us > 0.0 {
+            cpu_only_stats.avg_us / gpu_stats.avg_us
+        } else {
+            0.0
+        };
 
-        // Periodic resource cleanup to prevent GPU memory accumulation
-        if i % 25 == 0 {
-            // Every 25 iterations
-            ctx.reset_pool(); // Reset tensor pool to free temporary GPU memory
-        }
-    }
-
-    let avg_gpu_time: std::time::Duration = gpu_times.iter().sum::<std::time::Duration>() / gpu_iterations as u32;
-
-    // Ensure GPU operations complete and cleanup resources
-    ctx.synchronize();
-    ctx.reset_pool();
-
-    println!("CPU Sampling (CPU-only baseline) - Average time: {:?}", avg_cpu_only_time);
-    println!("GPU->CPU sync only - Average time: {:?}", avg_sync_time);
-    println!("CPU Sampling (with GPU->CPU sync) - Average time: {:?}", avg_cpu_total_time);
-    println!("GPU Sampling (no GPU->CPU sync for logits) - Average time: {:?}", avg_gpu_time);
-
-    // Calculate the time breakdown
-    let cpu_sync_ns = avg_sync_time.as_nanos() as f64;
-    let cpu_total_with_sync_ns = avg_cpu_total_time.as_nanos() as f64;
-    let cpu_only_ns = avg_cpu_only_time.as_nanos() as f64;
-    let gpu_ns = avg_gpu_time.as_nanos() as f64;
-
-    println!("Estimated GPU->CPU sync overhead: {:.2}µs", cpu_sync_ns / 1000.0);
-
-    if gpu_ns > 0.0 {
-        let cpu_vs_gpu_speedup = cpu_total_with_sync_ns / gpu_ns;
+        println!("Estimated GPU->CPU sync overhead: {:.2}µs", sync_overhead_us);
         println!(
             "GPU sampling is {:.2}x faster than CPU sampling (including sync overhead)",
             cpu_vs_gpu_speedup
         );
-
-        let cpu_only_vs_gpu_speedup = cpu_only_ns / gpu_ns;
         println!(
             "GPU sampling is {:.2}x faster than CPU sampling (CPU-only baseline)",
             cpu_only_vs_gpu_speedup
+        );
+
+        let mut metric_events = Vec::new();
+        let drain_deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match receiver.recv_timeout(Duration::from_millis(50)) {
+                Ok(event) => metric_events.push(event),
+                Err(RecvTimeoutError::Timeout) => {
+                    if Instant::now() >= drain_deadline {
+                        break;
+                    }
+                }
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let mut dispatch_records = Vec::new();
+        let mut seen_dispatch = FxHashSet::default();
+        let mut partial_count = 0usize;
+        let mut merge_count = 0usize;
+
+        for event in &metric_events {
+            match &event.event {
+                MetricEvent::GpuKernelDispatched {
+                    kernel_name,
+                    op_name,
+                    thread_groups,
+                } => {
+                    if kernel_name.starts_with("sample_topk") && seen_dispatch.insert((kernel_name.clone(), op_name.clone())) {
+                        dispatch_records.push(KernelDispatchRecord {
+                            kernel: kernel_name.clone(),
+                            op_name: op_name.clone(),
+                            thread_groups: *thread_groups,
+                        });
+                    }
+                }
+                MetricEvent::GpuOpCompleted { op_name, .. } => {
+                    if op_name.contains("sample_topk_partials") {
+                        partial_count += 1;
+                    } else if op_name.contains("sample_topk_merge_and_sample") {
+                        merge_count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(
+            partial_count > 0 && merge_count > 0,
+            "expected sample_topk kernels to emit GPU completion metrics"
+        );
+
+        let snapshot = BenchmarkSnapshot {
+            vocab_size,
+            top_k: k,
+            top_p,
+            temperature,
+            cpu_only: cpu_only_stats.clone(),
+            sync_only: sync_stats.clone(),
+            cpu_with_sync: cpu_total_stats.clone(),
+            gpu: gpu_stats.clone(),
+            sync_overhead_us,
+            cpu_vs_gpu_speedup,
+            cpu_only_vs_gpu_speedup,
+            cpu_only_iterations,
+            sync_iterations,
+            cpu_iterations,
+            gpu_iterations,
+            metrics_jsonl_path: metrics_path_display,
+            dispatch_records,
+        };
+
+        println!("Benchmark snapshot (JSON):\n{}", serde_json::to_string_pretty(&snapshot).unwrap());
+
+        Ok(())
+    });
+
+    drop(metrics_path_guard);
+
+    bench_result?;
+
+    if let Err(err) = fs::remove_file(&metrics_path) {
+        eprintln!(
+            "Warning: failed to remove benchmark metrics file {}: {err:?}",
+            metrics_path.display()
         );
     }
 
@@ -183,11 +412,10 @@ fn test_logits_download_overhead_simulation() {
     use std::time::Duration;
 
     let vocab_size = 150000;
-    let element_size = std::mem::size_of::<f32>(); // 4 bytes for f32
-    let tensor_size_bytes = vocab_size * element_size; // ~128KB
-    let gbps_bandwidth = 50.0; // Typical GPU memory bandwidth in GB/s
+    let element_size = std::mem::size_of::<f32>();
+    let tensor_size_bytes = vocab_size * element_size;
+    let gbps_bandwidth = 50.0;
 
-    // Calculate rough sync time based on memory transfer
     let sync_time_estimate = (tensor_size_bytes as f64) / (gbps_bandwidth * 1_000_000_000.0);
     let sync_time = Duration::from_secs_f64(sync_time_estimate);
 
@@ -198,26 +426,4 @@ fn test_logits_download_overhead_simulation() {
     );
     println!("Estimated GPU->CPU sync time: {:?}", sync_time);
     println!("This overhead is eliminated with GPU-based sampling!");
-}
-
-#[test]
-fn test_gpu_kernel_correctness_multiple_runs() -> Result<(), MetalError> {
-    let mut ctx = Context::new()?;
-
-    let vocab_size = 100;
-    let test_logits = create_test_logits(&mut ctx, vocab_size)?;
-
-    // Set fixed parameters
-    let k = 10;
-    let top_p = 0.9;
-    let temperature = 1.0;
-
-    // Generate multiple tokens to ensure the kernel works reliably
-    for i in 0..5 {
-        let token = gpu_sample_top_k_top_p::<F16Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
-        assert!(token < vocab_size as u32, "Token {} is out of range", token);
-        println!("Run {}: Generated token {}", i + 1, token);
-    }
-
-    Ok(())
 }

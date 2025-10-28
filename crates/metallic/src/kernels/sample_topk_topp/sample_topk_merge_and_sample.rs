@@ -1,4 +1,4 @@
-use metallic_instrumentation::GpuProfiler;
+use metallic_instrumentation::{GpuProfiler, MetricEvent, record_metric_async};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputePipelineState, MTLSize};
 
@@ -23,11 +23,8 @@ impl Operation for SampleTopKMergeAndSample {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         command_buffer.prepare_encoder_for_operation(EncoderType::MetalCompute)?;
         let encoder = command_buffer.get_compute_encoder()?;
-        let scope = GpuProfiler::profile_command_buffer(
-            command_buffer.raw(),
-            self.profiler_label.op_name.clone(),
-            self.profiler_label.backend.clone(),
-        );
+        let label = self.profiler_label.clone();
+        let scope = GpuProfiler::profile_command_buffer(command_buffer.raw(), label.op_name.clone(), label.backend.clone());
 
         assert_ne!(self.params.num_threadgroups, 0, "num_threadgroups must be non-zero");
         set_compute_pipeline_state(&encoder, &self.pipeline);
@@ -47,6 +44,17 @@ impl Operation for SampleTopKMergeAndSample {
             height: 1,
             depth: 1,
         };
+        let thread_groups = (
+            u32::try_from(grid.width).unwrap_or(u32::MAX),
+            u32::try_from(grid.height).unwrap_or(u32::MAX),
+            u32::try_from(grid.depth).unwrap_or(u32::MAX),
+        );
+        record_metric_async!(MetricEvent::GpuKernelDispatched {
+            kernel_name: "sample_topk_merge_and_sample".to_string(),
+            op_name: label.op_name.clone(),
+            thread_groups,
+        });
+
         dispatch_threads(&encoder, grid, tg);
 
         drop(scope);

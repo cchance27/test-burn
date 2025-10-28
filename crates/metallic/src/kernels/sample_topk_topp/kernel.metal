@@ -1,4 +1,5 @@
 #include <metal_stdlib>
+#include <metal_simdgroup>
 using namespace metal;
 
 #define FOR_EACH_FLOAT_TYPE(OP) \
@@ -30,6 +31,9 @@ struct RNG {
 
 constant uint MAX_TPTG = 256;
 constant uint TG_OUTPUT_K = 256;
+constant uint MIN_SIMDGROUP_SIZE = 32;
+constant uint MAX_SIMDGROUP_SIZE = 64;
+constant uint MAX_SIMDGROUPS = MAX_TPTG / MIN_SIMDGROUP_SIZE;
 
 // Min-heap functions
 inline void heap_sift_down(thread LogitPair* heap, uint size, uint pos) {
@@ -92,62 +96,114 @@ kernel void sample_topk_partials_##SUFFIX( \
     uint tid                                  [[thread_position_in_threadgroup]], \
     uint tptg                                 [[threads_per_threadgroup]], \
     uint tg_id                                [[threadgroup_position_in_grid]], \
-    uint num_tgs                              [[threadgroups_per_grid]] \
+    uint num_tgs                              [[threadgroups_per_grid]], \
+    uint simd_lane_id                         [[thread_index_in_simdgroup]], \
+    uint simd_group_in_tg                     [[simdgroup_index_in_threadgroup]], \
+    uint simd_width_attr                      [[threads_per_simdgroup]] \
 ) { \
     const uint V     = params.vocab_size; \
     const float denom = fmax(params.temperature, 1e-6f); \
     const ACCUM invT = static_cast<ACCUM>(1.0f / denom); \
     const uint M     = params.per_thread_m; \
     \
-    constexpr uint MAX_M = 32; \
-    LogitPair heap[MAX_M]; \
-    const uint M_use = min(M, (uint)MAX_M); \
-    uint heap_size = 0; \
+    constexpr uint MAX_LANE_HEAP = 4; \
+    constexpr uint SIMDGROUP_SHORTLIST = 64; \
+    constexpr uint SIMDGROUP_CANDIDATE_CAP = MAX_SIMDGROUP_SIZE * MAX_LANE_HEAP; \
+    constexpr uint SIMDGROUP_SHORTLIST_CAP = MAX_SIMDGROUPS * SIMDGROUP_SHORTLIST; \
+    constexpr uint SIMDGROUP_CANDIDATE_CAP_TOTAL = MAX_SIMDGROUPS * SIMDGROUP_CANDIDATE_CAP; \
+    \
+    LogitPair lane_heap[MAX_LANE_HEAP]; \
+    const uint lane_target = min(M, (uint)MAX_LANE_HEAP); \
+    uint lane_heap_size = 0; \
     \
     const uint items_per_tg = V / num_tgs + 1; \
     const uint block_start = tg_id * items_per_tg; \
     const uint block_end = min(block_start + items_per_tg, V); \
     \
-    for (uint i = block_start + tid; i < block_end; i += tptg) { \
+    uint scalar_prefix_end = block_start; \
+    if ((block_start & 3u) != 0u) { \
+        const uint align_gap = min(4u - (block_start & 3u), block_end - block_start); \
+        scalar_prefix_end += align_gap; \
+    } \
+    scalar_prefix_end = min(scalar_prefix_end, block_end); \
+    for (uint i = block_start + tid; i < scalar_prefix_end; i += tptg) { \
         ACCUM v = static_cast<ACCUM>(logits[i]); \
         v *= invT; \
-        heap_insert(heap, &heap_size, M_use, static_cast<float>(v), i); \
+        heap_insert(lane_heap, &lane_heap_size, lane_target, static_cast<float>(v), i); \
     } \
     \
-    heap_to_sorted(heap, heap_size); \
+    const uint vectorizable_len = (block_end > scalar_prefix_end) ? ((block_end - scalar_prefix_end) & ~3u) : 0u; \
+    const uint vector_count = vectorizable_len >> 2; \
+    if (vector_count > 0u) { \
+        using Vec4 = metal::vec<SCALAR, 4>; \
+        const device Vec4* logits4 = reinterpret_cast<const device Vec4*>(logits + scalar_prefix_end); \
+        for (uint group = tid; group < vector_count; group += tptg) { \
+            const Vec4 raw = logits4[group]; \
+            const uint base_idx = scalar_prefix_end + (group << 2); \
+            for (uint lane_step = 0; lane_step < 4u; ++lane_step) { \
+                const uint idx = base_idx + lane_step; \
+                ACCUM v = static_cast<ACCUM>(raw[lane_step]); \
+                v *= invT; \
+                heap_insert(lane_heap, &lane_heap_size, lane_target, static_cast<float>(v), idx); \
+            } \
+        } \
+    } \
+    const uint tail_start = scalar_prefix_end + (vector_count << 2); \
+    for (uint i = tail_start + tid; i < block_end; i += tptg) { \
+        ACCUM v = static_cast<ACCUM>(logits[i]); \
+        v *= invT; \
+        heap_insert(lane_heap, &lane_heap_size, lane_target, static_cast<float>(v), i); \
+    } \
     \
-    threadgroup LogitPair tg_shared[4096]; \
-    const uint max_per_thread = max((uint)1, 4096u / tptg); \
-    const uint write_count = min((uint)M_use, max_per_thread); \
-    for (uint m = 0; m < write_count; ++m) { \
-        const uint idx = tid * write_count + m; \
-        if (idx < 4096) { \
-            tg_shared[idx] = (m < heap_size) ? heap[m] : LogitPair{-INFINITY, 0u}; \
+    heap_to_sorted(lane_heap, lane_heap_size); \
+    \
+    const uint simd_width = clamp(simd_width_attr, (uint)MIN_SIMDGROUP_SIZE, (uint)MAX_SIMDGROUP_SIZE); \
+    const uint simd_lane = simd_lane_id; \
+    const uint simd_group_id = simd_group_in_tg; \
+    const uint simd_group_count = (tptg + simd_width - 1) / simd_width; \
+    \
+    threadgroup LogitPair sg_candidates[SIMDGROUP_CANDIDATE_CAP_TOTAL]; \
+    threadgroup LogitPair sg_shortlists[SIMDGROUP_SHORTLIST_CAP]; \
+    for (uint idx = tid; idx < SIMDGROUP_CANDIDATE_CAP_TOTAL; idx += tptg) { \
+        sg_candidates[idx] = LogitPair{-INFINITY, 0u}; \
+    } \
+    for (uint idx = tid; idx < SIMDGROUP_SHORTLIST_CAP; idx += tptg) { \
+        sg_shortlists[idx] = LogitPair{-INFINITY, 0u}; \
+    } \
+    threadgroup_barrier(mem_flags::mem_threadgroup); \
+    \
+    if (simd_group_id < MAX_SIMDGROUPS) { \
+        const uint lane_base = simd_group_id * SIMDGROUP_CANDIDATE_CAP + simd_lane * MAX_LANE_HEAP; \
+        for (uint m = 0; m < MAX_LANE_HEAP; ++m) { \
+            const uint idx = lane_base + m; \
+            if (idx < SIMDGROUP_CANDIDATE_CAP_TOTAL) { \
+                sg_candidates[idx] = (m < lane_heap_size) ? lane_heap[m] : LogitPair{-INFINITY, 0u}; \
+            } \
         } \
     } \
     threadgroup_barrier(mem_flags::mem_threadgroup); \
     \
-    const uint merge_threads = min(tptg, (uint)32); \
-    \
-    if (tid < merge_threads) { \
-        const uint out_k = min(params.k, TG_OUTPUT_K); \
-        LogitPair my_heap[TG_OUTPUT_K]; \
-        uint my_heap_size = 0; \
-        \
-        const uint total_items = min(tptg * write_count, (uint)4096); \
-        for (uint i = tid; i < total_items; i += merge_threads) { \
-            if (isfinite(tg_shared[i].value)) { \
-                heap_insert(my_heap, &my_heap_size, out_k, tg_shared[i].value, tg_shared[i].index); \
+    if (simd_group_id < min(simd_group_count, (uint)MAX_SIMDGROUPS) && simd_lane == 0) { \
+        LogitPair sg_heap[SIMDGROUP_SHORTLIST]; \
+        uint sg_heap_size = 0; \
+        const uint shortlist_base = simd_group_id * SIMDGROUP_SHORTLIST; \
+        const uint candidate_base = simd_group_id * SIMDGROUP_CANDIDATE_CAP; \
+        const uint lanes_in_group = min(simd_width, tptg - simd_group_id * simd_width); \
+        const uint candidate_count = min(lanes_in_group * MAX_LANE_HEAP, (uint)SIMDGROUP_CANDIDATE_CAP); \
+        for (uint i = 0; i < candidate_count; ++i) { \
+            const uint idx = candidate_base + i; \
+            if (idx < SIMDGROUP_CANDIDATE_CAP_TOTAL) { \
+                const LogitPair cand = sg_candidates[idx]; \
+                if (isfinite(cand.value) && cand.index < V) { \
+                    heap_insert(sg_heap, &sg_heap_size, SIMDGROUP_SHORTLIST, cand.value, cand.index); \
+                } \
             } \
         } \
-        \
-        heap_to_sorted(my_heap, my_heap_size); \
-        \
-        const uint my_base = tid * out_k; \
-        for (uint i = 0; i < out_k; ++i) { \
-            const uint idx = my_base + i; \
-            if (idx < 4096) { \
-                tg_shared[idx] = (i < my_heap_size) ? my_heap[i] : LogitPair{-INFINITY, 0u}; \
+        heap_to_sorted(sg_heap, sg_heap_size); \
+        for (uint i = 0; i < SIMDGROUP_SHORTLIST; ++i) { \
+            const uint idx = shortlist_base + i; \
+            if (idx < SIMDGROUP_SHORTLIST_CAP) { \
+                sg_shortlists[idx] = (i < sg_heap_size) ? sg_heap[i] : LogitPair{-INFINITY, 0u}; \
             } \
         } \
     } \
@@ -157,16 +213,16 @@ kernel void sample_topk_partials_##SUFFIX( \
         const uint out_k = min(params.k, TG_OUTPUT_K); \
         LogitPair final_heap[TG_OUTPUT_K]; \
         uint final_heap_size = 0; \
-        \
-        const uint merge_items = min(merge_threads * out_k, (uint)4096); \
-        for (uint i = 0; i < merge_items; ++i) { \
-            if (isfinite(tg_shared[i].value)) { \
-                heap_insert(final_heap, &final_heap_size, out_k, tg_shared[i].value, tg_shared[i].index); \
+        const uint shortlist_total = min(simd_group_count, (uint)MAX_SIMDGROUPS) * SIMDGROUP_SHORTLIST; \
+        for (uint i = 0; i < shortlist_total; ++i) { \
+            if (i < SIMDGROUP_SHORTLIST_CAP) { \
+                const LogitPair cand = sg_shortlists[i]; \
+                if (isfinite(cand.value) && cand.index < V) { \
+                    heap_insert(final_heap, &final_heap_size, out_k, cand.value, cand.index); \
+                } \
             } \
         } \
-        \
         heap_to_sorted(final_heap, final_heap_size); \
-        \
         const uint output_base = tg_id * TG_OUTPUT_K; \
         for (uint i = 0; i < TG_OUTPUT_K; ++i) { \
             if (i < final_heap_size) { \
@@ -254,24 +310,30 @@ kernel void sample_topk_merge_and_sample_##SUFFIX( \
             return; \
         } \
         \
-        float inv_sum = 1.0f / sum; \
-        for (uint i = 0; i < global_heap_size; ++i) { \
-            global_heap[i].value *= inv_sum; \
-        } \
-        \
         float cumulative = 0.0f; \
         uint cutoff = global_heap_size - 1; \
+        float cutoff_sum = 0.0f; \
         for (uint i = 0; i < global_heap_size; ++i) { \
-            cumulative += global_heap[i].value; \
+            float prob = global_heap[i].value / sum; \
+            cumulative += prob; \
+            global_heap[i].value = prob; \
             if (cumulative >= static_cast<float>(top_p)) { \
                 cutoff = i; \
+                cutoff_sum = cumulative; \
                 break; \
             } \
+        } \
+        if (cutoff == global_heap_size - 1 && cutoff_sum == 0.0f) { \
+            cutoff_sum = cumulative; \
+        } \
+        const float renorm = (cutoff_sum > 0.0f && isfinite(cutoff_sum)) ? (1.0f / cutoff_sum) : 1.0f; \
+        for (uint i = 0; i <= cutoff; ++i) { \
+            global_heap[i].value *= renorm; \
         } \
         \
         RNG rng; \
         rng.seed(params.seed); \
-        float r = rng.next() * cumulative; \
+        float r = rng.next(); \
         \
         float acc = 0.0f; \
         uint chosen = global_heap[0].index; \
@@ -291,3 +353,5 @@ kernel void sample_topk_merge_and_sample_##SUFFIX( \
 
 FOR_EACH_FLOAT_TYPE(DEFINE_SAMPLE_TOPK_PARTIALS_KERNEL)
 FOR_EACH_FLOAT_TYPE(DEFINE_SAMPLE_TOPK_MERGE_AND_SAMPLE_KERNEL)
+#define SIMDGROUP_CANDIDATE_CAP (MAX_SIMDGROUP_SIZE * MAX_LANE_HEAP)
+#define SIMDGROUP_CANDIDATE_CAP_TOTAL (MAX_SIMDGROUPS * SIMDGROUP_CANDIDATE_CAP)

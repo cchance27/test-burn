@@ -16,10 +16,21 @@ pub fn calculate_threads_per_tg_and_num_threadgroups(
     let tew = pipeline.threadExecutionWidth() as usize;
     let max_tptg = pipeline.maxTotalThreadsPerThreadgroup() as usize;
 
+    let override_tptg = std::env::var("METALLIC_SAMPLE_TPTG")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&v| v > 0 && v <= max_tptg)
+        .filter(|&v| v % tew == 0);
+
     // Choose threads_per_tg as a multiple of TEW, capped at 256 and device max
     let max_cap = 256usize.min(max_tptg);
     let multiples = (max_cap / tew).max(1);
-    let threads_per_tg = (multiples * tew).min(max_cap);
+    let fallback = (multiples * tew).min(max_cap);
+    let preferred = 128usize.min(max_cap);
+    let preferred_aligned = if preferred % tew == 0 { Some(preferred) } else { None };
+    let threads_per_tg = override_tptg
+        .or(preferred_aligned)
+        .unwrap_or(fallback);
 
     // Increase threadgroups for large vocabs to improve coverage and occupancy
     let items_per_thread = 32u32; // moderate per-thread work to reduce divergence
@@ -78,13 +89,14 @@ impl CustomKernelInvocable for SampleTopKTopPOp {
         let (partials_values, partials_indices) =
             ctx.call_custom::<SampleTopKPartialsOp>((logits.clone(), vocab_size, k, top_p, temperature, varied_seed, per_thread_m_clamp))?;
 
+        let default_per_thread_m = k.min(4).max(1);
         let params = SampleParams {
             vocab_size,
             k,
             top_p,
             temperature,
             seed: varied_seed, // Use the varied seed
-            per_thread_m: k.clamp(1, per_thread_m_clamp),
+            per_thread_m: default_per_thread_m.min(per_thread_m_clamp).max(1),
             num_threadgroups: 0, // will be set in partials/merge ops consistently
         };
 
