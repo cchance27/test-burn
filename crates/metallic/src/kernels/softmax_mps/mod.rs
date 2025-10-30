@@ -8,6 +8,8 @@ use crate::{
     CommandBuffer, Dtype, TensorElement, cache_keys::MpsMatrixDescriptorKey, kernels::matmul_mps::mps_matrix_from_buffer, operation::EncoderType, resource_cache::ResourceCache
 };
 
+pub mod cache;
+
 // Public, user-facing, zero-sized struct for the MPS Softmax operation.
 pub struct SoftmaxMpsOp;
 

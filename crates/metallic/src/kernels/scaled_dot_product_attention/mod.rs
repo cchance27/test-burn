@@ -10,6 +10,8 @@ use crate::{
 #[cfg(test)]
 mod scaled_dot_product_attention_test;
 
+pub mod cache;
+
 #[derive(Clone, Copy)]
 struct SdpaConfig {
     transpose_k: bool,

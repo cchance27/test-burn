@@ -1,3 +1,4 @@
+pub mod cache;
 mod interface;
 
 use interface::{SdpaGraphInputs, SdpaGraphInterface, SdpaGraphOutput};
@@ -8,8 +9,10 @@ use objc2_metal_performance_shaders::MPSCommandBuffer;
 #[cfg(test)]
 mod sdpa_mps_graph_test;
 
+use cache::{CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask};
+
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, cacheable_resources::{CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask}, kernels::{
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, kernels::{
         DefaultKernelInvocable, GraphKernel, GraphKernelAccumulator, GraphKernelAxis, GraphKernelDtypePolicy, GraphKernelSignature, GraphKernelTensorDescriptor
     }, operation::EncoderType, resource_cache::ResourceCache
 };

@@ -3,7 +3,9 @@ use objc2_foundation::{NSArray, NSMutableArray, NSNumber};
 use objc2_metal_performance_shaders_graph as mpsg;
 
 use crate::{
-    MetalError, Tensor, TensorElement, cacheable_resources::{CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, MpsGraphSdpaFeedBinding, MpsGraphSdpaOutputBinding}, mps_graph::bindings::{GraphTensorBinding, GraphTensorDataArrayBuilder}
+    MetalError, Tensor, TensorElement, kernels::sdpa_mps_graph::cache::{
+        CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, MpsGraphSdpaFeedBinding, MpsGraphSdpaOutputBinding
+    }, mps_graph::bindings::{GraphTensorBinding, GraphTensorDataArrayBuilder}
 };
 
 pub struct SdpaGraphInterface<'a> {

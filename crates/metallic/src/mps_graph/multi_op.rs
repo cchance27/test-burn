@@ -385,9 +385,7 @@ impl<'a> GenericGraphInterface<'a> {
     }
 
     pub fn bind_inputs<T: TensorElement>(&self, inputs: &[&Tensor<T>]) -> Result<Retained<NSArray<mpsg::MPSGraphTensorData>>, MetalError> {
-        use crate::{
-            cacheable_resources::mps_data_type_for_dtype, mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder}
-        };
+        use crate::mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder};
 
         let builder = GraphTensorDataArrayBuilder::new();
 
@@ -400,7 +398,7 @@ impl<'a> GenericGraphInterface<'a> {
             }
 
             let tensor = inputs[i];
-            let data_type = mps_data_type_for_dtype(tensor.dtype);
+            let data_type = tensor.dtype.into();
             let shape_nsnumbers = dims_to_nsnumbers(&tensor.dims)?;
             let spec = GraphBindingSpec {
                 expected_shape: &shape_nsnumbers,
@@ -417,9 +415,7 @@ impl<'a> GenericGraphInterface<'a> {
         &self,
         outputs: &[&Tensor<T>],
     ) -> Result<Retained<NSArray<mpsg::MPSGraphTensorData>>, MetalError> {
-        use crate::{
-            cacheable_resources::mps_data_type_for_dtype, mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder}
-        };
+        use crate::mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder};
 
         let builder = GraphTensorDataArrayBuilder::new();
 
@@ -432,7 +428,7 @@ impl<'a> GenericGraphInterface<'a> {
             }
 
             let tensor = outputs[i];
-            let data_type = mps_data_type_for_dtype(tensor.dtype);
+            let data_type = tensor.dtype.into();
             let shape_nsnumbers = dims_to_nsnumbers(&tensor.dims)?;
             let spec = GraphBindingSpec {
                 expected_shape: &shape_nsnumbers,

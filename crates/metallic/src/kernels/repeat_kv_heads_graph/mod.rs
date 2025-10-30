@@ -100,7 +100,7 @@ impl DefaultKernelInvocable for RepeatKvHeadsGraphOp {
         if in_dims != [canonical_heads, seq, head_dim] {
             return Err(MetalError::InvalidShape("repeat_kv_heads_graph input dims mismatch".into()));
         }
-        let data_type = crate::cacheable_resources::mps_data_type_for_dtype(T::DTYPE);
+        let data_type = T::DTYPE.into();
         let executable = Self::build_graph(data_type, canonical_heads, group_size, seq, head_dim)?;
 
         Ok((

@@ -58,6 +58,17 @@ impl Dtype {
     }
 }
 
+impl From<Dtype> for objc2_metal_performance_shaders::MPSDataType {
+    fn from(value: Dtype) -> Self {
+        use objc2_metal_performance_shaders::MPSDataType;
+        match value {
+            Dtype::F32 => MPSDataType::Float32,
+            Dtype::F16 => MPSDataType::Float16,
+            Dtype::U32 => MPSDataType::UInt32,
+        }
+    }
+}
+
 // F32 implementation
 #[derive(Clone, Copy, Default)]
 pub struct F32;

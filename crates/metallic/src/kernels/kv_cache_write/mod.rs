@@ -3,6 +3,8 @@ use metallic_instrumentation::GpuProfiler;
 use super::*;
 use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel};
 
+pub mod cache;
+
 pub struct KvCacheWriteOp;
 
 #[derive(Clone, Debug)]

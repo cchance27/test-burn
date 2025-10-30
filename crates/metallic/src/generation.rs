@@ -7,8 +7,8 @@ use metallic_instrumentation::{MetricEvent, global_cached_memory_profiler, recor
 use rand::prelude::*;
 use rustc_hash::FxHashMap;
 
-use super::{Context, MetalError, SamplerBuffers, Tensor, resource_cache::CacheMetrics};
-use crate::{TensorElement, Tokenizer, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25};
+use super::{Context, MetalError, SamplerBuffers, Tensor};
+use crate::{TensorElement, Tokenizer, caching::CacheMetrics, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25};
 
 const IM_START: &str = "[:1]";
 const IM_END: &str = "[:2]";

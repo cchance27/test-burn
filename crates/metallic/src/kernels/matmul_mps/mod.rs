@@ -22,6 +22,7 @@ mod matmul_alpha_beta;
 #[cfg(test)]
 mod matmul_alpha_beta_test;
 pub use matmul_alpha_beta::MatMulMpsAlphaBetaOp;
+pub mod cache;
 
 // Dispatcher moved to `matmul_dispatcher` module
 

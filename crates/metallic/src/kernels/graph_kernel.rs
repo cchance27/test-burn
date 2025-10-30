@@ -1,4 +1,4 @@
-use crate::{cacheable_resources::mps_data_type_for_dtype, error::MetalError, tensor::dtypes::Dtype};
+use crate::{error::MetalError, tensor::dtypes::Dtype};
 
 /// Describes how a graph-backed kernel expects its storage and accumulator
 /// precision to be configured. The storage dtype applies to the raw tensors
@@ -40,12 +40,12 @@ impl GraphKernelDtypePolicy {
 
     /// Convert the storage dtype to an `MPSDataType`.
     pub fn storage_mps_type(&self) -> objc2_metal_performance_shaders::MPSDataType {
-        mps_data_type_for_dtype(self.storage)
+        self.storage.into()
     }
 
     /// Convert the accumulator dtype (when present) to an `MPSDataType`.
     pub fn accumulator_mps_type(&self) -> Option<objc2_metal_performance_shaders::MPSDataType> {
-        self.accumulator().map(mps_data_type_for_dtype)
+        self.accumulator().map(Into::into)
     }
 
     /// Validate that the provided storage dtype matches the policy.

@@ -31,7 +31,7 @@ impl<'a> GraphTensorBinding<'a> {
         expected_shape: &'a objc2_foundation::NSArray<NSNumber>,
         data_type: MPSDataType,
     ) -> Result<Self, MetalError> {
-        let tensor_dtype = crate::cacheable_resources::mps_data_type_for_dtype(tensor.dtype);
+        let tensor_dtype: MPSDataType = tensor.dtype.into();
         if tensor_dtype != data_type {
             return Err(MetalError::OperationFailed(format!(
                 "Tensor dtype ({tensor_dtype:?}) does not match MPSGraph executable dtype ({data_type:?})"
