@@ -111,6 +111,30 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
         self.build_view(vec![self.len()], vec![1], self.offset)
     }
 
+    /// Returns true if the tensor layout is contiguous in memory for row-major iteration.
+    #[inline]
+    pub fn is_contiguous(&self) -> bool {
+        if self.dims.is_empty() {
+            return true;
+        }
+
+        let mut expected_stride = 1usize;
+        for (dim, &stride) in self.dims.iter().rev().zip(self.strides.iter().rev()) {
+            if *dim == 0 {
+                // Zero-sized tensors are trivially contiguous.
+                return true;
+            }
+
+            if stride != expected_stride {
+                return false;
+            }
+
+            expected_stride = expected_stride.saturating_mul(*dim);
+        }
+
+        true
+    }
+
     pub fn reshape(&self, new_dims: Vec<usize>) -> Result<Self, crate::MetalError> {
         let expected_elements: usize = new_dims.iter().product();
         let actual_elements = self.len();

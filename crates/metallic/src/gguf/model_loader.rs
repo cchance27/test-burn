@@ -282,6 +282,10 @@ impl GGUFTensor {
         &self.dims
     }
 
+    pub fn raw_view<'a>(&self, file: &'a GGUFFile) -> Result<GGUFRawTensor<'a>, GGUFError> {
+        self.info.view(file)
+    }
+
     pub fn materialize<T: TensorElement>(&self, file: &GGUFFile, context: &Context<T>) -> Result<Tensor<T>, GGUFError> {
         let view = self.info.view(file)?;
         match view {
@@ -353,6 +357,14 @@ impl GGUFModel {
     /// Get a tensor by name
     pub fn get_tensor(&self, name: &str) -> Option<&GGUFTensor> {
         self.tensors.get(name)
+    }
+
+    pub fn tensor_raw_view(&self, name: &str) -> Result<GGUFRawTensor<'_>, GGUFError> {
+        let tensor = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| GGUFError::InvalidTensorData(format!("Tensor '{}' not found in GGUF metadata", name)))?;
+        tensor.raw_view(&self.gguf_file)
     }
 
     /// Materialize a tensor into the provided Metal context.

@@ -1,4 +1,4 @@
-use std::ptr::NonNull;
+use std::ptr::{self, NonNull};
 
 use metallic_instrumentation::{GpuProfiler, config::AppConfig};
 use objc2_metal::{MTLBlitCommandEncoder as _, MTLBuffer as _, MTLDevice as _, MTLResourceOptions};
@@ -211,8 +211,15 @@ impl<T: TensorElement> Tensor<T> {
     }
 
     /// Immutable host view of the buffer. Ensure GPU work has completed before reading.
+    /// NOTE: Only use when the tensor layout is contiguous; strided views must call `try_to_vec()`.
     #[inline]
     pub fn as_slice(&self) -> &[T::Scalar] {
+        debug_assert!(
+            self.is_contiguous(),
+            "Tensor::as_slice() requires a contiguous layout. dims={:?} strides={:?}",
+            self.dims(),
+            self.strides
+        );
         self.ensure_ready();
         if self.host_accessible {
             let ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const T::Scalar;
@@ -241,7 +248,51 @@ impl<T: TensorElement> Tensor<T> {
     /// Copy the tensor contents to a host Vec.
     #[inline]
     pub fn to_vec(&self) -> Vec<T::Scalar> {
-        self.as_slice().to_vec()
+        self.try_to_vec().expect("failed to copy tensor to host vec")
+    }
+
+    /// Fallible variant that returns a host Vec, materializing strided layouts as needed.
+    /// Prefer this over `as_slice()` whenever the tensor may be a view with non-unit strides.
+    pub fn try_to_vec(&self) -> Result<Vec<T::Scalar>, MetalError> {
+        self.ensure_ready();
+
+        let len = self.len();
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+
+        if self.is_contiguous() {
+            return Ok(self.as_slice().to_vec());
+        }
+
+        let dims = self.dims.clone();
+        let strides = self.strides.clone();
+        let contiguous_strides = Self::compute_strides(&dims);
+        let elem_size = std::mem::size_of::<T::Scalar>();
+
+        let mut result = Vec::<T::Scalar>::with_capacity(len);
+        unsafe {
+            result.set_len(len);
+        }
+
+        let dst_bytes = result.as_mut_ptr() as *mut u8;
+
+        if self.host_accessible {
+            let src_ptr = unsafe { self.buf.contents().as_ptr().add(self.offset) } as *const u8;
+            copy_strided_bytes(&dims, &strides, &contiguous_strides, elem_size, src_ptr, dst_bytes);
+        } else {
+            self.ensure_staging_for_read()?;
+            let (staging_buf, base_offset) = {
+                let state = self.host_access.lock().expect("host access state mutex poisoned");
+                let staging = state.staging.as_ref().expect("staging buffer must exist for host read").clone();
+                let base_offset = self.offset.saturating_sub(state.base_offset);
+                (staging, base_offset)
+            };
+            let src_ptr = unsafe { (staging_buf.contents().as_ptr() as *const u8).add(base_offset) };
+            copy_strided_bytes(&dims, &strides, &contiguous_strides, elem_size, src_ptr, dst_bytes);
+        }
+
+        Ok(result)
     }
 
     /// Synchronize given command buffers before host read. Convenience to make the read contract explicit.
@@ -279,5 +330,77 @@ impl<T: TensorElement> Tensor<T> {
 
             unsafe { std::slice::from_raw_parts_mut(ptr, len) }
         }
+    }
+}
+
+fn copy_strided_bytes(
+    dims: &[usize],
+    strides: &[usize],
+    contiguous_strides: &[usize],
+    elem_size: usize,
+    src_ptr: *const u8,
+    dst_ptr: *mut u8,
+) {
+    if dims.is_empty() {
+        unsafe {
+            ptr::copy_nonoverlapping(src_ptr, dst_ptr, elem_size);
+        }
+        return;
+    }
+
+    copy_strided_recursive(dims, strides, contiguous_strides, elem_size, 0, src_ptr, dst_ptr, 0, 0);
+}
+
+fn copy_strided_recursive(
+    dims: &[usize],
+    strides: &[usize],
+    contiguous_strides: &[usize],
+    elem_size: usize,
+    level: usize,
+    src_ptr: *const u8,
+    dst_ptr: *mut u8,
+    src_offset: usize,
+    dst_offset: usize,
+) {
+    if level == dims.len() - 1 {
+        let count = dims[level];
+        let src_stride = strides[level];
+        if src_stride == 1 {
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    src_ptr.add(src_offset * elem_size),
+                    dst_ptr.add(dst_offset * elem_size),
+                    count * elem_size,
+                );
+            }
+        } else {
+            for i in 0..count {
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        src_ptr.add((src_offset + i * src_stride) * elem_size),
+                        dst_ptr.add((dst_offset + i) * elem_size),
+                        elem_size,
+                    );
+                }
+            }
+        }
+        return;
+    }
+
+    let dim = dims[level];
+    let src_stride = strides[level];
+    let dst_stride = contiguous_strides[level];
+    for i in 0..dim {
+        copy_strided_recursive(
+            dims,
+            strides,
+            contiguous_strides,
+            elem_size,
+            level + 1,
+            src_ptr,
+            dst_ptr,
+            src_offset + i * src_stride,
+            dst_offset + i * dst_stride,
+        );
     }
 }

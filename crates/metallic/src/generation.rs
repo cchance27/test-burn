@@ -179,6 +179,59 @@ impl Default for GenerationConfig {
     }
 }
 
+/// Deterministic fallback that inspects only the final logits row.
+/// NOTE: Forces a GPU sync so call sparingly on hot paths.
+fn greedy_argmax_last_token<T: TensorElement>(
+    logits_tensor: &Tensor<T>,
+    vocab_size: usize,
+    ctx: &mut Context<T>,
+) -> Result<u32, MetalError> {
+    if vocab_size == 0 {
+        return Ok(0);
+    }
+
+    ctx.synchronize();
+
+    let dims = logits_tensor.dims();
+    if dims.is_empty() {
+        return Err(MetalError::InvalidShape("Logits tensor must have at least one dimension".into()));
+    }
+
+    let last_dim = *dims.last().unwrap();
+    if last_dim != vocab_size {
+        return Err(MetalError::InvalidShape(format!(
+            "Logits tensor last dimension {} does not match vocab size {}",
+            last_dim, vocab_size
+        )));
+    }
+
+    let slice = logits_tensor.as_slice();
+    if slice.len() < vocab_size {
+        return Err(MetalError::InvalidShape("Logits tensor shorter than vocab size".to_string()));
+    }
+
+    let start_idx = slice.len() - vocab_size;
+    let mut best_idx = 0u32;
+    let mut best_val = f32::NEG_INFINITY;
+    let mut found = false;
+
+    for (offset, &raw) in slice[start_idx..].iter().enumerate() {
+        let value = T::to_f32(raw);
+        if !value.is_finite() {
+            continue;
+        }
+
+        let token_idx = offset as u32;
+        if !found || value > best_val || (value == best_val && token_idx > best_idx) {
+            found = true;
+            best_val = value;
+            best_idx = token_idx;
+        }
+    }
+
+    Ok(if found { best_idx } else { 0 })
+}
+
 /// GPU-based sample from logits using top-k and top-p (nucleus) sampling.
 /// This avoids the GPU-CPU sync bottleneck by performing sampling directly on GPU.
 ///
@@ -200,6 +253,11 @@ pub fn gpu_sample_top_k_top_p<T: TensorElement>(
 ) -> Result<u32, MetalError> {
     // Use GPU-based sampling to avoid downloading full logits tensor.
     // This invokes a custom Metal kernel to perform sampling entirely on the GPU.
+
+    // Defensive deterministic path: zero/invalid temperature or disabled top-k should never sample stochastically.
+    if temperature <= 0.0 || !temperature.is_finite() || top_k == 0 {
+        return greedy_argmax_last_token(logits_tensor, vocab_size, ctx);
+    }
 
     // Generate a random seed for the GPU kernel.
     let seed = rand::rng().next_u32();

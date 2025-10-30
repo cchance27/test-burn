@@ -412,7 +412,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         ctx.fused_qkv_projection(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, d_model, block0.kv_dim)?;
     ctx.synchronize();
 
-    let rust_q_proj_slice = q_mat.as_slice();
+    let rust_q_proj = q_mat.try_to_vec()?;
+    let rust_q_proj_slice = rust_q_proj.as_slice();
     println!(
         "Rust first Q proj first 10: {:?}",
         take_first_as_f32::<TestElement>(rust_q_proj_slice, 10)
@@ -481,7 +482,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     // --- 4. Test First Block K Projection ---
     println!("--- 4. Testing First Block K Projection ---");
     let k_mat = k_mat.clone();
-    let rust_k_proj_slice = k_mat.as_slice();
+    let rust_k_proj = k_mat.try_to_vec()?;
+    let rust_k_proj_slice = rust_k_proj.as_slice();
     println!(
         "Rust first K proj first 10: {:?}",
         take_first_as_f32::<TestElement>(rust_k_proj_slice, 10)
@@ -550,7 +552,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     // --- 5. Test First Block V Projection ---
     println!("--- 5. Testing First Block V Projection ---");
     let v_mat = v_mat.clone();
-    let rust_v_proj_slice = v_mat.as_slice();
+    let rust_v_proj = v_mat.try_to_vec()?;
+    let rust_v_proj_slice = rust_v_proj.as_slice();
     println!(
         "Rust first V proj first 10: {:?}",
         take_first_as_f32::<TestElement>(rust_v_proj_slice, 10)
