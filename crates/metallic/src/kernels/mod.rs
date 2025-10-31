@@ -3,9 +3,7 @@ use objc2_foundation::NSString;
 use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
 
-use crate::{
-    Context, Dtype, MetalError, Operation, Tensor, caching::ResourceCache
-};
+use crate::{Context, Dtype, MetalError, Operation, Tensor, caching::ResourceCache};
 
 // Rexport KernelManager and Invocable
 mod kernel_manager;

@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::mpsc, time::{Duration, Instant}
+    collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::{Arc, mpsc}, thread, time::{Duration, Instant}
 };
 
 use metallic_cli_helpers::app_event::AppEvent;
@@ -8,7 +8,9 @@ use rand::prelude::*;
 use rustc_hash::FxHashMap;
 
 use super::{Context, MetalError, SamplerBuffers, Tensor};
-use crate::{TensorElement, Tokenizer, caching::CacheMetrics, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25};
+use crate::{
+    TensorElement, Tokenizer, caching::CacheMetrics, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25, operation::CommandBuffer, tensor::dtypes::U32
+};
 
 const IM_START: &str = "[:1]";
 const IM_END: &str = "[:2]";
@@ -232,31 +234,125 @@ fn greedy_argmax_last_token<T: TensorElement>(
     Ok(if found { best_idx } else { 0 })
 }
 
-/// GPU-based sample from logits using top-k and top-p (nucleus) sampling.
-/// This avoids the GPU-CPU sync bottleneck by performing sampling directly on GPU.
-///
-/// NOTE: This is the infrastructure for GPU-based sampling. A full implementation would require:
-/// 1. A sophisticated Metal kernel that implements the complete sampling algorithm
-/// 2. GPU-based random number generation
-/// 3. Efficient top-k selection (potentially using GPU sorting/reduction algorithms)
-/// 4. Proper top-p (nucleus) sampling with cumulative probability calculations
-///
-/// The current approach still requires a small sync to read the single output token,
-/// but eliminates the major bottleneck of downloading the entire logits tensor (~600KB+ per token).
-pub fn gpu_sample_top_k_top_p<T: TensorElement>(
+struct SampleResult {
+    token: u32,
+    sample_duration: Duration,
+    iteration_duration: Duration,
+}
+
+pub(crate) struct GpuSampleFuture {
+    token_tensor: Option<Tensor<U32>>,
+    command_buffer: Option<CommandBuffer>,
+    iteration_start: Instant,
+    sample_start: Instant,
+    ready_token: Option<u32>,
+    ready_sample_duration: Duration,
+}
+
+impl GpuSampleFuture {
+    fn pending(token_tensor: Tensor<U32>, command_buffer: CommandBuffer, iteration_start: Instant, sample_start: Instant) -> Self {
+        Self {
+            token_tensor: Some(token_tensor),
+            command_buffer: Some(command_buffer),
+            iteration_start,
+            sample_start,
+            ready_token: None,
+            ready_sample_duration: Duration::ZERO,
+        }
+    }
+
+    fn ready(token: u32, iteration_start: Instant, sample_duration: Duration) -> Self {
+        Self {
+            token_tensor: None,
+            command_buffer: None,
+            iteration_start,
+            sample_start: iteration_start,
+            ready_token: Some(token),
+            ready_sample_duration: sample_duration,
+        }
+    }
+
+    fn finalize(&mut self) -> Result<SampleResult, MetalError> {
+        let token_tensor = self.token_tensor.take().expect("pending GPU sample must retain output tensor");
+        let token_slice = token_tensor.as_slice();
+        let now = Instant::now();
+        let sample_duration = now.saturating_duration_since(self.sample_start);
+        let iteration_duration = now.saturating_duration_since(self.iteration_start);
+        let token = token_slice[0];
+        self.ready_token = Some(token);
+        self.ready_sample_duration = sample_duration;
+        Ok(SampleResult {
+            token,
+            sample_duration,
+            iteration_duration,
+        })
+    }
+
+    fn try_complete<T: TensorElement>(&mut self, ctx: &mut Context<T>) -> Result<Option<SampleResult>, MetalError> {
+        if let Some(token) = self.ready_token {
+            return Ok(Some(SampleResult {
+                token,
+                sample_duration: self.ready_sample_duration,
+                iteration_duration: self.iteration_start.elapsed(),
+            }));
+        }
+
+        let completions = ctx.poll_command_buffer_completions();
+        let Some(command_buffer) = self.command_buffer.as_ref() else {
+            return Ok(None);
+        };
+
+        let completed = completions
+            .iter()
+            .any(|completion| completion.command_buffer.ptr_eq(command_buffer));
+
+        if !completed {
+            if command_buffer.is_completed() {
+                self.command_buffer = None;
+                let sample = self.finalize()?;
+                return Ok(Some(sample));
+            }
+            return Ok(None);
+        }
+
+        self.command_buffer = None;
+        let sample = self.finalize()?;
+        Ok(Some(sample))
+    }
+
+    fn wait<T: TensorElement>(mut self, ctx: &mut Context<T>) -> Result<SampleResult, MetalError> {
+        if let Some(token) = self.ready_token {
+            return Ok(SampleResult {
+                token,
+                sample_duration: self.ready_sample_duration,
+                iteration_duration: self.iteration_start.elapsed(),
+            });
+        }
+
+        loop {
+            if let Some(sample) = self.try_complete(ctx)? {
+                return Ok(sample);
+            }
+            thread::yield_now();
+        }
+    }
+}
+
+/// GPU-based sample from logits using top-k and top-p (nucleus) sampling with asynchronous completion.
+pub(crate) fn gpu_sample_top_k_top_p_async<T: TensorElement>(
     logits_tensor: &Tensor<T>,
     vocab_size: usize,
     top_k: usize,
     top_p: f32,
     temperature: f32,
     ctx: &mut Context<T>,
-) -> Result<u32, MetalError> {
-    // Use GPU-based sampling to avoid downloading full logits tensor.
-    // This invokes a custom Metal kernel to perform sampling entirely on the GPU.
+    iteration_start: Instant,
+) -> Result<GpuSampleFuture, MetalError> {
+    let sample_start = Instant::now();
 
-    // Defensive deterministic path: zero/invalid temperature or disabled top-k should never sample stochastically.
     if temperature <= 0.0 || !temperature.is_finite() || top_k == 0 {
-        return greedy_argmax_last_token(logits_tensor, vocab_size, ctx);
+        let token = greedy_argmax_last_token(logits_tensor, vocab_size, ctx)?;
+        return Ok(GpuSampleFuture::ready(token, iteration_start, sample_start.elapsed()));
     }
 
     // Generate a random seed for the GPU kernel.
@@ -272,9 +368,158 @@ pub fn gpu_sample_top_k_top_p<T: TensorElement>(
         40u32,
     ))?;
 
-    // The result is a tensor with a single u32 element.
-    let result_slice = output_token.as_slice();
-    Ok(result_slice[0])
+    let command_buffer = output_token
+        .defining_cmd_buffer
+        .borrow()
+        .clone()
+        .expect("sampling output tensor must have defining command buffer");
+
+    Ok(GpuSampleFuture::pending(
+        output_token,
+        command_buffer,
+        iteration_start,
+        sample_start,
+    ))
+}
+
+pub fn gpu_sample_top_k_top_p<T: TensorElement>(
+    logits_tensor: &Tensor<T>,
+    vocab_size: usize,
+    top_k: usize,
+    top_p: f32,
+    temperature: f32,
+    ctx: &mut Context<T>,
+) -> Result<u32, MetalError> {
+    let future = gpu_sample_top_k_top_p_async(logits_tensor, vocab_size, top_k, top_p, temperature, ctx, Instant::now())?;
+    ctx.submit_active_command_buffer();
+    ctx.poll_command_buffer_completions();
+    let result = future.wait(ctx)?;
+    Ok(result.token)
+}
+
+struct CompletedToken {
+    token_id: u32,
+    sample_duration: Duration,
+    iteration_duration: Duration,
+}
+
+impl CompletedToken {
+    fn from_sample(sample: SampleResult) -> Self {
+        Self {
+            token_id: sample.token,
+            sample_duration: sample.sample_duration,
+            iteration_duration: sample.iteration_duration,
+        }
+    }
+}
+
+struct ProcessOutcome {
+    continue_generation: bool,
+    is_eos: bool,
+}
+
+fn process_completed_token<T: TensorElement, F>(
+    token: CompletedToken,
+    generated_ids: &mut Vec<u32>,
+    tokenizer: &Tokenizer,
+    decoded_chunk: &mut String,
+    decode_scratch: &mut Vec<u8>,
+    ctx: &mut Context<T>,
+    metric_recording_overhead: &mut Duration,
+    token_callback: &mut F,
+) -> Result<ProcessOutcome, MetalError>
+where
+    F: FnMut(u32, Arc<str>, Duration) -> Result<bool, MetalError>,
+{
+    let sample_metric_start = Instant::now();
+    record_metric_async!(MetricEvent::InternalKernelCompleted {
+        parent_op_name: "sampling".to_string(),
+        internal_kernel_name: "gpu_top_k_top_p".to_string(),
+        duration_us: token.sample_duration.as_micros().max(1) as u64,
+    });
+    *metric_recording_overhead += sample_metric_start.elapsed();
+
+    if !token.iteration_duration.is_zero() {
+        let metric_start = Instant::now();
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
+            parent_op_name: "generation_loop".to_string(),
+            internal_kernel_name: "iteration_total".to_string(),
+            duration_us: token.iteration_duration.as_micros() as u64,
+        });
+        *metric_recording_overhead += metric_start.elapsed();
+    }
+
+    let push_start = Instant::now();
+    generated_ids.push(token.token_id);
+    let push_duration = push_start.elapsed();
+    if !push_duration.is_zero() {
+        let metric_start = Instant::now();
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
+            parent_op_name: "generation_loop".to_string(),
+            internal_kernel_name: "token_push".to_string(),
+            duration_us: push_duration.as_micros() as u64,
+        });
+        *metric_recording_overhead += metric_start.elapsed();
+    }
+
+    let decode_start = Instant::now();
+    let decoded_piece = tokenizer.decode_token_arc(token.token_id, decoded_chunk, decode_scratch)?;
+    let decode_duration = decode_start.elapsed();
+    let metric_start = Instant::now();
+    record_metric_async!(MetricEvent::InternalKernelCompleted {
+        parent_op_name: "decoding".to_string(),
+        internal_kernel_name: "token_decode".to_string(),
+        duration_us: decode_duration.as_micros().max(1) as u64,
+    });
+    *metric_recording_overhead += metric_start.elapsed();
+
+    let cache_log_start = Instant::now();
+    log_cache_stats(ctx, "generate", generated_ids.len());
+    let cache_log_duration = cache_log_start.elapsed();
+    if !cache_log_duration.is_zero() {
+        let metric_start = Instant::now();
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
+            parent_op_name: "generation_loop".to_string(),
+            internal_kernel_name: "cache_logging".to_string(),
+            duration_us: cache_log_duration.as_micros() as u64,
+        });
+        *metric_recording_overhead += metric_start.elapsed();
+    }
+
+    let mut continue_generation = true;
+    if let Some(piece) = decoded_piece {
+        let callback_start = Instant::now();
+        continue_generation = token_callback(token.token_id, piece, token.iteration_duration)?;
+        let callback_duration = callback_start.elapsed();
+        if !callback_duration.is_zero() {
+            let metric_start = Instant::now();
+            record_metric_async!(MetricEvent::InternalKernelCompleted {
+                parent_op_name: "generation_loop".to_string(),
+                internal_kernel_name: "token_callback".to_string(),
+                duration_us: callback_duration.as_micros() as u64,
+            });
+            *metric_recording_overhead += metric_start.elapsed();
+        }
+    }
+
+    let eos_check_start = Instant::now();
+    let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+    let is_eos = token.token_id == eos_token_id;
+    let eos_check_duration = eos_check_start.elapsed();
+    if !eos_check_duration.is_zero() {
+        let metric_start = Instant::now();
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
+            parent_op_name: "generation_loop".to_string(),
+            internal_kernel_name: "eos_check".to_string(),
+            duration_us: eos_check_duration.as_micros() as u64,
+        });
+        *metric_recording_overhead += metric_start.elapsed();
+    }
+
+    Ok(ProcessOutcome {
+        continue_generation,
+        is_eos,
+    })
 }
 
 /// Sample from logits using top-k and top-p (nucleus) sampling.
@@ -446,7 +691,7 @@ pub fn generate_autoregressive_with_kv_cache<T: TensorElement>(
     let (tx, _rx) = mpsc::channel();
 
     // Use the streaming function to handle the generation loop
-    let mut callback = |token_id: u32, _decoded_token: std::sync::Arc<str>, _iteration_duration: Duration| -> Result<bool, MetalError> {
+    let mut callback = |token_id: u32, _decoded_token: Arc<str>, _iteration_duration: Duration| -> Result<bool, MetalError> {
         generated_ids.push(token_id);
         Ok(true) // Continue generation
     };
@@ -478,7 +723,7 @@ pub fn generate_streaming<T: TensorElement>(
     let input_ids = tokenizer.encode(&full_prompt)?;
 
     let mut prompt_processing_duration: Option<Duration> = None;
-    let mut token_callback = |_token_id, decoded_token: std::sync::Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
+    let mut token_callback = |_token_id, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
         let now = Instant::now();
 
         let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
@@ -518,7 +763,7 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
     _tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError>
 where
-    F: FnMut(u32, std::sync::Arc<str>, Duration) -> Result<bool, MetalError>,
+    F: FnMut(u32, Arc<str>, Duration) -> Result<bool, MetalError>,
 {
     // Pre-allocate KV cache for all layers
     let n_layers = qwen.config.n_layers;
@@ -616,49 +861,44 @@ where
     let mut generated_ids = input_ids.to_vec();
     let prompt_len = input_ids.len();
     let vocab_size = qwen.config.vocab_size;
-    let mut next_token;
     let mut decoded_chunk = String::new();
     let mut decode_scratch = Vec::new();
 
-    if let Some(logits_tensor) = logits_tensor {
-        // Use GPU-based sampling to avoid downloading full logits tensor
-        let sample_start = Instant::now();
-        next_token = gpu_sample_top_k_top_p::<T>(&logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature, ctx)?;
-        let sample_duration = sample_start.elapsed();
-        record_metric_async!(MetricEvent::InternalKernelCompleted {
-            parent_op_name: "sampling".to_string(),
-            internal_kernel_name: "gpu_top_k_top_p".to_string(),
-            duration_us: sample_duration.as_micros().max(1) as u64,
-        });
+    let mut pending_output = if let Some(logits_tensor) = logits_tensor {
+        let iteration_start = Instant::now();
+        let initial_future = gpu_sample_top_k_top_p_async::<T>(
+            &logits_tensor,
+            vocab_size,
+            cfg.top_k,
+            cfg.top_p,
+            cfg.temperature,
+            ctx,
+            iteration_start,
+        )?;
+        ctx.submit_active_command_buffer();
+        ctx.poll_command_buffer_completions();
+        let initial_sample = initial_future.wait(ctx)?;
+        Some(CompletedToken::from_sample(initial_sample))
     } else {
-        next_token = 0;
-    }
+        Some(CompletedToken {
+            token_id: 0,
+            sample_duration: Duration::ZERO,
+            iteration_duration: Duration::ZERO,
+        })
+    };
 
-    generated_ids.push(next_token);
-    let decode_start = Instant::now();
-    let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
-    let decode_duration = decode_start.elapsed();
-    record_metric_async!(MetricEvent::InternalKernelCompleted {
-        parent_op_name: "decoding".to_string(),
-        internal_kernel_name: "token_decode".to_string(),
-        duration_us: decode_duration.as_micros().max(1) as u64,
-    });
-
-    log_cache_stats(ctx, "generate", generated_ids.len());
-
-    if let Some(piece) = decoded_piece
-        && !token_callback(next_token, piece, Duration::ZERO)?
-    {
-        return Ok(());
-    }
-
-    // --- Autoregressive Generation Loop ---
     ctx.with_gpu_scope("Generation Loop", |ctx| {
         let mut metric_recording_overhead = Duration::ZERO;
         let mut last_memory_profiling = Instant::now();
-        let memory_profiling_interval = Duration::from_millis(100); // Only profile every 100ms
+        let memory_profiling_interval = Duration::from_millis(100);
+
+        let mut current_input_token = pending_output.as_ref().map(|token| token.token_id).unwrap_or(0);
 
         for i in 0..cfg.max_tokens - 1 {
+            if pending_output.is_none() {
+                break;
+            }
+
             let iteration_start = Instant::now();
 
             let reset_start = Instant::now();
@@ -674,11 +914,10 @@ where
                 metric_recording_overhead += metric_start.elapsed();
             }
 
-            // Core token generation operations only
             let current_pos = prompt_len + i;
 
             let embed_start = Instant::now();
-            let input_tensor = qwen.embed(&[next_token], ctx)?;
+            let input_tensor = qwen.embed(&[current_input_token], ctx)?;
             let embed_duration = embed_start.elapsed();
             if !embed_duration.is_zero() {
                 let metric_start = Instant::now();
@@ -704,22 +943,17 @@ where
                 metric_recording_overhead += metric_start.elapsed();
             }
 
-            // Only perform memory profiling if profiling is enabled (meaning metrics are enabled)
-            // and only periodically to reduce performance impact
             if let Ok(config) = metallic_instrumentation::config::AppConfig::get_or_init_from_env()
                 && config.enable_profiling
                 && last_memory_profiling.elapsed() >= memory_profiling_interval
             {
-                // Report updated host memory usage during generation (only when it changes significantly)
                 let tensor_pool_used = ctx.pool.used_bytes();
-                let kv_cache_used = kv_cache_size; // For now, assume all KV cache is used
+                let kv_cache_used = kv_cache_size;
                 let _total_memory_used = tensor_pool_used + kv_cache_used;
 
-                // Get current process memory usage using the cached profiler
                 let process_memory_bytes = global_cached_memory_profiler().get_process_memory_usage();
                 last_memory_profiling = Instant::now();
 
-                // Only record if memory usage changed significantly (>1MB) or this is the first generation step
                 if process_memory_bytes > 1_048_576 || generated_ids.is_empty() {
                     record_metric_async!(MetricEvent::HostMemory {
                         total_bytes: process_memory_bytes,
@@ -734,7 +968,6 @@ where
 
             let logits_tensor = ctx.with_gpu_scope("generation_step_output", |ctx| qwen.output(&hidden_states, ctx))?;
 
-            // Report forward step memory usage (only once per generation step)
             if i == 0 {
                 let bytes_per_element = T::DTYPE.size_bytes();
                 let mut breakdown = FxHashMap::default();
@@ -753,109 +986,54 @@ where
                 });
             }
 
-            // Use GPU-based sampling to avoid downloading full logits tensor
-            let sample_start = Instant::now();
-            next_token = gpu_sample_top_k_top_p::<T>(&logits_tensor, vocab_size, cfg.top_k, cfg.top_p, cfg.temperature, ctx)?;
-            let sample_duration = sample_start.elapsed();
-            let metric_start = Instant::now();
-            record_metric_async!(MetricEvent::InternalKernelCompleted {
-                parent_op_name: "sampling".to_string(),
-                internal_kernel_name: "gpu_top_k_top_p".to_string(),
-                duration_us: sample_duration.as_micros().max(1) as u64,
-            });
-            metric_recording_overhead += metric_start.elapsed();
+            let sample_future = gpu_sample_top_k_top_p_async::<T>(
+                &logits_tensor,
+                vocab_size,
+                cfg.top_k,
+                cfg.top_p,
+                cfg.temperature,
+                ctx,
+                iteration_start,
+            )?;
+            ctx.submit_active_command_buffer();
+            ctx.poll_command_buffer_completions();
 
-            // Record iteration time for the core operations
-            let core_iteration_duration = iteration_start.elapsed();
-            if !core_iteration_duration.is_zero() {
-                let metric_start = Instant::now();
-                record_metric_async!(MetricEvent::InternalKernelCompleted {
-                    parent_op_name: "generation_loop".to_string(),
-                    internal_kernel_name: "iteration_total".to_string(),
-                    duration_us: core_iteration_duration.as_micros() as u64,
-                });
-                metric_recording_overhead += metric_start.elapsed();
-            }
-
-            // Non-core operations (bookkeeping, not part of actual token generation)
-            let push_start = Instant::now();
-            generated_ids.push(next_token);
-            let push_duration = push_start.elapsed();
-            if !push_duration.is_zero() {
-                let metric_start = Instant::now();
-                record_metric_async!(MetricEvent::InternalKernelCompleted {
-                    parent_op_name: "generation_loop".to_string(),
-                    internal_kernel_name: "token_push".to_string(),
-                    duration_us: push_duration.as_micros() as u64,
-                });
-                metric_recording_overhead += metric_start.elapsed();
-            }
-
-            let decode_start = Instant::now();
-            let decoded_piece = tokenizer.decode_token_arc(next_token, &mut decoded_chunk, &mut decode_scratch)?;
-            let decode_duration = decode_start.elapsed();
-            let metric_start = Instant::now();
-            record_metric_async!(MetricEvent::InternalKernelCompleted {
-                parent_op_name: "decoding".to_string(),
-                internal_kernel_name: "token_decode".to_string(),
-                duration_us: decode_duration.as_micros().max(1) as u64,
-            });
-            metric_recording_overhead += metric_start.elapsed();
-
-            let cache_log_start = Instant::now();
-            log_cache_stats(ctx, "generate", generated_ids.len());
-            let cache_log_duration = cache_log_start.elapsed();
-            if !cache_log_duration.is_zero() {
-                let metric_start = Instant::now();
-                record_metric_async!(MetricEvent::InternalKernelCompleted {
-                    parent_op_name: "generation_loop".to_string(),
-                    internal_kernel_name: "cache_logging".to_string(),
-                    duration_us: cache_log_duration.as_micros() as u64,
-                });
-                metric_recording_overhead += metric_start.elapsed();
-            }
-
-            let callback_start = Instant::now();
-            let should_continue = if let Some(piece) = decoded_piece {
-                token_callback(next_token, piece, core_iteration_duration)?
-            } else {
-                true
-            };
-            let callback_duration = callback_start.elapsed();
-            if !callback_duration.is_zero() {
-                let metric_start = Instant::now();
-                record_metric_async!(MetricEvent::InternalKernelCompleted {
-                    parent_op_name: "generation_loop".to_string(),
-                    internal_kernel_name: "token_callback".to_string(),
-                    duration_us: callback_duration.as_micros() as u64,
-                });
-                metric_recording_overhead += metric_start.elapsed();
-            }
-
-            if !should_continue {
+            let completed_token = pending_output.take().expect("pending output token must exist before processing");
+            let outcome = process_completed_token(
+                completed_token,
+                &mut generated_ids,
+                tokenizer,
+                &mut decoded_chunk,
+                &mut decode_scratch,
+                ctx,
+                &mut metric_recording_overhead,
+                token_callback,
+            )?;
+            if outcome.is_eos || !outcome.continue_generation {
+                let _ = sample_future.wait(ctx)?;
+                pending_output = None;
                 break;
             }
 
-            let eos_check_start = Instant::now();
-            let eos_token_id = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-            let is_eos = next_token == eos_token_id;
-            let eos_check_duration = eos_check_start.elapsed();
-            if !eos_check_duration.is_zero() {
-                let metric_start = Instant::now();
-                record_metric_async!(MetricEvent::InternalKernelCompleted {
-                    parent_op_name: "generation_loop".to_string(),
-                    internal_kernel_name: "eos_check".to_string(),
-                    duration_us: eos_check_duration.as_micros() as u64,
-                });
-                metric_recording_overhead += metric_start.elapsed();
-            }
-
-            if is_eos {
-                break;
-            }
+            let sample_result = sample_future.wait(ctx)?;
+            let next_completed = CompletedToken::from_sample(sample_result);
+            current_input_token = next_completed.token_id;
+            pending_output = Some(next_completed);
         }
 
-        // Record the total metric recording overhead
+        if let Some(remaining) = pending_output.take() {
+            let _ = process_completed_token(
+                remaining,
+                &mut generated_ids,
+                tokenizer,
+                &mut decoded_chunk,
+                &mut decode_scratch,
+                ctx,
+                &mut metric_recording_overhead,
+                token_callback,
+            )?;
+        }
+
         if !metric_recording_overhead.is_zero() {
             record_metric_async!(MetricEvent::InternalKernelCompleted {
                 parent_op_name: "generation_loop".to_string(),

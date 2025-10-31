@@ -262,7 +262,7 @@ impl<T: TensorElement> Context<T> {
         }
 
         if self.active_cmd_buffer.is_none() {
-            let (mut cmd_buf, completed) = self.command_buffer_pipeline.acquire()?;
+            let (cmd_buf, completed) = self.command_buffer_pipeline.acquire()?;
             if crate::profiling_state::get_profiling_state()
                 && let Some(profiler) = metallic_instrumentation::gpu_profiler::GpuProfiler::attach(&cmd_buf, true)
             {
@@ -279,7 +279,7 @@ impl<T: TensorElement> Context<T> {
         Ok(())
     }
 
-    fn wait_for_command_buffer(
+    pub(crate) fn wait_for_command_buffer(
         &mut self,
         command_buffer: CommandBuffer,
         label: Option<super::utils::GpuProfilerLabel>,

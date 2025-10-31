@@ -1,8 +1,7 @@
-use metallic_instrumentation::MetricEvent;
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 
 use super::{
-    command_buffer_pipeline::PipelineCompletion, main::Context, utils::{GPU_PROFILER_BACKEND, GpuProfilerLabel}
+    command_buffer_pipeline::{self, PipelineCompletion}, main::Context, utils::{GPU_PROFILER_BACKEND, GpuProfilerLabel}
 };
 use crate::tensor::TensorElement;
 
@@ -99,6 +98,24 @@ impl<T: TensorElement> Context<T> {
             .unwrap_or_else(|| GPU_PROFILER_BACKEND.to_string());
 
         Some(GpuProfilerLabel::new(op_name, backend))
+    }
+
+    pub(crate) fn submit_active_command_buffer(&mut self) {
+        if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+            let label = self.current_gpu_scope_label();
+            self.command_buffer_pipeline.submit(cmd_buf, label);
+        }
+    }
+
+    pub(crate) fn poll_command_buffer_completions(&mut self) -> Vec<PipelineCompletion> {
+        let mut completed = self.command_buffer_pipeline.collect_completed();
+        if completed.is_empty() {
+            completed = self.command_buffer_pipeline.reserve_slot();
+        }
+        if !completed.is_empty() {
+            self.process_pipeline_completions(completed.clone());
+        }
+        completed
     }
 
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.

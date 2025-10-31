@@ -4,12 +4,8 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::{
-        DefaultKernelInvocable, KernelFunction, ResourceCache
-    }
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction, ResourceCache}, operation::ComputeKernelEncoder
 };
-
-
 
 // Public, user-facing, zero-sized struct for the operation.
 pub struct MatmulGemvSmallN1Op;
@@ -89,10 +85,8 @@ impl<T: TensorElement> Operation for MatmulGemvSmallN1<T> {
         ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
             .pipeline(&self.pipeline)
             .bind_kernel(self)
-            .with_encoder(|encoder| {
-                unsafe {
-                    encoder.setThreadgroupMemoryLength_atIndex(smem_b_size, 0);
-                }
+            .with_encoder(|encoder| unsafe {
+                encoder.setThreadgroupMemoryLength_atIndex(smem_b_size, 0);
             })
             .dispatch_custom(threadgroups, threads_per_threadgroup);
 
@@ -101,7 +95,7 @@ impl<T: TensorElement> Operation for MatmulGemvSmallN1<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(encoder, 1, &self.b.buf, self.b.offset);
         set_buffer(encoder, 2, &self.out.buf, self.out.offset);

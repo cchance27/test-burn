@@ -1,9 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
-};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct ArangeOp;
@@ -38,9 +36,7 @@ impl DefaultKernelInvocable for ArangeOp {
         // Create the output tensor.
         let out = Tensor::new(vec![length], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
-        let profiler_label = ctx
-            .take_gpu_scope()
-            .unwrap_or_else(|| GpuProfilerLabel::fallback("arange_op"));
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("arange_op"));
 
         // Create the internal operation struct.
         let op = Arange {
@@ -63,13 +59,13 @@ impl<T: TensorElement> Operation for Arange<T> {
             .pipeline(&self.pipeline)
             .bind_kernel(self)
             .dispatch_1d(self.length as u32, 256);
-        
+
         Ok(())
     }
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::set_buffer;
-        
+
         set_buffer(encoder, 0, &self.out.buf, self.out.offset);
     }
 }

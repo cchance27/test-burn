@@ -1,6 +1,6 @@
 use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLResourceOptions, MTLSize};
 
 use super::*;
 use crate::{
@@ -55,7 +55,7 @@ impl<T: TensorElement> Operation for SampleTopKFused<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.input_logits.buf, self.input_logits.offset);
         set_buffer(encoder, 1, &self.output_token.buf, self.output_token.offset);
         set_bytes(encoder, 2, &self.params);
@@ -142,7 +142,13 @@ impl CustomKernelInvocable for SampleTopKFusedOp {
             num_threadgroups: 1,
         };
 
-        let output_token = Tensor::zeros_of_type::<U32>(vec![1], ctx)?;
+        let buffer_len = std::mem::size_of::<u32>();
+        let buffer = ctx
+            .device
+            .newBufferWithLength_options(buffer_len, MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferCreationFailed(buffer_len))?;
+        let mut output_token = Tensor::<U32>::from_existing_buffer(buffer, vec![1], U32::DTYPE, &ctx.device, &ctx.command_queue, 0, true)?;
+        output_token.as_mut_slice()[0] = 0;
 
         let op = Box::new(SampleTopKFused::<T> {
             pipeline,

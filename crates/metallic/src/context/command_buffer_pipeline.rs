@@ -1,17 +1,23 @@
 use std::{
-    cell::RefCell, collections::VecDeque, rc::{Rc, Weak}, sync::{Arc, Mutex}, time::Instant
+    cell::RefCell, collections::VecDeque, rc::{Rc, Weak}, sync::{
+        Arc, Mutex, atomic::{AtomicBool, Ordering}
+    }, time::Instant
 };
 
 use metallic_instrumentation::MetricEvent;
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLCommandQueue;
-use once_cell::sync::Lazy;
+use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 use rustc_hash::FxHashMap;
 
 use super::utils::{GPU_PROFILER_BACKEND, GpuProfilerLabel};
 use crate::{error::MetalError, operation::CommandBuffer};
 
 const DEFAULT_MAX_INFLIGHT: usize = 3;
+
+thread_local! {
+    static PIPELINE_REGISTRY: RefCell<FxHashMap<usize, PipelineRegistration>> =
+        RefCell::new(FxHashMap::default());
+}
 
 #[derive(Clone)]
 pub struct CommandBufferPipeline {
@@ -28,6 +34,9 @@ struct CommandBufferPipelineState {
 struct PipelineEntry {
     command_buffer: CommandBuffer,
     label: Option<GpuProfilerLabel>,
+    completion_flag: Arc<AtomicBool>,
+    completion_time: Arc<Mutex<Option<Instant>>>,
+    commit_instant: Instant,
 }
 
 #[derive(Clone)]
@@ -39,10 +48,8 @@ pub struct PipelineCompletion {
 
 struct PipelineRegistration {
     pipeline: Weak<RefCell<CommandBufferPipelineState>>,
-    completion_observer: Option<Arc<dyn Fn(&CommandBuffer) + Send + Sync + 'static>>,
+    completion_observer: Option<Arc<dyn Fn(&CommandBuffer) + 'static>>,
 }
-
-static PIPELINE_REGISTRY: Lazy<Mutex<FxHashMap<usize, PipelineRegistration>>> = Lazy::new(|| Mutex::new(FxHashMap::default()));
 
 impl CommandBufferPipeline {
     pub fn new(queue: Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Self {
@@ -62,8 +69,27 @@ impl CommandBufferPipeline {
 
     pub fn submit(&self, command_buffer: CommandBuffer, label: Option<GpuProfilerLabel>) {
         let mut state = self.inner.borrow_mut();
+        let completion_flag = Arc::new(AtomicBool::new(false));
+        let completion_time = Arc::new(Mutex::new(None));
+        let completion_flag_clone = completion_flag.clone();
+        let completion_time_clone = completion_time.clone();
+        command_buffer.on_completed(Box::new({
+            move |_: &ProtocolObject<dyn MTLCommandBuffer>| {
+                completion_flag_clone.store(true, Ordering::Release);
+                if let Ok(mut slot) = completion_time_clone.lock() {
+                    *slot = Some(Instant::now());
+                }
+            }
+        }));
+        let commit_instant = Instant::now();
         command_buffer.commit();
-        state.inflight.push_back(PipelineEntry { command_buffer, label });
+        state.inflight.push_back(PipelineEntry {
+            command_buffer,
+            label,
+            completion_flag,
+            completion_time,
+            commit_instant,
+        });
     }
 
     pub fn acquire(&self) -> Result<(CommandBuffer, Vec<PipelineCompletion>), MetalError> {
@@ -77,6 +103,10 @@ impl CommandBufferPipeline {
         self.inner.borrow_mut().reserve_slot_locked()
     }
 
+    pub fn collect_completed(&self) -> Vec<PipelineCompletion> {
+        self.inner.borrow_mut().collect_completed_locked()
+    }
+
     pub fn flush_all(&self) -> Vec<PipelineCompletion> {
         self.inner.borrow_mut().flush_all_locked()
     }
@@ -88,7 +118,7 @@ impl CommandBufferPipeline {
 
 impl CommandBufferPipelineState {
     fn reserve_slot_locked(&mut self) -> Vec<PipelineCompletion> {
-        let mut completed = Vec::new();
+        let mut completed = self.collect_completed_locked();
         while self.inflight.len() >= self.max_inflight {
             if let Some(done) = self.wait_oldest_locked() {
                 completed.push(done);
@@ -100,16 +130,39 @@ impl CommandBufferPipelineState {
     }
 
     fn flush_all_locked(&mut self) -> Vec<PipelineCompletion> {
-        let mut completed = Vec::new();
+        let mut completed = self.collect_completed_locked();
         while let Some(done) = self.wait_oldest_locked() {
             completed.push(done);
         }
         completed
     }
 
+    fn collect_completed_locked(&mut self) -> Vec<PipelineCompletion> {
+        let mut completed = Vec::new();
+        while let Some(front) = self.inflight.front() {
+            if !front.completion_flag.load(Ordering::Acquire) {
+                break;
+            }
+            let entry = self.inflight.pop_front().expect("front entry must exist");
+            entry.command_buffer.wait();
+            let wait_duration = entry
+                .completion_time
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+                .map(|finished| finished.saturating_duration_since(entry.commit_instant))
+                .unwrap_or_else(|| entry.commit_instant.elapsed());
+            completed.push(PipelineCompletion {
+                command_buffer: entry.command_buffer,
+                label: entry.label,
+                wait_duration,
+            });
+        }
+        completed
+    }
+
     fn wait_for_locked(&mut self, target: &CommandBuffer, label: Option<GpuProfilerLabel>) -> Vec<PipelineCompletion> {
         let mut completed = Vec::new();
-        target.commit();
 
         let mut tracked = false;
         for entry in self.inflight.iter_mut() {
@@ -128,10 +181,39 @@ impl CommandBufferPipelineState {
                     completed.push(done);
                 }
             }
+            if target.is_committed() {
+                let wait_start = Instant::now();
+                target.wait();
+                completed.push(PipelineCompletion {
+                    command_buffer: target.clone(),
+                    label,
+                    wait_duration: wait_start.elapsed(),
+                });
+                return completed;
+            }
+            let completion_flag = Arc::new(AtomicBool::new(false));
+            let completion_time = Arc::new(Mutex::new(None));
+            let completion_flag_clone = completion_flag.clone();
+            let completion_time_clone = completion_time.clone();
+            target.on_completed(Box::new({
+                move |_: &ProtocolObject<dyn MTLCommandBuffer>| {
+                    completion_flag_clone.store(true, Ordering::Release);
+                    if let Ok(mut slot) = completion_time_clone.lock() {
+                        *slot = Some(Instant::now());
+                    }
+                }
+            }));
+            let commit_instant = Instant::now();
+            target.commit();
             self.inflight.push_back(PipelineEntry {
                 command_buffer: target.clone(),
                 label,
+                completion_flag,
+                completion_time,
+                commit_instant,
             });
+        } else if !target.is_committed() {
+            target.commit();
         }
 
         while let Some(front) = self.inflight.front() {
@@ -152,10 +234,9 @@ impl CommandBufferPipelineState {
 
     fn wait_oldest_locked(&mut self) -> Option<PipelineCompletion> {
         self.inflight.pop_front().map(|entry| {
-            let wait_start = Instant::now();
             entry.command_buffer.wait();
             PipelineCompletion {
-                wait_duration: wait_start.elapsed(),
+                wait_duration: entry.commit_instant.elapsed(),
                 label: entry.label,
                 command_buffer: entry.command_buffer,
             }
@@ -164,53 +245,57 @@ impl CommandBufferPipelineState {
 }
 
 fn queue_key(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>) -> usize {
-    Retained::as_ptr(queue) as *const ProtocolObject<dyn MTLCommandQueue> as usize
+    Retained::as_ptr(queue) as usize
 }
 
 fn register_pipeline(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>, pipeline: &CommandBufferPipeline) {
     let key = queue_key(queue);
-    let mut registry = PIPELINE_REGISTRY.lock().expect("command buffer pipeline registry mutex poisoned");
-    let observer = registry.get(&key).and_then(|entry| entry.completion_observer.clone());
-    registry.insert(
-        key,
-        PipelineRegistration {
-            pipeline: Rc::downgrade(&pipeline.inner),
-            completion_observer: observer,
-        },
-    );
+    PIPELINE_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let observer = registry.get(&key).and_then(|entry| entry.completion_observer.clone());
+        registry.insert(
+            key,
+            PipelineRegistration {
+                pipeline: Rc::downgrade(&pipeline.inner),
+                completion_observer: observer,
+            },
+        );
+    });
 }
 
 pub fn register_completion_observer(
     queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>,
-    observer: Arc<dyn Fn(&CommandBuffer) + Send + Sync + 'static>,
+    observer: Arc<dyn Fn(&CommandBuffer) + 'static>,
 ) {
     let key = queue_key(queue);
-    let mut registry = PIPELINE_REGISTRY.lock().expect("command buffer pipeline registry mutex poisoned");
-    registry
-        .entry(key)
-        .and_modify(|entry| entry.completion_observer = Some(observer.clone()))
-        .or_insert_with(|| PipelineRegistration {
-            pipeline: Weak::new(),
-            completion_observer: Some(observer),
-        });
+    PIPELINE_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        registry
+            .entry(key)
+            .and_modify(|entry| entry.completion_observer = Some(observer.clone()))
+            .or_insert_with(|| PipelineRegistration {
+                pipeline: Weak::new(),
+                completion_observer: Some(observer),
+            });
+    });
 }
 
 pub fn lookup_pipeline(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Option<CommandBufferPipeline> {
     let key = queue_key(queue);
-    let mut registry = PIPELINE_REGISTRY.lock().expect("command buffer pipeline registry mutex poisoned");
-    let Some(entry) = registry.get_mut(&key) else {
-        return None;
-    };
-    if let Some(inner) = entry.pipeline.upgrade() {
-        Some(CommandBufferPipeline::from_inner(inner))
-    } else {
-        if entry.completion_observer.is_none() {
-            registry.remove(&key);
+    PIPELINE_REGISTRY.with(|registry| {
+        let mut registry = registry.borrow_mut();
+        let entry = registry.get_mut(&key)?;
+        if let Some(inner) = entry.pipeline.upgrade() {
+            Some(CommandBufferPipeline::from_inner(inner))
         } else {
-            entry.pipeline = Weak::new();
+            if entry.completion_observer.is_none() {
+                registry.remove(&key);
+            } else {
+                entry.pipeline = Weak::new();
+            }
+            None
         }
-        None
-    }
+    })
 }
 
 pub fn wait_with_pipeline(
@@ -237,10 +322,7 @@ pub fn dispatch_completions(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>
     }
 
     let key = queue_key(queue);
-    let observer = {
-        let mut registry = PIPELINE_REGISTRY.lock().expect("command buffer pipeline registry mutex poisoned");
-        registry.get(&key).and_then(|entry| entry.completion_observer.clone())
-    };
+    let observer = PIPELINE_REGISTRY.with(|registry| registry.borrow().get(&key).and_then(|entry| entry.completion_observer.clone()));
 
     for completion in completions {
         let waited = completion.wait_duration;

@@ -31,7 +31,7 @@ impl Operation for SoftmaxDispatch {
     }
 
     fn bind_kernel_args(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
-        // The dispatcher doesn't directly bind arguments to compute encoders - 
+        // The dispatcher doesn't directly bind arguments to compute encoders -
         // it delegates to the underlying operation
     }
 }

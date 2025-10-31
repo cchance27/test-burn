@@ -1,7 +1,7 @@
 use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLResourceOptions};
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 pub struct PermuteOp;
 
@@ -153,7 +153,7 @@ impl<T: TensorElement> Operation for Permute<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.src.buf, self.src.offset);
         set_buffer(encoder, 1, &self.dst.buf, self.dst.offset);
         set_buffer(encoder, 2, &self.src_strides_buf, 0);

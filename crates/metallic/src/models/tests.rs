@@ -11,7 +11,7 @@ impl Operation for TestOperation {
         let _encoder = command_buffer.get_compute_encoder()?;
         Ok(())
     }
-    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, _encoder: &Retained<ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>) {
         // No-op for test operation
     }
 }

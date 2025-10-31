@@ -1,9 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
-};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct OnesOp;
@@ -38,9 +36,7 @@ impl DefaultKernelInvocable for OnesOp {
         // Create the output tensor.
         let out = Tensor::new(dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
-        let profiler_label = ctx
-            .take_gpu_scope()
-            .unwrap_or_else(|| GpuProfilerLabel::fallback("ones_op"));
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("ones_op"));
 
         // Create the internal operation struct.
         let op = Ones {
@@ -84,7 +80,7 @@ impl<T: TensorElement> Operation for Ones<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.out.buf, self.out.offset);
         set_bytes(encoder, 1, &(self.dims.iter().map(|&x| x as u32).product::<u32>()));
     }

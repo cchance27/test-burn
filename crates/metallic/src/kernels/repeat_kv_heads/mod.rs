@@ -5,7 +5,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLResource};
 
 use super::*;
 use crate::{
-    CommandBuffer, TensorElement, operation::{ComputeKernelEncoder}, context::{GpuProfilerLabel, RepeatKvWorkspaceKind}
+    CommandBuffer, TensorElement, context::{GpuProfilerLabel, RepeatKvWorkspaceKind}, operation::ComputeKernelEncoder
 };
 
 pub struct RepeatKvHeadsOp;
@@ -223,7 +223,7 @@ impl<T: TensorElement> Operation for RepeatKvHeads<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.input.buf, self.input.offset);
         set_buffer(encoder, 1, &self.output.buf, self.output.offset);
         set_bytes(encoder, 2, &self.group_size);

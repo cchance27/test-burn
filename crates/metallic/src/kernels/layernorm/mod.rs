@@ -1,7 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 /// Public, user-facing, zero-sized struct for the LayerNorm operation.
 pub struct LayerNormOp;
@@ -59,9 +59,7 @@ impl DefaultKernelInvocable for LayerNormOp {
 
         let output = Tensor::new(input.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
-        let profiler_label = ctx
-            .take_gpu_scope()
-            .unwrap_or_else(|| GpuProfilerLabel::fallback("layernorm_op"));
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("layernorm_op"));
 
         let op = LayerNorm {
             input,
@@ -83,13 +81,13 @@ impl<T: TensorElement> Operation for LayerNorm<T> {
             .pipeline(&self.pipeline)
             .bind_kernel(self)
             .dispatch_1d(self.input.len() as u32, 256);
-        
+
         Ok(())
     }
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.input.buf, self.input.offset);
         set_buffer(encoder, 1, &self.output.buf, self.output.offset);
         set_buffer(encoder, 2, &self.gamma.buf, self.gamma.offset);

@@ -5,7 +5,7 @@ use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
+    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp, operation::ComputeKernelEncoder
 };
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
@@ -153,7 +153,7 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.gate.buf, self.gate.offset);
         set_buffer(encoder, 1, &self.up_inout.buf, self.up_inout.offset);
         set_buffer(encoder, 2, &self.gate_bias.buf, self.gate_bias.offset);

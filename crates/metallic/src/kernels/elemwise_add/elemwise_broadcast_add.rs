@@ -1,7 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 // User-facing struct for the broadcast element-wise add operation.
 pub struct BroadcastElemwiseAddOp;
@@ -127,7 +127,7 @@ impl<T: TensorElement> Operation for BroadcastElemwiseAdd<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(encoder, 1, &self.b.buf, self.b.offset);
         set_buffer(encoder, 2, &self.out.buf, self.out.offset);
@@ -169,7 +169,7 @@ impl<T: TensorElement> Operation for BroadcastElemwiseAddInplace<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(encoder, 1, &self.b.buf, self.b.offset);
         set_buffer(encoder, 2, &self.a.buf, self.a.offset); // output is the same as input for inplace
