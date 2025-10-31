@@ -1,8 +1,7 @@
-use metallic_instrumentation::MetricEvent;
 use objc2_metal::{MTLCommandBuffer, MTLCommandQueue};
 
 use super::{
-    main::Context, utils::{GPU_PROFILER_BACKEND, GpuProfilerLabel}
+    command_buffer_pipeline::{self, PipelineCompletion}, main::Context, utils::{GPU_PROFILER_BACKEND, GpuProfilerLabel}
 };
 use crate::tensor::TensorElement;
 
@@ -101,38 +100,36 @@ impl<T: TensorElement> Context<T> {
         Some(GpuProfilerLabel::new(op_name, backend))
     }
 
+    pub(crate) fn submit_active_command_buffer(&mut self) {
+        if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+            let label = self.current_gpu_scope_label();
+            self.command_buffer_pipeline.submit(cmd_buf, label);
+        }
+    }
+
+    pub(crate) fn poll_command_buffer_completions(&mut self) -> Vec<PipelineCompletion> {
+        let mut completed = self.command_buffer_pipeline.collect_completed();
+        if completed.is_empty() {
+            completed = self.command_buffer_pipeline.reserve_slot();
+        }
+        if !completed.is_empty() {
+            self.process_pipeline_completions(completed.clone());
+        }
+        completed
+    }
+
     /// Synchronize pending GPU work, committing and waiting on the active command buffer.
     /// Falls back to the legacy submit/wait path if no active buffer exists.
     pub fn synchronize(&mut self) {
         if let Some(cmd_buf) = self.active_cmd_buffer.take() {
-            let wait_start = std::time::Instant::now();
-            cmd_buf.commit();
-            cmd_buf.wait();
-            let waited = wait_start.elapsed();
-            if !waited.is_zero() {
-                if let Some(label) = self.current_gpu_scope_label() {
-                    let path = label.op_name;
-                    metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
-                        op_name: format!("{}/cb_wait", path),
-                        backend: label.backend,
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                } else {
-                    metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
-                        op_name: "Generation Loop/cb_wait".to_string(),
-                        backend: GPU_PROFILER_BACKEND.to_string(),
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                }
-            }
-
-            // Validate tensor preparation states after command buffer completion
-            self.tensor_preparation_cache().validate_states(&cmd_buf);
-            return;
+            let label = self.current_gpu_scope_label();
+            self.command_buffer_pipeline.submit(cmd_buf, label);
         }
 
+        let completed = self.command_buffer_pipeline.flush_all();
+        self.process_pipeline_completions(completed);
+
         if let Some(cb) = self.command_queue.commandBuffer() {
-            // No active CB; attribute to the outermost scope if present
             let wait_start = std::time::Instant::now();
             cb.commit();
             cb.waitUntilCompleted();
@@ -153,39 +150,24 @@ impl<T: TensorElement> Context<T> {
                     });
                 }
             }
-
-            // Create a temporary command buffer reference to validate states (simplified)
-            // In practice, the cache validation would be more complex here
         }
     }
 
     pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
-        if crate::profiling_state::get_profiling_state()
-            && let Some(cmd_buf) = self.active_cmd_buffer.take()
-        {
-            // Attribute CB finalize commit/wait to the current scope to avoid 'Other'
-            let wait_start = std::time::Instant::now();
-            cmd_buf.commit();
-            cmd_buf.wait();
-            let waited = wait_start.elapsed();
-            if !waited.is_zero() {
-                if let Some(label) = self.current_gpu_scope_label() {
-                    metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
-                        op_name: format!("{}/cb_wait", label.op_name),
-                        backend: label.backend,
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                } else {
-                    metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
-                        op_name: "Generation Loop/cb_wait".to_string(),
-                        backend: GPU_PROFILER_BACKEND.to_string(),
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                }
-            }
-
-            // Validate tensor preparation states after command buffer completion
-            self.tensor_preparation_cache().validate_states(&cmd_buf);
+        if !crate::profiling_state::get_profiling_state() {
+            return;
         }
+
+        if let Some(cmd_buf) = self.active_cmd_buffer.take() {
+            let label = self.current_gpu_scope_label();
+            self.command_buffer_pipeline.submit(cmd_buf, label);
+        }
+
+        let completed = self.command_buffer_pipeline.flush_all();
+        self.process_pipeline_completions(completed);
+    }
+
+    pub(crate) fn process_pipeline_completions(&mut self, completions: Vec<PipelineCompletion>) {
+        command_buffer_pipeline::dispatch_completions(&self.command_queue, &completions);
     }
 }

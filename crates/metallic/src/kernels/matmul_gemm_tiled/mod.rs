@@ -2,7 +2,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder
 };
 
 #[repr(C)]
@@ -219,7 +219,7 @@ impl<T: TensorElement> Operation for MatmulGemmTiled<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.left.buf, self.left.offset);
         set_buffer(encoder, 1, &self.right.buf, self.right.offset);
         set_buffer(encoder, 2, &self.out.buf, self.out.offset);

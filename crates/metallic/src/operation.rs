@@ -7,17 +7,21 @@ use std::{
 use block2::RcBlock;
 use metallic_instrumentation::gpu_profiler::{CommandBufferCompletionHandler, GpuProfiler, ProfiledCommandBuffer};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
+use objc2_metal::{
+    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize
+};
 use tracing::trace;
 
 use super::{caching::ResourceCache, error::MetalError};
-use crate::{encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, context::GpuProfilerLabel};
+use crate::{
+    context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+};
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
 pub trait Operation {
     /// Encode this operation into the provided command buffer.
     fn encode(&self, command_buffer: &CommandBuffer, cache: &mut ResourceCache) -> Result<(), MetalError>;
-    
+
     /// Bind kernel arguments to the compute encoder.
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>);
 }
@@ -366,7 +370,7 @@ impl ComputeKernelEncoder {
         let encoder = command_buffer.get_compute_encoder()?;
         let label = profiler_label.clone();
         let profiler_scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-        
+
         Ok(Self {
             encoder,
             _profiler_scope: profiler_scope,
@@ -391,7 +395,7 @@ impl ComputeKernelEncoder {
     #[inline]
     pub fn with_encoder<F>(self, f: F) -> Self
     where
-        F: FnOnce(&Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>)
+        F: FnOnce(&Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>),
     {
         f(&self.encoder);
         self
@@ -412,7 +416,7 @@ impl ComputeKernelEncoder {
     }
 
     /// Dispatch a 1D grid of threads.
-    /// 
+    ///
     /// # Arguments
     /// * `total_elements` - Total number of elements to process
     /// * `threads_per_threadgroup` - Number of threads per threadgroup (typically 256)
@@ -432,7 +436,7 @@ impl ComputeKernelEncoder {
     }
 
     /// Dispatch a 2D grid of threads.
-    /// 
+    ///
     /// # Arguments
     /// * `width` - Width of the grid
     /// * `height` - Height of the grid
@@ -448,7 +452,7 @@ impl ComputeKernelEncoder {
     }
 
     /// Dispatch a 3D grid of threads.
-    /// 
+    ///
     /// # Arguments
     /// * `width` - Width of the grid
     /// * `height` - Height of the grid
@@ -470,7 +474,7 @@ impl ComputeKernelEncoder {
     pub fn dispatch_custom(self, groups: MTLSize, threads_per_tg: MTLSize) {
         dispatch_threadgroups(&self.encoder, groups, threads_per_tg);
     }
-    
+
     /// Dispatch a compute kernel using thread-level parallelism (dispatchThreads:threadsPerThreadgroup:).
     /// Use this when you need direct control over the total thread count and threadgroup size.
     #[inline]

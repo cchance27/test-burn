@@ -3,7 +3,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder
 };
 
 #[repr(C)]
@@ -41,7 +41,7 @@ impl<T: TensorElement> Operation for MatMulGemv<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(encoder, 1, &self.x.buf, self.x.offset);
         set_buffer(encoder, 2, &self.y.buf, self.y.offset);

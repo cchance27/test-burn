@@ -1,9 +1,12 @@
+use std::sync::Arc;
+
 use kernels::{KernelBackendOverride, KernelBackendOverrides, KernelBackendRegistry, KernelManager, matmul_mlx::MlxKernelCache};
 use metallic_instrumentation::config::AppConfig;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
+use super::command_buffer_pipeline::{self, CommandBufferPipeline, PipelineCompletion};
 use crate::{
     Tensor, TensorElement, caching::{CacheRegistry, CacheStats, KvCacheEntry, KvCacheState, ResourceCache, TensorPreparationCache}, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable, MultiTensorOutput}, operation::CommandBuffer, pool::MemoryPool, profiling_state, tensor::Dtype
 };
@@ -59,6 +62,7 @@ pub struct Context<T: TensorElement> {
     pub(crate) cache_registry: CacheRegistry,
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     pub(crate) active_cmd_buffer: Option<CommandBuffer>,
+    pub(crate) command_buffer_pipeline: CommandBufferPipeline,
     /// Resource cache associated with the active command buffer.
     pub active_resource_cache: Option<ResourceCache>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
@@ -96,6 +100,18 @@ impl<T: TensorElement> Context<T> {
             let _ = cache_registry.slot_mut(|| tensor_cache);
         }
 
+        let pipeline = CommandBufferPipeline::new(command_queue.clone());
+        let observer_cache = cache_registry
+            .slot::<TensorPreparationCache<T>>()
+            .expect("tensor preparation cache slot initialized")
+            .clone();
+        command_buffer_pipeline::register_completion_observer(
+            &command_queue,
+            Arc::new(move |cmd_buffer: &CommandBuffer| {
+                observer_cache.validate_states(cmd_buffer);
+            }),
+        );
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -108,6 +124,7 @@ impl<T: TensorElement> Context<T> {
             rng_seed_counter: 0,
             cache_registry,
             active_cmd_buffer: None,
+            command_buffer_pipeline: pipeline,
             active_resource_cache: None,
             sampler_buffers: SamplerBuffers::default(),
             forced_matmul_backend: forced_backend,
@@ -236,43 +253,38 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
-        // Check and refresh committed command buffer if needed
-        if let Some(active) = self.active_cmd_buffer.as_ref()
-            && active.is_committed()
+        if let Some(committed) = self.active_cmd_buffer.as_ref()
+            && committed.is_committed()
         {
-            if !active.is_completed() {
-                active.wait();
-            }
-            // Buffer is committed, clear it to create a fresh one
-            self.active_cmd_buffer = None;
+            let committed = self.active_cmd_buffer.take().expect("active command buffer must exist");
+            let completions = self.wait_for_command_buffer(committed, None);
+            self.process_pipeline_completions(completions);
         }
 
-        // Check if we need to create a new buffer
-        let new_buffer_created = if self.active_cmd_buffer.is_none() {
-            let cmd_buf = crate::operation::CommandBuffer::new(&self.command_queue)?;
+        if self.active_cmd_buffer.is_none() {
+            let (cmd_buf, completed) = self.command_buffer_pipeline.acquire()?;
             if crate::profiling_state::get_profiling_state()
                 && let Some(profiler) = metallic_instrumentation::gpu_profiler::GpuProfiler::attach(&cmd_buf, true)
             {
                 cmd_buf.retain_profiler(profiler);
             }
+            self.process_pipeline_completions(completed);
             self.active_cmd_buffer = Some(cmd_buf);
-            true
-        } else {
-            false
-        };
+        }
 
         if ensure_cache && self.active_resource_cache.is_none() {
             self.active_resource_cache = Some(crate::caching::ResourceCache::with_device(self.device.clone()));
         }
 
-        // If a new command buffer was created, we need to clear preparation states
-        // for tensors prepared for the previous command buffer
-        if new_buffer_created {
-            // No need to explicitly clear preparation states here since the preparation
-            // cache will detect command buffer changes and handle invalidation appropriately
-        }
-
         Ok(())
+    }
+
+    pub(crate) fn wait_for_command_buffer(
+        &mut self,
+        command_buffer: CommandBuffer,
+        label: Option<super::utils::GpuProfilerLabel>,
+    ) -> Vec<PipelineCompletion> {
+        command_buffer_pipeline::wait_with_pipeline(&self.command_queue, &command_buffer, label)
     }
 
     pub(crate) fn active_command_buffer_mut(&mut self) -> Result<&mut crate::operation::CommandBuffer, MetalError> {

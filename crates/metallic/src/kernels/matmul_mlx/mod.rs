@@ -4,11 +4,13 @@ use std::{
 
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
-use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary, MTLSize};
+use objc2_metal::{
+    MTLComputeCommandEncoder, MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary, MTLSize
+};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::{ComputeKernelEncoder}, tensor::Dtype
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder, tensor::Dtype
 };
 
 #[repr(C)]
@@ -424,7 +426,7 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.left.buf, self.left.offset);
         set_buffer(encoder, 1, &self.right.buf, self.right.offset);
         if self.use_out_source {

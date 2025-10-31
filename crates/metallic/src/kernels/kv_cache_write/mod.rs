@@ -1,7 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 pub mod cache;
 
@@ -113,7 +113,7 @@ impl<T: TensorElement> Operation for KvCacheWrite<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.k_src.buf, self.k_src.offset);
         set_buffer(encoder, 1, &self.v_src.buf, self.v_src.offset);
         set_buffer(encoder, 2, &self.k_dst.buf, self.k_dst.offset);

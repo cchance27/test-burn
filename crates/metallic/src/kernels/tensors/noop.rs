@@ -1,9 +1,7 @@
 use objc2_metal::{MTLComputeCommandEncoder, MTLSize};
 
 use super::*;
-use crate::{
-    CommandBuffer, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
-};
+use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 /// Public, user-facing, zero-sized struct for a NOOP operation.
 /// This runs a minimal compute kernel that does nothing and returns the provided tensor unchanged.
@@ -33,9 +31,7 @@ impl DefaultKernelInvocable for NoopOp {
         // Ensure the tensor is tracked for an active command.
         ctx.prepare_tensors_for_active_cmd(&[&out])?;
 
-        let profiler_label = ctx
-            .take_gpu_scope()
-            .unwrap_or_else(|| GpuProfilerLabel::fallback("noop_op"));
+        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("noop_op"));
 
         let op = Noop {
             out: out.clone(),

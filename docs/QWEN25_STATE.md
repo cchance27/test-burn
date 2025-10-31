@@ -245,3 +245,44 @@ The matmul dispatcher and softmax dispatcher are the key optimization points tha
 ### Long-Term Enhancements:
 1. **GPU tokenizer/decoder** - Completes the GPU-only pipeline
 2. **Advanced memory management** - Optimizes KV cache usage
+
+---
+
+## Latest Profiling Snapshot (63 tok/s, 16ms loop latency)
+
+- **Throughput**: 63 tokens/sec (target ≈150 tok/s)
+- **Generation loop latency**: ~16ms per token
+- **Profiling (profilingdisabled.jsonl)**:
+  - `ResourceCacheAccess`: 14,287 events – indicates heavy use of cache lookups per token
+  - `InternalKernelCompleted:generation_loop`: 3,236 ops totaling 609.5ms (avg 0.2ms, max 19.4ms)
+  - `GpuOpCompleted`: 1,220 ops totaling 3.0ms (avg 0.002ms)
+  - Minimal GPU compute time vs high kernel scheduling overhead implies that command dispatch and CPU-side orchestration dominate token time, not raw math throughput.
+
+### Immediate Focus Areas
+
+1. **Command Buffer Pipelining**
+   - Current loop appears mostly serialized; GPU dispatch time is dwarfed by CPU coordination.
+   - Maintain 2–3 command buffers in flight, pre-populating the next token's kernels while the current buffer executes to hide submission overhead.
+   - Batch Metal command encoder creation (reuse encoder objects, avoid per-token setup costs) and issue fences only when token ID must be read back.
+
+2. **Resource Cache Hot Path Audit**
+   - `ResourceCacheAccess` dominance suggests frequent lookups for recurrent tensors (e.g., matmul weights, rope caches).
+   - Introduce persistent handles for the static resources needed every token to avoid hash-map probing; prebind buffers within a `generation_plan` struct during session initialization.
+   - Where the cache is unavoidable, profile the hash/equality path and consider fxhash-like alternatives to reduce lookup time.
+
+3. **GPU-Resident Token Staging**
+   - Implement the circular token ID buffer outlined above so the embedding kernel can run entirely on GPU, removing a CPU→GPU bounce per step.
+   - Pair with a lightweight GPU-side argmax-to-ID staging kernel that writes to a mapped buffer, so the CPU only reads when strictly necessary.
+
+4. **Microkernel Fusion Opportunities**
+   - The `generation_loop` max latency spikes (≈19ms) hint at occasional cache misses or unfused sequences.
+   - Investigate fusing RMSNorm + matmul epilogues (where mathematically valid) to reduce command count.
+   - Evaluate whether Q/K/V projections can be dispatched as a single GEMM with grouped bias to reduce three separate command submissions.
+
+### Medium-Term Investigations
+
+1. **Async Tokenizer Path**
+   - Offload decode work to a background CPU thread so the main thread can immediately queue the next GPU workload after issuing readback.
+
+2. **Command Submission Telemetry**
+   - Add per-token logging of command-buffer creation, commit, and completion times to quantify the CPU orchestration cost and validate that pipelining improvements move the bottleneck back to GPU math.

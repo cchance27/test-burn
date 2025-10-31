@@ -1,3 +1,4 @@
+pub(crate) mod command_buffer_pipeline;
 mod gpu_profiling;
 mod kv_cache;
 mod main;

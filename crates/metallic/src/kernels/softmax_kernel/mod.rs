@@ -2,7 +2,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, caching::ResourceCache, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 /// Public, user-facing, zero-sized struct for the legacy Softmax operation.
 pub struct SoftmaxKernelOp;
@@ -107,7 +107,7 @@ impl<T: TensorElement> Operation for SoftmaxKernelOperation<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.attn.buf, self.attn.offset);
         set_bytes(encoder, 1, &self.seq_q);
         set_bytes(encoder, 2, &self.seq_k);

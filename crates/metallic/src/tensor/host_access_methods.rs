@@ -4,9 +4,14 @@ use metallic_instrumentation::{GpuProfiler, config::AppConfig};
 use objc2_metal::{MTLBlitCommandEncoder as _, MTLBuffer as _, MTLDevice as _, MTLResourceOptions};
 
 use super::{CommandBuffer, MetalError, Tensor, TensorElement};
-use crate::context::GPU_PROFILER_BACKEND;
+use crate::context::{GPU_PROFILER_BACKEND, command_buffer_pipeline};
 
 impl<T: TensorElement> Tensor<T> {
+    fn wait_command_buffer(&self, command_buffer: &CommandBuffer) {
+        let completions = command_buffer_pipeline::wait_with_pipeline(&self.command_queue, command_buffer, None);
+        command_buffer_pipeline::dispatch_completions(&self.command_queue, &completions);
+    }
+
     fn ensure_staging_buffer(&self) -> Result<Option<super::RetainedBuffer>, MetalError> {
         let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         let target_size = state.region_len;
@@ -78,7 +83,7 @@ impl<T: TensorElement> Tensor<T> {
             scope.finish();
         }
         command_buffer.commit();
-        command_buffer.wait();
+        self.wait_command_buffer(&command_buffer);
 
         let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         state.staging_valid = true;
@@ -129,7 +134,7 @@ impl<T: TensorElement> Tensor<T> {
                 scope.finish();
             }
             command_buffer.commit();
-            command_buffer.wait();
+            self.wait_command_buffer(&command_buffer);
 
             let mut state = self.host_access.lock().expect("host access state mutex poisoned");
             state.staging_valid = true;
@@ -193,7 +198,7 @@ impl<T: TensorElement> Tensor<T> {
             scope.finish();
         }
         command_buffer.commit();
-        command_buffer.wait();
+        self.wait_command_buffer(&command_buffer);
 
         let mut state = self.host_access.lock().expect("host access state mutex poisoned");
         state.host_dirty = false;
@@ -204,8 +209,7 @@ impl<T: TensorElement> Tensor<T> {
     fn ensure_ready(&self) {
         let pending = { self.defining_cmd_buffer.borrow().clone() };
         if let Some(cmd_buf) = pending {
-            cmd_buf.commit();
-            cmd_buf.wait();
+            self.wait_command_buffer(&cmd_buf);
             self.defining_cmd_buffer.borrow_mut().take();
         }
     }

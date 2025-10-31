@@ -3,11 +3,10 @@ use std::convert::TryFrom;
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::{ComputeKernelEncoder}};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 /// Public, user-facing, zero-sized struct for the KV rearrange operation.
 pub struct KvRearrangeOp;
-
 
 #[cfg(test)]
 mod tests;
@@ -93,13 +92,13 @@ impl<T: TensorElement> Operation for KvRearrange<T> {
             .pipeline(&self.pipeline)
             .bind_kernel(self)
             .dispatch_1d(self.output.len() as u32, 256);
-        
+
         Ok(())
     }
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.input.buf, self.input.offset);
         set_buffer(encoder, 1, &self.output.buf, self.output.offset);
         set_bytes(encoder, 2, &self.kv_dim);

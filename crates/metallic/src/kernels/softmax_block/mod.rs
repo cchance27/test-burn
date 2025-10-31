@@ -3,7 +3,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Tensor, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
+    CommandBuffer, Context, MetalError, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder
 };
 
 // Public, user-facing, zero-sized struct for the operation.
@@ -99,7 +99,7 @@ impl<T: TensorElement> Operation for SoftmaxBlock<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.input.buf, self.input.offset);
         set_buffer(encoder, 1, &self.output.buf, self.output.offset);
         set_bytes(encoder, 2, &self.batch);

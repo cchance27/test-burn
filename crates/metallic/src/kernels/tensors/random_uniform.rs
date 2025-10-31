@@ -1,9 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
-};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct RandomUniformOp;
@@ -103,7 +101,7 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.out.buf, self.out.offset);
         set_bytes(encoder, 1, &self.seed);
         set_bytes(encoder, 2, &self.min_val);

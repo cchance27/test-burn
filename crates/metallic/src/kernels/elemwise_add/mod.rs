@@ -1,7 +1,7 @@
 use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::ComputeKernelEncoder};
 
 // Additional Operations for this Metal Kernel (additional functions in the kernel)
 mod elemwise_broadcast_add;
@@ -68,13 +68,13 @@ impl<T: TensorElement> Operation for ElemwiseAdd<T> {
             .pipeline(&self.pipeline)
             .bind_kernel(self)
             .dispatch_1d(self.a.len() as u32, 256);
-        
+
         Ok(())
     }
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(encoder, 1, &self.b.buf, self.b.offset);
         set_buffer(encoder, 2, &self.out.buf, self.out.offset);

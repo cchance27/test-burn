@@ -4,7 +4,7 @@ use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, ResourceCache, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::{ComputeKernelEncoder}
+    CommandBuffer, Context, MetalError, Operation, ResourceCache, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder
 };
 
 // Public, user-facing, zero-sized struct for the operation.
@@ -101,7 +101,7 @@ impl<T: TensorElement> Operation for MatmulGemvSmallN2<T> {
 
     fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
-        
+
         set_buffer(encoder, 0, &self.a.buf, self.a.offset);
         set_buffer(encoder, 1, &self.b.buf, self.b.offset);
         set_buffer(encoder, 2, &self.out.buf, self.out.offset);
