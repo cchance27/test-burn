@@ -1,4 +1,6 @@
-use std::{cell::RefCell, ffi::c_void, ptr::NonNull};
+use std::{
+    cell::RefCell, ffi::c_void, hash::{Hash, Hasher}, ptr::NonNull
+};
 
 use half::f16;
 use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
@@ -7,10 +9,100 @@ use objc2_metal::{MTLBuffer, MTLCreateSystemDefaultDevice, MTLDevice, MTLResourc
 use objc2_metal_performance_shaders::MPSDataType;
 use objc2_metal_performance_shaders_graph as mpsg;
 use rustc_hash::FxHashMap;
+use serde::{Deserialize, Serialize};
 
-use crate::{
-    cache_keys::{MaskSizeBucket, MpsGraphSdpaKey, MpsGraphSdpaMaskKey}, cacheable::Cacheable, caching::CacheableKernel, error::MetalError, tensor::dtypes::Dtype
-};
+use crate::{caching::CacheableKernel, error::MetalError, tensor::dtypes::Dtype};
+
+/// Bucketing for mask sizes to enable reuse across different sequence lengths.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum MaskSizeBucket {
+    XSmall,   // 1-32
+    Small,    // 33-128
+    Medium,   // 129-512
+    Large,    // 513-1024
+    XLarge,   // 1025-2048
+    XXLarge,  // 2049-4096
+    XXXLarge, // >4096
+}
+
+impl From<usize> for MaskSizeBucket {
+    fn from(seq_len: usize) -> Self {
+        match seq_len {
+            0..=32 => MaskSizeBucket::XSmall,
+            33..=128 => MaskSizeBucket::Small,
+            129..=512 => MaskSizeBucket::Medium,
+            513..=1024 => MaskSizeBucket::Large,
+            1025..=2048 => MaskSizeBucket::XLarge,
+            2049..=4096 => MaskSizeBucket::XXLarge,
+            _ => MaskSizeBucket::XXXLarge,
+        }
+    }
+}
+
+/// Key for MPSGraph SDPA operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphSdpaKey {
+    pub batch: usize,
+    pub dim: usize,
+    pub causal: bool,
+    pub dtype: Dtype,
+    pub accumulator_dtype: Option<Dtype>,
+}
+
+impl PartialEq for MpsGraphSdpaKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.batch == other.batch
+            && self.dim == other.dim
+            && self.causal == other.causal
+            && self.dtype == other.dtype
+            && self.accumulator_dtype == other.accumulator_dtype
+    }
+}
+
+impl Eq for MpsGraphSdpaKey {}
+
+impl Hash for MpsGraphSdpaKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.batch.hash(state);
+        self.dim.hash(state);
+        self.causal.hash(state);
+        self.dtype.hash(state);
+        self.accumulator_dtype.hash(state);
+    }
+}
+
+/// Key for reusable mask buffers in MPSGraph SDPA.
+/// This enables mask reuse across different sequence lengths that fit within the same bucket.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphSdpaMaskKey {
+    pub causal: bool,
+    pub dtype: Dtype,
+    pub head_dim: usize,
+    pub seq_q_bucket: MaskSizeBucket,
+    pub seq_k_bucket: MaskSizeBucket,
+}
+
+impl PartialEq for MpsGraphSdpaMaskKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.causal == other.causal
+            && self.dtype == other.dtype
+            && self.head_dim == other.head_dim
+            && self.seq_q_bucket == other.seq_q_bucket
+            && self.seq_k_bucket == other.seq_k_bucket
+    }
+}
+
+impl Eq for MpsGraphSdpaMaskKey {}
+
+impl Hash for MpsGraphSdpaMaskKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.causal.hash(state);
+        self.dtype.hash(state);
+        self.head_dim.hash(state);
+        self.seq_q_bucket.hash(state);
+        self.seq_k_bucket.hash(state);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MpsGraphSdpaFeedBinding {
@@ -43,14 +135,12 @@ pub struct CacheableMpsGraphSdpa {
     pub accumulator_data_type: Option<MPSDataType>,
 }
 
-impl Cacheable for CacheableMpsGraphSdpa {
-    type Key = MpsGraphSdpaKey;
-
-    fn cache_key(&self) -> Self::Key {
-        self.key.clone()
+impl CacheableMpsGraphSdpa {
+    pub fn key(&self) -> &MpsGraphSdpaKey {
+        &self.key
     }
 
-    fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
+    pub fn from_key(key: &MpsGraphSdpaKey, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let data_type = key.dtype.into();
         let accumulator_type = key.accumulator_dtype.map(Into::into);
 
@@ -200,14 +290,12 @@ pub struct CacheableMpsGraphSdpaMask {
     pub views: CacheableMpsGraphSdpaMaskViews,
 }
 
-impl Cacheable for CacheableMpsGraphSdpaMask {
-    type Key = MpsGraphSdpaMaskKey;
-
-    fn cache_key(&self) -> Self::Key {
-        self.key.clone()
+impl CacheableMpsGraphSdpaMask {
+    pub fn key(&self) -> &MpsGraphSdpaMaskKey {
+        &self.key
     }
 
-    fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
+    pub fn from_key(key: &MpsGraphSdpaMaskKey, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let data_type = key.dtype.into();
 
         let mut seq_q_size = mask_bucket_size(key.seq_q_bucket);
@@ -236,9 +324,7 @@ impl Cacheable for CacheableMpsGraphSdpaMask {
             views: RefCell::new(FxHashMap::default()),
         })
     }
-}
 
-impl CacheableMpsGraphSdpaMask {
     pub fn view_for(
         &self,
         device: &Retained<ProtocolObject<dyn MTLDevice>>,

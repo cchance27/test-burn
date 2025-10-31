@@ -23,7 +23,7 @@ impl DefaultKernelInvocable for SiluOp {
         ctx: &mut Context<T>,
         input: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         ctx.prepare_tensors_for_active_cmd(&[&input])?;
 

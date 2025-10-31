@@ -29,6 +29,7 @@ pub enum CacheEventKind {
     Hit,
     MissCreate,
     Cleared,
+    Evicted,
 }
 
 impl fmt::Display for CacheEventKind {
@@ -37,6 +38,7 @@ impl fmt::Display for CacheEventKind {
             Self::Hit => f.write_str("hit"),
             Self::MissCreate => f.write_str("miss-create"),
             Self::Cleared => f.write_str("cleared"),
+            Self::Evicted => f.write_str("evicted"),
         }
     }
 }
@@ -70,6 +72,12 @@ impl CacheCounters {
     }
 
     #[inline]
+    pub fn record_eviction(&mut self, cache: &'static str, detail: String, count: u64) {
+        self.evictions = self.evictions.saturating_add(count);
+        self.last_event = Some(CacheEvent::new(CacheEventKind::Evicted, cache, detail));
+    }
+
+    #[inline]
     pub fn hits(&self) -> u64 {
         self.hits
     }
@@ -81,7 +89,7 @@ impl CacheCounters {
 }
 
 /// Statistics about an individual cache.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct CacheMetrics {
     pub size: usize,
     pub hits: u64,
@@ -109,23 +117,6 @@ impl CacheMetrics {
             longest_idle_age: lifetime.longest_idle,
             shortest_idle_age: lifetime.shortest_idle,
             max_entry_reuse_count: lifetime.max_reuse_count,
-        }
-    }
-}
-
-impl Default for CacheMetrics {
-    fn default() -> Self {
-        Self {
-            size: 0,
-            hits: 0,
-            misses: 0,
-            evictions: 0,
-            last_event: None,
-            oldest_entry_age: None,
-            newest_entry_age: None,
-            longest_idle_age: None,
-            shortest_idle_age: None,
-            max_entry_reuse_count: None,
         }
     }
 }

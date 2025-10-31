@@ -1,6 +1,6 @@
 #![cfg(test)]
 use crate::{
-    Context, MetalError, Tensor, cache_keys::SdpaKey, cacheable::Cacheable as _, kernels::scaled_dot_product_attention::cache::CacheableSdpa
+    Context, MetalError, Tensor, kernels::scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKey}
 };
 
 mod batch_record_test;

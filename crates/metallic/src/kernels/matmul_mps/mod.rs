@@ -8,7 +8,7 @@ use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixM
 
 use super::{DefaultKernelInvocable, KernelFunction};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey}, context::GpuProfilerLabel, operation::EncoderType, resource_cache::ResourceCache
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, kernels::matmul_mps::cache::{MpsGemmKey, MpsMatrixDescriptorKey}, operation::EncoderType
 };
 
 #[cfg(test)]

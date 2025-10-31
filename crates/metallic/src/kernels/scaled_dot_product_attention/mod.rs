@@ -4,7 +4,7 @@ use objc2_metal::MTLComputePipelineState;
 
 use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::{SdpaKey, SeqKBucket}, kernels::sdpa_mps_graph::SdpaMpsGraphOp, resource_cache::ResourceCache
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}
 };
 
 #[cfg(test)]

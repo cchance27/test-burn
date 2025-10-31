@@ -13,11 +13,11 @@ impl<T: TensorElement> Context<T> {
 
         // First, check if tensor is already prepared for current command buffer
         if let Some(active_cmd_buffer) = self.active_cmd_buffer.as_ref()
-            && self.tensor_preparation_cache.is_prepared(tensor, active_cmd_buffer)
+            && self.tensor_preparation_cache().is_prepared(tensor, active_cmd_buffer)
         {
             // Tensor is already prepared; record cache hit metrics and return
             let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
-            self.tensor_preparation_cache.record_cache_hit(elapsed_us);
+            self.tensor_preparation_cache().record_cache_hit(elapsed_us);
             return Ok(());
         }
 
@@ -28,22 +28,22 @@ impl<T: TensorElement> Context<T> {
                 if self.active_cmd_buffer.as_ref().map(|active| dep.ptr_eq(active)).unwrap_or(false) {
                     // If tensor is already pending on our active command buffer, we're done
                     // Still mark in cache for tracking purposes
-                    self.tensor_preparation_cache.mark_prepared(tensor, active_cmd_buffer);
+                    self.tensor_preparation_cache().mark_prepared(tensor, active_cmd_buffer);
 
                     // Record timing for this preparation attempt
                     let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
-                    self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+                    self.tensor_preparation_cache().record_cache_miss(elapsed_us);
                     return Ok(());
                 }
 
                 if dep.is_completed() {
                     tensor.defining_cmd_buffer.borrow_mut().take();
                     // Mark tensor as prepared for the current command buffer
-                    self.tensor_preparation_cache.mark_prepared(tensor, active_cmd_buffer);
+                    self.tensor_preparation_cache().mark_prepared(tensor, active_cmd_buffer);
 
                     // Record timing for this preparation attempt
                     let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
-                    self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+                    self.tensor_preparation_cache().record_cache_miss(elapsed_us);
                     return Ok(());
                 }
 
@@ -76,7 +76,7 @@ impl<T: TensorElement> Context<T> {
                     tensor.defining_cmd_buffer.borrow_mut().take();
                     // Record timing for this preparation attempt
                     let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
-                    self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+                    self.tensor_preparation_cache().record_cache_miss(elapsed_us);
                     return Ok(());
                 }
 
@@ -108,12 +108,12 @@ impl<T: TensorElement> Context<T> {
 
         // Mark tensor as prepared if we have an active command buffer
         if let Some(active_cmd_buffer) = self.active_cmd_buffer.as_ref() {
-            self.tensor_preparation_cache.mark_prepared(tensor, active_cmd_buffer);
+            self.tensor_preparation_cache().mark_prepared(tensor, active_cmd_buffer);
         }
 
         // Record timing for this preparation attempt
         let elapsed_us = start_time.elapsed().as_micros().max(1) as u64;
-        self.tensor_preparation_cache.record_cache_miss(elapsed_us);
+        self.tensor_preparation_cache().record_cache_miss(elapsed_us);
 
         Ok(())
     }

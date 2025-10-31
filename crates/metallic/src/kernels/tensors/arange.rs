@@ -30,7 +30,7 @@ impl DefaultKernelInvocable for ArangeOp {
         ctx: &mut Context<T>,
         length: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Create the output tensor.
         let out = Tensor::new(vec![length], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;

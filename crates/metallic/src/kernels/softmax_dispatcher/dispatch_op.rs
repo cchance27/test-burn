@@ -5,9 +5,9 @@ use super::{
     dispatcher::{SoftmaxCaps, SoftmaxPrefs, select_policy}, execute::SoftmaxDispatch, prefs, types::{SoftmaxBackend, SoftmaxShape, SoftmaxVariant}
 };
 use crate::{
-    context::Context, error::MetalError, kernels::{
+    caching::ResourceCache, context::Context, error::MetalError, kernels::{
         DefaultKernelInvocable, Operation, softmax_block::SoftmaxBlockOp, softmax_kernel::SoftmaxKernelOp, softmax_vec::SoftmaxVecOp
-    }, resource_cache::ResourceCache, tensor::{Dtype, Tensor, TensorElement}
+    }, tensor::{Dtype, Tensor, TensorElement}
 };
 
 /// A public, zero-sized struct that acts as the entry point for the softmax dispatcher.
@@ -95,7 +95,7 @@ impl DefaultKernelInvocable for SoftmaxDispatchOp {
                     let op = crate::kernels::softmax_mps::create_softmax_mps_operation_from_context(
                         src.clone(),
                         cache_ref.get_or_create_descriptor(
-                            crate::cache_keys::MpsMatrixDescriptorKey {
+                            crate::kernels::matmul_mps::cache::MpsMatrixDescriptorKey {
                                 rows: seq_q,
                                 columns: seq_k,
                                 row_bytes: view.row_bytes,
@@ -134,7 +134,7 @@ impl DefaultKernelInvocable for SoftmaxDispatchOp {
                     let op = crate::kernels::softmax_mps::create_softmax_mps_operation_from_context(
                         src.clone(),
                         cache_ref.get_or_create_descriptor(
-                            crate::cache_keys::MpsMatrixDescriptorKey {
+                            crate::kernels::matmul_mps::cache::MpsMatrixDescriptorKey {
                                 rows: seq_q,
                                 columns: seq_k,
                                 row_bytes: view.row_bytes,

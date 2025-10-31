@@ -1,6 +1,6 @@
 use super::main::Context;
 use crate::{
-    MetalError, Tensor, cache_keys::SdpaKey, kernels::scaled_dot_product_attention::ScaledDotProductAttentionDispatchOp, tensor::TensorElement
+    MetalError, Tensor, kernels::scaled_dot_product_attention::{ScaledDotProductAttentionDispatchOp, cache::SdpaKey}, tensor::TensorElement
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

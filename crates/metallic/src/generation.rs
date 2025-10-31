@@ -537,9 +537,9 @@ where
     // their shapes changed (e.g. when generating with a longer context than before).
     let repeated_batch_heads = batch_size * n_heads;
     let mut cache_shapes_changed = false;
-    if !ctx.kv_caches.is_empty() {
+    if !ctx.kv_caches().is_empty() {
         for layer_idx in 0..n_layers {
-            match ctx.kv_caches.get(&layer_idx) {
+            match ctx.kv_caches().get(&layer_idx) {
                 Some(entry) => {
                     let k_dims = entry.k.dims();
                     if entry.capacity != kv_capacity || k_dims[0] != repeated_batch_heads || k_dims[2] != kv_head_dim {
@@ -557,7 +557,7 @@ where
 
     // Ensure KV caches start from a clean slate between generations.
     ctx.clear_kv_caches();
-    ctx.kv_cache_pool.reset();
+    ctx.kv_cache_pool_mut().reset();
 
     // Pre-reserve KV cache pool exactly to avoid chunk overshoot
     let bytes_per_element = std::mem::size_of::<T>();
@@ -566,7 +566,7 @@ where
         .checked_mul(2) // K + V
         .and_then(|b| b.checked_mul(n_layers))
         .ok_or(MetalError::OutOfMemory)?;
-    ctx.kv_cache_pool.reserve_exact(total_bytes)?;
+    ctx.kv_cache_pool_mut().reserve_exact(total_bytes)?;
 
     // Report KV cache allocation - only if metrics are enabled
     let kv_cache_size = kv_capacity * batch_size * n_heads * kv_head_dim * std::mem::size_of::<T>();
@@ -584,7 +584,7 @@ where
             total_bytes: process_memory_bytes,
             tensor_pool_reserved_bytes: ctx.pool.total_capacity() as u64,
             tensor_pool_used_bytes: ctx.pool.used_bytes() as u64,
-            kv_pool_reserved_bytes: ctx.kv_cache_pool.total_capacity() as u64,
+            kv_pool_reserved_bytes: ctx.kv_cache_pool().total_capacity() as u64,
             kv_pool_used_bytes: 0,
             forward_pass_breakdown: forward_pass_breakdown.clone(),
         });
@@ -725,8 +725,8 @@ where
                         total_bytes: process_memory_bytes,
                         tensor_pool_reserved_bytes: ctx.pool.total_capacity() as u64,
                         tensor_pool_used_bytes: ctx.pool.used_bytes() as u64,
-                        kv_pool_reserved_bytes: ctx.kv_cache_pool.total_capacity() as u64,
-                        kv_pool_used_bytes: ctx.kv_cache_pool.used_bytes() as u64,
+                        kv_pool_reserved_bytes: ctx.kv_cache_pool().total_capacity() as u64,
+                        kv_pool_used_bytes: ctx.kv_cache_pool().used_bytes() as u64,
                         forward_pass_breakdown: forward_pass_breakdown.clone(),
                     });
                 }

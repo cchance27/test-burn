@@ -4,8 +4,8 @@ use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::rc::Retained;
 use rustc_hash::FxHashMap;
 
-use super::{CommandBuffer, Tensor};
-use crate::TensorElement;
+use super::registry::CacheRegistrySlot;
+use crate::{CommandBuffer, Tensor, TensorElement};
 
 /// Cache key for identifying a tensor uniquely
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -200,6 +200,13 @@ impl<T: TensorElement> Clone for TensorPreparationCache<T> {
             metrics: self.metrics.clone(),
             _phantom: std::marker::PhantomData,
         }
+    }
+}
+
+impl<T: TensorElement> CacheRegistrySlot for TensorPreparationCache<T> {
+    fn clear_slot(&mut self) {
+        // Clear resets both cached tensors and metrics.
+        self.clear();
     }
 }
 

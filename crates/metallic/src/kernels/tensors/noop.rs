@@ -25,7 +25,7 @@ impl DefaultKernelInvocable for NoopOp {
         ctx: &mut Context<T>,
         out: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Ensure the tensor is tracked for an active command.
         ctx.prepare_tensors_for_active_cmd(&[&out])?;

@@ -25,7 +25,7 @@ impl DefaultKernelInvocable for LayerNormOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, gamma, beta, feature_dim) = args;
 

@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, resource_cache::ResourceCache
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
 };
 
 /// Public, user-facing, zero-sized struct for the RoPE operation.
@@ -38,7 +38,7 @@ impl DefaultKernelInvocable for RoPEOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, cos, sin, dim, seq_len, position_offset) = args;
 

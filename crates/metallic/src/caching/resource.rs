@@ -3,26 +3,20 @@ use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
 
 use crate::{
-    cache_keys::{
-        FusedOperationType, MaskSizeBucket, MpsGemmKey, MpsGraphFusedKey, MpsGraphKvWriteKey, MpsGraphSdpaKey, MpsGraphSdpaMaskKey, MpsMatrixDescriptorKey, MpsSoftMaxKey, SdpaKey, SeqKBucket
-    }, caching::{CacheMetrics, CacheRegistry, CacheableKernel}, error::MetalError, kernels::{
-        kv_cache_write::cache::{CacheableMpsGraphKvWrite, KvWriteGraphKernel}, matmul_mps::cache::{MpsGemmKernel, MpsMatrixDescriptorKernel}, scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKernel}, sdpa_mps_graph::cache::{CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, MpsGraphSdpaKernel, MpsGraphSdpaMaskKernel}, softmax_mps::cache::SoftmaxMpsKernel
-    }, mps_graph::cache::{CacheableMpsGraphFused, MpsGraphFusedKernel}, tensor::dtypes::Dtype
+    caching::{CacheMetrics, CacheRegistry, CacheableKernel}, error::MetalError, kernels::{
+        kv_cache_write::cache::{CacheableMpsGraphKvWrite, KvWriteGraphKernel, MpsGraphKvWriteKey}, matmul_mps::cache::{MpsGemmKernel, MpsGemmKey, MpsMatrixDescriptorKernel, MpsMatrixDescriptorKey}, scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKernel, SdpaKey}, sdpa_mps_graph::cache::{
+            CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, MaskSizeBucket, MpsGraphSdpaKernel, MpsGraphSdpaKey, MpsGraphSdpaMaskKernel, MpsGraphSdpaMaskKey
+        }, softmax_mps::cache::{MpsSoftMaxKey, SeqKBucket, SoftmaxMpsKernel}
+    }, mps_graph::cache::{CacheableMpsGraphFused, FusedOperationType, MpsGraphFusedKernel, MpsGraphFusedKey}, tensor::dtypes::Dtype
 };
 
 /// Unified resource cache facade that wraps the generic kernel registry.
+#[derive(Default)]
 pub struct ResourceCache {
     registry: CacheRegistry,
 }
 
 impl ResourceCache {
-    /// Create a new cache without a default device.
-    pub fn new() -> Self {
-        Self {
-            registry: CacheRegistry::new(),
-        }
-    }
-
     /// Create a new cache with a fallback Metal device used when callers do not provide one.
     pub fn with_device(device: Retained<ProtocolObject<dyn MTLDevice>>) -> Self {
         Self {
@@ -286,12 +280,6 @@ impl ResourceCache {
     }
 }
 
-impl Default for ResourceCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Aggregated cache statistics grouped by kernel type.
 #[derive(Clone, Debug)]
 pub struct CacheStats {
@@ -342,7 +330,7 @@ mod tests {
 
     #[test]
     fn registry_tracks_hits_and_misses() {
-        let mut registry = CacheRegistry::new();
+        let mut registry = CacheRegistry::default();
 
         let first = registry
             .get_or_create::<MockKernel>(&MockParams(7), None)
@@ -364,7 +352,7 @@ mod tests {
 
     #[test]
     fn resource_cache_stats_default_to_zero() {
-        let cache = ResourceCache::new();
+        let cache = ResourceCache::default();
         let stats = cache.get_stats();
 
         assert_eq!(stats.gemm.size, 0);

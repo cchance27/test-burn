@@ -1,5 +1,5 @@
 use super::types::SoftmaxPolicy;
-use crate::{CommandBuffer, context::GpuProfilerLabel, error::MetalError, kernels::Operation, resource_cache::ResourceCache};
+use crate::{CommandBuffer, caching::ResourceCache, context::GpuProfilerLabel, error::MetalError, kernels::Operation};
 
 /// The internal operation struct for the softmax dispatcher.
 /// It holds the policy and the actual operation to be executed.

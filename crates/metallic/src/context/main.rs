@@ -5,38 +5,13 @@ use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Tensor, TensorElement, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable, MultiTensorOutput}, operation::CommandBuffer, pool::MemoryPool, profiling_state, resource_cache::{CacheStats, ResourceCache}, tensor::Dtype, tensor_preparation_cache::TensorPreparationCache
+    Tensor, TensorElement, caching::{CacheRegistry, CacheStats, KvCacheEntry, KvCacheState, ResourceCache, TensorPreparationCache}, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable, MultiTensorOutput}, operation::CommandBuffer, pool::MemoryPool, profiling_state, tensor::Dtype
 };
 
 #[derive(Default)]
 pub struct SamplerBuffers {
     pub scaled: Vec<f32>,
     pub indices: Vec<usize>,
-}
-
-pub struct KvWritePlan<T: TensorElement> {
-    pub k_src: Tensor<T>,
-    pub v_src: Tensor<T>,
-    pub k_cache: Tensor<T>,
-    pub v_cache: Tensor<T>,
-    pub canonical_heads: usize,
-    pub repeated_heads: usize,
-    pub group_size: usize,
-    pub group_size_u32: u32,
-    pub seq_in_src: usize,
-    pub head_dim: usize,
-    pub capacity_seq_val: usize,
-    pub element_size: usize,
-    pub src_head_stride: u32,
-    pub src_seq_stride: u32,
-    pub dst_head_stride: u32,
-    pub dst_seq_stride: u32,
-    pub total_threads: u32,
-    pub heads_u32: u32,
-    pub head_dim_u32: u32,
-    pub seq_len_u32: u32,
-    pub step_u32: u32,
-    pub step: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,31 +43,10 @@ pub struct AliasKey {
     pub length_bytes: usize,
 }
 
-#[derive(Clone)]
-pub(crate) struct KvCacheEntry<T: TensorElement> {
-    pub k: Tensor<T>,
-    pub v: Tensor<T>,
-    #[allow(dead_code)]
-    pub dtype: Dtype,
-    pub element_size: usize,
-    pub zeroing_complete: bool,
-    pub capacity: usize,
-}
-
-impl<T: TensorElement> KvCacheEntry<T> {
-    #[inline]
-    pub fn total_bytes(&self) -> usize {
-        self.k.size_bytes() + self.v.size_bytes()
-    }
-}
-
-const KV_CACHE_POOL_MAX_BYTES: usize = 8 * 1024 * 1024 * 1024; // 8GB
-
 pub struct Context<T: TensorElement> {
     pub device: Retained<ProtocolObject<dyn MTLDevice>>,
     pub command_queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pub pool: MemoryPool,
-    pub kv_cache_pool: MemoryPool,
     pub kernel_manager: KernelManager,
     backend_registry: KernelBackendRegistry,
     // Metrics counters
@@ -102,10 +56,7 @@ pub struct Context<T: TensorElement> {
     // RNG seed counter for deterministic random generation
     pub rng_seed_counter: u64,
 
-    // Per-layer on-device KV caches stored centrally for developer DX.
-    pub(crate) kv_caches: FxHashMap<usize, KvCacheEntry<T>>,
-    pub(crate) kv_cache_total_bytes: usize,
-
+    pub(crate) cache_registry: CacheRegistry,
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     pub(crate) active_cmd_buffer: Option<CommandBuffer>,
     /// Resource cache associated with the active command buffer.
@@ -118,7 +69,6 @@ pub struct Context<T: TensorElement> {
     pub(crate) mlx_kernel_cache: MlxKernelCache,
     pub(crate) sdpa_workspaces: FxHashMap<super::sdpa_workspace::SdpaWorkspaceKey, super::sdpa_workspace::SdpaWorkspaceState>,
     pub(crate) kv_repeat_workspaces: FxHashMap<RepeatKvWorkspaceKey, RepeatKvWorkspaceEntry<T>>,
-    pub(crate) tensor_preparation_cache: TensorPreparationCache<T>,
     pub(crate) pending_gpu_scope: Option<super::utils::GpuProfilerLabel>,
     pub(crate) gpu_scope_stack: Vec<super::utils::GpuProfilerLabel>,
 }
@@ -128,7 +78,6 @@ impl<T: TensorElement> Context<T> {
         let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
         let command_queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
         let pool = MemoryPool::new(&device, &command_queue)?;
-        let kv_cache_pool = MemoryPool::with_limit(&device, &command_queue, KV_CACHE_POOL_MAX_BYTES)?;
         let forced_backend = detect_forced_matmul_backend();
         // Initialize the global profiling state based on environment configuration
         profiling_state::initialize_profiling_state_from_env();
@@ -137,19 +86,27 @@ impl<T: TensorElement> Context<T> {
             profiling_state::set_profiling_state(true);
         }
 
+        let mut cache_registry = CacheRegistry::default();
+        {
+            let kv_state = KvCacheState::<T>::new(&device, &command_queue)?;
+            let _ = cache_registry.slot_mut(|| kv_state);
+        }
+        {
+            let tensor_cache = TensorPreparationCache::<T>::new();
+            let _ = cache_registry.slot_mut(|| tensor_cache);
+        }
+
         Ok(Context::<T> {
             device,
             command_queue,
             pool,
-            kv_cache_pool,
             kernel_manager: KernelManager::new(),
             backend_registry: KernelBackendRegistry::from_environment(),
             pooled_bytes_allocated: 0,
             pooled_allocations: 0,
             pool_resets: 0,
             rng_seed_counter: 0,
-            kv_caches: FxHashMap::default(),
-            kv_cache_total_bytes: 0,
+            cache_registry,
             active_cmd_buffer: None,
             active_resource_cache: None,
             sampler_buffers: SamplerBuffers::default(),
@@ -157,7 +114,6 @@ impl<T: TensorElement> Context<T> {
             mlx_kernel_cache: MlxKernelCache::default(),
             sdpa_workspaces: FxHashMap::default(),
             kv_repeat_workspaces: FxHashMap::default(),
-            tensor_preparation_cache: TensorPreparationCache::new(),
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
         })
@@ -176,6 +132,47 @@ impl<T: TensorElement> Context<T> {
     #[inline]
     pub fn backend_registry_mut(&mut self) -> &mut KernelBackendRegistry {
         &mut self.backend_registry
+    }
+
+    #[inline]
+    pub(crate) fn kv_cache_state(&self) -> &KvCacheState<T> {
+        self.cache_registry
+            .slot::<KvCacheState<T>>()
+            .expect("KV cache state slot initialized")
+    }
+
+    #[inline]
+    pub(crate) fn kv_cache_state_mut(&mut self) -> &mut KvCacheState<T> {
+        self.cache_registry
+            .slot_mut_existing::<KvCacheState<T>>()
+            .expect("KV cache state slot initialized")
+    }
+
+    #[inline]
+    pub(crate) fn tensor_preparation_cache(&self) -> &TensorPreparationCache<T> {
+        self.cache_registry
+            .slot::<TensorPreparationCache<T>>()
+            .expect("tensor preparation cache slot initialized")
+    }
+
+    #[inline]
+    pub fn kv_cache_pool(&self) -> &MemoryPool {
+        self.kv_cache_state().pool()
+    }
+
+    #[inline]
+    pub fn kv_cache_pool_mut(&mut self) -> &mut MemoryPool {
+        self.kv_cache_state_mut().pool_mut()
+    }
+
+    #[inline]
+    pub fn kv_caches(&self) -> &FxHashMap<usize, KvCacheEntry<T>> {
+        self.kv_cache_state().caches()
+    }
+
+    #[inline]
+    pub fn kv_caches_mut(&mut self) -> &mut FxHashMap<usize, KvCacheEntry<T>> {
+        self.kv_cache_state_mut().caches_mut()
     }
 
     #[inline]
@@ -204,7 +201,7 @@ impl<T: TensorElement> Context<T> {
         }
         self.sdpa_workspaces.clear();
         // Also clear tensor preparation cache when clearing other caches
-        self.tensor_preparation_cache.clear();
+        self.tensor_preparation_cache().clear();
     }
 
     #[inline]
@@ -219,13 +216,13 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[inline]
-    pub fn get_tensor_preparation_metrics(&self) -> crate::tensor_preparation_cache::TensorPreparationMetrics {
-        self.tensor_preparation_cache.get_metrics()
+    pub fn get_tensor_preparation_metrics(&self) -> crate::caching::TensorPreparationMetrics {
+        self.tensor_preparation_cache().get_metrics()
     }
 
     #[inline]
     pub fn report_tensor_preparation_metrics(&self) {
-        self.tensor_preparation_cache.report_metrics();
+        self.tensor_preparation_cache().report_metrics();
     }
 
     #[cfg(test)]
@@ -265,7 +262,7 @@ impl<T: TensorElement> Context<T> {
         };
 
         if ensure_cache && self.active_resource_cache.is_none() {
-            self.active_resource_cache = Some(crate::resource_cache::ResourceCache::with_device(self.device.clone()));
+            self.active_resource_cache = Some(crate::caching::ResourceCache::with_device(self.device.clone()));
         }
 
         // If a new command buffer was created, we need to clear preparation states
@@ -293,7 +290,7 @@ impl<T: TensorElement> Context<T> {
     pub(crate) fn mark_tensor_pending<U: TensorElement>(&self, tensor: &Tensor<U>) {
         tensor.mark_device_dirty();
         // Mark tensor as dirty in the preparation cache since it's now pending on GPU
-        self.tensor_preparation_cache.mark_dirty(tensor);
+        self.tensor_preparation_cache().mark_dirty(tensor);
         if let Some(active) = &self.active_cmd_buffer {
             tensor.defining_cmd_buffer.borrow_mut().replace(active.clone());
         }
@@ -302,7 +299,7 @@ impl<T: TensorElement> Context<T> {
     pub(crate) fn call_with_cache<K: crate::kernels::DefaultKernelInvocable>(
         &mut self,
         args: K::Args<'_, T>,
-        cache: &mut crate::resource_cache::ResourceCache,
+        cache: &mut crate::caching::ResourceCache,
     ) -> Result<Tensor<T>, MetalError> {
         // Get the current scope path to potentially nest with the kernel being called
         let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {

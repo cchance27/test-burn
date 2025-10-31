@@ -271,10 +271,6 @@ impl<T: TensorElement> Tensor<T> {
         let elem_size = std::mem::size_of::<T::Scalar>();
 
         let mut result = Vec::<T::Scalar>::with_capacity(len);
-        unsafe {
-            result.set_len(len);
-        }
-
         let dst_bytes = result.as_mut_ptr() as *mut u8;
 
         if self.host_accessible {
@@ -290,6 +286,10 @@ impl<T: TensorElement> Tensor<T> {
             };
             let src_ptr = unsafe { (staging_buf.contents().as_ptr() as *const u8).add(base_offset) };
             copy_strided_bytes(&dims, &strides, &contiguous_strides, elem_size, src_ptr, dst_bytes);
+        }
+
+        unsafe {
+            result.set_len(len);
         }
 
         Ok(result)
@@ -351,6 +351,7 @@ fn copy_strided_bytes(
     copy_strided_recursive(dims, strides, contiguous_strides, elem_size, 0, src_ptr, dst_ptr, 0, 0);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn copy_strided_recursive(
     dims: &[usize],
     strides: &[usize],

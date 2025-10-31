@@ -1,7 +1,7 @@
 #![cfg(test)]
 use objc2::{rc::Retained, runtime::ProtocolObject};
 
-use crate::{CommandBuffer, Context, F32Element, MetalError, Operation, Tensor, TensorElement, resource_cache::ResourceCache};
+use crate::{CommandBuffer, Context, F32Element, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache};
 
 // Simple test operation that just validates it can be called
 pub struct TestOperation;

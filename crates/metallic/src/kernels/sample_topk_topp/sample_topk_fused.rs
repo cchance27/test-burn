@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, context::GpuProfilerLabel, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, operation::EncoderType, resource_cache::ResourceCache, tensor::dtypes::U32
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, operation::EncoderType, tensor::dtypes::U32
 };
 
 pub struct SampleTopKFusedOp;

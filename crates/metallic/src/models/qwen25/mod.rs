@@ -472,7 +472,7 @@ impl<T: TensorElement> Qwen25<T> {
 
                 // Create a view over the repeated KV cache for attention
                 let cache_entry = ctx
-                    .kv_caches
+                    .kv_caches()
                     .get(&layer_idx)
                     .cloned()
                     .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;

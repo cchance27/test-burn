@@ -41,6 +41,19 @@ pub enum MetricEvent {
         hit_rate: f64,
         size: u64,
     },
+    /// Cache eviction event with detailed metadata.
+    CacheEviction {
+        /// Name of the cache that performed eviction.
+        cache: String,
+        /// Eviction strategy that triggered this event.
+        strategy: String,
+        /// Number of entries evicted.
+        count: u64,
+        /// Reason for eviction (e.g., "size_limit_exceeded", "idle_timeout", "manual_clear").
+        reason: String,
+        /// Cache size after eviction.
+        size_after: u64,
+    },
     /// Memory-mapped file usage for GGUF models.
     GgufFileMmap {
         /// Size of the memory-mapped file in bytes.

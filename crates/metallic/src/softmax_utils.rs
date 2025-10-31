@@ -3,7 +3,7 @@ use std::sync::OnceLock;
 use metallic_env::SOFTMAX_BACKEND_VAR;
 
 use crate::{
-    cache_keys::MpsMatrixDescriptorKey, context::Context, error::MetalError, kernels::softmax_kernel::SoftmaxKernelOp, resource_cache::ResourceCache, tensor::{Dtype, MpsMatrixBatchView, Tensor, TensorElement}
+    caching::ResourceCache, context::Context, error::MetalError, kernels::{matmul_mps::cache::MpsMatrixDescriptorKey, softmax_kernel::SoftmaxKernelOp}, tensor::{Dtype, MpsMatrixBatchView, Tensor, TensorElement}
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

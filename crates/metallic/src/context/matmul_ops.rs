@@ -1,8 +1,8 @@
 use super::{main::Context, utils::MatMulBackendOverride as InternalMatMulBackendOverride};
 use crate::{
-    MetalError, Tensor, kernels::{
+    MetalError, Tensor, caching::ResourceCache, kernels::{
         elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv::MatmulGemvOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}
-    }, resource_cache::ResourceCache, tensor::TensorElement
+    }, tensor::TensorElement
 };
 
 #[derive(Debug, Clone, Copy)]

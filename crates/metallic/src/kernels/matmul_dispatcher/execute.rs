@@ -1,8 +1,8 @@
 use super::types::*;
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, kernels::{
+    Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, kernels::{
         DefaultKernelInvocable, KernelFunction, matmul_gemm_tiled::MatmulGemmTiledOp, matmul_gemv::MatmulGemvOp, matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp}
-    }, resource_cache::ResourceCache, tensor::Dtype
+    }, tensor::Dtype
 };
 
 #[derive(Clone, Copy)]

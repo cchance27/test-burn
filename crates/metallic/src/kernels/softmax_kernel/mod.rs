@@ -2,7 +2,7 @@ use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel, resource_cache::ResourceCache};
+use crate::{CommandBuffer, TensorElement, caching::ResourceCache, context::GpuProfilerLabel};
 
 /// Public, user-facing, zero-sized struct for the legacy Softmax operation.
 pub struct SoftmaxKernelOp;
@@ -30,7 +30,7 @@ impl DefaultKernelInvocable for SoftmaxKernelOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (attn, rows_total, seq_q, seq_k, causal, query_offset) = args;
 

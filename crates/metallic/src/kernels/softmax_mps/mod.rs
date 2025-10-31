@@ -5,7 +5,7 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 use super::*;
 use crate::{
-    CommandBuffer, Dtype, TensorElement, cache_keys::MpsMatrixDescriptorKey, kernels::matmul_mps::mps_matrix_from_buffer, operation::EncoderType, resource_cache::ResourceCache
+    CommandBuffer, Dtype, TensorElement, caching::ResourceCache, kernels::matmul_mps::{cache::MpsMatrixDescriptorKey, mps_matrix_from_buffer}, operation::EncoderType
 };
 
 pub mod cache;

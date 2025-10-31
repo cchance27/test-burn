@@ -1497,7 +1497,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::Meta
         ctx.reset_pool();
         ctx.clear_cache();
         ctx.clear_kv_caches();
-        ctx.kv_cache_pool.reset();
+        ctx.kv_cache_pool_mut().reset();
 
         let prefix = &input_ids[..=pos];
         let prefix_embedding = model.embed(prefix, &mut ctx)?;
@@ -1513,7 +1513,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::Meta
     ctx.reset_pool();
     ctx.clear_cache();
     ctx.clear_kv_caches();
-    ctx.kv_cache_pool.reset();
+    ctx.kv_cache_pool_mut().reset();
 
     // Prepare KV cache pool for incremental forward steps.
     let n_layers = model.config.n_layers;
@@ -1525,7 +1525,7 @@ fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::Meta
     let batch_size = 1;
 
     ctx.clear_kv_caches();
-    ctx.kv_cache_pool.reset();
+    ctx.kv_cache_pool_mut().reset();
     let kv_capacity = input_ids.len().max(1);
     for layer_idx in 0..n_layers {
         ctx.alloc_kv_cache(layer_idx, kv_capacity, batch_size * n_heads, kv_head_dim)?;
@@ -1733,7 +1733,7 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
     ctx.synchronize();
 
     let entry = ctx
-        .kv_caches
+        .kv_caches()
         .get(&layer_idx)
         .cloned()
         .expect("kv cache must exist after allocation");
@@ -1773,7 +1773,11 @@ fn test_kv_cache_write_kernel_updates_cache_and_records_dispatches() -> Result<(
 fn dump_kv_snapshot<T: TensorElement>(ctx: &mut Context<T>, step: usize) {
     ctx.synchronize();
 
-    let mut snapshot: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
+    let mut snapshot: Vec<_> = ctx
+        .kv_caches()
+        .iter()
+        .map(|(&layer_idx, entry)| (layer_idx, entry.clone()))
+        .collect();
 
     snapshot.sort_by_key(|(layer_idx, _)| *layer_idx);
 

@@ -30,7 +30,7 @@ impl DefaultKernelInvocable for OnesOp {
         ctx: &mut Context<T>,
         dims: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Create the output tensor.
         let out = Tensor::new(dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;

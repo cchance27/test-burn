@@ -6,7 +6,9 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, cache_keys::{MpsGemmKey, MpsMatrixDescriptorKey}, context::GpuProfilerLabel, kernels::DefaultKernelInvocable, operation::EncoderType, resource_cache::ResourceCache
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, kernels::{
+        DefaultKernelInvocable, matmul_mps::cache::{MpsGemmKey, MpsMatrixDescriptorKey}
+    }, operation::EncoderType
 };
 
 // Public struct for matmul with alpha/beta scaling

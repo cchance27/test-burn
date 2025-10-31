@@ -104,7 +104,11 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         kv_cache_logits_history.push(logits_tensor.to_vec());
 
         // Validate that the KV cache grows with each token and exposes the expected repeated layout.
-        let cache_snapshots: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
+        let cache_snapshots: Vec<_> = ctx
+            .kv_caches()
+            .iter()
+            .map(|(&layer_idx, entry)| (layer_idx, entry.clone()))
+            .collect();
 
         for (layer_idx, entry) in cache_snapshots {
             let history = ctx.kv_cache_history_view(&entry.k, i + 1)?;

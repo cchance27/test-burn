@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use metallic::{
-    kernels::{KernelFunction, KernelManager}, operation::{CommandBuffer, FillConstant, Operation, RandomUniform}, resource_cache::ResourceCache, tensor::{Dtype, F32Element, Tensor}
+    caching::ResourceCache, kernels::{KernelFunction, KernelManager}, operation::{CommandBuffer, FillConstant, Operation, RandomUniform}, tensor::{Dtype, F32Element, Tensor}
 };
 use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
 

@@ -1,4 +1,4 @@
-use crate::{caching::CacheMetrics, resource_cache::ResourceCache};
+use crate::caching::{CacheMetrics, ResourceCache};
 
 #[derive(Clone, Debug)]
 pub struct CacheMetricsSnapshot {

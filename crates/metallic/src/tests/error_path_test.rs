@@ -94,7 +94,7 @@ fn test_sdpa_invalid_batch_dimensions() {
 
 #[test]
 fn test_matmul_invalid_shapes() {
-    use crate::{cache_keys::MpsGemmKey, resource_cache::ResourceCache};
+    use crate::{caching::ResourceCache, kernels::matmul_mps::cache::MpsGemmKey};
 
     let context = Context::<F32Element>::new().unwrap();
     let mut cache = ResourceCache::with_device(context.device.clone());

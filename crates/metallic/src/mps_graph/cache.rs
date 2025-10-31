@@ -1,12 +1,64 @@
+use std::hash::{Hash, Hasher};
+
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::{NSArray, NSMutableArray, NSMutableDictionary};
 use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders::MPSDataType;
 use objc2_metal_performance_shaders_graph as mpsg;
+use serde::{Deserialize, Serialize};
 
 use crate::{
-    cache_keys::MpsGraphFusedKey, cacheable::Cacheable, caching::CacheableKernel, error::MetalError, mps_graph::multi_op::{GraphFeedBinding, GraphResultBinding, MultiOpGraphBuilder}
+    caching::CacheableKernel, error::MetalError, mps_graph::multi_op::{GraphFeedBinding, GraphResultBinding, MultiOpGraphBuilder}, tensor::dtypes::Dtype
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum FusedOperationType {
+    SdpaProjection,
+}
+
+/// Key for MPSGraph fused operations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphFusedKey {
+    pub batch: usize,
+    pub seq_q: usize,
+    pub seq_k: usize,
+    pub dim: usize,
+    pub output_dim: usize,
+    pub causal: bool,
+    pub dtype: Dtype,
+    pub operation_type: FusedOperationType,
+    pub accumulator_dtype: Option<Dtype>,
+}
+
+impl PartialEq for MpsGraphFusedKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.batch == other.batch
+            && self.seq_q == other.seq_q
+            && self.seq_k == other.seq_k
+            && self.dim == other.dim
+            && self.output_dim == other.output_dim
+            && self.causal == other.causal
+            && self.dtype == other.dtype
+            && self.operation_type == other.operation_type
+            && self.accumulator_dtype == other.accumulator_dtype
+    }
+}
+
+impl Eq for MpsGraphFusedKey {}
+
+impl Hash for MpsGraphFusedKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.batch.hash(state);
+        self.seq_q.hash(state);
+        self.seq_k.hash(state);
+        self.dim.hash(state);
+        self.output_dim.hash(state);
+        self.causal.hash(state);
+        self.dtype.hash(state);
+        self.operation_type.hash(state);
+        self.accumulator_dtype.hash(state);
+    }
+}
 
 #[derive(Clone)]
 pub struct CacheableMpsGraphFused {
@@ -18,14 +70,12 @@ pub struct CacheableMpsGraphFused {
     pub accumulator_data_type: Option<MPSDataType>,
 }
 
-impl Cacheable for CacheableMpsGraphFused {
-    type Key = MpsGraphFusedKey;
-
-    fn cache_key(&self) -> Self::Key {
-        self.key.clone()
+impl CacheableMpsGraphFused {
+    pub fn key(&self) -> &MpsGraphFusedKey {
+        &self.key
     }
 
-    fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
+    pub fn from_key(key: &MpsGraphFusedKey, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let data_type: MPSDataType = key.dtype.into();
         let accumulator_type = key.accumulator_dtype.map(Into::into);
 

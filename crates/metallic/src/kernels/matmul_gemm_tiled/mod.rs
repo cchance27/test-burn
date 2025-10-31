@@ -57,7 +57,7 @@ impl DefaultKernelInvocable for MatmulGemmTiledOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (left, right, bias, existing_out, transpose_left, transpose_right, alpha, beta) = args;
 
@@ -209,7 +209,7 @@ impl DefaultKernelInvocable for MatmulGemmTiledOp {
 }
 
 impl<T: TensorElement> Operation for MatmulGemmTiled<T> {
-    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut crate::resource_cache::ResourceCache) -> Result<(), MetalError> {
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut crate::caching::ResourceCache) -> Result<(), MetalError> {
         let encoder = command_buffer.get_compute_encoder()?;
 
         let label = self.profiler_label.clone();

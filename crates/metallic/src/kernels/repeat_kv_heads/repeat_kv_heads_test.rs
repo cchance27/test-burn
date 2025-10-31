@@ -122,7 +122,7 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
     }
 
     let entry = ctx
-        .kv_caches
+        .kv_caches()
         .get(&layer_idx)
         .cloned()
         .expect("kv cache must exist after allocation");

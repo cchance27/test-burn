@@ -1,11 +1,40 @@
+use std::hash::{Hash, Hasher};
+
 use objc2::{
     AnyThread, rc::Retained, runtime::{NSObjectProtocol, ProtocolObject}
 };
 use objc2_foundation::{NSMutableArray, NSMutableDictionary, NSNumber, NSString};
 use objc2_metal::MTLDevice;
 use objc2_metal_performance_shaders_graph as mpsg;
+use serde::{Deserialize, Serialize};
 
-use crate::{cache_keys::MpsGraphKvWriteKey, cacheable::Cacheable, caching::CacheableKernel, error::MetalError};
+use crate::{caching::CacheableKernel, error::MetalError, tensor::dtypes::Dtype};
+
+/// Key for the MPSGraph KV write executable.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MpsGraphKvWriteKey {
+    pub heads: usize,
+    pub seq_bucket: usize,
+    pub head_dim: usize,
+    pub dtype: Dtype,
+}
+
+impl PartialEq for MpsGraphKvWriteKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.heads == other.heads && self.seq_bucket == other.seq_bucket && self.head_dim == other.head_dim && self.dtype == other.dtype
+    }
+}
+
+impl Eq for MpsGraphKvWriteKey {}
+
+impl Hash for MpsGraphKvWriteKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.heads.hash(state);
+        self.seq_bucket.hash(state);
+        self.head_dim.hash(state);
+        self.dtype.hash(state);
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MpsGraphKvWriteFeedBinding {
@@ -35,14 +64,12 @@ pub struct CacheableMpsGraphKvWrite {
     pub data_type: objc2_metal_performance_shaders::MPSDataType,
 }
 
-impl Cacheable for CacheableMpsGraphKvWrite {
-    type Key = MpsGraphKvWriteKey;
-
-    fn cache_key(&self) -> Self::Key {
-        self.key.clone()
+impl CacheableMpsGraphKvWrite {
+    pub fn key(&self) -> &MpsGraphKvWriteKey {
+        &self.key
     }
 
-    fn from_key(key: &Self::Key, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
+    pub fn from_key(key: &MpsGraphKvWriteKey, _device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>) -> Result<Self, MetalError> {
         let shape_array: Retained<objc2_foundation::NSArray<NSNumber>> = {
             let arr = NSMutableArray::array();
             arr.addObject(&*NSNumber::numberWithUnsignedInteger(key.heads));

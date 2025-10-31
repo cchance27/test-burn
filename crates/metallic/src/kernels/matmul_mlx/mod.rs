@@ -9,7 +9,7 @@ use objc2_metal::{MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionCo
 use rustc_hash::FxHashMap;
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}, resource_cache::ResourceCache, tensor::Dtype
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}, tensor::Dtype
 };
 
 #[repr(C)]

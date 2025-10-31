@@ -12,9 +12,9 @@ mod sdpa_mps_graph_test;
 use cache::{CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, kernels::{
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, kernels::{
         DefaultKernelInvocable, GraphKernel, GraphKernelAccumulator, GraphKernelAxis, GraphKernelDtypePolicy, GraphKernelSignature, GraphKernelTensorDescriptor
-    }, operation::EncoderType, resource_cache::ResourceCache
+    }, operation::EncoderType
 };
 
 // SDPA via MPSGraph (f16-only for now). We assume additive mask semantics: 0.0 for allowed and -inf for disallowed.

@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_cacheable_trait() {
-    use crate::cache_keys::SeqKBucket;
+    use crate::kernels::softmax_mps::cache::SeqKBucket;
 
     // Test CacheableSdpa since it doesn't require complex objects
     let key = SdpaKey {
@@ -22,14 +22,14 @@ fn test_cacheable_trait() {
         seq_k_bucket: SeqKBucket::from(64),
         transpose_k: false,
     };
-    assert_eq!(sdpa.cache_key(), expected_key);
+    assert_eq!(sdpa.key(), &expected_key);
 }
 
 #[test]
 fn sdpa_cache_hits_increase_for_repeated_requests() {
-    use crate::{resource_cache::ResourceCache, tensor::dtypes::Dtype};
+    use crate::{caching::ResourceCache, tensor::dtypes::Dtype};
 
-    let mut cache = ResourceCache::new();
+    let mut cache = ResourceCache::default();
     let dtype = Dtype::F32;
 
     // Initial miss populates the cache.

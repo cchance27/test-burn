@@ -4,7 +4,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
 
 use super::*;
-use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, resource_cache::ResourceCache, tensor::dtypes::U32};
+use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, tensor::dtypes::U32};
 
 // Global counter for seed variation
 static SEED_COUNTER: AtomicU32 = AtomicU32::new(0);

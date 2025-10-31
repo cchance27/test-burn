@@ -8,7 +8,7 @@ use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptio
 use tracing::subscriber;
 
 use crate::{
-    context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, FillConstant}, resource_cache::ResourceCache, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage}
+    caching::ResourceCache, context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, FillConstant}, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage}
 };
 
 // Maintainers: run this test on Apple Silicon hardware before releasing.

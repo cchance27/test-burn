@@ -127,7 +127,7 @@ impl<T: TensorElement> Context<T> {
             }
 
             // Validate tensor preparation states after command buffer completion
-            self.tensor_preparation_cache.validate_states(&cmd_buf);
+            self.tensor_preparation_cache().validate_states(&cmd_buf);
             return;
         }
 
@@ -185,7 +185,7 @@ impl<T: TensorElement> Context<T> {
             }
 
             // Validate tensor preparation states after command buffer completion
-            self.tensor_preparation_cache.validate_states(&cmd_buf);
+            self.tensor_preparation_cache().validate_states(&cmd_buf);
         }
     }
 }

@@ -3,7 +3,7 @@ use objc2_foundation::{NSArray, NSMutableArray, NSNumber, NSString};
 use objc2_metal_performance_shaders_graph as mpsg;
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, kernels::{DefaultKernelInvocable, GraphKernel, GraphKernelAccumulator, GraphKernelDtypePolicy}, mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder}, resource_cache::ResourceCache
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, kernels::{DefaultKernelInvocable, GraphKernel, GraphKernelAccumulator, GraphKernelDtypePolicy}, mps_graph::bindings::{GraphBindingSpec, GraphTensorDataArrayBuilder}
 };
 
 pub struct RepeatKvHeadsGraphOp;

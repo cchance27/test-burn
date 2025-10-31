@@ -10,13 +10,12 @@ This document outlines the proposed improvements to the metallic crate's caching
 
 The primary caching system in metallic consists of:
 
-#### `cacheable::Cacheable` trait
-- Defines the contract for cacheable resources
-- Has associated `Key` type
-- Provides `cache_key()` and `from_key()` methods
-- Implemented by various kernel-specific types
+#### Legacy `cacheable::Cacheable` trait
+- Previously defined the contract for cacheable resources
+- Provided a `Key` type plus `cache_key()` and `from_key()` helpers
+- Implemented by various kernel-specific types before the unified per-kernel cache modules were introduced
 
-#### `resource_cache::ResourceCache` struct
+#### `caching::ResourceCache` struct
 - Contains hardcoded caches for specific kernel types
 - Maintains separate hashmaps for different resource types:
   - `gemm_cache: FxHashMap<MpsGemmKey, CacheEntry<CacheableMpsGemm>>`
@@ -31,11 +30,11 @@ The primary caching system in metallic consists of:
 - Each implements the `Cacheable` trait
 - Contains kernel creation logic in `from_key()` methods
 
-#### `cache_keys` module
-- Defines the key types for caching
-- Provides unique identification for cached resources
+#### Kernel-local key definitions
+- Kernel modules (`matmul_mps`, `softmax_mps`, `sdpa_mps_graph`, etc.) define their own cache keys alongside the cached resources they materialise.
+- Keys are colocated with creation logic, removing the previous `cache_keys` staging area and making ownership explicit.
 
-### 2. KV Cache System (context/kv_cache.rs)
+### 2. KV Cache System (context/kv_cache.rs + caching/kv.rs)
 
 A specialized caching system for Key-Value attention caches:
 
@@ -43,6 +42,7 @@ A specialized caching system for Key-Value attention caches:
 - Tracks cache entries per layer
 - Handles cache writes using both kernel and blit operations
 - Integrates with MPS graph execution for optimized cache operations
+- Backed by `caching::kv::KvCacheState`, which is stored inside the unified registry via typed slots.
 
 ### 3. Tensor Preparation Cache System (tensor_preparation_cache.rs)
 
@@ -66,9 +66,8 @@ A performance optimization cache:
 - Kernels must use the cache infrastructure directly
 
 ### 2. Hardcoded Dependencies
-- Adding new kernel types requires modifying the core cache
-- The cache struct has hardcoded fields for each type
-- Method proliferation: `get_or_create_gemm()`, `get_or_create_softmax()`, etc.
+- Adding new kernel types previously required modifying the core cache. Moving keys/resources into kernel modules reduces this surface area, but older helper methods still exist and should be retired in favour of registry accessors.
+- The cache struct had hardcoded fields for each type, though the generic registry now abstracts most of this.
 
 ### 3. Code Duplication
 - Similar `from_key` methods exist across different cacheable types
@@ -82,7 +81,7 @@ A performance optimization cache:
 ### 5. Mixed Responsibilities
 - Cache infrastructure handles kernel-specific creation logic
 - Kernel modules depend on cache infrastructure for resource creation
-- Separation of concerns is violated
+- Separation of concerns is reduced now that key structs live with their kernels, but further consolidation (e.g., local helper methods) is still desirable.
 
 ## Proposed Solution: Unified Trait-Based Architecture
 
@@ -134,8 +133,8 @@ impl ResourceCache {
         cache.get_or_create(&key, device)
     }
     
-    /// Type-safe access to kernel-specific caches
-    fn get_kernel_cache<K: CacheableKernel>(&mut self) -> &mut KernelCache<K> {
+/// Type-safe access to kernel-specific caches
+fn get_kernel_cache<K: CacheableKernel>(&mut self) -> &mut KernelCache<K> {
         let type_id = TypeId::of::<K>();
         self.caches
             .entry(type_id)
@@ -144,6 +143,22 @@ impl ResourceCache {
             .expect("Type should match")
     }
 }
+
+### 4. Typed Registry Slots for Context-owned Caches
+
+The registry now stores non-kernel caches (KV allocator, tensor preparation cache) via typed slots:
+
+```rust
+pub fn slot_mut<T, F>(&mut self, init: F) -> &mut T
+where
+    T: CacheRegistrySlot + 'static,
+    F: FnOnce() -> T,
+{
+    // lazily provision the slot and return a typed reference
+}
+```
+
+This keeps context state (e.g., `KvCacheState`, `TensorPreparationCache`) behind the same registry API so metrics and lifecycle hooks remain centralised.
 ```
 
 ### 3. Kernel Implementation Example

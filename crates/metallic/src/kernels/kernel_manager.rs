@@ -14,6 +14,7 @@ pub trait CustomKernelInvocable {
     fn function_id() -> Option<KernelFunction>;
 
     #[allow(clippy::new_ret_no_self)]
+    #[allow(clippy::type_complexity)]
     fn new<'a, T: TensorElement>(
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
@@ -96,6 +97,7 @@ pub trait DefaultKernelInvocable {
 
     fn function_id() -> Option<KernelFunction>;
 
+    #[allow(clippy::new_ret_no_self)]
     fn new<'a, T: TensorElement>(
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,

@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Context, Dtype, MetalError, Operation, Tensor, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, resource_cache::ResourceCache
+    Context, Dtype, MetalError, Operation, Tensor, caching::ResourceCache, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
 };
 
 // Rexport KernelManager and Invocable

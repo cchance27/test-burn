@@ -3,14 +3,13 @@ use objc2_metal::{MTLBlitCommandEncoder as _, MTLBuffer, MTLDevice, MTLResource,
 
 use super::{main::Context, utils::tier_up_capacity};
 use crate::{
-    MetalError, tensor::{Tensor, TensorElement}
+    MetalError, caching::{KvCacheEntry, KvWritePlan}, tensor::{Tensor, TensorElement}
 };
 
 impl<T: TensorElement> Context<T> {
     #[inline]
     pub(crate) fn clear_kv_caches(&mut self) {
-        self.kv_caches.clear();
-        self.kv_cache_total_bytes = 0;
+        self.kv_cache_state_mut().clear_entries();
         self.sdpa_workspaces.clear();
     }
 
@@ -27,8 +26,13 @@ impl<T: TensorElement> Context<T> {
         let repeated_dims = vec![repeated_batch_heads, seq_len, head_dim];
 
         // Allocate K and V tensors directly from the dedicated KV cache pool
-        let k_allocation = self.kv_cache_pool.alloc_tensor::<T>(repeated_dims.clone())?;
-        let v_allocation = self.kv_cache_pool.alloc_tensor::<T>(repeated_dims)?;
+        let (k_allocation, v_allocation) = {
+            let state = self.kv_cache_state_mut();
+            let pool = state.pool_mut();
+            let k_allocation = pool.alloc_tensor::<T>(repeated_dims.clone())?;
+            let v_allocation = pool.alloc_tensor::<T>(repeated_dims)?;
+            (k_allocation, v_allocation)
+        };
 
         let dtype = k_allocation.dtype();
         let element_size = k_allocation.element_size();
@@ -52,7 +56,7 @@ impl<T: TensorElement> Context<T> {
         self.mark_tensor_pending(&v);
         self.finalize_active_command_buffer_if_latency();
 
-        let entry = super::main::KvCacheEntry {
+        let entry = KvCacheEntry {
             k,
             v,
             dtype,
@@ -60,15 +64,7 @@ impl<T: TensorElement> Context<T> {
             zeroing_complete: true,
             capacity: seq_len,
         };
-        let entry_bytes = entry.total_bytes();
-        if let Some(prev) = self.kv_caches.insert(layer_idx, entry) {
-            self.kv_cache_total_bytes = self
-                .kv_cache_total_bytes
-                .saturating_sub(prev.total_bytes())
-                .saturating_add(entry_bytes);
-        } else {
-            self.kv_cache_total_bytes = self.kv_cache_total_bytes.saturating_add(entry_bytes);
-        }
+        self.kv_cache_state_mut().insert(layer_idx, entry);
         Ok(())
     }
 
@@ -95,7 +91,7 @@ impl<T: TensorElement> Context<T> {
         group_size: usize,
         k_step: &Tensor<T>,
         v_step: &Tensor<T>,
-    ) -> Result<super::main::KvWritePlan<T>, MetalError> {
+    ) -> Result<KvWritePlan<T>, MetalError> {
         let k_src = k_step.clone();
         let v_src = v_step.clone();
 
@@ -130,8 +126,8 @@ impl<T: TensorElement> Context<T> {
         }
 
         let entry = self
-            .kv_caches
-            .get(&layer_idx)
+            .kv_cache_state()
+            .get(layer_idx)
             .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not allocated", layer_idx)))?;
         let k_cache = entry.k.clone();
         let v_cache = entry.v.clone();
@@ -239,7 +235,7 @@ impl<T: TensorElement> Context<T> {
             .checked_mul(head_dim_u32)
             .ok_or_else(|| MetalError::InvalidShape("thread count exceeds u32::MAX".into()))?;
 
-        Ok(super::main::KvWritePlan {
+        Ok(KvWritePlan {
             k_src,
             v_src,
             k_cache,
@@ -265,8 +261,8 @@ impl<T: TensorElement> Context<T> {
         })
     }
 
-    fn dispatch_kv_write(&mut self, layer_idx: usize, plan: super::main::KvWritePlan<T>) -> Result<(), MetalError> {
-        let super::main::KvWritePlan {
+    fn dispatch_kv_write(&mut self, layer_idx: usize, plan: KvWritePlan<T>) -> Result<(), MetalError> {
+        let KvWritePlan {
             k_src,
             v_src,
             k_cache,
@@ -429,8 +425,11 @@ impl<T: TensorElement> Context<T> {
                     executable.encodeToCommandBuffer_inputsArray_resultsArray_executionDescriptor(&mps_cb, &inputs, Some(&outputs), None);
                 }
 
-                if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
-                    entry.zeroing_complete = false;
+                {
+                    let state = self.kv_cache_state_mut();
+                    if let Some(entry) = state.get_mut(layer_idx) {
+                        entry.zeroing_complete = false;
+                    }
                 }
                 self.mark_tensor_pending(&k_cache);
                 self.mark_tensor_pending(&v_cache);
@@ -481,8 +480,11 @@ impl<T: TensorElement> Context<T> {
             Err(err) => return Err(err),
         }
 
-        if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
-            entry.zeroing_complete = false;
+        {
+            let state = self.kv_cache_state_mut();
+            if let Some(entry) = state.get_mut(layer_idx) {
+                entry.zeroing_complete = false;
+            }
         }
 
         self.mark_tensor_pending(&k_cache);
@@ -579,8 +581,11 @@ impl<T: TensorElement> Context<T> {
         self.mark_tensor_pending(v_cache);
         self.finalize_active_command_buffer_if_latency();
 
-        if let Some(entry) = self.kv_caches.get_mut(&layer_idx) {
-            entry.zeroing_complete = false;
+        {
+            let state = self.kv_cache_state_mut();
+            if let Some(entry) = state.get_mut(layer_idx) {
+                entry.zeroing_complete = false;
+            }
         }
 
         Ok(())

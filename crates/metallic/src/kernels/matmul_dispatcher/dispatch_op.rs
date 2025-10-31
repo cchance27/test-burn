@@ -2,11 +2,11 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
 
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, kernels::{
+    Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, kernels::{
         DefaultKernelInvocable, matmul_dispatcher::{
             dispatcher::select_policy, execute::{MatmulDispatchArgs, execute}, types::{MatShape, MatmulCaps}
         }
-    }, resource_cache::ResourceCache
+    }
 };
 
 pub struct MatmulDispatchOp;

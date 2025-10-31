@@ -12,7 +12,7 @@ use objc2_metal::{
 };
 use tracing::trace;
 
-use super::{Tensor, error::MetalError, resource_cache::ResourceCache};
+use super::{Tensor, caching::ResourceCache, error::MetalError};
 use crate::{
     TensorElement, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}
 };
