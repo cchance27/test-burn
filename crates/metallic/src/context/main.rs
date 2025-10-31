@@ -4,6 +4,7 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
+use super::command_buffer_pipeline::{CommandBufferPipeline, PipelineCompletion};
 use crate::{
     Tensor, TensorElement, caching::{CacheRegistry, CacheStats, KvCacheEntry, KvCacheState, ResourceCache, TensorPreparationCache}, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable, MultiTensorOutput}, operation::CommandBuffer, pool::MemoryPool, profiling_state, tensor::Dtype
 };
@@ -59,6 +60,7 @@ pub struct Context<T: TensorElement> {
     pub(crate) cache_registry: CacheRegistry,
     /// Lazily created command buffer used to batch kernel dispatches until synchronization.
     pub(crate) active_cmd_buffer: Option<CommandBuffer>,
+    pub(crate) command_buffer_pipeline: CommandBufferPipeline,
     /// Resource cache associated with the active command buffer.
     pub active_resource_cache: Option<ResourceCache>,
     /// Workspace reused across sampling invocations to avoid per-token allocations.
@@ -96,6 +98,8 @@ impl<T: TensorElement> Context<T> {
             let _ = cache_registry.slot_mut(|| tensor_cache);
         }
 
+        let pipeline = CommandBufferPipeline::new(command_queue.clone());
+
         Ok(Context::<T> {
             device,
             command_queue,
@@ -108,6 +112,7 @@ impl<T: TensorElement> Context<T> {
             rng_seed_counter: 0,
             cache_registry,
             active_cmd_buffer: None,
+            command_buffer_pipeline: pipeline,
             active_resource_cache: None,
             sampler_buffers: SamplerBuffers::default(),
             forced_matmul_backend: forced_backend,
@@ -236,30 +241,34 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     fn ensure_active_cmd_buffer_internal(&mut self, ensure_cache: bool) -> Result<(), MetalError> {
-        // Check and refresh committed command buffer if needed
-        if let Some(active) = self.active_cmd_buffer.as_ref()
-            && active.is_committed()
+        if let Some(committed) = self.active_cmd_buffer.as_ref()
+            && committed.is_committed()
         {
-            if !active.is_completed() {
-                active.wait();
-            }
-            // Buffer is committed, clear it to create a fresh one
-            self.active_cmd_buffer = None;
+            let committed = self.active_cmd_buffer.take().expect("active command buffer must exist");
+            let wait_start = std::time::Instant::now();
+            committed.wait();
+            let waited = wait_start.elapsed();
+            let completion = PipelineCompletion {
+                command_buffer: committed,
+                label: None,
+                wait_duration: waited,
+            };
+            self.process_pipeline_completions(vec![completion]);
         }
 
-        // Check if we need to create a new buffer
-        let new_buffer_created = if self.active_cmd_buffer.is_none() {
-            let cmd_buf = crate::operation::CommandBuffer::new(&self.command_queue)?;
+        let mut new_buffer_created = false;
+
+        if self.active_cmd_buffer.is_none() {
+            let (mut cmd_buf, completed) = self.command_buffer_pipeline.acquire()?;
             if crate::profiling_state::get_profiling_state()
                 && let Some(profiler) = metallic_instrumentation::gpu_profiler::GpuProfiler::attach(&cmd_buf, true)
             {
                 cmd_buf.retain_profiler(profiler);
             }
+            self.process_pipeline_completions(completed);
             self.active_cmd_buffer = Some(cmd_buf);
-            true
-        } else {
-            false
-        };
+            new_buffer_created = true;
+        }
 
         if ensure_cache && self.active_resource_cache.is_none() {
             self.active_resource_cache = Some(crate::caching::ResourceCache::with_device(self.device.clone()));
