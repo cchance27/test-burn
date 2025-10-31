@@ -19,4 +19,6 @@ venv
 *.png
 tools/metal_probes/*.air
 tools/metal_probes/.build
+*.metallib
+*.air
 .zed
