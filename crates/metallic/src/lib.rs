@@ -22,8 +22,13 @@ pub mod tokenizer;
 
 pub mod mps_graph;
 
+pub mod macros;
+
 pub mod kernels;
 
 mod tests;
 
 pub use caching::{CacheMetricsSnapshot, CacheStats, ResourceCache, TensorPreparationCache, TensorPreparationMetrics};
+
+#[cfg(all(feature = "src_kernels", feature = "built_kernels"))]
+compile_error!("features `src_kernels` and `built_kernels` are mutually exclusive — pick only one.");

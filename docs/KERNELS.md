@@ -65,10 +65,10 @@ Edit `src/metallic/kernels/mod.rs` to make the kernel management system aware of
     }
 
     impl KernelLibrary {
-        fn source(&self) -> &'static str {
+        pub fn kernel(&self) -> KernelSource {
             match self {
-                KernelLibrary::ElemwiseAdd => include_str!("elemwise_add/kernel.metal"),
-                KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"), // <-- Add this
+                KernelLibrary::ElemwiseAdd => kernel_lib!("elemwise_add"),
+                KernelLibrary::ElemwiseMul => kernel_lib!("elemwise_mul"), // <-- Add this
             }
         }
     }
@@ -320,3 +320,69 @@ and telemetry consistent:
 Following this pattern keeps DX uniform: every kernel exposes a single entry point, reports backend
 selection through `KernelBackendSelected` events, and shares graph executables through the reusable
 cache layers introduced in Milestone C.
+
+## Metal Kernel Compilation System (Source vs Precompiled)
+
+The project now supports both source-based and precompiled Metal kernel compilation via a flexible macro-based system that can be configured at build time.
+
+### Two Kernel Source Types
+
+The system supports two different ways of loading Metal kernels:
+
+1. **Source-based Kernels** (`src_kernels` feature):
+   - Kernels are loaded as text source code at runtime using `include_str!`
+   - Compiled each time the application starts
+   - Slower startup time but easier debugging
+   - Default in debug builds
+
+2. **Precompiled Binary Kernels** (`built_kernels` feature):
+   - Kernels are precompiled to `.metallib` files during build
+   - Loaded at runtime as binary using `include_bytes!`
+   - Faster startup time with pre-validated compilation
+   - Default in release builds
+
+### KernelSource Enum
+
+The system uses a `KernelSource` enum to represent either type:
+
+```rust
+pub enum KernelSource {
+    Text(&'static str),     // For source-based compilation
+    Binary(&'static [u8]),  // For precompiled binary kernels
+}
+```
+
+### Build Configuration
+
+The build process is controlled by feature flags and build mode:
+
+- `--features src_kernels`: Forces source-based compilation
+- `--features built_kernels`: Forces precompiled binary compilation
+- In debug builds: defaults to source-based compilation
+- In release builds: defaults to precompiled binary compilation
+
+The `build.rs` script automatically compiles `.metal` files to `.metallib` files during the build process when precompiled binaries are enabled.
+
+### kernel_lib! Macro
+
+A `kernel_lib!` macro abstracts the selection between source and binary:
+
+```rust
+#[cfg(feature = "built_kernels")] 
+#[macro_export]
+macro_rules! kernel_lib {
+    ($name:expr) => {
+        $crate::kernels::KernelSource::Binary(include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".metallib")))
+    };
+}
+
+#[cfg(all(not(feature = "built_kernels"), any(debug_assertions, feature = "src_kernels")))]
+#[macro_export]
+macro_rules! kernel_lib {
+    ($name:expr) => {
+        $crate::kernels::KernelSource::Text(include_str!(concat!($name, "/kernel.metal")))
+    };
+}
+```
+
+This macro automatically selects the appropriate kernel type based on the build configuration.

@@ -123,7 +123,6 @@ impl KernelManager {
     pub fn new() -> Self {
         Self::default()
     }
-
     pub fn get_pipeline(
         &mut self,
         func: KernelFunction,
@@ -132,35 +131,52 @@ impl KernelManager {
     ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
         let key = KernelPipelineKey { function: func, dtype };
 
+        // 1️⃣ Return cached pipeline if already created
         if let Some(pipeline) = self.pipelines.get(&key) {
             return Ok(pipeline.clone());
         }
 
+        // 2️⃣ Load or cache the MTL library (source or precompiled)
         let lib_id = func.library();
         let library = if let Some(lib) = self.libraries.get(&lib_id) {
             lib.clone()
         } else {
-            let source = lib_id.source();
-            let source_ns = NSString::from_str(source);
-            let options = MTLCompileOptions::new();
-            options.setLanguageVersion(MTLLanguageVersion::Version4_0);
+            let kernel = lib_id.kernel();
+            let lib = match kernel {
+                KernelSource::Text(src) => {
+                    let source_ns = NSString::from_str(src);
+                    let options = MTLCompileOptions::new();
+                    options.setLanguageVersion(MTLLanguageVersion::Version4_0);
+                    options.setEnableLogging(true);
+                    device
+                        .newLibraryWithSource_options_error(&source_ns, Some(&options))
+                        .map_err(|err| MetalError::LibraryCompilationFailed(err.to_string()))?
+                }
+                KernelSource::Binary(bytes) => {
+                    let data = dispatch2::DispatchData::from_bytes(bytes);
+                    device
+                        .newLibraryWithData_error(&data)
+                        .map_err(|err| MetalError::LibraryCompilationFailed(err.to_string()))?
+                }
+            };
 
-            #[cfg(debug_assertions)]
-            options.setEnableLogging(true);
-
-            let lib = device
-                .newLibraryWithSource_options_error(&source_ns, Some(&options))
-                .map_err(|err| MetalError::LibraryCompilationFailed(err.to_string()))?;
+            // Cache and return
             self.libraries.insert(lib_id, lib.clone());
             lib
         };
 
+        // 3️⃣ Retrieve the Metal function from the library
         let fn_name = NSString::from_str(func.name_for_dtype(dtype)?);
         let metal_fn = library
             .newFunctionWithName(&fn_name)
             .ok_or_else(|| MetalError::FunctionCreationFailed(fn_name.to_string()))?;
-        let pipeline = device.newComputePipelineStateWithFunction_error(&metal_fn).unwrap();
 
+        // 4️⃣ Create the compute pipeline
+        let pipeline = device
+            .newComputePipelineStateWithFunction_error(&metal_fn)
+            .map_err(|_| MetalError::PipelineCreationFailed)?;
+
+        // 5️⃣ Cache and return
         self.pipelines.insert(key, pipeline.clone());
         Ok(pipeline)
     }

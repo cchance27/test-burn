@@ -3,7 +3,7 @@ use objc2_foundation::NSString;
 use objc2_metal::{MTLComputePipelineState, MTLDevice, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
 
-use crate::{Context, Dtype, MetalError, Operation, Tensor, caching::ResourceCache};
+use crate::{Context, Dtype, MetalError, Operation, Tensor, caching::ResourceCache, kernel_lib};
 
 // Rexport KernelManager and Invocable
 mod kernel_manager;
@@ -55,6 +55,14 @@ pub use softmax_dispatcher::SoftmaxDispatchOp;
 pub mod sample_topk_topp;
 pub mod tensors;
 
+/// Used by our Macro to load kernel source or binary
+/// Represents the source of a Metal kernel, either as text source code or as a precompiled
+#[derive(Copy, Clone, Debug)]
+pub enum KernelSource {
+    Text(&'static str),
+    Binary(&'static [u8]),
+}
+
 /// Uniquely identifies a compiled Metal library.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum KernelLibrary {
@@ -85,32 +93,32 @@ pub enum KernelLibrary {
 }
 
 impl KernelLibrary {
-    fn source(&self) -> &'static str {
+    pub fn kernel(&self) -> KernelSource {
         match self {
-            KernelLibrary::Cast => include_str!("cast/kernel.metal"),
-            KernelLibrary::ElemwiseAdd => include_str!("elemwise_add/kernel.metal"),
-            KernelLibrary::ElemwiseAbs => include_str!("elemwise_abs/kernel.metal"),
-            KernelLibrary::ElemwiseDiv => include_str!("elemwise_div/kernel.metal"),
-            KernelLibrary::ElemwiseMul => include_str!("elemwise_mul/kernel.metal"),
-            KernelLibrary::ElemwiseSub => include_str!("elemwise_sub/kernel.metal"),
-            KernelLibrary::Gelu => include_str!("gelu/kernel.metal"),
-            KernelLibrary::KvCacheWrite => include_str!("kv_cache_write/kernel.metal"),
-            KernelLibrary::KvRearrange => include_str!("kv_rearrange/kernel.metal"),
-            KernelLibrary::LayerNorm => include_str!("layernorm/kernel.metal"),
-            KernelLibrary::Permute => include_str!("permute/kernel.metal"),
-            KernelLibrary::RepeatKvHeads => include_str!("repeat_kv_heads/kernel.metal"),
-            KernelLibrary::Rope => include_str!("rope/kernel.metal"),
-            KernelLibrary::RMSNorm => include_str!("rmsnorm/kernel.metal"),
-            KernelLibrary::Silu => include_str!("silu/kernel.metal"),
-            KernelLibrary::SoftmaxKernel => include_str!("softmax_kernel/kernel.metal"),
-            KernelLibrary::Swiglu => include_str!("swiglu/kernel.metal"),
-            KernelLibrary::Tensors => include_str!("tensors/kernel.metal"),
-            KernelLibrary::MatmulGemv => include_str!("matmul_gemv/kernel.metal"),
-            KernelLibrary::MatmulGemvSmalln => include_str!("matmul_gemv_smalln/kernel.metal"),
-            KernelLibrary::MatmulGemmTiled => include_str!("matmul_gemm_tiled/kernel.metal"),
-            KernelLibrary::SoftmaxBlock => include_str!("softmax_block/kernel.metal"),
-            KernelLibrary::SoftmaxVec => include_str!("softmax_vec/kernel.metal"),
-            KernelLibrary::SampleTopKTopP => include_str!("sample_topk_topp/kernel.metal"),
+            KernelLibrary::Cast => kernel_lib!("cast"),
+            KernelLibrary::ElemwiseAdd => kernel_lib!("elemwise_add"),
+            KernelLibrary::ElemwiseAbs => kernel_lib!("elemwise_abs"),
+            KernelLibrary::ElemwiseDiv => kernel_lib!("elemwise_div"),
+            KernelLibrary::ElemwiseMul => kernel_lib!("elemwise_mul"),
+            KernelLibrary::ElemwiseSub => kernel_lib!("elemwise_sub"),
+            KernelLibrary::Gelu => kernel_lib!("gelu"),
+            KernelLibrary::KvCacheWrite => kernel_lib!("kv_cache_write"),
+            KernelLibrary::KvRearrange => kernel_lib!("kv_rearrange"),
+            KernelLibrary::LayerNorm => kernel_lib!("layernorm"),
+            KernelLibrary::Permute => kernel_lib!("permute"),
+            KernelLibrary::RepeatKvHeads => kernel_lib!("repeat_kv_heads"),
+            KernelLibrary::Rope => kernel_lib!("rope"),
+            KernelLibrary::RMSNorm => kernel_lib!("rmsnorm"),
+            KernelLibrary::Silu => kernel_lib!("silu"),
+            KernelLibrary::SoftmaxKernel => kernel_lib!("softmax_kernel"),
+            KernelLibrary::Swiglu => kernel_lib!("swiglu"),
+            KernelLibrary::Tensors => kernel_lib!("tensors"),
+            KernelLibrary::MatmulGemv => kernel_lib!("matmul_gemv"),
+            KernelLibrary::MatmulGemvSmalln => kernel_lib!("matmul_gemv_smalln"),
+            KernelLibrary::MatmulGemmTiled => kernel_lib!("matmul_gemm_tiled"),
+            KernelLibrary::SoftmaxBlock => kernel_lib!("softmax_block"),
+            KernelLibrary::SoftmaxVec => kernel_lib!("softmax_vec"),
+            KernelLibrary::SampleTopKTopP => kernel_lib!("sample_topk_topp"),
         }
     }
 }

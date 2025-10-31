@@ -1,3 +1,8 @@
+[package]
+name = "metallic_cli"
+version = "0.1.0"
+edition = "2024"
+
 [workspace]
 members = [
     "crates/metallic_env",
@@ -6,11 +11,13 @@ members = [
     "crates/metallic_cli_helpers",
 ]
 
-[package]
-name = "metallic_cli"
-version = "0.1.0"
-edition = "2024"
+[workspace.features]
+src_kernels = ["metallic/src_kernels"]
+built_kernels = ["metallic/built_kernels"]
 
+[features]
+src_kernels = ["metallic/src_kernels"]
+built_kernels = ["metallic/built_kernels"]
 
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
@@ -55,7 +62,7 @@ libc = { version = "0.2.177", optional = false }
 mach2 = "0.5"
 metallic_env = { path = "crates/metallic_env" }
 metallic_instrumentation = { path = "crates/metallic_instrumentation" }
-metallic = { path = "crates/metallic" }
+metallic = { path = "crates/metallic", default-features = false }
 metallic_cli_helpers = { path = "crates/metallic_cli_helpers" }
 clap = { version = "4.5.49", features = ["derive"] }
 
