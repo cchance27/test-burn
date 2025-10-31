@@ -1,12 +1,10 @@
-use super::*;
-use crate::context::GpuProfilerLabel;
-use crate::{Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, resource_cache::ResourceCache};
-use metallic_instrumentation::GpuProfiler;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState, MTLSize};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
+use super::*;
+use crate::{
+    CommandBuffer, Context, MetalError, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
+};
 
 /// Public, user-facing, zero-sized struct for the RoPE operation.
 pub struct RoPEOp;
@@ -24,7 +22,7 @@ struct RoPE<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for RoPEOp {
+impl DefaultKernelInvocable for RoPEOp {
     /// Input arguments for the call: (input, cos, sin, dim, seq_len, position_offset)
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, u32, u32, u32);
 
@@ -39,7 +37,7 @@ impl KernelInvocable for RoPEOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, cos, sin, dim, seq_len, position_offset) = args;
 
@@ -104,19 +102,9 @@ impl KernelInvocable for RoPEOp {
 }
 
 impl<T: TensorElement> Operation for RoPE<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
-
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         let total_elements = self.input.len() as u32;
+
         let threads_per_tg = MTLSize {
             width: 256,
             height: 1,
@@ -128,19 +116,25 @@ impl<T: TensorElement> Operation for RoPE<T> {
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.input.buf, self.input.offset);
-        set_buffer(&encoder, 1, &self.output.buf, self.output.offset);
-        set_buffer(&encoder, 2, &self.cos.buf, self.cos.offset);
-        set_buffer(&encoder, 3, &self.sin.buf, self.sin.offset);
-        set_bytes(&encoder, 4, &self.dim);
-        set_bytes(&encoder, 5, &self.seq_len);
-        set_bytes(&encoder, 6, &self.position_offset);
-        set_bytes(&encoder, 7, &total_elements);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
 
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.input.buf, self.input.offset);
+        set_buffer(encoder, 1, &self.output.buf, self.output.offset);
+        set_buffer(encoder, 2, &self.cos.buf, self.cos.offset);
+        set_buffer(encoder, 3, &self.sin.buf, self.sin.offset);
+        set_bytes(encoder, 4, &self.dim);
+        set_bytes(encoder, 5, &self.seq_len);
+        set_bytes(encoder, 6, &self.position_offset);
+        set_bytes(encoder, 7, &(self.input.len() as u32));
     }
 }
 

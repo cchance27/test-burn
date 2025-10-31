@@ -1,6 +1,7 @@
 //! Q8 quantization support for GGUF format
-use crate::gguf::{GGUFDataType, GGUFError, tensor_info::GGUTensorInfo};
 use half::f16;
+
+use crate::gguf::{GGUFDataType, GGUFError, tensor_info::GGUTensorInfo};
 
 /// Dequantize Q8_0/Q8_1 tensor data to F32
 pub fn dequantize_q8_to_f32(data: &[u8], data_type: GGUFDataType) -> Result<Vec<f32>, Box<dyn std::error::Error>> {

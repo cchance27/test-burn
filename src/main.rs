@@ -1,22 +1,14 @@
+use std::{
+    any::Any, io::{Write, stdout}, panic::{self, AssertUnwindSafe}, sync::mpsc, thread, time::Duration
+};
+
 use anyhow::Result;
 use metallic::{
-    Context, F16Element, TensorElement, Tokenizer,
-    generation::generate_streaming,
-    gguf::{GGUFFile, model_loader::GGUFModelLoader},
-    profiling_state,
+    Context, F16Element, TensorElement, Tokenizer, generation::generate_streaming, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
 use metallic_cli_helpers::prelude::*;
-use metallic_instrumentation::prelude::*;
-use metallic_instrumentation::{MetricEvent, record_metric_async};
+use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
 use rustc_hash::FxHashMap;
-use std::{
-    any::Any,
-    io::{Write, stdout},
-    panic::{self, AssertUnwindSafe},
-    sync::mpsc,
-    thread,
-    time::Duration,
-};
 
 mod cli;
 mod tui;
@@ -24,12 +16,9 @@ mod tui;
 use clap::Parser;
 use crossterm::event::{self, Event as CrosstermEvent, MouseButton, MouseEvent};
 use ratatui::{
-    Terminal,
-    backend::{Backend, CrosstermBackend},
-    layout::Position,
+    Terminal, backend::{Backend, CrosstermBackend}, layout::Position
 };
-use tui::app::FocusArea;
-use tui::{App, AppResult, ui};
+use tui::{App, AppResult, app::FocusArea, ui};
 
 fn main() -> AppResult<()> {
     // Ensure profiling state is initialized from the environment before anything else.
@@ -40,11 +29,25 @@ fn main() -> AppResult<()> {
     // Parse command line arguments using CLAP
     let cli_config = cli::CliConfig::parse();
 
+    // Load instrumentation config from the environment so exporter selection honours CLI env vars.
+    let app_config = AppConfig::get_or_init_from_env().map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
+
     // Initialize instrumentation system with async recorder for zero-overhead metrics
     let (sender, receiver) = mpsc::channel();
     let channel_exporter = Box::new(ChannelExporter::new(sender));
 
-    let exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter];
+    let mut exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter];
+
+    if let Some(path) = app_config.metrics_jsonl_path.clone() {
+        match JsonlExporter::new(&path) {
+            Ok(jsonl_exporter) => exporters.push(Box::new(jsonl_exporter)),
+            Err(error) => eprintln!("Failed to initialize JsonlExporter at {:?}: {}", path, error),
+        }
+    }
+
+    if app_config.enable_console_metrics {
+        exporters.push(Box::new(ConsoleExporter::new()));
+    }
 
     let async_recorder = AsyncMetricRecorder::new(exporters);
     let metric_queue = async_recorder.queue.clone();
@@ -78,6 +81,28 @@ fn main() -> AppResult<()> {
 
                 worker_tx.send(AppEvent::StatusUpdate("Initializing context...".to_string()))?;
                 let mut ctx = Context::<F16Element>::new()?;
+
+                // Apply global backend override first (affects all kernels that consult the registry)
+                if let Some(choice) = cli_config.backend {
+                    let override_policy = match choice {
+                        cli::config::GlobalBackendChoice::Auto => KernelBackendOverride::Auto,
+                        cli::config::GlobalBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
+                        cli::config::GlobalBackendChoice::Graph => KernelBackendOverride::Force(KernelBackendKind::Graph),
+                    };
+                    ctx.set_global_backend_override(override_policy);
+                }
+
+                // Then apply per-op SDPA override if provided (takes precedence for sdpa)
+                if let Some(choice) = cli_config.sdpa_backend {
+                    let override_policy = match choice {
+                        cli::config::SdpaBackendChoice::Auto => KernelBackendOverride::Auto,
+                        cli::config::SdpaBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
+                        cli::config::SdpaBackendChoice::Graph => KernelBackendOverride::Force(KernelBackendKind::Graph),
+                    };
+                    ctx.apply_backend_overrides(KernelBackendOverrides {
+                        sdpa: Some(override_policy),
+                    });
+                }
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
@@ -280,6 +305,10 @@ fn run_tui_mode(
                                     app.reset_metrics_scroll();
                                 }
                             }
+                            crossterm::event::KeyCode::Char('s') => {
+                                app.metrics_view = tui::app::MetricsView::Stats;
+                                app.reset_metrics_scroll();
+                            }
                             crossterm::event::KeyCode::Char('c') => {
                                 // Check if it's Control+C for copying all content from focused widget
                                 if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
@@ -288,19 +317,23 @@ fn run_tui_mode(
                                         FocusArea::GeneratedText => app.generated_text.clone(),
                                         FocusArea::Metrics => {
                                             let metrics_help = match app.metrics_view {
-                                                tui::app::MetricsView::Memory => "[m] Memory [l] Latency [c] Collapse",
-                                                tui::app::MetricsView::Latency => "[m] Memory [l] Latency [c] Collapse",
+                                                tui::app::MetricsView::Memory => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                tui::app::MetricsView::Latency => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                tui::app::MetricsView::Stats => "[m] Memory [l] Latency [s] Stats [c] Collapse",
                                             };
                                             let metrics_content = match app.metrics_view {
-                                                tui::app::MetricsView::Memory => {
-                                                    ui::render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth())
-                                                },
-                                                tui::app::MetricsView::Latency => {
-                                                    ui::render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth())
-                                                },
+                                                tui::app::MetricsView::Memory => ui::render_memory_metrics(
+                                                    &app.memory_rows,
+                                                    app.memory_collapse_depth.get_current_depth(),
+                                                ),
+                                                tui::app::MetricsView::Latency => ui::render_hierarchical_latency_metrics(
+                                                    &app.latency_tree,
+                                                    app.latency_collapse_depth.get_current_depth(),
+                                                ),
+                                                tui::app::MetricsView::Stats => ui::render_stats_metrics_from_app(&app),
                                             };
                                             format!("{}\n\n{}", metrics_help, metrics_content)
-                                        },
+                                        }
                                         FocusArea::LogBox => app.log_messages.join("\n"),
                                     };
                                     copy_text_to_clipboard(&content_to_copy);
@@ -351,6 +384,13 @@ fn run_tui_mode(
             tracing::debug!("Converted to {} memory rows", memory_rows.len());
             if !memory_rows.is_empty() {
                 handle_app_event(&mut app, AppEvent::MemoryUpdate(memory_rows));
+            }
+
+            // Process stats events
+            let stats_rows = tui::metrics::metric_event_to_stats_rows(&enriched_event.event);
+            tracing::debug!("Converted to {} stats rows", stats_rows.len());
+            if !stats_rows.is_empty() {
+                handle_app_event(&mut app, AppEvent::StatsUpdate(stats_rows));
             }
         }
 
@@ -487,6 +527,22 @@ fn run_json_mode(
                     });
                     logs.push(log_entry);
                 }
+                AppEvent::StatsUpdate(stats_rows) => {
+                    let log_entry = serde_json::json!({
+                        "type": "stats_update",
+                        "rows": stats_rows
+                    });
+                    logs.push(log_entry);
+                }
+                AppEvent::GenerationComplete { total_generation_time: _ } => {
+                    // For JSON output mode, we just log that generation completed
+                    let log_entry = serde_json::json!({
+                        "type": "generation_complete",
+                        "message": "Generation completed successfully",
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    logs.push(log_entry);
+                }
                 AppEvent::LogMessage(message) => {
                     let log_entry = serde_json::json!({
                         "type": "log_message",
@@ -561,11 +617,29 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
                 app.add_latency_metric(row);
             }
         }
+        AppEvent::StatsUpdate(stats_rows) => {
+            // Determine the type of stats and update the appropriate field
+            if !stats_rows.is_empty() {
+                // Check if these are resource cache stats or tensor preparation stats
+                if stats_rows[0].label.contains("Cache") && !stats_rows[0].label.contains("Tensor Preparation") {
+                    // This is a resource cache stat - we need to find the actual cache type
+                    // The first entry should be "{CacheType} Cache" at level 0 now (after our mapping change)
+                    let cache_type = stats_rows[0].label.trim_start().to_string();
+                    app.resource_cache_stats.insert(cache_type, stats_rows);
+                } else {
+                    // This is tensor preparation stats or other stats
+                    app.tensor_preparation_stats = stats_rows;
+                }
+            }
+        }
         AppEvent::Alert(alert) => {
             app.push_alert(alert);
         }
         AppEvent::LogMessage(message) => {
             app.add_log_message(&message);
+        }
+        AppEvent::GenerationComplete { total_generation_time } => {
+            app.generation_time = total_generation_time;
         }
     }
 }

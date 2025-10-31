@@ -220,7 +220,14 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
 
         // Apply softmax using the new kernel system (in-place operation)
         let rows_total = softmax_rows_total(&attn_tensor, seq_k);
-        let result = context.call::<SoftmaxOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0))?;
+        let result = context.call::<crate::kernels::softmax_kernel::SoftmaxKernelOp>((
+            &attn_tensor,
+            rows_total,
+            seq_q as u32,
+            seq_k as u32,
+            0,
+            0,
+        ))?;
         context.synchronize();
 
         results.push(result.as_slice().to_vec());

@@ -1,6 +1,9 @@
+use objc2_metal::MTLComputeCommandEncoder;
+
 use super::*;
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state};
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
+};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct OnesOp;
@@ -10,10 +13,11 @@ struct Ones<T: TensorElement> {
     dims: Vec<usize>,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for OnesOp {
+impl DefaultKernelInvocable for OnesOp {
     // Input arguments for the call.
     type Args<'a, T: TensorElement> = Vec<usize>;
     // The output type.
@@ -29,16 +33,21 @@ impl KernelInvocable for OnesOp {
         ctx: &mut Context<T>,
         dims: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Create the output tensor.
         let out = Tensor::new(dims.clone(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("ones_op"));
 
         // Create the internal operation struct.
         let op = Ones {
             dims,
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         // Return the boxed operation and the output tensor.
@@ -49,24 +58,8 @@ impl KernelInvocable for OnesOp {
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl<T: TensorElement> Operation for Ones<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        // Calculate total elements
-        let total_elements: usize = self.dims.iter().product();
-
-        // Create and set the constant buffer for total_elements
-        let total_elements_u32 = total_elements as u32;
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.out.buf, self.out.offset);
-        set_bytes(&encoder, 1, &total_elements_u32);
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let total_elements: u32 = self.dims.iter().map(|&x| x as u32).product();
 
         // Dispatch threads - each thread handles 4 elements
         let threadgroup_size = MTLSize {
@@ -76,23 +69,30 @@ impl<T: TensorElement> Operation for Ones<T> {
         };
 
         let threadgroups = MTLSize {
-            width: total_elements.div_ceil(4).div_ceil(threadgroup_size.width),
+            width: total_elements.div_ceil(4).div_ceil(threadgroup_size.width as u32) as usize,
             height: 1,
             depth: 1,
         };
 
-        dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
-
-        encoder.endEncoding();
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(threadgroups, threadgroup_size);
 
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.out.buf, self.out.offset);
+        set_bytes(encoder, 1, &(self.dims.iter().map(|&x| x as u32).product::<u32>()));
     }
 }
 
 #[cfg(test)]
 mod ones_test {
-    use crate::kernels::tensors::OnesOp;
-    use crate::{Context, F32Element, MetalError};
+    use crate::{Context, F32Element, MetalError, kernels::tensors::OnesOp};
 
     #[test]
     fn test_ones() -> Result<(), MetalError> {

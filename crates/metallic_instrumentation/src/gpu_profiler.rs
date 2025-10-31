@@ -1,7 +1,6 @@
 //! GPU command-buffer profiler emitting per-operation metrics.
 
-use crate::event::MetricEvent;
-use crate::record_metric_async;
+use crate::{event::MetricEvent, record_metric_async};
 pub type CommandBufferCompletionHandler = Box<dyn FnOnce(&ProtocolObject<dyn MTLCommandBuffer>) + Send + 'static>;
 
 pub trait ProfiledCommandBuffer {
@@ -9,16 +8,14 @@ pub trait ProfiledCommandBuffer {
     fn on_completed(&self, handler: CommandBufferCompletionHandler);
 }
 
-use objc2::msg_send;
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
+use std::{
+    sync::{Arc, Mutex, OnceLock, Weak}, time::{Duration, Instant}
+};
+
+use objc2::{msg_send, rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLComputeCommandEncoder};
 use rustc_hash::FxHashMap;
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant};
-
-use tracing::{self, dispatcher};
-use tracing::{Dispatch, trace};
+use tracing::{self, Dispatch, dispatcher, trace};
 
 #[derive(Clone)]
 pub struct GpuProfiler {

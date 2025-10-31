@@ -1,7 +1,5 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use metallic::kernels::softmax::apply_softmax;
-use metallic::resource_cache::ResourceCache;
-use metallic::{Context, F32Element, Tensor};
+use metallic::{Context, F32Element, Tensor, caching::ResourceCache, softmax_utils::apply_softmax};
 use metallic_env::SOFTMAX_BACKEND_VAR;
 
 const ITERATIONS: usize = 5;

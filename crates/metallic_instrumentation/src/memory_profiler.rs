@@ -3,8 +3,10 @@
 //! The main benefit of this profiler is that it caches the sysinfo::System instance and process ID,
 //! avoiding expensive recreation of these objects on each call, which was happening in the generation loop.
 
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::{
+    sync::{Arc, Mutex}, time::{Duration, Instant}
+};
+
 use sysinfo::{Pid, ProcessRefreshKind, System, get_current_pid};
 
 const MEMORY_CACHE_DURATION: Duration = Duration::from_millis(50); // Cache system memory value for 50ms

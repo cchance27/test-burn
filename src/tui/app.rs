@@ -1,8 +1,12 @@
-use crate::tui::components::{AlertedState, StatusBar, StatusBarState};
-use crate::tui::metrics::{HierarchicalMetric, RunningAverage};
+use std::time::Duration;
+
 use metallic_cli_helpers::prelude::*;
 use ratatui::layout::Position;
-use std::time::Duration;
+use rustc_hash::FxHashMap;
+
+use crate::tui::{
+    components::{AlertedState, StatusBar, StatusBarState}, metrics::{HierarchicalMetric, RunningAverage}
+};
 
 /// Result type used throughout the TUI application
 pub type AppResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -16,6 +20,7 @@ pub struct App {
     pub status: String,
     pub memory_rows: Vec<MemoryRow>,
     pub prompt_processing_time: Duration,
+    pub generation_time: Duration,
     pub latency_tree: Vec<HierarchicalMetric>,
     pub metrics_view: MetricsView,
     pub latency_collapse_depth: CollapseDepth,
@@ -43,6 +48,10 @@ pub struct App {
     pub text_selection_end: Option<Position>,
     pub is_selecting: bool,
 
+    // Stats metrics rows for the stats view
+    pub tensor_preparation_stats: Vec<metallic_cli_helpers::app_event::StatsRow>,
+    pub resource_cache_stats: rustc_hash::FxHashMap<String, Vec<metallic_cli_helpers::app_event::StatsRow>>,
+
     // Status bar
     pub status_bar: StatusBar,
 }
@@ -57,6 +66,7 @@ impl App {
             status: "Initializing...".to_string(),
             memory_rows: Vec::new(),
             prompt_processing_time: Duration::default(),
+            generation_time: Duration::default(),
             latency_tree: Vec::new(),
             metrics_view: MetricsView::Memory,
             latency_collapse_depth: CollapseDepth::new(),
@@ -80,6 +90,8 @@ impl App {
             text_selection_start: None,
             text_selection_end: None,
             is_selecting: false,
+            tensor_preparation_stats: Vec::new(),
+            resource_cache_stats: FxHashMap::default(),
             status_bar: StatusBar::new(StatusBarState::Normal),
         }
     }
@@ -92,6 +104,9 @@ impl App {
         match self.metrics_view {
             MetricsView::Latency => self.latency_collapse_depth.next(),
             MetricsView::Memory => self.memory_collapse_depth.next(),
+            MetricsView::Stats => {
+                // Stats view doesn't use collapse depths, so just reset scroll
+            }
         }
         self.reset_metrics_scroll();
     }
@@ -154,6 +169,7 @@ impl App {
         let metrics_content_lines = match self.metrics_view {
             MetricsView::Memory => self.calculate_memory_metrics_lines(),
             MetricsView::Latency => self.calculate_latency_metrics_lines(),
+            MetricsView::Stats => self.calculate_stats_metrics_lines(),
         } as u16;
 
         // Calculate visible lines in the metrics area (subtract 3: 2 for borders + 1 for title)
@@ -210,6 +226,15 @@ impl App {
             }
         }
         count
+    }
+
+    fn calculate_stats_metrics_lines(&self) -> usize {
+        // For now, we'll show a simple "Statistics" view
+        // In the future, this can show tensor preparation metrics and other statistics
+        let help_lines = 2; // Help text and blank line
+        let stats_lines = 5; // Placeholder for stats content
+
+        help_lines + stats_lines
     }
 
     fn adjust_log_scroll(&mut self, delta: i32) {
@@ -298,7 +323,7 @@ impl App {
     pub fn toggle_log_visibility(&mut self) {
         let was_visible = self.log_visible;
         self.log_visible = !self.log_visible;
-        
+
         // Set flag to scroll to bottom on next render when making the log visible
         if self.log_visible && !was_visible {
             self.request_scroll_to_log_end = true;
@@ -323,10 +348,10 @@ impl App {
         }
 
         // Auto-scroll to bottom if we were already at the bottom and log is visible
-        if self.log_visible && 
-           (self.focus != FocusArea::LogBox
-            || (self.log_area.height > 0
-                && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)))
+        if self.log_visible
+            && (self.focus != FocusArea::LogBox
+                || (self.log_area.height > 0
+                    && self.log_scroll as usize >= self.log_messages.len().saturating_sub(self.log_area.height as usize)))
         {
             self.scroll_to_log_end();
         }
@@ -340,7 +365,7 @@ impl App {
         } else {
             0
         };
-        
+
         self.log_scroll = max_scroll;
         // Clear the request flag if it was set
         self.request_scroll_to_log_end = false;
@@ -649,6 +674,7 @@ impl App {
 pub enum MetricsView {
     Memory,
     Latency,
+    Stats,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

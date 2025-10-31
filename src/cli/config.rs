@@ -17,6 +17,10 @@ pub struct CliConfig {
     #[command(flatten)]
     pub generation: GenerationConfig,
 
+    /// Global backend override for all kernels (defaults to environment-driven auto selection)
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    pub backend: Option<GlobalBackendChoice>,
+
     /// Enable verbose output
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
@@ -24,6 +28,10 @@ pub struct CliConfig {
     /// Output format (json, text, tui)
     #[arg(long, value_enum, default_value_t = OutputFormat::Tui)]
     pub output_format: OutputFormat,
+
+    /// Override the SDPA backend (defaults to environment-driven auto selection)
+    #[arg(long, value_enum, value_name = "BACKEND")]
+    pub sdpa_backend: Option<SdpaBackendChoice>,
 }
 
 /// Generation configuration options
@@ -57,6 +65,28 @@ pub enum OutputFormat {
     Json,
 }
 
+/// Global backend override that applies to all kernels when supported.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum GlobalBackendChoice {
+    /// Allow the dispatcher to choose the backend automatically.
+    Auto,
+    /// Force the legacy Metal implementation.
+    Legacy,
+    /// Force the graph-backed implementation.
+    Graph,
+}
+
+/// Available SDPA backend overrides exposed via the CLI.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum SdpaBackendChoice {
+    /// Allow the dispatcher to choose the backend automatically.
+    Auto,
+    /// Force the legacy Metal implementation.
+    Legacy,
+    /// Force the graph-backed implementation.
+    Graph,
+}
+
 impl CliConfig {
     /// Get the prompt text, using default if not provided
     pub fn get_prompt(&self) -> String {
@@ -87,8 +117,10 @@ mod tests {
             gguf_path: "test.gguf".to_string(),
             prompt: None,
             generation: GenerationConfig::default(),
+            backend: None,
             verbose: 0,
             output_format: OutputFormat::Tui,
+            sdpa_backend: None,
         };
 
         assert_eq!(config.get_prompt(), "Create a short javascript hello world app.");
@@ -100,8 +132,10 @@ mod tests {
             gguf_path: "test.gguf".to_string(),
             prompt: Some("Hello, world!".to_string()),
             generation: GenerationConfig::default(),
+            backend: None,
             verbose: 0,
             output_format: OutputFormat::Tui,
+            sdpa_backend: None,
         };
 
         assert_eq!(config.get_prompt(), "Hello, world!");

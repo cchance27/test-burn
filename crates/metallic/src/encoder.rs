@@ -1,6 +1,7 @@
+use std::ffi::c_void;
+
 use objc2::runtime::ProtocolObject;
 use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
-use std::ffi::c_void;
 
 /// Sets the compute pipeline state for a command encoder.
 #[inline]

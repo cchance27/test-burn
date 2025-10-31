@@ -1,7 +1,8 @@
-use crate::prelude::*;
+use std::{
+    sync::mpsc, time::{Duration, SystemTime, UNIX_EPOCH}
+};
 
-use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use crate::prelude::*;
 
 #[test]
 fn jsonl_exporter_writes_serialised_metrics() {

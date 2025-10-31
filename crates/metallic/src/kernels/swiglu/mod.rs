@@ -1,14 +1,12 @@
-use super::*;
-
-use crate::Context;
-use crate::Dtype;
-use crate::MetalError;
-use crate::Tensor;
-use crate::TensorElement;
-use crate::context::GpuProfilerLabel;
-use crate::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use metallic_instrumentation::GpuProfiler;
 use std::convert::TryFrom;
+
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputeCommandEncoder;
+
+use super::*;
+use crate::{
+    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
+};
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
 pub struct SwiGLUOp;
@@ -34,7 +32,7 @@ struct SwiGLUFusedActivation<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for SwiGLUFusedActivationOp {
+impl DefaultKernelInvocable for SwiGLUFusedActivationOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -122,26 +120,10 @@ impl KernelInvocable for SwiGLUFusedActivationOp {
 }
 
 impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
-
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         let vector_width = std::cmp::max(self.vector_width as usize, 1);
         let base_threads = 256usize;
         let threads_per_tg_width = std::cmp::max(base_threads / vector_width, 1);
-        let threads_per_tg = MTLSize {
-            width: threads_per_tg_width,
-            height: 1,
-            depth: 1,
-        };
         let total_threads = if self.vector_width > 1 {
             let vectorized = self.total_elements / self.vector_width;
             let remainder = self.total_elements % self.vector_width;
@@ -150,31 +132,41 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
             self.total_elements
         };
 
+        let threads_per_tg = MTLSize {
+            width: threads_per_tg_width,
+            height: 1,
+            depth: 1,
+        };
         let groups = MTLSize {
             width: (total_threads as usize).div_ceil(threads_per_tg.width),
             height: 1,
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.gate.buf, self.gate.offset);
-        set_buffer(&encoder, 1, &self.up_inout.buf, self.up_inout.offset);
-        set_buffer(&encoder, 2, &self.gate_bias.buf, self.gate_bias.offset);
-        set_buffer(&encoder, 3, &self.up_bias.buf, self.up_bias.offset);
-        set_bytes(&encoder, 4, &self.total_elements);
-        set_bytes(&encoder, 5, &self.bias_len);
-        set_bytes(&encoder, 6, &self.vector_width);
-        set_bytes(&encoder, 7, &self.gate_leading_stride);
-        set_bytes(&encoder, 8, &self.up_leading_stride);
-
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
 
         Ok(())
     }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.gate.buf, self.gate.offset);
+        set_buffer(encoder, 1, &self.up_inout.buf, self.up_inout.offset);
+        set_buffer(encoder, 2, &self.gate_bias.buf, self.gate_bias.offset);
+        set_buffer(encoder, 3, &self.up_bias.buf, self.up_bias.offset);
+        set_bytes(encoder, 4, &self.total_elements);
+        set_bytes(encoder, 5, &self.bias_len);
+        set_bytes(encoder, 6, &self.vector_width);
+        set_bytes(encoder, 7, &self.gate_leading_stride);
+        set_bytes(encoder, 8, &self.up_leading_stride);
+    }
 }
 
-impl KernelInvocable for SwiGLUOp {
+impl DefaultKernelInvocable for SwiGLUOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         &'a Tensor<T>,
@@ -252,6 +244,9 @@ fn execute_swiglu_logic<T: TensorElement>(
     }
 
     let (gate_temp, gate_leading_stride, up_temp, up_leading_stride) = if let Some(fused_weight) = fused_gate_up {
+        if std::env::var("METALLIC_DEBUG_SWIGLU").is_ok() {
+            println!("[SWIGLU] Using fused gate/up weight dims {:?}", fused_weight.dims());
+        }
         let fused_dims = fused_weight.dims();
         if fused_dims.len() != 2 {
             return Err(MetalError::InvalidShape(format!(
@@ -283,6 +278,9 @@ fn execute_swiglu_logic<T: TensorElement>(
         let up_stride = leading_stride_as_u32(&up_view)?;
         (gate_view, gate_stride, up_view, up_stride)
     } else {
+        if std::env::var("METALLIC_DEBUG_SWIGLU").is_ok() {
+            println!("[SWIGLU] Using separate gate/up weights");
+        }
         // gate_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_gate])?;
         let gate_dims = ffn_gate.dims();
@@ -436,14 +434,14 @@ pub fn swiglu_with_optional_cache<T: TensorElement>(
 
 // Implement `Operation` for the internal struct.
 impl<T: TensorElement> Operation for SwiGLU<T> {
-    fn encode(
-        &self,
-        _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        // Since all computation was done in the `new` method of KernelInvocable,
+    fn encode(&self, _command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        // Since all computation was done in the `new` method of DefaultKernelInvocable,
         // this method just returns Ok(())
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // No arguments to bind for this placeholder operation
     }
 }
 

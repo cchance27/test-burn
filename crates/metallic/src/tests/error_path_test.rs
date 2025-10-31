@@ -1,6 +1,5 @@
 use super::*;
-use crate::tensor::Dtype;
-use crate::{F32Element, TensorInit, TensorStorage};
+use crate::{F32Element, TensorInit, TensorStorage, tensor::Dtype};
 
 #[test]
 fn test_sdpa_invalid_shapes() {
@@ -95,8 +94,7 @@ fn test_sdpa_invalid_batch_dimensions() {
 
 #[test]
 fn test_matmul_invalid_shapes() {
-    use crate::cache_keys::MpsGemmKey;
-    use crate::resource_cache::ResourceCache;
+    use crate::{caching::ResourceCache, kernels::matmul_mps::cache::MpsGemmKey};
 
     let context = Context::<F32Element>::new().unwrap();
     let mut cache = ResourceCache::with_device(context.device.clone());
@@ -124,6 +122,8 @@ fn test_matmul_invalid_shapes() {
         batch_size: 1,
         alpha: 1.0,
         beta: 0.0,
+        beta_nonzero: false,
+        dtype: crate::tensor::dtypes::Dtype::F32,
     };
 
     // This might not fail at the Rust level, but would fail at the Metal level
@@ -263,7 +263,8 @@ fn test_softmax_invalid_dimensions() {
     // This might fail at tensor creation time
     if let Ok(attn_tensor) = result {
         let rows_total = if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 };
-        let result = context.call::<SoftmaxOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0));
+        let result =
+            context.call::<crate::kernels::softmax_kernel::SoftmaxKernelOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0));
         // Should not panic, but might return an error
         assert!(result.is_ok() || result.is_err());
     }

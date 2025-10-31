@@ -1,6 +1,5 @@
 use ratatui::{
-    prelude::*,
-    widgets::{Block, Paragraph},
+    prelude::*, widgets::{Block, Paragraph}
 };
 
 #[derive(Debug, Clone, PartialEq)]

@@ -1,20 +1,15 @@
-use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
+use std::{
+    sync::mpsc, time::{Duration, Instant}
+};
+
 use metallic_env::ENABLE_PROFILING_VAR;
+use metallic_instrumentation::{event::MetricEvent, gpu_profiler::GpuProfiler, prelude::*};
+use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
+use tracing::subscriber;
 
 use crate::{
-    context::Context,
-    kernels::elemwise_add::ElemwiseAddOp,
-    operation::{CommandBuffer, FillConstant},
-    resource_cache::ResourceCache,
-    tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage},
+    caching::ResourceCache, context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, TestBlitZeroFill}, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage}
 };
-
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
-use std::{
-    sync::mpsc,
-    time::{Duration, Instant},
-};
-use tracing::subscriber;
 
 // Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]
@@ -32,7 +27,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
         let queue = device.newCommandQueue().expect("command queue");
 
         let mut cache = ResourceCache::with_device(device.clone());
-        let mut command_buffer = CommandBuffer::new(&queue).expect("command buffer");
+        let command_buffer = CommandBuffer::new(&queue).expect("command buffer");
         let profiler = GpuProfiler::attach(&command_buffer, true).expect("gpu profiler support");
 
         let element_count = 16usize;
@@ -44,16 +39,8 @@ fn gpu_profiler_emits_individual_kernel_events() {
         let tensor = Tensor::<F32Element>::from_existing_buffer(buffer, vec![element_count], Dtype::F32, &device, &queue, 0, true)
             .expect("tensor from buffer");
 
-        let op_a = FillConstant {
-            dst: tensor.clone(),
-            value: 0.0,
-            ones_pipeline: None,
-        };
-        let op_b = FillConstant {
-            dst: tensor.clone(),
-            value: 0.0,
-            ones_pipeline: None,
-        };
+        let op_a = TestBlitZeroFill { dst: tensor.clone() };
+        let op_b = TestBlitZeroFill { dst: tensor.clone() };
 
         command_buffer.record(&op_a, &mut cache).expect("record first fill");
         command_buffer.record(&op_b, &mut cache).expect("record second fill");
@@ -73,7 +60,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
                 duration_us,
             } = enriched.event
                 && backend == "Metal"
-                && op_name.starts_with("FillConstantZero")
+                && op_name.starts_with("TestBlitZeroFill")
             {
                 gpu_events.push((op_name, duration_us));
             }
@@ -86,8 +73,8 @@ fn gpu_profiler_emits_individual_kernel_events() {
         assert_eq!(names.len(), 2, "kernel event names must remain distinct");
         for name in &names {
             assert!(
-                name.starts_with("FillConstantZero@"),
-                "unexpected kernel name for FillConstantZero: {name}"
+                name.starts_with("TestBlitZeroFill@"),
+                "unexpected kernel name for TestBlitZeroFill: {name}"
             );
             assert!(!name.contains('#'), "kernel names should be de-duplicated before emission: {name}");
         }

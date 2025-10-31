@@ -1,16 +1,19 @@
 use criterion::{Criterion, criterion_group, criterion_main};
-use metallic::kernels::KernelInvocable;
-use metallic::kernels::scaled_dot_product_attention::{
-    ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp,
-    ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp,
+use metallic::{
+    Context, F32Element, Tensor, kernels::{
+        DefaultKernelInvocable, scaled_dot_product_attention::{
+            ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp, ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp
+        }
+    }
 };
-use metallic::{Context, F32Element, Tensor};
 
 const ITERATIONS: usize = 1;
 
 fn run_variant_batched<O>(ctx: &mut Context<F32Element>, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
 where
-    O: for<'a> KernelInvocable<Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32)>,
+    O: for<'a> DefaultKernelInvocable<
+        Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32),
+    >,
 {
     let q_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
     let k_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();
@@ -30,7 +33,9 @@ where
 
 fn run_variant_per_batch<O>(ctx: &mut Context<F32Element>, batch: usize, seq_q: usize, seq_k: usize, dim: usize, causal: bool)
 where
-    O: for<'a> KernelInvocable<Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32)>,
+    O: for<'a> DefaultKernelInvocable<
+        Args<'a, F32Element> = (&'a Tensor<F32Element>, &'a Tensor<F32Element>, &'a Tensor<F32Element>, bool, u32),
+    >,
 {
     let q_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_q, dim], ctx).unwrap();
     let k_tensor = Tensor::<F32Element>::random_uniform(vec![batch, seq_k, dim], ctx).unwrap();

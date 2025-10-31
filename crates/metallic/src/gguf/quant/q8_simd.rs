@@ -1,10 +1,11 @@
 //! SIMD-optimized Q8 quantization support for GGUF format
-use crate::gguf::GGUFDataType;
-use half::f16;
-
 // SIMD imports for AArch64 (macOS with Metal)
 #[cfg(target_arch = "aarch64")]
 use std::arch::aarch64::*;
+
+use half::f16;
+
+use crate::gguf::GGUFDataType;
 
 /// Dequantize Q8_0/Q8_1 tensor data to F32 using SIMD optimization
 #[cfg(target_arch = "aarch64")]

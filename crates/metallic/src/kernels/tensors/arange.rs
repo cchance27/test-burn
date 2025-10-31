@@ -1,6 +1,9 @@
+use objc2_metal::MTLComputeCommandEncoder;
+
 use super::*;
-use crate::encoder::{dispatch_threadgroups, set_buffer, set_compute_pipeline_state};
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
+};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct ArangeOp;
@@ -10,10 +13,11 @@ struct Arange<T: TensorElement> {
     length: usize,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for ArangeOp {
+impl DefaultKernelInvocable for ArangeOp {
     // Input arguments for the call.
     type Args<'a, T: TensorElement> = usize;
     // The output type.
@@ -29,16 +33,21 @@ impl KernelInvocable for ArangeOp {
         ctx: &mut Context<T>,
         length: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         // Create the output tensor.
         let out = Tensor::new(vec![length], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("arange_op"));
 
         // Create the internal operation struct.
         let op = Arange {
             length,
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         // Return the boxed operation and the output tensor.
@@ -49,42 +58,25 @@ impl KernelInvocable for ArangeOp {
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl<T: TensorElement> Operation for Arange<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.out.buf, self.out.offset);
-
-        let threadgroup_size = MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        };
-
-        let threadgroups = MTLSize {
-            width: self.length.div_ceil(threadgroup_size.width),
-            height: 1,
-            depth: 1,
-        };
-
-        dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
-
-        encoder.endEncoding();
-
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_1d(self.length as u32, 256);
+        
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::set_buffer;
+        
+        set_buffer(encoder, 0, &self.out.buf, self.out.offset);
     }
 }
 
 #[cfg(test)]
 mod arange_test {
-    use crate::kernels::tensors::ArangeOp;
-    use crate::{Context, F32Element, MetalError};
+    use crate::{Context, F32Element, MetalError, kernels::tensors::ArangeOp};
 
     #[test]
     fn test_arange() -> Result<(), MetalError> {

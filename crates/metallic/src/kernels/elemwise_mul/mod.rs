@@ -1,5 +1,7 @@
+use objc2_metal::MTLComputeCommandEncoder;
+
 use super::*;
-use crate::{TensorElement, TensorInit, TensorStorage};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
 
 pub struct ElemwiseMulOp;
 
@@ -11,9 +13,10 @@ struct ElemwiseMul<T: TensorElement> {
     b: Tensor<T>,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for ElemwiseMulOp {
+impl DefaultKernelInvocable for ElemwiseMulOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
 
     fn function_id() -> Option<KernelFunction> {
@@ -24,7 +27,7 @@ impl KernelInvocable for ElemwiseMulOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (a, b) = args;
         if a.dims() != b.dims() {
@@ -39,11 +42,16 @@ impl KernelInvocable for ElemwiseMulOp {
 
         let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("elemwise_mul_op"));
+
         let op = ElemwiseMul {
             a,
             b,
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), out))
@@ -51,16 +59,9 @@ impl KernelInvocable for ElemwiseMulOp {
 }
 
 impl<T: TensorElement> Operation for ElemwiseMul<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         let total_elements = self.a.len() as u32;
+
         let threads_per_tg = MTLSize {
             width: 256,
             height: 1,
@@ -72,14 +73,20 @@ impl<T: TensorElement> Operation for ElemwiseMul<T> {
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
-        set_buffer(&encoder, 1, &self.b.buf, self.b.offset);
-        set_buffer(&encoder, 2, &self.out.buf, self.out.offset);
-        set_bytes(&encoder, 3, &total_elements);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
 
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.a.buf, self.a.offset);
+        set_buffer(encoder, 1, &self.b.buf, self.b.offset);
+        set_buffer(encoder, 2, &self.out.buf, self.out.offset);
+        set_bytes(encoder, 3, &(self.a.len() as u32));
     }
 }

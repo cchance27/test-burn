@@ -1,24 +1,18 @@
 #![cfg(test)]
-use crate::{Context, F32Element, MetalError, Tensor, TensorElement};
-use crate::{Operation, resource_cache::ResourceCache};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLCommandEncoder as _};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+
+use crate::{CommandBuffer, Context, F32Element, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache};
 
 // Simple test operation that just validates it can be called
 pub struct TestOperation;
 
 impl Operation for TestOperation {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-        encoder.endEncoding();
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let _encoder = command_buffer.get_compute_encoder()?;
         Ok(())
+    }
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>) {
+        // No-op for test operation
     }
 }
 
@@ -102,7 +96,7 @@ impl Model {
         }
 
         // Create a command buffer for this forward pass
-        let mut cmd_buf = crate::CommandBuffer::new(command_queue)?;
+        let cmd_buf = crate::CommandBuffer::new(command_queue)?;
 
         // For now, we assume the first operation takes the inputs directly
         // In a more sophisticated implementation, we might need to handle

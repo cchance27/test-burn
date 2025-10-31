@@ -1,51 +1,48 @@
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::{MTLCommandBuffer, MTLComputePipelineState};
+use metallic_instrumentation::{MetricEvent, record_metric_async};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
-use super::{KernelFunction, KernelInvocable};
+use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
 use crate::{
-    Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, cache_keys::SdpaKey, resource_cache::ResourceCache,
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}
 };
 
 #[cfg(test)]
 mod scaled_dot_product_attention_test;
 
+pub mod cache;
+
 #[derive(Clone, Copy)]
 struct SdpaConfig {
     transpose_k: bool,
     reuse_workspace: bool,
-    use_mps_softmax: bool,
 }
 
 impl SdpaConfig {
     const BASELINE: Self = Self {
-        transpose_k: false,
+        transpose_k: true, // Prefer logical transpose by default to avoid materialized permutes
         reuse_workspace: false,
-        use_mps_softmax: false,
     };
 
     const NO_PERMUTE: Self = Self {
-        transpose_k: true,
+        transpose_k: true, // Same as baseline now - both prefer logical transpose
         reuse_workspace: false,
-        use_mps_softmax: false,
     };
 
     const WORKSPACE: Self = Self {
         transpose_k: false,
         reuse_workspace: true,
-        use_mps_softmax: false,
     };
 
+    // Note: This configuration is now handled by the new softmax dispatcher
     const MPS_SOFTMAX: Self = Self {
         transpose_k: false,
         reuse_workspace: false,
-        use_mps_softmax: true,
     };
 
     const ALL: Self = Self {
         transpose_k: true,
         reuse_workspace: true,
-        use_mps_softmax: true,
     };
 }
 
@@ -63,6 +60,9 @@ pub struct ScaledDotProductAttentionMpsSoftmaxOp;
 
 /// Variant that combines all optimizations.
 pub struct ScaledDotProductAttentionOptimizedOp;
+
+/// Dispatches between legacy and graph-backed SDPA implementations.
+pub struct ScaledDotProductAttentionDispatchOp;
 
 // Internal struct that holds the operation - we'll use existing kernels to implement it
 #[allow(dead_code)]
@@ -131,10 +131,20 @@ fn create_sdpa_operation<T: TensorElement>(
         batch: b,
         dim: d,
         dtype: q.dtype,
+        causal,
+        seq_k_bucket: SeqKBucket::from(s_k),
+        transpose_k: config.transpose_k,
     };
     let scale = if let Some(cache_ref) = cache.as_mut() {
         cache_ref
-            .get_or_create_sdpa(sdpa_descriptor.batch, sdpa_descriptor.dim, sdpa_descriptor.dtype)
+            .get_or_create_sdpa_full(
+                sdpa_descriptor.batch,
+                sdpa_descriptor.dim,
+                sdpa_descriptor.dtype,
+                sdpa_descriptor.causal,
+                s_k,
+                sdpa_descriptor.transpose_k,
+            )
             .scale
     } else {
         compute_sdpa_scale(d)
@@ -180,13 +190,16 @@ fn create_sdpa_operation<T: TensorElement>(
 
     ctx.prepare_tensors_for_active_cmd(&[&attention])?;
 
+    // For the QK^T matmul, prefer logical transpose via stride manipulation over materialized permute
+    // when the backend supports it (MLX does, MPS does, etc.)
     let (k_operand, transpose_b) = if config.transpose_k {
+        // Use logical transpose by swapping dimensions and strides - no data movement
         (k.clone(), true)
     } else {
+        // Fallback to materialized transpose - requires copying data
         (k.permute(&[0, 2, 1], ctx)?, false)
     };
 
-    ctx.set_pending_gpu_scope("sdpa_matmul_qk_op");
     let qk_scaled_result = match cache.as_deref_mut() {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?
@@ -202,23 +215,22 @@ fn create_sdpa_operation<T: TensorElement>(
         ))
     })?;
 
-    ctx.set_pending_gpu_scope("sdpa_softmax_op");
     let softmax_result = {
-        let cache_opt = cache.as_deref_mut();
-        crate::kernels::softmax::apply_softmax(
-            ctx,
-            cache_opt,
-            &qk_scaled_result,
-            b,
-            rows_to_process,
-            s_k,
-            causal,
-            adjusted_query_offset,
-            config.use_mps_softmax,
-        )?
+        // Use the softmax dispatcher to select optimal backend/variant
+        if let Some(cache_ref) = cache.as_mut() {
+            ctx.call_with_cache::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>(
+                (&qk_scaled_result, causal, adjusted_query_offset),
+                cache_ref,
+            )?
+        } else {
+            ctx.call::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>((
+                &qk_scaled_result,
+                causal,
+                adjusted_query_offset,
+            ))?
+        }
     };
 
-    ctx.set_pending_gpu_scope("sdpa_matmul_av_op");
     match cache {
         Some(cache_ref) => {
             ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;
@@ -261,7 +273,7 @@ fn compute_sdpa_scale(dim: usize) -> f32 {
 }
 
 // Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for ScaledDotProductAttentionOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionOp {
     // Input arguments for the call - three input tensors + causal flag
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
@@ -279,7 +291,7 @@ impl KernelInvocable for ScaledDotProductAttentionOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionNoPermuteOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -296,7 +308,7 @@ impl KernelInvocable for ScaledDotProductAttentionNoPermuteOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionWorkspaceOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -313,7 +325,7 @@ impl KernelInvocable for ScaledDotProductAttentionWorkspaceOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -330,7 +342,7 @@ impl KernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
     }
 }
 
-impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
+impl DefaultKernelInvocable for ScaledDotProductAttentionOptimizedOp {
     type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
 
     fn function_id() -> Option<KernelFunction> {
@@ -347,15 +359,51 @@ impl KernelInvocable for ScaledDotProductAttentionOptimizedOp {
     }
 }
 
+impl DefaultKernelInvocable for ScaledDotProductAttentionDispatchOp {
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
+
+    fn function_id() -> Option<KernelFunction> {
+        None
+    }
+
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
+        _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+        cache: Option<&mut ResourceCache>,
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
+        let selection = ctx.backend_registry().select_sdpa(KernelBackendKind::Legacy);
+
+        let profiler_backend = match selection.backend {
+            KernelBackendKind::Legacy => "Metal",
+            KernelBackendKind::Graph => "MPSGraph",
+        };
+        ctx.override_pending_gpu_backend(profiler_backend);
+
+        let result = match selection.backend {
+            KernelBackendKind::Legacy => ScaledDotProductAttentionOptimizedOp::new(ctx, args, None, cache),
+            KernelBackendKind::Graph => SdpaMpsGraphOp::new(ctx, args, None, cache),
+        }?;
+
+        record_metric_async!(MetricEvent::KernelBackendSelected {
+            op_name: "sdpa".to_string(),
+            backend: selection.backend.as_str().to_string(),
+            reason: selection.reason.as_str().to_string(),
+        });
+
+        Ok(result)
+    }
+}
+
 // Implement `Operation` for the internal struct.
 impl<T: TensorElement> Operation for ScaledDotProductAttention<T> {
-    fn encode(
-        &self,
-        _command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        // Since all computation was done in the `new` method of KernelInvocable,
+    fn encode(&self, _command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        // Since all computation was done in the `new` method of DefaultKernelInvocable,
         // this method just returns Ok(())
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // No arguments to bind for this placeholder operation
     }
 }

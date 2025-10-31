@@ -1,7 +1,7 @@
+use std::{sync::Arc, time::Duration};
+
 use chrono::{DateTime, Utc};
 use serde::Serialize;
-use std::sync::Arc;
-use std::time::Duration;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct LatencyRow {
@@ -27,6 +27,14 @@ pub struct MemoryRow {
     pub absolute_kv_mb: f64,
     pub absolute_kv_cache_mb: f64,
     pub show_absolute: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct StatsRow {
+    pub label: String,
+    pub value: String, // Can be numeric or a formatted string
+    pub level: u8,
+    pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -81,10 +89,14 @@ pub enum AppEvent {
         prompt_processing: Duration,
         iteration: Option<Duration>,
     },
+    GenerationComplete {
+        total_generation_time: Duration,
+    },
     TokenCount(usize),
     StatusUpdate(String),
     MemoryUpdate(Vec<MemoryRow>),
     LatencyUpdate(Vec<LatencyRow>),
+    StatsUpdate(Vec<StatsRow>),
     Alert(Alert),
     LogMessage(String),
 }

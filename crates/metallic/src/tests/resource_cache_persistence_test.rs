@@ -1,5 +1,6 @@
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
+
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
 
 fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Result<Tensor<F32Element>, MetalError> {
     Tensor::new(dims.to_vec(), TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(data))

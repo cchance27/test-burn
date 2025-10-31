@@ -1,14 +1,9 @@
 use ratatui::{
-    Frame,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
-    text::Text,
-    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    Frame, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style}, text::Text, widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap}
 };
 
 use crate::tui::{
-    app::{App, FocusArea, MetricsView},
-    metrics::HierarchicalMetric,
+    app::{App, FocusArea, MetricsView}, metrics::HierarchicalMetric
 };
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -55,22 +50,28 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .split(sidebar_inner);
 
     let prompt_section = Paragraph::new(format!(
-        "Prompt Tokens: {}\nProcessing Time: {}",
+        "Prompt Tokens: {}\nPre-processing Time: {}\nGeneration Time: {}",
         app.prompt_token_count,
-        format_duration(app.prompt_processing_time)
+        format_duration(app.prompt_processing_time),
+        format_duration(app.generation_time)
     ))
     .block(Block::default().title("Prompt").borders(Borders::ALL));
 
     let metrics_block_title = match app.metrics_view {
         MetricsView::Memory => "Memory Usage",
         MetricsView::Latency => "Latency",
+        MetricsView::Stats => "Statistics",
     };
 
     let collapse_label = match app.metrics_view {
         MetricsView::Memory => app.memory_collapse_depth.label(),
         MetricsView::Latency => app.latency_collapse_depth.label(),
+        MetricsView::Stats => "N/A".to_string(), // Stats view doesn't use collapse depths
     };
-    let metrics_help = format!("[m] Memory [l] Latency [c] Collapse ({})", collapse_label);
+    let metrics_help = match app.metrics_view {
+        MetricsView::Memory | MetricsView::Latency => format!("[m] Memory [l] Latency [c] Collapse ({})", collapse_label),
+        MetricsView::Stats => format!("[m] Memory [l] Latency [s] Stats ({})", collapse_label),
+    };
 
     // Always calculate and update max depths before rendering to account for dynamic changes
     if matches!(app.metrics_view, MetricsView::Memory) && !app.memory_rows.is_empty() {
@@ -82,6 +83,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let metrics_text = match app.metrics_view {
         MetricsView::Memory => render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth()),
         MetricsView::Latency => render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth()),
+        MetricsView::Stats => render_stats_metrics_from_app(app),
     };
 
     let metrics_block = Block::default()
@@ -184,6 +186,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     let metrics_text = match app.metrics_view {
         MetricsView::Memory => render_memory_metrics(&app.memory_rows, app.memory_collapse_depth.get_current_depth()),
         MetricsView::Latency => render_hierarchical_latency_metrics(&app.latency_tree, app.latency_collapse_depth.get_current_depth()),
+        MetricsView::Stats => render_stats_metrics_from_app(app),
     };
     let metrics_content = format!("{}\n\n{}", metrics_help, metrics_text);
     let metrics_content_lines = metrics_content.lines().count();
@@ -204,24 +207,24 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     }
 
     // Log area scrollbar
-    if app.log_visible {
-        if let Some(log_area) = log_area {
-            let log_content_lines = app.log_messages.len();
-            let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
+    if app.log_visible
+        && let Some(log_area) = log_area
+    {
+        let log_content_lines = app.log_messages.len();
+        let log_visible_lines = log_area.height.saturating_sub(2) as usize; // Subtract 2 for borders
 
-            if log_content_lines > log_visible_lines && log_visible_lines > 0 {
-                let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                    .begin_symbol(Some("↑"))
-                    .end_symbol(Some("↓"));
+        if log_content_lines > log_visible_lines && log_visible_lines > 0 {
+            let log_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓"));
 
-                // Calculate the maximum scroll position (content lines - visible lines)
-                let max_scroll = (log_content_lines - log_visible_lines).max(0);
-                let current_scroll = (app.log_scroll as usize).min(max_scroll);
+            // Calculate the maximum scroll position (content lines - visible lines)
+            let max_scroll = (log_content_lines - log_visible_lines).max(0);
+            let current_scroll = (app.log_scroll as usize).min(max_scroll);
 
-                let log_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
+            let log_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);
 
-                frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
-            }
+            frame.render_stateful_widget(log_scrollbar, log_area, &mut log_scrollbar_state.clone());
         }
     }
 }
@@ -667,4 +670,71 @@ fn create_text_with_selection(text: &str, app: &App, _area: Rect) -> ratatui::te
         // No active selection, return text as is
         Text::from(text.to_string())
     }
+}
+
+/// Render statistics metrics with actual data from app
+pub fn render_stats_metrics_from_app(app: &App) -> String {
+    let mut has_any_stats = false;
+
+    // Check if we have any stats at all
+    if !app.tensor_preparation_stats.is_empty() || !app.resource_cache_stats.is_empty() {
+        has_any_stats = true;
+    }
+
+    if !has_any_stats {
+        return "No statistics metrics available yet. Metrics will appear once tensor operations begin.".to_string();
+    }
+
+    let mut result = String::new();
+    result.push_str("Statistics Metrics:\n\n");
+
+    // Add tensor preparation stats first if available (at the top)
+    if !app.tensor_preparation_stats.is_empty() {
+        for row in &app.tensor_preparation_stats {
+            let indent = "  ".repeat(row.level as usize);
+            if !row.value.is_empty() {
+                result.push_str(&format!("{}{}: {}\n", indent, row.label.trim_start(), row.value));
+            } else {
+                // If value is empty, this is likely a section header
+                result.push_str(&format!("{}{}\n", indent, row.label.trim_start()));
+            }
+
+            // Add description if available
+            if !row.description.is_empty() {
+                let desc_indent = "  ".repeat((row.level + 1) as usize);
+                result.push_str(&format!("{}({})\n", desc_indent, row.description));
+            }
+        }
+    }
+
+    // Add a separator if we have both types of stats
+    if !app.tensor_preparation_stats.is_empty() && !app.resource_cache_stats.is_empty() {
+        result.push('\n');
+    }
+
+    // Add resource cache stats if available
+    if !app.resource_cache_stats.is_empty() {
+        // Iterate through each cache type and display its stats
+        for rows in app.resource_cache_stats.values() {
+            for row in rows {
+                let indent = "  ".repeat(row.level as usize);
+                if !row.value.is_empty() {
+                    result.push_str(&format!("{}{}: {}\n", indent, row.label.trim_start(), row.value));
+                } else {
+                    // If value is empty, this is likely a section header
+                    result.push_str(&format!("{}{}\n", indent, row.label.trim_start()));
+                }
+
+                // Add description if available
+                if !row.description.is_empty() {
+                    let desc_indent = "  ".repeat((row.level + 1) as usize);
+                    result.push_str(&format!("{}({})\n", desc_indent, row.description));
+                }
+            }
+            // Add a blank line between different cache types for readability
+            result.push('\n');
+        }
+    }
+
+    result
 }

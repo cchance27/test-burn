@@ -6,8 +6,9 @@
 //! get more accurate performance measurements.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use metallic::gguf::GGUFDataType;
-use metallic::gguf::quant::{q8, q8_simd};
+use metallic::gguf::{
+    GGUFDataType, quant::{q8, q8_simd}
+};
 
 /// Number of iterations to run within each benchmark measurement
 /// This helps reduce measurement noise for very fast operations like dequantization

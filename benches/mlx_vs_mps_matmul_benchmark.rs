@@ -1,6 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use metallic::kernels::elemwise_add::BroadcastElemwiseAddInplaceOp;
-use metallic::{Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
+use metallic::{
+    Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
+};
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
 fn bytes_for_shape<T: TensorElement>(m: usize, k: usize, n: usize) -> usize {

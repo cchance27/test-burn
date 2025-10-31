@@ -1,9 +1,10 @@
 //! Memory reporting utilities that recreate the historical memory sidebar format.
 
+use std::collections::BTreeMap;
+
 use rustc_hash::FxHashMap;
 
 use crate::memory_collector::MemoryCollector;
-use std::collections::BTreeMap;
 
 /// Memory reporting utilities for displaying memory usage in the historical sidebar format.
 pub struct MemoryReporter {

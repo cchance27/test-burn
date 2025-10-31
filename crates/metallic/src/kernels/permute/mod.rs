@@ -1,7 +1,7 @@
+use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLResourceOptions};
+
 use super::*;
-use crate::{TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel};
-use metallic_instrumentation::GpuProfiler;
-use objc2_metal::{MTLBuffer, MTLResourceOptions};
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
 
 pub struct PermuteOp;
 
@@ -16,7 +16,7 @@ struct Permute<T: TensorElement> {
     permute_buf: Retained<ProtocolObject<dyn MTLBuffer>>,
 }
 
-impl KernelInvocable for PermuteOp {
+impl DefaultKernelInvocable for PermuteOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Vec<u32>);
 
     fn function_id() -> Option<KernelFunction> {
@@ -27,7 +27,7 @@ impl KernelInvocable for PermuteOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (src, permute) = args;
 
@@ -128,30 +128,9 @@ impl KernelInvocable for PermuteOp {
 }
 
 impl<T: TensorElement> Operation for Permute<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
-
-        let rank = self.src.dims.len() as u32;
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        let _rank = self.src.dims.len() as u32;
         let num_elements = self.src.len() as u32;
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.src.buf, self.src.offset);
-        set_buffer(&encoder, 1, &self.dst.buf, self.dst.offset);
-        set_buffer(&encoder, 2, &self.src_strides_buf, 0);
-        set_buffer(&encoder, 3, &self.dst_strides_buf, 0);
-        set_buffer(&encoder, 4, &self.dims_buf, 0);
-        set_buffer(&encoder, 5, &self.permute_buf, 0);
-        set_bytes(&encoder, 6, &rank);
-        set_bytes(&encoder, 7, &num_elements);
 
         let threads_per_tg = MTLSize {
             width: 256,
@@ -164,9 +143,25 @@ impl<T: TensorElement> Operation for Permute<T> {
             depth: 1,
         };
 
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
+
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.src.buf, self.src.offset);
+        set_buffer(encoder, 1, &self.dst.buf, self.dst.offset);
+        set_buffer(encoder, 2, &self.src_strides_buf, 0);
+        set_buffer(encoder, 3, &self.dst_strides_buf, 0);
+        set_buffer(encoder, 4, &self.dims_buf, 0);
+        set_buffer(encoder, 5, &self.permute_buf, 0);
+        set_bytes(encoder, 6, &(self.src.dims.len() as u32));
+        set_bytes(encoder, 7, &(self.src.len() as u32));
     }
 }
 

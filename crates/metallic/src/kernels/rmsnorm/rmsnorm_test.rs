@@ -1,5 +1,4 @@
-use crate::kernels::rmsnorm::RMSNormOp;
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::rmsnorm::RMSNormOp};
 
 #[test]
 fn test_rmsnorm_logic() -> Result<(), MetalError> {

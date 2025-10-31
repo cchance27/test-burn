@@ -1,8 +1,8 @@
 #![cfg(test)]
-use crate::models::{Qwen25, Qwen25Config};
-use crate::{F32Element, TensorInit, TensorStorage};
-
 use super::*;
+use crate::{
+    F32Element, TensorInit, TensorStorage, context::RepeatKvWorkspaceKind, models::{Qwen25, Qwen25Config}
+};
 
 #[test]
 fn test_qwen25_basic_construct_and_forward() -> Result<(), MetalError> {
@@ -59,32 +59,6 @@ fn test_qwen25_embed() -> Result<(), MetalError> {
 }
 
 #[test]
-fn test_qwen25_forward_tokens() -> Result<(), MetalError> {
-    let mut ctx = Context::<F32Element>::new()?;
-    let cfg = Qwen25Config {
-        n_layers: 1,
-        d_model: 8,
-        ff_dim: 16,
-        n_heads: 2,
-        n_kv_heads: 1,
-        seq_len: 4,
-        vocab_size: 16,
-        rope_freq_base: 1e6,
-        rms_eps: 1e-6,
-    };
-    let model = Qwen25::new(cfg, &mut ctx)?;
-
-    // Test forward pass with tokens
-    let tokens = vec![1, 2, 3];
-    let logits = model.forward_tokens(&tokens, &mut ctx)?;
-
-    // Check the output shape - should be [batch, seq, vocab_size]
-    assert_eq!(logits.dims(), &[1, 3, 16]);
-
-    Ok(())
-}
-
-#[test]
 fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
@@ -130,7 +104,11 @@ fn test_kv_cache_correctness() -> Result<(), MetalError> {
         kv_cache_logits_history.push(logits_tensor.to_vec());
 
         // Validate that the KV cache grows with each token and exposes the expected repeated layout.
-        let cache_snapshots: Vec<_> = ctx.kv_caches.iter().map(|(&layer_idx, entry)| (layer_idx, entry.clone())).collect();
+        let cache_snapshots: Vec<_> = ctx
+            .kv_caches()
+            .iter()
+            .map(|(&layer_idx, entry)| (layer_idx, entry.clone()))
+            .collect();
 
         for (layer_idx, entry) in cache_snapshots {
             let history = ctx.kv_cache_history_view(&entry.k, i + 1)?;
@@ -216,7 +194,17 @@ fn test_repeat_kv_heads_gpu_matches_cpu() -> Result<(), MetalError> {
         out
     };
 
-    let output = Qwen25::repeat_kv_heads(&history, group_size, batch, n_kv_heads, n_heads, head_dim, &mut ctx)?;
+    let output = Qwen25::repeat_kv_heads(
+        &history,
+        group_size,
+        batch,
+        n_kv_heads,
+        n_heads,
+        head_dim,
+        0,
+        RepeatKvWorkspaceKind::Key,
+        &mut ctx,
+    )?;
     ctx.synchronize();
 
     assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);

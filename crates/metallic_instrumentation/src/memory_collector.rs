@@ -1,10 +1,10 @@
 //! Memory collection and reporting functionality for runtime memory statistics.
 
+use std::collections::BTreeMap;
+
 use rustc_hash::FxHashMap;
 
-use crate::event::MetricEvent;
-use crate::record_metric_async;
-use std::collections::BTreeMap;
+use crate::{event::MetricEvent, record_metric_async};
 
 /// Memory collector for gathering runtime memory statistics from Metal and CPU.
 pub struct MemoryCollector {

@@ -1,12 +1,11 @@
 //! Tensor conversion utilities for GGUF format and Quantization
-use crate::Tensor;
-use crate::TensorElement;
-use crate::gguf::GGUFDataType;
-use crate::gguf::GGUFFile;
-use crate::gguf::tensor_info::GGUTensorInfo;
-use crate::{TensorInit, TensorStorage};
-use half::f16;
 use std::convert::TryFrom;
+
+use half::f16;
+
+use crate::{
+    Tensor, TensorElement, TensorInit, TensorStorage, gguf::{GGUFDataType, GGUFFile, tensor_info::GGUTensorInfo}
+};
 
 // Quantization modules for GGUF format
 pub mod q8;
@@ -14,7 +13,6 @@ pub mod q8_simd;
 
 #[cfg(not(target_arch = "aarch64"))]
 pub use q8::dequantize_q8_to_f32;
-
 #[cfg(target_arch = "aarch64")]
 pub use q8_simd::dequantize_q8_to_f32_simd;
 

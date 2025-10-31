@@ -1,8 +1,9 @@
 //! Canonical metric event definitions for the unified instrumentation system.
 
+use std::collections::BTreeMap;
+
 use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
 
 /// Structured, type-safe metric events emitted by the instrumentation layer.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,8 +29,31 @@ pub enum MetricEvent {
         internal_kernel_name: String,
         duration_us: u64,
     },
+    /// Records which backend executed a kernel when multiple options are available.
+    KernelBackendSelected { op_name: String, backend: String, reason: String },
     /// Captures resource cache utilisation metrics.
     ResourceCacheAccess { cache_key: String, hit: bool, bytes: u64 },
+    /// Periodic summary of a resource cache (e.g., mpsgraph_sdpa) for dashboards.
+    ResourceCacheSummary {
+        cache: String,
+        hits: u64,
+        misses: u64,
+        hit_rate: f64,
+        size: u64,
+    },
+    /// Cache eviction event with detailed metadata.
+    CacheEviction {
+        /// Name of the cache that performed eviction.
+        cache: String,
+        /// Eviction strategy that triggered this event.
+        strategy: String,
+        /// Number of entries evicted.
+        count: u64,
+        /// Reason for eviction (e.g., "size_limit_exceeded", "idle_timeout", "manual_clear").
+        reason: String,
+        /// Cache size after eviction.
+        size_after: u64,
+    },
     /// Memory-mapped file usage for GGUF models.
     GgufFileMmap {
         /// Size of the memory-mapped file in bytes.
@@ -72,5 +96,18 @@ pub enum MetricEvent {
         tensor_count: u64,
         /// Memory usage by tensor category.
         breakdown: FxHashMap<String, u64>,
+    },
+    /// Tensor preparation cache statistics.
+    TensorPreparationStats {
+        /// Number of times tensor preparation was skipped due to cache hit
+        cache_hits: u64,
+        /// Number of times tensor preparation was performed (cache miss)
+        cache_misses: u64,
+        /// Total time spent in preparation operations (microseconds)
+        total_preparation_time_us: u64,
+        /// Estimated time saved by cache hits (microseconds)
+        estimated_time_saved_us: u64,
+        /// Hit rate as a percentage (0-100)
+        hit_rate: f64,
     },
 }

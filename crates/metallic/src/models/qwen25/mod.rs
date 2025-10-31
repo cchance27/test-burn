@@ -1,11 +1,15 @@
-use crate::kernels::kv_rearrange::KvRearrangeOp;
-use crate::kernels::repeat_kv_heads::RepeatKvHeadsOp;
-use crate::kernels::rmsnorm::RMSNormOp;
-use crate::kernels::rope::RoPEOp;
-use crate::{Context, MetalError, Tensor, TensorElement};
+use std::{
+    collections::BTreeMap, time::{Duration, Instant}
+};
+
 use metallic_instrumentation::{MetricEvent, record_metric_async};
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use objc2_metal::MTLBlitCommandEncoder as _;
+
+use crate::{
+    Context, MetalError, Tensor, TensorElement, context::RepeatKvWorkspaceKind, kernels::{
+        backend_registry::KernelBackendKind, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp
+    }
+};
 
 mod qwen25_tests;
 
@@ -107,37 +111,6 @@ impl<T: TensorElement> Qwen25<T> {
         Ok(logits)
     }
 
-    /// Forward pass that takes tokens as input and returns logits
-    pub fn forward_tokens(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
-        // Embed tokens
-        let embedded = self.embed(tokens, ctx)?;
-
-        let embedded_slice = embedded.as_slice();
-        let embedded_max = embedded_slice.iter().map(|&v| T::to_f32(v)).fold(f32::NEG_INFINITY, f32::max);
-        let embedded_min = embedded_slice.iter().map(|&v| T::to_f32(v)).fold(f32::INFINITY, f32::min);
-        println!("Embedded stats - max: {:.4}, min: {:.4}", embedded_max, embedded_min);
-
-        // Additional debug: sample first few values
-        if embedded_slice.len() >= 5 {
-            println!(
-                "First 5 embedded values: {:.6}, {:.6}, {:.6}, {:.6}, {:.6}",
-                embedded_slice[0], embedded_slice[1], embedded_slice[2], embedded_slice[3], embedded_slice[4]
-            );
-        }
-
-        println!("Forward tokens: processing {} tokens", tokens.len());
-
-        // Run through transformer blocks
-        let hidden = self.forward(&embedded, ctx)?;
-
-        // Synchronize to ensure forward pass is complete before reading values
-
-        // Apply output projection
-        let logits = self.output(&hidden, ctx)?;
-
-        Ok(logits)
-    }
-
     pub fn new(config: Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         // allocate embed and output weights
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
@@ -209,7 +182,7 @@ impl<T: TensorElement> Qwen25<T> {
 
         let mut x = input.clone();
 
-        for block in self.blocks.iter() {
+        for (layer_idx, block) in self.blocks.iter().enumerate() {
             let resid_attn = x.clone();
 
             // RMSNorm before Attention
@@ -281,9 +254,29 @@ impl<T: TensorElement> Qwen25<T> {
             let k_history = CacheHistory::from_tensor(k_heads_after_rope)?;
             let v_history = CacheHistory::from_tensor(v_heads)?;
 
-            let k_repeated = Qwen25::repeat_kv_heads(&k_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let k_repeated = Qwen25::repeat_kv_heads(
+                &k_history,
+                group_size,
+                batch,
+                n_kv_heads,
+                n_heads,
+                kv_head_dim,
+                layer_idx,
+                RepeatKvWorkspaceKind::Key,
+                ctx,
+            )?;
 
-            let v_repeated = Qwen25::repeat_kv_heads(&v_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+            let v_repeated = Qwen25::repeat_kv_heads(
+                &v_history,
+                group_size,
+                batch,
+                n_kv_heads,
+                n_heads,
+                kv_head_dim,
+                layer_idx,
+                RepeatKvWorkspaceKind::Value,
+                ctx,
+            )?;
 
             // SDPA (causal mask enabled)
             let attn_out_heads = ctx.scaled_dot_product_attention(&q_heads_after_rope, &k_repeated, &v_repeated, true)?;
@@ -314,7 +307,7 @@ impl<T: TensorElement> Qwen25<T> {
             let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
             // FFN using extracted SwiGLU
-            let ffn_output_flat = ctx.SwiGLU(
+            let ffn_output_flat = ctx.call::<SwiGLUOp>((
                 &x_normed_mlp_flat,
                 &block.ffn_gate,
                 &block.ffn_gate_bias,
@@ -323,7 +316,7 @@ impl<T: TensorElement> Qwen25<T> {
                 &block.ffn_down,
                 &block.ffn_down_bias,
                 Some(&block.ffn_gate_up_weight),
-            )?;
+            ))?;
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
@@ -479,7 +472,7 @@ impl<T: TensorElement> Qwen25<T> {
 
                 // Create a view over the repeated KV cache for attention
                 let cache_entry = ctx
-                    .kv_caches
+                    .kv_caches()
                     .get(&layer_idx)
                     .cloned()
                     .ok_or_else(|| MetalError::InvalidOperation(format!("KV cache for layer {} not found", layer_idx)))?;
@@ -487,10 +480,28 @@ impl<T: TensorElement> Qwen25<T> {
                 let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
                 cpu_accum += cpu_chk.elapsed();
                 let (k_repeated, v_repeated) = ctx.with_gpu_scope(format!("kv_repeat_block_{}_op", layer_idx), |ctx| {
-                    let k_repeated =
-                        Qwen25::repeat_kv_heads(&k_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
-                    let v_repeated =
-                        Qwen25::repeat_kv_heads(&v_repeated_history, group_size, batch, n_kv_heads, n_heads, kv_head_dim, ctx)?;
+                    let k_repeated = Qwen25::repeat_kv_heads(
+                        &k_repeated_history,
+                        group_size,
+                        batch,
+                        n_kv_heads,
+                        n_heads,
+                        kv_head_dim,
+                        layer_idx,
+                        RepeatKvWorkspaceKind::Key,
+                        ctx,
+                    )?;
+                    let v_repeated = Qwen25::repeat_kv_heads(
+                        &v_repeated_history,
+                        group_size,
+                        batch,
+                        n_kv_heads,
+                        n_heads,
+                        kv_head_dim,
+                        layer_idx,
+                        RepeatKvWorkspaceKind::Value,
+                        ctx,
+                    )?;
                     Ok::<_, MetalError>((k_repeated, v_repeated))
                 })?;
                 breakdown.insert(
@@ -539,7 +550,7 @@ impl<T: TensorElement> Qwen25<T> {
 
                 cpu_accum += cpu_chk.elapsed();
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
-                    ctx.SwiGLU(
+                    ctx.call::<SwiGLUOp>((
                         &x_normed_mlp_flat,
                         &block.ffn_gate,
                         &block.ffn_gate_bias,
@@ -548,8 +559,9 @@ impl<T: TensorElement> Qwen25<T> {
                         &block.ffn_down,
                         &block.ffn_down_bias,
                         Some(&block.ffn_gate_up_weight),
-                    )
+                    ))
                 })?;
+
                 breakdown.insert("mlp_swiglu".to_string(), (ffn_output_flat.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
                 ctx.set_pending_gpu_scope(format!("mlp_reshape_block_{}_op", layer_idx));
@@ -599,8 +611,11 @@ impl<T: TensorElement> Qwen25<T> {
         n_kv_heads: usize,
         n_heads: usize,
         head_dim: usize,
+        layer_idx: usize,
+        workspace_kind: RepeatKvWorkspaceKind,
         ctx: &mut Context<T>,
     ) -> Result<Tensor<T>, MetalError> {
+        let prefer_shared = ctx.backend_registry().select_sdpa(KernelBackendKind::Legacy).backend == KernelBackendKind::Graph;
         if n_kv_heads == 0 || n_heads == 0 {
             return Err(MetalError::InvalidShape("Invalid head counts for repeat_kv_heads".to_string()));
         }
@@ -636,10 +651,59 @@ impl<T: TensorElement> Qwen25<T> {
                 history.active_seq as u32,
                 head_dim as u32,
                 history.cache_capacity as u32,
+                layer_idx as u32,
+                workspace_kind,
+                prefer_shared,
             )),
             heads if heads == repeated_heads => {
-                // The KV cache already stores repeated heads in [batch * n_heads, seq, head_dim].
-                Ok(input)
+                // Check which backend is currently selected
+                let current_backend = ctx.backend_registry().select_sdpa(KernelBackendKind::Legacy).backend;
+
+                // For MPSGraph backend, we can work with zero-copy tensor views directly
+                // even if they have non-zero offsets or strided layouts, but we need to be careful
+                // to avoid triggering MLIR pass assertions, so we only optimize when not prefer_shared
+                if current_backend == KernelBackendKind::Graph && !prefer_shared {
+                    // Use the input tensor directly with its existing layout
+                    // The MPSGraph binding logic can handle non-zero offsets via MPSNDArray views
+                    Ok(input)
+                } else if prefer_shared {
+                    // For legacy backend or when shared memory is preferred, proceed with workspace copy
+                    let mut workspace = ctx.acquire_repeat_kv_workspace(
+                        layer_idx,
+                        workspace_kind,
+                        repeated_heads,
+                        history.active_seq,
+                        history.cache_capacity,
+                        head_dim,
+                        prefer_shared,
+                    )?;
+
+                    ctx.prepare_tensors_for_active_cmd(&[&input, &workspace])?;
+                    let command_buffer = ctx.active_command_buffer_mut_without_cache()?;
+                    let encoder = command_buffer.get_blit_encoder()?;
+
+                    let head_dim_bytes = head_dim * input.dtype.size_bytes();
+                    let copy_bytes = history.active_seq * head_dim_bytes;
+                    unsafe {
+                        for head in 0..repeated_heads {
+                            let src_offset = input.offset + head * history.cache_capacity * head_dim_bytes;
+                            let dst_offset = workspace.offset + head * history.active_seq * head_dim_bytes;
+                            encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                                &input.buf,
+                                src_offset,
+                                &workspace.buf,
+                                dst_offset,
+                                copy_bytes,
+                            );
+                        }
+                    }
+                    ctx.mark_tensor_pending(&workspace);
+                    workspace.strides = Tensor::<T>::compute_strides(workspace.dims());
+                    Ok(workspace)
+                } else {
+                    // The KV cache already stores repeated heads in [batch * n_heads, seq, head_dim].
+                    Ok(input)
+                }
             }
             _ => Err(MetalError::InvalidShape("Invalid input dimensions for repeat_kv_heads".to_string())),
         }
@@ -674,6 +738,8 @@ impl<T: TensorElement> CacheHistory<T> {
             ));
         }
 
+        // For newly created tensors (like from rearrange), capacity and active sequence are the same
+        // For KV cache history views, this will be properly set by the gather_cache_history function
         Ok(Self {
             cache_capacity: dims[1],
             active_seq: dims[1],

@@ -15,11 +15,9 @@
 //! assert_eq!(*_guard, Level::DEBUG);
 //! ```
 
-use std::marker::PhantomData;
-use std::ops::Deref;
+use std::{marker::PhantomData, ops::Deref};
 
-use super::guard::EnvVarGuard;
-use super::{EnvVar, Environment};
+use super::{EnvVar, Environment, guard::EnvVarGuard};
 
 /// Errors emitted when interacting with typed environment variables.
 #[derive(Debug, thiserror::Error)]

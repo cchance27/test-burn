@@ -1,11 +1,16 @@
-use super::*;
-use crate::context::GpuProfilerLabel;
-use crate::{TensorElement, TensorInit, TensorStorage};
-use metallic_instrumentation::GpuProfiler;
 use std::convert::TryFrom;
+
+use objc2_metal::MTLComputeCommandEncoder;
+
+use super::*;
+use crate::{CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, operation::{ComputeKernelEncoder}};
 
 /// Public, user-facing, zero-sized struct for the KV rearrange operation.
 pub struct KvRearrangeOp;
+
+
+#[cfg(test)]
+mod tests;
 
 /// Internal struct that holds data for the Operation trait.
 struct KvRearrange<T: TensorElement> {
@@ -22,7 +27,7 @@ struct KvRearrange<T: TensorElement> {
     profiler_label: GpuProfilerLabel,
 }
 
-impl KernelInvocable for KvRearrangeOp {
+impl DefaultKernelInvocable for KvRearrangeOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, u32, u32, u32, u32, u32, u32); // (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq)
 
     fn function_id() -> Option<KernelFunction> {
@@ -33,7 +38,7 @@ impl KernelInvocable for KvRearrangeOp {
         ctx: &mut Context<T>,
         args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        _cache: std::option::Option<&mut crate::resource_cache::ResourceCache>,
+        _cache: std::option::Option<&mut crate::caching::ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (input, kv_dim, kv_head_dim, n_heads, n_kv_heads, head_dim, seq) = args;
 
@@ -83,45 +88,28 @@ impl KernelInvocable for KvRearrangeOp {
 }
 
 impl<T: TensorElement> Operation for KvRearrange<T> {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::ComputeEncoderCreationFailed)?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer, &encoder, label.op_name, label.backend);
-
-        let total_elements = self.output.len() as u32;
-        let threads_per_tg = MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        };
-        let groups = MTLSize {
-            width: total_elements.div_ceil(256) as usize,
-            height: 1,
-            depth: 1,
-        };
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.input.buf, self.input.offset);
-        set_buffer(&encoder, 1, &self.output.buf, self.output.offset);
-        set_bytes(&encoder, 2, &self.kv_dim);
-        set_bytes(&encoder, 3, &self.row_stride);
-        set_bytes(&encoder, 4, &self.kv_head_dim);
-        set_bytes(&encoder, 5, &self.n_heads);
-        set_bytes(&encoder, 6, &self.n_kv_heads);
-        set_bytes(&encoder, 7, &self.head_dim);
-        set_bytes(&encoder, 8, &self.seq);
-        set_bytes(&encoder, 9, &total_elements);
-
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
-        encoder.endEncoding();
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_1d(self.output.len() as u32, 256);
+        
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.input.buf, self.input.offset);
+        set_buffer(encoder, 1, &self.output.buf, self.output.offset);
+        set_bytes(encoder, 2, &self.kv_dim);
+        set_bytes(encoder, 3, &self.row_stride);
+        set_bytes(encoder, 4, &self.kv_head_dim);
+        set_bytes(encoder, 5, &self.n_heads);
+        set_bytes(encoder, 6, &self.n_kv_heads);
+        set_bytes(encoder, 7, &self.head_dim);
+        set_bytes(encoder, 8, &self.seq);
+        set_bytes(encoder, 9, &(self.output.len() as u32));
     }
 }
 
@@ -155,105 +143,4 @@ fn cpu_reference_rearrange(
         }
     }
     output
-}
-
-#[cfg(test)]
-mod kv_rearrange_test {
-    use crate::F32Element;
-
-    use super::*;
-
-    #[test]
-    fn test_kv_rearrange_logic() -> Result<(), MetalError> {
-        let mut ctx = Context::<F32Element>::new()?;
-        let batch = 2usize;
-        let seq = 3usize;
-        let n_heads = 4usize;
-        let n_kv_heads = 2usize;
-        let head_dim = 2usize;
-        let kv_head_dim = 3usize;
-        let d_model = n_heads * head_dim;
-        let kv_dim = n_kv_heads * kv_head_dim;
-        let fused_dim = d_model + 2 * kv_dim;
-        let rows = batch * seq;
-
-        // Create a fused QKV tensor so slicing produces strided views.
-        let fused_data: Vec<f32> = (0..rows * fused_dim).map(|i| i as f32).collect();
-        let fused = Tensor::new(
-            vec![rows, fused_dim],
-            TensorStorage::Dedicated(&ctx),
-            TensorInit::CopyFrom(&fused_data),
-        )?;
-
-        let q_mat = fused.slice_last_dim(0..d_model)?;
-        let k_mat = fused.slice_last_dim(d_model..d_model + kv_dim)?;
-        let v_mat = fused.slice_last_dim(d_model + kv_dim..fused_dim)?;
-
-        let q_result = ctx.call::<KvRearrangeOp>((
-            q_mat.clone(),
-            d_model as u32,
-            head_dim as u32,
-            n_heads as u32,
-            n_heads as u32,
-            head_dim as u32,
-            seq as u32,
-        ))?;
-        let k_result = ctx.call::<KvRearrangeOp>((
-            k_mat.clone(),
-            kv_dim as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-        ))?;
-        let v_result = ctx.call::<KvRearrangeOp>((
-            v_mat.clone(),
-            kv_dim as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-        ))?;
-
-        ctx.synchronize();
-
-        // Verify output dimensions for each projection.
-        assert_eq!(q_result.dims(), &[batch * n_heads, seq, head_dim]);
-        assert_eq!(k_result.dims(), &[batch * n_kv_heads, seq, kv_head_dim]);
-        assert_eq!(v_result.dims(), &[batch * n_kv_heads, seq, kv_head_dim]);
-
-        // CPU reference for verification using the original fused buffer.
-        let row_stride = fused_dim;
-        let q_expected = cpu_reference_rearrange(&fused_data, row_stride, batch, seq, n_heads, n_heads, head_dim, head_dim, 0);
-        let k_expected = cpu_reference_rearrange(
-            &fused_data,
-            row_stride,
-            batch,
-            seq,
-            n_kv_heads,
-            n_kv_heads,
-            kv_head_dim,
-            kv_head_dim,
-            d_model,
-        );
-        let v_expected = cpu_reference_rearrange(
-            &fused_data,
-            row_stride,
-            batch,
-            seq,
-            n_kv_heads,
-            n_kv_heads,
-            kv_head_dim,
-            kv_head_dim,
-            d_model + kv_dim,
-        );
-
-        assert_eq!(q_result.as_slice(), q_expected.as_slice());
-        assert_eq!(k_result.as_slice(), k_expected.as_slice());
-        assert_eq!(v_result.as_slice(), v_expected.as_slice());
-
-        Ok(())
-    }
 }

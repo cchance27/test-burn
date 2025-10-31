@@ -1,15 +1,17 @@
 //! Centralised instrumentation configuration handling.
 
-use std::path::PathBuf;
-use std::sync::OnceLock;
 #[cfg(test)]
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    path::PathBuf, sync::{
+        OnceLock, atomic::{AtomicUsize, Ordering}
+    }
+};
 
+use metallic_env::{
+    EnvVarError, environment::instrument::{ENABLE_PROFILING, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH}
+};
 use tracing::Level;
-
-use metallic_env::EnvVarError;
-use metallic_env::environment::instrument::{ENABLE_PROFILING, LOG_LEVEL, METRICS_CONSOLE, METRICS_JSONL_PATH};
 
 /// Errors that can occur while loading or initialising [`AppConfig`].
 #[derive(Debug, thiserror::Error)]
@@ -156,7 +158,7 @@ impl AppConfig {
 
     #[cfg(test)]
     fn default_config() -> Self {
-        Self::from_env().unwrap_or_else(|_| Self {
+        Self::from_env().unwrap_or(Self {
             log_level: Level::INFO,
             metrics_jsonl_path: None,
             enable_console_metrics: false,
@@ -178,12 +180,12 @@ impl AppConfig {
 
     #[cfg(test)]
     fn ensure_profiling_enabled() {
-        if let Some(existing) = APP_CONFIG.get() {
-            if !existing.enable_profiling {
-                let mut updated = existing.clone();
-                updated.enable_profiling = true;
-                Self::overwrite_for_tests(updated);
-            }
+        if let Some(existing) = APP_CONFIG.get()
+            && !existing.enable_profiling
+        {
+            let mut updated = existing.clone();
+            updated.enable_profiling = true;
+            Self::overwrite_for_tests(updated);
         }
     }
 }
