@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use kernels::{KernelBackendOverride, KernelBackendOverrides, KernelBackendRegistry, KernelManager, matmul_mlx::MlxKernelCache};
 use metallic_instrumentation::config::AppConfig;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLCommandQueue, MTLCreateSystemDefaultDevice, MTLDevice};
 use rustc_hash::FxHashMap;
 
-use super::command_buffer_pipeline::{CommandBufferPipeline, PipelineCompletion};
+use super::command_buffer_pipeline::{self, CommandBufferPipeline, PipelineCompletion};
 use crate::{
     Tensor, TensorElement, caching::{CacheRegistry, CacheStats, KvCacheEntry, KvCacheState, ResourceCache, TensorPreparationCache}, context::detect_forced_matmul_backend, error::MetalError, kernels::{self, CustomKernelInvocable, DefaultKernelInvocable, MultiTensorOutput}, operation::CommandBuffer, pool::MemoryPool, profiling_state, tensor::Dtype
 };
@@ -99,6 +101,16 @@ impl<T: TensorElement> Context<T> {
         }
 
         let pipeline = CommandBufferPipeline::new(command_queue.clone());
+        let observer_cache = cache_registry
+            .slot::<TensorPreparationCache<T>>()
+            .expect("tensor preparation cache slot initialized")
+            .clone();
+        command_buffer_pipeline::register_completion_observer(
+            &command_queue,
+            Arc::new(move |cmd_buffer: &CommandBuffer| {
+                observer_cache.validate_states(cmd_buffer);
+            }),
+        );
 
         Ok(Context::<T> {
             device,
@@ -245,15 +257,8 @@ impl<T: TensorElement> Context<T> {
             && committed.is_committed()
         {
             let committed = self.active_cmd_buffer.take().expect("active command buffer must exist");
-            let wait_start = std::time::Instant::now();
-            committed.wait();
-            let waited = wait_start.elapsed();
-            let completion = PipelineCompletion {
-                command_buffer: committed,
-                label: None,
-                wait_duration: waited,
-            };
-            self.process_pipeline_completions(vec![completion]);
+            let completions = self.wait_for_command_buffer(committed, None);
+            self.process_pipeline_completions(completions);
         }
 
         if self.active_cmd_buffer.is_none() {
@@ -272,6 +277,14 @@ impl<T: TensorElement> Context<T> {
         }
 
         Ok(())
+    }
+
+    fn wait_for_command_buffer(
+        &mut self,
+        command_buffer: CommandBuffer,
+        label: Option<super::utils::GpuProfilerLabel>,
+    ) -> Vec<PipelineCompletion> {
+        command_buffer_pipeline::wait_with_pipeline(&self.command_queue, &command_buffer, label)
     }
 
     pub(crate) fn active_command_buffer_mut(&mut self) -> Result<&mut crate::operation::CommandBuffer, MetalError> {

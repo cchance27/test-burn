@@ -3,7 +3,7 @@
 This project now ships an implicit synchronization model for Metal tensors. The goal is to keep GPU work batched on a single command buffer, only force synchronization when host code genuinely needs the results, and remove the burden of sprinkling `ctx.synchronize()` throughout model code.
 
 ## What Was Implemented
-- **Stateful tensors.** Each `Tensor` owns `defining_cmd_buffer: Rc<RefCell<Option<CommandBuffer>>>`. `Tensor::ensure_ready` commits and waits the buffer on demand before returning host views (`src/metallic/tensor.rs`).
+- **Stateful tensors.** Each `Tensor` owns `defining_cmd_buffer: Rc<RefCell<Option<CommandBuffer>>>`. `Tensor::ensure_ready` now routes pending work through the shared command-buffer pipeline, committing and waiting on demand before returning host views (`crates/metallic/src/tensor/host_access_methods.rs`).
 - **Shared command-buffer wrapper.** `CommandBuffer` wraps `MTLCommandBuffer` in an `Arc` and tracks `committed`/`completed` flags, giving us cheap clones plus `is_committed`/`is_completed`/`ptr_eq` helpers (`src/metallic/operation.rs:160`).
 - **Context-managed batching.** `Context` holds an `active_cmd_buffer`, a `command_buffer_pipeline`, and the associated `active_resource_cache`. `ensure_active_cmd_buffer` now acquires fresh buffers through the pipeline, draining completed work only when the in-flight queue hits the triple-buffer limit so CPU encoding, GPU execution, and future CoreML stages can overlap (`src/metallic/src/context/main.rs`).
 - **Lazy sync on host access.** Calls such as `as_slice`, `as_mut_slice`, and `to_vec` promote pending GPU work to completion before exposing CPU data.

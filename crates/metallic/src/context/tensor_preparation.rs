@@ -48,10 +48,13 @@ impl<T: TensorElement> Context<T> {
                 }
 
                 // Attribute dependency wait to current logical GPU scope so it doesn't show up as Other
-                let wait_start = std::time::Instant::now();
-                dep.commit();
-                dep.wait();
-                let waited = wait_start.elapsed();
+                let completions = self.wait_for_command_buffer(dep.clone(), None);
+                let waited = completions
+                    .iter()
+                    .find(|completion| completion.command_buffer.ptr_eq(&dep))
+                    .map(|completion| completion.wait_duration)
+                    .unwrap_or_default();
+                self.process_pipeline_completions(completions);
                 if !waited.is_zero() {
                     if let Some(label) = self.current_gpu_scope_label() {
                         let path = label.op_name;
@@ -81,10 +84,13 @@ impl<T: TensorElement> Context<T> {
                 }
 
                 // Attribute dependency wait to current logical GPU scope so it doesn't show up as Other
-                let wait_start = std::time::Instant::now();
-                dep.commit();
-                dep.wait();
-                let waited = wait_start.elapsed();
+                let completions = self.wait_for_command_buffer(dep.clone(), None);
+                let waited = completions
+                    .iter()
+                    .find(|completion| completion.command_buffer.ptr_eq(&dep))
+                    .map(|completion| completion.wait_duration)
+                    .unwrap_or_default();
+                self.process_pipeline_completions(completions);
                 if !waited.is_zero() {
                     if let Some(label) = self.current_gpu_scope_label() {
                         let path = label.op_name;

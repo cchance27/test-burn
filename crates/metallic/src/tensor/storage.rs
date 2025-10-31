@@ -6,6 +6,7 @@ use objc2_metal::{MTLBlitCommandEncoder as _, MTLBuffer as _, MTLResourceOptions
 use super::{
     Arc, CommandBuffer, Context, Dtype, HostAccessState, MTLCommandQueue, MTLDevice, MetalError, Mutex, PhantomData, ProtocolObject, Rc, RefCell, RetainedBuffer, Tensor, TensorElement, TensorInit, TensorStorage, shared_host_access_state
 };
+use crate::context::command_buffer_pipeline;
 
 impl<T: TensorElement> Tensor<T> {
     #[inline]
@@ -94,7 +95,8 @@ impl<T: TensorElement> Tensor<T> {
                     encoder.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging_buf, 0, &dest_buf, 0, byte_len);
                 }
                 command_buffer.commit();
-                command_buffer.wait();
+                let completions = command_buffer_pipeline::wait_with_pipeline(&context.command_queue, &command_buffer, None);
+                command_buffer_pipeline::dispatch_completions(&context.command_queue, &completions);
 
                 Ok(Self::build_tensor(
                     dims,

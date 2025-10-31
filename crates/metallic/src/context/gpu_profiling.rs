@@ -151,25 +151,6 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn process_pipeline_completions(&mut self, completions: Vec<PipelineCompletion>) {
-        for completion in completions {
-            let waited = completion.wait_duration;
-            if !waited.is_zero() {
-                if let Some(label) = completion.label.as_ref() {
-                    metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
-                        op_name: format!("{}/cb_wait", label.op_name),
-                        backend: label.backend.clone(),
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                } else {
-                    metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
-                        op_name: "Generation Loop/cb_wait".to_string(),
-                        backend: GPU_PROFILER_BACKEND.to_string(),
-                        duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
-                    });
-                }
-            }
-
-            self.tensor_preparation_cache().validate_states(&completion.command_buffer);
-        }
+        command_buffer_pipeline::dispatch_completions(&self.command_queue, &completions);
     }
 }
