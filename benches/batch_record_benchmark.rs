@@ -17,10 +17,10 @@ impl Operation for BenchBlitZeroFill {
         Ok(())
     }
     
-    fn bind_to_encoder(&self, encoder: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, _encoder: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>) {
         // No-op for blit operation
     }
-    
+
 }
 
 fn bench_individual_vs_batched(c: &mut Criterion) {

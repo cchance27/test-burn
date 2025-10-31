@@ -151,7 +151,7 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
         Ok(())
     }
 
-    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
         
         set_buffer(encoder, 0, &self.gate.buf, self.gate.offset);
@@ -440,7 +440,7 @@ impl<T: TensorElement> Operation for SwiGLU<T> {
         Ok(())
     }
 
-    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         // No arguments to bind for this placeholder operation
     }
 }

@@ -240,7 +240,7 @@ impl Operation for MatMulMps {
         Ok(())
     }
 
-    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         // MPS operations don't bind compute encoder arguments directly - they use MPSMatrix views
     }
 }

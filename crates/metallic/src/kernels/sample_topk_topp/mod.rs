@@ -66,7 +66,7 @@ impl Operation for SampleTopKWrapper {
         Ok(())
     }
 
-    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         // No arguments to bind for this placeholder operation
     }
 }

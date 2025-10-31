@@ -111,7 +111,7 @@ impl<T: TensorElement> Operation for KvCacheWrite<T> {
         Ok(())
     }
 
-    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         use crate::encoder::{set_buffer, set_bytes};
         
         set_buffer(encoder, 0, &self.k_src.buf, self.k_src.offset);

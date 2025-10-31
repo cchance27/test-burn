@@ -110,24 +110,25 @@ In your kernel's `mod.rs`, you will implement the `KernelInvocable` trait. This 
 ```rust
 // You can pull in super::* to pull in most imports required for kernel creation to keep kernel rust files small.
 use super::*;
+use crate::{CommandBuffer, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
 
 // 1. Public, user-facing, zero-sized struct for the operation.
 pub struct ElemwiseMulOp;
 
 // 2. Internal struct that holds data for the `Operation` trait.
-struct ElemwiseMul {
-    a: Tensor,
-    b: Tensor,
-    out: Tensor,
+struct ElemwiseMul<T: TensorElement> {
+    a: Tensor<T>,
+    b: Tensor<T>,
+    out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
-// 3. Implement `KernelInvocable` for the public struct.
-impl KernelInvocable for ElemwiseMulOp {
-    // Input arguments for the call.
-    type Args = (Tensor, Tensor);
+// 3. Implement `DefaultKernelInvocable` for the public struct (updated trait).
+impl DefaultKernelInvocable for ElemwiseMulOp {
+    // Input arguments for the call with generic tensor element type.
+    type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>);
     // The output type.
-    type Output = Tensor;
 
     // Link to the enum variant in `KernelFunction`.
     fn function_id() -> Option<KernelFunction> {
@@ -136,15 +137,24 @@ impl KernelInvocable for ElemwiseMulOp {
 
     // This `new` method is called by `ctx.call()`.
     // It creates the output tensor and the internal `Operation` struct.
-    fn new(
-        ctx: &mut Context,
-        args: Self::Args,
+    fn new<'a, T: TensorElement>(
+        ctx: &mut Context<T>,
+        args: Self::Args<'a, T>,
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-    ) -> Result<(Box<dyn Operation>, Self::Output), MetalError> {
+        _cache: Option<&mut ResourceCache>,
+    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (a, b) = args;
 
+        // Prepare tensors for the active command
+        ctx.prepare_tensors_for_active_cmd(&[&a, &b])?;
+        
         // Create the output tensor.
-        let out = Tensor::create_tensor_pooled(a.dims().to_vec(), ctx)?;
+        let out = Tensor::new(a.dims().to_vec(), TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+
+        // Create a GPU profiler label for debugging/timing
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("elemwise_mul_op"));
 
         // Create the internal operation struct.
         let op = ElemwiseMul {
@@ -152,6 +162,7 @@ impl KernelInvocable for ElemwiseMulOp {
             b,
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Module should be supplied from our kernel library"),
+            profiler_label,
         };
 
         // Return the boxed operation and the output tensor.
@@ -161,14 +172,27 @@ impl KernelInvocable for ElemwiseMulOp {
 
 // 4. Implement `Operation` for the internal struct.
 // This contains the low-level logic to encode the kernel onto the command buffer.
-impl Operation for ElemwiseMul {
-    fn encode(
-        &self,
-        command_buffer: &Retained<ProtocolObject<dyn MTLCommandBuffer>>,
-        _cache: &mut ResourceCache,
-    ) -> Result<(), MetalError> {
-        // ... encoding logic (set buffers, dispatch threads, etc.)
+impl<T: TensorElement> Operation for ElemwiseMul<T> {
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
+        // Use the new ComputeKernelEncoder for structured encoding
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)  // Bind kernel arguments using the new method
+            .dispatch_1d(self.a.len() as u32, 256);
+        
         Ok(())
+    }
+
+    // NEW: Implement bind_kernel_args to handle the kernel argument binding
+    fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        // Bind input tensors as buffers to the compute encoder
+        set_buffer(encoder, 0, &self.a.buf, self.a.offset);
+        set_buffer(encoder, 1, &self.b.buf, self.b.offset);
+        set_buffer(encoder, 2, &self.out.buf, self.out.offset);
+        // Bind additional scalar parameters if needed
+        set_bytes(encoder, 3, &(self.a.len() as u32));
     }
 }
 ```
@@ -221,6 +245,52 @@ fn some_function(ctx: &mut Context, tensor_a: Tensor, tensor_b: Tensor) -> Resul
     Ok(result)
 }
 ```
+
+## 4. New ComputeKernelEncoder Pattern
+
+The project now uses a new structured approach for encoding Metal kernels using `ComputeKernelEncoder` and the `bind_kernel_args` method. This modern approach provides several benefits:
+
+### ComputeKernelEncoder Benefits
+- **Structured encoding**: Provides a fluent API for kernel encoding with method chaining
+- **Built-in profiling**: Automatically handles GPU profiling scope creation and cleanup
+- **Standardized dispatch**: Consistent dispatch patterns (1D, 2D, 3D) with proper threadgroup calculations
+- **Reduced boilerplate**: Eliminates manual encoder management and error handling
+
+### Key Components
+
+1. **ComputeKernelEncoder**: A helper struct that provides a clean API for encoding compute kernels:
+   ```rust
+   ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+       .pipeline(&self.pipeline)                    // Set the compute pipeline
+       .bind_kernel(self)                           // Bind kernel arguments using bind_kernel_args
+       .dispatch_1d(self.total_elements as u32, 256); // Dispatch with specified threadgroup size
+   ```
+
+2. **bind_kernel_args method**: A required method in the `Operation` trait that handles argument binding:
+   ```rust
+   fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+       use crate::encoder::{set_buffer, set_bytes};
+       
+       // Bind input tensors as buffers
+       set_buffer(encoder, 0, &self.input1.buf, self.input1.offset);
+       set_buffer(encoder, 1, &self.input2.buf, self.input2.offset);
+       set_buffer(encoder, 2, &self.output.buf, self.output.offset);
+       
+       // Bind scalar parameters if needed
+       set_bytes(encoder, 3, &self.scalar_param);
+   }
+   ```
+
+### Available ComputeKernelEncoder Methods
+- `pipeline(&pipeline)`: Set the compute pipeline state
+- `bind_kernel(&operation)`: Bind arguments using the operation's `bind_kernel_args` method
+- `buffer(index, buffer, offset)`: Bind a buffer directly (fallback option)
+- `bytes(index, data)`: Bind bytes directly (fallback option) 
+- `dispatch_1d(total_elements, threads_per_threadgroup)`: Dispatch 1D grid
+- `dispatch_2d(width, height, threads_per_tg)`: Dispatch 2D grid
+- `dispatch_3d(width, height, depth, threads_per_tg)`: Dispatch 3D grid
+- `dispatch_custom(groups, threads_per_tg)`: Dispatch with custom parameters
+- `dispatch_threads(grid_size, threadgroup_size)`: Direct dispatch control
 
 ## Graph-backed Kernels
 

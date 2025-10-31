@@ -19,7 +19,7 @@ pub trait Operation {
     fn encode(&self, command_buffer: &CommandBuffer, cache: &mut ResourceCache) -> Result<(), MetalError>;
     
     /// Bind kernel arguments to the compute encoder.
-    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>);
+    fn bind_kernel_args(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>);
 }
 
 /// A simple test-only operation for filling buffers with zeros using the blit encoder.
@@ -47,7 +47,7 @@ impl<T: crate::TensorElement> Operation for TestBlitZeroFill<T> {
         Ok(())
     }
 
-    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+    fn bind_kernel_args(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
         // TestBlitZeroFill uses a blit encoder, not a compute encoder, so no compute arguments to bind
     }
 }
@@ -383,7 +383,7 @@ impl ComputeKernelEncoder {
     /// Bind kernel arguments directly from an Operation that implements bind_to_encoder
     #[inline]
     pub fn bind_kernel<O: Operation>(self, kernel: &O) -> Self {
-        kernel.bind_to_encoder(&self.encoder);
+        kernel.bind_kernel_args(&self.encoder);
         self
     }
 
