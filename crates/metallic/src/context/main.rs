@@ -256,8 +256,6 @@ impl<T: TensorElement> Context<T> {
             self.process_pipeline_completions(vec![completion]);
         }
 
-        let mut new_buffer_created = false;
-
         if self.active_cmd_buffer.is_none() {
             let (mut cmd_buf, completed) = self.command_buffer_pipeline.acquire()?;
             if crate::profiling_state::get_profiling_state()
@@ -267,18 +265,10 @@ impl<T: TensorElement> Context<T> {
             }
             self.process_pipeline_completions(completed);
             self.active_cmd_buffer = Some(cmd_buf);
-            new_buffer_created = true;
         }
 
         if ensure_cache && self.active_resource_cache.is_none() {
             self.active_resource_cache = Some(crate::caching::ResourceCache::with_device(self.device.clone()));
-        }
-
-        // If a new command buffer was created, we need to clear preparation states
-        // for tensors prepared for the previous command buffer
-        if new_buffer_created {
-            // No need to explicitly clear preparation states here since the preparation
-            // cache will detect command buffer changes and handle invalidation appropriately
         }
 
         Ok(())

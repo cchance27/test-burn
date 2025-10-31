@@ -22,7 +22,7 @@
 2. **Context Integration**
    - `Context` owns one pipeline instance and keeps only a single *active* buffer for encoding.
    - `ensure_active_cmd_buffer_internal` acquires a fresh buffer from the pipeline, first draining completions if the in-flight queue is saturated.
-   - `finalize_active_command_buffer_if_latency` moves the current buffer into the pipeline. If latency mode is enabled we immediately flush all in-flight work to preserve today’s profiling semantics.
+   - `finalize_active_command_buffer_if_latency` moves the current buffer into the pipeline. If latency mode is enabled we immediately flush all in-flight work to preserve today’s profiling semantics; otherwise we keep the buffer active so steady-state decode throughput matches the pre-pipeline behaviour.
    - `synchronize` commits any active buffer, then flushes the pipeline completely, ensuring the tensor preparation cache is validated.
 
 3. **Completion Handling**

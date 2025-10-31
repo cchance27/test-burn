@@ -137,15 +137,17 @@ impl<T: TensorElement> Context<T> {
     }
 
     pub(crate) fn finalize_active_command_buffer_if_latency(&mut self) {
+        if !crate::profiling_state::get_profiling_state() {
+            return;
+        }
+
         if let Some(cmd_buf) = self.active_cmd_buffer.take() {
             let label = self.current_gpu_scope_label();
             self.command_buffer_pipeline.submit(cmd_buf, label);
         }
 
-        if crate::profiling_state::get_profiling_state() {
-            let completed = self.command_buffer_pipeline.flush_all();
-            self.process_pipeline_completions(completed);
-        }
+        let completed = self.command_buffer_pipeline.flush_all();
+        self.process_pipeline_completions(completed);
     }
 
     pub(crate) fn process_pipeline_completions(&mut self, completions: Vec<PipelineCompletion>) {

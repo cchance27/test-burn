@@ -6,7 +6,6 @@ use objc2_metal::MTLCommandQueue;
 use super::utils::GpuProfilerLabel;
 use crate::{error::MetalError, operation::CommandBuffer};
 
-const MIN_INFLIGHT_LIMIT: usize = 1;
 const DEFAULT_MAX_INFLIGHT: usize = 3;
 
 pub struct CommandBufferPipeline {
@@ -30,22 +29,9 @@ impl CommandBufferPipeline {
     pub fn new(queue: Retained<ProtocolObject<dyn MTLCommandQueue>>) -> Self {
         Self {
             queue,
-            inflight: VecDeque::new(),
+            inflight: VecDeque::with_capacity(DEFAULT_MAX_INFLIGHT),
             max_inflight: DEFAULT_MAX_INFLIGHT,
         }
-    }
-
-    pub fn with_capacity(queue: Retained<ProtocolObject<dyn MTLCommandQueue>>, max_inflight: usize) -> Self {
-        let clamped = max_inflight.max(MIN_INFLIGHT_LIMIT);
-        Self {
-            queue,
-            inflight: VecDeque::new(),
-            max_inflight: clamped,
-        }
-    }
-
-    pub fn set_max_inflight(&mut self, max_inflight: usize) {
-        self.max_inflight = max_inflight.max(MIN_INFLIGHT_LIMIT);
     }
 
     pub fn submit(&mut self, command_buffer: CommandBuffer, label: Option<GpuProfilerLabel>) {
