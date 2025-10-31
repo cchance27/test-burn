@@ -2,14 +2,13 @@ use std::{
     convert::{TryFrom, TryInto}, ffi::c_void, ptr::NonNull
 };
 
-use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSString;
-use objc2_metal::{MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLDataType, MTLDevice, MTLFunctionConstantValues, MTLLibrary, MTLSize};
 use rustc_hash::FxHashMap;
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}, tensor::Dtype
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::{ComputeKernelEncoder}, tensor::Dtype
 };
 
 #[repr(C)]
@@ -415,46 +414,50 @@ impl DefaultKernelInvocable for MatMulMlxOp {
 
 impl<T: TensorElement> Operation for MatMulMlx<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(self.threadgroups, self.threads_per_tg);
 
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
+        Ok(())
+    }
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.left.buf, self.left.offset);
-        set_buffer(&encoder, 1, &self.right.buf, self.right.offset);
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.left.buf, self.left.offset);
+        set_buffer(encoder, 1, &self.right.buf, self.right.offset);
         if self.use_out_source {
-            set_buffer(&encoder, 2, &self.out.buf, self.out.offset);
+            set_buffer(encoder, 2, &self.out.buf, self.out.offset);
         }
-        set_buffer(&encoder, 3, &self.out.buf, self.out.offset);
+        set_buffer(encoder, 3, &self.out.buf, self.out.offset);
 
         if let Some(bias) = &self.bias {
-            set_buffer(&encoder, 4, &bias.buf, bias.offset);
-            set_bytes(&encoder, 5, &self.params);
+            set_buffer(encoder, 4, &bias.buf, bias.offset);
+            set_bytes(encoder, 5, &self.params);
             if let Some(addmm) = &self.addmm {
-                set_bytes(&encoder, 6, addmm);
+                set_bytes(encoder, 6, addmm);
             }
             let batch_shape: i32 = self
                 .batch_size
                 .try_into()
-                .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))?;
-            set_bytes(&encoder, 7, &batch_shape);
-            set_bytes(&encoder, 8, &self.batch_strides);
+                .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))
+                .unwrap_or(0);
+            set_bytes(encoder, 7, &batch_shape);
+            set_bytes(encoder, 8, &self.batch_strides);
         } else {
-            set_bytes(&encoder, 4, &self.params);
+            set_bytes(encoder, 4, &self.params);
             if let Some(addmm) = &self.addmm {
-                set_bytes(&encoder, 5, addmm);
+                set_bytes(encoder, 5, addmm);
             }
             let batch_shape: i32 = self
                 .batch_size
                 .try_into()
-                .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))?;
-            set_bytes(&encoder, 6, &batch_shape);
-            set_bytes(&encoder, 7, &self.batch_strides);
+                .map_err(|_| MetalError::InvalidOperation("Batch size exceeds i32".to_string()))
+                .unwrap_or(0);
+            set_bytes(encoder, 6, &batch_shape);
+            set_bytes(encoder, 7, &self.batch_strides);
         }
-
-        dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
-        Ok(())
     }
 }
 

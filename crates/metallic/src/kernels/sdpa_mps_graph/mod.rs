@@ -3,7 +3,7 @@ mod interface;
 
 use interface::{SdpaGraphInputs, SdpaGraphInterface, SdpaGraphOutput};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 use objc2_metal_performance_shaders::MPSCommandBuffer;
 
 #[cfg(test)]
@@ -107,6 +107,10 @@ impl<T: TensorElement> Operation for SdpaMpsGraphOperation<T> {
         });
 
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // MPSGraph operations don't bind compute encoder arguments directly - they use MPSGraph bindings
     }
 }
 

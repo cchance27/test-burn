@@ -1,6 +1,8 @@
+use objc2_metal::{MTLComputeCommandEncoder, MTLSize};
+
 use super::*;
 use crate::{
-    CommandBuffer, TensorElement, encoder::{dispatch_threadgroups, set_compute_pipeline_state}
+    CommandBuffer, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
 };
 
 /// Public, user-facing, zero-sized struct for a NOOP operation.
@@ -12,6 +14,7 @@ struct Noop<T: TensorElement> {
     #[allow(dead_code)]
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 impl DefaultKernelInvocable for NoopOp {
@@ -30,9 +33,14 @@ impl DefaultKernelInvocable for NoopOp {
         // Ensure the tensor is tracked for an active command.
         ctx.prepare_tensors_for_active_cmd(&[&out])?;
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("noop_op"));
+
         let op = Noop {
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         Ok((Box::new(op), out))
@@ -41,11 +49,6 @@ impl DefaultKernelInvocable for NoopOp {
 
 impl<T: TensorElement> Operation for Noop<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-
-        // Minimal threadgroup dispatch: 1 thread, no buffers.
         let threadgroup_size = MTLSize {
             width: 1,
             height: 1,
@@ -56,8 +59,16 @@ impl<T: TensorElement> Operation for Noop<T> {
             height: 1,
             depth: 1,
         };
-        dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
+
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(threadgroups, threadgroup_size);
 
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // No arguments to bind for a NOOP operation
     }
 }

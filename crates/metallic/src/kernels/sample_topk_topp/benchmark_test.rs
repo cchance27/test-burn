@@ -261,7 +261,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
             sweep_configs.extend([(128usize, 2u32), (128, 3), (128, 4)]);
         }
 
-        let gpu_iterations = 1000;
+        let gpu_iterations = 100;
         let gpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
         let mut best_gpu_stats = None;
         let mut best_config = None;

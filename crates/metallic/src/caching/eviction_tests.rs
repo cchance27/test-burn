@@ -8,7 +8,7 @@ mod tests {
     use objc2_metal::MTLDevice;
 
     use crate::{
-        caching::{CacheRegistry, CacheableKernel, EvictionPolicy, EvictionStrategy}, error::MetalError
+        caching::{CacheRegistry, CacheableKernel, EvictionPolicy}, error::MetalError
     };
 
     // Mock kernel for testing

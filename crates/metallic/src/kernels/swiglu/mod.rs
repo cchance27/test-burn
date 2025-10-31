@@ -1,10 +1,11 @@
 use std::convert::TryFrom;
 
-use metallic_instrumentation::GpuProfiler;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
+    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
 };
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
@@ -120,19 +121,9 @@ impl DefaultKernelInvocable for SwiGLUFusedActivationOp {
 
 impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-
         let vector_width = std::cmp::max(self.vector_width as usize, 1);
         let base_threads = 256usize;
         let threads_per_tg_width = std::cmp::max(base_threads / vector_width, 1);
-        let threads_per_tg = MTLSize {
-            width: threads_per_tg_width,
-            height: 1,
-            depth: 1,
-        };
         let total_threads = if self.vector_width > 1 {
             let vectorized = self.total_elements / self.vector_width;
             let remainder = self.total_elements % self.vector_width;
@@ -141,26 +132,37 @@ impl<T: TensorElement> Operation for SwiGLUFusedActivation<T> {
             self.total_elements
         };
 
+        let threads_per_tg = MTLSize {
+            width: threads_per_tg_width,
+            height: 1,
+            depth: 1,
+        };
         let groups = MTLSize {
             width: (total_threads as usize).div_ceil(threads_per_tg.width),
             height: 1,
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.gate.buf, self.gate.offset);
-        set_buffer(&encoder, 1, &self.up_inout.buf, self.up_inout.offset);
-        set_buffer(&encoder, 2, &self.gate_bias.buf, self.gate_bias.offset);
-        set_buffer(&encoder, 3, &self.up_bias.buf, self.up_bias.offset);
-        set_bytes(&encoder, 4, &self.total_elements);
-        set_bytes(&encoder, 5, &self.bias_len);
-        set_bytes(&encoder, 6, &self.vector_width);
-        set_bytes(&encoder, 7, &self.gate_leading_stride);
-        set_bytes(&encoder, 8, &self.up_leading_stride);
-
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
 
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.gate.buf, self.gate.offset);
+        set_buffer(encoder, 1, &self.up_inout.buf, self.up_inout.offset);
+        set_buffer(encoder, 2, &self.gate_bias.buf, self.gate_bias.offset);
+        set_buffer(encoder, 3, &self.up_bias.buf, self.up_bias.offset);
+        set_bytes(encoder, 4, &self.total_elements);
+        set_bytes(encoder, 5, &self.bias_len);
+        set_bytes(encoder, 6, &self.vector_width);
+        set_bytes(encoder, 7, &self.gate_leading_stride);
+        set_bytes(encoder, 8, &self.up_leading_stride);
     }
 }
 
@@ -436,6 +438,10 @@ impl<T: TensorElement> Operation for SwiGLU<T> {
         // Since all computation was done in the `new` method of DefaultKernelInvocable,
         // this method just returns Ok(())
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // No arguments to bind for this placeholder operation
     }
 }
 

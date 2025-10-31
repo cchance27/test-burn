@@ -1,7 +1,7 @@
 use metallic_instrumentation::gpu_profiler::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLComputeCommandEncoder, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::*;
@@ -209,5 +209,9 @@ impl Operation for MatMulMpsAlphaBeta {
 
         drop(scope);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // MPS operations don't bind compute encoder arguments directly - they use MPSMatrix views
     }
 }

@@ -1,10 +1,10 @@
-use metallic_instrumentation::{GpuProfiler, MetricEvent, record_metric_async};
+use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}, operation::EncoderType, tensor::dtypes::U32
+    CommandBuffer, Context, MetalError, Tensor, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, operation::{ComputeKernelEncoder, EncoderType}, tensor::dtypes::U32
 };
 
 pub struct SampleTopKFusedOp;
@@ -21,14 +21,6 @@ pub struct SampleTopKFused<T: TensorElement> {
 impl<T: TensorElement> Operation for SampleTopKFused<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         command_buffer.prepare_encoder_for_operation(EncoderType::MetalCompute)?;
-        let encoder = command_buffer.get_compute_encoder()?;
-        let label = self.profiler_label.clone();
-        let scope = GpuProfiler::profile_command_buffer(command_buffer.raw(), label.op_name.clone(), label.backend.clone());
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.input_logits.buf, self.input_logits.offset);
-        set_buffer(&encoder, 1, &self.output_token.buf, self.output_token.offset);
-        set_bytes(&encoder, 2, &self.params);
 
         let tptg = self.threads_per_tg;
 
@@ -49,14 +41,24 @@ impl<T: TensorElement> Operation for SampleTopKFused<T> {
         );
         record_metric_async!(MetricEvent::GpuKernelDispatched {
             kernel_name: "sample_topk_fused".to_string(),
-            op_name: label.op_name.clone(),
+            op_name: self.profiler_label.op_name.clone(),
             thread_groups,
         });
 
-        dispatch_threads(&encoder, grid, tg);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_threads(grid, tg);
 
-        drop(scope);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.input_logits.buf, self.input_logits.offset);
+        set_buffer(encoder, 1, &self.output_token.buf, self.output_token.offset);
+        set_bytes(encoder, 2, &self.params);
     }
 }
 

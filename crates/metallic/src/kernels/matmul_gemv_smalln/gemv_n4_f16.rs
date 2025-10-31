@@ -1,13 +1,10 @@
 use half::f16;
-use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSUInteger;
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{
-        DefaultKernelInvocable, KernelFunction, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state
-    }
+    CommandBuffer, Context, MetalError, Operation, ResourceCache, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::{ComputeKernelEncoder}
 };
 
 // Public, user-facing, zero-sized struct for the operation.
@@ -18,6 +15,8 @@ struct MatmulGemvSmallN4<T: TensorElement> {
     a: Tensor<T>,
     b: Tensor<T>,
     out: Tensor<T>,
+    m: u32,
+    k: u32,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     profiler_label: GpuProfilerLabel,
 }
@@ -55,6 +54,8 @@ impl DefaultKernelInvocable for MatmulGemvSmallN4Op {
             a: a.clone(),
             b: b.clone(),
             out: out.clone(),
+            m: m as u32,
+            k: _k as u32,
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
             profiler_label,
         };
@@ -65,12 +66,7 @@ impl DefaultKernelInvocable for MatmulGemvSmallN4Op {
 
 impl<T: TensorElement> Operation for MatmulGemvSmallN4<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-
-        let (m, k) = (self.a.dims()[0] as u32, self.a.dims()[1] as u32);
+        let (m, _k) = (self.a.dims()[0] as u32, self.a.dims()[1] as u32);
         let _n = self.b.dims()[1] as u32;
 
         const ROWS_PER_TG: u32 = 16;
@@ -89,19 +85,27 @@ impl<T: TensorElement> Operation for MatmulGemvSmallN4<T> {
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
-        set_buffer(&encoder, 1, &self.b.buf, self.b.offset);
-        set_buffer(&encoder, 2, &self.out.buf, self.out.offset);
-        set_bytes(&encoder, 3, &m);
-        set_bytes(&encoder, 4, &k);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .with_encoder(|encoder| {
+                let smem_b_size = (TILE_K_SIZE as usize * COLS_PER_TG as usize * std::mem::size_of::<f16>()) as NSUInteger;
+                unsafe {
+                    encoder.setThreadgroupMemoryLength_atIndex(smem_b_size, 0);
+                }
+            })
+            .dispatch_custom(threadgroups, threads_per_threadgroup);
 
-        let smem_b_size = (TILE_K_SIZE as usize * COLS_PER_TG as usize * std::mem::size_of::<f16>()) as NSUInteger;
-        unsafe {
-            encoder.setThreadgroupMemoryLength_atIndex(smem_b_size, 0);
-        }
-
-        dispatch_threadgroups(&encoder, threadgroups, threads_per_threadgroup);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.a.buf, self.a.offset);
+        set_buffer(encoder, 1, &self.b.buf, self.b.offset);
+        set_buffer(encoder, 2, &self.out.buf, self.out.offset);
+        set_bytes(encoder, 3, &self.m);
+        set_bytes(encoder, 4, &self.k);
     }
 }

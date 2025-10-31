@@ -1,6 +1,6 @@
 use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
 use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
 use crate::{
@@ -401,5 +401,9 @@ impl<T: TensorElement> Operation for ScaledDotProductAttention<T> {
         // Since all computation was done in the `new` method of DefaultKernelInvocable,
         // this method just returns Ok(())
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // No arguments to bind for this placeholder operation
     }
 }

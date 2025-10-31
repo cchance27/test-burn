@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
 use super::*;
 use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, tensor::dtypes::U32};
@@ -64,5 +64,9 @@ struct SampleTopKWrapper;
 impl Operation for SampleTopKWrapper {
     fn encode(&self, _cb: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // No arguments to bind for this placeholder operation
     }
 }

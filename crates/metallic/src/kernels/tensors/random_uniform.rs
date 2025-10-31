@@ -1,6 +1,8 @@
+use objc2_metal::MTLComputeCommandEncoder;
+
 use super::*;
 use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
 };
 
 // 1. Public, user-facing, zero-sized struct for the operation.
@@ -14,6 +16,7 @@ struct RandomUniform<T: TensorElement> {
     seed: u32,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+    profiler_label: GpuProfilerLabel,
 }
 
 // 3. Implement `KernelInvocable` for the public struct.
@@ -47,6 +50,10 @@ impl DefaultKernelInvocable for RandomUniformOp {
             seed
         });
 
+        let profiler_label = ctx
+            .take_gpu_scope()
+            .unwrap_or_else(|| GpuProfilerLabel::fallback("random_uniform_op"));
+
         // Create the internal operation struct.
         let op = RandomUniform {
             dims,
@@ -55,6 +62,7 @@ impl DefaultKernelInvocable for RandomUniformOp {
             seed,
             out: out.clone(),
             pipeline: pipeline.expect("Kernel Library supplied for MetalKernels"),
+            profiler_label,
         };
 
         // Return the boxed operation and the output tensor.
@@ -66,20 +74,11 @@ impl DefaultKernelInvocable for RandomUniformOp {
 // This contains the low-level logic to encode the kernel onto the command buffer.
 impl<T: TensorElement> Operation for RandomUniform<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
         // Calculate total elements
         let total_elements: usize = self.dims.iter().product();
 
-        // Set pipeline state and buffers
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.out.buf, self.out.offset);
-        set_bytes(&encoder, 1, &self.seed);
-        set_bytes(&encoder, 2, &self.min_val);
-
-        // Create scale and set it
-        let scale = self.max_val - self.min_val;
-        set_bytes(&encoder, 3, &scale);
+        // Create scale
+        let _scale = self.max_val - self.min_val;
 
         // Dispatch threads - each thread handles 1 element
         let threadgroup_size = MTLSize {
@@ -94,9 +93,21 @@ impl<T: TensorElement> Operation for RandomUniform<T> {
             depth: 1,
         };
 
-        dispatch_threadgroups(&encoder, threadgroups, threadgroup_size);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(threadgroups, threadgroup_size);
 
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.out.buf, self.out.offset);
+        set_bytes(encoder, 1, &self.seed);
+        set_bytes(encoder, 2, &self.min_val);
+        set_bytes(encoder, 3, &(self.max_val - self.min_val));
     }
 }
 

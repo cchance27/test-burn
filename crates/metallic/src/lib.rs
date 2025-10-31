@@ -1,6 +1,6 @@
 pub use context::{Context, SamplerBuffers};
 pub use error::MetalError;
-pub use operation::{CommandBuffer, Operation};
+pub use operation::{CommandBuffer, ComputeKernelEncoder, Operation};
 pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
 pub use tokenizer::{SpecialTokens, Tokenizer, TokenizerError};
 

@@ -1,11 +1,9 @@
-use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
+use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{
-        DefaultKernelInvocable, KernelFunction, ResourceCache, dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state
-    }
+    CommandBuffer, Context, MetalError, Tensor, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel
 };
 
 // Public, user-facing, zero-sized struct for the operation.
@@ -71,10 +69,6 @@ impl DefaultKernelInvocable for SoftmaxVecOp {
 
 impl<T: TensorElement> Operation for SoftmaxVec<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
         // Match legacy behavior: use native execution width (min 32) and dispatch rows on Y
         let native = self.pipeline.threadExecutionWidth();
         let width = if native < 32 { 32 } else { native };
@@ -89,16 +83,23 @@ impl<T: TensorElement> Operation for SoftmaxVec<T> {
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.input.buf, self.input.offset);
-        set_buffer(&encoder, 1, &self.output.buf, self.output.offset);
-        // Kernel expects (seq_q, seq_k, causal, query_offset)
-        set_bytes(&encoder, 2, &self.seq_q);
-        set_bytes(&encoder, 3, &self.seq_k);
-        set_bytes(&encoder, 4, &self.causal);
-        set_bytes(&encoder, 5, &self.query_offset);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(threadgroups, threads_per_threadgroup);
 
-        dispatch_threadgroups(&encoder, threadgroups, threads_per_threadgroup);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.input.buf, self.input.offset);
+        set_buffer(encoder, 1, &self.output.buf, self.output.offset);
+        // Kernel expects (seq_q, seq_k, causal, query_offset)
+        set_bytes(encoder, 2, &self.seq_q);
+        set_bytes(encoder, 3, &self.seq_k);
+        set_bytes(encoder, 4, &self.causal);
+        set_bytes(encoder, 5, &self.query_offset);
     }
 }

@@ -1,6 +1,7 @@
 use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSUInteger;
+use objc2_metal::MTLComputeCommandEncoder;
 use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixSoftMax};
 
 use super::*;
@@ -37,6 +38,10 @@ impl<T: TensorElement> Operation for SoftmaxMpsOperation<T> {
                 .encodeToCommandBuffer_inputMatrix_resultMatrix(command_buffer.raw(), &attn_matrix, &attn_matrix);
         }
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // MPS operations don't bind compute encoder arguments directly - they use MPSMatrix views
     }
 }
 

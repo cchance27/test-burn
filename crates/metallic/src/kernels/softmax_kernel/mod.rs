@@ -1,8 +1,8 @@
-use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, caching::ResourceCache, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, caching::ResourceCache, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
 
 /// Public, user-facing, zero-sized struct for the legacy Softmax operation.
 pub struct SoftmaxKernelOp;
@@ -83,11 +83,6 @@ impl DefaultKernelInvocable for SoftmaxKernelOp {
 
 impl<T: TensorElement> Operation for SoftmaxKernelOperation<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-
         // Ensure at least 32 threads per threadgroup to satisfy kernel's reduction assumptions
         let native = self.pipeline.threadExecutionWidth();
         let width = if native < 32 { 32 } else { native };
@@ -101,13 +96,22 @@ impl<T: TensorElement> Operation for SoftmaxKernelOperation<T> {
             height: self.rows_total as usize,
             depth: 1,
         };
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.attn.buf, self.attn.offset);
-        set_bytes(&encoder, 1, &self.seq_q);
-        set_bytes(&encoder, 2, &self.seq_k);
-        set_bytes(&encoder, 3, &self.causal);
-        set_bytes(&encoder, 4, &self.query_offset);
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
+
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
+
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.attn.buf, self.attn.offset);
+        set_bytes(encoder, 1, &self.seq_q);
+        set_bytes(encoder, 2, &self.seq_k);
+        set_bytes(encoder, 3, &self.causal);
+        set_bytes(encoder, 4, &self.query_offset);
     }
 }

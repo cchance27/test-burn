@@ -1,5 +1,6 @@
 use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::{NSArray, NSMutableArray, NSNumber, NSString};
+use objc2_metal::MTLComputeCommandEncoder;
 use objc2_metal_performance_shaders_graph as mpsg;
 
 use crate::{
@@ -157,6 +158,10 @@ impl<T: TensorElement> Operation for RepeatKvHeadsGraph<T> {
             );
         }
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // MPSGraph operations don't bind compute encoder arguments directly - they use MPSGraph bindings
     }
 }
 

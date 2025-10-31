@@ -1,9 +1,8 @@
-use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}
 };
 
 #[repr(C)]
@@ -210,25 +209,24 @@ impl DefaultKernelInvocable for MatmulGemmTiledOp {
 
 impl<T: TensorElement> Operation for MatmulGemmTiled<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut crate::caching::ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(self.threadgroups, self.threads_per_tg);
 
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.left.buf, self.left.offset);
-        set_buffer(&encoder, 1, &self.right.buf, self.right.offset);
-        if let Some(ref bias) = self.bias {
-            set_buffer(&encoder, 2, &self.out.buf, self.out.offset);
-            set_bytes(&encoder, 3, &self.params);
-            set_buffer(&encoder, 4, &bias.buf, bias.offset);
-        } else {
-            set_buffer(&encoder, 2, &self.out.buf, self.out.offset);
-            set_bytes(&encoder, 3, &self.params);
-        }
-
-        dispatch_threadgroups(&encoder, self.threadgroups, self.threads_per_tg);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.left.buf, self.left.offset);
+        set_buffer(encoder, 1, &self.right.buf, self.right.offset);
+        set_buffer(encoder, 2, &self.out.buf, self.out.offset);
+        set_bytes(encoder, 3, &self.params);
+        if let Some(bias) = &self.bias {
+            set_buffer(encoder, 4, &bias.buf, bias.offset);
+        }
     }
 }
 

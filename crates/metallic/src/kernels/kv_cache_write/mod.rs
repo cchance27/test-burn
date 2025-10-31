@@ -1,7 +1,7 @@
-use metallic_instrumentation::GpuProfiler;
+use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
-use crate::{CommandBuffer, TensorElement, context::GpuProfilerLabel};
+use crate::{CommandBuffer, TensorElement, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel};
 
 pub mod cache;
 
@@ -92,11 +92,6 @@ impl DefaultKernelInvocable for KvCacheWriteOp {
 
 impl<T: TensorElement> Operation for KvCacheWrite<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-
         let threads_per_tg = MTLSize {
             width: 256,
             height: 1,
@@ -108,24 +103,31 @@ impl<T: TensorElement> Operation for KvCacheWrite<T> {
             depth: 1,
         };
 
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.k_src.buf, self.k_src.offset);
-        set_buffer(&encoder, 1, &self.v_src.buf, self.v_src.offset);
-        set_buffer(&encoder, 2, &self.k_dst.buf, self.k_dst.offset);
-        set_buffer(&encoder, 3, &self.v_dst.buf, self.v_dst.offset);
-        set_bytes(&encoder, 4, &self.params.canonical_heads);
-        set_bytes(&encoder, 5, &self.params.head_dim);
-        set_bytes(&encoder, 6, &self.params.seq_len);
-        set_bytes(&encoder, 7, &self.params.step);
-        set_bytes(&encoder, 8, &self.params.group_size);
-        set_bytes(&encoder, 9, &self.params.src_head_stride);
-        set_bytes(&encoder, 10, &self.params.src_seq_stride);
-        set_bytes(&encoder, 11, &self.params.dst_head_stride);
-        set_bytes(&encoder, 12, &self.params.dst_seq_stride);
-        set_bytes(&encoder, 13, &self.params.total_threads);
-        set_bytes(&encoder, 14, &self.params.repeated_heads);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(groups, threads_per_tg);
 
-        dispatch_threadgroups(&encoder, groups, threads_per_tg);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.k_src.buf, self.k_src.offset);
+        set_buffer(encoder, 1, &self.v_src.buf, self.v_src.offset);
+        set_buffer(encoder, 2, &self.k_dst.buf, self.k_dst.offset);
+        set_buffer(encoder, 3, &self.v_dst.buf, self.v_dst.offset);
+        set_bytes(encoder, 4, &self.params.canonical_heads);
+        set_bytes(encoder, 5, &self.params.head_dim);
+        set_bytes(encoder, 6, &self.params.seq_len);
+        set_bytes(encoder, 7, &self.params.step);
+        set_bytes(encoder, 8, &self.params.group_size);
+        set_bytes(encoder, 9, &self.params.src_head_stride);
+        set_bytes(encoder, 10, &self.params.src_seq_stride);
+        set_bytes(encoder, 11, &self.params.dst_head_stride);
+        set_bytes(encoder, 12, &self.params.dst_seq_stride);
+        set_bytes(encoder, 13, &self.params.total_threads);
+        set_bytes(encoder, 14, &self.params.repeated_heads);
     }
 }

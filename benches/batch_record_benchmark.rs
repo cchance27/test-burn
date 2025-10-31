@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use metallic::{
     caching::ResourceCache, operation::{CommandBuffer, Operation}, tensor::{Dtype, F32Element, Tensor}
 };
-use objc2::{rc::Retained, runtime::ProtocolObject};
+
 use objc2_metal::{MTLBlitCommandEncoder as _, MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
 
 // Simple benchmark-only operation for zero-fill using blit encoder
@@ -16,6 +16,11 @@ impl Operation for BenchBlitZeroFill {
         encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
         Ok(())
     }
+    
+    fn bind_to_encoder(&self, encoder: &objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>) {
+        // No-op for blit operation
+    }
+    
 }
 
 fn bench_individual_vs_batched(c: &mut Criterion) {

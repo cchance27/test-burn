@@ -1,13 +1,13 @@
-use metallic_instrumentation::GpuProfiler;
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLComputePipelineState, MTLSize};
+use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
 use super::*;
 use crate::{
-    CommandBuffer, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, kernels::{DefaultKernelInvocable, KernelFunction}
+    CommandBuffer, TensorElement, TensorInit, TensorStorage, operation::{ComputeKernelEncoder}, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}
 };
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct GemvParams {
     k: u32,
     n: u32,
@@ -31,20 +31,21 @@ struct MatMulGemv<T: TensorElement> {
 
 impl<T: TensorElement> Operation for MatMulGemv<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-
-        let label = self.profiler_label.clone();
-        let _scope = GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend);
-
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.a.buf, self.a.offset);
-        set_buffer(&encoder, 1, &self.x.buf, self.x.offset);
-        set_buffer(&encoder, 2, &self.y.buf, self.y.offset);
-        set_bytes(&encoder, 3, &self.params);
-
-        dispatch_threadgroups(&encoder, self.grid_size, self.threadgroup_size);
+        ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
+            .pipeline(&self.pipeline)
+            .bind_kernel(self)
+            .dispatch_custom(self.grid_size, self.threadgroup_size);
 
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        use crate::encoder::{set_buffer, set_bytes};
+        
+        set_buffer(encoder, 0, &self.a.buf, self.a.offset);
+        set_buffer(encoder, 1, &self.x.buf, self.x.offset);
+        set_buffer(encoder, 2, &self.y.buf, self.y.offset);
+        set_bytes(encoder, 3, &self.params);
     }
 }
 

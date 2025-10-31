@@ -3,7 +3,7 @@ use std::time::Duration;
 use metallic_instrumentation::gpu_profiler::GpuProfiler;
 use objc2::{AnyThread, rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::NSUInteger;
-use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputePipelineState};
+use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLComputeCommandEncoder, MTLComputePipelineState};
 use objc2_metal_performance_shaders::{MPSMatrix, MPSMatrixDescriptor, MPSMatrixMultiplication};
 
 use super::{DefaultKernelInvocable, KernelFunction};
@@ -238,6 +238,10 @@ impl Operation for MatMulMps {
 
         drop(scope);
         Ok(())
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // MPS operations don't bind compute encoder arguments directly - they use MPSMatrix views
     }
 }
 

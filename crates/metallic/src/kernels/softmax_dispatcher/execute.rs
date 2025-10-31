@@ -1,3 +1,6 @@
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputeCommandEncoder;
+
 use super::types::SoftmaxPolicy;
 use crate::{CommandBuffer, caching::ResourceCache, context::GpuProfilerLabel, error::MetalError, kernels::Operation};
 
@@ -25,5 +28,10 @@ impl Operation for SoftmaxDispatch {
         // Simply execute the underlying operation without creating an encoder here
         // The underlying operation will handle its own encoder and profiling
         self.op.encode(command_buffer, cache)
+    }
+
+    fn bind_to_encoder(&self, _encoder: &Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>) {
+        // The dispatcher doesn't directly bind arguments to compute encoders - 
+        // it delegates to the underlying operation
     }
 }
