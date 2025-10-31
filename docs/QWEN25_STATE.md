@@ -150,11 +150,11 @@ Based on Qwen2.5-Coder-0.5B: d_model=896, ff_dim=4864, n_heads=14, n_kv_heads=2,
   - **Sync Points**: **YES** - GPU to CPU sync required to read logits for sampling
 
 ### 4. Sampling
-- **Logits Processing**: Download logits from GPU, apply temperature/top-p/top-k sampling
-  - **Input**: [batch, seq, 151936] logits tensor from GPU
-  - **CPU/GPU Work**: CPU operation (sampling functions in `gpu_sample_top_k_top_p`)
-  - **Sync Points**: **YES** - GPU sync to download logits to CPU memory
-  - **Operation**: Download tensor from GPU, apply sampling strategy to select next token ID
+- **Logits Processing**: Fused top-k/top-p sampling is performed directly on the GPU.
+  - **Input**: [batch, seq, 151936] logits tensor on GPU
+  - **CPU/GPU Work**: GPU operation (`SampleTopKFused` Metal kernel).
+  - **Sync Points**: **Minimal**. A small sync is required to read the single resulting token ID (a `u32`) from the GPU. The large logits tensor is never downloaded.
+  - **Operation**: A custom Metal kernel performs temperature scaling, top-k selection, top-p nucleus sampling, and random sampling in a single, fused operation.
 
 ### 5. KV Cache Management
 - **For autoregressive generation**, KV caches are maintained across tokens
@@ -167,8 +167,7 @@ Based on Qwen2.5-Coder-0.5B: d_model=896, ff_dim=4864, n_heads=14, n_kv_heads=2,
 ### Performance Bottlenecks Summary:
 1. **Large matmuls**: Output projection (896×151936) and FFN operations (896×4864, 4864×896) dominate computation
 2. **KV cache management**: Storage and retrieval of large KV tensors affects memory bandwidth
-3. **GPU-CPU sync points**: Only during logits download for sampling - minimize these
-4. **Matmul dispatcher effectiveness**: Depends on selecting optimal kernel for each shape (MLX vs MPS vs custom GEMV)
+3. **Matmul dispatcher effectiveness**: Depends on selecting optimal kernel for each shape (MLX vs MPS vs custom GEMV)
 
 The matmul dispatcher and softmax dispatcher are the key optimization points that select from multiple backends (MLX, MPS, custom GEMV kernels, vec/block softmax) based on tensor dimensions and device capabilities.
 
@@ -177,7 +176,7 @@ The matmul dispatcher and softmax dispatcher are the key optimization points tha
 ## Current Sync Points Analysis
 
 ### 1. Mandatory Sync Points (per token):
-- **Logits Download**: GPU → CPU sync to read logits for sampling (main bottleneck)
+- **Token ID Readback**: A GPU → CPU sync to read the single selected token ID. This is a very small data transfer (4 bytes) and is a massive improvement over downloading the entire logits tensor.
 
 ### 2. Indirect Sync Points (per token):
 - **Token ID Processing**: CPU → GPU sync for token embedding lookup
@@ -188,16 +187,11 @@ The matmul dispatcher and softmax dispatcher are the key optimization points tha
 
 ---
 
-## Proposed Architectural Improvements to Reduce Sync Points
+## Architectural Improvements
 
-### 1. GPU-Based Sampling (Eliminates Logits Download Sync)
-- **Current**: Download logits to CPU → sample → return token ID to GPU
-- **Improved**: Implement sampling kernels directly in Metal
-  - Top-k selection kernel: Find top-k indices directly on GPU
-  - Softmax + sampling kernel: Apply temperature, compute probabilities, sample on GPU
-  - Output single token ID back to CPU (much smaller data transfer)
-- **Benefit**: Eliminates the main sync point for every generated token
-- **Priority**: **HIGH** - This would have the most dramatic impact on performance
+### 1. GPU-Based Sampling (Eliminates Logits Download Sync) - ✅ DONE
+- **Status**: **Implemented**. The `SampleTopKFused` Metal kernel performs the entire sampling process on the GPU.
+- **Benefit**: The main sync point for every generated token has been eliminated, resulting in a significant performance improvement.
 
 ### 2. GPU-Based Token Embedding (Eliminates CPU→GPU Transfer)
 - **Current**: CPU passes token ID → GPU embedding lookup
@@ -210,7 +204,7 @@ The matmul dispatcher and softmax dispatcher are the key optimization points tha
   - While CPU processes current token, GPU can start processing next step
   - Use multiple command buffers in flight
 - **Benefit**: Overlaps CPU and GPU work, hiding sync latencies
-- **Priority**: **MEDIUM** - Improves overall throughput
+- **Priority**: **HIGH** - This is the next major performance improvement to tackle.
 
 ### 4. GPU-Based KV Cache Management
 - **Current**: Some KV cache operations may involve CPU coordination
