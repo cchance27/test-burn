@@ -1,13 +1,26 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use metallic::{
-    caching::ResourceCache, kernels::{KernelFunction, KernelManager}, operation::{CommandBuffer, FillConstant, Operation, RandomUniform}, tensor::{Dtype, F32Element, Tensor}
+    caching::ResourceCache, operation::{CommandBuffer, Operation}, tensor::{Dtype, F32Element, Tensor}
 };
-use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::{MTLBlitCommandEncoder as _, MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptions};
+
+// Simple benchmark-only operation for zero-fill using blit encoder
+struct BenchBlitZeroFill {
+    dst: Tensor<F32Element>,
+}
+
+impl Operation for BenchBlitZeroFill {
+    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut metallic::caching::ResourceCache) -> Result<(), metallic::MetalError> {
+        let encoder = command_buffer.get_blit_encoder()?;
+        encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
+        Ok(())
+    }
+}
 
 fn bench_individual_vs_batched(c: &mut Criterion) {
     let device = MTLCreateSystemDefaultDevice().expect("default metal device");
     let queue = device.newCommandQueue().expect("command queue");
-    let mut km = KernelManager::new();
 
     let mut group = c.benchmark_group("record_vs_batch_record_mixed");
 
@@ -26,26 +39,10 @@ fn bench_individual_vs_batched(c: &mut Criterion) {
                 let tensor = Tensor::<F32Element>::from_existing_buffer(buffer, vec![element_count], Dtype::F32, &device, &queue, 0, true)
                     .expect("tensor from buffer");
 
-                for i in 0..n {
-                    if i % 2 == 0 {
-                        // Blit op (zero-fill)
-                        let op = FillConstant {
-                            dst: tensor.clone(),
-                            value: 0.0,
-                            ones_pipeline: None,
-                        };
-                        command_buffer.record(&op, &mut cache).unwrap();
-                    } else {
-                        // Compute op (random uniform)
-                        let op = RandomUniform {
-                            dst: tensor.clone(),
-                            seed: 42,
-                            pipeline: km
-                                .get_pipeline(KernelFunction::RandomUniform, Dtype::F32, &device)
-                                .expect("random_uniform pipeline"),
-                        };
-                        command_buffer.record(&op, &mut cache).unwrap();
-                    }
+                for _i in 0..n {
+                    // Blit op (zero-fill) - simplified for benchmark
+                    let op = BenchBlitZeroFill { dst: tensor.clone() };
+                    command_buffer.record(&op, &mut cache).unwrap();
                 }
                 command_buffer.commit();
                 command_buffer.wait();
@@ -67,24 +64,10 @@ fn bench_individual_vs_batched(c: &mut Criterion) {
                     .expect("tensor from buffer");
 
                 let mut ops: Vec<Box<dyn Operation>> = Vec::with_capacity(n);
-                for i in 0..n {
-                    if i % 2 == 0 {
-                        let op = FillConstant {
-                            dst: tensor.clone(),
-                            value: 0.0,
-                            ones_pipeline: None,
-                        };
-                        ops.push(Box::new(op));
-                    } else {
-                        let op = RandomUniform {
-                            dst: tensor.clone(),
-                            seed: 42,
-                            pipeline: km
-                                .get_pipeline(KernelFunction::RandomUniform, Dtype::F32, &device)
-                                .expect("random_uniform pipeline"),
-                        };
-                        ops.push(Box::new(op));
-                    }
+                for _i in 0..n {
+                    // Blit op (zero-fill) - simplified for benchmark
+                    let op = BenchBlitZeroFill { dst: tensor.clone() };
+                    ops.push(Box::new(op));
                 }
                 let borrowed: Vec<&dyn Operation> = ops.iter().map(|b| b.as_ref()).collect();
                 command_buffer.record_batch(&borrowed, &mut cache).unwrap();

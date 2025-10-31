@@ -7,15 +7,15 @@ use std::{
 use block2::RcBlock;
 use metallic_instrumentation::gpu_profiler::{CommandBufferCompletionHandler, GpuProfiler, ProfiledCommandBuffer};
 use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{
-    MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize
-};
+use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 use tracing::trace;
 
-use super::{Tensor, caching::ResourceCache, error::MetalError};
-use crate::{
-    TensorElement, encoder::{dispatch_threads, set_buffer, set_bytes, set_compute_pipeline_state}
-};
+#[cfg(test)]
+use super::Tensor;
+use super::{caching::ResourceCache, error::MetalError};
+#[cfg(test)]
+use crate::TensorElement;
+use crate::{encoder::{dispatch_threadgroups, set_buffer, set_bytes, set_compute_pipeline_state}, context::GpuProfilerLabel};
 
 /// A generic GPU operation that can encode itself into a Metal command buffer.
 pub trait Operation {
@@ -23,129 +23,31 @@ pub trait Operation {
     fn encode(&self, command_buffer: &CommandBuffer, cache: &mut ResourceCache) -> Result<(), MetalError>;
 }
 
-//TODO: Aren't these operations supposed to be in kernels?
+// Note: Legacy FillConstant, Arange, and RandomUniform operations have been removed.
+// Use proper kernel implementations from crates/metallic/src/kernels/tensors/ instead.
 
-/// An operation that fills a tensor with a constant value.
-pub struct FillConstant<T: TensorElement> {
+/// A simple test-only operation for filling buffers with zeros using the blit encoder.
+/// This is intentionally kept minimal for testing batch recording and profiling infrastructure.
+/// For production code, use `Tensor::zeros()` or other proper tensor generation methods.
+#[cfg(test)]
+pub(crate) struct TestBlitZeroFill<T: TensorElement> {
     pub dst: Tensor<T>,
-    pub value: f32,
-    pub ones_pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
-impl<T: TensorElement> Operation for FillConstant<T> {
+#[cfg(test)]
+impl<T: TensorElement> Operation for TestBlitZeroFill<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        if self.value == 0.0 {
-            // Encode blit fill for zeros
-            let encoder = command_buffer.get_blit_encoder()?;
-            let profiler_scope = GpuProfiler::profile_blit(
-                command_buffer.raw(),
-                &encoder,
-                format!("FillConstantZero@{:p}", self),
-                "Metal".to_string(),
-            );
-            encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
-            if let Some(scope) = profiler_scope {
-                scope.finish();
-            }
-            Ok(())
-        } else if self.value == 1.0 {
-            // Encode compute kernel for ones
-            if let Some(pipeline) = &self.ones_pipeline {
-                let encoder = command_buffer.get_compute_encoder()?;
-                let profiler_scope = GpuProfiler::profile_compute(
-                    command_buffer.raw(),
-                    &encoder,
-                    format!("FillConstantOnes@{:p}", self),
-                    "Metal".to_string(),
-                );
-                set_compute_pipeline_state(&encoder, pipeline);
-                set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
-                // pass total elements for tail-guarding
-                let num_elements = self.dst.len();
-                let num_elements_u32: u32 = num_elements as u32;
-                set_bytes(&encoder, 1, &num_elements_u32);
-                let threads_per_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
-                let threadgroup_size = MTLSize {
-                    width: threads_per_threadgroup,
-                    height: 1,
-                    depth: 1,
-                };
-                let num_vecs = num_elements.div_ceil(4);
-                let grid_size = MTLSize {
-                    width: num_vecs,
-                    height: 1,
-                    depth: 1,
-                };
-                dispatch_threads(&encoder, grid_size, threadgroup_size);
-                if let Some(scope) = profiler_scope {
-                    scope.finish();
-                }
-                Ok(())
-            } else {
-                Err(MetalError::OperationNotSupported("Ones pipeline not available".to_string()))
-            }
-        } else {
-            Err(MetalError::OperationNotSupported(
-                "FillConstant only supports 0.0 and 1.0".to_string(),
-            ))
+        let encoder = command_buffer.get_blit_encoder()?;
+        let profiler_scope = GpuProfiler::profile_blit(
+            command_buffer.raw(),
+            &encoder,
+            format!("TestBlitZeroFill@{:p}", self),
+            "Metal".to_string(),
+        );
+        encoder.fillBuffer_range_value(&self.dst.buf, (self.dst.offset..self.dst.offset + self.dst.size_bytes()).into(), 0);
+        if let Some(scope) = profiler_scope {
+            scope.finish();
         }
-    }
-}
-
-/// An operation that fills a tensor with sequential values (0..n).
-pub struct Arange<T: TensorElement> {
-    pub dst: Tensor<T>,
-    pub num_elements: usize,
-    pub pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-}
-
-impl<T: TensorElement> Operation for Arange<T> {
-    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
-        let threads_per_threadgroup = self.pipeline.maxTotalThreadsPerThreadgroup();
-        let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
-            height: 1,
-            depth: 1,
-        };
-        let grid_size = MTLSize {
-            width: self.num_elements,
-            height: 1,
-            depth: 1,
-        };
-        dispatch_threads(&encoder, grid_size, threadgroup_size);
-        Ok(())
-    }
-}
-
-/// An operation that fills a tensor with uniform random values.
-pub struct RandomUniform<T: TensorElement> {
-    pub dst: Tensor<T>,
-    pub seed: u64,
-    pub pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
-}
-
-impl<T: TensorElement> Operation for RandomUniform<T> {
-    fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-        let encoder = command_buffer.get_compute_encoder()?;
-        set_compute_pipeline_state(&encoder, &self.pipeline);
-        set_buffer(&encoder, 0, &self.dst.buf, self.dst.offset);
-        set_bytes(&encoder, 1, &(self.seed as u32));
-        let threads_per_threadgroup = self.pipeline.maxTotalThreadsPerThreadgroup();
-        let threadgroup_size = MTLSize {
-            width: threads_per_threadgroup,
-            height: 1,
-            depth: 1,
-        };
-        let num_elements = self.dst.len();
-        let grid_size = MTLSize {
-            width: num_elements,
-            height: 1,
-            depth: 1,
-        };
-        dispatch_threads(&encoder, grid_size, threadgroup_size);
         Ok(())
     }
 }
