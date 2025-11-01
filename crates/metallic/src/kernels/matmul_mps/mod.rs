@@ -188,8 +188,26 @@ impl DefaultKernelInvocable for MatMulMpsOp {
         };
         let result_desc = cache.get_or_create_descriptor(result_desc_key, &ctx.device)?;
 
-        // Create the internal operation struct.
-        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul_mps_op"));
+        // Get the hierarchical scope from context, or create a fallback
+        let mut profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul"));
+
+        // Append op_type/backend to the hierarchical path (no formatting in hot path)
+        profiler_label.op_name = format!("{}/matmul/mps", profiler_label.op_name);
+        profiler_label.backend = "mps".to_string();
+
+        // Only construct metadata HashMap when profiling is enabled
+        if crate::profiling_state::get_profiling_state() {
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), "matmul".to_string());
+            data.insert("backend".to_string(), "mps".to_string());
+            data.insert("batch".to_string(), left_view.batch.to_string());
+            data.insert("m".to_string(), eff_left_rows.to_string());
+            data.insert("n".to_string(), eff_right_cols.to_string());
+            data.insert("k".to_string(), eff_left_cols.to_string());
+            data.insert("tA".to_string(), if transpose_left { "1".to_string() } else { "0".to_string() });
+            data.insert("tB".to_string(), if transpose_right { "1".to_string() } else { "0".to_string() });
+            profiler_label.data = Some(data);
+        }
 
         let op = MatMulMps {
             left_buf: matmul_left_buf,
@@ -228,7 +246,11 @@ impl Operation for MatMulMps {
         GpuProfiler::mark_use_cpu_scope_for_cb(command_buffer.raw());
         let scope = {
             let label = &self.profiler_label;
-            GpuProfiler::profile_command_buffer(command_buffer.raw(), label.op_name.clone(), label.backend.clone())
+            if let Some(data) = label.data.clone() {
+                GpuProfiler::profile_command_buffer_with_data(command_buffer.raw(), label.op_name.clone(), label.backend.clone(), data)
+            } else {
+                GpuProfiler::profile_command_buffer(command_buffer.raw(), label.op_name.clone(), label.backend.clone())
+            }
         };
         unsafe {
             self.gemm.setBatchStart(0 as NSUInteger);

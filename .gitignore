@@ -6,7 +6,6 @@ debug_compare_out
 debug_dumps
 **/pytorch/*.json
 *.jsonl
-*.json
 *.log
 *.tsv
 .DS_Store

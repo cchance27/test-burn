@@ -58,6 +58,7 @@ fn gpu_profiler_emits_individual_kernel_events() {
                 op_name,
                 backend,
                 duration_us,
+                data: _,
             } = enriched.event
                 && backend == "Metal"
                 && op_name.starts_with("TestBlitZeroFill")
@@ -130,6 +131,7 @@ fn context_call_attaches_gpu_profiler() {
                     op_name,
                     backend,
                     duration_us,
+                    data: _,
                 } = enriched.event
                     && backend == "Metal"
                     && op_name.starts_with("elemwise_add_op")
@@ -186,6 +188,7 @@ fn matmul_mps_emits_gpu_event() {
                     op_name,
                     backend,
                     duration_us,
+                    data: _,
                 } = enriched.event
                 && backend == "Metal"
                 && op_name.starts_with("matmul_test_scope")

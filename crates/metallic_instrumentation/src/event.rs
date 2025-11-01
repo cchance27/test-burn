@@ -22,6 +22,9 @@ pub enum MetricEvent {
         /// The backend that executed the operation (e.g., "Mlx", "Mps").
         backend: String,
         duration_us: u64,
+        /// Optional structured metadata for operations (e.g., matmul shapes, configuration).
+        #[serde(skip_serializing_if = "Option::is_none")]
+        data: Option<FxHashMap<String, String>>,
     },
     /// Timing data for internal kernels invoked by frameworks such as MPS.
     InternalKernelCompleted {

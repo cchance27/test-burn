@@ -141,12 +141,14 @@ impl<T: TensorElement> Context<T> {
                         op_name: format!("{}/cb_wait", path),
                         backend: label.backend,
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                        data: None,
                     });
                 } else {
                     metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
                         op_name: "Generation Loop/cb_wait".to_string(),
                         backend: GPU_PROFILER_BACKEND.to_string(),
                         duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                        data: None,
                     });
                 }
             }

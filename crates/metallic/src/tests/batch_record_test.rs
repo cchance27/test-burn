@@ -61,6 +61,7 @@ fn batch_profiler_emits_individual_kernel_events() {
                     op_name,
                     backend,
                     duration_us,
+                    data: _,
                 } = enriched.event
                 && backend == "Metal"
                 && op_name.starts_with("TestBlitZeroFill")

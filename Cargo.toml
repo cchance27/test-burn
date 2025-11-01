@@ -11,10 +11,6 @@ members = [
     "crates/metallic_cli_helpers",
 ]
 
-[workspace.features]
-src_kernels = ["metallic/src_kernels"]
-built_kernels = ["metallic/built_kernels"]
-
 [features]
 src_kernels = ["metallic/src_kernels"]
 built_kernels = ["metallic/built_kernels"]

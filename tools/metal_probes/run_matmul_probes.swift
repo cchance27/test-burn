@@ -1,9 +1,10 @@
 import Foundation
 import Metal
 import MetalPerformanceShaders
+import Darwin
 
 struct MatmulShapeSpec: Hashable {
-    enum Backend: String {
+    enum Backend: String, CaseIterable {
         case mlx
         case mps
         case gemv
@@ -25,11 +26,49 @@ struct MatmulShapeSpec: Hashable {
     let bias: Bool
 }
 
+private let outputSupportsColor: Bool = {
+    if ProcessInfo.processInfo.environment["NO_COLOR"] != nil {
+        return false
+    }
+    return isatty(fileno(stdout)) != 0
+}()
+
+private func colorize(_ text: String, code: String) -> String {
+    guard outputSupportsColor else { return text }
+    return "\u{001B}[\(code)m\(text)\u{001B}[0m"
+}
+
+private func formatTag(_ tag: String) -> String {
+    switch tag {
+    case "baseline":
+        return colorize("[baseline]", code: "33;1")
+    case "best-gpu":
+        return colorize("[best-gpu]", code: "32;1")
+    default:
+        return "[\(tag)]"
+    }
+}
+
 struct BenchmarkResult {
     let spec: MatmulShapeSpec
-    let timingsMs: [Double]
+    let backend: MatmulShapeSpec.Backend
+    let variantName: String
+    let library: String?
+    let isBaseline: Bool
+    let gpuTimingsMs: [Double]
+    let cpuTimingsMs: [Double]
     let maxAbsError: Float
     let maxRelError: Float
+
+    var averageGpuMs: Double? {
+        guard !gpuTimingsMs.isEmpty else { return nil }
+        return gpuTimingsMs.reduce(0, +) / Double(gpuTimingsMs.count)
+    }
+
+    var averageCpuMs: Double? {
+        guard !cpuTimingsMs.isEmpty else { return nil }
+        return cpuTimingsMs.reduce(0, +) / Double(cpuTimingsMs.count)
+    }
 }
 
 enum HarnessError: Error, CustomStringConvertible {
@@ -62,6 +101,26 @@ enum HarnessError: Error, CustomStringConvertible {
             return "Failed to parse MATMUL_QWEN25_SIZES.md: \(msg)"
         }
     }
+}
+
+struct KernelVariantConfig: Decodable {
+    let name: String
+    let library: String?
+    let enabled: Bool?
+    let baseline: Bool?
+}
+
+struct KernelVariant {
+    let name: String
+    let library: String?
+    let isBaseline: Bool
+}
+
+struct VariantFailure {
+    let spec: MatmulShapeSpec
+    let backend: MatmulShapeSpec.Backend
+    let variantName: String
+    let errorDescription: String
 }
 
 struct LCG {
@@ -280,6 +339,8 @@ struct GEMMAddMMParams {
 }
 
 final class MatmulHarness {
+    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .mps, .gemv, .gemmTiled]
+
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
     private let libraries: [String: MTLLibrary]
@@ -287,6 +348,10 @@ final class MatmulHarness {
     private let matmulDir: URL
     private let iterations: Int
     private let warmup: Int
+    private let variants: [MatmulShapeSpec.Backend: [KernelVariant]]
+    private let enabledBackends: [MatmulShapeSpec.Backend]
+    private let compareAllBackends: Bool
+    private(set) var variantFailures: [VariantFailure] = []
 
     init(buildDir: URL, matmulDir: URL) throws {
         guard let device = MTLCreateSystemDefaultDevice() else {
@@ -302,26 +367,196 @@ final class MatmulHarness {
         self.iterations = Int(ProcessInfo.processInfo.environment["MATMUL_BENCH_ITERS"] ?? "") ?? 8
         self.warmup = Int(ProcessInfo.processInfo.environment["MATMUL_BENCH_WARMUP"] ?? "") ?? 2
         self.libraries = try MatmulHarness.loadLibraries(device: device, buildDir: buildDir)
+        let variantsMapping = MatmulHarness.loadVariants(matmulDir: matmulDir)
+        self.variants = variantsMapping
+
+        let defaultBackends = MatmulHarness.backendDisplayOrder.filter { variantsMapping[$0] != nil }
+        let backendEnv = ProcessInfo.processInfo.environment["MATMUL_BACKENDS"]
+        if let env = backendEnv, !env.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let requested = env
+                .split(separator: ",")
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .compactMap { MatmulShapeSpec.Backend(rawValue: $0) }
+                .filter { variantsMapping[$0] != nil }
+            self.enabledBackends = requested.isEmpty ? defaultBackends : requested
+        } else {
+            self.enabledBackends = defaultBackends
+        }
+
+        let compareEnv = ProcessInfo.processInfo.environment["MATMUL_COMPARE_ALL"]
+        self.compareAllBackends = MatmulHarness.parseEnvBool(compareEnv, defaultValue: true)
+
+        try validateVariantLibraries()
+    }
+
+    private static func parseEnvBool(_ raw: String?, defaultValue: Bool) -> Bool {
+        guard let raw = raw else { return defaultValue }
+        let normalized = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if normalized.isEmpty { return defaultValue }
+        switch normalized {
+        case "0", "false", "no", "off":
+            return false
+        case "1", "true", "yes", "on":
+            return true
+        default:
+            return defaultValue
+        }
+    }
+
+    private static func defaultLibraryName(for backend: MatmulShapeSpec.Backend) -> String? {
+        switch backend {
+        case .mlx:
+            return "original_mlx"
+        case .gemv:
+            return "original_gemv"
+        case .gemmTiled:
+            return "original_gemm_tiled"
+        case .mps:
+            return nil
+        }
+    }
+
+    private static func defaultVariants() -> [MatmulShapeSpec.Backend: [KernelVariant]] {
+        var mapping: [MatmulShapeSpec.Backend: [KernelVariant]] = [:]
+        for backend in MatmulShapeSpec.Backend.allCases {
+            switch backend {
+            case .mlx, .gemv, .gemmTiled:
+                if let library = defaultLibraryName(for: backend) {
+                    mapping[backend] = [KernelVariant(name: "baseline", library: library, isBaseline: true)]
+                }
+            case .mps:
+                mapping[backend] = [KernelVariant(name: "baseline", library: nil, isBaseline: true)]
+            }
+        }
+        return mapping
+    }
+
+    private static func buildVariants(from configs: [KernelVariantConfig], backend: MatmulShapeSpec.Backend) -> [KernelVariant] {
+        let defaultLibrary = defaultLibraryName(for: backend)
+        var variants: [KernelVariant] = []
+        var hasBaseline = false
+        for config in configs {
+            let libraryName = config.library ?? defaultLibrary
+            variants.append(KernelVariant(name: config.name, library: libraryName, isBaseline: config.baseline ?? false))
+            if config.baseline == true {
+                hasBaseline = true
+            }
+        }
+        if !hasBaseline, let first = variants.first {
+            variants[0] = KernelVariant(name: first.name, library: first.library, isBaseline: true)
+        }
+        return variants
+    }
+
+    private static func loadVariants(matmulDir: URL) -> [MatmulShapeSpec.Backend: [KernelVariant]] {
+        let manifestURL = matmulDir.appendingPathComponent("variants.json")
+        let defaults = defaultVariants()
+        let fileManager = FileManager.default
+        guard fileManager.fileExists(atPath: manifestURL.path) else {
+            return defaults
+        }
+
+        do {
+            let data = try Data(contentsOf: manifestURL)
+            let decoder = JSONDecoder()
+            let rawManifest = try decoder.decode([String: [KernelVariantConfig]].self, from: data)
+            var mapping: [MatmulShapeSpec.Backend: [KernelVariant]] = [:]
+            for (key, configs) in rawManifest {
+                guard let backend = MatmulShapeSpec.Backend(rawValue: key.lowercased()) else {
+                    print("Warning: Unknown backend in variants manifest: \(key)")
+                    continue
+                }
+                let enabledConfigs = configs.filter { $0.enabled ?? true }
+                if enabledConfigs.isEmpty {
+                    continue
+                }
+                let variants = buildVariants(from: enabledConfigs, backend: backend)
+                if !variants.isEmpty {
+                    mapping[backend] = variants
+                }
+            }
+            for (backend, variants) in defaults where mapping[backend] == nil {
+                mapping[backend] = variants
+            }
+            return mapping
+        } catch {
+            print("Warning: Failed to load variants manifest (\(error)). Falling back to defaults.")
+            return defaults
+        }
+    }
+
+    private func validateVariantLibraries() throws {
+        var missing: [String] = []
+        for (backend, variants) in variants {
+            for variant in variants {
+                guard let libraryName = variant.library else { continue }
+                if libraries[libraryName] == nil {
+                    missing.append("\(backend.rawValue)::\(variant.name) expects \(libraryName).metallib")
+                }
+            }
+        }
+        if !missing.isEmpty {
+            throw HarnessError.libraryLoadFailed(missing.joined(separator: ", "))
+        }
+    }
+
+    private func candidateBackends(for spec: MatmulShapeSpec) -> [MatmulShapeSpec.Backend] {
+        if compareAllBackends {
+            return enabledBackends
+        }
+        return enabledBackends.contains(spec.backend) ? [spec.backend] : []
+    }
+
+    private func runVariant(spec: MatmulShapeSpec, backend: MatmulShapeSpec.Backend, variant: KernelVariant) throws -> BenchmarkResult {
+        switch backend {
+        case .mlx:
+            return try runMLX(spec: spec, variant: variant)
+        case .mps:
+            return try runMPS(spec: spec, variant: variant)
+        case .gemv:
+            return try runGEMV(spec: spec, variant: variant)
+        case .gemmTiled:
+            return try runGEMMTiled(spec: spec, variant: variant)
+        }
     }
 
     func run(specs: [MatmulShapeSpec]) throws -> [BenchmarkResult] {
+        variantFailures.removeAll()
         var results: [BenchmarkResult] = []
+
         for spec in specs {
-            switch spec.backend {
-            case .mlx:
-                let result = try runMLX(spec: spec)
-                results.append(result)
-            case .mps:
-                let result = try runMPS(spec: spec)
-                results.append(result)
-            case .gemv:
-                let result = try runGEMV(spec: spec)
-                results.append(result)
-            case .gemmTiled:
-                let result = try runGEMMTiled(spec: spec)
-                results.append(result)
+            let backends = candidateBackends(for: spec)
+            if backends.isEmpty {
+                variantFailures.append(VariantFailure(spec: spec, backend: spec.backend, variantName: "<none>", errorDescription: "no enabled backends"))
+                continue
+            }
+
+            for backend in backends {
+                guard let variantList = variants[backend], !variantList.isEmpty else {
+                    continue
+                }
+                for variant in variantList {
+                    do {
+                        let result = try runVariant(spec: spec, backend: backend, variant: variant)
+                        results.append(result)
+                    } catch {
+                        variantFailures.append(
+                            VariantFailure(
+                                spec: spec,
+                                backend: backend,
+                                variantName: variant.name,
+                                errorDescription: String(describing: error)
+                            )
+                        )
+                    }
+                }
             }
         }
+
+        if results.isEmpty {
+            throw HarnessError.parseFailure("no successful matmul benchmarks")
+        }
+
         return results
     }
 
@@ -380,9 +615,9 @@ final class MatmulHarness {
         )
     }
 
-    private func runMLX(spec: MatmulShapeSpec) throws -> BenchmarkResult {
-        guard let library = libraries["original_mlx"] else {
-            throw HarnessError.libraryLoadFailed("original_mlx.metallib")
+    private func runMLX(spec: MatmulShapeSpec, variant: KernelVariant) throws -> BenchmarkResult {
+        guard let libraryName = variant.library, let library = libraries[libraryName] else {
+            throw HarnessError.libraryLoadFailed((variant.library ?? "original_mlx") + ".metallib")
         }
 
         let tensors = loadMatmulTensors(spec: spec)
@@ -456,6 +691,7 @@ final class MatmulHarness {
         let threadsPerTG = MTLSize(width: 32, height: wnSel, depth: wmSel)
 
         var gpuTimings: [Double] = []
+        var cpuTimings: [Double] = []
         let totalIterations = max(iterations, warmup + 1)
 
         for iteration in 0..<totalIterations {
@@ -499,12 +735,15 @@ final class MatmulHarness {
 
             encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerTG)
             encoder.endEncoding()
+            let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
 
             if iteration >= warmup {
                 let duration = measureGPUTime(commandBuffer: commandBuffer)
                 gpuTimings.append(duration)
+                let cpuElapsed = DispatchTime.now().uptimeNanoseconds &- cpuStart
+                cpuTimings.append(Double(cpuElapsed) / 1_000_000.0)
             }
         }
 
@@ -516,13 +755,18 @@ final class MatmulHarness {
 
         return BenchmarkResult(
             spec: spec,
-            timingsMs: gpuTimings,
+            backend: .mlx,
+            variantName: variant.name,
+            library: libraryName,
+            isBaseline: variant.isBaseline,
+            gpuTimingsMs: gpuTimings,
+            cpuTimingsMs: cpuTimings,
             maxAbsError: validation.maxAbsError,
             maxRelError: validation.maxRelError
         )
     }
 
-    private func runMPS(spec: MatmulShapeSpec) throws -> BenchmarkResult {
+    private func runMPS(spec: MatmulShapeSpec, variant: KernelVariant) throws -> BenchmarkResult {
         let tensors = loadMatmulTensors(spec: spec)
         guard MPSSupportsMTLDevice(device) else {
             throw HarnessError.metalUnavailable
@@ -567,6 +811,7 @@ final class MatmulHarness {
 
         let totalIterations = max(iterations, warmup + 1)
         var gpuTimings: [Double] = []
+        var cpuTimings: [Double] = []
 
         for iteration in 0..<totalIterations {
             restoreOutputBuffer(buffer: tensors.output, initial: tensors.initialOutput)
@@ -580,12 +825,15 @@ final class MatmulHarness {
             let resultMatrix = MPSMatrix(buffer: tensors.output, descriptor: outDescriptor)
 
             op.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
+            let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
 
             if iteration >= warmup {
                 let duration = measureGPUTime(commandBuffer: commandBuffer)
                 gpuTimings.append(duration)
+                let cpuElapsed = DispatchTime.now().uptimeNanoseconds &- cpuStart
+                cpuTimings.append(Double(cpuElapsed) / 1_000_000.0)
             }
         }
 
@@ -597,15 +845,20 @@ final class MatmulHarness {
 
         return BenchmarkResult(
             spec: spec,
-            timingsMs: gpuTimings,
+            backend: .mps,
+            variantName: variant.name,
+            library: nil,
+            isBaseline: variant.isBaseline,
+            gpuTimingsMs: gpuTimings,
+            cpuTimingsMs: cpuTimings,
             maxAbsError: validation.maxAbsError,
             maxRelError: validation.maxRelError
         )
     }
 
-    private func runGEMV(spec: MatmulShapeSpec) throws -> BenchmarkResult {
-        guard let library = libraries["original_gemv"] else {
-            throw HarnessError.libraryLoadFailed("original_gemv.metallib")
+    private func runGEMV(spec: MatmulShapeSpec, variant: KernelVariant) throws -> BenchmarkResult {
+        guard let libraryName = variant.library, let library = libraries[libraryName] else {
+            throw HarnessError.libraryLoadFailed((variant.library ?? "original_gemv") + ".metallib")
         }
 
         let tensors = loadMatmulTensors(spec: spec)
@@ -640,6 +893,7 @@ final class MatmulHarness {
         var k = UInt32(spec.k)
         
         var gpuTimings: [Double] = []
+        var cpuTimings: [Double] = []
         let totalIterations = max(iterations, warmup + 1)
 
         for iteration in 0..<totalIterations {
@@ -692,12 +946,15 @@ final class MatmulHarness {
             }
 
             encoder.endEncoding()
+            let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
 
             if iteration >= warmup {
                 let duration = measureGPUTime(commandBuffer: commandBuffer)
                 gpuTimings.append(duration)
+                let cpuElapsed = DispatchTime.now().uptimeNanoseconds &- cpuStart
+                cpuTimings.append(Double(cpuElapsed) / 1_000_000.0)
             }
         }
 
@@ -709,15 +966,20 @@ final class MatmulHarness {
 
         return BenchmarkResult(
             spec: spec,
-            timingsMs: gpuTimings,
+            backend: .gemv,
+            variantName: variant.name,
+            library: libraryName,
+            isBaseline: variant.isBaseline,
+            gpuTimingsMs: gpuTimings,
+            cpuTimingsMs: cpuTimings,
             maxAbsError: validation.maxAbsError,
             maxRelError: validation.maxRelError
         )
     }
 
-    private func runGEMMTiled(spec: MatmulShapeSpec) throws -> BenchmarkResult {
-        guard let library = libraries["original_gemm_tiled"] else {
-            throw HarnessError.libraryLoadFailed("original_gemm_tiled.metallib")
+    private func runGEMMTiled(spec: MatmulShapeSpec, variant: KernelVariant) throws -> BenchmarkResult {
+        guard let libraryName = variant.library, let library = libraries[libraryName] else {
+            throw HarnessError.libraryLoadFailed((variant.library ?? "original_gemm_tiled") + ".metallib")
         }
 
         let tensors = loadMatmulTensors(spec: spec)
@@ -747,6 +1009,7 @@ final class MatmulHarness {
         )
 
         var gpuTimings: [Double] = []
+        var cpuTimings: [Double] = []
         let totalIterations = max(iterations, warmup + 1)
 
         for iteration in 0..<totalIterations {
@@ -783,12 +1046,15 @@ final class MatmulHarness {
 
             encoder.dispatchThreadgroups(threadgroups, threadsPerThreadgroup: threadsPerTG)
             encoder.endEncoding()
+            let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()
 
             if iteration >= warmup {
                 let duration = measureGPUTime(commandBuffer: commandBuffer)
                 gpuTimings.append(duration)
+                let cpuElapsed = DispatchTime.now().uptimeNanoseconds &- cpuStart
+                cpuTimings.append(Double(cpuElapsed) / 1_000_000.0)
             }
         }
 
@@ -800,7 +1066,12 @@ final class MatmulHarness {
 
         return BenchmarkResult(
             spec: spec,
-            timingsMs: gpuTimings,
+            backend: .gemmTiled,
+            variantName: variant.name,
+            library: libraryName,
+            isBaseline: variant.isBaseline,
+            gpuTimingsMs: gpuTimings,
+            cpuTimingsMs: cpuTimings,
             maxAbsError: validation.maxAbsError,
             maxRelError: validation.maxRelError
         )
@@ -1040,7 +1311,7 @@ func makeThreadgroups(
 }
 
 func restoreOutputBuffer(buffer: MTLBuffer, initial: [Float16]) {
-    initial.withUnsafeBytes { bytes in
+    _ = initial.withUnsafeBytes { bytes in
         memcpy(buffer.contents(), bytes.baseAddress!, bytes.count)
     }
 }
@@ -1072,7 +1343,7 @@ struct OriginalProfileData {
 // Global variable to hold the original profiling data
 var originalProfilingData: [String: OriginalProfileData] = [:]
 
-func summarize(results: [BenchmarkResult]) {
+func summarize(specs: [MatmulShapeSpec], results: [BenchmarkResult], failures: [VariantFailure]) {
     // Load original profiling data from markdown file
     guard let markdownPath = CommandLine.arguments.last else {
         print("Error: No markdown path provided")
@@ -1085,39 +1356,97 @@ func summarize(results: [BenchmarkResult]) {
         print("Warning: Could not load original profiling data: \(error)")
     }
     
-    guard !results.isEmpty else {
+    if results.isEmpty {
         print("No benchmark results to display.")
         return
     }
 
-    print("Matmul benchmark summary (iterations=\(results.first?.timingsMs.count ?? 0))")
-    for result in results {
-        let spec = result.spec
-        let avg = result.timingsMs.isEmpty ? 0.0 : result.timingsMs.reduce(0, +) / Double(result.timingsMs.count)
-        let maxAbs = result.maxAbsError
-        let maxRel = result.maxRelError
-        
-        // Create a key to match against original profiling data
+    let iterationCount = results.first?.gpuTimingsMs.count ?? 0
+    let grouped = Dictionary(grouping: results, by: { $0.spec })
+
+    print("Matmul benchmark summary (iterations=\(iterationCount))")
+
+    for spec in specs {
+        guard let specResults = grouped[spec], !specResults.isEmpty else {
+            let tag = "op=\(spec.op) batch=\(spec.batch) m=\(spec.m) n=\(spec.n) k=\(spec.k) tA=\(spec.transposeA ? 1 : 0) tB=\(spec.transposeB ? 1 : 0)"
+            print("Spec \(tag): no successful variants")
+            continue
+        }
+
         let key = makeProfileKey(spec: spec)
         let originalData = originalProfilingData[key] ?? OriginalProfileData()
-        
-        let tag = "\(spec.backend.rawValue) :: \(spec.op) :: batch=\(spec.batch) m=\(spec.m) n=\(spec.n) k=\(spec.k) tA=\(spec.transposeA ? 1 : 0) tB=\(spec.transposeB ? 1 : 0)"
-        
-        // Format to match original markdown (3 decimal places, no trailing zeros)
-        let avgStr = formatTime(avg)
-        let maxAbsStr = String(format: "%.4e", maxAbs)
-        let maxRelStr = String(format: "%.4e", maxRel)
-        
-        var comparisonStr = ""
-        if originalData.avgTimeMs > 0 {
-            let percentChange = ((avg - originalData.avgTimeMs) / originalData.avgTimeMs) * 100.0
-            let sign = percentChange >= 0 ? "+" : ""
-            comparisonStr = " [vs orig \(formatTime(originalData.avgTimeMs))ms] (\(sign)\(String(format: "%.2f", percentChange))%)"
-        } else {
-            comparisonStr = " [vs orig N/A]"
+
+        let tag = "op=\(spec.op) | batch=\(spec.batch) | m=\(spec.m) | n=\(spec.n) | k=\(spec.k) | tA=\(spec.transposeA ? 1 : 0) | tB=\(spec.transposeB ? 1 : 0)"
+        print("Spec \(tag):")
+
+        let bestCpu = specResults.min(by: { ($0.averageCpuMs ?? .greatestFiniteMagnitude) < ($1.averageCpuMs ?? .greatestFiniteMagnitude) })
+        if let bestCpu = bestCpu, let avgCpu = bestCpu.averageCpuMs, avgCpu.isFinite {
+            let line = "  best_avg_cpu: \(bestCpu.backend.rawValue)/\(bestCpu.variantName) = \(formatTime(avgCpu))ms"
+            print(colorize(line, code: "32;1"))
         }
-        
-        print(" - \(tag): avg=\(avgStr)ms\(comparisonStr) maxAbs=\(maxAbsStr) maxRel=\(maxRelStr)")
+
+        let bestGpu = specResults.min(by: { lhs, rhs in
+            (lhs.averageGpuMs ?? .greatestFiniteMagnitude) < (rhs.averageGpuMs ?? .greatestFiniteMagnitude)
+        })
+
+        if let bestGpu = bestGpu, let avgGpu = bestGpu.averageGpuMs, avgGpu.isFinite {
+            let line = "  best_avg_gpu: \(bestGpu.backend.rawValue)/\(bestGpu.variantName) = \(formatTime(avgGpu))ms"
+            print(colorize(line, code: "32;1"))
+        }
+
+        let sortedVariants = specResults.sorted { lhs, rhs in
+            let lhsIndex = MatmulHarness.backendDisplayOrder.firstIndex(of: lhs.backend) ?? Int.max
+            let rhsIndex = MatmulHarness.backendDisplayOrder.firstIndex(of: rhs.backend) ?? Int.max
+            if lhsIndex != rhsIndex {
+                return lhsIndex < rhsIndex
+            }
+            if lhs.variantName != rhs.variantName {
+                return lhs.variantName < rhs.variantName
+            }
+            // Stable fallback on CPU average to keep deterministic ordering even when names match
+            return (lhs.averageCpuMs ?? .greatestFiniteMagnitude) < (rhs.averageCpuMs ?? .greatestFiniteMagnitude)
+        }
+
+        for result in sortedVariants {
+            let avgGpuStr = result.averageGpuMs.map { "\(formatTime($0))ms" } ?? "N/A"
+            let avgCpuStr = result.averageCpuMs.map { "\(formatTime($0))ms" } ?? "N/A"
+            let maxAbsStr = String(format: "%.4e", result.maxAbsError)
+            let maxRelStr = String(format: "%.4e", result.maxRelError)
+            var tags: [String] = []
+            if result.isBaseline && result.backend == spec.backend {
+                tags.append("baseline")
+            }
+            if let bestGpu = bestGpu, bestGpu.backend == result.backend, bestGpu.variantName == result.variantName {
+                tags.append("best-gpu")
+            }
+            let tagSuffix: String
+            if tags.isEmpty {
+                tagSuffix = ""
+            } else {
+                let colored = tags.map(formatTag).joined(separator: " ")
+                tagSuffix = " " + colored
+            }
+
+            var comparisonStr = ""
+            if originalData.avgTimeMs > 0, let avgCpu = result.averageCpuMs {
+                let percentChange = ((avgCpu - originalData.avgTimeMs) / originalData.avgTimeMs) * 100.0
+                let sign = percentChange >= 0 ? "+" : ""
+                comparisonStr = " [vs orig \(formatTime(originalData.avgTimeMs))ms] (\(sign)\(String(format: "%.2f", percentChange))%)"
+            } else {
+                comparisonStr = " [vs orig N/A]"
+            }
+
+            print("   - \(result.backend.rawValue)/\(result.variantName)\(tagSuffix): avg_gpu=\(avgGpuStr) | avg_cpu=\(avgCpuStr)\(comparisonStr) maxAbs=\(maxAbsStr) maxRel=\(maxRelStr)")
+        }
+    }
+
+    if !failures.isEmpty {
+        print("\nVariant failures:")
+        for failure in failures {
+            let spec = failure.spec
+            let specKey = "op=\(spec.op) batch=\(spec.batch) m=\(spec.m) n=\(spec.n) k=\(spec.k)"
+            print(" - \(failure.backend.rawValue)/\(failure.variantName) @ \(specKey): \(failure.errorDescription)")
+        }
     }
 }
 
@@ -1222,7 +1551,7 @@ func main() -> Int32 {
         let specs = try MatmulDocParser.parseSpecs(markdownPath: markdownPath)
         let harness = try MatmulHarness(buildDir: buildDir, matmulDir: matmulDir)
         let results = try harness.run(specs: specs)
-        summarize(results: results)
+        summarize(specs: specs, results: results, failures: harness.variantFailures)
     } catch {
         print("Error: \(error)")
         return 1

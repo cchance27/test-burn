@@ -392,7 +392,37 @@ impl DefaultKernelInvocable for MatMulMlxOp {
             depth: wm_sel,
         };
 
-        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul_mlx_op"));
+        // Determine operation type based on arguments
+        let op_type = if bias.is_some() {
+            "matmul_bias_add"
+        } else if existing_out.is_some() {
+            // When existing_out is provided with alpha/beta, it's an alpha-beta operation
+            "matmul_alpha_beta" // The batch info will be handled in the label
+        } else {
+            // Default to basic matmul
+            "matmul"
+        };
+
+        // Get the hierarchical scope from context, or create a fallback
+        let mut profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul"));
+
+        // Append op_type/backend to the hierarchical path (no formatting in hot path)
+        profiler_label.op_name = format!("{}/{}/mlx", profiler_label.op_name, op_type);
+        profiler_label.backend = "mlx".to_string();
+
+        // Only construct metadata HashMap when profiling is enabled
+        if crate::profiling_state::get_profiling_state() {
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), op_type.to_string());
+            data.insert("backend".to_string(), "mlx".to_string());
+            data.insert("batch".to_string(), batch.to_string());
+            data.insert("m".to_string(), m.to_string());
+            data.insert("n".to_string(), n.to_string());
+            data.insert("k".to_string(), k.to_string());
+            data.insert("tA".to_string(), if transpose_left { "1".to_string() } else { "0".to_string() });
+            data.insert("tB".to_string(), if transpose_right { "1".to_string() } else { "0".to_string() });
+            profiler_label.data = Some(data);
+        }
 
         let op = MatMulMlx {
             left: left_tensor,

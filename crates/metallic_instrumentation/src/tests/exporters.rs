@@ -61,6 +61,7 @@ fn channel_exporter_clones_events() {
         op_name: "channel_op".to_string(),
         backend: "TestBackend".to_string(),
         duration_us: 123,
+        data: None,
     };
 
     let received = receiver

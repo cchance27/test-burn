@@ -1,0 +1,14 @@
+{
+  "mlx": [
+    { "name": "baseline", "library": "original_mlx", "baseline": true }
+  ],
+  "mps": [
+    { "name": "baseline", "baseline": true }
+  ],
+  "gemv": [
+    { "name": "baseline", "library": "original_gemv", "baseline": true }
+  ],
+  "gemm_tiled": [
+    { "name": "baseline", "library": "original_gemm_tiled", "baseline": true }
+  ]
+}

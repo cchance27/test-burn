@@ -332,12 +332,14 @@ pub fn dispatch_completions(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>
                     op_name: format!("{}/cb_wait", label.op_name),
                     backend: label.backend.clone(),
                     duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                    data: None,
                 });
             } else {
                 metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
                     op_name: "Generation Loop/cb_wait".to_string(),
                     backend: GPU_PROFILER_BACKEND.to_string(),
                     duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
+                    data: None,
                 });
             }
         }

@@ -27,21 +27,37 @@ pub struct MemoryUsage {
     pub kv_cache_bytes: usize,
 }
 
+use rustc_hash::FxHashMap;
+
 #[derive(Clone, Debug)]
 pub struct GpuProfilerLabel {
     pub op_name: String,
     pub backend: String,
+    pub data: Option<FxHashMap<String, String>>,
 }
 
 impl GpuProfilerLabel {
     pub fn new(op_name: String, backend: String) -> Self {
-        Self { op_name, backend }
+        Self {
+            op_name,
+            backend,
+            data: None,
+        }
+    }
+
+    pub fn with_data(op_name: String, backend: String, data: FxHashMap<String, String>) -> Self {
+        Self {
+            op_name,
+            backend,
+            data: Some(data),
+        }
     }
 
     pub fn fallback(op_name: &str) -> Self {
         Self {
             op_name: op_name.to_string(),
             backend: GPU_PROFILER_BACKEND.to_string(),
+            data: None,
         }
     }
 }

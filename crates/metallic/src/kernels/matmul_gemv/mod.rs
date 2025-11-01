@@ -104,7 +104,26 @@ impl DefaultKernelInvocable for MatmulGemvOp {
             depth: 1,
         };
 
-        let profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("gemv_op"));
+        // Get the hierarchical scope from context, or create a fallback
+        let mut profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul"));
+
+        // Append op_type/backend to the hierarchical path (no formatting in hot path)
+        profiler_label.op_name = format!("{}/matmul/gemv", profiler_label.op_name);
+        profiler_label.backend = "gemv".to_string();
+
+        // Only construct metadata HashMap when profiling is enabled
+        if crate::profiling_state::get_profiling_state() {
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), "matmul".to_string());
+            data.insert("backend".to_string(), "gemv".to_string());
+            data.insert("batch".to_string(), "1".to_string());
+            data.insert("m".to_string(), "1".to_string());
+            data.insert("n".to_string(), n.to_string());
+            data.insert("k".to_string(), k.to_string());
+            data.insert("tA".to_string(), "0".to_string());
+            data.insert("tB".to_string(), "0".to_string());
+            profiler_label.data = Some(data);
+        }
 
         let op = MatMulGemv {
             pipeline,

@@ -12,10 +12,23 @@ MATMUL_BASE_KEYS = ("op", "batch", "m", "n", "k", "tA", "tB")
 MATMUL_SCOPE_KEYS = MATMUL_BASE_KEYS + ("backend",)
 
 
-def parse_matmul_scope(op_name: str) -> Optional[Dict[str, str]]:
+def parse_matmul_scope(op_name: str, data: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+    """Parse matmul metadata from either the data field (new) or op_name path (legacy)."""
     if "/cb_wait" in op_name:
         return None
 
+    # New format: matmul parameters are in a nested data field
+    if data is not None:
+        # Check if there's a nested 'data' field with matmul parameters
+        nested_data = data.get("data")
+        if nested_data is not None and isinstance(nested_data, dict) and "op" in nested_data:
+            return nested_data
+
+    # Fallback: check if the top-level data has matmul parameters (direct format)
+    if data is not None and "op" in data and "backend" in data:
+        return data
+
+    # Legacy format: parse from the op_name path
     segment = None
     for marker in ("matmul_cache/", "matmul/"):
         marker_idx = op_name.find(marker)
@@ -180,7 +193,9 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
                     gpu_wait_samples[op_name].append(duration_int)
                 else:
                     gpu_kernel_samples[op_name].append(duration_int)
-                    matmul_meta = parse_matmul_scope(op_name)
+                    # Extract the optional data field for structured metadata
+                    event_data = data.get("data")
+                    matmul_meta = parse_matmul_scope(op_name, event_data)
                     if matmul_meta:
                         backend = matmul_meta.get("backend", "<unknown>")
                         base_shape = matmul_shape_key(matmul_meta)
