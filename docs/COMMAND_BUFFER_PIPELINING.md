@@ -46,53 +46,49 @@
 5. ✅ Provide clear follow-up instructions for on-device validation (profiling, perf counters, stress tests).
 
 ## Current Status & Observations
-- **Throughput**: With pipelining enabled and profiling disabled we improved from ~62 tok/s to ~65 tok/s. Latency per token remains ~15–16 ms, indicating GPU kernels dominate runtime.
-- **Command Buffer Behavior**: In throughput mode we keep a single command buffer per iteration; sampling submits the buffer to the pipeline and overlaps CPU prep of the next token. In profiling mode every op is flushed individually, so there is no overlap (expected) but per-kernel timing is accurate.
+- **Throughput**: Pipelining plus profiling-disabled runs lift us from ~62 tok/s to ~65 tok/s, but the forward command buffer still burns ~13 ms/token (p50 `sampling :: gpu_top_k_top_p` ≈ 13.13 ms), well short of the ≤ 6.6 ms payload we need for ≥ 150 tok/s.
+- **Command Buffer Behavior**: Throughput mode still emits ~30 `Generation Loop/cb_wait` events per token (total 3.35 s, avg 1.16 ms), so we are micro-flushing frequently despite the pipeline. Profiling mode keeps its expected per-op flushes for observability.
 - **GPU Kernel Breakdown (profiling enabled)**:
   - `metallic::kernels::matmul_mlx::MatMulMlxOp`: ~2.6 s total, ~0.20 ms median per dispatch (largest contributor).
   - `metallic::kernels::rmsnorm::RMSNormOp`: ~2.5 s total, ~0.36 ms median.
   - `metallic::kernels::matmul_mps::MatMulMpsOp`: ~2.25 s total, ~0.30 ms median (fallback path still triggered).
   - KV rearrange/cache writes, RoPE, elemwise add: 0.9–1.4 s each.
   - `sample_topk_fused`: ~1.25 ms median per token, ~4.2 ms p99.
-- **Host staging**: `tensor_staging_prepare/flush` appear more frequently than expected (0.26–0.42 ms avg); likely triggered by CPU-side embedding / tokenizer reads.
+- **Host staging**: With profiling disabled, `tensor_staging_prepare/flush` total only ~5.5 ms over the full run (~0.06 ms/token). The 0.26–0.42 ms averages observed under profiling were measurement artifacts from forced flushes, so staging is not the top bottleneck in steady-state decode.
+- **Matmul backend probe**: Forcing the m=1, n≈152k decode projection onto MLX increased kernel time to ~3.65 ms (vs. 2.5 ms on MPS) and added matching `cb_wait` overhead. The heuristic has been reverted; we need MLX-side tuning before flipping this path by default.
 
 ## Next Steps
-- Reduce per-token matmul time (ensure MLX path, explore fusing norms, investigate splitting attention vs FFN buffers for additional overlap).
-- Audit CPU fallbacks (embedding, `forward_cpu_block_*` call sites) and minimize staging to keep tensors resident on GPU.
-- Continue using `analyze_jsonl.py` with filters (e.g. `--kernel-filter rmsnorm`) to track hot kernels after each optimization.
-- Explore deeper pipelining opportunities:
-  - Evaluate splitting forward-pass work across multiple command buffers (attention vs FFN) to keep the GPU busy while the CPU prepares the next token.
-  - Assess whether streaming/decode work can move to a dedicated thread so UI callbacks do not block the main decode loop once the sampled token has been read.
-  - Investigate staging hotspots (`tensor_staging_prepare/flush`) to ensure we are not accidentally forcing synchronous host reads between kernels.
+- Target matmul coverage (eliminate `matmul_mps` fallbacks, keep MLX hot) and cut RMSNorm cost, since together they dominate the 13 ms/token forward window.
+- Add instrumentation around matmul dispatch decisions so we can enumerate remaining shapes that miss the MLX path and measure improvements per change.
+- Prototype RMSNorm + projection fusion (or similar register-level reuse) to retire the standalone RMSNorm launch per block.
+- Rework command-buffer scheduling so sampling waits on a smaller buffer suffix while the next iteration encodes on a fresh buffer, reducing cb_wait pressure and enabling real overlap.
+- Continue to rely on `analyze_jsonl.py --kernel-filter` to validate reductions in matmul and RMSNorm time after each optimization.
 
 ## Roadmap Toward 150 tok/s
 ### Baseline recap (profiling enabled, 49 decode tokens)
-- Forward iteration median is ~128 ms when profiling forces serial command buffers; throughput mode without profiling lands at 15–16 ms/token (≈65 tok/s).
+- Forward iteration median is ~128 ms when profiling forces serial command buffers; throughput mode without profiling lands at ~15–16 ms/token (≈65 tok/s) and still spends ~13 ms inside the forward buffer.
 - GPU work is dominated by three kernels: `matmul_mlx` (2.62 s total, ~27 ms/token), `rmsnorm` (2.50 s total, ~26 ms/token) and `matmul_mps` (2.25 s total, ~24 ms/token). Sampling (`sample_topk_fused`) sits at ~1.4 ms/token.
-- Host staging costs are non-trivial: `tensor_staging_prepare/flush` together burn ~949 ms over the run (~19 ms/token) and signal that we are bouncing tensors between CPU and GPU.
-- CPU fallbacks (`forward_cpu_block_*`) contribute ~0.6 ms/token and keep the CPU tied up while the GPU finishes the current command buffer.
+- Host staging is negligible in throughput runs (~0.06 ms/token) but spikes under profiling because we intentionally flush every kernel.
+- CPU fallbacks (`forward_cpu_block_*`) contribute ~0.6 ms/token and keep the CPU tied up while the GPU drains the full buffer.
 
 ### Optimization initiatives (ordered by expected impact)
-1. **GPU math pipeline (expected gain: 3–4 ms/token)**
-   - Ensure every projection lands on the `matmul_mlx` fast path; audit shapes that still route through `matmul_mps` and either realign dimensions or extend the MLX backend.
-   - Prototype matmul+RMSNorm fusion (or RMSNorm+gate fusion inside FFN) to remove the standalone `rmsnorm` dispatches and reduce kernel count per block.
-   - Review QKV/FFN scheduling to combine small matmuls into fewer, larger tiles that better saturate the Metal matrix cores.
+1. **GPU math pipeline (expected gain: 7–8 ms/token)**
+   - Ensure every projection hits the `matmul_mlx` fast path; audit and remediate shapes still routed through `matmul_mps` via instrumentation-informed fixes.
+   - Prototype matmul+RMSNorm fusion (or RMSNorm+gate fusion inside the FFN) to remove the standalone `rmsnorm` dispatch per block.
+   - Review QKV/FFN scheduling to merge small matmuls into larger tiles that better saturate Metal matrix cores and reduce launch count.
+   - **New**: Benchmark MLX for skinny decode projections (m=1, massive n) and tune tiling/register usage so the MLX path matches or beats the current 2.5 ms MPS latency before re-enabling the override.
 
-2. **Eliminate avoidable host staging (expected gain: 2–3 ms/token)**
-   - Track down why `tensor_staging_prepare/flush` fires on every iteration; keep embedding, logits, and sampling buffers resident on GPU until the stream callback actually needs host access.
-   - Push token decode and streamer callbacks onto a dedicated thread that consumes device-to-host copies asynchronously so kernel submission for the next token never waits on `as_slice()`.
+2. **Command-buffer overlap beyond sampling (expected gain: 3–4 ms/token)**
+   - Split the decode command buffer (e.g. attention vs FFN/logits) so sampling waits on a smaller suffix while the next iteration encodes on a fresh buffer, reducing `cb_wait` pressure.
+   - Experiment with triple-buffering (attention/FFN/sampling) to keep one buffer encoding while another executes and the third retires, validating tensor readiness invariants along the way.
 
-3. **Command-buffer overlap beyond sampling (expected gain: 2–3 ms/token)**
-   - Split the decode command buffer into at least two stages (attention vs FFN) so CPU prep of the next iteration can start after attention commits instead of waiting for the entire forward pass.
-   - Experiment with triple-buffering (attention/FFN/sampling) to keep one buffer encoding while another executes and the third drains, validating tensor readiness invariants as we go.
+3. **Kernel fusion & data movement (expected gain: 1–2 ms/token)**
+   - Investigate combining RoPE + input permutations and collapsing chained elementwise ops (RoPE, residual add, SwiGLU) into composite kernels.
+   - Reduce KV rearrange launches by reusing permuted layouts across heads or batching rearrange work per layer where possible.
 
-4. **Kernel launch count & data movement (expected gain: 1–2 ms/token)**
-   - Investigate opportunities to fuse RoPE + matmul input transforms and to collapse chained elementwise ops (RoPE, add, SwiGLU) into composite kernels using our existing Metal graph utilities.
-   - Reduce KV rearrange invocations by reusing permuted layouts across heads or batching rearrange work per layer where possible.
-
-5. **Longer-term bets**
-   - Evaluate CoreML/ANE offload for matmul-heavy paths on supported hardware once the Metal path is lean, using the pipeline’s third slot.
-   - Add lightweight perf regressions (smoke decode with metrics assertions) so future kernel changes do not silently erode gains.
+4. **Instrumentation & guardrails**
+   - Add matmul dispatch logging in throughput mode to track backend selections and prevent regressions.
+   - Keep lightweight perf regressions (smoke decode with metrics assertions) once we land the big wins so future kernel tweaks do not silently erode gains.
 
 ### Measurement plan
 - Track progress with `METALLIC_ENABLE_PROFILING=true` runs captured by `/tmp/profiling*.jsonl`, using `analyze_jsonl.py --kernel-filter` to validate reductions in matmul and staging time.
@@ -102,3 +98,8 @@
 - `cargo +nightly fmt` locally to keep formatting consistent.
 - Defer `cargo clippy` / `cargo build` / runtime validation to an Apple Silicon host; request that the team runs decode benchmarks (`analyze_jsonl.py`, standard generation loop) to confirm throughput gains.
 - Once merged, enable Metal instrumented runs to verify simultaneous CPU/GPU command buffers and inspect `GpuOpCompleted` attribution for accuracy.
+
+## TODO
+- Add matmul backend selection instrumentation and report on remaining `matmul_mps` fallbacks before the next optimization cycle.
+- Prototype attention/FFN command-buffer splitting to validate that sampling can overlap with encoding of the subsequent token and collapse the current micro-flush pattern.
+- Investigate MLX kernel tuning for the decode projection (m=1, n≈152k, k=896); only reintroduce the MLX override once profiling demonstrates a win over MPS (ideally ≤2.5 ms including waits).

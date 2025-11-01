@@ -11,7 +11,7 @@ rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"
 
 shopt -s nullglob
-sources=("${SCRIPT_DIR}"/*.metal)
+sources=("${SCRIPT_DIR}"/simdgroup/*.metal)
 shopt -u nullglob
 
 if [[ ${#sources[@]} -eq 0 ]]; then

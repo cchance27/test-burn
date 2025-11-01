@@ -5,9 +5,54 @@ import json
 import math
 from collections import defaultdict, Counter
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
-PERCENTILES = (50, 90, 95, 99)
+PERCENTILES = (95, 99)
+MATMUL_BASE_KEYS = ("op", "batch", "m", "n", "k", "tA", "tB")
+MATMUL_SCOPE_KEYS = MATMUL_BASE_KEYS + ("backend",)
+
+
+def parse_matmul_scope(op_name: str) -> Optional[Dict[str, str]]:
+    if "/cb_wait" in op_name:
+        return None
+
+    segment = None
+    for marker in ("matmul_cache/", "matmul/"):
+        marker_idx = op_name.find(marker)
+        if marker_idx != -1:
+            segment = op_name[marker_idx:]
+            break
+
+    if segment is None:
+        return None
+
+    segments = segment.split("/")
+    meta: Dict[str, str] = {}
+    for seg in segments[1:]:
+        if "::" in seg:
+            break
+        token = seg.split("#", 1)[0]
+        if not token or "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        meta[key] = value
+
+    if not meta:
+        return None
+    return meta
+
+
+def matmul_shape_key(meta: Dict[str, str]) -> str:
+    keys = list(MATMUL_BASE_KEYS)
+    parts = [f"{key}={meta.get(key, '?')}" for key in keys]
+    extras = sorted(
+        (key, value)
+        for key, value in meta.items()
+        if key not in MATMUL_SCOPE_KEYS
+    )
+    if extras:
+        parts.extend(f"{key}={value}" for key, value in extras)
+    return " | ".join(parts)
 
 
 def percentile(sorted_samples: List[float], pct: float) -> float:
@@ -74,6 +119,7 @@ def render_summary(title: str, stats: Dict[str, float], indent: int = 2) -> str:
 def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_totals: bool, kernel_filter: str) -> None:
     path = Path(filename)
     print(f"\n=== Analyzing {path} ===")
+    filter_lower = kernel_filter.lower()
 
     event_counts: Counter[str] = Counter()
     event_duration_samples: Dict[str, List[int]] = defaultdict(list)
@@ -84,6 +130,9 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
     gpu_wait_samples: Dict[str, List[int]] = defaultdict(list)
     gpu_kernel_samples: Dict[str, List[int]] = defaultdict(list)
     gpu_kernel_base_samples: Dict[str, List[int]] = defaultdict(list)
+    matmul_shape_samples: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
+    matmul_backend_samples: Dict[str, List[int]] = defaultdict(list)
+    matmul_variant_samples: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     sync_samples: List[int] = []
 
     total_events = 0
@@ -131,11 +180,21 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
                     gpu_wait_samples[op_name].append(duration_int)
                 else:
                     gpu_kernel_samples[op_name].append(duration_int)
+                    matmul_meta = parse_matmul_scope(op_name)
+                    if matmul_meta:
+                        backend = matmul_meta.get("backend", "<unknown>")
+                        base_shape = matmul_shape_key(matmul_meta)
+                        matmul_shape_samples[base_shape][backend].append(duration_int)
+                        matmul_backend_samples[backend].append(duration_int)
+                        op_variant = matmul_meta.get("op", "<unknown>")
+                        matmul_variant_samples[(op_variant, backend)].append(duration_int)
                     base_name = op_name.split("/")[-1] if op_name else "<unknown>"
                     if base_name.startswith("sdpa_block_") and base_name.endswith("_op"):
                         base_name = "sdpa"
                     elif base_name.startswith("mlp_swiglu_block_") and base_name.endswith("_op"):
                         base_name = "mlp_swiglu"
+                    elif base_name.startswith("forward_cpu_block_"):
+                        base_name = "forward_cpu"
                     elif base_name.endswith("_op"):
                         base_name = base_name.rsplit("_", 1)[0]
                     base_name = base_name.rstrip("_")
@@ -180,7 +239,7 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
                 or kernel in {"iteration_total", "forward_step_total"}
             ):
                 continue
-            if kernel_filter and kernel_filter.lower() not in kernel.lower():
+            if kernel_filter and filter_lower not in kernel.lower():
                 continue
             kernel_totals.append((kernel, summarize(samples)))
 
@@ -195,7 +254,7 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
         print("\nGPU kernel durations (excluding waits):")
         kernel_totals = []
         for op_name, samples in gpu_kernel_samples.items():
-            if kernel_filter and kernel_filter.lower() not in op_name.lower():
+            if kernel_filter and filter_lower not in op_name.lower():
                 continue
             kernel_totals.append((op_name, summarize(samples)))
 
@@ -210,8 +269,8 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
         print("\nGPU kernel aggregate (by kernel type):")
         base_totals = []
         for base_name, samples in gpu_kernel_base_samples.items():
-            if kernel_filter and kernel_filter.lower() not in base_name.lower():
-                continue;
+            if kernel_filter and filter_lower not in base_name.lower():
+                continue
             base_totals.append((base_name, summarize(samples)))
         if not base_totals:
             print("  (no kernels matched)")
@@ -219,6 +278,54 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
             base_totals.sort(key=lambda item: item[1]["total_ms"], reverse=True)
             for base_name, stats in base_totals[:top_n]:
                 print(render_summary(base_name, stats, indent=2))
+
+    if matmul_backend_samples:
+        print("\nMatmul backend summary:")
+        backend_totals = []
+        for backend, samples in matmul_backend_samples.items():
+            if kernel_filter and filter_lower not in backend.lower():
+                continue
+            backend_totals.append((backend, summarize(samples)))
+        backend_totals.sort(key=lambda item: item[1]["total_ms"], reverse=True)
+        for backend, stats in backend_totals[:top_n]:
+            title = f"backend={backend}"
+            print(render_summary(title, stats, indent=2))
+
+    if matmul_variant_samples:
+        print("\nMatmul op/backend summary:")
+        variant_totals = []
+        for (op_variant, backend), samples in matmul_variant_samples.items():
+            label = f"{op_variant} @ {backend}"
+            if kernel_filter and filter_lower not in label.lower():
+                continue
+            variant_totals.append((label, summarize(samples)))
+        variant_totals.sort(key=lambda item: item[1]["total_ms"], reverse=True)
+        for label, stats in variant_totals[:top_n]:
+            print(render_summary(label, stats, indent=2))
+
+    if matmul_shape_samples:
+        print("\nMatmul shape backend summary:")
+        shape_entries: List[Tuple[str, float, Dict[str, Dict[str, float]]]] = []
+        for shape, backend_map in matmul_shape_samples.items():
+            backend_stats = {backend: summarize(samples) for backend, samples in backend_map.items()}
+            total_ms = sum(stats["total_ms"] for stats in backend_stats.values())
+            shape_entries.append((shape, total_ms, backend_stats))
+        shape_entries.sort(key=lambda item: item[1], reverse=True)
+        printed = 0
+        for shape, _total_ms, backend_stats in shape_entries:
+            if kernel_filter and filter_lower not in shape.lower() and not any(
+                filter_lower in backend.lower() for backend in backend_stats.keys()
+            ):
+                continue
+            if printed >= top_n:
+                break
+            printed += 1
+            print(f"  {shape}:")
+            backend_totals = sorted(
+                backend_stats.items(), key=lambda item: item[1]["total_ms"], reverse=True
+            )
+            for backend, stats in backend_totals:
+                print(render_summary(f"backend={backend}", stats, indent=4))
 
     if gpu_wait_samples:
         print("\nGPU wait breakdown:")
