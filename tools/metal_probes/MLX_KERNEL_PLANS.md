@@ -198,3 +198,29 @@ The MLX dot product example provides several optimization patterns that can be a
 - Compile-time optimization for different shape categories
 
 This plan leverages the proven MLX optimization patterns while addressing the specific performance bottlenecks in the current implementation. The step-by-step approach ensures measurable progress while maintaining code quality and correctness.
+
+---
+
+## 2025-11-03 — Current Plan Checkpoint (m=1, NT)
+
+Completed
+- Implemented v2 m=1 NT kernels with A-tiling + double buffer and 2 cols/thread mapping.
+- Fixed tg64 coverage and barrier placement; correctness validated (maxRel ~ 4.8e-4).
+- Added vectorized B-loads (half4) variants with deeper unroll; enabled in variants.
+- Disabled all B-tiling variants (`*_col_bt_*`) in `variants_enhanced.json` due to regressions.
+- Verified dispatch is variant-driven (bnXX/tgYY tokens), keeping the harness heuristic-free.
+
+Observations
+- bn64 + tg128 variants generally outperform bn128 across Qwen-25 shapes.
+- BK=128 best for moderate N (~10k), BK=64 best for very large N (~150k).
+- B-tiling adds overhead on Apple GPUs for these shapes; A-tiling alone + vec loads is superior.
+
+Near-term tasks
+- Add `bn256_*` variants for very large N and compare vs bn64.
+- Explore simdgroup broadcasts for staged A to reduce shared-memory traffic.
+- Try half8 vectorized loads (two half4) where alignment is safe; keep scalar head/tail for edges.
+- Tight ILP/occupancy sweep: unroll 8 vs 16 on vec path, confirm register usage and spill-free execution.
+- Keep bt_* variants disabled; leave them in the manifest for reference/testing only.
+
+Policy
+- Do not add heuristics to the harness; it exists to surface data that will inform heuristics in Metallic. The harness should remain a neutral executor and reporter.

@@ -63,7 +63,7 @@ enum HarnessError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .usage:
-            return "usage: run_matmul_probes.swift <build_dir> <matmul_dir> <sizes_markdown>"
+            return "usage: run_matmul_probes.swift [--verbose-failures] <build_dir> <matmul_dir> <sizes_markdown>"
         case .metalUnavailable:
             return "Metal device unavailable"
         case .commandQueueUnavailable:

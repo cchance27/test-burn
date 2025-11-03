@@ -18,6 +18,10 @@ private func formatTag(_ tag: String) -> String {
         return colorize("[baseline]", code: "33;1")
     case "best-gpu":
         return colorize("[best-gpu]", code: "32;1")
+    case "best-cpu":
+        return colorize("[best-cpu]", code: "36;1")
+    case "host-gap":
+        return colorize("[host-gap]", code: "35;1")
     default:
         return "[\(tag)]"
     }
@@ -26,7 +30,12 @@ private func formatTag(_ tag: String) -> String {
 // Global variable to hold the original profiling data
 var originalProfilingData: [String: OriginalProfileData] = [:]
 
-func summarize(specs: [MatmulShapeSpec], results: [BenchmarkResult], failures: [VariantFailure]) {
+func summarize(
+    specs: [MatmulShapeSpec],
+    results: [BenchmarkResult],
+    failures: [VariantFailure],
+    verboseFailures: Bool
+) {
     // Load original profiling data from markdown file
     guard let markdownPath = CommandLine.arguments.last else {
         print("Error: No markdown path provided")
@@ -63,19 +72,11 @@ func summarize(specs: [MatmulShapeSpec], results: [BenchmarkResult], failures: [
         print("Spec \(tag):")
 
         let bestCpu = specResults.min(by: { ($0.averageCpuMs ?? .greatestFiniteMagnitude) < ($1.averageCpuMs ?? .greatestFiniteMagnitude) })
-        if let bestCpu = bestCpu, let avgCpu = bestCpu.averageCpuMs, avgCpu.isFinite {
-            let line = "  best_avg_cpu: \(bestCpu.backend.rawValue)/\(bestCpu.variantName) = \(formatTime(avgCpu))ms"
-            print(colorize(line, code: "32;1"))
-        }
-
         let bestGpu = specResults.min(by: { lhs, rhs in
             (lhs.averageGpuMs ?? .greatestFiniteMagnitude) < (rhs.averageGpuMs ?? .greatestFiniteMagnitude)
         })
-
-        if let bestGpu = bestGpu, let avgGpu = bestGpu.averageGpuMs, avgGpu.isFinite {
-            let line = "  best_avg_gpu: \(bestGpu.backend.rawValue)/\(bestGpu.variantName) = \(formatTime(avgGpu))ms"
-            print(colorize(line, code: "32;1"))
-        }
+        let gpuGapThreshold: Double = 0.01
+        let cpuLeadThreshold: Double = 0.10
 
         let sortedVariants = specResults.sorted { lhs, rhs in
             let lhsIndex = VariantManager.backendDisplayOrder.firstIndex(of: lhs.backend) ?? Int.max
@@ -102,6 +103,24 @@ func summarize(specs: [MatmulShapeSpec], results: [BenchmarkResult], failures: [
             if let bestGpu = bestGpu, bestGpu.backend == result.backend, bestGpu.variantName == result.variantName {
                 tags.append("best-gpu")
             }
+            if let bestCpu = bestCpu, bestCpu.backend == result.backend, bestCpu.variantName == result.variantName {
+                tags.append("best-cpu")
+            }
+            if let bestGpu = bestGpu,
+               let bestGpuAvg = bestGpu.averageGpuMs,
+               let resultGpu = result.averageGpuMs,
+               let bestGpuCpu = bestGpu.averageCpuMs,
+               let resultCpu = result.averageCpuMs,
+               resultGpu.isFinite,
+               bestGpuAvg.isFinite,
+               bestGpuCpu.isFinite,
+               resultCpu.isFinite {
+                let gpuGap = resultGpu - bestGpuAvg
+                let cpuLead = bestGpuCpu - resultCpu
+                if gpuGap <= gpuGapThreshold && cpuLead >= cpuLeadThreshold {
+                    tags.append("host-gap")
+                }
+            }
             let tagSuffix: String
             if tags.isEmpty {
                 tagSuffix = ""
@@ -125,10 +144,50 @@ func summarize(specs: [MatmulShapeSpec], results: [BenchmarkResult], failures: [
 
     if !failures.isEmpty {
         print("\nVariant failures:")
-        for failure in failures {
-            let spec = failure.spec
-            let specKey = "op=\(spec.op) batch=\(spec.batch) m=\(spec.m) n=\(spec.n) k=\(spec.k)"
-            print(" - \(failure.backend.rawValue)/\(failure.variantName) @ \(specKey): \(failure.errorDescription)")
+        if verboseFailures {
+            for failure in failures {
+                let spec = failure.spec
+                let specKey = "op=\(spec.op) batch=\(spec.batch) m=\(spec.m) n=\(spec.n) k=\(spec.k)"
+                print(" - \(failure.backend.rawValue)/\(failure.variantName) @ \(specKey): \(failure.errorDescription)")
+            }
+        } else {
+            // Group failures by variant and op, aggregating reasons
+            var grouped: [String: [String: [String: Int]]] = [:]
+            for failure in failures {
+                let variantKey = "\(failure.backend.rawValue)/\(failure.variantName)"
+                grouped[variantKey, default: [:]][failure.spec.op, default: [:]][failure.errorDescription, default: 0] += 1
+            }
+
+            func sortKey(for variantKey: String) -> (Int, String) {
+                let parts = variantKey.split(separator: "/", maxSplits: 1, omittingEmptySubsequences: false)
+                let backendName = parts.first.map(String.init) ?? ""
+                let variantName = parts.count > 1 ? String(parts[1]) : ""
+                let backend = MatmulShapeSpec.Backend(rawValue: backendName)
+                let backendIndex = backend.flatMap { VariantManager.backendDisplayOrder.firstIndex(of: $0) } ?? Int.max
+                return (backendIndex, variantName)
+            }
+
+            for variantKey in grouped.keys.sorted(by: { sortKey(for: $0) < sortKey(for: $1) }) {
+                let opEntries = grouped[variantKey] ?? [:]
+                let opSummaries = opEntries.keys.sorted().map { op -> String in
+                    let reasonMap = opEntries[op] ?? [:]
+                    let total = reasonMap.values.reduce(0, +)
+                    let reasonSummary: String
+                    if reasonMap.count == 1, let reason = reasonMap.keys.first {
+                        reasonSummary = reason
+                    } else {
+                        let pieces = reasonMap.keys.sorted().map { reason -> String in
+                            let count = reasonMap[reason] ?? 0
+                            return "\(count)x \(reason)"
+                        }
+                        reasonSummary = pieces.joined(separator: "; ")
+                    }
+                    return "\(op) skipped \(total) (\(reasonSummary))"
+                }
+                let summaryLine = opSummaries.joined(separator: ", ")
+                print(" - \(variantKey): \(summaryLine)")
+            }
+            print("   (use --verbose-failures to list every skipped spec)")
         }
     }
 }
@@ -221,21 +280,39 @@ func getOriginalPerformanceData(spec: MatmulShapeSpec) -> OriginalProfileData {
 
 func main() -> Int32 {
     let args = CommandLine.arguments
-    guard args.count >= 4 else {
+    var index = 1
+    var verboseFailures = false
+
+    while index < args.count {
+        let arg = args[index]
+        if arg == "--verbose" || arg == "--verbose-failures" {
+            verboseFailures = true
+            index += 1
+            continue
+        }
+        break
+    }
+
+    guard args.count - index >= 3 else {
         print(HarnessError.usage)
         return 1
     }
 
-    let buildDir = URL(fileURLWithPath: args[1])
-    let matmulDir = URL(fileURLWithPath: args[2])
-    let markdownPath = args[3]
+    let buildDir = URL(fileURLWithPath: args[index]); index += 1
+    let matmulDir = URL(fileURLWithPath: args[index]); index += 1
+    let markdownPath = args[index]
 
     do {
         let parser = MatmulDocParser()
         let specs = try parser.parseSpecs(markdownPath: markdownPath)
         let harness = try MatmulHarness(buildDir: buildDir, matmulDir: matmulDir)
         let results = try harness.run(specs: specs)
-        summarize(specs: specs, results: results, failures: harness.variantFailures)
+        summarize(
+            specs: specs,
+            results: results,
+            failures: harness.variantFailures,
+            verboseFailures: verboseFailures
+        )
     } catch {
         print("Error: \(error)")
         return 1

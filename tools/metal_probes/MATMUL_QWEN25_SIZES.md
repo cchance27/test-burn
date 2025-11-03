@@ -1,6 +1,6 @@
-These are the sizes we found in analyze_jsonl.py with our profiling enabled so that we can perform experimental testing on matmul backends and optimization using direct swift kernel benchmarking to avoid having to test them in the larger metallic crate, once we narrow down improvements, we can look to work them into the proper metallic kernels, to replace the various mlx/gemv/other kernels. 
+These are the sizes and shapes from a qwen25 inference run with our metallic inference rust framework.
 
-We want to ensure that we're testing and benching all of them against the originals and our experiments and validating they are correct still.
+The times are from running with METALLIC_PROFILING_ENABLED and are likely CPU timed not jsut the GPU timed.
 
 Matmul backend summary:
   backend=mlx: count=9120 | total=1794.58ms | avg=0.197ms | min=0.105ms | max=2.613ms | p95_ms=0.241ms, p99_ms=0.282ms

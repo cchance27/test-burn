@@ -82,3 +82,43 @@ Files of interest:
 - `tools/metal_probes/matmul/optimized_mlx_nn.metal`
 - `tools/metal_probes/run_matmul_probes.swift`
 - `tools/metal_probes/matmul/variants.json`
+
+---
+
+## 2025-11-03 — M=1 NT v2 Kernel Status (m1_optimized_v2)
+
+Summary of the latest clean run and kernel work focused on m=1, transposeB=true (NT) shapes.
+
+What worked
+- A-tiling + double buffer + 2 columns/thread: Correct and fast across shapes.
+- Vectorized B loads (half4) with deeper unroll: Clear gains on hot shapes.
+- bn64 + tg128 is the best general mapping for Qwen-like m=1 shapes; bn128 is close but usually second.
+- Correctness stable across all variants (maxRel ~ 4.8e-4), including tails for K not multiple of unroll.
+
+Best results observed
+- m=1, n=9728, k=896 (NT): `nt_bn64_col_vec4_bk128_tg128` at 0.142 ms GPU — faster than MPS (0.162 ms).
+- m=1, n=151936, k=896 (NT): `nt_bn64_col_vec4_bk64_tg128` at 2.038 ms GPU — ~4% from MPS (1.961 ms).
+- m=1, n=896, k=896 (NT): MPS still best at 0.026 ms; our best (`nt_bn128_col_vec4_bk128_tg128`) ~0.075–0.08 ms. MLX bk64_nt remains very competitive here (~0.036 ms).
+
+What didn’t help
+- B-tiling (staging BK×BN slice of B in threadgroup memory) regressed performance on all tested shapes. We disabled all `*bt*` variants by default in `variants_enhanced.json` to keep runs focused.
+- Earlier tg64 versions missed half the columns due to barrier placement; fixed by (1) mapping 2 columns per thread and (2) making all barriers uniform across the TG.
+
+Design/implementation notes
+- Dispatch uses variant name tokens (`bnXX`, `tgYY`) to configure per-variant geometry — this is not a runtime heuristic; the harness stays neutral. Heuristics will live in Metallic, not the harness.
+- Vectorized path handles alignment: scalar head steps to 4-aligned K, runs half4 core (unroll=8), then scalar tail.
+- Register use remained within budget; threadgroup memory stayed under typical limits (e.g., BK=128 uses ~32 KB for B when we tested, but B-tiling is now disabled).
+
+Recommendations
+- Default benchmark set (enabled): A-tiling `*_col_*` + vectorized `*_col_vec4_*`. Keep bn64+tg128 as primary variants to compare against MPS and MLX.
+- Disabled by default: all `*_col_bt_*` (B-tiling) variants.
+
+Ideas to test next
+- Increase columns-per-TG: Try `bn256` with tg128 (2 cols/thread) for very large N to reduce TG count.
+- Wider vector loads: half8 (two half4) where alignment guaranteed; keep scalar head/tail guards.
+- SIMD-group broadcast: broadcast staged A values within simdgroup to reduce shared-memory reads.
+- ILP tuning: explore unroll=16 for vec path, balancing register pressure vs occupancy.
+- Occupancy sweeps: revisit tg64 vs tg128 across BN=64/128 with the vec4 path.
+
+Harness policy reminder
+- The benchmark harness remains heuristic-free by design; we only map dispatch geometry from variant names and filter by declared supports. Any selection heuristics will be implemented in the Metallic framework, not in the harness.

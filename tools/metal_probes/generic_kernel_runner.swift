@@ -252,17 +252,29 @@ class GenericKernelRunner: BaseBackendRunner {
     }
     
     private func calculateM1Dispatch(spec: MatmulShapeSpec, pipeline: MTLComputePipelineState, variant: KernelVariant) -> (MTLSize, MTLSize) {
-        // M1 optimized kernels typically use 32-wide threadgroups
-        let threadgroupSize = MTLSize(width: 32, height: 1, depth: 1) // 32 threads per threadgroup
+        let threadgroupWidth: Int
+        let columnsPerThreadgroup: Int
         
-        let nPerThreadgroup: Int
-        if variant.name.contains("small_k") {
-            nPerThreadgroup = 32  // Smaller N per threadgroup for small_k variant
+        if variant.name.contains("bn128") {
+            threadgroupWidth = 128
+            columnsPerThreadgroup = 128
+        } else if variant.name.contains("bn64") {
+            threadgroupWidth = 128
+            columnsPerThreadgroup = 64
+        } else if variant.name.contains("small_k") {
+            threadgroupWidth = 32
+            columnsPerThreadgroup = 32
         } else {
-            nPerThreadgroup = 128 // Standard N per threadgroup
+            threadgroupWidth = 32
+            columnsPerThreadgroup = 128
         }
         
-        let threadgroups = MTLSize(width: (spec.n + nPerThreadgroup - 1) / nPerThreadgroup, height: 1, depth: 1)
+        let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        let threadgroups = MTLSize(
+            width: (spec.n + columnsPerThreadgroup - 1) / columnsPerThreadgroup,
+            height: 1,
+            depth: 1
+        )
         
         return (threadgroups, threadgroupSize)
     }
@@ -610,18 +622,43 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
     }
     
     private func calculateM1Dispatch(spec: MatmulShapeSpec, pipeline: MTLComputePipelineState, variant: KernelVariant) -> (MTLSize, MTLSize) {
-        // M1 optimized kernels typically use 32-wide threadgroups
-        let threadgroupSize = MTLSize(width: 32, height: 1, depth: 1) // 32 threads per threadgroup
-        
-        let nPerThreadgroup: Int
-        if variant.name.contains("small_k") {
-            nPerThreadgroup = 32  // Smaller N per threadgroup for small_k variant
-        } else {
-            nPerThreadgroup = 128 // Standard N per threadgroup
+        // Match v2 NT kernels' expectations and new occupancy variants:
+        // - columns per TG inferred from "bn{cols}" (e.g., bn128 -> 128 columns)
+        // - threadgroup width inferred from "tg{threads}" (e.g., tg64 -> 64 threads)
+        // - defaults: bn128 => 128 cols, tg128 => 128 threads
+        // - small_k: 32 threads per TG, 32 columns per TG
+
+        let name = variant.name
+
+        if name.contains("small_k") {
+            let threadgroupSize = MTLSize(width: 32, height: 1, depth: 1)
+            let threadgroups = MTLSize(width: (spec.n + 32 - 1) / 32, height: 1, depth: 1)
+            return (threadgroups, threadgroupSize)
         }
-        
-        let threadgroups = MTLSize(width: (spec.n + nPerThreadgroup - 1) / nPerThreadgroup, height: 1, depth: 1)
-        
+
+        func extractInt(after token: String, default def: Int) -> Int {
+            if let range = name.range(of: token) {
+                let start = range.upperBound
+                var digits = ""
+                var idx = start
+                while idx < name.endIndex, name[idx].isNumber {
+                    digits.append(name[idx])
+                    idx = name.index(after: idx)
+                }
+                if let val = Int(digits) { return val }
+            }
+            return def
+        }
+
+        let cols = extractInt(after: "bn", default: (name.contains("bn64") ? 64 : 128))
+        let tg   = extractInt(after: "tg", default: 128)
+
+        let columnsPerTG = max(1, cols)
+        let threadgroupWidth = max(1, tg)
+
+        let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        let threadgroups = MTLSize(width: (spec.n + columnsPerTG - 1) / columnsPerTG, height: 1, depth: 1)
+
         return (threadgroups, threadgroupSize)
     }
     

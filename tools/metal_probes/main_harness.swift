@@ -189,7 +189,7 @@ final class MatmulHarness {
                                 spec: spec,
                                 backend: backend,
                                 variantName: variant.name,
-                                errorDescription: "skipped: unsupported configuration"
+                                errorDescription: "unsupported"
                             )
                         )
                         // ensure key exists for bookkeeping, even if no supported specs

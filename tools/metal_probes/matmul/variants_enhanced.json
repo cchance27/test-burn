@@ -1,8 +1,8 @@
 {
   "mlx": [
-    { 
-      "name": "baseline", 
-      "library": "original_mlx", 
+    {
+      "name": "baseline",
+      "library": "original_mlx",
       "baseline": true,
       "tileBM": 32,
       "tileBN": 32,
@@ -23,13 +23,36 @@
         "expectedTransposeB": true
       }
     },
-    { 
-      "name": "m1_fast_nt", 
-      "library": "optimized_mlx_m1", 
-      "tileBM": 8, 
-      "tileBN": 128, 
-      "tileBK": 64, 
-      "warpM": 1, 
+    {
+      "name": "baseline_nn",
+      "library": "original_mlx",
+      "baseline": true,
+      "tileBM": 32,
+      "tileBN": 32,
+      "tileBK": 16,
+      "warpM": 2,
+      "warpN": 2,
+      "supports": {
+        "transposeA": false,
+        "transposeB": false,
+        "smallK": true,
+        "smallMN": true,
+        "batch": true,
+        "bias": true,
+        "accumulate": true,
+        "functionName": "gemm_nn_f16_f16_32_32_16_2_2",
+        "functionNameBias": "gemm_bias_nn_f16_f16_32_32_16_2_2",
+        "expectedTransposeA": false,
+        "expectedTransposeB": false
+      }
+    },
+    {
+      "name": "m1_fast_nt",
+      "library": "optimized_mlx_m1",
+      "tileBM": 8,
+      "tileBN": 128,
+      "tileBK": 64,
+      "warpM": 1,
       "warpN": 4,
       "supports": {
         "transposeA": false,
@@ -45,13 +68,13 @@
         "expectedTransposeB": true
       }
     },
-    { 
-      "name": "m1_fast_nn", 
-      "library": "optimized_mlx_m1", 
-      "tileBM": 8, 
-      "tileBN": 128, 
-      "tileBK": 64, 
-      "warpM": 1, 
+    {
+      "name": "m1_fast_nn",
+      "library": "optimized_mlx_m1",
+      "tileBM": 8,
+      "tileBN": 128,
+      "tileBK": 64,
+      "warpM": 1,
       "warpN": 4,
       "supports": {
         "transposeA": false,
@@ -67,13 +90,13 @@
         "expectedTransposeB": false
       }
     },
-    { 
-      "name": "m1_fast_tn", 
-      "library": "optimized_mlx_m1", 
-      "tileBM": 8, 
-      "tileBN": 128, 
-      "tileBK": 64, 
-      "warpM": 1, 
+    {
+      "name": "m1_fast_tn",
+      "library": "optimized_mlx_m1",
+      "tileBM": 8,
+      "tileBN": 128,
+      "tileBK": 64,
+      "warpM": 1,
       "warpN": 4,
       "supports": {
         "transposeA": true,
@@ -89,13 +112,13 @@
         "expectedTransposeB": false
       }
     },
-    { 
-      "name": "m1_fast_tt", 
-      "library": "optimized_mlx_m1", 
-      "tileBM": 8, 
-      "tileBN": 128, 
-      "tileBK": 64, 
-      "warpM": 1, 
+    {
+      "name": "m1_fast_tt",
+      "library": "optimized_mlx_m1",
+      "tileBM": 8,
+      "tileBN": 128,
+      "tileBK": 64,
+      "warpM": 1,
       "warpN": 4,
       "supports": {
         "transposeA": false,
@@ -111,13 +134,13 @@
         "expectedTransposeB": true
       }
     },
-    { 
-      "name": "bk64_nt", 
-      "library": "optimized_mlx_bk64", 
-      "tileBM": 32, 
-      "tileBN": 32, 
-      "tileBK": 64, 
-      "warpM": 2, 
+    {
+      "name": "bk64_nt",
+      "library": "optimized_mlx_bk64",
+      "tileBM": 32,
+      "tileBN": 32,
+      "tileBK": 64,
+      "warpM": 2,
       "warpN": 2,
       "supports": {
         "transposeA": false,
@@ -133,13 +156,13 @@
         "expectedTransposeB": true
       }
     },
-    { 
-      "name": "bk64_nn", 
-      "library": "optimized_mlx_bk64", 
-      "tileBM": 32, 
-      "tileBN": 32, 
-      "tileBK": 64, 
-      "warpM": 2, 
+    {
+      "name": "bk64_nn",
+      "library": "optimized_mlx_bk64",
+      "tileBM": 32,
+      "tileBN": 32,
+      "tileBK": 64,
+      "warpM": 2,
       "warpN": 2,
       "supports": {
         "transposeA": false,
@@ -155,13 +178,13 @@
         "expectedTransposeB": false
       }
     },
-    { 
-      "name": "bk64_tn", 
-      "library": "optimized_mlx_bk64", 
-      "tileBM": 32, 
-      "tileBN": 32, 
-      "tileBK": 64, 
-      "warpM": 2, 
+    {
+      "name": "bk64_tn",
+      "library": "optimized_mlx_bk64",
+      "tileBM": 32,
+      "tileBN": 32,
+      "tileBK": 64,
+      "warpM": 2,
       "warpN": 2,
       "supports": {
         "transposeA": true,
@@ -177,13 +200,13 @@
         "expectedTransposeB": false
       }
     },
-    { 
-      "name": "bk64_tt", 
-      "library": "optimized_mlx_bk64", 
-      "tileBM": 32, 
-      "tileBN": 32, 
-      "tileBK": 64, 
-      "warpM": 2, 
+    {
+      "name": "bk64_tt",
+      "library": "optimized_mlx_bk64",
+      "tileBM": 32,
+      "tileBN": 32,
+      "tileBK": 64,
+      "warpM": 2,
       "warpN": 2,
       "supports": {
         "transposeA": true,
@@ -199,13 +222,13 @@
         "expectedTransposeB": true
       }
     },
-    { 
-      "name": "nn_fast", 
-      "library": "optimized_mlx_nn", 
-      "tileBM": 32, 
-      "tileBN": 64, 
-      "tileBK": 32, 
-      "warpM": 2, 
+    {
+      "name": "nn_fast",
+      "library": "optimized_mlx_nn",
+      "tileBM": 32,
+      "tileBN": 64,
+      "tileBK": 32,
+      "warpM": 2,
       "warpN": 2,
       "supports": {
         "transposeA": false,
@@ -221,13 +244,13 @@
         "expectedTransposeB": false
       }
     },
-    { 
-      "name": "nn_wide", 
-      "library": "optimized_mlx_nn", 
-      "tileBM": 16, 
-      "tileBN": 128, 
-      "tileBK": 32, 
-      "warpM": 1, 
+    {
+      "name": "nn_wide",
+      "library": "optimized_mlx_nn",
+      "tileBM": 16,
+      "tileBN": 128,
+      "tileBK": 32,
+      "warpM": 1,
       "warpN": 4,
       "supports": {
         "transposeA": false,
@@ -245,9 +268,9 @@
     }
   ],
   "m1_optimized": [
-    { 
-      "name": "simd_basic", 
-      "library": "m1_dot_product", 
+    {
+      "name": "simd_basic",
+      "library": "m1_dot_product",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -260,12 +283,13 @@
         "functionName": "m1_dot_product_simd",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": true
     },
-    { 
-      "name": "simd_tiled_1", 
-      "library": "m1_dot_product", 
-      "kernel_name_override": "m1_dot_product_tiled_simd1", 
+    {
+      "name": "simd_tiled_1",
+      "library": "m1_dot_product",
+      "kernel_name_override": "m1_dot_product_tiled_simd1",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -278,12 +302,13 @@
         "functionName": "m1_dot_product_tiled_simd1",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": true
     },
-    { 
-      "name": "simd_tiled_2", 
-      "library": "m1_dot_product", 
-      "kernel_name_override": "m1_dot_product_tiled_simd2", 
+    {
+      "name": "simd_tiled_2",
+      "library": "m1_dot_product",
+      "kernel_name_override": "m1_dot_product_tiled_simd2",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -296,12 +321,13 @@
         "functionName": "m1_dot_product_tiled_simd2",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": true
     },
-    { 
-      "name": "simd_tiled_4", 
-      "library": "m1_dot_product", 
-      "kernel_name_override": "m1_dot_product_tiled_simd4", 
+    {
+      "name": "simd_tiled_4",
+      "library": "m1_dot_product",
+      "kernel_name_override": "m1_dot_product_tiled_simd4",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -314,14 +340,433 @@
         "functionName": "m1_dot_product_tiled_simd4",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": true
     }
   ],
   "m1_optimized_v2": [
-    { 
-      "name": "basic", 
-      "library": "m1_dot_product_v2", 
-      "kernel_name_override": "m1_dot_product_v2_basic", 
+    {
+      "name": "nt_bn128_col_vec4_bk128_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_vec4_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_vec4_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_vec4_bk128_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_vec4_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_vec4_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_vec4_bk64_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_vec4_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_vec4_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_vec4_bk64_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_vec4_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_vec4_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_bt_bk64_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_bt_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_bt_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn128_col_bt_bk128_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_bt_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_bt_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn64_col_bt_bk64_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_bt_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_bt_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn64_col_bt_bk128_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_bt_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_bt_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn128_col_bt_bk64_tg64",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_bt_bk64_tg64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_bt_bk64_tg64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn64_col_bt_bk64_tg64",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_bt_bk64_tg64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_bt_bk64_tg64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn128_col",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_bk64_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_bk64_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_bk128_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_bk128_tg128",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_bk64_tg64",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_col_bk64_tg64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_col_bk64_tg64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_bk64_tg64",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col_bk64_tg64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col_bk64_tg64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_col",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_col",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_row",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128_row",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128_row",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn64_row",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64_row",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64_row",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn128_v1",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "nt_bn64_v1",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_nt_bn64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v2_nt_bn64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": false
+    },
+    {
+      "name": "basic",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_basic",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -334,12 +779,13 @@
         "functionName": "m1_dot_product_v2_basic",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": false
     },
-    { 
-      "name": "tiled_1", 
-      "library": "m1_dot_product_v2", 
-      "kernel_name_override": "m1_dot_product_v2_tiled1", 
+    {
+      "name": "tiled_1",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_tiled1",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -352,12 +798,13 @@
         "functionName": "m1_dot_product_v2_tiled1",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": false
     },
-    { 
-      "name": "tiled_2", 
-      "library": "m1_dot_product_v2", 
-      "kernel_name_override": "m1_dot_product_v2_tiled2", 
+    {
+      "name": "tiled_2",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_tiled2",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -370,12 +817,13 @@
         "functionName": "m1_dot_product_v2_tiled2",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": false
     },
-    { 
-      "name": "tiled_4", 
-      "library": "m1_dot_product_v2", 
-      "kernel_name_override": "m1_dot_product_v2_tiled4", 
+    {
+      "name": "tiled_4",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_tiled4",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -388,12 +836,13 @@
         "functionName": "m1_dot_product_v2_tiled4",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": false
     },
-    { 
-      "name": "simd_naive", 
-      "library": "m1_dot_product_v2", 
-      "kernel_name_override": "m1_dot_product_v2_simd_naive", 
+    {
+      "name": "simd_naive",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_simd_naive",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -406,12 +855,13 @@
         "functionName": "m1_dot_product_v2_simd_naive",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": false
     },
-    { 
-      "name": "small_k", 
-      "library": "m1_dot_product_v2", 
-      "kernel_name_override": "m1_dot_product_v2_small_k", 
+    {
+      "name": "small_k",
+      "library": "m1_dot_product_v2",
+      "kernel_name_override": "m1_dot_product_v2_small_k",
       "is_m1_specific": true,
       "supports": {
         "transposeA": false,
@@ -424,12 +874,13 @@
         "functionName": "m1_dot_product_v2_small_k",
         "expectedTransposeA": false,
         "expectedTransposeB": false
-      }
+      },
+      "enabled": false
     }
   ],
   "mps": [
-    { 
-      "name": "baseline", 
+    {
+      "name": "baseline",
       "baseline": true,
       "supports": {
         "transposeA": true,
@@ -444,9 +895,9 @@
     }
   ],
   "gemv": [
-    { 
-      "name": "baseline", 
-      "library": "original_gemv", 
+    {
+      "name": "baseline",
+      "library": "original_gemv",
       "baseline": true,
       "supports": {
         "transposeA": false,
@@ -461,9 +912,9 @@
         "expectedTransposeB": false
       }
     },
-    { 
-      "name": "smalln", 
-      "library": "original_gemv_smalln", 
+    {
+      "name": "smalln",
+      "library": "original_gemv_smalln",
       "baseline": false,
       "supports": {
         "transposeA": false,
@@ -473,24 +924,30 @@
         "batch": false,
         "bias": false,
         "accumulate": false,
-        "supportedNValues": [1, 2, 4, 8, 16],
+        "supportedNValues": [
+          1,
+          2,
+          4,
+          8,
+          16
+        ],
         "functionName": "gemv_n1_f16",
         "expectedTransposeA": false,
-        "expectedTransposeB": false 
+        "expectedTransposeB": false
       }
     }
   ],
   "gemm_tiled": [
-    { 
-      "name": "baseline", 
-      "library": "original_gemm_tiled", 
+    {
+      "name": "baseline",
+      "library": "original_gemm_tiled",
       "baseline": true,
       "supports": {
         "transposeA": true,
         "transposeB": true,
         "smallK": true,
         "smallMN": true,
-        "batch": false,
+        "batch": true,
         "bias": true,
         "accumulate": false,
         "functionName": "gemm_tiled_f16",
