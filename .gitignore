@@ -8,6 +8,7 @@ debug_dumps
 *.jsonl
 *.log
 *.tsv
+cache*.json
 .DS_Store
 test.py
 **/Cargo.lock
