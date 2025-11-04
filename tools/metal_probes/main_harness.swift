@@ -317,24 +317,64 @@ final class MatmulHarness {
         let bStride = tensors.bLayout.cols * MemoryLayout<Float16>.stride
         let outStride = spec.n * MemoryLayout<Float16>.stride
 
-        let aDescriptor = MPSMatrixDescriptor(
-            rows: tensors.aLayout.rows,
-            columns: tensors.aLayout.cols,
-            rowBytes: aStride,
-            dataType: .float16
-        )
-        let bDescriptor = MPSMatrixDescriptor(
-            rows: tensors.bLayout.rows,
-            columns: tensors.bLayout.cols,
-            rowBytes: bStride,
-            dataType: .float16
-        )
-        let outDescriptor = MPSMatrixDescriptor(
-            rows: spec.m,
-            columns: spec.n,
-            rowBytes: outStride,
-            dataType: .float16
-        )
+        // Build descriptors with native batch where available, matching Metallic's usage
+        let aDescriptor: MPSMatrixDescriptor
+        let bDescriptor: MPSMatrixDescriptor
+        let outDescriptor: MPSMatrixDescriptor
+
+        // Determine batch count and per-matrix byte sizes before creating descriptors
+        let batchCount = max(spec.batch, 1)
+        let aMatrixBytes = tensors.aLayout.rows * aStride
+        let bMatrixBytes = tensors.bLayout.rows * bStride
+        let outMatrixBytes = spec.m * outStride
+
+        if batchCount > 1 {
+            // Prefer the initializer that includes `matrices` and `matrixBytes` so MPS sees a batched view
+            aDescriptor = MPSMatrixDescriptor(
+                rows: tensors.aLayout.rows,
+                columns: tensors.aLayout.cols,
+                matrices: batchCount,
+                rowBytes: aStride,
+                matrixBytes: aMatrixBytes,
+                dataType: .float16
+            )
+            bDescriptor = MPSMatrixDescriptor(
+                rows: tensors.bLayout.rows,
+                columns: tensors.bLayout.cols,
+                matrices: batchCount,
+                rowBytes: bStride,
+                matrixBytes: bMatrixBytes,
+                dataType: .float16
+            )
+            outDescriptor = MPSMatrixDescriptor(
+                rows: spec.m,
+                columns: spec.n,
+                matrices: batchCount,
+                rowBytes: outStride,
+                matrixBytes: outMatrixBytes,
+                dataType: .float16
+            )
+        } else {
+            // Single-matrix case
+            aDescriptor = MPSMatrixDescriptor(
+                rows: tensors.aLayout.rows,
+                columns: tensors.aLayout.cols,
+                rowBytes: aStride,
+                dataType: .float16
+            )
+            bDescriptor = MPSMatrixDescriptor(
+                rows: tensors.bLayout.rows,
+                columns: tensors.bLayout.cols,
+                rowBytes: bStride,
+                dataType: .float16
+            )
+            outDescriptor = MPSMatrixDescriptor(
+                rows: spec.m,
+                columns: spec.n,
+                rowBytes: outStride,
+                dataType: .float16
+            )
+        }
 
         let op = MPSMatrixMultiplication(
             device: device,
@@ -351,11 +391,10 @@ final class MatmulHarness {
         var gpuTimings: [Double] = []
         var cpuTimings: [Double] = []
         
-        // Calculate batch strides in bytes for MPS
-        let batchCount = max(spec.batch, 1)
-        let batchStrideA = tensors.aLayout.rows * tensors.aLayout.cols * MemoryLayout<Float16>.stride
-        let batchStrideB = tensors.bLayout.rows * tensors.bLayout.cols * MemoryLayout<Float16>.stride
-        let batchStrideOut = spec.m * spec.n * MemoryLayout<Float16>.stride
+        // Calculate batch strides in bytes for MPS (contiguous layout) if needed elsewhere
+        // let batchStrideA = tensors.aLayout.rows * tensors.aLayout.cols * MemoryLayout<Float16>.stride
+        // let batchStrideB = tensors.bLayout.rows * tensors.bLayout.cols * MemoryLayout<Float16>.stride
+        // let batchStrideOut = spec.m * spec.n * MemoryLayout<Float16>.stride
 
         for iteration in 0..<totalIterations {
             restoreOutputBuffer(buffer: tensors.output, initial: tensors.initialOutput)
@@ -364,19 +403,14 @@ final class MatmulHarness {
                 throw HarnessError.commandQueueUnavailable
             }
 
-            // Process each batch - MPS doesn't have a native batch API, so we encode
-            // separate operations. The command buffer will batch them efficiently.
-            for batchIdx in 0..<batchCount {
-                let aOffset = batchIdx * batchStrideA
-                let bOffset = batchIdx * batchStrideB
-                let outOffset = batchIdx * batchStrideOut
-                
-                let aMatrix = MPSMatrix(buffer: tensors.a, offset: aOffset, descriptor: aDescriptor)
-                let bMatrix = MPSMatrix(buffer: tensors.b, offset: bOffset, descriptor: bDescriptor)
-                let resultMatrix = MPSMatrix(buffer: tensors.output, offset: outOffset, descriptor: outDescriptor)
-
-                op.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
-            }
+            // Native MPS batching: encode once with batched matrix descriptors
+            // Mirrors Metallic's use of setBatchStart/setBatchSize
+            op.batchStart = 0
+            op.batchSize = batchCount
+            let aMatrix = MPSMatrix(buffer: tensors.a, offset: 0, descriptor: aDescriptor)
+            let bMatrix = MPSMatrix(buffer: tensors.b, offset: 0, descriptor: bDescriptor)
+            let resultMatrix = MPSMatrix(buffer: tensors.output, offset: 0, descriptor: outDescriptor)
+            op.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
             
             let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
