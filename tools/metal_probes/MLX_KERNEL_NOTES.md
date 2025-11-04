@@ -172,3 +172,56 @@ Disabled variants (default sweeps)
 - vA paths: disabled all tg128 (`nt_bn128/64_col_vec4_tgread_vA_*_tg128`) and all tg64 (`*_tgread_vA_*_tg64`).
 - unroll16: disabled tgread and tgread_vA (`*_tgread_unroll16_bk64_tg128`, `*_tgread_vA_unroll16_bk64_tg128`).
 - bn256 (sgbr): disabled both `nt_bn256_col_vec4_sgbr_bk{64,128}_tg128` by default pending validation.
+
+---
+
+## 2025-11-04 — M=1 NT v4: Three-Strategy Kernel Set
+
+What v4 adds
+- Large-N (n > 4096): bn256 tgread vec4 path
+  - Kernel: `m1_dot_product_v4_nt_bn256_col_vec4_tgread_bk64_tg128`
+  - Variant: `m1_optimized_v4/nt_bn256_col_vec4_tgread_bk64_tg128`
+- Tiny shapes (n < 2048, k < 2048): ultra-low-overhead single-TG style
+  - Kernel: `m1_dot_product_v4_nt_tiny_bn64_tg64`
+  - Variant: `m1_optimized_v4/nt_tiny_bn64_tg64`
+- Large-K, small-N (k > 2048, n < 2048): collaborative K-parallel reduction
+  - Kernel: `m1_dot_product_v4_nt_bn8_largek_smalln_tg256`
+  - Variant: `m1_optimized_v4/nt_bn8_largek_smalln_tg256`
+
+Notes
+- v4 large-N is a direct bn256 instantiation of our best tgread vec4 path (BK=64, TG=128), targeting very high N throughput.
+- v4 tiny keeps launch overhead minimal: one TG per 64 columns, 64 threads, straightforward scalar core with 8× unroll.
+- v4 largeK/smallN parallelizes K across SIMD-groups and reduces collaboratively; aims to lift occupancy for shapes like n=896, k=4864.
+
+Harness integration
+- Added `m1_optimized_v4` backend; dispatch derives `bn`/`tg` from variant names (same as v2/v3), so no heuristics in harness.
+
+---
+
+## 2025-11-04 — v4 Results Snapshot (bench iterations=6)
+
+Winners by shape
+- n ≈ 9728, k = 896 (NT)
+  - Best: v3 tgread `nt_bn128_col_vec4_tgread_bk128_tg128` ≈ 0.141 ms (gap to MPS ~0.007 ms).
+  - v4 tiny ≈ 0.165–0.169 ms; v4 bn256 tgread ≈ 0.195–0.201 ms (no gain here).
+- n = 896, k = 4864 (NT, large‑K small‑N)
+  - Best: v4 largeK/smallN `nt_bn4_largek_smalln_tg256` and `nt_bn8_largek_smalln_tg256` ≈ 0.131 ms (≫ v2/v3 ~0.36–0.43 ms; still above MPS 0.085 ms).
+- n = 896, k = 896 (NT)
+  - Best: v4 largeK/smallN `nt_bn4_largek_smalln_tg256` ≈ 0.040 ms; v4 `bn8_tg128` ≈ 0.051 ms; v4 tiny ≈ 0.062 ms; v3 tgread ≈ 0.075–0.081 ms; MPS ≈ 0.024 ms.
+- n = 151936, k = 896 (NT, very large N)
+  - Best: v4 largeK/smallN `nt_bn4_largek_smalln_tg256` ≈ 1.923 ms — beats MPS ≈ 1.966 ms. v3 tgread ≈ 2.04–2.08 ms.
+
+Takeaways
+- v4 largeK/smallN (K‑parallel reduction) is a clear win for small‑N across K=896..4864 and also scales to huge N (wins over MPS at n≈152k).
+- For n≈10k, v3 tgread bn128/bk128/tg128 remains the best path; v4 variants are close but not better.
+- v4 bn256 tgread (large‑N specialization) did not improve over v3; keep as experimental only.
+
+Next attempts to surpass MPS
+- n≈10k, k=896: shave ≥0.01 ms
+  - v3 tgread (bn128/bk128/tg128): software pipeline half4 loads (overlap load/FMA), try half8 vectorization where aligned, and trim any redundant barriers. Keep scalar head/tail.
+  - Consider bn96/bn160 experiments if occupancy and mapping permit.
+- large‑K small‑N: push 0.131 ms → 0.10–0.11 ms
+  - v4 largeK/smallN: add half4 vectorized B reads inside K‑slices; tune COLUMNS_PER_TG (bn4/bn8/bn16) and TG size (tg128 vs tg256) per N.
+  - Explore light TG staging for A (register prefetch) and unroll inner K‑loop for ILP.
+- tiny shapes: reduce CPU + GPU
+  - v4 tiny: add TG=32 instantiation (bn32/bn16) and measure; keep unroll=8; test early‑exit path and ensure coalesced column access.

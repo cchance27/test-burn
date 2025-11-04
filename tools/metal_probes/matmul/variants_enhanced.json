@@ -1314,6 +1314,160 @@
       "enabled": false
     }
   ],
+  "m1_optimized_v4": [
+    {
+      "name": "nt_bn256_col_vec4_tgread_bk64_tg128",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_bn256_col_vec4_tgread_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_bn256_col_vec4_tgread_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_tiny_bn64_tg64",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_tiny_bn64_tg64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_tiny_bn64_tg64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn8_largek_smalln_tg256",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_bn8_largek_smalln_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_bn8_largek_smalln_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn256_col_vec4_tgread_bk128_tg128",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_bn256_col_vec4_tgread_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_bn256_col_vec4_tgread_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_tiny_bn32_tg64",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_tiny_bn32_tg64",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_tiny_bn32_tg64",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn8_largek_smalln_tg128",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_bn8_largek_smalln_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_bn8_largek_smalln_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn16_largek_smalln_tg256",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_bn16_largek_smalln_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_bn16_largek_smalln_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn4_largek_smalln_tg256",
+      "library": "m1_dot_product_v4",
+      "kernel_name_override": "m1_dot_product_v4_nt_bn4_largek_smalln_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v4_nt_bn4_largek_smalln_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    }
+  ],
   "gemv": [
     {
       "name": "baseline",

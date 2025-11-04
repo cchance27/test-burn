@@ -1,7 +1,7 @@
 import Foundation
 
 struct VariantManager {
-    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .mps, .gemv, .gemmTiled]
+    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .mps, .gemv, .gemmTiled]
     
     static func loadVariants(matmulDir: URL) -> [MatmulShapeSpec.Backend: [KernelVariant]] {
         let fileManager = FileManager.default

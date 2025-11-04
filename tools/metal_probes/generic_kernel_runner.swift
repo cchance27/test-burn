@@ -218,7 +218,7 @@ class GenericKernelRunner: BaseBackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -599,7 +599,7 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:

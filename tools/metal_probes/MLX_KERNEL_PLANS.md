@@ -189,6 +189,75 @@ Next kernel work (prioritized)
 Harness work (non‑kernel)
 - Reduce CPU overhead by batching more dispatches per command buffer and by reusing encoders where safe. This will not affect GPU times but improves host‑side latency comparisons against MPS.
 
+---
+
+## 2025-11-04 — v4 Strategy Rollout
+
+Goals
+- Specialize kernels by shape class instead of one‑size‑fits‑all.
+
+Strategies
+- Large N (n > 4096):
+  - Add bn256 to vec4 tgread path (BK=64, TG=128).
+  - Variant: `m1_optimized_v4/nt_bn256_col_vec4_tgread_bk64_tg128`.
+- Tiny (n < 2048, k < 2048):
+  - Single‑TG kernel: 64 threads, 64 columns per TG, K‑loop unroll=8.
+  - Variant: `m1_optimized_v4/nt_tiny_bn64_tg64`.
+- Large‑K small‑N (k > 2048, n < 2048):
+  - K‑parallel across SIMD‑groups; 256 threads (8 SIMDs), 8 columns per TG.
+  - Variant: `m1_optimized_v4/nt_bn8_largek_smalln_tg256`.
+
+Dispatch
+- v4 continues to use bn/tg tokens for threadgroup sizing and grid width; no heuristics in the harness.
+
+Next validation
+- Benchmark v4 against v3 winners:
+  - Large N: confirm bn256 TG128 ≈ or > bn64 TG128.
+  - Tiny: measure host/GPU times vs v3 tgread on n,k<2048.
+  - Large‑K small‑N: target closing gap on n=896,k=4864.
+
+Follow‑ups
+- If tiny wins clearly, add more bn/tg instantiations (e.g., bn32,tg32) for very small N.
+- Tune columns‑per‑TG for largeK/smallN (bn4/bn16) and adjust TG size if needed.
+
+---
+
+## 2025-11-04 — v4 Findings and Next Steps
+
+Findings
+- n≈10k,k=896: v3 tgread `bn128/bk128/tg128` ≈ 0.141 ms remains best; v4 tiny ≈ 0.165–0.169 ms; bn256 tgread ≈ 0.195–0.201 ms.
+- n=896,k=4864: v4 largeK/smallN `bn4/bn8,tg256` ≈ 0.131 ms (big win vs v2/v3); still above MPS 0.085 ms.
+- n=896,k=896: v4 largeK/smallN `bn4,tg256` ≈ 0.040 ms (best); MPS ~0.024 ms.
+- n=151936,k=896: v4 largeK/smallN `bn4,tg256` ≈ 1.923 ms — beats MPS ~1.966 ms.
+
+Next attempts to beat MPS
+- Target 1 (n≈10k,k=896):
+  - v3 tgread bn128/bk128/tg128: software pipeline half4 loads (overlap loads and FMAs), consider half8 where aligned, eliminate redundant barriers, confirm 2‑cols/thread mapping remains optimal.
+  - If needed, param‑sweep bn (96/160/192) to see if a non‑power‑of‑two BN improves cache and mapping.
+- Target 2 (n=896,k=4864):
+  - v4 largeK/smallN: introduce half4 B reads in K‑loop, evaluate two‑stage reduction (lane then SIMD‑group then TG), and ILP unroll tuned to register pressure. Keep variants: bn4/bn8/bn16 and tg128/tg256.
+- Target 3 (n=896,k=896):
+  - v4 largeK/smallN: try tg128 with bn8/bn16; confirm tiny TG=32 candidate; ensure scalar head/tail and alignment logic are optimal.
+
+Default sweep adjustments
+- Keep v4 largeK/smallN (`bn4/bn8,tg256` + `bn8,tg128`) and v4 tiny (`bn32/bn64,tg64`).
+- De‑emphasize v4 bn256 tgread; retain for targeted runs only.
+- Maintain v3 tgread bn128/bk128/tg128 as the n≈10k control.
+
+Things to Try for v4
+  - Add a TG=32 tiny variant and probe bn16/bn32 quickly.
+  - Tighten the default variant set further to speed up subsequent sweep cycles.
+  - Beat MPS on n≈10k,k=896:
+    - v3 tgread bn128/bk128/tg128: software pipeline the half4 B loads (overlap loads/FMAs), test half8 where aligned, trim any redundant barriers. Keep 2-cols/thread
+      mapping.
+    - Try bn sweep: try bn96/bn160/bn192
+  - Push large-K small-N (0.131ms → ~0.10ms):
+    - v4 largeK/smallN: add half4 vectorized B loads inside the K-slice; tune columns-per-TG (bn4/bn8/bn16) and TG size (tg128 vs tg256), keep unroll tuned to avoid
+      spills.
+    - Try a two-stage reduction (lane→SIMD-group→TG) only if it helps latency.
+  - Tiny shapes (short + robust):
+    - Add TG=32 tiny variant (bn32/bn16) to see if we can shave both GPU and CPU further for n,k<2048; confirm early-exit and alignment guards.
+
 Disabled set (reflected in variants_enhanced.json)
 - sgbr: `nt_bn128_col_vec4_sgbr_bk128_tg128`, `nt_bn64_col_vec4_sgbr_bk128_tg128`, `nt_bn64_col_vec4_sgbr_bk64_tg128` (kept `nt_bn128_col_vec4_sgbr_bk64_tg128`).
 - tg64: `nt_bn128_col_vec4_tgread_bk64_tg64`, `nt_bn64_col_vec4_tgread_bk64_tg64`.
