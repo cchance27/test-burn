@@ -277,10 +277,10 @@ func makeBatchStrides(
         return (0, 0, 0)
     }
 
-    let elementSize = MemoryLayout<Float16>.stride
-    let strideA = UInt(aLayout.rows * aLayout.cols * elementSize)
-    let strideB = UInt(bLayout.rows * bLayout.cols * elementSize)
-    let strideC = useOutSource ? UInt(spec.m * spec.n * elementSize) : 0
+    // Strides are in elements, not bytes, for use with typed pointers in Metal
+    let strideA = UInt(aLayout.rows * aLayout.cols)
+    let strideB = UInt(bLayout.rows * bLayout.cols)
+    let strideC = useOutSource ? UInt(spec.m * spec.n) : 0
     return (strideA, strideB, strideC)
 }
 

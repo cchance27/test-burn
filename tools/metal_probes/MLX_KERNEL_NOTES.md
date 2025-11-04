@@ -85,6 +85,36 @@ Files of interest:
 
 ---
 
+## 2025-11-04 — v5 Additions (Ultra‑Tiny + Aggressive Large‑K)
+
+What’s new
+- Added `m1_optimized_v5` backend with two focused strategies:
+  - Ultra‑tiny path for n,k < ~1024: `nt_ultra_tiny_bn32_tg32` in `m1_dot_product_v5.metal`.
+    - 32 threads/TG, 32 cols/TG, zero TG memory, 16‑way scalar unroll.
+  - Aggressive Large‑K small‑N path: tg512 K‑parallel reductions.
+    - Variants: `nt_bn4_largek_smalln_tg512`, `nt_bn8_largek_smalln_tg512`, `nt_bn16_largek_smalln_tg512`.
+    - Improves K slicing (16 SIMDs) vs v4 (8 SIMDs at tg256).
+
+Why
+- Prior v4 tiny (tg64) landed ~0.062 ms on n=896,k=896 — slower than v2 (~0.050 ms).
+  v5 ultra‑tiny minimizes dispatch and ALU overhead further (tg32, deeper unroll).
+- Large‑K small‑N stalled around 0.129 ms with tg256; doubling SIMDGROUPs increases parallel K coverage
+  to target ~0.10–0.11 ms for (n=896,k=4864), closing the gap to MPS (0.085 ms).
+
+How to run
+- Limit to v5 to iterate fast:
+  `MATMUL_BACKENDS=m1_optimized_v5 METAL_RUN=1 ./tools/metal_probes/run_matmul_probes_enhanced.sh`
+
+Dispatch tokens
+- Names include `bnXX` and `tgYY` so the harness auto‑derives grid/TG geometry.
+- Ultra‑tiny is `bn32/tg32`; large‑K small‑N uses `tg512` with `bn{4,8,16}`.
+
+Notes
+- If v5 tg512 variants trigger device limits on older GPUs, drop to tg256 by cloning the v5 kernel with
+  `max_total_threads_per_threadgroup(256)` and adding entries to the manifest.
+- Keep v4 bn256 `tgread` experimental; disable if neutral across full sweep.
+
+
 ## 2025-11-03 — M=1 NT v2 Kernel Status (m1_optimized_v2)
 
 Summary of the latest clean run and kernel work focused on m=1, transposeB=true (NT) shapes.

@@ -20,6 +20,13 @@ METAL_RUN=1 ./tools/metal_probes/run_matmul_probes_enhanced.sh
 
 The harness prints per‑shape GPU/CPU times and max errors.
 
+Quick v5 pointers
+- New backend key: `m1_optimized_v5` (already wired up).
+- New kernels live in `m1_dot_product_v5.metal`:
+  - Ultra‑tiny: `m1_dot_product_v5_nt_ultra_tiny_bn32_tg32`.
+  - Large‑K small‑N (aggressive): `m1_dot_product_v5_nt_bn{4,8,16}_largek_smalln_tg512`.
+  - Register more instantiations by copying a JSON block and adjusting the name tokens.
+
 ## Where Things Live
 
 - Kernels: `tools/metal_probes/matmul/*.metal`
@@ -60,10 +67,12 @@ Tips:
 2) If creating a brand‑new backend key (e.g., `m1_optimized_v5`)
 
 - Add enum case in `tools/metal_probes/matmul_types.swift` → `MatmulShapeSpec.Backend`.
+- Add enum case in `tools/metal_probes/generic_kernel_runner.swift` -> `calculateDispatchForKernel` there are 2 locations it needs to be added to to make sure its dispatched properly.
 - Add the backend to `VariantManager.backendDisplayOrder` in `tools/metal_probes/variant_manager.swift`.
+
 - `generic_kernel_runner.swift` already supports M=1 backends; dispatch derives from name tokens.
 
-3) Register a variant in `variants_enhanced.json`
+1) Register a variant in `variants_enhanced.json`
 
 ```json
 {
@@ -116,6 +125,16 @@ The harness infers launch geometry from tokens in the variant name:
 - `bnXX` → columns per threadgroup (e.g., `bn128` = 128 columns/TG)
 - `tgYY` → threads per threadgroup (e.g., `tg64` = 64 threads/TG)
 - Defaults: `bn128`, `tg128` if no token present
+
+Special override for one‑TG experiments:
+- Include `single_tg` in the variant name to force a single threadgroup (grid=1×1×1). Your kernel must grid‑stride over N using `thread_position_in_grid`.
+
+Shape gating (quality of life)
+- The harness now applies name‑based gating for some specialized variants:
+  - `ultra_tiny` → only runs for m=1 and n,k ≤ 2048
+  - `largek_smalln` → only runs for m=1 and k ≥ 2048 and n ≤ 2048
+  - `bn256` + `tgread` → only runs for m=1 and n ≥ 4096
+This prevents slow/irrelevant variants from running on the wrong shapes in the default sweep.
 
 Grid = `(N + bn - 1) / bn` TGs in X; 1×1 in Y×Z. Tokens match only when followed by digits (so `tgread` is not `tg`).
 
@@ -172,4 +191,3 @@ MATMUL_BENCH_ITERS=6 MATMUL_BENCH_WARMUP=2 \
 
 - The harness is intentionally heuristic‑free; selection heuristics belong in Metallic, not here.
 - Keep the default suite lean — disable parity/losers in the manifest and record why in NOTES/PLANS.
-

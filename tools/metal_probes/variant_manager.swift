@@ -1,7 +1,7 @@
 import Foundation
 
 struct VariantManager {
-    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .mps, .gemv, .gemmTiled]
+    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .mps, .gemv, .gemmTiled]
     
     static func loadVariants(matmulDir: URL) -> [MatmulShapeSpec.Backend: [KernelVariant]] {
         let fileManager = FileManager.default
@@ -124,6 +124,25 @@ struct VariantManager {
             return false
         }
         
+        // Heuristic gating for specialized v4/v5 kernels by name tokens
+        let vname = variant.name
+        // Ultra-tiny: target small shapes only
+        if vname.contains("ultra_tiny") {
+            if !(spec.n <= 2048 && spec.k <= 2048 && spec.m == 1) { return false }
+        }
+        // LargeK smallN: require large K and small N
+        if vname.contains("largek_smalln") {
+            if !(spec.k >= 2048 && spec.n <= 2048 && spec.m == 1) { return false }
+        }
+        // Debug: allow dbg variants regardless of bn/tg mapping but keep largeK gating
+        if vname.contains("dbg") {
+            if !(spec.k >= 2048 && spec.n >= 32 && spec.m == 1) { return false }
+        }
+        // bn256 large-N vec4: prefer N large
+        if vname.contains("bn256") && vname.contains("tgread") {
+            if !(spec.n >= 4096 && spec.m == 1) { return false }
+        }
+
         return true
     }
 }

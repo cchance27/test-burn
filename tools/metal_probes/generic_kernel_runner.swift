@@ -187,6 +187,22 @@ class GenericKernelRunner: BaseBackendRunner {
             elementCount: tensors.cpuReferenceFloat.count
         )
 
+        // Optional debug dump for variants with "dbg" in their name
+        if variant.name.lowercased().contains("dbg") {
+            let countToShow = min(64, tensors.cpuReferenceFloat.count)
+            let ptr = tensors.output.contents().bindMemory(to: Float16.self, capacity: countToShow)
+            var line = "DBG output[0..\(countToShow-1)]: "
+            for i in 0..<countToShow {
+                line += String(format: "% .6f ", Float(ptr[i]))
+            }
+            print("\n\(line)")
+            var refLine = "DBG cpu-ref[0..\(min(8, countToShow)-1)]: "
+            for i in 0..<min(8, countToShow) {
+                refLine += String(format: "% .6f ", tensors.cpuReferenceFloat[i])
+            }
+            print(refLine)
+        }
+
         // Handle infinity and NaN values for JSON encoding
         let safeMaxAbsError = validation.maxAbsError.isFinite ? validation.maxAbsError : Float.greatestFiniteMagnitude
         let safeMaxRelError = validation.maxRelError.isFinite ? validation.maxRelError : Float.greatestFiniteMagnitude
@@ -218,7 +234,7 @@ class GenericKernelRunner: BaseBackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -285,6 +301,11 @@ class GenericKernelRunner: BaseBackendRunner {
         let columnsPerThreadgroup = max(1, cols)
         let threadgroupWidth = max(1, tg)
         let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        // Optional single-TG override for ultra-tiny experiments
+        if name.contains("single_tg") {
+            let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
+            return (threadgroups, threadgroupSize)
+        }
         let threadgroups = MTLSize(width: (spec.n + columnsPerThreadgroup - 1) / columnsPerThreadgroup, height: 1, depth: 1)
 
         return (threadgroups, threadgroupSize)
@@ -568,6 +589,21 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
             reference: tensors.cpuReferenceFloat,
             elementCount: tensors.cpuReferenceFloat.count
         )
+        // Debug dump for dbg variants (Unified runner path)
+        if variant.name.lowercased().contains("dbg") {
+            let countToShow = min(64, tensors.cpuReferenceFloat.count)
+            let ptr = tensors.output.contents().bindMemory(to: Float16.self, capacity: countToShow)
+            var line = "DBG output[0..\(countToShow-1)]: "
+            for i in 0..<countToShow {
+                line += String(format: "% .6f ", Float(ptr[i]))
+            }
+            print("\n\(line)")
+            var refLine = "DBG cpu-ref[0..\(min(8, countToShow)-1)]: "
+            for i in 0..<min(8, countToShow) {
+                refLine += String(format: "% .6f ", tensors.cpuReferenceFloat[i])
+            }
+            print(refLine)
+        }
         
         let safeMaxAbsError = validation.maxAbsError.isFinite ? validation.maxAbsError : Float.greatestFiniteMagnitude
         let safeMaxRelError = validation.maxRelError.isFinite ? validation.maxRelError : Float.greatestFiniteMagnitude
@@ -599,7 +635,7 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -666,6 +702,11 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
         let columnsPerTG = max(1, cols)
         let threadgroupWidth = max(1, tg)
         let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        // Single-TG override for debug or experiments
+        if name.contains("single_tg") {
+            let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
+            return (threadgroups, threadgroupSize)
+        }
         let threadgroups = MTLSize(width: (spec.n + columnsPerTG - 1) / columnsPerTG, height: 1, depth: 1)
         return (threadgroups, threadgroupSize)
     }

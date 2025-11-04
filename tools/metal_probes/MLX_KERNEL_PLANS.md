@@ -315,6 +315,22 @@ This plan leverages the proven MLX optimization patterns while addressing the sp
 
 ---
 
+## 2025-11-04 — v5 Quick Triage and Actions
+
+Issues observed
+- v5 tg512 variants produced correct‑looking runtimes but maxRel ~ 2.0 across many shapes.
+  - Root cause: on devices with `maxTotalThreadsPerThreadgroup < 512`, only a subset of SIMDGROUPs execute; reductions read uninitialized `partial` values.
+- v5 `nt_ultra_tiny_bn32_tg32` showed incorrect outputs in the broad sweep; `nt_ultra_tiny_single_tg32` validated but should be gated to tiny shapes to avoid large‑N stalls.
+
+Actions taken
+- Disabled v5 tg512 variants; added tg256 equivalents and enabled them.
+- Disabled v5 `nt_ultra_tiny_bn32_tg32` pending a focused correctness pass; kept `single_tg32` and gated tiny/largeK variants via `VariantManager` name‑based rules.
+
+Next steps
+- Re‑enable `nt_ultra_tiny_bn32_tg32` after we port the v4 tiny kernel body verbatim into v5 and re‑validate (maxRel ≤ ~4.8e‑4).
+- Add half4 vectorized B loads (guarded) to the v5 largeK kernel and tune unroll for ILP; compare v5 tg256 vs v4 tg256.
+- Consider adding a `bn64_tg32` tiny variant to test 32‑lane TG with larger per‑TG coverage on n≈896,k≈896.
+
 ## 2025-11-03 — Current Plan Checkpoint (m=1, NT)
 
 Completed
