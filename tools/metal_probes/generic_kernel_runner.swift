@@ -218,7 +218,7 @@ class GenericKernelRunner: BaseBackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -252,30 +252,41 @@ class GenericKernelRunner: BaseBackendRunner {
     }
     
     private func calculateM1Dispatch(spec: MatmulShapeSpec, pipeline: MTLComputePipelineState, variant: KernelVariant) -> (MTLSize, MTLSize) {
-        let threadgroupWidth: Int
-        let columnsPerThreadgroup: Int
-        
-        if variant.name.contains("bn128") {
-            threadgroupWidth = 128
-            columnsPerThreadgroup = 128
-        } else if variant.name.contains("bn64") {
-            threadgroupWidth = 128
-            columnsPerThreadgroup = 64
-        } else if variant.name.contains("small_k") {
-            threadgroupWidth = 32
-            columnsPerThreadgroup = 32
-        } else {
-            threadgroupWidth = 32
-            columnsPerThreadgroup = 128
+        // Robust token parsing: find bnXX and tgYY only when immediately followed by digits.
+        func extractInt(after token: String, in name: String, default def: Int) -> Int {
+            var found: Int? = nil
+            var searchStart = name.startIndex
+            while let r = name[searchStart...].range(of: token) {
+                let start = r.upperBound
+                if start < name.endIndex, name[start].isNumber {
+                    var i = start
+                    var digits = ""
+                    while i < name.endIndex, name[i].isNumber {
+                        digits.append(name[i])
+                        i = name.index(after: i)
+                    }
+                    if let val = Int(digits) { found = val }
+                }
+                searchStart = name.index(after: r.lowerBound)
+            }
+            return found ?? def
         }
-        
+
+        let name = variant.name
+        if name.contains("small_k") {
+            let threadgroupSize = MTLSize(width: 32, height: 1, depth: 1)
+            let threadgroups = MTLSize(width: (spec.n + 32 - 1) / 32, height: 1, depth: 1)
+            return (threadgroups, threadgroupSize)
+        }
+
+        let cols = extractInt(after: "bn", in: name, default: (name.contains("bn64") ? 64 : 128))
+        let tg   = extractInt(after: "tg", in: name, default: 128)
+
+        let columnsPerThreadgroup = max(1, cols)
+        let threadgroupWidth = max(1, tg)
         let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
-        let threadgroups = MTLSize(
-            width: (spec.n + columnsPerThreadgroup - 1) / columnsPerThreadgroup,
-            height: 1,
-            depth: 1
-        )
-        
+        let threadgroups = MTLSize(width: (spec.n + columnsPerThreadgroup - 1) / columnsPerThreadgroup, height: 1, depth: 1)
+
         return (threadgroups, threadgroupSize)
     }
     
@@ -588,7 +599,7 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -622,43 +633,40 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
     }
     
     private func calculateM1Dispatch(spec: MatmulShapeSpec, pipeline: MTLComputePipelineState, variant: KernelVariant) -> (MTLSize, MTLSize) {
-        // Match v2 NT kernels' expectations and new occupancy variants:
-        // - columns per TG inferred from "bn{cols}" (e.g., bn128 -> 128 columns)
-        // - threadgroup width inferred from "tg{threads}" (e.g., tg64 -> 64 threads)
-        // - defaults: bn128 => 128 cols, tg128 => 128 threads
-        // - small_k: 32 threads per TG, 32 columns per TG
+        // Match v2 expectations; robust parsing for bnXX/tgYY only when followed by digits.
+        func extractInt(after token: String, in name: String, default def: Int) -> Int {
+            var found: Int? = nil
+            var searchStart = name.startIndex
+            while let r = name[searchStart...].range(of: token) {
+                let start = r.upperBound
+                if start < name.endIndex, name[start].isNumber {
+                    var i = start
+                    var digits = ""
+                    while i < name.endIndex, name[i].isNumber {
+                        digits.append(name[i])
+                        i = name.index(after: i)
+                    }
+                    if let val = Int(digits) { found = val }
+                }
+                searchStart = name.index(after: r.lowerBound)
+            }
+            return found ?? def
+        }
 
         let name = variant.name
-
         if name.contains("small_k") {
             let threadgroupSize = MTLSize(width: 32, height: 1, depth: 1)
             let threadgroups = MTLSize(width: (spec.n + 32 - 1) / 32, height: 1, depth: 1)
             return (threadgroups, threadgroupSize)
         }
 
-        func extractInt(after token: String, default def: Int) -> Int {
-            if let range = name.range(of: token) {
-                let start = range.upperBound
-                var digits = ""
-                var idx = start
-                while idx < name.endIndex, name[idx].isNumber {
-                    digits.append(name[idx])
-                    idx = name.index(after: idx)
-                }
-                if let val = Int(digits) { return val }
-            }
-            return def
-        }
-
-        let cols = extractInt(after: "bn", default: (name.contains("bn64") ? 64 : 128))
-        let tg   = extractInt(after: "tg", default: 128)
+        let cols = extractInt(after: "bn", in: name, default: (name.contains("bn64") ? 64 : 128))
+        let tg   = extractInt(after: "tg", in: name, default: 128)
 
         let columnsPerTG = max(1, cols)
         let threadgroupWidth = max(1, tg)
-
         let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
         let threadgroups = MTLSize(width: (spec.n + columnsPerTG - 1) / columnsPerTG, height: 1, depth: 1)
-
         return (threadgroups, threadgroupSize)
     }
     

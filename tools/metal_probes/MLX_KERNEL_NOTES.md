@@ -93,6 +93,7 @@ What worked
 - A-tiling + double buffer + 2 columns/thread: Correct and fast across shapes.
 - Vectorized B loads (half4) with deeper unroll: Clear gains on hot shapes.
 - bn64 + tg128 is the best general mapping for Qwen-like m=1 shapes; bn128 is close but usually second.
+- New v3 SIMD-group-broadcast path mirrors the bn64/bn128 vec4 geometry but replaces per-thread TG reads with `simd_broadcast_first` so only one lane touches threadgroup memory per SIMD. Code landed as `m1_dot_product_v3` and is ready for benchmarking.
 - Correctness stable across all variants (maxRel ~ 4.8e-4), including tails for K not multiple of unroll.
 
 Best results observed
@@ -112,13 +113,62 @@ Design/implementation notes
 Recommendations
 - Default benchmark set (enabled): A-tiling `*_col_*` + vectorized `*_col_vec4_*`. Keep bn64+tg128 as primary variants to compare against MPS and MLX.
 - Disabled by default: all `*_col_bt_*` (B-tiling) variants.
+- Added a new backend (`m1_optimized_v3`) that contains the SIMD-broadcast vec4 variants; run these side-by-side with v2 to isolate the benefit of removing redundant TG memory reads.
 
 Ideas to test next
 - Increase columns-per-TG: Try `bn256` with tg128 (2 cols/thread) for very large N to reduce TG count.
 - Wider vector loads: half8 (two half4) where alignment guaranteed; keep scalar head/tail guards.
-- SIMD-group broadcast: broadcast staged A values within simdgroup to reduce shared-memory reads.
+- SIMD-group broadcast benchmarking: the code exists in v3; next step is to capture perf deltas vs. v2 and confirm TG memory bandwidth relief on large-K cases.
 - ILP tuning: explore unroll=16 for vec path, balancing register pressure vs occupancy.
 - Occupancy sweeps: revisit tg64 vs tg128 across BN=64/128 with the vec4 path.
 
 Harness policy reminder
 - The benchmark harness remains heuristic-free by design; we only map dispatch geometry from variant names and filter by declared supports. Any selection heuristics will be implemented in the Metallic framework, not in the harness.
+
+---
+
+## 2025-11-04 — M=1 NT v3 Progress (sgbr / tgread / tgread_vA)
+
+Source status
+- v3 kernel families in `m1_dot_product_v3.metal`:
+  - `sgbr`: simdgroup-broadcast of A tile (only one lane touches TG per SIMD); vectorized B (half4).
+  - `tgread`: per-lane TG reads for A (Apple HW often broadcasts); vectorized B.
+  - `tgread_vA`: manual vectorization of A from TG (scalar pack → float4) + vectorized B.
+  - `unroll16`: deeper ILP variant of `tgread`/`tgread_vA` for tg128.
+  - tg64 occupancy variants exist for tgread and vA.
+
+Dispatch fix
+- Fixed Swift dispatch parsing to extract `bnXX`/`tgYY` only when followed by digits. This avoids falsely matching `tg` inside the word `tgread` and launching 128-thread groups for `tg64` kernels. After this change, all tg64 variants launched correctly and no longer returned 0.0ms timings.
+
+Correctness
+- All v3 variants now validate with maxRel ≈ 4.8e-4 on the hot shapes. Earlier large-error artifacts (and 0.0ms) were caused by the misdispatch bug, not kernel math.
+
+Performance observations (GPU time)
+- m=1, n≈10k, k=896 (NT):
+  - Best v3: `nt_bn64_col_vec4_tgread_bk128_tg128` ≈ 0.142 ms (close to MPS 0.134 ms).
+  - `sgbr` is similar (≈0.172–0.175 ms). `tg64` is slower (≈0.165–0.191 ms).
+  - `vA` does not improve over `tgread` and often adds CPU overhead.
+- m=1, n=896, k=4864 (NT):
+  - Best v3: `nt_bn128_col_vec4_tgread_bk64_tg128` ≈ 0.196 ms (still >2× MPS 0.085 ms).
+  - `tg64` regresses badly (e.g., ≈0.45–0.78 ms); `vA` also regresses.
+- m=1, n=896, k=896 (NT):
+  - Best v3 tg128 ≈ 0.072–0.082 ms; MPS still best at ≈0.024 ms.
+  - `tg64` slower than tg128 here as well (≈0.141 ms vs 0.074 ms).
+
+Takeaways
+- tg128 is the right occupancy for the v3 designs across the hot shapes. tg64 should be kept for targeted experiments only.
+- `tgread` is a solid baseline; `sgbr` is close and sometimes slightly worse/neutral. `tgread_vA` adds packing cost without consistent wins.
+- `unroll16` offers tiny gains on n≈10k but regresses on large-K skinny-N; keep only where it wins.
+- CPU timings remain higher than MPS; addressable via harness-side batching/reuse (outside kernel scope).
+
+Action items
+- Keep enabled in default sweeps: tg128 (`tgread`, `sgbr`), with BN in {64, 128}, BK in {64, 128}. Keep one `tgread_vA` as control.
+- Disable by default (retain for opt-in tests): tg64 across the board; `unroll16` for large-K cases.
+- Next kernel probes: refine ILP for large-K via software pipelining of B loads, confirm barrier placement minimality, and evaluate half8 (two half4) once we strengthen alignment guards.
+
+Disabled variants (default sweeps)
+- sgbr: disabled `nt_bn128_col_vec4_sgbr_bk128_tg128`, `nt_bn64_col_vec4_sgbr_bk128_tg128`, `nt_bn64_col_vec4_sgbr_bk64_tg128`; kept `nt_bn128_col_vec4_sgbr_bk64_tg128` only.
+- tg64 occupancy: disabled `nt_bn128_col_vec4_tgread_bk64_tg64`, `nt_bn64_col_vec4_tgread_bk64_tg64`.
+- vA paths: disabled all tg128 (`nt_bn128/64_col_vec4_tgread_vA_*_tg128`) and all tg64 (`*_tgread_vA_*_tg64`).
+- unroll16: disabled tgread and tgread_vA (`*_tgread_unroll16_bk64_tg128`, `*_tgread_vA_unroll16_bk64_tg128`).
+- bn256 (sgbr): disabled both `nt_bn256_col_vec4_sgbr_bk{64,128}_tg128` by default pending validation.

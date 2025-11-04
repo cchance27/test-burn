@@ -9,6 +9,8 @@ This plan leverages insights from the MLX dot product example to optimize Metal 
 - The enhanced Swift harness (`run_matmul_probes_enhanced.sh` pipeline) now loads `variants_enhanced.json`, enforces each variant’s `supports.*` flags, and records any filtered specs as explicit gaps.  
 - Updating kernel capabilities therefore requires flipping the matching JSON booleans (`smallK`, `bias`, `accumulate`, `supportedNValues`, etc.) after the Metal implementation is proven.  
 - GEMV variants deliberately advertise `bias: false` today; until we land epilogue/bias support in Metal we should leave those specs routed to other backends.
+- All `_col_bt_` (B-tiling) variants stay present but `enabled:false` in the manifest after repeated regressions; targeted experiments can flip them on, but default sweeps stay focused on the faster A-tiling paths.  
+- Introduced a dedicated backend (`m1_optimized_v3`) that houses the SIMD-group-broadcast vec4 variants. The harness derives dispatch geometry from variant names (`bnXX`, `bkYY`, `tgZZ`) exactly as it does for v2, keeping heuristics out of the probes.
 
 ## Key Insights from MLX Dot Product Example
 
@@ -66,6 +68,7 @@ The MLX dot product example provides several optimization patterns that can be a
   - Optimize for 8x8 matrix operations (matching MLX reference)
 - **Based on**: `sgemm_tiled_simd` and `sgemm_naive_simd` kernels
 - **Implementation**: Adapt the NBLK template system for different tile sizes
+- **Status**: The first SIMD-broadcast implementation (`m1_dot_product_v3`) is available for bn64/bn128 × bk64/bk128 (tg128). Next step is benchmarking vs. the v2 vec4 kernels and validating gains on large-K shapes.
 
 ### 5. Memory Access Optimization
 - **Goal**: Implement coalesced memory access patterns and eliminate bank conflicts
@@ -151,6 +154,48 @@ The MLX dot product example provides several optimization patterns that can be a
 - Command-buffer optimization
 - Initial MLX SIMD patterns for M=1 kernels
 
+### Immediate Next Steps (rolling)
+- Benchmark the new v3 SIMD-broadcast variants (bn64/bn128 × bk64/bk128, tg128) against the v2 vec4 kernels and MPS baselines; capture both GPU/CPU deltas.
+- Prototype bn256 column tiles (tg128; still 2 columns/thread) to see if fewer threadgroups help huge-N workloads (>150k).
+- Explore half8 vector loads (two half4) once alignment guarantees are in place; keep scalar head/tail guards for leftovers.
+- Experiment with deeper ILP (unroll=16) on the vec path and monitor register pressure / spills.
+- Revisit tg64 vs. tg128 for the vec and broadcast paths to understand occupancy/latency trade-offs per spec.
+- DEBT: v3 tg64 + vA (vectorized A from TG) variants are temporarily disabled in `variants_enhanced.json` due to precision mismatches and suspicious 0.0ms GPU timing in the harness. Re‑audit kk‑relative indexing and tail/align guards for packed half4 B loads under tg64 occupancy; re‑enable once correctness matches baseline (maxRel ≤ ~4.8e-4).
+
+---
+
+## 2025-11-04 — v3 Progress Snapshot and Plan Updates
+
+Summary of latest run (iterations=6)
+- Correctness: All v3 variants pass with maxRel ≈ 4.8e-4 after dispatch fix (bn/tg token parsing). The prior 0.0ms + huge-error artifacts are resolved.
+- m=1, n=9728, k=896: Best v3 ~0.142 ms (tgread, bn64, bk128, tg128). MPS remains best at ~0.134 ms.
+- m=1, n=896, k=4864: Best v3 ~0.196 ms (tgread, bn128, bk64, tg128), still >2× MPS (0.085 ms). tg64 variants regress heavily here.
+- m=1, n=896, k=896: Best v3 ~0.072–0.082 ms (tg128). MPS is ~0.024 ms.
+
+Decisions (default sweep set)
+- Keep: tg128 variants (`tgread`, `sgbr`) with BN∈{64,128} and BK∈{64,128}. For sgbr, keep `bn128/bk64` only.
+- Disable: `tgread_vA` (all tg128), all tg64 variants (`tgread` and `vA`), and all `unroll16` (both `tgread` and `vA`) in default sweeps.
+- Experimental only: re‑enable any of the above selectively if targeting a specific micro-study.
+
+Root‑cause fix captured
+- Swift dispatch now extracts `bnXX`/`tgYY` only when followed by digits, avoiding accidental `tg` match inside `tgread`. This was the source of earlier tg64 mis‑launches.
+
+Next kernel work (prioritized)
+- Large‑K skinny‑N focus: Improve ILP and memory pipelining in the `tgread` path with software prefetch and reduced dependency chains; target `bn128/bk64/tg128` as current winner to beat.
+- Alignment and vectorization: Evaluate half8 (two half4 reads) where K‑alignment permits; keep solid scalar head/tail guards and ensure no misaligned half4 casts.
+- Barrier minimization: Audit all `threadgroup_barrier` placements to ensure only the strictly necessary barriers remain (especially around double‑buffered A prefetch), preserving correctness.
+- SGBR tuning: Confirm bank‑conflict behavior and whether simdgroup broadcast helps on very large‑N; keep as a near‑parity alternative.
+
+Harness work (non‑kernel)
+- Reduce CPU overhead by batching more dispatches per command buffer and by reusing encoders where safe. This will not affect GPU times but improves host‑side latency comparisons against MPS.
+
+Disabled set (reflected in variants_enhanced.json)
+- sgbr: `nt_bn128_col_vec4_sgbr_bk128_tg128`, `nt_bn64_col_vec4_sgbr_bk128_tg128`, `nt_bn64_col_vec4_sgbr_bk64_tg128` (kept `nt_bn128_col_vec4_sgbr_bk64_tg128`).
+- tg64: `nt_bn128_col_vec4_tgread_bk64_tg64`, `nt_bn64_col_vec4_tgread_bk64_tg64`.
+- vA: all tg128 (`nt_bn128/64_col_vec4_tgread_vA_*_tg128`) and all tg64 (`*_tgread_vA_*_tg64`).
+- unroll16: `*_tgread_unroll16_bk64_tg128`, `*_tgread_vA_unroll16_bk64_tg128`.
+- bn256 sgbr: `nt_bn256_col_vec4_sgbr_bk{64,128}_tg128` kept disabled pending separate validation.
+
 ### Week 2: Large-K GEMV Hybrid
 - Implement block tiling from MLX example
 - Optimize for critical large-K shapes
@@ -217,7 +262,7 @@ Observations
 
 Near-term tasks
 - Add `bn256_*` variants for very large N and compare vs bn64.
-- Explore simdgroup broadcasts for staged A to reduce shared-memory traffic.
+- Explore simdgroup broadcasts for staged A to reduce shared-memory traffic. **(Started: implemented in v3; pending perf data.)**
 - Try half8 vectorized loads (two half4) where alignment is safe; keep scalar head/tail for edges.
 - Tight ILP/occupancy sweep: unroll 8 vs 16 on vec path, confirm register usage and spill-free execution.
 - Keep bt_* variants disabled; leave them in the manifest for reference/testing only.

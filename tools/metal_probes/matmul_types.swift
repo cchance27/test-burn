@@ -11,6 +11,7 @@ struct MatmulShapeSpec: Hashable, Codable {
         case gemmTiled = "gemm_tiled"
         case m1Optimized = "m1_optimized"
         case m1OptimizedV2 = "m1_optimized_v2"
+        case m1OptimizedV3 = "m1_optimized_v3"
     }
 
     let op: String
