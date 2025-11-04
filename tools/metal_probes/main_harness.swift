@@ -350,6 +350,12 @@ final class MatmulHarness {
         let totalIterations = max(iterations, warmup + 1)
         var gpuTimings: [Double] = []
         var cpuTimings: [Double] = []
+        
+        // Calculate batch strides in bytes for MPS
+        let batchCount = max(spec.batch, 1)
+        let batchStrideA = tensors.aLayout.rows * tensors.aLayout.cols * MemoryLayout<Float16>.stride
+        let batchStrideB = tensors.bLayout.rows * tensors.bLayout.cols * MemoryLayout<Float16>.stride
+        let batchStrideOut = spec.m * spec.n * MemoryLayout<Float16>.stride
 
         for iteration in 0..<totalIterations {
             restoreOutputBuffer(buffer: tensors.output, initial: tensors.initialOutput)
@@ -358,11 +364,20 @@ final class MatmulHarness {
                 throw HarnessError.commandQueueUnavailable
             }
 
-            let aMatrix = MPSMatrix(buffer: tensors.a, descriptor: aDescriptor)
-            let bMatrix = MPSMatrix(buffer: tensors.b, descriptor: bDescriptor)
-            let resultMatrix = MPSMatrix(buffer: tensors.output, descriptor: outDescriptor)
+            // Process each batch - MPS doesn't have a native batch API, so we encode
+            // separate operations. The command buffer will batch them efficiently.
+            for batchIdx in 0..<batchCount {
+                let aOffset = batchIdx * batchStrideA
+                let bOffset = batchIdx * batchStrideB
+                let outOffset = batchIdx * batchStrideOut
+                
+                let aMatrix = MPSMatrix(buffer: tensors.a, offset: aOffset, descriptor: aDescriptor)
+                let bMatrix = MPSMatrix(buffer: tensors.b, offset: bOffset, descriptor: bDescriptor)
+                let resultMatrix = MPSMatrix(buffer: tensors.output, offset: outOffset, descriptor: outDescriptor)
 
-            op.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
+                op.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
+            }
+            
             let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
             commandBuffer.waitUntilCompleted()

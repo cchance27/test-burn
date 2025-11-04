@@ -1713,7 +1713,7 @@
         "transposeB": true,
         "smallK": true,
         "smallMN": true,
-        "batch": true,
+        "batch": false,
         "bias": true,
         "accumulate": false,
         "functionName": "gemm_tiled_f16",
