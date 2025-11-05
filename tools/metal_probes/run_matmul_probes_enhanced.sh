@@ -5,6 +5,8 @@ SDK=${SDK:-macosx}
 METAL_STD=${METAL_STD:-metal4.0}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Ensure we run from the script directory so relative paths and caches land here
+cd "${SCRIPT_DIR}"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 MATMUL_DIR="${SCRIPT_DIR}/matmul"
 BUILD_DIR="${SCRIPT_DIR}/.build/matmul"

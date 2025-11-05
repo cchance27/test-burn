@@ -1660,6 +1660,504 @@
       "enabled": true
     }
   ],
+  "m1_optimized_v6": [
+    {
+      "name": "nt_bn8_largek_smalln_kpar_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn8_largek_smalln_kpar_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn8_largek_smalln_kpar_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn16_largek_smalln_kpar_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn16_largek_smalln_kpar_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn16_largek_smalln_kpar_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn8_largek_smalln_kpar_bk256_tg256",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn8_largek_smalln_kpar_bk256_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn8_largek_smalln_kpar_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_vec4_tgread_vA_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn128_col_vec4_tgread_vA_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn128_col_vec4_tgread_vA_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn256_col_vec4_tgread_vA_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn256_col_vec4_tgread_vA_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn256_col_vec4_tgread_vA_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    }
+    ,
+    {
+      "name": "nt_bn4_largek_smalln_kpar_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn4_largek_smalln_kpar_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn4_largek_smalln_kpar_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn32_largek_smalln_kpar_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn32_largek_smalln_kpar_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn32_largek_smalln_kpar_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn32_largek_smalln_kpar_bk256_tg256",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn32_largek_smalln_kpar_bk256_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn32_largek_smalln_kpar_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_vec4_tgread_vA_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn64_col_vec4_tgread_vA_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn64_col_vec4_tgread_vA_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn192_col_vec4_tgread_vA_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn192_col_vec4_tgread_vA_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn192_col_vec4_tgread_vA_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn128_col_vec4_tgread_vA_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn128_col_vec4_tgread_vA_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn128_col_vec4_tgread_vA_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn256_col_vec4_tgread_vA_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn256_col_vec4_tgread_vA_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn256_col_vec4_tgread_vA_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    }
+    ,
+    {
+      "name": "nt_bn192_col_vec4_tgread_vA_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn192_col_vec4_tgread_vA_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn192_col_vec4_tgread_vA_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn160_col_vec4_tgread_vA_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn160_col_vec4_tgread_vA_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn160_col_vec4_tgread_vA_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn160_col_vec4_tgread_vA_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn160_col_vec4_tgread_vA_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn160_col_vec4_tgread_vA_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn224_col_vec4_tgread_vA_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn224_col_vec4_tgread_vA_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn224_col_vec4_tgread_vA_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn224_col_vec4_tgread_vA_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn224_col_vec4_tgread_vA_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn224_col_vec4_tgread_vA_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_col_vec4_tgread_vA_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn64_col_vec4_tgread_vA_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn64_col_vec4_tgread_vA_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn256_col_vec4_tgread_vA_bk64_tg256",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn256_col_vec4_tgread_vA_bk64_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn256_col_vec4_tgread_vA_bk64_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn4_largek_smalln_kpar_bk256_tg256",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn4_largek_smalln_kpar_bk256_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn4_largek_smalln_kpar_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn16_largek_smalln_kpar_bk256_tg256",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn16_largek_smalln_kpar_bk256_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn16_largek_smalln_kpar_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn8_largek_smalln_kpar_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn8_largek_smalln_kpar_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn8_largek_smalln_kpar_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn16_largek_smalln_kpar_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn16_largek_smalln_kpar_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn16_largek_smalln_kpar_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn32_largek_smalln_kpar_bk64_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn32_largek_smalln_kpar_bk64_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn32_largek_smalln_kpar_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_largek_smalln_kpar_bk128_tg128",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn64_largek_smalln_kpar_bk128_tg128",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn64_largek_smalln_kpar_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    },
+    {
+      "name": "nt_bn64_largek_smalln_kpar_bk256_tg256",
+      "library": "m1_dot_product_v6",
+      "kernel_name_override": "m1_dot_product_v6_nt_bn64_largek_smalln_kpar_bk256_tg256",
+      "is_m1_specific": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v6_nt_bn64_largek_smalln_kpar_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      },
+      "enabled": true
+    }
+  ],
   "gemv": [
     {
       "name": "baseline",
