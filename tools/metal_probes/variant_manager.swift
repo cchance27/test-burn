@@ -146,7 +146,7 @@ struct VariantManager {
             return (false, "n=\(specToCheck.n) not in supportedNValues")
         }
         
-        // Heuristic gating for specialized v4/v5 kernels by name tokens
+        // Heuristic gating for specialized kernels by name tokens
         let vname = variant.name
         // Ultra-tiny: target small shapes only
         if vname.contains("ultra_tiny") {
@@ -180,6 +180,33 @@ struct VariantManager {
         if vname.contains("bn256") && vname.contains("tgread") {
             if !(spec.n >= 4096 && spec.m == 1) { 
                 return (false, "bn256+tgread requires n>=4096, m=1 (got m=\(spec.m), n=\(spec.n))")
+            }
+        }
+
+        // v7 worksteal CHUNK=4 variants are only beneficial for very large N
+        if vname.contains("worksteal_chunk4") {
+            if !(specToCheck.n >= 32768 && specToCheck.m == 1) {
+                return (false, "worksteal_chunk4 prefers large N (n>=32768), m=1 (got m=\(specToCheck.m), n=\(specToCheck.n))")
+            }
+        }
+
+        // v7 triple-buffer variants tend to help when N is moderately large
+        if vname.contains("triplebuf") {
+            if !(specToCheck.n >= 4096 && specToCheck.m == 1) {
+                return (false, "triplebuf prefers n>=4096, m=1 (got m=\(specToCheck.m), n=\(specToCheck.n))")
+            }
+        }
+
+        // Multi-row batching variants require m to be at least the row count in name (e.g., rows8)
+        if let rowsRange = vname.range(of: "rows"), rowsRange.upperBound < vname.endIndex, vname[rowsRange.upperBound].isNumber {
+            var i = rowsRange.upperBound
+            var digits = ""
+            while i < vname.endIndex, vname[i].isNumber {
+                digits.append(vname[i])
+                i = vname.index(after: i)
+            }
+            if let rows = Int(digits), specToCheck.m < rows {
+                return (false, "rows\(rows) requires m>=\(rows) (got m=\(specToCheck.m))")
             }
         }
 

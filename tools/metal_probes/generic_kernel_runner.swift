@@ -721,12 +721,15 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
         let columnsPerTG = max(1, cols)
         let threadgroupWidth = max(1, tg)
         let threadgroupSize = MTLSize(width: threadgroupWidth, height: 1, depth: 1)
+        // Derive rows per TG if specified (e.g., rows8)
+        let rowsPerTG = extractInt(after: "rows", in: name, default: 1)
+        let heightGroups = max(1, (spec.m + rowsPerTG - 1) / rowsPerTG)
         // Single-TG override for debug or experiments
         if name.contains("single_tg") {
             let threadgroups = MTLSize(width: 1, height: 1, depth: 1)
             return (threadgroups, threadgroupSize)
         }
-        let threadgroups = MTLSize(width: (spec.n + columnsPerTG - 1) / columnsPerTG, height: 1, depth: 1)
+        let threadgroups = MTLSize(width: (spec.n + columnsPerTG - 1) / columnsPerTG, height: heightGroups, depth: max(spec.batch, 1))
         return (threadgroups, threadgroupSize)
     }
     

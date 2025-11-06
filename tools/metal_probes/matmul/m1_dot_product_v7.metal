@@ -633,6 +633,414 @@ void m1_dot_product_v7_nt_adaptive_bn128_tg128(
     }
 }
 
+// ==========================================================
+// New v7 tiny, barrier-free param kernels with vector loads
+// - Designed for m=1, medium-N (e.g., ~10k), K~512-2048
+// - No threadgroup memory, no barriers; rely on L1 for A
+// - BN, BK and UNROLL provided at runtime via constant buffers
+// - TG (threads per threadgroup) is chosen at dispatch time
+// ==========================================================
+
+inline void v7_tiny_vec4_core(
+    device const half* __restrict A,
+    device const half* __restrict B,
+    device half* __restrict C,
+    int M,
+    int N,
+    int K,
+    int BN,
+    int UNROLL,
+    ushort tgWidth,
+    uint3 gid,
+    uint3 lid)
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    // tgWidth provided from host via builtin threads_per_threadgroup
+    const int group_base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += tgWidth) {
+        const int col = group_base_col + co;
+        if (col >= N) continue;
+
+        const device half* __restrict bcol = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+        float acc = 0.0f;
+
+        int k = 0;
+        // align to 4 for half4 loads from B
+        for (; k < K && ((k & 3) != 0); ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        const int step4 = 4;
+        const int U = max(1, UNROLL);
+        // unrolled loop over half4
+        for (; k + U*step4 - 1 < K; k += U*step4) {
+            #pragma unroll 1
+            for (int u = 0; u < U; ++u) {
+                const int kk = k + u*step4;
+                const device half4* pB = reinterpret_cast<const device half4*>(bcol + kk);
+                half4 hb = *pB;
+                float4 fb = float4(hb);
+                acc = fma(float(A[kk + 0]), fb.x, acc);
+                acc = fma(float(A[kk + 1]), fb.y, acc);
+                acc = fma(float(A[kk + 2]), fb.z, acc);
+                acc = fma(float(A[kk + 3]), fb.w, acc);
+            }
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        C[col] = half(acc);
+    }
+}
+
+inline void v7_tiny_vec4A_core(
+    device const half* __restrict A,
+    device const half* __restrict B,
+    device half* __restrict C,
+    int M,
+    int N,
+    int K,
+    int BN,
+    int UNROLL,
+    ushort tgWidth,
+    uint3 gid,
+    uint3 lid)
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    // tgWidth provided
+    const int group_base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += tgWidth) {
+        const int col = group_base_col + co;
+        if (col >= N) continue;
+        const device half* __restrict bcol = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+        float acc = 0.0f;
+
+        int k = 0;
+        // align both A and B to 4
+        for (; k < K && ((k & 3) != 0); ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        const int U = max(1, UNROLL);
+        for (; k + 4*U - 1 < K; k += 4*U) {
+            #pragma unroll 1
+            for (int u = 0; u < U; ++u) {
+                const int kk = k + 4*u;
+                const device half4* pA = reinterpret_cast<const device half4*>(A + kk);
+                const device half4* pB = reinterpret_cast<const device half4*>(bcol + kk);
+                float4 fa = float4(*pA);
+                float4 fb = float4(*pB);
+                acc = fma(fa.x, fb.x, acc);
+                acc = fma(fa.y, fb.y, acc);
+                acc = fma(fa.z, fb.z, acc);
+                acc = fma(fa.w, fb.w, acc);
+            }
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        C[col] = half(acc);
+    }
+}
+
+inline void v7_tiny_vec8_core(
+    device const half* __restrict A,
+    device const half* __restrict B,
+    device half* __restrict C,
+    int M,
+    int N,
+    int K,
+    int BN,
+    int UNROLL,
+    ushort tgWidth,
+    uint3 gid,
+    uint3 lid)
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    // tgWidth provided
+    const int group_base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += tgWidth) {
+        const int col = group_base_col + co;
+        if (col >= N) continue;
+        const device half* __restrict bcol = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+        float acc = 0.0f;
+
+        int k = 0;
+        // align to 8 for paired half4 reads from B
+        for (; k < K && ((k & 7) != 0); ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        const int U = max(1, UNROLL);
+        for (; k + 8*U - 1 < K; k += 8*U) {
+            #pragma unroll 1
+            for (int u = 0; u < U; ++u) {
+                const int kk = k + 8*u;
+                const device half4* pB0 = reinterpret_cast<const device half4*>(bcol + kk);
+                const device half4* pB1 = reinterpret_cast<const device half4*>(bcol + kk + 4);
+                float4 fb0 = float4(*pB0);
+                float4 fb1 = float4(*pB1);
+                acc = fma(float(A[kk + 0]), fb0.x, acc);
+                acc = fma(float(A[kk + 1]), fb0.y, acc);
+                acc = fma(float(A[kk + 2]), fb0.z, acc);
+                acc = fma(float(A[kk + 3]), fb0.w, acc);
+                acc = fma(float(A[kk + 4]), fb1.x, acc);
+                acc = fma(float(A[kk + 5]), fb1.y, acc);
+                acc = fma(float(A[kk + 6]), fb1.z, acc);
+                acc = fma(float(A[kk + 7]), fb1.w, acc);
+            }
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        C[col] = half(acc);
+    }
+}
+
+// Kernel wrappers (param encoding order matches Swift runner):
+// buffers: 0=A,1=B,2=C, [bias?], M,N,K, BN, BK, UNROLL
+
+[[kernel]]
+void m1_dot_product_v7_nt_tiny_vec4_param(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    constant int& BN [[buffer(6)]],
+    constant int& BK [[buffer(7)]],
+    constant int& UNROLL [[buffer(8)]],
+    uint3 tgsz [[threads_per_threadgroup]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    (void)BK;
+    v7_tiny_vec4_core(A, B, C, M, N, K, BN, UNROLL, static_cast<ushort>(tgsz.x), gid, lid);
+}
+
+[[kernel]]
+void m1_dot_product_v7_nt_tiny_vec4a_param(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    constant int& BN [[buffer(6)]],
+    constant int& BK [[buffer(7)]],
+    constant int& UNROLL [[buffer(8)]],
+    uint3 tgsz [[threads_per_threadgroup]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    (void)BK;
+    v7_tiny_vec4A_core(A, B, C, M, N, K, BN, UNROLL, static_cast<ushort>(tgsz.x), gid, lid);
+}
+
+[[kernel]]
+void m1_dot_product_v7_nt_tiny_vec8_param(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    constant int& BN [[buffer(6)]],
+    constant int& BK [[buffer(7)]],
+    constant int& UNROLL [[buffer(8)]],
+    uint3 tgsz [[threads_per_threadgroup]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    (void)BK;
+    v7_tiny_vec8_core(A, B, C, M, N, K, BN, UNROLL, static_cast<ushort>(tgsz.x), gid, lid);
+}
+
+// Specialized wrapper for best-known configuration (bn32, bk256, tg256, unroll=4)
+// Matches generic runner's parameter layout (M,N,K only after output), no BN/BK/UNROLL buffers needed.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void m1_dot_product_v7_nt_tiny_vec8_bn32_bk256_tg256_u4(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint3 tgsz [[threads_per_threadgroup]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    const int BN = 32;
+    const int UNROLL = 4;
+    v7_tiny_vec8_core(A, B, C, M, N, K, BN, UNROLL, static_cast<ushort>(tgsz.x), gid, lid);
+}
+
+// ==========================================================
+// v7 tiny clone of v4 winner (BN=64, TG=64), M=1 only
+// Barrier-free, scalar A/B loads with 8-FMA unroll
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void m1_dot_product_v7_nt_tiny_bn64_tg64(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    const int BN = 64;
+    const int base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += 64) {
+        const int col = base_col + co;
+        if (col >= N) continue;
+        const device half* __restrict bcol = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+        float acc = 0.0f;
+        int k = 0;
+        for (; k + 7 < K; k += 8) {
+            acc = fma(float(A[k    ]), float(bcol[k    ]), acc);
+            acc = fma(float(A[k + 1]), float(bcol[k + 1]), acc);
+            acc = fma(float(A[k + 2]), float(bcol[k + 2]), acc);
+            acc = fma(float(A[k + 3]), float(bcol[k + 3]), acc);
+            acc = fma(float(A[k + 4]), float(bcol[k + 4]), acc);
+            acc = fma(float(A[k + 5]), float(bcol[k + 5]), acc);
+            acc = fma(float(A[k + 6]), float(bcol[k + 6]), acc);
+            acc = fma(float(A[k + 7]), float(bcol[k + 7]), acc);
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        C[col] = half(acc);
+    }
+}
+
+// ==========================================================
+// v7 tiny simdgroup-friendly variant (BN=64, TG=64)
+// Use half4 B vector loads and 8-FMA unroll to raise ILP
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void m1_dot_product_v7_nt_tiny_sgmm_bn64_tg64(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    const int BN = 64;
+    const int base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += 64) {
+        const int col = base_col + co;
+        if (col >= N) continue;
+        const device half* __restrict bcol = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+        float acc = 0.0f;
+        int k = 0;
+        // align to 4
+        for (; k < K && ((k & 3) != 0); ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        for (; k + 7 < K; k += 8) {
+            // two half4 loads of B, scalar A to keep reg pressure reasonable
+            const device half4* pB0 = reinterpret_cast<const device half4*>(bcol + k);
+            const device half4* pB1 = reinterpret_cast<const device half4*>(bcol + k + 4);
+            float4 fb0 = float4(*pB0);
+            float4 fb1 = float4(*pB1);
+            acc = fma(float(A[k + 0]), fb0.x, acc);
+            acc = fma(float(A[k + 1]), fb0.y, acc);
+            acc = fma(float(A[k + 2]), fb0.z, acc);
+            acc = fma(float(A[k + 3]), fb0.w, acc);
+            acc = fma(float(A[k + 4]), fb1.x, acc);
+            acc = fma(float(A[k + 5]), fb1.y, acc);
+            acc = fma(float(A[k + 6]), fb1.z, acc);
+            acc = fma(float(A[k + 7]), fb1.w, acc);
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(bcol[k]), acc);
+        }
+        C[col] = half(acc);
+    }
+}
+
+// ==========================================================
+// v7 multi-row batching variant (BN=64, TG=64, rowsPerTG=8)
+// Reuse B across 8 rows to raise arithmetic intensity
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void m1_dot_product_v7_nt_tiny_multim_bn64_tg64_rows8(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    const int rowsPerTG = 8;
+    const int rowBase = static_cast<int>(gid.y) * rowsPerTG;
+    const ushort lane = static_cast<ushort>(lid.x);
+    const int BN = 64;
+    const int base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += 64) {
+        const int col = base_col + co;
+        if (col >= N) continue;
+        const device half* __restrict bcol = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+        float acc[rowsPerTG];
+        for (int r = 0; r < rowsPerTG; ++r) acc[r] = 0.0f;
+
+        int k = 0;
+        for (; k + 7 < K; k += 8) {
+            // Load B once, reuse across rows
+            half b0 = bcol[k + 0];
+            half b1 = bcol[k + 1];
+            half b2 = bcol[k + 2];
+            half b3 = bcol[k + 3];
+            half b4 = bcol[k + 4];
+            half b5 = bcol[k + 5];
+            half b6 = bcol[k + 6];
+            half b7 = bcol[k + 7];
+            for (int r = 0; r < rowsPerTG; ++r) {
+                const int row = rowBase + r;
+                if (row >= M) break;
+                const device half* arow = A + static_cast<size_t>(row) * static_cast<size_t>(K);
+                acc[r] = fma(float(arow[k + 0]), float(b0), acc[r]);
+                acc[r] = fma(float(arow[k + 1]), float(b1), acc[r]);
+                acc[r] = fma(float(arow[k + 2]), float(b2), acc[r]);
+                acc[r] = fma(float(arow[k + 3]), float(b3), acc[r]);
+                acc[r] = fma(float(arow[k + 4]), float(b4), acc[r]);
+                acc[r] = fma(float(arow[k + 5]), float(b5), acc[r]);
+                acc[r] = fma(float(arow[k + 6]), float(b6), acc[r]);
+                acc[r] = fma(float(arow[k + 7]), float(b7), acc[r]);
+            }
+        }
+        for (; k < K; ++k) {
+            half bv = bcol[k];
+            for (int r = 0; r < rowsPerTG; ++r) {
+                const int row = rowBase + r;
+                if (row >= M) break;
+                const device half* arow = A + static_cast<size_t>(row) * static_cast<size_t>(K);
+                acc[r] = fma(float(arow[k]), float(bv), acc[r]);
+            }
+        }
+        for (int r = 0; r < rowsPerTG; ++r) {
+            const int row = rowBase + r;
+            if (row >= M) break;
+            C[static_cast<size_t>(row) * static_cast<size_t>(N) + static_cast<size_t>(col)] = half(acc[r]);
+        }
+    }
+}
+
 // 7) Memory Layout Transformation for Better Coalescing (BN=64, BK=64)
 //    Transform B tile into TG memory for contiguous access.
 [[kernel, max_total_threads_per_threadgroup(128)]]
@@ -841,5 +1249,309 @@ void m1_dot_product_v7_nt_bn16_largek_smalln_kpar_vec4_both_bk256_tg256(
     if (simd_lane_id == 0u) {
         if (col0 < N) { D[col0] = half(acc0); }
         if (col1 < N) { D[col1] = half(acc1); }
+    }
+}
+
+// Optimized for K-parallel reduction with full vectorization
+// Changes: manual FMA, XOR shuffle, __restrict hints.
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void m1_dot_product_v7_nt_bn8_largek_smalln_kpar_vec4_both_bk256_tg256_fma_xorshuf(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* D [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simdgroup_id [[simdgroup_index_in_threadgroup]]) 
+{
+    if (M != 1) { return; }
+    
+    const int BN = 8;
+    const int base_col = static_cast<int>(gid.x) * BN;
+    const int col = base_col + static_cast<int>(simdgroup_id);
+    
+    if (static_cast<int>(simdgroup_id) >= BN || col >= N) { return; }
+
+    const uint W = 32u;
+    const device half* __restrict colB = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+    float acc = 0.0f;
+    
+    // Process K in half4 chunks, padded to multiple of 4
+    const int K4 = K & ~3;
+    
+    // Vectorized path: manual FMA for better fusion than dot()
+    for (int k = static_cast<int>(simd_lane_id) * 4; k + 3 < K4; k += static_cast<int>(W) * 4) {
+        const device half4* A4 = reinterpret_cast<const device half4*>(A + k);
+        const device half4* B4 = reinterpret_cast<const device half4*>(colB + k);
+        
+        const float4 af = float4(*A4);
+        const float4 bf = float4(*B4);
+        
+        acc = fma(af.x, bf.x, acc);
+        acc = fma(af.y, bf.y, acc);
+        acc = fma(af.z, bf.z, acc);
+        acc = fma(af.w, bf.w, acc);
+    }
+    
+    // Scalar tail for misaligned K
+    for (int k = K4 + static_cast<int>(simd_lane_id); k < K; k += static_cast<int>(W)) {
+        acc = fma(float(A[k]), float(colB[static_cast<size_t>(k)]), acc);
+    }
+    
+    // XOR-based reduction (fewer dependencies than shuffle_down)
+    acc += simd_shuffle_xor(acc, 16u);
+    acc += simd_shuffle_xor(acc, 8u);
+    acc += simd_shuffle_xor(acc, 4u);
+    acc += simd_shuffle_xor(acc, 2u);
+    acc += simd_shuffle_xor(acc, 1u);
+    
+    if (simd_lane_id == 0u) { 
+        D[col] = half(acc); 
+    }
+}
+
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void m1_dot_product_v7_nt_bn16_largek_smalln_kpar_vec4_both_bk256_tg256_fma_xorshuf(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* D [[buffer(2)]],
+    constant int& M [[buffer(3)]],
+    constant int& N [[buffer(4)]],
+    constant int& K [[buffer(5)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simdgroup_id [[simdgroup_index_in_threadgroup]]) 
+{
+    if (M != 1) { return; }
+    
+    const int BN = 16;
+    const int base_col = static_cast<int>(gid.x) * BN;
+    const int SG_COLS = 2;
+    const int col_pair = static_cast<int>(simdgroup_id);
+    
+    if (col_pair >= (BN / SG_COLS)) { return; }
+    
+    const int col0 = base_col + col_pair * SG_COLS + 0;
+    const int col1 = base_col + col_pair * SG_COLS + 1;
+
+    const uint W = 32u;
+    const device half* __restrict colB0 = (col0 < N) ? (B + static_cast<size_t>(col0) * static_cast<size_t>(K)) : nullptr;
+    const device half* __restrict colB1 = (col1 < N) ? (B + static_cast<size_t>(col1) * static_cast<size_t>(K)) : nullptr;
+    
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    const int K4 = K & ~3;
+    
+    // Dual-column vectorized accumulation
+    for (int k = static_cast<int>(simd_lane_id) * 4; k + 3 < K4; k += static_cast<int>(W) * 4) {
+        const device half4* A4 = reinterpret_cast<const device half4*>(A + k);
+        const float4 af = float4(*A4);
+        
+        if (colB0) {
+            const device half4* B40 = reinterpret_cast<const device half4*>(colB0 + k);
+            const float4 bf0 = float4(*B40);
+            acc0 = fma(af.x, bf0.x, acc0);
+            acc0 = fma(af.y, bf0.y, acc0);
+            acc0 = fma(af.z, bf0.z, acc0);
+            acc0 = fma(af.w, bf0.w, acc0);
+        }
+        
+        if (colB1) {
+            const device half4* B41 = reinterpret_cast<const device half4*>(colB1 + k);
+            const float4 bf1 = float4(*B41);
+            acc1 = fma(af.x, bf1.x, acc1);
+            acc1 = fma(af.y, bf1.y, acc1);
+            acc1 = fma(af.z, bf1.z, acc1);
+            acc1 = fma(af.w, bf1.w, acc1);
+        }
+    }
+    
+    // Scalar tail
+    for (int k = K4 + static_cast<int>(simd_lane_id); k < K; k += static_cast<int>(W)) {
+        const float a_val = float(A[k]);
+        if (colB0) { acc0 = fma(a_val, float(colB0[static_cast<size_t>(k)]), acc0); }
+        if (colB1) { acc1 = fma(a_val, float(colB1[static_cast<size_t>(k)]), acc1); }
+    }
+    
+    // XOR reduction for both columns
+    acc0 += simd_shuffle_xor(acc0, 16u);
+    acc0 += simd_shuffle_xor(acc0, 8u);
+    acc0 += simd_shuffle_xor(acc0, 4u);
+    acc0 += simd_shuffle_xor(acc0, 2u);
+    acc0 += simd_shuffle_xor(acc0, 1u);
+    
+    acc1 += simd_shuffle_xor(acc1, 16u);
+    acc1 += simd_shuffle_xor(acc1, 8u);
+    acc1 += simd_shuffle_xor(acc1, 4u);
+    acc1 += simd_shuffle_xor(acc1, 2u);
+    acc1 += simd_shuffle_xor(acc1, 1u);
+    
+    if (simd_lane_id == 0u) {
+        if (col0 < N) { D[col0] = half(acc0); }
+        if (col1 < N) { D[col1] = half(acc1); }
+    }
+}
+
+// ==========================================================
+// BIAS-ENABLED VARIANTS OF FASTEST v7 KERNELS
+// ==========================================================
+
+// Bias variant: nn_tiny_bn64_tg64 with bias support (tB=0, non-transposed B: K×N layout)
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void m1_dot_product_v7_nn_tiny_bn64_tg64_bias(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    device const half* bias [[buffer(3)]],
+    constant int& M [[buffer(4)]],
+    constant int& N [[buffer(5)]],
+    constant int& K [[buffer(6)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    const int BN = 64;
+    const int base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += 64) {
+        const int col = base_col + co;
+        if (col >= N) continue;
+        // For tB=0: B is K×N, so element B[k,col] is at B[k*N + col]
+        const size_t col_offset = static_cast<size_t>(col);
+        const size_t N_size = static_cast<size_t>(N);
+        float acc = 0.0f;
+        int k = 0;
+        for (; k + 7 < K; k += 8) {
+            acc = fma(float(A[k    ]), float(B[static_cast<size_t>(k    ) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 1]), float(B[static_cast<size_t>(k + 1) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 2]), float(B[static_cast<size_t>(k + 2) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 3]), float(B[static_cast<size_t>(k + 3) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 4]), float(B[static_cast<size_t>(k + 4) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 5]), float(B[static_cast<size_t>(k + 5) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 6]), float(B[static_cast<size_t>(k + 6) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 7]), float(B[static_cast<size_t>(k + 7) * N_size + col_offset]), acc);
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(B[static_cast<size_t>(k) * N_size + col_offset]), acc);
+        }
+        // Add bias
+        acc += float(bias[col]);
+        C[col] = half(acc);
+    }
+}
+
+// Bias variant: nn_tiny_sgmm_bn64_tg64 with bias support (tB=0, non-transposed B: K×N layout)
+[[kernel, max_total_threads_per_threadgroup(64)]]
+void m1_dot_product_v7_nn_tiny_sgmm_bn64_tg64_bias(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* C [[buffer(2)]],
+    device const half* bias [[buffer(3)]],
+    constant int& M [[buffer(4)]],
+    constant int& N [[buffer(5)]],
+    constant int& K [[buffer(6)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]])
+{
+    if (M != 1) { return; }
+    const ushort lane = static_cast<ushort>(lid.x);
+    const int BN = 64;
+    const int base_col = static_cast<int>(gid.x) * BN;
+
+    for (int co = lane; co < BN; co += 64) {
+        const int col = base_col + co;
+        if (col >= N) continue;
+        // For tB=0: B is K×N, access pattern B[k*N + col]
+        const size_t col_offset = static_cast<size_t>(col);
+        const size_t N_size = static_cast<size_t>(N);
+        float acc = 0.0f;
+        int k = 0;
+        // align to 4
+        for (; k < K && ((k & 3) != 0); ++k) {
+            acc = fma(float(A[k]), float(B[static_cast<size_t>(k) * N_size + col_offset]), acc);
+        }
+        for (; k + 7 < K; k += 8) {
+            // Load A scalars and B elements with strided access
+            acc = fma(float(A[k + 0]), float(B[static_cast<size_t>(k + 0) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 1]), float(B[static_cast<size_t>(k + 1) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 2]), float(B[static_cast<size_t>(k + 2) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 3]), float(B[static_cast<size_t>(k + 3) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 4]), float(B[static_cast<size_t>(k + 4) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 5]), float(B[static_cast<size_t>(k + 5) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 6]), float(B[static_cast<size_t>(k + 6) * N_size + col_offset]), acc);
+            acc = fma(float(A[k + 7]), float(B[static_cast<size_t>(k + 7) * N_size + col_offset]), acc);
+        }
+        for (; k < K; ++k) {
+            acc = fma(float(A[k]), float(B[static_cast<size_t>(k) * N_size + col_offset]), acc);
+        }
+        // Add bias
+        acc += float(bias[col]);
+        C[col] = half(acc);
+    }
+}
+
+// Bias variant: nn_bn16_largek_smalln_kpar_vec4_both_bk256_tg256 with bias support (tB=0, non-transposed B: K×N layout)
+[[kernel, max_total_threads_per_threadgroup(256)]]
+void m1_dot_product_v7_nn_bn16_largek_smalln_kpar_vec4_both_bk256_tg256_bias(
+    device const half* A [[buffer(0)]],
+    device const half* B [[buffer(1)]],
+    device half* D [[buffer(2)]],
+    device const half* bias [[buffer(3)]],
+    constant int& M [[buffer(4)]],
+    constant int& N [[buffer(5)]],
+    constant int& K [[buffer(6)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simdgroup_id [[simdgroup_index_in_threadgroup]]) 
+{
+    if (M != 1) { return; }
+    const int BN = 16;
+    const int base_col = static_cast<int>(gid.x) * BN;
+    const int SG_COLS = 2;
+    const int col_pair = static_cast<int>(simdgroup_id);
+    if (col_pair >= (BN / SG_COLS)) { return; }
+    const int col0 = base_col + col_pair * SG_COLS + 0;
+    const int col1 = base_col + col_pair * SG_COLS + 1;
+
+    const uint W = 32u;
+    // For tB=0: B is K×N, so B[k,col] is at B[k*N + col]
+    const bool valid0 = (col0 < N);
+    const bool valid1 = (col1 < N);
+    
+    float acc0 = 0.0f;
+    float acc1 = 0.0f;
+    
+    // K-parallel reduction: each lane handles elements spaced by W
+    for (int k = static_cast<int>(simd_lane_id); k < K; k += static_cast<int>(W)) {
+        const float a = float(A[k]);
+        const size_t row_offset = static_cast<size_t>(k) * static_cast<size_t>(N);
+        if (valid0) { acc0 = fma(a, float(B[row_offset + col0]), acc0); }
+        if (valid1) { acc1 = fma(a, float(B[row_offset + col1]), acc1); }
+    }
+    
+    // Reduce across simdgroup
+    acc0 += simd_shuffle_down(acc0, 16u);
+    acc0 += simd_shuffle_down(acc0, 8u);
+    acc0 += simd_shuffle_down(acc0, 4u);
+    acc0 += simd_shuffle_down(acc0, 2u);
+    acc0 += simd_shuffle_down(acc0, 1u);
+    acc1 += simd_shuffle_down(acc1, 16u);
+    acc1 += simd_shuffle_down(acc1, 8u);
+    acc1 += simd_shuffle_down(acc1, 4u);
+    acc1 += simd_shuffle_down(acc1, 2u);
+    acc1 += simd_shuffle_down(acc1, 1u);
+    
+    if (simd_lane_id == 0u) {
+        if (valid0) { 
+            acc0 += float(bias[col0]);
+            D[col0] = half(acc0); 
+        }
+        if (valid1) { 
+            acc1 += float(bias[col1]);
+            D[col1] = half(acc1); 
+        }
     }
 }

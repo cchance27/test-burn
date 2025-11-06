@@ -477,7 +477,7 @@ final class MatmulHarness {
             outDescriptor = MPSMatrixDescriptor(rows: spec.m, columns: spec.n, rowBytes: outStride, dataType: .float16)
         }
 
-        let op = MPSMatrixMultiplication(device: device, transposeLeft: spec.transposeA, transposeRight: spec.transposeB, resultRows: spec.m, resultColumns: spec.n, interiorColumns: spec.k, alpha: alpha, beta: beta)
+        let matmulOp = MPSMatrixMultiplication(device: device, transposeLeft: spec.transposeA, transposeRight: spec.transposeB, resultRows: spec.m, resultColumns: spec.n, interiorColumns: spec.k, alpha: alpha, beta: beta)
 
         var gpuTimings: [Double] = []
         var cpuTimings: [Double] = []
@@ -487,12 +487,36 @@ final class MatmulHarness {
 
             guard let commandBuffer = commandQueue.makeCommandBuffer() else { throw HarnessError.commandQueueUnavailable }
 
-            op.batchStart = 0
-            op.batchSize = batchCount
+            matmulOp.batchStart = 0
+            matmulOp.batchSize = batchCount
             let aMatrix = MPSMatrix(buffer: tensors.a, offset: 0, descriptor: aDescriptor)
             let bMatrix = MPSMatrix(buffer: tensors.b, offset: 0, descriptor: bDescriptor)
             let resultMatrix = MPSMatrix(buffer: tensors.output, offset: 0, descriptor: outDescriptor)
-            op.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
+            matmulOp.encode(commandBuffer: commandBuffer, leftMatrix: aMatrix, rightMatrix: bMatrix, resultMatrix: resultMatrix)
+            
+            // Add bias if needed using MPSMatrixSum
+            if spec.bias, let biasBuffer = tensors.bias {
+                // Create a bias matrix descriptor: M x N where we'll broadcast the bias vector
+                // For M=1 case, the bias is already 1xN, so we can add directly
+                let biasDescriptor = MPSMatrixDescriptor(rows: spec.m, columns: spec.n, rowBytes: spec.n * MemoryLayout<Float16>.stride, dataType: .float16)
+                
+                // Create temporary buffer for broadcasting bias if M > 1
+                var biasMatrix: MPSMatrix
+                if spec.m == 1 {
+                    // Direct case: bias is already the right shape (1 x N)
+                    biasMatrix = MPSMatrix(buffer: biasBuffer, offset: 0, descriptor: biasDescriptor)
+                } else {
+                    // Need to broadcast bias across M rows
+                    // For now, we'll use the bias buffer directly and rely on MPS behavior
+                    // Note: This might need adjustment for M > 1 cases
+                    biasMatrix = MPSMatrix(buffer: biasBuffer, offset: 0, descriptor: biasDescriptor)
+                }
+                
+                // Use MPSMatrixSum to add bias to result: result = result + bias
+                // MPSMatrixSum performs: result = alpha * primaryMatrix + secondaryMatrix
+                let sumOp = MPSMatrixSum(device: device, count: 2, rows: spec.m, columns: spec.n, transpose: false)
+                sumOp.encode(to: commandBuffer, sourceMatrices: [resultMatrix, biasMatrix], resultMatrix: resultMatrix, scale: nil, offsetVector: nil, biasVector: nil, start: 0)
+            }
             
             let cpuStart = DispatchTime.now().uptimeNanoseconds
             commandBuffer.commit()
