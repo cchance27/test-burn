@@ -152,6 +152,7 @@ Grid = `(N + bn - 1) / bn` TGs in X; 1×1 in Y×Z. Tokens match only when follow
 - Always add scalar head/tail when using `half4`/`float4` to handle alignment and tails.
 - Keep barriers only where truly necessary around double‑buffered A tiles.
 - If you see `0.0ms` GPU + huge error, verify variant name tokens and that your kernel symbol matches the manifest.
+- Memory layout reminder (critical for correctness): for NT shapes (`transposeB=true`), the harness fills B as `[N x K]` row‑major. Index B using `col*K + k` (or take `const device half* colB = B + col*K`) — not `k*N + col`. For NN shapes (`transposeB=false`), B is `[K x N]` row‑major.
 
 ## Naming Cheatsheet
 

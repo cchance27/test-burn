@@ -27,4 +27,7 @@ The following are design goals and rules for our Agents and Developers for the p
 - Please remember to context.synchronize() as needed to make sure that tensors are settled in the gpu memory when created or used.
 - If updating code that has comments that reference it make sure the comments are updated to match the new changes.
 - Use ideomatic rust always
-- DO NOT edit cargo.toml and cargo.lock, to add or modify crates use cargo add/remove etc.
+- Always use `cargo add xxxx` to add packages don't manually edit cargo files.
+- When reviewing json files, use jq, grep and other bash commands, if more advanced parsing is needed use a python one liner, as json files could be extremely large so cating them or reading those files directly could be a major issue.
+- When reviewing logs or csv files use bash commands (grep, awk, sed, cut, sort etc), as the files may be very large so reading them or catting them is ill advised. 
+- When executing cargo commands make sure to use options like -q and --message-format=short to minimize output and maximize context usage.

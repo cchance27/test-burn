@@ -26,6 +26,8 @@ final class MatmulHarness {
     private let variants: [MatmulShapeSpec.Backend: [KernelVariant]]
     private let enabledBackends: [MatmulShapeSpec.Backend]
     private let compareAllBackends: Bool
+    private let pipelineCache = PipelineCache()
+    private var tensorCache: [MatmulShapeSpec: MatmulTensors] = [:]
     private(set) var variantFailures: [VariantFailure] = []
 
     init(buildDir: URL, matmulDir: URL) throws {
@@ -100,11 +102,11 @@ final class MatmulHarness {
         return enabledBackends.contains(spec.backend) ? [spec.backend] : []
     }
 
-    private func runVariant(spec: MatmulShapeSpec, backend: MatmulShapeSpec.Backend, variant: KernelVariant) throws -> BenchmarkResult {
+    private func runVariant(spec: MatmulShapeSpec, backend: MatmulShapeSpec.Backend, variant: KernelVariant, tensors: MatmulTensors) throws -> BenchmarkResult {
         // Use unified runner for all kernel backends, MPS as special case
         switch backend {
         case .mps:
-            return try runMPS(spec: spec, variant: variant)
+            return try runMPS(spec: spec, variant: variant, tensors: tensors)
         default:
             // For all other backends, use the unified runner
             let runner = UnifiedBackendRunner(
@@ -112,10 +114,24 @@ final class MatmulHarness {
                 commandQueue: commandQueue,
                 libraries: libraries,
                 iterations: iterations,
-                warmup: warmup
+                warmup: warmup,
+                pipelineCache: self.pipelineCache
             )
-            return try runner.runVariant(spec: spec, backend: backend, variant: variant)
+            return try runner.runVariant(spec: spec, backend: backend, variant: variant, tensors: tensors)
         }
+    }
+
+    private func tensorCacheKey(for spec: MatmulShapeSpec) -> String {
+        let tA_str = spec.transposeA ? "1" : "0"
+        let tB_str = spec.transposeB ? "1" : "0"
+        let bias_str = spec.bias ? "1" : "0"
+        let alpha_str = String(spec.alpha).replacingOccurrences(of: ".", with: "_")
+        let beta_str = String(spec.beta).replacingOccurrences(of: ".", with: "_")
+
+        let op_str = spec.op.replacingOccurrences(of: "[^a-zA-Z0-9_]", with: "_", options: .regularExpression)
+        let backend_str = spec.backend.rawValue.replacingOccurrences(of: "[^a-zA-Z0-9_]", with: "_", options: .regularExpression)
+
+        return "spec_\(op_str)_\(backend_str)_m\(spec.m)_n\(spec.n)_k\(spec.k)_tA\(tA_str)_tB\(tB_str)_alpha\(alpha_str)_beta\(beta_str)_bias\(bias_str)_batch\(spec.batch).json"
     }
 
     private func cacheDirectory() -> URL {
@@ -124,48 +140,98 @@ final class MatmulHarness {
         return cacheDir
     }
 
-    private func cacheFileURL(for variantName: String) -> URL {
-        // Sanitize the variantName for filesystem compatibility (replace '/' with '_')
+    private func resultsCacheFileURL(for variantName: String) -> URL {
         let sanitized = variantName.replacingOccurrences(of: "/", with: "_")
         return cacheDirectory().appendingPathComponent("cache_\(sanitized).json")
     }
 
     private func loadCachedResults(for variantName: String) -> [BenchmarkResult]? {
-        let cacheURL = cacheFileURL(for: variantName)
-        
-        guard FileManager.default.fileExists(atPath: cacheURL.path) else {
-            return nil
-        }
-        
+        let cacheURL = resultsCacheFileURL(for: variantName)
+        guard FileManager.default.fileExists(atPath: cacheURL.path) else { return nil }
         do {
             let data = try Data(contentsOf: cacheURL)
-            let cachedResults = try JSONDecoder().decode([BenchmarkResult].self, from: data)
-            return cachedResults
+            return try JSONDecoder().decode([BenchmarkResult].self, from: data)
         } catch {
-            print("Warning: Could not load cache for \(variantName): \(error)")
+            print("Warning: Could not load results cache for \(variantName): \(error)")
             return nil
         }
     }
 
     private func saveCachedResults(_ results: [BenchmarkResult], for variantName: String) {
-        let cacheURL = cacheFileURL(for: variantName)
-        
+        let cacheURL = resultsCacheFileURL(for: variantName)
         do {
             let data = try JSONEncoder().encode(results)
             try data.write(to: cacheURL)
         } catch {
-            print("Warning: Could not save cache for \(variantName): \(error)")
+            print("Warning: Could not save results cache for \(variantName): \(error)")
         }
+    }
+
+    private func prepareTensorCache(specs: [MatmulShapeSpec]) throws {
+        tensorCache.removeAll()
+        let tensorCacheDir = cacheDirectory().appendingPathComponent("tensors")
+        try? FileManager.default.createDirectory(at: tensorCacheDir, withIntermediateDirectories: true)
+
+        let uniqueSpecs = Set(specs)
+        print("Pre-computing or loading \(uniqueSpecs.count) unique CPU reference tensors...")
+
+        for spec in uniqueSpecs {
+            let cacheKey = tensorCacheKey(for: spec)
+            let cacheFileURL = tensorCacheDir.appendingPathComponent(cacheKey)
+
+            if FileManager.default.fileExists(atPath: cacheFileURL.path) {
+                do {
+                    let data = try Data(contentsOf: cacheFileURL)
+                    let cachedData = try JSONDecoder().decode(CPUReferenceCache.self, from: data)
+                    tensorCache[spec] = MatmulTensors(
+                        a: device.makeBuffer(array: cachedData.aValues),
+                        b: device.makeBuffer(array: cachedData.bValues),
+                        bias: cachedData.biasValues.map { device.makeBuffer(array: $0) },
+                        output: device.makeBuffer(array: cachedData.initialOutput),
+                        cpuReferenceFloat: cachedData.cpuReferenceFloat,
+                        initialOutput: cachedData.initialOutput,
+                        aLayout: cachedData.aLayout,
+                        bLayout: cachedData.bLayout
+                    )
+                    print("Loaded tensor from cache: \(cacheKey)")
+                    continue // Skip to next spec
+                } catch {
+                    print("Warning: Could not load tensor cache for spec key \(cacheKey): \(error). Regenerating.")
+                    try? FileManager.default.removeItem(at: cacheFileURL)
+                }
+            }
+
+            // If not loaded from cache, generate new data
+            print("Generating new tensor: \(cacheKey)")
+            let rawData = generateRawTensorData(spec: spec)
+            tensorCache[spec] = MatmulTensors(
+                a: device.makeBuffer(array: rawData.aValues),
+                b: device.makeBuffer(array: rawData.bValues),
+                bias: rawData.biasValues.map { device.makeBuffer(array: $0) },
+                output: device.makeBuffer(array: rawData.initialOutput),
+                cpuReferenceFloat: rawData.cpuReferenceFloat,
+                initialOutput: rawData.initialOutput,
+                aLayout: rawData.aLayout,
+                bLayout: rawData.bLayout
+            )
+
+            do {
+                let data = try JSONEncoder().encode(rawData)
+                try data.write(to: cacheFileURL)
+            } catch {
+                print("Warning: Could not save tensor cache for spec key \(cacheKey): \(error)")
+            }
+        }
+        print("Tensor pre-computation and loading complete.")
     }
 
     func run(specs: [MatmulShapeSpec]) throws -> [BenchmarkResult] {
         variantFailures.removeAll()
-        
-        // Load all cached results first
+        try prepareTensorCache(specs: specs)
+
         var allResults: [BenchmarkResult] = []
         var allCachedResults: [String: [BenchmarkResult]] = [:]
         
-        // Group specs by backend+variant to enable per-variant caching
         var variantSpecs: [String: [MatmulShapeSpec]] = [:]
         
         for spec in specs {
@@ -176,32 +242,19 @@ final class MatmulHarness {
             }
 
             for backend in backends {
-                guard let variantList = variants[backend], !variantList.isEmpty else {
-                    continue
-                }
+                guard let variantList = variants[backend], !variantList.isEmpty else { continue }
                 for variant in variantList {
-                    let key = "\(backend.rawValue)/\(variant.name)"  // Use backend/variant as key
+                    let key = "\(backend.rawValue)/\(variant.name)"
                     if VariantManager.variantSupports(backend: backend, variant: variant, spec: spec) {
                         variantSpecs[key, default: []].append(spec)
                     } else {
-                        variantFailures.append(
-                            VariantFailure(
-                                spec: spec,
-                                backend: backend,
-                                variantName: variant.name,
-                                errorDescription: "unsupported"
-                            )
-                        )
-                        // ensure key exists for bookkeeping, even if no supported specs
-                        if variantSpecs[key] == nil {
-                            variantSpecs[key] = []
-                        }
+                        variantFailures.append(VariantFailure(spec: spec, backend: backend, variantName: variant.name, errorDescription: "unsupported"))
+                        if variantSpecs[key] == nil { variantSpecs[key] = [] }
                     }
                 }
             }
         }
         
-        // Load cached results for all variants first
         for variantName in variantSpecs.keys {
             if let cached = loadCachedResults(for: variantName) {
                 allCachedResults[variantName] = cached
@@ -211,89 +264,53 @@ final class MatmulHarness {
             }
         }
         
-        // Process each variant separately with caching
         for (variantName, specsForVariant) in variantSpecs {
             print("Processing variant: \(variantName)")
             
             let cachedResults = allCachedResults[variantName] ?? []
             
-            // Find uncached specs for this variant
             let uncachedSpecs = specsForVariant.filter { spec in
                 !cachedResults.contains { result in
-                    result.spec.m == spec.m && 
-                    result.spec.n == spec.n && 
-                    result.spec.k == spec.k &&
-                    result.spec.transposeA == spec.transposeA &&
-                    result.spec.transposeB == spec.transposeB &&
-                    result.spec.batch == spec.batch &&
-                    result.spec.bias == spec.bias &&
-                    result.spec.op == spec.op  // Added op check for completeness
+                    result.spec.m == spec.m && result.spec.n == spec.n && result.spec.k == spec.k &&
+                    result.spec.transposeA == spec.transposeA && result.spec.transposeB == spec.transposeB &&
+                    result.spec.batch == spec.batch && result.spec.bias == spec.bias && result.spec.op == spec.op
                 }
             }
             
             if uncachedSpecs.isEmpty {
-                if specsForVariant.isEmpty {
-                    print("  No supported specs for \(variantName).")
-                } else {
-                    print("  All results for \(variantName) are cached. Skipping benchmark run.")
-                }
+                if specsForVariant.isEmpty { print("  No supported specs for \(variantName).") }
+                else { print("  All results for \(variantName) are cached. Skipping benchmark run.") }
                 continue
             }
             
             print("  Running \(uncachedSpecs.count) uncached specs for \(variantName)...")
             
-            // Calculate total runs for progress tracking for this specific variant
-            var totalUncachedRuns = 0
-            for spec in uncachedSpecs {
-                let backends = candidateBackends(for: spec)
-                for backend in backends {
-                    if let variantList = variants[backend] {
-                        for variant in variantList where "\(backend.rawValue)/\(variant.name)" == variantName {
-                            totalUncachedRuns += 1
-                        }
-                    }
-                }
-            }
-            
             var completedUncachedRuns = 0
             
-            // Run uncached specs
             for spec in uncachedSpecs {
-                let backends = candidateBackends(for: spec)
-                if backends.isEmpty {
-                    variantFailures.append(VariantFailure(spec: spec, backend: spec.backend, variantName: "<none>", errorDescription: "no enabled backends"))
-                    completedUncachedRuns += 1
+                guard let tensors = tensorCache[spec] else {
+                    variantFailures.append(VariantFailure(spec: spec, backend: spec.backend, variantName: "<unknown>", errorDescription: "Could not find pre-computed tensors for spec."))
                     continue
                 }
 
-                for backend in backends {
-                    guard let variantList = variants[backend], !variantList.isEmpty else {
-                        continue
-                    }
+                for backend in candidateBackends(for: spec) {
+                    guard let variantList = variants[backend] else { continue }
                     for variant in variantList where "\(backend.rawValue)/\(variant.name)" == variantName {
                         do {
-                            print("    Running: \(variant.name) [\(backend.rawValue)] - M:\(spec.m) N:\(spec.n) K:\(spec.k) | \(completedUncachedRuns + 1)/\(totalUncachedRuns)", terminator: "\r")
-                            let result = try runVariant(spec: spec, backend: backend, variant: variant)
-                            allResults.append(result)  // Only add new results 
+                            print("    Running: \(variant.name) [\(backend.rawValue)] - M:\(spec.m) N:\(spec.n) K:\(spec.k) | \(completedUncachedRuns + 1)/\(uncachedSpecs.count)", terminator: "\r")
+                            let result = try runVariant(spec: spec, backend: backend, variant: variant, tensors: tensors)
+                            allResults.append(result)
                             completedUncachedRuns += 1
                         } catch {
-                            variantFailures.append(
-                                VariantFailure(
-                                    spec: spec,
-                                    backend: backend,
-                                    variantName: variant.name,
-                                    errorDescription: String(describing: error)
-                                )
-                            )
+                            variantFailures.append(VariantFailure(spec: spec, backend: backend, variantName: variant.name, errorDescription: String(describing: error)))
                             completedUncachedRuns += 1
                         }
                     }
                 }
             }
             
-            print("") // New line after progress indicator for this variant
+            print("")
             
-            // Save all results (new + cached) for this variant
             let resultsForVariant = allResults.filter { "\($0.backend.rawValue)/\($0.variantName)" == variantName }
             saveCachedResults(resultsForVariant, for: variantName)
             
@@ -304,11 +321,8 @@ final class MatmulHarness {
         return allResults
     }
 
-    private func runMPS(spec: MatmulShapeSpec, variant: KernelVariant) throws -> BenchmarkResult {
-        let tensors = loadMatmulTensors(spec: spec)
-        guard MPSSupportsMTLDevice(device) else {
-            throw HarnessError.metalUnavailable
-        }
+    private func runMPS(spec: MatmulShapeSpec, variant: KernelVariant, tensors: MatmulTensors) throws -> BenchmarkResult {
+        guard MPSSupportsMTLDevice(device) else { throw HarnessError.metalUnavailable }
 
         let alpha = Double(spec.alpha)
         let beta = Double(spec.beta)
@@ -317,94 +331,35 @@ final class MatmulHarness {
         let bStride = tensors.bLayout.cols * MemoryLayout<Float16>.stride
         let outStride = spec.n * MemoryLayout<Float16>.stride
 
-        // Build descriptors with native batch where available, matching Metallic's usage
         let aDescriptor: MPSMatrixDescriptor
         let bDescriptor: MPSMatrixDescriptor
         let outDescriptor: MPSMatrixDescriptor
 
-        // Determine batch count and per-matrix byte sizes before creating descriptors
         let batchCount = max(spec.batch, 1)
         let aMatrixBytes = tensors.aLayout.rows * aStride
         let bMatrixBytes = tensors.bLayout.rows * bStride
         let outMatrixBytes = spec.m * outStride
 
         if batchCount > 1 {
-            // Prefer the initializer that includes `matrices` and `matrixBytes` so MPS sees a batched view
-            aDescriptor = MPSMatrixDescriptor(
-                rows: tensors.aLayout.rows,
-                columns: tensors.aLayout.cols,
-                matrices: batchCount,
-                rowBytes: aStride,
-                matrixBytes: aMatrixBytes,
-                dataType: .float16
-            )
-            bDescriptor = MPSMatrixDescriptor(
-                rows: tensors.bLayout.rows,
-                columns: tensors.bLayout.cols,
-                matrices: batchCount,
-                rowBytes: bStride,
-                matrixBytes: bMatrixBytes,
-                dataType: .float16
-            )
-            outDescriptor = MPSMatrixDescriptor(
-                rows: spec.m,
-                columns: spec.n,
-                matrices: batchCount,
-                rowBytes: outStride,
-                matrixBytes: outMatrixBytes,
-                dataType: .float16
-            )
+            aDescriptor = MPSMatrixDescriptor(rows: tensors.aLayout.rows, columns: tensors.aLayout.cols, matrices: batchCount, rowBytes: aStride, matrixBytes: aMatrixBytes, dataType: .float16)
+            bDescriptor = MPSMatrixDescriptor(rows: tensors.bLayout.rows, columns: tensors.bLayout.cols, matrices: batchCount, rowBytes: bStride, matrixBytes: bMatrixBytes, dataType: .float16)
+            outDescriptor = MPSMatrixDescriptor(rows: spec.m, columns: spec.n, matrices: batchCount, rowBytes: outStride, matrixBytes: outMatrixBytes, dataType: .float16)
         } else {
-            // Single-matrix case
-            aDescriptor = MPSMatrixDescriptor(
-                rows: tensors.aLayout.rows,
-                columns: tensors.aLayout.cols,
-                rowBytes: aStride,
-                dataType: .float16
-            )
-            bDescriptor = MPSMatrixDescriptor(
-                rows: tensors.bLayout.rows,
-                columns: tensors.bLayout.cols,
-                rowBytes: bStride,
-                dataType: .float16
-            )
-            outDescriptor = MPSMatrixDescriptor(
-                rows: spec.m,
-                columns: spec.n,
-                rowBytes: outStride,
-                dataType: .float16
-            )
+            aDescriptor = MPSMatrixDescriptor(rows: tensors.aLayout.rows, columns: tensors.aLayout.cols, rowBytes: aStride, dataType: .float16)
+            bDescriptor = MPSMatrixDescriptor(rows: tensors.bLayout.rows, columns: tensors.bLayout.cols, rowBytes: bStride, dataType: .float16)
+            outDescriptor = MPSMatrixDescriptor(rows: spec.m, columns: spec.n, rowBytes: outStride, dataType: .float16)
         }
 
-        let op = MPSMatrixMultiplication(
-            device: device,
-            transposeLeft: spec.transposeA,
-            transposeRight: spec.transposeB,
-            resultRows: spec.m,
-            resultColumns: spec.n,
-            interiorColumns: spec.k,
-            alpha: alpha,
-            beta: beta
-        )
+        let op = MPSMatrixMultiplication(device: device, transposeLeft: spec.transposeA, transposeRight: spec.transposeB, resultRows: spec.m, resultColumns: spec.n, interiorColumns: spec.k, alpha: alpha, beta: beta)
 
-        let totalIterations = max(iterations, warmup + 1)
         var gpuTimings: [Double] = []
         var cpuTimings: [Double] = []
-        
-        // Calculate batch strides in bytes for MPS (contiguous layout) if needed elsewhere
-        // let batchStrideA = tensors.aLayout.rows * tensors.aLayout.cols * MemoryLayout<Float16>.stride
-        // let batchStrideB = tensors.bLayout.rows * tensors.bLayout.cols * MemoryLayout<Float16>.stride
-        // let batchStrideOut = spec.m * spec.n * MemoryLayout<Float16>.stride
 
-        for iteration in 0..<totalIterations {
+        for iteration in 0..<(iterations + warmup) {
             restoreOutputBuffer(buffer: tensors.output, initial: tensors.initialOutput)
 
-            guard let commandBuffer = commandQueue.makeCommandBuffer() else {
-                throw HarnessError.commandQueueUnavailable
-            }
+            guard let commandBuffer = commandQueue.makeCommandBuffer() else { throw HarnessError.commandQueueUnavailable }
 
-            // Native MPS batching: encode once with batched matrix descriptors
-            // Mirrors Metallic's use of setBatchStart/setBatchSize
             op.batchStart = 0
             op.batchSize = batchCount
             let aMatrix = MPSMatrix(buffer: tensors.a, offset: 0, descriptor: aDescriptor)
@@ -417,34 +372,18 @@ final class MatmulHarness {
             commandBuffer.waitUntilCompleted()
 
             if iteration >= warmup {
-                let duration = measureGPUTime(commandBuffer: commandBuffer)
-                gpuTimings.append(duration)
+                gpuTimings.append(measureGPUTime(commandBuffer: commandBuffer))
                 let cpuElapsed = DispatchTime.now().uptimeNanoseconds &- cpuStart
                 cpuTimings.append(Double(cpuElapsed) / 1_000_000.0)
             }
         }
 
-        let validation = validateOutput(
-            buffer: tensors.output,
-            reference: tensors.cpuReferenceFloat,
-            elementCount: tensors.cpuReferenceFloat.count
-        )
+        let validation = validateOutput(buffer: tensors.output, reference: tensors.cpuReferenceFloat, elementCount: tensors.cpuReferenceFloat.count)
 
-        // Handle infinity and NaN values for JSON encoding
-        let safeMaxAbsError = validation.maxAbsError.isFinite ? validation.maxAbsError : Float.greatestFiniteMagnitude
-        let safeMaxRelError = validation.maxRelError.isFinite ? validation.maxRelError : Float.greatestFiniteMagnitude
+        let safeMaxAbsError = validation.maxAbsError.isFinite ? validation.maxAbsError : .greatestFiniteMagnitude
+        let safeMaxRelError = validation.maxRelError.isFinite ? validation.maxRelError : .greatestFiniteMagnitude
 
-        return BenchmarkResult(
-            spec: spec,
-            backend: .mps,
-            variantName: variant.name,
-            library: nil,
-            isBaseline: variant.isBaseline,
-            gpuTimingsMs: gpuTimings,
-            cpuTimingsMs: cpuTimings,
-            maxAbsError: safeMaxAbsError,
-            maxRelError: safeMaxRelError
-        )
+        return BenchmarkResult(spec: spec, backend: .mps, variantName: variant.name, library: nil, isBaseline: variant.isBaseline, gpuTimingsMs: gpuTimings, cpuTimingsMs: cpuTimings, maxAbsError: safeMaxAbsError, maxRelError: safeMaxRelError)
     }
 
     private static func loadLibraries(device: MTLDevice, buildDir: URL) throws -> [String: MTLLibrary] {
@@ -457,8 +396,7 @@ final class MatmulHarness {
         for file in contents where file.pathExtension == "metallib" {
             do {
                 let library = try device.makeLibrary(URL: file)
-                let basename = file.deletingPathExtension().lastPathComponent
-                libraries[basename] = library
+                libraries[file.deletingPathExtension().lastPathComponent] = library
             } catch {
                 throw HarnessError.libraryLoadFailed(file.path)
             }
@@ -466,7 +404,7 @@ final class MatmulHarness {
         return libraries
     }
     
-    private func loadMatmulTensors(spec: MatmulShapeSpec) -> MatmulTensors {
+    private func generateRawTensorData(spec: MatmulShapeSpec) -> CPUReferenceCache {
         var rng = LCG(seed: 0x1234_5678_9ABC_DEF0)
 
         let aLayout = baseLayout(rows: spec.m, cols: spec.k, transposed: spec.transposeA)
@@ -480,42 +418,19 @@ final class MatmulHarness {
         var biasValues: [Float16]? = spec.bias ? [Float16](repeating: 0, count: spec.n) : nil
         var initialOutput = [Float16](repeating: 0, count: outElements)
 
-        for i in 0..<aElements {
-            aValues[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-        }
-        for i in 0..<bElements {
-            bValues[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-        }
-        if var bias = biasValues {
-            for i in 0..<bias.count {
-                bias[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-            }
-            biasValues = bias
-        }
-        for i in 0..<initialOutput.count {
-            initialOutput[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-        }
+        for i in 0..<aElements { aValues[i] = Float16(rng.nextFloatSigned(scale: 1.0)) }
+        for i in 0..<bElements { bValues[i] = Float16(rng.nextFloatSigned(scale: 1.0)) }
+        if var bias = biasValues { for i in 0..<bias.count { bias[i] = Float16(rng.nextFloatSigned(scale: 1.0)) }; biasValues = bias }
+        for i in 0..<initialOutput.count { initialOutput[i] = Float16(rng.nextFloatSigned(scale: 1.0)) }
 
-        let cpuReference = cpuMatmul(
-            spec: spec,
-            a: aValues,
-            b: bValues,
-            bias: biasValues,
-            initialOutput: initialOutput
-        )
+        let cpuReference = cpuMatmul(spec: spec, a: aValues, b: bValues, bias: biasValues, initialOutput: initialOutput)
 
-        let aBuffer = device.makeBuffer(array: aValues)
-        let bBuffer = device.makeBuffer(array: bValues)
-        let biasBuffer = biasValues.map { device.makeBuffer(array: $0) }
-        let outputBuffer = device.makeBuffer(array: initialOutput)
-
-        return MatmulTensors(
-            a: aBuffer,
-            b: bBuffer,
-            bias: biasBuffer,
-            output: outputBuffer,
-            cpuReferenceFloat: cpuReference,
+        return CPUReferenceCache(
+            aValues: aValues,
+            bValues: bValues,
+            biasValues: biasValues,
             initialOutput: initialOutput,
+            cpuReferenceFloat: cpuReference,
             aLayout: aLayout,
             bLayout: bLayout
         )

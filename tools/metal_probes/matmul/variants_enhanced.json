@@ -278,8 +278,8 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": false,
-        "accumulate": false,
+        "bias": true,
+        "accumulate": true,
         "functionName": "m1_dot_product_simd",
         "expectedTransposeA": false,
         "expectedTransposeB": false
@@ -297,8 +297,8 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": false,
-        "accumulate": false,
+        "bias": true,
+        "accumulate": true,
         "functionName": "m1_dot_product_tiled_simd1",
         "expectedTransposeA": false,
         "expectedTransposeB": false
@@ -316,8 +316,8 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": false,
-        "accumulate": false,
+        "bias": true,
+        "accumulate": true,
         "functionName": "m1_dot_product_tiled_simd2",
         "expectedTransposeA": false,
         "expectedTransposeB": false
@@ -335,8 +335,8 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": false,
-        "accumulate": false,
+        "bias": true,
+        "accumulate": true,
         "functionName": "m1_dot_product_tiled_simd4",
         "expectedTransposeA": false,
         "expectedTransposeB": false
@@ -356,8 +356,8 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": false,
-        "accumulate": false,
+        "bias": true,
+        "accumulate": true,
         "functionName": "m1_dot_product_v2_nt_bn128_col_vec4_bk128_tg128",
         "expectedTransposeA": false,
         "expectedTransposeB": true
@@ -375,8 +375,8 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": false,
-        "accumulate": false,
+        "bias": true,
+        "accumulate": true,
         "functionName": "m1_dot_product_v2_nt_bn64_col_vec4_bk128_tg128",
         "expectedTransposeA": false,
         "expectedTransposeB": true
@@ -2218,6 +2218,280 @@
         "functionNameBias": "gemm_tiled_f16",
         "expectedTransposeA": false,
         "expectedTransposeB": false
+      }
+    }
+  ]
+,
+  "m1_optimized_v7": [
+    {
+      "name": "v7_sbcast_vec4_bn256_tg256",
+      "library": "m1_dot_product_v7",
+      "transposeBOverride": false,
+      "enabled": false,
+      "baseline": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": false,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": true,
+        "accumulate": true,
+        "functionName": "m1_dot_product_v7_sbcast_vec4_bn256",
+        "functionNameBias": "m1_dot_product_v7_sbcast_vec4_bn256_bias",
+        "functionNameAccumulate": "m1_dot_product_v7_sbcast_vec4_bn256_accumulate",
+        "expectedTransposeA": false,
+        "expectedTransposeB": false
+      }
+    },
+    {
+      "name": "v7_largek_smalln_kpar2_bn64_tg128",
+      "library": "m1_dot_product_v7",
+      "transposeBOverride": false,
+      "enabled": false,
+      "supports": {
+        "transposeA": false,
+        "transposeB": false,
+        "smallK": false,
+        "smallMN": true,
+        "batch": false,
+        "bias": true,
+        "accumulate": true,
+        "functionName": "m1_dot_product_v7_kpar2_bn64",
+        "functionNameBias": "m1_dot_product_v7_kpar2_bn64_bias",
+        "functionNameAccumulate": "m1_dot_product_v7_kpar2_bn64_accumulate",
+        "expectedTransposeA": false,
+        "expectedTransposeB": false
+      }
+    },
+    {
+      "name": "nt_bn8_largek_smalln_hybrid_kpar_bk256_tg256",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn8_largek_smalln_hybrid_kpar_bk256_tg256",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": true,
+        "accumulate": true,
+        "functionName": "m1_dot_product_v7_nt_bn8_largek_smalln_hybrid_kpar_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn128_col_vec4_worksteal_bk128_tg128",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn128_col_vec4_worksteal_bk128_tg128",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn128_col_vec4_worksteal_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn16_smalln_simdgroupmm_tg256",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn16_smalln_simdgroupmm_tg256",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn16_smalln_simdgroupmm_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn128_col_vec4_triplebuf_bk64_tg128",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn128_col_vec4_triplebuf_bk64_tg128",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn128_col_vec4_triplebuf_bk64_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn256_fused_bias_relu_tg256",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn256_fused_bias_relu_tg256",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": true,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn256_fused_bias_relu_tg256",
+        "functionNameBias": "m1_dot_product_v7_nt_bn256_fused_bias_relu_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn256_fused_bias_gelu_tg256",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn256_fused_bias_gelu_tg256",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": true,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn256_fused_bias_gelu_tg256",
+        "functionNameBias": "m1_dot_product_v7_nt_bn256_fused_bias_gelu_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_adaptive_bn128_tg128",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_adaptive_bn128_tg128",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_adaptive_bn128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn64_col_vec4_transformB_bk64_tg128",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn64_col_vec4_transformB_tg128",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn64_col_vec4_transformB_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn128_col_vec4_worksteal_chunk4_bk128_tg128",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn128_col_vec4_worksteal_chunk4_bk128_tg128",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn128_col_vec4_worksteal_chunk4_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn64_col_vec4_worksteal_chunk4_bk128_tg128",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn64_col_vec4_worksteal_chunk4_bk128_tg128",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn64_col_vec4_worksteal_chunk4_bk128_tg128",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn8_largek_smalln_kpar_vec4_both_bk256_tg256",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn8_largek_smalln_kpar_vec4_both_bk256_tg256",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn8_largek_smalln_kpar_vec4_both_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
+      }
+    },
+    {
+      "name": "nt_bn16_largek_smalln_kpar_vec4_both_bk256_tg256",
+      "library": "m1_dot_product_v7",
+      "kernel_name_override": "m1_dot_product_v7_nt_bn16_largek_smalln_kpar_vec4_both_bk256_tg256",
+      "is_m1_specific": true,
+      "enabled": true,
+      "supports": {
+        "transposeA": false,
+        "transposeB": true,
+        "smallK": true,
+        "smallMN": true,
+        "batch": false,
+        "bias": false,
+        "accumulate": false,
+        "functionName": "m1_dot_product_v7_nt_bn16_largek_smalln_kpar_vec4_both_bk256_tg256",
+        "expectedTransposeA": false,
+        "expectedTransposeB": true
       }
     }
   ]

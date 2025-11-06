@@ -10,7 +10,8 @@ class GenericKernelRunner: BaseBackendRunner {
         backendType: MatmulShapeSpec.Backend,
         functionName: String
     ) throws -> BenchmarkResult {
-        
+        throw HarnessError.unsupportedBackend("GenericKernelRunner.runGenericKernel is deprecated and should not be called.")
+        /*
         guard let libraryName = variant.library else {
             throw HarnessError.libraryLoadFailed("No library specified for \(backendType.rawValue)/\(variant.name)")
         }
@@ -218,6 +219,7 @@ class GenericKernelRunner: BaseBackendRunner {
             maxAbsError: safeMaxAbsError,
             maxRelError: safeMaxRelError
         )
+        */
     }
     
     private func calculateDispatchForKernel(spec: MatmulShapeSpec, variant: KernelVariant, pipeline: MTLComputePipelineState, backendType: MatmulShapeSpec.Backend) -> (MTLSize, MTLSize) {
@@ -234,7 +236,7 @@ class GenericKernelRunner: BaseBackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .m1OptimizedV6:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .m1OptimizedV6, .m1OptimizedV7:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -382,7 +384,8 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
     func runVariant(
         spec: MatmulShapeSpec,
         backend: MatmulShapeSpec.Backend,
-        variant: KernelVariant
+        variant: KernelVariant,
+        tensors: MatmulTensors
     ) throws -> BenchmarkResult {
         let kernelSpec = applyOverridesIfNeeded(spec: spec, variant: variant)
         let functionName = determineFunctionName(spec: kernelSpec, variant: variant)
@@ -392,7 +395,8 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
             kernelSpec: kernelSpec,
             backendType: backend,
             variant: variant,
-            functionName: functionName
+            functionName: functionName,
+            tensors: tensors
         )
     }
     
@@ -426,7 +430,8 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
         kernelSpec: MatmulShapeSpec,
         backendType: MatmulShapeSpec.Backend,
         variant: KernelVariant,
-        functionName: String
+        functionName: String,
+        tensors: MatmulTensors
     ) throws -> BenchmarkResult {
         guard let libraryName = variant.library else {
             throw HarnessError.libraryLoadFailed("No library specified for \(backendType.rawValue)/\(variant.name)")
@@ -447,15 +452,29 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
             alpha: alpha,
             beta: beta
         )
-        
+
+        // --- Caching Logic ---
+        var specializationKey = ""
+        if let spec = specialization {
+            let tile = spec.tile
+            let consts = spec.constants
+            specializationKey = "tile:\(tile.0)-\(tile.1)-\(tile.2)-\(tile.3)-\(tile.4)_consts:\(consts.hasBatch)-\(consts.useOutSource)-\(consts.doAxpby)-\(consts.doBiasAdd)-\(consts.alignM)-\(consts.alignN)-\(consts.alignK)"
+        }
+        let cacheKey = "\(libraryName):\(functionName):\(specializationKey)"
+
         let pipeline: MTLComputePipelineState
-        do {
-            pipeline = try device.makeComputePipelineState(function: function)
-        } catch {
-            throw HarnessError.pipelineCreationFailed("\(functionName): \(error)")
+        if let cachedPipeline = pipelineCache.pipelines[cacheKey] {
+            pipeline = cachedPipeline
+        } else {
+            do {
+                let newPipeline = try device.makeComputePipelineState(function: function)
+                pipelineCache.pipelines[cacheKey] = newPipeline
+                pipeline = newPipeline
+            } catch {
+                throw HarnessError.pipelineCreationFailed("\(functionName): \(error)")
+            }
         }
         
-        let tensors = loadMatmulTensors(spec: kernelSpec)
         let mlxLaunch = specialization.map {
             prepareMLXLaunch(
                 specialization: $0,
@@ -635,7 +654,7 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
                 // Fallback for MLX without tile override
                 return calculateGenericDispatch(spec: spec, pipeline: pipeline)
             }
-        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .m1OptimizedV6:
+        case .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .m1OptimizedV6, .m1OptimizedV7:
             // For M1 optimized kernels
             return calculateM1Dispatch(spec: spec, pipeline: pipeline, variant: variant)
         case .gemv:
@@ -854,7 +873,7 @@ class UnifiedBackendRunner: BaseBackendRunner, BackendRunner {
         let tile = specialization.tile
         let constants = specialization.constants
         
-        var params = buildGEMMParams(
+        let params = buildGEMMParams(
             spec: spec,
             tile: (tile.0, tile.1, tile.2),
             constants: constants

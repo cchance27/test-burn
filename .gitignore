@@ -19,7 +19,10 @@ venv
 *.png
 tools/metal_probes/**/*.air
 tools/metal_probes/.build
+tools/metal_probes/.cache
 *.metallib
 *.air
 .zed
 *.cpython*
+__pycache__
+.trae

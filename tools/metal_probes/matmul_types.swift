@@ -3,7 +3,23 @@ import Metal
 import MetalPerformanceShaders
 import Darwin
 
-struct MatmulShapeSpec: Hashable, Codable {
+struct TensorLayout: Codable, Hashable {
+    let rows: Int
+    let cols: Int
+}
+
+// A new struct to hold all the data that can be serialized to disk.
+struct CPUReferenceCache: Codable {
+    let aValues: [Float16]
+    let bValues: [Float16]
+    let biasValues: [Float16]?
+    let initialOutput: [Float16]
+    let cpuReferenceFloat: [Float]
+    let aLayout: TensorLayout
+    let bLayout: TensorLayout
+}
+
+struct MatmulShapeSpec: Codable {
     enum Backend: String, CaseIterable, Codable {
         case mlx
         case mps
@@ -15,6 +31,7 @@ struct MatmulShapeSpec: Hashable, Codable {
         case m1OptimizedV4 = "m1_optimized_v4"
         case m1OptimizedV5 = "m1_optimized_v5"
         case m1OptimizedV6 = "m1_optimized_v6"
+        case m1OptimizedV7 = "m1_optimized_v7"
     }
 
     let op: String
@@ -30,6 +47,40 @@ struct MatmulShapeSpec: Hashable, Codable {
     let alpha: Float
     let beta: Float
     let bias: Bool
+}
+
+extension MatmulShapeSpec: Hashable {
+    static func == (lhs: MatmulShapeSpec, rhs: MatmulShapeSpec) -> Bool {
+        return lhs.op == rhs.op &&
+            lhs.backend == rhs.backend &&
+            lhs.batch == rhs.batch &&
+            lhs.m == rhs.m &&
+            lhs.n == rhs.n &&
+            lhs.k == rhs.k &&
+            lhs.transposeA == rhs.transposeA &&
+            lhs.transposeB == rhs.transposeB &&
+            lhs.stridedBatch == rhs.stridedBatch &&
+            lhs.accumulate == rhs.accumulate &&
+            lhs.alpha == rhs.alpha &&
+            lhs.beta == rhs.beta &&
+            lhs.bias == rhs.bias
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(op)
+        hasher.combine(backend)
+        hasher.combine(batch)
+        hasher.combine(m)
+        hasher.combine(n)
+        hasher.combine(k)
+        hasher.combine(transposeA)
+        hasher.combine(transposeB)
+        hasher.combine(stridedBatch)
+        hasher.combine(accumulate)
+        hasher.combine(alpha)
+        hasher.combine(beta)
+        hasher.combine(bias)
+    }
 }
 
 struct BenchmarkResult: Codable {
@@ -67,7 +118,7 @@ enum HarnessError: Error, CustomStringConvertible {
     var description: String {
         switch self {
         case .usage:
-            return "usage: run_matmul_probes.swift [--verbose-failures] <build_dir> <matmul_dir> <sizes_markdown>"
+            return "usage: run_matmul_probes.swift [--verbose-failures] [--bestvsbaseline] <build_dir> <matmul_dir> <sizes_markdown>"
         case .metalUnavailable:
             return "Metal device unavailable"
         case .commandQueueUnavailable:
@@ -160,8 +211,8 @@ struct MatmulTensors {
     let output: MTLBuffer
     let cpuReferenceFloat: [Float]
     let initialOutput: [Float16]
-    let aLayout: (rows: Int, cols: Int)
-    let bLayout: (rows: Int, cols: Int)
+    let aLayout: TensorLayout
+    let bLayout: TensorLayout
 }
 
 struct MLXFunctionConstants {

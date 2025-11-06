@@ -22,6 +22,8 @@ private func formatTag(_ tag: String) -> String {
         return colorize("[best-cpu]", code: "36;1")
     case "host-gap":
         return colorize("[host-gap]", code: "35;1")
+    case "bad-rel":
+        return colorize("[bad-rel]", code: "31;1")
     default:
         return "[\(tag)]"
     }
@@ -34,16 +36,13 @@ func summarize(
     specs: [MatmulShapeSpec],
     results: [BenchmarkResult],
     failures: [VariantFailure],
-    verboseFailures: Bool
+    verboseFailures: Bool,
+    bestVsBaselineOnly: Bool,
+    originalMarkdownPath: String
 ) {
-    // Load original profiling data from markdown file
-    guard let markdownPath = CommandLine.arguments.last else {
-        print("Error: No markdown path provided")
-        return
-    }
-    
+    // Load original profiling data from markdown file (provided explicitly)
     do {
-        try loadOriginalProfilingData(markdownPath: markdownPath)
+        try loadOriginalProfilingData(markdownPath: originalMarkdownPath)
     } catch {
         print("Warning: Could not load original profiling data: \(error)")
     }
@@ -55,6 +54,16 @@ func summarize(
 
     let iterationCount = results.first?.gpuTimingsMs.count ?? 0
     let grouped = Dictionary(grouping: results, by: { $0.spec })
+
+    // Heuristic: mark results with high relative error as bad and exclude from best-* tags.
+    // Default cutoff chosen above typical f16 noise (~4.8e-4). Override via env MATMUL_BAD_REL_THRESHOLD.
+    let defaultBadRel: Float = 1e-3
+    let badRelEnv = ProcessInfo.processInfo.environment["MATMUL_BAD_REL_THRESHOLD"]
+    let badRelThreshold = Float(badRelEnv ?? "") ?? defaultBadRel
+    func isBadResult(_ r: BenchmarkResult) -> Bool {
+        guard r.maxRelError.isFinite else { return true }
+        return r.maxRelError > badRelThreshold
+    }
 
     print("Matmul benchmark summary (iterations=\(iterationCount))")
 
@@ -71,8 +80,9 @@ func summarize(
         let tag = "op=\(spec.op) | batch=\(spec.batch) | m=\(spec.m) | n=\(spec.n) | k=\(spec.k) | tA=\(spec.transposeA ? 1 : 0) | tB=\(spec.transposeB ? 1 : 0)"
         print("Spec \(tag):")
 
-        let bestCpu = specResults.min(by: { ($0.averageCpuMs ?? .greatestFiniteMagnitude) < ($1.averageCpuMs ?? .greatestFiniteMagnitude) })
-        let bestGpu = specResults.min(by: { lhs, rhs in
+        let eligible = specResults.filter { !isBadResult($0) }
+        let bestCpu = eligible.min(by: { ($0.averageCpuMs ?? .greatestFiniteMagnitude) < ($1.averageCpuMs ?? .greatestFiniteMagnitude) })
+        let bestGpu = eligible.min(by: { lhs, rhs in
             (lhs.averageGpuMs ?? .greatestFiniteMagnitude) < (rhs.averageGpuMs ?? .greatestFiniteMagnitude)
         })
         let gpuGapThreshold: Double = 0.01
@@ -91,6 +101,69 @@ func summarize(
             return (lhs.averageCpuMs ?? .greatestFiniteMagnitude) < (rhs.averageCpuMs ?? .greatestFiniteMagnitude)
         }
 
+        // Helper to build a unique id
+        func rid(_ r: BenchmarkResult) -> String { "\(r.backend.rawValue)/\(r.variantName)" }
+
+        if bestVsBaselineOnly {
+            let baseline = sortedVariants.first { $0.backend == spec.backend && $0.isBaseline }
+            let mpsCandidates = sortedVariants.filter { $0.backend == .mps }
+            let mpsBest = mpsCandidates.min(by: { ($0.averageGpuMs ?? .greatestFiniteMagnitude) < ($1.averageGpuMs ?? .greatestFiniteMagnitude) })
+
+            var selected: [BenchmarkResult] = []
+            var seenIds: Set<String> = []
+            func push(_ r: BenchmarkResult?) {
+                guard let r = r else { return }
+                let id = rid(r)
+                if !seenIds.contains(id) { selected.append(r); seenIds.insert(id) }
+            }
+            push(baseline)
+            push(mpsBest)
+            push(bestGpu)
+            push(bestCpu)
+
+            for result in selected {
+                let avgGpuStr = result.averageGpuMs.map { "\(formatTime($0))ms" } ?? "N/A"
+                let avgCpuStr = result.averageCpuMs.map { "\(formatTime($0))ms" } ?? "N/A"
+                let maxAbsStr = String(format: "%.4e", result.maxAbsError)
+                let maxRelStr = String(format: "%.4e", result.maxRelError)
+                var tags: [String] = []
+                if result.isBaseline && result.backend == spec.backend { tags.append("baseline") }
+                if isBadResult(result) { tags.append("bad-rel") }
+                if let bestGpu = bestGpu, bestGpu.backend == result.backend, bestGpu.variantName == result.variantName { tags.append("best-gpu") }
+                if let bestCpu = bestCpu, bestCpu.backend == result.backend, bestCpu.variantName == result.variantName { tags.append("best-cpu") }
+
+                if let bestGpu = bestGpu,
+                   let bestGpuAvg = bestGpu.averageGpuMs,
+                   let resultGpu = result.averageGpuMs,
+                   let bestGpuCpu = bestGpu.averageCpuMs,
+                   let resultCpu = result.averageCpuMs,
+                   resultGpu.isFinite,
+                   bestGpuAvg.isFinite,
+                   bestGpuCpu.isFinite,
+                   resultCpu.isFinite {
+                    let gpuGap = resultGpu - bestGpuAvg
+                    let cpuLead = bestGpuCpu - resultCpu
+                    if gpuGap <= gpuGapThreshold && cpuLead >= cpuLeadThreshold {
+                        tags.append("host-gap")
+                    }
+                }
+
+                let tagSuffix: String = tags.isEmpty ? "" : (" " + tags.map(formatTag).joined(separator: " "))
+
+                var comparisonStr = ""
+                if originalData.avgTimeMs > 0, let avgCpu = result.averageCpuMs {
+                    let percentChange = ((avgCpu - originalData.avgTimeMs) / originalData.avgTimeMs) * 100.0
+                    let sign = percentChange >= 0 ? "+" : ""
+                    comparisonStr = " [vs orig \(formatTime(originalData.avgTimeMs))ms] (\(sign)\(String(format: "%.2f", percentChange))%)"
+                } else {
+                    comparisonStr = " [vs orig N/A]"
+                }
+
+                print("   - \(result.backend.rawValue)/\(result.variantName)\(tagSuffix): avg_gpu=\(avgGpuStr) | avg_cpu=\(avgCpuStr)\(comparisonStr) maxAbs=\(maxAbsStr) maxRel=\(maxRelStr)")
+            }
+            continue
+        }
+
         for result in sortedVariants {
             let avgGpuStr = result.averageGpuMs.map { "\(formatTime($0))ms" } ?? "N/A"
             let avgCpuStr = result.averageCpuMs.map { "\(formatTime($0))ms" } ?? "N/A"
@@ -99,6 +172,9 @@ func summarize(
             var tags: [String] = []
             if result.isBaseline && result.backend == spec.backend {
                 tags.append("baseline")
+            }
+            if isBadResult(result) {
+                tags.append("bad-rel")
             }
             if let bestGpu = bestGpu, bestGpu.backend == result.backend, bestGpu.variantName == result.variantName {
                 tags.append("best-gpu")
@@ -280,27 +356,32 @@ func getOriginalPerformanceData(spec: MatmulShapeSpec) -> OriginalProfileData {
 
 func main() -> Int32 {
     let args = CommandLine.arguments
-    var index = 1
     var verboseFailures = false
+    var bestVsBaselineOnly = false
 
-    while index < args.count {
-        let arg = args[index]
-        if arg == "--verbose" || arg == "--verbose-failures" {
-            verboseFailures = true
-            index += 1
-            continue
+    // Parse flags anywhere; collect positional args
+    var positionals: [String] = []
+    if args.count > 1 {
+        for i in 1..<args.count {
+            let arg = args[i]
+            if arg == "--verbose" || arg == "--verbose-failures" {
+                verboseFailures = true
+            } else if arg == "--bestvsbaseline" || arg == "--best-vs-baseline" {
+                bestVsBaselineOnly = true
+            } else {
+                positionals.append(arg)
+            }
         }
-        break
     }
 
-    guard args.count - index >= 3 else {
+    guard positionals.count >= 3 else {
         print(HarnessError.usage)
         return 1
     }
 
-    let buildDir = URL(fileURLWithPath: args[index]); index += 1
-    let matmulDir = URL(fileURLWithPath: args[index]); index += 1
-    let markdownPath = args[index]
+    let buildDir = URL(fileURLWithPath: positionals[0])
+    let matmulDir = URL(fileURLWithPath: positionals[1])
+    let markdownPath = positionals[2]
 
     do {
         let parser = MatmulDocParser()
@@ -311,7 +392,9 @@ func main() -> Int32 {
             specs: specs,
             results: results,
             failures: harness.variantFailures,
-            verboseFailures: verboseFailures
+            verboseFailures: verboseFailures,
+            bestVsBaselineOnly: bestVsBaselineOnly,
+            originalMarkdownPath: markdownPath
         )
     } catch {
         print("Error: \(error)")

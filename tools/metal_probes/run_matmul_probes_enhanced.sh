@@ -97,5 +97,6 @@ if [[ "${METAL_RUN:-0}" == "1" ]]; then
     fi
   done
 
-  xcrun swift "${temp_swift}" "${BUILD_DIR}" "${MATMUL_DIR}" "${SCRIPT_DIR}/MATMUL_QWEN25_SIZES.md"
+  # Forward any CLI flags to the Swift harness (e.g., --bestvsbaseline)
+  xcrun swift "${temp_swift}" "${BUILD_DIR}" "${MATMUL_DIR}" "${SCRIPT_DIR}/MATMUL_QWEN25_SIZES.md" "$@"
 fi

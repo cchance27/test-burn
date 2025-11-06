@@ -6,9 +6,15 @@ protocol BackendRunner {
     func runVariant(
         spec: MatmulShapeSpec,
         backend: MatmulShapeSpec.Backend,
-        variant: KernelVariant
+        variant: KernelVariant,
+        tensors: MatmulTensors
     ) throws -> BenchmarkResult
     func validateVariant(variant: KernelVariant) throws
+}
+
+// Cache for compiled Metal pipelines
+final class PipelineCache {
+    var pipelines: [String: MTLComputePipelineState] = [:]
 }
 
 // Base class that handles common functionality
@@ -18,70 +24,18 @@ class BaseBackendRunner {
     let libraries: [String: MTLLibrary]
     let iterations: Int
     let warmup: Int
+    let pipelineCache: PipelineCache
     
-    init(device: MTLDevice, commandQueue: MTLCommandQueue, libraries: [String: MTLLibrary], iterations: Int, warmup: Int) {
+    init(device: MTLDevice, commandQueue: MTLCommandQueue, libraries: [String: MTLLibrary], iterations: Int, warmup: Int, pipelineCache: PipelineCache) {
         self.device = device
         self.commandQueue = commandQueue
         self.libraries = libraries
         self.iterations = iterations
         self.warmup = warmup
+        self.pipelineCache = pipelineCache
     }
     
-    func loadMatmulTensors(spec: MatmulShapeSpec) -> MatmulTensors {
-        var rng = LCG(seed: 0x1234_5678_9ABC_DEF0)
 
-        let aLayout = baseLayout(rows: spec.m, cols: spec.k, transposed: spec.transposeA)
-        let bLayout = baseLayout(rows: spec.k, cols: spec.n, transposed: spec.transposeB)
-        let aElements = spec.batch * aLayout.rows * aLayout.cols
-        let bElements = spec.batch * bLayout.rows * bLayout.cols
-        let outElements = spec.batch * spec.m * spec.n
-
-        var aValues = [Float16](repeating: 0, count: aElements)
-        var bValues = [Float16](repeating: 0, count: bElements)
-        var biasValues: [Float16]? = spec.bias ? [Float16](repeating: 0, count: spec.n) : nil
-        var initialOutput = [Float16](repeating: 0, count: outElements)
-
-        for i in 0..<aElements {
-            aValues[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-        }
-        for i in 0..<bElements {
-            bValues[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-        }
-        if var bias = biasValues {
-            for i in 0..<bias.count {
-                bias[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-            }
-            biasValues = bias
-        }
-        for i in 0..<initialOutput.count {
-            initialOutput[i] = Float16(rng.nextFloatSigned(scale: 1.0))
-        }
-
-        let cpuReference = cpuMatmul(
-            spec: spec,
-            a: aValues,
-            b: bValues,
-            bias: biasValues,
-            initialOutput: initialOutput
-        )
-
-        let aBuffer = device.makeBuffer(array: aValues)
-        let bBuffer = device.makeBuffer(array: bValues)
-        let biasBuffer = biasValues.map { device.makeBuffer(array: $0) }
-        let outputBuffer = device.makeBuffer(array: initialOutput)
-
-        return MatmulTensors(
-            a: aBuffer,
-            b: bBuffer,
-            bias: biasBuffer,
-            output: outputBuffer,
-            cpuReferenceFloat: cpuReference,
-            initialOutput: initialOutput,
-            aLayout: aLayout,
-            bLayout: bLayout
-        )
-    }
-    
     func restoreOutputBuffer(buffer: MTLBuffer, initial: [Float16]) {
         _ = initial.withUnsafeBytes { bytes in
             memcpy(buffer.contents(), bytes.baseAddress!, bytes.count)
@@ -116,11 +70,11 @@ class BaseBackendRunner {
 }
 
 // Common utility functions
-func baseLayout(rows: Int, cols: Int, transposed: Bool) -> (rows: Int, cols: Int) {
+func baseLayout(rows: Int, cols: Int, transposed: Bool) -> TensorLayout {
     if transposed {
-        return (cols, rows)
+        return TensorLayout(rows: cols, cols: rows)
     } else {
-        return (rows, cols)
+        return TensorLayout(rows: rows, cols: cols)
     }
 }
 
@@ -269,8 +223,8 @@ func determineMinorStride(m: Int) -> Int32 {
 
 func makeBatchStrides(
     spec: MatmulShapeSpec,
-    aLayout: (rows: Int, cols: Int),
-    bLayout: (rows: Int, cols: Int),
+    aLayout: TensorLayout,
+    bLayout: TensorLayout,
     useOutSource: Bool
 ) -> (UInt, UInt, UInt) {
     if spec.batch <= 1 {

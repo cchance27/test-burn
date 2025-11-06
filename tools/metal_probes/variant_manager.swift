@@ -1,7 +1,7 @@
 import Foundation
 
 struct VariantManager {
-    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .m1OptimizedV6, .mps, .gemv, .gemmTiled]
+    static let backendDisplayOrder: [MatmulShapeSpec.Backend] = [.mlx, .m1Optimized, .m1OptimizedV2, .m1OptimizedV3, .m1OptimizedV4, .m1OptimizedV5, .m1OptimizedV6, .m1OptimizedV7, .mps, .gemv, .gemmTiled]
     
     static func loadVariants(matmulDir: URL) -> [MatmulShapeSpec.Backend: [KernelVariant]] {
         let fileManager = FileManager.default
@@ -81,46 +81,68 @@ struct VariantManager {
     }
     
     static func variantSupports(backend: MatmulShapeSpec.Backend, variant: KernelVariant, spec: MatmulShapeSpec) -> Bool {
+        // Apply overrides (e.g., transposeB) before evaluating support constraints
+        let specToCheck: MatmulShapeSpec
+        if let overrideB = variant.transposeBOverride {
+            specToCheck = MatmulShapeSpec(
+                op: spec.op,
+                backend: spec.backend,
+                batch: spec.batch,
+                m: spec.m,
+                n: spec.n,
+                k: spec.k,
+                transposeA: spec.transposeA,
+                transposeB: overrideB,
+                stridedBatch: spec.stridedBatch,
+                accumulate: spec.accumulate,
+                alpha: spec.alpha,
+                beta: spec.beta,
+                bias: spec.bias
+            )
+        } else {
+            specToCheck = spec
+        }
+
         // If no support information is available, assume it's supported
         guard let supports = variant.supports else {
             return true
         }
         
         // Check each dimension-specific support
-        if !supports.transposeA && spec.transposeA {
+        if !supports.transposeA && specToCheck.transposeA {
             return false
         }
-        if !supports.transposeB && spec.transposeB {
+        if !supports.transposeB && specToCheck.transposeB {
             return false
         }
-        if let expectedA = supports.expectedTransposeA, spec.transposeA != expectedA {
+        if let expectedA = supports.expectedTransposeA, specToCheck.transposeA != expectedA {
             return false
         }
-        if let expectedB = supports.expectedTransposeB, spec.transposeB != expectedB {
+        if let expectedB = supports.expectedTransposeB, specToCheck.transposeB != expectedB {
             return false
         }
-        if !supports.batch && spec.batch > 1 {
+        if !supports.batch && specToCheck.batch > 1 {
             return false
         }
-        if !supports.bias && spec.bias {
+        if !supports.bias && specToCheck.bias {
             return false
         }
-        if !supports.accumulate && (spec.accumulate || spec.beta != 0.0) {
+        if !supports.accumulate && (specToCheck.accumulate || specToCheck.beta != 0.0) {
             return false
         }
         
         // Check if it's a small dimension case
-        if !supports.smallMN && (spec.m <= 16 || spec.n <= 16) {
+        if !supports.smallMN && (specToCheck.m <= 16 || specToCheck.n <= 16) {
             return false
         }
-        if !supports.smallK && spec.k < 64 {
+        if !supports.smallK && specToCheck.k < 64 {
             return false
         }
         
         // Check specific N values for GEMV
         if backend == .gemv, 
            let supportedNValues = supports.supportedNValues, 
-           !supportedNValues.contains(spec.n) {
+           !supportedNValues.contains(specToCheck.n) {
             return false
         }
         
@@ -128,15 +150,23 @@ struct VariantManager {
         let vname = variant.name
         // Ultra-tiny: target small shapes only
         if vname.contains("ultra_tiny") {
-            if !(spec.n <= 2048 && spec.k <= 2048 && spec.m == 1) { return false }
+            if !(specToCheck.n <= 2048 && specToCheck.k <= 2048 && specToCheck.m == 1) { return false }
+        }
+        // Fused-bias kernels must only run when bias is requested
+        if vname.contains("fused_bias") && !specToCheck.bias {
+            return false
         }
         // LargeK smallN: require large K and small N
         if vname.contains("largek_smalln") {
-            if !(spec.k >= 2048 && spec.n <= 2048 && spec.m == 1) { return false }
+            if !(specToCheck.k >= 2048 && specToCheck.n <= 2048 && specToCheck.m == 1) { return false }
         }
         // Debug: allow dbg variants regardless of bn/tg mapping but keep largeK gating
         if vname.contains("dbg") {
-            if !(spec.k >= 2048 && spec.n >= 32 && spec.m == 1) { return false }
+            if !(specToCheck.k >= 2048 && specToCheck.n >= 32 && specToCheck.m == 1) { return false }
+        }
+        // smalln kernels: only run when N is truly small (<=16)
+        if vname.contains("smalln") {
+            if !(specToCheck.n <= 16 && specToCheck.m == 1) { return false }
         }
         // bn256 large-N vec4: prefer N large
         if vname.contains("bn256") && vname.contains("tgread") {
