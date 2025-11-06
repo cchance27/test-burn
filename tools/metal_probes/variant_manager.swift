@@ -80,7 +80,7 @@ struct VariantManager {
         return variants
     }
     
-    static func variantSupports(backend: MatmulShapeSpec.Backend, variant: KernelVariant, spec: MatmulShapeSpec) -> Bool {
+    static func variantSupports(backend: MatmulShapeSpec.Backend, variant: KernelVariant, spec: MatmulShapeSpec) -> (Bool, String?) {
         // Apply overrides (e.g., transposeB) before evaluating support constraints
         let specToCheck: MatmulShapeSpec
         if let overrideB = variant.transposeBOverride {
@@ -105,74 +105,84 @@ struct VariantManager {
 
         // If no support information is available, assume it's supported
         guard let supports = variant.supports else {
-            return true
+            return (true, nil)
         }
         
         // Check each dimension-specific support
         if !supports.transposeA && specToCheck.transposeA {
-            return false
+            return (false, "transposeA not supported")
         }
         if !supports.transposeB && specToCheck.transposeB {
-            return false
+            return (false, "transposeB not supported")
         }
         if let expectedA = supports.expectedTransposeA, specToCheck.transposeA != expectedA {
-            return false
+            return (false, "transposeA=\(specToCheck.transposeA) but expected \(expectedA)")
         }
         if let expectedB = supports.expectedTransposeB, specToCheck.transposeB != expectedB {
-            return false
+            return (false, "transposeB=\(specToCheck.transposeB) but expected \(expectedB)")
         }
         if !supports.batch && specToCheck.batch > 1 {
-            return false
+            return (false, "batch=\(specToCheck.batch) not supported")
         }
         if !supports.bias && specToCheck.bias {
-            return false
+            return (false, "bias not supported")
         }
         if !supports.accumulate && (specToCheck.accumulate || specToCheck.beta != 0.0) {
-            return false
+            return (false, "accumulate not supported")
         }
         
         // Check if it's a small dimension case
         if !supports.smallMN && (specToCheck.m <= 16 || specToCheck.n <= 16) {
-            return false
+            return (false, "smallMN not supported (m=\(specToCheck.m), n=\(specToCheck.n))")
         }
         if !supports.smallK && specToCheck.k < 64 {
-            return false
+            return (false, "smallK not supported (k=\(specToCheck.k))")
         }
         
         // Check specific N values for GEMV
         if backend == .gemv, 
            let supportedNValues = supports.supportedNValues, 
            !supportedNValues.contains(specToCheck.n) {
-            return false
+            return (false, "n=\(specToCheck.n) not in supportedNValues")
         }
         
         // Heuristic gating for specialized v4/v5 kernels by name tokens
         let vname = variant.name
         // Ultra-tiny: target small shapes only
         if vname.contains("ultra_tiny") {
-            if !(specToCheck.n <= 2048 && specToCheck.k <= 2048 && specToCheck.m == 1) { return false }
+            if !(specToCheck.n <= 2048 && specToCheck.k <= 2048 && specToCheck.m == 1) { 
+                return (false, "ultra_tiny requires n<=2048, k<=2048, m=1 (got m=\(specToCheck.m), n=\(specToCheck.n), k=\(specToCheck.k))")
+            }
         }
         // Fused-bias kernels must only run when bias is requested
         if vname.contains("fused_bias") && !specToCheck.bias {
-            return false
+            return (false, "fused_bias requires bias=true")
         }
         // LargeK smallN: require large K and small N
         if vname.contains("largek_smalln") {
-            if !(specToCheck.k >= 2048 && specToCheck.n <= 2048 && specToCheck.m == 1) { return false }
+            if !(specToCheck.k >= 2048 && specToCheck.n <= 2048 && specToCheck.m == 1) { 
+                return (false, "largek_smalln requires k>=2048, n<=2048, m=1 (got m=\(specToCheck.m), n=\(specToCheck.n), k=\(specToCheck.k))")
+            }
         }
         // Debug: allow dbg variants regardless of bn/tg mapping but keep largeK gating
         if vname.contains("dbg") {
-            if !(specToCheck.k >= 2048 && specToCheck.n >= 32 && specToCheck.m == 1) { return false }
+            if !(specToCheck.k >= 2048 && specToCheck.n >= 32 && specToCheck.m == 1) { 
+                return (false, "dbg requires k>=2048, n>=32, m=1 (got m=\(specToCheck.m), n=\(specToCheck.n), k=\(specToCheck.k))")
+            }
         }
         // smalln kernels: only run when N is truly small (<=16)
-        if vname.contains("smalln") {
-            if !(specToCheck.n <= 16 && specToCheck.m == 1) { return false }
+        if vname.contains("smalln") && !vname.contains("largek_smalln") {
+            if !(specToCheck.n <= 16 && specToCheck.m == 1) { 
+                return (false, "smalln requires n<=16, m=1 (got m=\(specToCheck.m), n=\(specToCheck.n))")
+            }
         }
         // bn256 large-N vec4: prefer N large
         if vname.contains("bn256") && vname.contains("tgread") {
-            if !(spec.n >= 4096 && spec.m == 1) { return false }
+            if !(spec.n >= 4096 && spec.m == 1) { 
+                return (false, "bn256+tgread requires n>=4096, m=1 (got m=\(spec.m), n=\(spec.n))")
+            }
         }
 
-        return true
+        return (true, nil)
     }
 }

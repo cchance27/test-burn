@@ -352,10 +352,12 @@ final class MatmulHarness {
                 guard let variantList = variants[backend], !variantList.isEmpty else { continue }
                 for variant in variantList {
                     let key = "\(backend.rawValue)/\(variant.name)"
-                    if VariantManager.variantSupports(backend: backend, variant: variant, spec: spec) {
+                    let (isSupported, reason) = VariantManager.variantSupports(backend: backend, variant: variant, spec: spec)
+                    if isSupported {
                         variantSpecs[key, default: []].append(spec)
                     } else {
-                        variantFailures.append(VariantFailure(spec: spec, backend: backend, variantName: variant.name, errorDescription: "unsupported"))
+                        let errorDesc = reason ?? "unsupported"
+                        variantFailures.append(VariantFailure(spec: spec, backend: backend, variantName: variant.name, errorDescription: errorDesc))
                         if variantSpecs[key] == nil { variantSpecs[key] = [] }
                     }
                 }
