@@ -3,6 +3,14 @@ import Metal
 import MetalPerformanceShaders
 import Darwin
 
+// Protocol for types that can be initialized with a zero value
+protocol ZeroInitializable {
+    static var zero: Self { get }
+}
+
+extension Float: ZeroInitializable {}
+extension Float16: ZeroInitializable {}
+
 struct TensorLayout: Codable, Hashable {
     let rows: Int
     let cols: Int
@@ -17,6 +25,84 @@ struct CPUReferenceCache: Codable {
     let cpuReferenceFloat: [Float]
     let aLayout: TensorLayout
     let bLayout: TensorLayout
+}
+
+// Custom binary serialization for performance
+extension CPUReferenceCache {
+    func toData() -> Data {
+        var data = Data()
+
+        // Write layouts
+        withUnsafeBytes(of: aLayout) { data.append(contentsOf: $0) }
+        withUnsafeBytes(of: bLayout) { data.append(contentsOf: $0) }
+
+        // Write array counts and data
+        let arrays: [[Any]] = [aValues, bValues, biasValues ?? [], initialOutput, cpuReferenceFloat]
+        for (index, array) in arrays.enumerated() {
+            var count = Int32(array.count)
+            withUnsafeBytes(of: &count) { data.append(contentsOf: $0) }
+            
+            if count > 0 {
+                switch index {
+                case 0: (array as! [Float16]).withUnsafeBytes { data.append(contentsOf: $0) }
+                case 1: (array as! [Float16]).withUnsafeBytes { data.append(contentsOf: $0) }
+                case 2: (array as! [Float16]).withUnsafeBytes { data.append(contentsOf: $0) }
+                case 3: (array as! [Float16]).withUnsafeBytes { data.append(contentsOf: $0) }
+                case 4: (array as! [Float]).withUnsafeBytes { data.append(contentsOf: $0) }
+                default: break
+                }
+            }
+        }
+        
+        return data
+    }
+
+    init?(data: Data) {
+        var offset = 0
+
+        // Read layouts
+        let layoutSize = MemoryLayout<TensorLayout>.size
+        guard data.count >= offset + 2 * layoutSize else { return nil }
+        self.aLayout = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: TensorLayout.self) }
+        offset += layoutSize
+        self.bLayout = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: TensorLayout.self) }
+        offset += layoutSize
+
+        // Helper to read arrays
+        func readArray<T: ZeroInitializable>(type: T.Type) -> [T]? {
+            guard data.count >= offset + MemoryLayout<Int32>.size else { return nil }
+            let count = Int(data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Int32.self) })
+            offset += MemoryLayout<Int32>.size
+            
+            if count == 0 { return [] }
+            
+            let stride = MemoryLayout<T>.size
+            let byteCount = count * stride
+            guard data.count >= offset + byteCount else { return nil }
+            
+            var array = [T](repeating: T.zero, count: count)
+            _ = array.withUnsafeMutableBytes { buffer in
+                data.copyBytes(to: buffer, from: offset..<(offset + byteCount))
+            }
+            offset += byteCount
+            return array
+        }
+        
+        // Read arrays
+        guard let aVals = readArray(type: Float16.self),
+              let bVals = readArray(type: Float16.self),
+              let biasValsOpt = readArray(type: Float16.self),
+              let initialOut = readArray(type: Float16.self),
+              let cpuRef = readArray(type: Float.self) else {
+            return nil
+        }
+
+        self.aValues = aVals
+        self.bValues = bVals
+        self.biasValues = biasValsOpt.isEmpty ? nil : biasValsOpt
+        self.initialOutput = initialOut
+        self.cpuReferenceFloat = cpuRef
+    }
 }
 
 struct MatmulShapeSpec: Codable {

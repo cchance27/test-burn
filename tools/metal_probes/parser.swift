@@ -74,7 +74,11 @@ class MatmulDocParser {
         let accumulate = (entries["accumulate"] ?? "0") != "0"
         let alpha = Float(entries["alpha"] ?? "1") ?? 1.0
         let beta = Float(entries["beta"] ?? "0") ?? 0.0
-        let bias = (entries["bias"] ?? "0") != "0"
+        // Infer bias=true if the op name indicates a bias epilogue (e.g., matmul_bias_add)
+        let opLower = op.lowercased()
+        let impliedBias = opLower.contains("bias")
+        let biasExplicit = (entries["bias"] ?? "0") != "0"
+        let bias = biasExplicit || impliedBias
 
         guard m > 0, n > 0, k > 0 else {
             throw HarnessError.parseFailure("invalid dimensions in line: \(line)")

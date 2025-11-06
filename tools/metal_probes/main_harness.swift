@@ -131,7 +131,7 @@ final class MatmulHarness {
         let op_str = spec.op.replacingOccurrences(of: "[^a-zA-Z0-9_]", with: "_", options: .regularExpression)
         let backend_str = spec.backend.rawValue.replacingOccurrences(of: "[^a-zA-Z0-9_]", with: "_", options: .regularExpression)
 
-        return "spec_\(op_str)_\(backend_str)_m\(spec.m)_n\(spec.n)_k\(spec.k)_tA\(tA_str)_tB\(tB_str)_alpha\(alpha_str)_beta\(beta_str)_bias\(bias_str)_batch\(spec.batch).json"
+        return "spec_\(op_str)_\(backend_str)_m\(spec.m)_n\(spec.n)_k\(spec.k)_tA\(tA_str)_tB\(tB_str)_alpha\(alpha_str)_beta\(beta_str)_bias\(bias_str)_batch\(spec.batch).bin"
     }
 
     private func cacheDirectory() -> URL {
@@ -140,13 +140,115 @@ final class MatmulHarness {
         return cacheDir
     }
 
-    private func resultsCacheFileURL(for variantName: String) -> URL {
+    /// Returns the cache file URL for a variant's benchmark results.
+    /// 
+    /// The cache file naming strategy ties the cache to the specific version of the Metal kernel:
+    /// - With hash: `cache_{variant_name}.{library_hash}.json`
+    /// - Without hash (e.g., MPS): `cache_{variant_name}.json`
+    ///
+    /// When a .metal file changes, it gets a new hash in the compiled .metallib filename.
+    /// The cache files automatically use this new hash, and old cache files with outdated
+    /// hashes are cleaned up. This ensures:
+    /// 1. Cache invalidation when kernels change
+    /// 2. No accidental reuse of results from old kernel versions
+    /// 3. No collision between caches for different kernel libraries
+    private func resultsCacheFileURL(for variantName: String, libraryHash: String?) -> URL {
         let sanitized = variantName.replacingOccurrences(of: "/", with: "_")
-        return cacheDirectory().appendingPathComponent("cache_\(sanitized).json")
+        if let hash = libraryHash {
+            return cacheDirectory().appendingPathComponent("cache_\(sanitized).\(hash).json")
+        } else {
+            return cacheDirectory().appendingPathComponent("cache_\(sanitized).json")
+        }
     }
 
-    private func loadCachedResults(for variantName: String) -> [BenchmarkResult]? {
-        let cacheURL = resultsCacheFileURL(for: variantName)
+    /// Extracts the hash from a compiled metallib filename.
+    ///
+    /// The build script compiles Metal kernels with hash-based naming:
+    /// `{library_name}.{sha256_hash}.metallib`
+    ///
+    /// This function finds the metallib file for a given library and extracts its hash,
+    /// which is then used to name cache files appropriately.
+    private func getLibraryHash(for libraryName: String?) -> String? {
+        guard let libName = libraryName else { return nil }
+        
+        // Check the build directory for metallib files matching this library name
+        let fileManager = FileManager.default
+        guard let contents = try? fileManager.contentsOfDirectory(at: buildDir, includingPropertiesForKeys: nil) else {
+            return nil
+        }
+        
+        for file in contents where file.pathExtension == "metallib" {
+            let fileName = file.deletingPathExtension().lastPathComponent
+            // Format is: basename.hash.metallib
+            let components = fileName.split(separator: ".")
+            if components.count >= 2 {
+                let baseName = String(components[0])
+                if baseName == libName {
+                    // The hash is everything after the first dot
+                    let hash = components.dropFirst().joined(separator: ".")
+                    return String(hash)
+                }
+            }
+        }
+        return nil
+    }
+    
+    /// Cleans up outdated cache files for a specific variant.
+    ///
+    /// When a Metal kernel is modified, it gets a new hash. This function removes cache files
+    /// that have the old hash for this specific variant, ensuring we don't use stale results.
+    ///
+    /// Important: This only removes caches for the SPECIFIC variant being processed, not for
+    /// other variants that might use the same library. The cache filename includes both the
+    /// variant name and the library hash, so each variant's caches are independent.
+    ///
+    /// Example:
+    /// - Variant: `m1_optimized_v2/nt_bn128_col`
+    /// - Current hash: `abc123...`
+    /// - Removes: `cache_m1_optimized_v2_nt_bn128_col.xyz789....json`
+    /// - Keeps: `cache_m1_optimized_v2_nt_bn128_col.abc123....json`
+    /// - Keeps: `cache_m1_optimized_v2_other_variant.xyz789....json` (different variant)
+    private func cleanupOldCaches(for variantName: String, currentHash: String?) {
+        let fileManager = FileManager.default
+        let cacheDir = cacheDirectory()
+        let sanitized = variantName.replacingOccurrences(of: "/", with: "_")
+        
+        guard let contents = try? fileManager.contentsOfDirectory(at: cacheDir, includingPropertiesForKeys: nil) else {
+            return
+        }
+        
+        // Find all cache files for this specific variant
+        let prefix = "cache_\(sanitized)"
+        for file in contents where file.lastPathComponent.hasPrefix(prefix) && file.pathExtension == "json" {
+            let fileName = file.deletingPathExtension().lastPathComponent
+            
+            // Check if this is an old cache file with a different hash
+            if let hash = currentHash {
+                // Expected format: cache_variantname.hash.json
+                let expectedName = "cache_\(sanitized).\(hash)"
+                
+                // Only remove if:
+                // 1. The file starts with our specific variant name prefix
+                // 2. The file has a hash extension (contains a dot after sanitized name)
+                // 3. The hash doesn't match our current hash
+                if fileName.hasPrefix(prefix + ".") && fileName != expectedName {
+                    // This is an old cache file for THIS variant, remove it
+                    try? fileManager.removeItem(at: file)
+                    print("Removed outdated cache: \(file.lastPathComponent)")
+                }
+            } else {
+                // If current hash is nil (e.g., MPS backend without library), clean up any hash-suffixed caches
+                // that might be leftover from when this variant had a library
+                if fileName.hasPrefix(prefix + ".") && fileName != "cache_\(sanitized)" {
+                    try? fileManager.removeItem(at: file)
+                    print("Removed hash-suffixed cache for non-library variant: \(file.lastPathComponent)")
+                }
+            }
+        }
+    }
+
+    private func loadCachedResults(for variantName: String, libraryHash: String?) -> [BenchmarkResult]? {
+        let cacheURL = resultsCacheFileURL(for: variantName, libraryHash: libraryHash)
         guard FileManager.default.fileExists(atPath: cacheURL.path) else { return nil }
         do {
             let data = try Data(contentsOf: cacheURL)
@@ -157,8 +259,8 @@ final class MatmulHarness {
         }
     }
 
-    private func saveCachedResults(_ results: [BenchmarkResult], for variantName: String) {
-        let cacheURL = resultsCacheFileURL(for: variantName)
+    private func saveCachedResults(_ results: [BenchmarkResult], for variantName: String, libraryHash: String?) {
+        let cacheURL = resultsCacheFileURL(for: variantName, libraryHash: libraryHash)
         do {
             let data = try JSONEncoder().encode(results)
             try data.write(to: cacheURL)
@@ -182,19 +284,23 @@ final class MatmulHarness {
             if FileManager.default.fileExists(atPath: cacheFileURL.path) {
                 do {
                     let data = try Data(contentsOf: cacheFileURL)
-                    let cachedData = try JSONDecoder().decode(CPUReferenceCache.self, from: data)
-                    tensorCache[spec] = MatmulTensors(
-                        a: device.makeBuffer(array: cachedData.aValues),
-                        b: device.makeBuffer(array: cachedData.bValues),
-                        bias: cachedData.biasValues.map { device.makeBuffer(array: $0) },
-                        output: device.makeBuffer(array: cachedData.initialOutput),
-                        cpuReferenceFloat: cachedData.cpuReferenceFloat,
-                        initialOutput: cachedData.initialOutput,
-                        aLayout: cachedData.aLayout,
-                        bLayout: cachedData.bLayout
-                    )
-                    print("Loaded tensor from cache: \(cacheKey)")
-                    continue // Skip to next spec
+                    if let cachedData = CPUReferenceCache(data: data) {
+                        tensorCache[spec] = MatmulTensors(
+                            a: device.makeBuffer(array: cachedData.aValues),
+                            b: device.makeBuffer(array: cachedData.bValues),
+                            bias: cachedData.biasValues.map { device.makeBuffer(array: $0) },
+                            output: device.makeBuffer(array: cachedData.initialOutput),
+                            cpuReferenceFloat: cachedData.cpuReferenceFloat,
+                            initialOutput: cachedData.initialOutput,
+                            aLayout: cachedData.aLayout,
+                            bLayout: cachedData.bLayout
+                        )
+                        print("Loaded tensor from cache: \(cacheKey)")
+                        continue // Skip to next spec
+                    } else {
+                        print("Warning: Could not decode tensor cache for spec key \(cacheKey). Regenerating.")
+                        try? FileManager.default.removeItem(at: cacheFileURL)
+                    }
                 } catch {
                     print("Warning: Could not load tensor cache for spec key \(cacheKey): \(error). Regenerating.")
                     try? FileManager.default.removeItem(at: cacheFileURL)
@@ -216,7 +322,7 @@ final class MatmulHarness {
             )
 
             do {
-                let data = try JSONEncoder().encode(rawData)
+                let data = rawData.toData()
                 try data.write(to: cacheFileURL)
             } catch {
                 print("Warning: Could not save tensor cache for spec key \(cacheKey): \(error)")
@@ -231,6 +337,7 @@ final class MatmulHarness {
 
         var allResults: [BenchmarkResult] = []
         var allCachedResults: [String: [BenchmarkResult]] = [:]
+        var variantHashes: [String: String?] = [:]
         
         var variantSpecs: [String: [MatmulShapeSpec]] = [:]
         
@@ -255,8 +362,25 @@ final class MatmulHarness {
             }
         }
         
+        // Get library hashes and clean up old caches
+        for (variantName, _) in variantSpecs {
+            let parts = variantName.split(separator: "/")
+            if parts.count >= 2 {
+                let backendStr = String(parts[0])
+                let varName = parts.dropFirst().joined(separator: "/")
+                if let backend = MatmulShapeSpec.Backend(rawValue: backendStr),
+                   let variantList = variants[backend],
+                   let variant = variantList.first(where: { $0.name == varName }) {
+                    let hash = getLibraryHash(for: variant.library)
+                    variantHashes[variantName] = hash
+                    cleanupOldCaches(for: variantName, currentHash: hash)
+                }
+            }
+        }
+        
         for variantName in variantSpecs.keys {
-            if let cached = loadCachedResults(for: variantName) {
+            let hash = variantHashes[variantName] ?? nil
+            if let cached = loadCachedResults(for: variantName, libraryHash: hash) {
                 allCachedResults[variantName] = cached
                 allResults.append(contentsOf: cached)
             } else {
@@ -312,7 +436,8 @@ final class MatmulHarness {
             print("")
             
             let resultsForVariant = allResults.filter { "\($0.backend.rawValue)/\($0.variantName)" == variantName }
-            saveCachedResults(resultsForVariant, for: variantName)
+            let hash = variantHashes[variantName] ?? nil
+            saveCachedResults(resultsForVariant, for: variantName, libraryHash: hash)
             
             print("  Saved results for \(variantName). Total cached: \(resultsForVariant.count)")
         }
@@ -396,7 +521,10 @@ final class MatmulHarness {
         for file in contents where file.pathExtension == "metallib" {
             do {
                 let library = try device.makeLibrary(URL: file)
-                libraries[file.deletingPathExtension().lastPathComponent] = library
+                let fileName = file.deletingPathExtension().lastPathComponent
+                if let baseName = fileName.split(separator: ".").first {
+                    libraries[String(baseName)] = library
+                }
             } catch {
                 throw HarnessError.libraryLoadFailed(file.path)
             }

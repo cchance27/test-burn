@@ -12,7 +12,6 @@ MATMUL_DIR="${SCRIPT_DIR}/matmul"
 BUILD_DIR="${SCRIPT_DIR}/.build/matmul"
 
 mkdir -p "${MATMUL_DIR}"
-rm -rf "${BUILD_DIR}"
 mkdir -p "${BUILD_DIR}"
 MODULE_CACHE_DIR="${BUILD_DIR}/module_cache"
 FAKE_HOME="${BUILD_DIR}/home"
@@ -62,11 +61,33 @@ fi
 
 for src in "${sources[@]}"; do
   base="$(basename "${src}" .metal)"
-  air="${BUILD_DIR}/${base}.air"
-  metallib="${BUILD_DIR}/${base}.metallib"
-  echo "Compiling ${base}.metal → ${base}.metallib"
-  xcrun -sdk "${SDK}" metal -c -std="${METAL_STD}" "${src}" -o "${air}"
-  xcrun -sdk "${SDK}" metallib "${air}" -o "${metallib}"
+  hash=$(shasum -a 256 "${src}" | awk '{print $1}')
+  
+  # Check for existing compiled files for this base name
+  existing_libs=("${BUILD_DIR}/${base}."*.metallib)
+  found_match=false
+  
+  if [[ -e "${existing_libs[0]}" ]]; then
+    for existing_lib in "${existing_libs[@]}"; do
+      existing_hash=$(basename "${existing_lib}" .metallib | cut -d. -f2-)
+      if [[ "${existing_hash}" == "${hash}" ]]; then
+        echo "Skipping compilation for ${base}.metal (hash match)"
+        found_match=true
+        break
+      else
+        echo "Removing outdated compiled files for ${base}.metal"
+        rm -f "${BUILD_DIR}/${base}.${existing_hash}.air" "${BUILD_DIR}/${base}.${existing_hash}.metallib"
+      fi
+    done
+  fi
+
+  if [[ "${found_match}" == "false" ]]; then
+    air="${BUILD_DIR}/${base}.${hash}.air"
+    metallib="${BUILD_DIR}/${base}.${hash}.metallib"
+    echo "Compiling ${base}.metal → ${base}.${hash}.metallib"
+    xcrun -sdk "${SDK}" metal -c -std="${METAL_STD}" "${src}" -o "${air}"
+    xcrun -sdk "${SDK}" metallib "${air}" -o "${metallib}"
+  fi
 done
 
 echo "Enhanced matmul probe compilation succeeded."

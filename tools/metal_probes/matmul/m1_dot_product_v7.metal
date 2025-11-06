@@ -591,21 +591,26 @@ void m1_dot_product_v7_nt_adaptive_bn128_tg128(
 
     bool use_kpar = (K >= 2048 && N <= 2048);
     if (use_kpar) {
-        const int col_local = static_cast<int>(simdgroup_id);
-        const int col = base_col + col_local;
-        if (col_local >= BN || col >= N) { return; }
-        float acc = 0.0f;
+        // Process all BN columns per threadgroup: each simdgroup reduces multiple columns in sequence.
+        const int SG_COUNT = 4; // 128 threads / 32 lanes per simdgroup
+        const int col_local = static_cast<int>(simdgroup_id); // 0..SG_COUNT-1
         const uint W = 32u;
-        const device half* __restrict colB = B + static_cast<size_t>(col) * static_cast<size_t>(K);
-        for (int k = static_cast<int>(simd_lane_id); k < K; k += static_cast<int>(W)) {
-            acc = fma(float(A[k]), float(colB[static_cast<size_t>(k)]), acc);
+        for (int colStart = 0; colStart < BN; colStart += SG_COUNT) {
+            const int col = base_col + colStart + col_local;
+            if (col >= N) { continue; }
+            const device half* __restrict colB = B + static_cast<size_t>(col) * static_cast<size_t>(K);
+            float acc = 0.0f;
+            for (int k = static_cast<int>(simd_lane_id); k < K; k += static_cast<int>(W)) {
+                acc = fma(float(A[k]), float(colB[static_cast<size_t>(k)]), acc);
+            }
+            // simdgroup reduction
+            acc += simd_shuffle_down(acc, 16u);
+            acc += simd_shuffle_down(acc, 8u);
+            acc += simd_shuffle_down(acc, 4u);
+            acc += simd_shuffle_down(acc, 2u);
+            acc += simd_shuffle_down(acc, 1u);
+            if (simd_lane_id == 0u) { D[col] = half(acc); }
         }
-        acc += simd_shuffle_down(acc, 16u);
-        acc += simd_shuffle_down(acc, 8u);
-        acc += simd_shuffle_down(acc, 4u);
-        acc += simd_shuffle_down(acc, 2u);
-        acc += simd_shuffle_down(acc, 1u);
-        if (simd_lane_id == 0u) { D[col] = half(acc); }
     } else {
         const int col = base_col + static_cast<int>(tidx);
         if (static_cast<int>(tidx) >= BN || col >= N) { return; }

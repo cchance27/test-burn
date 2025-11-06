@@ -284,7 +284,7 @@
         "expectedTransposeA": false,
         "expectedTransposeB": false
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "simd_tiled_1",
@@ -303,7 +303,7 @@
         "expectedTransposeA": false,
         "expectedTransposeB": false
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "simd_tiled_2",
@@ -322,7 +322,7 @@
         "expectedTransposeA": false,
         "expectedTransposeB": false
       },
-      "enabled": true
+      "enabled": false
     },
     {
       "name": "simd_tiled_4",
@@ -341,7 +341,7 @@
         "expectedTransposeA": false,
         "expectedTransposeB": false
       },
-      "enabled": true
+      "enabled": false
     }
   ],
   "m1_optimized_v2": [
@@ -2212,10 +2212,9 @@
         "smallK": true,
         "smallMN": true,
         "batch": false,
-        "bias": true,
+        "bias": false,
         "accumulate": false,
         "functionName": "gemm_tiled_f16",
-        "functionNameBias": "gemm_tiled_f16",
         "expectedTransposeA": false,
         "expectedTransposeB": false
       }
