@@ -1,8 +1,9 @@
+use objc2_metal::MTLComputeCommandEncoder;
+
 use super::*;
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, operation::ComputeKernelEncoder, tensor::{dtypes::U32, TensorInit, TensorStorage}
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, context::GpuProfilerLabel, operation::ComputeKernelEncoder, tensor::{TensorInit, TensorStorage, dtypes::U32}
 };
-use objc2_metal::MTLComputeCommandEncoder;
 
 /// GPU embedding lookup: gather rows for given token ids into an output [batch, seq, d_model].
 pub struct EmbeddingLookupOp;
@@ -94,14 +95,22 @@ impl<T: TensorElement> Operation for EmbeddingLookup<T> {
     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
         let threads = 256usize;
         let total = self.total as usize;
-        let groups = (total + threads - 1) / threads;
+        let groups = total.div_ceil(threads);
 
         ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
             .pipeline(&self.pipeline)
             .bind_kernel(self)
             .dispatch_custom(
-                objc2_metal::MTLSize { width: groups, height: 1, depth: 1 },
-                objc2_metal::MTLSize { width: threads, height: 1, depth: 1 },
+                objc2_metal::MTLSize {
+                    width: groups,
+                    height: 1,
+                    depth: 1,
+                },
+                objc2_metal::MTLSize {
+                    width: threads,
+                    height: 1,
+                    depth: 1,
+                },
             );
         Ok(())
     }

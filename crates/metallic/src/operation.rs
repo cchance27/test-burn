@@ -318,6 +318,14 @@ impl CommandBuffer {
     }
 }
 
+impl Drop for CommandBuffer {
+    fn drop(&mut self) {
+        // Ensure any active encoder is ended to avoid Metal assertion on encoder dealloc
+        // This is safe to call multiple times; `end_current_encoder` guards emptiness.
+        self.end_current_encoder();
+    }
+}
+
 impl ProfiledCommandBuffer for CommandBuffer {
     fn raw(&self) -> &Retained<ProtocolObject<dyn MTLCommandBuffer>> {
         self.raw()

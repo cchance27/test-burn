@@ -599,6 +599,10 @@ impl InstrumentCpuFillThresholdMb {
     }
 
     /// Unset.
-    pub fn unset(&self) { CPU_FILL_THRESHOLD_MB.unset(); }
-    pub fn unset_guard(&self) -> super::guard::EnvVarGuard<'_> { CPU_FILL_THRESHOLD_MB.unset_guard() }
+    pub fn unset(&self) {
+        CPU_FILL_THRESHOLD_MB.unset();
+    }
+    pub fn unset_guard(&self) -> super::guard::EnvVarGuard<'_> {
+        CPU_FILL_THRESHOLD_MB.unset_guard()
+    }
 }
