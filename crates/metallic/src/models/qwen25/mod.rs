@@ -3,7 +3,7 @@ use std::{
 };
 
 use metallic_instrumentation::{MetricEvent, record_metric_async};
-use objc2_metal::MTLBlitCommandEncoder as _;
+use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice as _};
 
 use crate::{
     Context, MetalError, Tensor, TensorElement, context::RepeatKvWorkspaceKind, kernels::{
@@ -48,32 +48,35 @@ impl<T: TensorElement> Qwen25<T> {
         let batch = 1; // For now, assume batch size of 1
         let seq = tokens.len();
 
-        // Create output tensor [batch, seq, d_model]
-        let mut embedded = Tensor::zeros(vec![batch, seq, self.config.d_model], ctx, true)?;
-
-        // Get the embedding weight data
-        let embed_data = self.embed_weight.as_slice();
-
-        // For each token, look up its embedding
-        let output_data = embedded.as_mut_slice();
-        for (i, &token_id) in tokens.iter().enumerate() {
-            if token_id as usize >= self.config.vocab_size {
-                return Err(MetalError::InvalidShape(format!(
-                    "Token ID {} exceeds vocabulary size {}",
-                    token_id, self.config.vocab_size
-                )));
-            }
-
-            // Copy the embedding for this token
-            let src_start = (token_id as usize) * self.config.d_model;
-            let src_end = src_start + self.config.d_model;
-            let dst_start = i * self.config.d_model;
-            let dst_end = dst_start + self.config.d_model;
-
-            output_data[dst_start..dst_end].copy_from_slice(&embed_data[src_start..src_end]);
+        // Build a small Shared indices tensor so host writes do not force a blit flush.
+        let byte_len = seq * std::mem::size_of::<u32>();
+        let buf = ctx
+            .device
+            .newBufferWithLength_options(byte_len, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferCreationFailed(byte_len))?;
+        let mut indices = Tensor::<crate::tensor::dtypes::U32>::from_existing_buffer(
+            buf,
+            vec![seq],
+            crate::tensor::dtypes::U32::DTYPE,
+            &ctx.device,
+            &ctx.command_queue,
+            0,
+            true,
+        )?;
+        let ids = indices.as_mut_slice();
+        for (i, &tok) in tokens.iter().enumerate() {
+            ids[i] = tok;
         }
 
-        Ok(embedded)
+        // Call GPU embedding lookup to produce [batch, seq, d_model] directly on device.
+        let out = ctx.call::<crate::kernels::embedding_lookup::EmbeddingLookupOp>((
+            &self.embed_weight,
+            &indices,
+        ))?;
+
+        // Ensure expected shape
+        debug_assert_eq!(out.dims(), &[batch, seq, self.config.d_model]);
+        Ok(out)
     }
 
     /// Apply the output layer to convert from d_model to vocab_size

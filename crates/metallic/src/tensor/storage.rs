@@ -11,7 +11,17 @@ use crate::context::command_buffer_pipeline;
 impl<T: TensorElement> Tensor<T> {
     #[inline]
     pub fn cpu_fill_threshold_bytes() -> usize {
-        super::DEFAULT_CPU_FILL_THRESHOLD_MB * 1024 * 1024
+        // Prefer explicit environment override via metallic_env
+        if let Ok(Some(mb)) = metallic_env::environment::instrument::CPU_FILL_THRESHOLD_MB.get() {
+            return mb.saturating_mul(1024 * 1024);
+        }
+        // Default: 1MB in debug builds to aid CPU fills during testing,
+        // 0MB in release builds to force GPU zeroing and avoid staging flushes.
+        if cfg!(debug_assertions) {
+            super::DEFAULT_CPU_FILL_THRESHOLD_MB * 1024 * 1024
+        } else {
+            0
+        }
     }
 
     fn build_tensor(

@@ -54,6 +54,7 @@ pub mod swiglu;
 pub use softmax_dispatcher::SoftmaxDispatchOp;
 pub mod sample_topk_topp;
 pub mod tensors;
+pub mod embedding_lookup;
 
 /// Used by our Macro to load kernel source or binary
 /// Represents the source of a Metal kernel, either as text source code or as a precompiled
@@ -90,6 +91,7 @@ pub enum KernelLibrary {
     SoftmaxBlock,
     SoftmaxVec,
     SampleTopKTopP,
+    EmbeddingLookup,
 }
 
 impl KernelLibrary {
@@ -119,6 +121,7 @@ impl KernelLibrary {
             KernelLibrary::SoftmaxBlock => kernel_lib!("softmax_block"),
             KernelLibrary::SoftmaxVec => kernel_lib!("softmax_vec"),
             KernelLibrary::SampleTopKTopP => kernel_lib!("sample_topk_topp"),
+            KernelLibrary::EmbeddingLookup => kernel_lib!("embedding_lookup"),
         }
     }
 }
@@ -164,6 +167,7 @@ pub enum KernelFunction {
     SampleTopKPartials,
     SampleTopKMergeAndSample,
     SampleTopKFused,
+    EmbeddingLookup,
 }
 
 impl KernelFunction {
@@ -202,6 +206,7 @@ impl KernelFunction {
             KernelFunction::SampleTopKPartials => KernelLibrary::SampleTopKTopP,
             KernelFunction::SampleTopKMergeAndSample => KernelLibrary::SampleTopKTopP,
             KernelFunction::SampleTopKFused => KernelLibrary::SampleTopKTopP,
+            KernelFunction::EmbeddingLookup => KernelLibrary::EmbeddingLookup,
         }
     }
 
@@ -313,6 +318,8 @@ impl KernelFunction {
             (KernelFunction::SampleTopKMergeAndSample, F16) => "sample_topk_merge_and_sample_f16",
             (KernelFunction::SampleTopKFused, F32) => "sample_topk_fused_f32",
             (KernelFunction::SampleTopKFused, F16) => "sample_topk_fused_f16",
+            (KernelFunction::EmbeddingLookup, F32) => "embedding_lookup_kernel_f32",
+            (KernelFunction::EmbeddingLookup, F16) => "embedding_lookup_kernel_f16",
             _ => unimplemented!("Kernel function {:?} not implemented for dtype {:?}", self, dtype),
         };
 

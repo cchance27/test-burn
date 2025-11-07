@@ -31,6 +31,8 @@ pub enum InstrumentEnvVar {
     MatmulSimdMMin,
     /// Minimum N dimension to enable SIMD-optimized GEMM.
     MatmulSimdNMin,
+    /// Threshold (in MB) under which tensors are zero-filled on CPU instead of GPU.
+    TensorCpuFillThresholdMb,
 }
 
 impl InstrumentEnvVar {
@@ -47,6 +49,7 @@ impl InstrumentEnvVar {
             InstrumentEnvVar::MatmulSmallnMaxN => "METALLIC_MATMUL_SMALLN_MAX_N",
             InstrumentEnvVar::MatmulSimdMMin => "METALLIC_MATMUL_SIMD_M_MIN",
             InstrumentEnvVar::MatmulSimdNMin => "METALLIC_MATMUL_SIMD_N_MIN",
+            InstrumentEnvVar::TensorCpuFillThresholdMb => "METALLIC_TENSOR_CPU_FILL_THRESHOLD_MB",
         }
     }
 
@@ -91,6 +94,10 @@ pub const MATMUL_SIMD_M_MIN: TypedEnvVar<String> =
 /// Typed descriptor for matmul SIMD N minimum threshold.
 pub const MATMUL_SIMD_N_MIN: TypedEnvVar<String> =
     TypedEnvVar::new(InstrumentEnvVar::MatmulSimdNMin.into_env(), parse_string, format_string);
+
+/// Typed descriptor for the CPU fill threshold (MB) for tensor zero-inits.
+pub const CPU_FILL_THRESHOLD_MB: TypedEnvVar<usize> =
+    TypedEnvVar::new(InstrumentEnvVar::TensorCpuFillThresholdMb.into_env(), parse_usize, format_usize);
 
 /// Shim exposing ergonomic helpers for the log level variable.
 pub struct InstrumentLogLevel;
@@ -512,6 +519,8 @@ pub const MATMUL_SMALLN_MAX_N_VAR: InstrumentMatmulSmallnMaxN = InstrumentMatmul
 pub const MATMUL_SIMD_M_MIN_VAR: InstrumentMatmulSimdMMin = InstrumentMatmulSimdMMin;
 /// Ergonomic constant exposing the matmul-simd-n-min helper methods.
 pub const MATMUL_SIMD_N_MIN_VAR: InstrumentMatmulSimdNMin = InstrumentMatmulSimdNMin;
+/// Ergonomic constant exposing the CPU fill threshold helper methods.
+pub const CPU_FILL_THRESHOLD_MB_VAR: InstrumentCpuFillThresholdMb = InstrumentCpuFillThresholdMb;
 
 fn parse_log_level(value: &str) -> Result<Level, EnvVarParseError> {
     value.parse::<Level>().map_err(|_| EnvVarParseError::new("invalid tracing level"))
@@ -547,4 +556,49 @@ fn parse_bool(value: &str) -> Result<bool, EnvVarParseError> {
 
 fn format_bool(value: &bool) -> Result<String, EnvVarFormatError> {
     Ok(value.to_string())
+}
+
+fn parse_usize(value: &str) -> Result<usize, EnvVarParseError> {
+    value
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| EnvVarParseError::new("value is not a valid usize"))
+}
+
+fn format_usize(value: &usize) -> Result<String, EnvVarFormatError> {
+    Ok(value.to_string())
+}
+
+/// Shim exposing ergonomic helpers for the CPU fill threshold variable.
+pub struct InstrumentCpuFillThresholdMb;
+
+impl InstrumentCpuFillThresholdMb {
+    /// Descriptor for the CPU fill threshold.
+    pub const fn descriptor(&self) -> TypedEnvVar<usize> {
+        CPU_FILL_THRESHOLD_MB
+    }
+
+    /// Canonical key name.
+    pub const fn key(&self) -> &'static str {
+        CPU_FILL_THRESHOLD_MB.key()
+    }
+
+    /// Get the typed value if present.
+    pub fn get(&self) -> Result<Option<usize>, EnvVarError> {
+        CPU_FILL_THRESHOLD_MB.get()
+    }
+
+    /// Set the threshold (in MB).
+    pub fn set(&self, value: usize) -> Result<(), EnvVarError> {
+        CPU_FILL_THRESHOLD_MB.set(value)
+    }
+
+    /// Scoped set.
+    pub fn set_guard(&self, value: usize) -> Result<TypedEnvVarGuard<'_, usize>, EnvVarError> {
+        CPU_FILL_THRESHOLD_MB.set_guard(value)
+    }
+
+    /// Unset.
+    pub fn unset(&self) { CPU_FILL_THRESHOLD_MB.unset(); }
+    pub fn unset_guard(&self) -> super::guard::EnvVarGuard<'_> { CPU_FILL_THRESHOLD_MB.unset_guard() }
 }
