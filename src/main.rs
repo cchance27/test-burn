@@ -341,9 +341,22 @@ fn run_tui_mode(
                                     app.toggle_collapse();
                                 }
                             }
+                            // Add new key binding for toggling between markdown and plain text display
                             crossterm::event::KeyCode::Tab => {
                                 app.focus_next();
                                 app.reset_metrics_scroll();
+                            }
+                            crossterm::event::KeyCode::Char('d') => {
+                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                    // Toggle between markdown and plain text display
+                                    app.text_display_mode = match app.text_display_mode {
+                                        tui::app::TextDisplayMode::Plain => tui::app::TextDisplayMode::Markdown,
+                                        tui::app::TextDisplayMode::Markdown => tui::app::TextDisplayMode::Plain,
+                                    };
+                                } else {
+                                    // For regular 'd' key, could add some other functionality if wanted
+                                    // For now, just handle as a normal character key - but since it's not mapped to anything, it's ignored
+                                }
                             }
                             crossterm::event::KeyCode::Up => app.scroll_active(-1),
                             crossterm::event::KeyCode::Down => app.scroll_active(1),

@@ -1,6 +1,7 @@
 use ratatui::{
     Frame, layout::{Alignment, Constraint, Direction, Layout, Rect}, style::{Color, Modifier, Style}, text::Text, widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap}
 };
+use tui_markdown::from_str;
 
 use crate::tui::{
     app::{App, FocusArea, MetricsView}, metrics::HierarchicalMetric
@@ -33,9 +34,18 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .borders(Borders::ALL)
         .border_style(border_style(app.focus == FocusArea::GeneratedText));
 
-    // Create text with selections highlighted
-    let text_with_selection = create_text_with_selection(&app.generated_text, app, text_area);
-    let text_area_widget = Paragraph::new(text_with_selection)
+    // Create text content based on display mode
+    let text_content = match app.text_display_mode {
+        crate::tui::app::TextDisplayMode::Markdown => {
+            from_str(&app.generated_text)
+        }
+        crate::tui::app::TextDisplayMode::Plain => {
+            // Create text with selections highlighted (original behavior)
+            create_text_with_selection(&app.generated_text, app, text_area)
+        }
+    };
+    
+    let text_area_widget = Paragraph::new(text_content)
         .block(text_block)
         .wrap(Wrap { trim: false })
         .scroll((app.text_scroll, 0));
@@ -122,8 +132,15 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         None
     };
 
+    // Add markdown mode indicator to status
+    let mode_indicator = match app.text_display_mode {
+        crate::tui::app::TextDisplayMode::Markdown => " [Ctrl+D: Plain Text Mode]",
+        crate::tui::app::TextDisplayMode::Plain => " [Ctrl+D: Markdown Mode]",
+    };
+    let extended_status = format!("{}{}", app.status, mode_indicator);
+
     app.status_bar.set_tokens_per_second(tokens_per_second);
-    app.status_bar.set_status_text(&app.status);
+    app.status_bar.set_status_text(&extended_status);
 
     // Render the status bar using the component
     app.status_bar.render(frame, main_layout[1]);
@@ -138,7 +155,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     if app.request_follow_text {
         if app.text_area.height > 0 {
-            let content_lines = app.generated_text.matches('\n').count() + 1;
+            let content_lines = if matches!(app.text_display_mode, crate::tui::app::TextDisplayMode::Markdown) {
+                // For markdown mode, calculate the visual lines from the markdown text
+                let markdown_text = from_str(&app.generated_text);
+                markdown_text.lines.len()
+            } else {
+                // For plain text mode, count the actual lines
+                app.generated_text.matches('\n').count() + 1
+            };
             let visible = app.text_area.height as usize;
             let baseline = content_lines.saturating_sub(visible) as u16;
             app.text_scroll = baseline;
@@ -158,23 +182,33 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Render scrollbars for widgets that need them
 
-    // Text area scrollbar
-    let wrap_width = text_area.width.saturating_sub(2); // Subtract 2 for borders
-    let mut total_visual_lines = 0u16;
-    for line in app.generated_text.lines() {
-        let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width) as u16;
-        total_visual_lines = total_visual_lines.saturating_add(visual_lines);
-    }
-
+    // Text area scrollbar - calculate based on the text content already created
     let text_visible_lines = text_area.height.saturating_sub(2); // Subtract 2 for borders
+    let total_content_lines = match app.text_display_mode {
+        crate::tui::app::TextDisplayMode::Markdown => {
+            // Create the markdown text and count its lines
+            let markdown_text = from_str(&app.generated_text);
+            markdown_text.lines.len()
+        }
+        crate::tui::app::TextDisplayMode::Plain => {
+            // For plain text mode, use existing calculation
+            let wrap_width = text_area.width.saturating_sub(2); // Subtract 2 for borders
+            let mut total_visual_lines = 0u16;
+            for line in app.generated_text.lines() {
+                let visual_lines = app.count_visual_lines_for_content_line(line, wrap_width) as u16;
+                total_visual_lines = total_visual_lines.saturating_add(visual_lines);
+            }
+            total_visual_lines as usize
+        }
+    };
+    let max_scroll = total_content_lines.saturating_sub(text_visible_lines as usize).max(0);
 
-    if total_visual_lines > text_visible_lines && text_visible_lines > 0 {
+    if max_scroll > 0 && text_visible_lines > 0 {
         let text_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
             .begin_symbol(Some("↑"))
             .end_symbol(Some("↓"));
 
-        // Calculate the maximum scroll position (total visual lines - visible lines)
-        let max_scroll = (total_visual_lines - text_visible_lines) as usize;
+        // Calculate the current scroll position
         let current_scroll = (app.text_scroll as usize).min(max_scroll);
 
         let text_scrollbar_state = ScrollbarState::new(max_scroll).position(current_scroll);

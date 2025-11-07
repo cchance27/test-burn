@@ -54,6 +54,9 @@ pub struct App {
 
     // Status bar
     pub status_bar: StatusBar,
+
+    // Text display mode - whether to show as markdown or plain text
+    pub text_display_mode: TextDisplayMode,
 }
 
 impl App {
@@ -93,6 +96,7 @@ impl App {
             tensor_preparation_stats: Vec::new(),
             resource_cache_stats: FxHashMap::default(),
             status_bar: StatusBar::new(StatusBarState::Normal),
+            text_display_mode: TextDisplayMode::Plain,
         }
     }
 
@@ -821,4 +825,10 @@ pub enum FocusArea {
     GeneratedText,
     Metrics,
     LogBox,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TextDisplayMode {
+    Plain,
+    Markdown,
 }
