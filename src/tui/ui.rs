@@ -36,15 +36,13 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // Create text content based on display mode
     let text_content = match app.text_display_mode {
-        crate::tui::app::TextDisplayMode::Markdown => {
-            from_str(&app.generated_text)
-        }
+        crate::tui::app::TextDisplayMode::Markdown => from_str(&app.generated_text),
         crate::tui::app::TextDisplayMode::Plain => {
             // Create text with selections highlighted (original behavior)
             create_text_with_selection(&app.generated_text, app, text_area)
         }
     };
-    
+
     let text_area_widget = Paragraph::new(text_content)
         .block(text_block)
         .wrap(Wrap { trim: false })

@@ -1,8 +1,8 @@
 use super::types::*;
 use crate::{
     Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, kernels::{
-        DefaultKernelInvocable, KernelFunction, matmul_gemm_tiled::MatmulGemmTiledOp, matmul_gemv::MatmulGemvOp, matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp}
-    }, tensor::Dtype
+        DefaultKernelInvocable, KernelFunction, matmul_gemv::MatmulGemvOp, matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulMpsAlphaBetaOp, MatMulMpsOp}
+    }, tensor::{Dtype, TensorType}
 };
 
 #[derive(Clone, Copy)]
@@ -32,7 +32,7 @@ pub fn execute<'a, T: TensorElement>(
                 // Route through MLX GEMM with fused epilogue when possible
                 let mlx_args = (
                     args.left,
-                    args.right,
+                    TensorType::Dense(args.right),
                     args.bias,
                     args.out,
                     args.transpose_left,
@@ -103,7 +103,7 @@ pub fn execute<'a, T: TensorElement>(
                 let is_vector_shape = left_dims[0] == 1;
                 let gemm_args = (
                     args.left,
-                    args.right,
+                    TensorType::Dense(args.right),
                     args.bias,
                     args.out,
                     args.transpose_left,
@@ -123,7 +123,12 @@ pub fn execute<'a, T: TensorElement>(
                             let pipeline = ctx
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                            MatmulGemvOp::new(
+                                ctx,
+                                (args.left, TensorType::Dense(args.right), None),
+                                Some(pipeline),
+                                cache.as_deref_mut(),
+                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
@@ -138,7 +143,12 @@ pub fn execute<'a, T: TensorElement>(
                             let pipeline = ctx
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                            MatmulGemvOp::new(
+                                ctx,
+                                (args.left, TensorType::Dense(args.right), None),
+                                Some(pipeline),
+                                cache.as_deref_mut(),
+                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
@@ -153,7 +163,12 @@ pub fn execute<'a, T: TensorElement>(
                             let pipeline = ctx
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                            MatmulGemvOp::new(
+                                ctx,
+                                (args.left, TensorType::Dense(args.right), None),
+                                Some(pipeline),
+                                cache.as_deref_mut(),
+                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
@@ -168,7 +183,12 @@ pub fn execute<'a, T: TensorElement>(
                             let pipeline = ctx
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                            MatmulGemvOp::new(
+                                ctx,
+                                (args.left, TensorType::Dense(args.right), None),
+                                Some(pipeline),
+                                cache.as_deref_mut(),
+                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
@@ -183,21 +203,32 @@ pub fn execute<'a, T: TensorElement>(
                             let pipeline = ctx
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                            MatmulGemvOp::new(
+                                ctx,
+                                (args.left, TensorType::Dense(args.right), None),
+                                Some(pipeline),
+                                cache.as_deref_mut(),
+                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
                     }
                     MatmulVariant::GemmTiled(_) => {
                         // Use the new tiled GEMM kernel
-                        MatmulGemmTiledOp::new(ctx, gemm_args, None, cache.as_deref_mut())
+                        unimplemented!("Doesnt currently support TensorType");
+                        //MatmulGemmTiledOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                     }
                     MatmulVariant::SmallN(_) | MatmulVariant::GemmSimd(_) | MatmulVariant::GemmGeneric => {
                         if is_vector_shape {
                             let pipeline = ctx
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
+                            MatmulGemvOp::new(
+                                ctx,
+                                (args.left, TensorType::Dense(args.right), None),
+                                Some(pipeline),
+                                cache.as_deref_mut(),
+                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache)
                         }

@@ -7,8 +7,8 @@ static GLOBAL_PROFILING_STATE: AtomicBool = AtomicBool::new(false);
 pub fn initialize_profiling_state_from_env() {
     let initial_state = match ENABLE_PROFILING_VAR.get() {
         Ok(Some(value)) => value,
-        Ok(None) => true, // Default to true when not set
-        Err(_) => true,   // Default to true if there's an error
+        Ok(None) => false, // Default to false when not set for performance
+        Err(_) => false,   // Default to false if there's an error
     };
 
     GLOBAL_PROFILING_STATE.store(initial_state, Ordering::Relaxed);

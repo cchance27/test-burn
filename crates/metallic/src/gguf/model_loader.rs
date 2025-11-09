@@ -7,8 +7,23 @@ use super::{GGUFDataType, GGUFError, GGUFFile};
 use crate::{
     Context, Tensor, TensorElement, TensorStorage, gguf::{
         GGUFValue, file::GGUFMetadata, tensor_info::{GGUFRawTensor, GGUTensorInfo}
-    }, tensor::TensorInit
+    }, tensor::{Q8_0_BLOCK_SIZE_BYTES, Q8_0_WEIGHTS_PER_BLOCK, QuantizedQ8_0Tensor, TensorInit, quantized::swizzle_q8_0_blocks_nk}
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GGUFLayoutHint {
+    Nk,
+    Kn,
+}
+
+impl GGUFLayoutHint {
+    fn from_architecture(arch: Option<&str>) -> Self {
+        match arch.map(|s| s.to_ascii_lowercase()) {
+            Some(ref a) if a.contains("falcon") || a.contains("refact") => GGUFLayoutHint::Kn,
+            _ => GGUFLayoutHint::Nk,
+        }
+    }
+}
 
 fn convert_f64_bytes(raw: &[u8]) -> Result<Vec<f32>, GGUFError> {
     if !raw.len().is_multiple_of(8) {
@@ -234,6 +249,16 @@ impl GGUFModelLoader {
     /// Load a model from the GGUF file
     pub fn load_model(&self) -> Result<GGUFModel, GGUFError> {
         let mut tensors: FxHashMap<String, GGUFTensor> = FxHashMap::default();
+        let arch = self
+            .gguf_file
+            .metadata
+            .entries
+            .get("general.architecture")
+            .and_then(|value| match value {
+                GGUFValue::String(s) => Some(s.as_str()),
+                _ => None,
+            });
+        let layout_hint = GGUFLayoutHint::from_architecture(arch);
 
         for tensor_info in &self.gguf_file.tensor_metadata {
             let mut dims: Vec<usize> = tensor_info.dimensions.iter().map(|&d| d as usize).collect();
@@ -254,6 +279,7 @@ impl GGUFModelLoader {
             gguf_file: Arc::clone(&self.gguf_file),
             tensors,
             metadata: self.gguf_file.metadata.clone(),
+            layout_hint,
         })
     }
 }
@@ -328,6 +354,80 @@ impl GGUFTensor {
             },
         }
     }
+
+    /// Materialize a Q8_0 tensor as packed bytes on GPU without upcasting.
+    /// This returns a `QuantizedQ8_0Tensor` (raw = `Tensor<U8>`) and preserves the logical dims.
+    pub fn materialize_q8_0_packed<TCtx: TensorElement>(
+        &self,
+        file: &GGUFFile,
+        ctx: &Context<TCtx>,
+        layout_hint: GGUFLayoutHint,
+    ) -> Result<QuantizedQ8_0Tensor, GGUFError> {
+        // Validate the raw view and type
+        let view = self.info.view(file)?;
+        let raw = match view {
+            GGUFRawTensor::Bytes(bytes, super::GGUFDataType::Q8_0) => bytes,
+            _ => {
+                return Err(GGUFError::InvalidTensorData(format!(
+                    "Tensor '{}' is not Q8_0 bytes",
+                    self.info.name
+                )));
+            }
+        };
+
+        if raw.len() % Q8_0_BLOCK_SIZE_BYTES != 0 {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor '{}' Q8_0 data length {} is not a multiple of {}",
+                self.info.name,
+                raw.len(),
+                Q8_0_BLOCK_SIZE_BYTES
+            )));
+        }
+
+        let blocks = raw.len() / Q8_0_BLOCK_SIZE_BYTES;
+        let total_weights = blocks * Q8_0_WEIGHTS_PER_BLOCK;
+        if total_weights < self.expected_elements {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor '{}' expects {} elements but Q8_0 blocks contain {}",
+                self.info.name, self.expected_elements, total_weights
+            )));
+        }
+
+        if std::env::var("Q8_SWIZZLE_DEBUG").is_ok() {
+            eprintln!(
+                "[Q8_SWIZZLE_DEBUG] tensor={} dims={:?} layout_hint={:?}",
+                self.info.name, self.dims, layout_hint
+            );
+        }
+
+        let maybe_swizzled = if matches!(layout_hint, GGUFLayoutHint::Nk) && self.dims.len() == 2 {
+            // Our matmul conventions store dense weights as [K, N] (rows = K, cols = N).
+            // NK row-major in GGUF means rows correspond to output N and columns to input K.
+            // To swizzle NK into k-block-major, use rows_n = dims[1] (N) and cols_k = dims[0] (K).
+            let cols_k = self.dims[0]; // K
+            let rows_n = self.dims[1]; // N
+            swizzle_q8_0_blocks_nk(rows_n, cols_k, raw)
+        } else {
+            None
+        };
+
+        if layout_hint != GGUFLayoutHint::Nk {
+            return Err(GGUFError::InvalidTensorData(format!(
+                "Tensor '{}' uses unsupported layout {:?} for Q8_0 weights",
+                self.info.name, layout_hint
+            )));
+        }
+
+        let source = maybe_swizzled.as_deref().unwrap_or(raw);
+        let mut data_bytes = Vec::with_capacity(blocks * Q8_0_WEIGHTS_PER_BLOCK);
+        let mut scale_bytes = Vec::with_capacity(blocks * 2);
+        for chunk in source.chunks_exact(Q8_0_BLOCK_SIZE_BYTES) {
+            scale_bytes.extend_from_slice(&chunk[0..2]);
+            data_bytes.extend_from_slice(&chunk[2..(2 + Q8_0_WEIGHTS_PER_BLOCK)]);
+        }
+        QuantizedQ8_0Tensor::from_split_bytes_in_context(self.dims.clone(), &data_bytes, &scale_bytes, ctx)
+            .map_err(|e| GGUFError::InvalidTensorData(e.to_string()))
+    }
 }
 
 /// A model loaded from a GGUF file
@@ -335,6 +435,7 @@ pub struct GGUFModel {
     pub(crate) gguf_file: Arc<GGUFFile>,
     pub tensors: FxHashMap<String, GGUFTensor>,
     pub metadata: GGUFMetadata,
+    pub layout_hint: GGUFLayoutHint,
 }
 
 macro_rules! create_metadata_getter {
@@ -391,6 +492,10 @@ impl GGUFModel {
         }
     }
 
+    pub fn layout_hint(&self) -> GGUFLayoutHint {
+        self.layout_hint
+    }
+
     /// Get context length from metadata
     pub fn get_context_length(&self) -> Option<u64> {
         if let Some(super::GGUFValue::U32(len)) = self.metadata.entries.get("qwen2.context_length") {
@@ -413,5 +518,14 @@ impl GGUFModel {
             Ok(v) => Ok(v),
             Err(e) => Err(super::GGUFError::InvalidTensorData(e.to_string())),
         }
+    }
+
+    /// Convenience: materialize a named tensor as packed Q8_0 without upcasting.
+    pub fn materialize_q8_0_packed<TCtx: TensorElement>(&self, name: &str, ctx: &Context<TCtx>) -> Result<QuantizedQ8_0Tensor, GGUFError> {
+        let descriptor = self
+            .tensors
+            .get(name)
+            .ok_or_else(|| GGUFError::InvalidTensorData(format!("Tensor '{}' not found in GGUF metadata", name)))?;
+        descriptor.materialize_q8_0_packed(self.gguf_file.as_ref(), ctx, self.layout_hint)
     }
 }

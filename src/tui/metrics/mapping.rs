@@ -179,31 +179,31 @@ pub fn map_hierarchical_gpu_op(path: &str) -> Option<Vec<String>> {
                 if seg.starts_with("matmul") {
                     // Look ahead to see if next segment is a backend
                     let seg_idx = segments.iter().position(|&s| s == seg);
-                    if let Some(idx) = seg_idx {
-                        if idx + 1 < segments.len() {
-                            let backend = segments[idx + 1];
-                            // Format as "MatMul [OpType (BACKEND)]"
-                            let op_display = if seg == "matmul" {
-                                format!("MatMul [{}]", backend.to_uppercase())
-                            } else if seg == "matmul_bias_add" {
-                                format!("MatMul [BiasAdd ({})]", backend.to_uppercase())
-                            } else if seg == "matmul_alpha_beta" {
-                                format!("MatMul [AlphaBeta ({})]", backend.to_uppercase())
-                            } else if seg == "matmul_alpha_beta_cache" {
-                                format!("MatMul [AlphaBetaCache ({})]", backend.to_uppercase())
-                            } else {
-                                format!("MatMul [{}]", backend.to_uppercase())
-                            };
+                    if let Some(idx) = seg_idx
+                        && idx + 1 < segments.len()
+                    {
+                        let backend = segments[idx + 1];
+                        // Format as "MatMul [OpType (BACKEND)]"
+                        let op_display = if seg == "matmul" {
+                            format!("MatMul [{}]", backend.to_uppercase())
+                        } else if seg == "matmul_bias_add" {
+                            format!("MatMul [BiasAdd ({})]", backend.to_uppercase())
+                        } else if seg == "matmul_alpha_beta" {
+                            format!("MatMul [AlphaBeta ({})]", backend.to_uppercase())
+                        } else if seg == "matmul_alpha_beta_cache" {
+                            format!("MatMul [AlphaBetaCache ({})]", backend.to_uppercase())
+                        } else {
+                            format!("MatMul [{}]", backend.to_uppercase())
+                        };
 
-                            if !has_forward_step && !has_block {
-                                result_path.push("Forward Step".to_string());
-                                has_forward_step = true;
-                            }
-                            if !result_path.contains(&op_display) {
-                                result_path.push(op_display);
-                            }
-                            continue; // Skip the backend segment (will be handled as part of matmul)
+                        if !has_forward_step && !has_block {
+                            result_path.push("Forward Step".to_string());
+                            has_forward_step = true;
                         }
+                        if !result_path.contains(&op_display) {
+                            result_path.push(op_display);
+                        }
+                        continue; // Skip the backend segment (will be handled as part of matmul)
                     }
                 }
 
@@ -211,10 +211,11 @@ pub fn map_hierarchical_gpu_op(path: &str) -> Option<Vec<String>> {
                 if matches!(seg, "mlx" | "mps" | "gemv") {
                     // Check if previous segment was matmul-related
                     let seg_idx = segments.iter().position(|&s| s == seg);
-                    if let Some(idx) = seg_idx {
-                        if idx > 0 && segments[idx - 1].starts_with("matmul") {
-                            continue; // Skip this backend segment
-                        }
+                    if let Some(idx) = seg_idx
+                        && idx > 0
+                        && segments[idx - 1].starts_with("matmul")
+                    {
+                        continue; // Skip this backend segment
                     }
                 }
 

@@ -308,9 +308,9 @@ impl CacheableMpsGraphSdpaMask {
         let buffer = match key.dtype {
             Dtype::F16 => build_mask_buffer_f16(total, seq_q_size, seq_k_size)?,
             Dtype::F32 => build_mask_buffer_f32(total, seq_q_size, seq_k_size)?,
-            Dtype::U32 => {
+            Dtype::U8 | Dtype::U32 => {
                 return Err(MetalError::OperationFailed(
-                    "U32 dtype not supported for causal mask buffers".into(),
+                    "U8/U32 dtype not supported for causal mask buffers".into(),
                 ));
             }
         };

@@ -11,6 +11,11 @@
 
 using namespace metal;
 
+constant uint Q8_0_WEIGHTS_PER_BLOCK = 32u;
+
+// Loader mode function constant: 0 = Dense (existing path), 1 = Q8 NK swizzled
+constant uint LOADER_MODE [[function_constant(400)]];
+
 // https://github.com/ml-explore/mlx/blob/02efb310cac667bc547d1b96f21596c221f84fe7/mlx/backend/metal/kernels/steel/gemm/params.h#L1
 ///////////////////////////////////////////////////////////////////////////////
 // GEMM param classes
@@ -769,6 +774,282 @@ struct GEMMKernel {
     }
   }
 
+  // Fill RHS tile Bs from NK-swizzled quant blocks for the current K,N tile
+  static METAL_FUNC void quant_fill_rhs_tile_nk(
+      const device uchar* __restrict Bq8,
+      const device ushort* __restrict Bq8Scales,
+      threadgroup T* __restrict Bs,
+      const constant GEMMParams* __restrict params,
+      const int k_base,
+      const int n_base,
+      const short tgp_bn,
+      const short ldb_tgp,
+      const uint simd_group_id,
+      const uint simd_lane_id) {
+    if (transpose_b) {
+      // Not supported yet; caller should fallback to dense loader
+      // Leave Bs untouched (zeros) for safety
+      return;
+    }
+    const int K = params->K;
+    const int N = params->N;
+    const int blocks_per_k = (K + 31) >> 5;
+    const uint total_blocks = (uint)blocks_per_k * (uint)N;
+    const int k_end = min(k_base + BK, K);
+
+    if (LOADER_MODE == 2) {
+      const uint sg_span = (uint)WN * 32u;
+      for (uint nb = (uint)(simd_group_id % (uint)WN) * 32u + simd_lane_id; nb < (uint)tgp_bn; nb += sg_span) {
+        const int n = n_base + (int)nb;
+        if (n >= N) {
+          for (int kk = 0; kk < BK; ++kk) {
+            Bs[kk * ldb_tgp + (short)nb] = T(0);
+          }
+          continue;
+        }
+        int k_curr = k_base;
+        int kk_local = 0;
+        while (k_curr < k_end) {
+          const int block_idx = k_curr >> 5;
+          const int inner     = k_curr & 31;
+          const uint block_id = (uint)block_idx * (uint)N + (uint)n;
+
+          const float scale = (float)as_type<half>(Bq8Scales[block_id]);
+          uint off = block_id * (uint)Q8_0_WEIGHTS_PER_BLOCK + (uint)inner;
+          const int count = min(32 - inner, k_end - k_curr);
+
+          // (No-tail specialization removed: process one block at a time)
+
+          // Fast path: full aligned 32‑value single block
+          if (inner == 0 && count >= 32) {
+            const device uint2* u2v = (const device uint2*)(Bq8 + off);
+            // 4x 8-byte loads per block
+            for (int v = 0; v < 4; ++v) {
+              const uint2 u = u2v[v];
+              const char4 q0 = as_type<char4>(u.x);
+              const char4 q1 = as_type<char4>(u.y);
+              const int base = kk_local + (v << 3);
+              const float4 wf0 = float4((float)q0.x, (float)q0.y, (float)q0.z, (float)q0.w) * scale;
+              const float4 wf1 = float4((float)q1.x, (float)q1.y, (float)q1.z, (float)q1.w) * scale;
+              Bs[(base + 0) * ldb_tgp + (short)nb] = (T)wf0.x;
+              Bs[(base + 1) * ldb_tgp + (short)nb] = (T)wf0.y;
+              Bs[(base + 2) * ldb_tgp + (short)nb] = (T)wf0.z;
+              Bs[(base + 3) * ldb_tgp + (short)nb] = (T)wf0.w;
+              Bs[(base + 4) * ldb_tgp + (short)nb] = (T)wf1.x;
+              Bs[(base + 5) * ldb_tgp + (short)nb] = (T)wf1.y;
+              Bs[(base + 6) * ldb_tgp + (short)nb] = (T)wf1.z;
+              Bs[(base + 7) * ldb_tgp + (short)nb] = (T)wf1.w;
+            }
+            kk_local += 32;
+            k_curr   += 32;
+            continue;
+          }
+
+          // Head align to 4 bytes (char4 body)
+          int done = 0;
+          const uint mis4 = off & 3u;
+          if (mis4 != 0u) {
+            const int align_n = min(count, (int)(4u - mis4));
+            for (int i = 0; i < align_n; ++i) {
+              const float w = (float)((const device char*)(Bq8 + off))[0] * scale;
+              Bs[(kk_local + done) * ldb_tgp + (short)nb] = (T)w;
+              off += 1u;
+              done += 1;
+            }
+          }
+
+          // 8-byte vectorized body (two char4 per step)
+          int vec8 = (count - done) >> 3;
+          const device uint2* u2v = (const device uint2*)(Bq8 + off);
+          for (int v = 0; v < vec8; ++v) {
+            const uint2 u = u2v[v];
+            const char4 q0 = as_type<char4>(u.x);
+            const char4 q1 = as_type<char4>(u.y);
+            const int base = kk_local + done + (v << 3);
+            const float4 wf0 = float4((float)q0.x, (float)q0.y, (float)q0.z, (float)q0.w) * scale;
+            const float4 wf1 = float4((float)q1.x, (float)q1.y, (float)q1.z, (float)q1.w) * scale;
+            Bs[(base + 0) * ldb_tgp + (short)nb] = (T)wf0.x;
+            Bs[(base + 1) * ldb_tgp + (short)nb] = (T)wf0.y;
+            Bs[(base + 2) * ldb_tgp + (short)nb] = (T)wf0.z;
+            Bs[(base + 3) * ldb_tgp + (short)nb] = (T)wf0.w;
+            Bs[(base + 4) * ldb_tgp + (short)nb] = (T)wf1.x;
+            Bs[(base + 5) * ldb_tgp + (short)nb] = (T)wf1.y;
+            Bs[(base + 6) * ldb_tgp + (short)nb] = (T)wf1.z;
+            Bs[(base + 7) * ldb_tgp + (short)nb] = (T)wf1.w;
+          }
+          off += (uint)(vec8 * 8);
+          done += vec8 * 8;
+
+          // 4-byte vectorized body for the remainder
+          int vec4 = (count - done) >> 2;
+          const device char4* qv = (const device char4*)(Bq8 + off);
+          for (int v = 0; v < vec4; ++v) {
+            const char4 q = qv[v];
+            const float4 wf = float4((float)q.x, (float)q.y, (float)q.z, (float)q.w) * scale;
+            Bs[(kk_local + done + 0) * ldb_tgp + (short)nb] = (T)wf.x;
+            Bs[(kk_local + done + 1) * ldb_tgp + (short)nb] = (T)wf.y;
+            Bs[(kk_local + done + 2) * ldb_tgp + (short)nb] = (T)wf.z;
+            Bs[(kk_local + done + 3) * ldb_tgp + (short)nb] = (T)wf.w;
+            done += 4;
+          }
+          off += (uint)(vec4 * 4);
+
+          // Tail
+          for (int i = done; i < count; ++i) {
+            const float w = (float)((const device char*)(Bq8 + off))[0] * scale;
+            Bs[(kk_local + i) * ldb_tgp + (short)nb] = (T)w;
+            off += 1u;
+          }
+
+          kk_local += count;
+          k_curr   += count;
+        }
+        for (; kk_local < BK; ++kk_local) {
+          Bs[kk_local * ldb_tgp + (short)nb] = T(0);
+        }
+      }
+      return;
+    }
+
+    const uint tgp_size = (uint)(WM * WN * 32);
+    const uint thread_idx = simd_group_id * 32u + simd_lane_id;
+    const uint bytes_max = total_blocks * 34u;
+    for (uint nb = thread_idx; nb < (uint)tgp_bn; nb += tgp_size) {
+      const int n = n_base + (int)nb;
+      if (n >= N) {
+        // Zero-pad
+        for (int kk = 0; kk < BK; ++kk) {
+          Bs[kk * ldb_tgp + (short)nb] = T(0);
+        }
+        continue;
+      }
+      int k_curr = k_base;
+      int kk_local = 0;
+      while (k_curr < k_end) {
+        const int block_idx = k_curr >> 5;
+        const int inner = k_curr & 31;
+        const uint block_id = (uint)block_idx * (uint)N + (uint)n;
+        const uint base = block_id * 34u;
+        // Bounds clamp: if computed base exceeds available bytes, zero-pad and exit
+        if (base >= bytes_max) {
+          // Zero remaining rows in BK
+          for (; kk_local < BK; ++kk_local) {
+            Bs[kk_local * ldb_tgp + nb] = T(0);
+          }
+          break;
+        }
+        const ushort bits = (ushort)Bq8[base] | ((ushort)Bq8[base + 1] << 8);
+        const half hs = as_type<half>(bits);
+        const float scale = (float)hs;
+        const int count = min(32 - inner, k_end - k_curr);
+        const uint data_off = base + 2u + (uint)inner;
+        const int max_avail = (data_off < bytes_max) ? (int)(bytes_max - data_off) : 0;
+        const int avail = max(0, min(count, max_avail));
+        // Vectorized conversion and store
+        uint off = data_off;
+        int done = 0;
+        // Align to 4 bytes for char4 loads
+        uint mis = off & 3u;
+        if (mis != 0u) {
+          int align_n = min(avail, (int)(4u - mis));
+          for (int i = 0; i < align_n; ++i) {
+            const float w = (float)((const device char*)(Bq8 + off))[0] * scale;
+            Bs[(kk_local + done) * ldb_tgp + (short)nb] = (T)w;
+            off += 1u;
+            done += 1;
+          }
+        }
+        // 4-wide vector loop
+        int vec4 = (avail - done) >> 2;
+        const device char4* qv = (const device char4*)(Bq8 + off);
+        for (int v = 0; v < vec4; ++v) {
+          char4 q = qv[v];
+          float4 wf = float4((float)q.x, (float)q.y, (float)q.z, (float)q.w) * scale;
+          Bs[(kk_local + done + 0) * ldb_tgp + (short)nb] = (T)wf.x;
+          Bs[(kk_local + done + 1) * ldb_tgp + (short)nb] = (T)wf.y;
+          Bs[(kk_local + done + 2) * ldb_tgp + (short)nb] = (T)wf.z;
+          Bs[(kk_local + done + 3) * ldb_tgp + (short)nb] = (T)wf.w;
+          done += 4;
+        }
+        off += (uint)(vec4 * 4);
+        // Tail
+        for (int i = done; i < avail; ++i) {
+          const float w = (float)((const device char*)(Bq8 + off))[0] * scale;
+          Bs[(kk_local + i) * ldb_tgp + (short)nb] = (T)w;
+          off += 1u;
+        }
+        // Zero-pad if truncated by bounds
+        for (int i = avail; i < count; ++i) {
+          Bs[(kk_local + i) * ldb_tgp + (short)nb] = T(0);
+        }
+        kk_local += count;
+        k_curr += count;
+      }
+      // Zero-pad any remainder in BK
+      for (; kk_local < BK; ++kk_local) {
+        Bs[kk_local * ldb_tgp + (short)nb] = T(0);
+      }
+    }
+  }
+
+  // GEMM main loop variant using quant loader for B (NK swizzled); dense loader for A
+  template <bool M_aligned, bool N_aligned, bool K_aligned_>
+  static METAL_FUNC void gemm_loop_qnk(
+      threadgroup T* As [[threadgroup(0)]],
+      threadgroup T* Bs [[threadgroup(1)]],
+      const int gemm_k_iterations,
+      thread loader_a_t& loader_a,
+      const device uchar* __restrict Bq8,
+      const device ushort* __restrict Bq8Scales,
+      thread mma_t& mma_op,
+      thread const short& tgp_bm,
+      thread const short& tgp_bn,
+      thread const short& lbk,
+      const constant GEMMParams* params,
+      const int c_col,
+      const uint simd_group_id,
+      const uint simd_lane_id,
+      LoopAlignment<M_aligned, N_aligned, K_aligned_> l = {}) {
+    (void)l;
+    // Stride in threadgroup memory for B tiles
+    const short ldb_tgp = transpose_b ? (BK + tgp_padding_b) : (BN + tgp_padding_b);
+    // Iterate K tiles
+    for (int k_it = 0; k_it < gemm_k_iterations; ++k_it) {
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      // Load A tile (dense)
+      if (M_aligned) {
+        loader_a.load_unsafe();
+      } else {
+        const short2 tile_dims_A = transpose_a ? short2(tgp_bm, BK) : short2(BK, tgp_bm);
+        loader_a.load_safe(tile_dims_A);
+      }
+      // Load B tile (quant NK)
+      const int k_base = k_it * BK;
+      // NOTE: caller passes c_col (start of this tile in N) as n_base
+      quant_fill_rhs_tile_nk(Bq8, Bq8Scales, Bs, params, k_base, c_col, tgp_bn, ldb_tgp, simd_group_id, simd_lane_id);
+
+      threadgroup_barrier(mem_flags::mem_threadgroup);
+      // MMA
+      mma_op.mma(As, Bs);
+      // Advance A
+      loader_a.next();
+    }
+    if (!K_aligned_) {
+      // Handle remaining K tail
+      const int k_last = gemm_k_iterations * BK;
+      // Load last A slice
+      {
+        const short2 tile_dims_A_last = transpose_a ? short2(tgp_bm, lbk) : short2(lbk, tgp_bm);
+        loader_a.load_safe(tile_dims_A_last);
+      }
+      // Load last B slice quant
+    const short ldb_tgp2 = transpose_b ? (BK + tgp_padding_b) : (BN + tgp_padding_b);
+      quant_fill_rhs_tile_nk(Bq8, Bq8Scales, Bs, params, k_last, c_col, tgp_bn, ldb_tgp2, simd_group_id, simd_lane_id);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    mma_op.mma(As, Bs);
+  }
+  }
+
   /* Main kernel function */
   static METAL_FUNC void run(
       const device T* A [[buffer(0)]],
@@ -1077,6 +1358,8 @@ template <
     const constant GEMMAddMMParams* addmm_params [[buffer(5), function_constant(use_out_source)]],
     const constant int* batch_shape [[buffer(6)]],
     const constant size_t* batch_strides [[buffer(7)]],
+    const device uchar *Bq8 [[buffer(9)]],
+    const device ushort *Bq8Scales [[buffer(16)]],
     const constant uint32_t* lhs_indices [[buffer(10), function_constant(do_gather)]],
     const constant uint32_t* rhs_indices [[buffer(11), function_constant(do_gather)]],
     const constant uint32_t* C_indices [[buffer(12), function_constant(gather_bias)]],
@@ -1277,6 +1560,27 @@ template <
   ///////////////////////////////////////////////////////////////////////////////
   // MNK aligned loop
   if (align_M && align_N) {
+    if ((LOADER_MODE == 1 || LOADER_MODE == 2) && !transpose_b) {
+      // Quant RHS path: NK swizzled blocks -> dequantize to Bs
+      const short ldb_tgp = transpose_b ? (BK + gemm_kernel::tgp_padding_b) : (BN + gemm_kernel::tgp_padding_b);
+      for (int k_it = 0; k_it < gemm_k_iterations; k_it++) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        loader_a.load_unsafe();
+        gemm_kernel::quant_fill_rhs_tile_nk((const device uchar*)Bq8, (const device ushort*)Bq8Scales, Bs, params, k_it * BK, c_col, tgp_bn, ldb_tgp, simd_group_id, simd_lane_id);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        mma_op.mma(As, Bs);
+        loader_a.next();
+      }
+      threadgroup_barrier(mem_flags::mem_none);
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue(C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue(C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
+        }
+      }
+      return mma_op.store_result(D, params->ldd);
+    }
     // Do gemm
     for (int k = 0; k < gemm_k_iterations; k++) {
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1316,7 +1620,18 @@ template <
   else { // Loop over K - unaligned case
     const int leftover_bk = 0;
 
-    if ((align_M || tgp_bm == BM) && (align_N || tgp_bn == BN)) {
+    if ((LOADER_MODE == 1 || LOADER_MODE == 2) && !transpose_b && (align_M || tgp_bm == BM) && (align_N || tgp_bn == BN)) {
+      gemm_kernel::template gemm_loop_qnk<true, true, true>(
+          As, Bs, gemm_k_iterations, loader_a, (const device uchar*)Bq8, (const device ushort*)Bq8Scales, mma_op, tgp_bm, tgp_bn, leftover_bk, params, c_col, simd_group_id, simd_lane_id);
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue(C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue(C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
+        }
+      }
+      return mma_op.store_result(D, params->ldd);
+    } else if ((align_M || tgp_bm == BM) && (align_N || tgp_bn == BN)) {
       // Do gemm
       gemm_kernel::gemm_loop(
           As,
@@ -1344,6 +1659,17 @@ template <
       // Store results to device memory
       return mma_op.store_result(D, params->ldd);
 
+    } else if ((LOADER_MODE == 1 || LOADER_MODE == 2) && !transpose_b && (align_N || tgp_bn == BN)) {
+      gemm_kernel::template gemm_loop_qnk<false, true, true>(
+          As, Bs, gemm_k_iterations, loader_a, (const device uchar*)Bq8, (const device ushort*)Bq8Scales, mma_op, tgp_bm, tgp_bn, leftover_bk, params, c_col, simd_group_id, simd_lane_id);
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue_safe(C, addmm_params->ldc, addmm_params->fdc, short2(tgp_bn, tgp_bm), epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue_safe(C, addmm_params->ldc, addmm_params->fdc, short2(tgp_bn, tgp_bm), epilogue_op_add);
+        }
+      }
+      return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
     } else if (align_N || tgp_bn == BN) {
       gemm_kernel::gemm_loop(
           As,
@@ -1379,6 +1705,17 @@ template <
       // Store results to device memory
       return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
 
+    } else if ((LOADER_MODE == 1 || LOADER_MODE == 2) && !transpose_b && (align_M || tgp_bm == BM)) {
+      gemm_kernel::template gemm_loop_qnk<true, false, true>(
+          As, Bs, gemm_k_iterations, loader_a, (const device uchar*)Bq8, (const device ushort*)Bq8Scales, mma_op, tgp_bm, tgp_bn, leftover_bk, params, c_col, simd_group_id, simd_lane_id);
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue_safe(C, addmm_params->ldc, addmm_params->fdc, short2(tgp_bn, tgp_bm), epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue_safe(C, addmm_params->ldc, addmm_params->fdc, short2(tgp_bn, tgp_bm), epilogue_op_add);
+        }
+      }
+      return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
     } else if (align_M || tgp_bm == BM) {
       gemm_kernel::gemm_loop(
           As,
@@ -1414,6 +1751,17 @@ template <
       // Store results to device memory
       return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
 
+    } else if ((LOADER_MODE == 1 || LOADER_MODE == 2) && !transpose_b) {
+      gemm_kernel::template gemm_loop_qnk<false, false, true>(
+          As, Bs, gemm_k_iterations, loader_a, (const device uchar*)Bq8, (const device ushort*)Bq8Scales, mma_op, tgp_bm, tgp_bn, leftover_bk, params, c_col, simd_group_id, simd_lane_id);
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue_safe(C, addmm_params->ldc, addmm_params->fdc, short2(tgp_bn, tgp_bm), epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue_safe(C, addmm_params->ldc, addmm_params->fdc, short2(tgp_bn, tgp_bm), epilogue_op_add);
+        }
+      }
+      return mma_op.store_result_safe(D, params->ldd, short2(tgp_bn, tgp_bm));
     } else {
       gemm_kernel::gemm_loop(
           As,
@@ -1463,6 +1811,8 @@ template <
       const constant GEMMAddMMParams* addmm_params [[buffer(5), function_constant(use_out_source)]], \
       const constant int* batch_shape [[buffer(6)]], \
       const constant size_t* batch_strides [[buffer(7)]], \
+      const device uchar *Bq8 [[buffer(9)]], \
+      const device ushort *Bq8Scales [[buffer(16)]], \
       const constant uint32_t* lhs_indices [[buffer(10), function_constant(do_gather)]], \
       const constant uint32_t* rhs_indices [[buffer(11), function_constant(do_gather)]], \
       const constant uint32_t* C_indices [[buffer(12), function_constant(gather_bias)]], \
@@ -1518,6 +1868,8 @@ template <
     const constant GEMMAddMMParams* addmm_params [[buffer(6), function_constant(use_out_source)]],
     const constant int* batch_shape [[buffer(7)]],
     const constant size_t* batch_strides [[buffer(8)]],
+    const device uchar *Bq8 [[buffer(9)]],
+    const device ushort *Bq8Scales [[buffer(16)]],
     const constant uint32_t* lhs_indices [[buffer(10), function_constant(do_gather)]],
     const constant uint32_t* rhs_indices [[buffer(11), function_constant(do_gather)]],
     const constant uint32_t* C_indices [[buffer(12), function_constant(gather_bias)]],
@@ -1718,6 +2070,34 @@ template <
   ///////////////////////////////////////////////////////////////////////////////
   // MNK aligned loop
   if (align_M && align_N) {
+    if ((LOADER_MODE == 1 || LOADER_MODE == 2) && !transpose_b) {
+      // Quant RHS path (NK swizzled blocks) with bias/epilogue
+      const short ldb_tgp = transpose_b ? (BK + gemm_kernel::tgp_padding_b) : (BN + gemm_kernel::tgp_padding_b);
+      for (int k_it = 0; k_it < gemm_k_iterations; k_it++) {
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        loader_a.load_unsafe();
+        gemm_kernel::quant_fill_rhs_tile_nk((const device uchar*)Bq8, (const device ushort*)Bq8Scales, Bs, params, k_it * BK, c_col, tgp_bn, ldb_tgp, simd_group_id, simd_lane_id);
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        mma_op.mma(As, Bs);
+        loader_a.next();
+      }
+      threadgroup_barrier(mem_flags::mem_none);
+      // Bias add
+      if (do_bias_add) {
+        mma_op.apply_bias(bias, c_col);
+      }
+      // Epilogue if needed
+      if (use_out_source) {
+        if (do_axpby) {
+          mma_op.apply_epilogue(
+              C, addmm_params->ldc, addmm_params->fdc, epilogue_op_axpby);
+        } else {
+          mma_op.apply_epilogue(
+              C, addmm_params->ldc, addmm_params->fdc, epilogue_op_add);
+        }
+      }
+      return mma_op.store_result(D, params->ldd);
+    }
     // Do gemm
     for (int k = 0; k < gemm_k_iterations; k++) {
       threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1925,6 +2305,8 @@ template <
       const constant GEMMAddMMParams* addmm_params [[buffer(6), function_constant(use_out_source)]], \
       const constant int* batch_shape [[buffer(7)]], \
       const constant size_t* batch_strides [[buffer(8)]], \
+      const device uchar *Bq8 [[buffer(9)]], \
+      const device ushort *Bq8Scales [[buffer(16)]], \
       const constant uint32_t* lhs_indices [[buffer(10), function_constant(do_gather)]], \
       const constant uint32_t* rhs_indices [[buffer(11), function_constant(do_gather)]], \
       const constant uint32_t* C_indices [[buffer(12), function_constant(gather_bias)]], \

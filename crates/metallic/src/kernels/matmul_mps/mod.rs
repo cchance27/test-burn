@@ -192,7 +192,7 @@ impl DefaultKernelInvocable for MatMulMpsOp {
         let mut profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul"));
 
         // Append op_type/backend to the hierarchical path (no formatting in hot path)
-        profiler_label.op_name = format!("{}/matmul/mps", profiler_label.op_name);
+        profiler_label.op_name = format!("{}/matmul/mps (D)", profiler_label.op_name);
         profiler_label.backend = "mps".to_string();
 
         // Only construct metadata HashMap when profiling is enabled

@@ -2,7 +2,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use metallic::{
     Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
         matmul_dispatcher::MatmulDispatchOp, matmul_gemm_tiled::MatmulGemmTiledOp, matmul_gemv_smalln::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp, softmax_block::SoftmaxBlockOp, softmax_vec::SoftmaxVecOp
-    }
+    }, tensor::TensorType
 };
 
 /// Direct kernel benchmarks that test raw kernel performance without dispatcher overhead.
@@ -98,12 +98,14 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
 
                 // Warmup
                 let _warmup_out = ctx
-                    .call::<MatMulMlxOp>((&a, &b, None, None, false, false, 1.0f32, 0.0f32))
+                    .call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, false, false, 1.0f32, 0.0f32))
                     .expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let _iter_out = ctx.call::<MatMulMlxOp>((&a, &b, None, None, false, false, 1.0f32, 0.0f32)).unwrap();
+                    let _iter_out = ctx
+                        .call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, false, false, 1.0f32, 0.0f32))
+                        .unwrap();
                     ctx.synchronize();
                 });
 

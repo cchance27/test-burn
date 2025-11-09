@@ -4,6 +4,7 @@ use crate::{
 };
 
 mod batch_record_test;
+mod bench_qwen25_matmul;
 mod cacheable_test;
 mod clamping_extreme_test;
 mod determinism_test;
@@ -15,6 +16,10 @@ mod matmul;
 mod matmul_alpha_beta_parity_test;
 mod matmul_backend_regression_test;
 mod matmul_dispatch_test;
+mod q8_0_quantized_tensor;
+mod q8_parity_qwen25;
+mod q8_proxy_smoke;
+mod q8_qkv_fused;
 mod resource_cache_persistence_test;
 mod softmax_kernel_consistency_test;
 mod tensor_test;

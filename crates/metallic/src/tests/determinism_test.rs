@@ -1,5 +1,5 @@
 use super::*;
-use crate::{F32Element, TensorElement, TensorInit, TensorStorage};
+use crate::{F32Element, TensorElement, TensorInit, TensorStorage, tensor::TensorType};
 
 fn softmax_rows_total<T: TensorElement>(attn_tensor: &Tensor<T>, seq_k: usize) -> u32 {
     if seq_k == 0 { 0 } else { (attn_tensor.len() / seq_k) as u32 }
@@ -165,7 +165,7 @@ fn test_matmul_determinism() -> Result<(), MetalError> {
         let _result_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&result_data))?;
 
         // Use the new kernel system
-        let result = context.matmul(&a_tensor, &b_tensor, false, false)?;
+        let result = context.matmul(&a_tensor, &TensorType::Dense(&b_tensor), false, false, None)?;
         context.synchronize();
 
         results.push(result.as_slice().to_vec());

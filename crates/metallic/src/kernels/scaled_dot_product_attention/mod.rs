@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
 use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}, tensor::TensorType
 };
 
 #[cfg(test)]
@@ -200,12 +200,17 @@ fn create_sdpa_operation<T: TensorElement>(
         (k.permute(&[0, 2, 1], ctx)?, false)
     };
 
-    let qk_scaled_result = match cache.as_deref_mut() {
-        Some(cache_ref) => {
-            ctx.matmul_alpha_beta_with_cache(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0, cache_ref)?
-        }
-        None => ctx.matmul_alpha_beta(&q_active, &k_operand, &attention, false, transpose_b, scale, 0.0)?,
-    };
+    let cache_for_qk = cache.as_mut().map(|c| &mut **c);
+    let qk_scaled_result = ctx.matmul_alpha_beta(
+        &q_active,
+        &TensorType::Dense(&k_operand),
+        &attention,
+        false,
+        transpose_b,
+        scale,
+        0.0,
+        cache_for_qk,
+    )?;
 
     let row_offset_u32 = u32::try_from(row_offset)
         .map_err(|_| MetalError::InvalidShape(format!("SDPA row offset {row_offset} exceeds representable query offset range")))?;
@@ -231,14 +236,8 @@ fn create_sdpa_operation<T: TensorElement>(
         }
     };
 
-    match cache {
-        Some(cache_ref) => {
-            ctx.matmul_alpha_beta_with_cache(&softmax_result, v, &out, false, false, 1.0, 0.0, cache_ref)?;
-        }
-        None => {
-            ctx.matmul_alpha_beta(&softmax_result, v, &out, false, false, 1.0, 0.0)?;
-        }
-    };
+    let cache_for_v = cache.as_mut().map(|c| &mut **c);
+    ctx.matmul_alpha_beta(&softmax_result, &TensorType::Dense(v), &out, false, false, 1.0, 0.0, cache_for_v)?;
 
     // Create a dummy operation since all work is done in this function
     Ok((

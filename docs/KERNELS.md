@@ -365,24 +365,29 @@ The `build.rs` script automatically compiles `.metal` files to `.metallib` files
 
 ### kernel_lib! Macro
 
-A `kernel_lib!` macro abstracts the selection between source and binary:
+The `kernel_lib!` macro abstracts the runtime choice between precompiled `.metallib` binaries and inline source kernels. Its most recent form accepts an optional *extra* list of Metal sources:
+
+The standard single kernel file version like below will include_str in debug and build and include_bytes the matmul/metal.kernel...
+
+kernel_lib!("matmul"); 
+
+When you have kernels that rely on shared loader logic, epilog helpers, or otherwise span multiple `.metal` files (for example `common/gemv_core.metal` + `matmul_q8_gemv/kernel_body.metal`), call `kernel_lib!` with the shared sources listed after the main library name:
 
 ```rust
-#[cfg(feature = "built_kernels")] 
-#[macro_export]
-macro_rules! kernel_lib {
-    ($name:expr) => {
-        $crate::kernels::KernelSource::Binary(include_bytes!(concat!(env!("OUT_DIR"), "/", $name, ".metallib")))
-    };
-}
-
-#[cfg(all(not(feature = "built_kernels"), any(debug_assertions, feature = "src_kernels")))]
-#[macro_export]
-macro_rules! kernel_lib {
-    ($name:expr) => {
-        $crate::kernels::KernelSource::Text(include_str!(concat!($name, "/kernel.metal")))
-    };
-}
+kernel_lib!(
+    "matmul_q8_gemv",
+    "common/gemv_core.metal",
+    "matmul_q8_gemv/kernel_body.metal"
+)
 ```
 
-This macro automatically selects the appropriate kernel type based on the build configuration.
+In debug/src-kernel mode the macro concatenates the listed extras (no `kernel.metal`) so the runtime compiler sees a single blob without `#include`s. In release/built-kernel mode these extras are ignored because the `.metallib` already contains everything.
+
+In release/built-kernels mode the macro will include_bytes the generated kernel, but the build.rs needs to know the files to include, as such the above kernel_lib!() will require a sources file list for the build.rs script to use (we haven't created a proc macro to do this automatically as part of kernel_lib!() execution.
+
+metal.sources under matmul_q8_gemv per the above example would have the following text:
+
+```
+common/gemv_core.metal
+matmul_q8_gemv/kernel_body.metal
+```

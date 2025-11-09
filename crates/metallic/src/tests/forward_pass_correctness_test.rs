@@ -5,7 +5,7 @@ use ndarray::ArrayD;
 use ndarray_npy::ReadNpyExt;
 
 use crate::{
-    Dtype, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, context::Context, error::MetalError, generation, generation::GenerationConfig, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{elemwise_add::BroadcastElemwiseAddOp, kv_rearrange::KvRearrangeOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp}, models::{LoadableModel, Qwen25}, tokenizer::Tokenizer
+    Dtype, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, context::Context, error::MetalError, generation::{self, GenerationConfig}, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{elemwise_add::BroadcastElemwiseAddOp, kv_rearrange::KvRearrangeOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp}, models::{LoadableModel, Qwen25}, tensor::TensorType, tokenizer::Tokenizer
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -64,6 +64,7 @@ fn dtype_threshold<T: TensorElement>(f32_value: f32, half_value: f32) -> f32 {
     match T::DTYPE {
         Dtype::F32 => f32_value,
         Dtype::F16 => half_value,
+        Dtype::U8 => unreachable!("dtype_threshold not implemented for U8"),
         Dtype::U32 => unreachable!("dtype_threshold not implemented for U32"),
     }
 }
@@ -238,7 +239,13 @@ fn run_blocks_up_to<T: TensorElement>(
             .reshape(vec![batch, seq, d_model])?;
 
         let attn_out = ctx
-            .matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)?
+            .matmul(
+                &attn_out_reshaped.reshape(vec![m, d_model])?,
+                &TensorType::Dense(&block.attn_out_weight),
+                false,
+                true,
+                None,
+            )?
             .reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
 
@@ -400,7 +407,14 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     println!("x_flat (input) dims: {:?}", x_flat.dims());
     println!("Expected fused output dims: [{}, {}]", m, d_model + 2 * block0.kv_dim);
 
-    let linear = ctx.matmul_bias_add(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, false, false)?;
+    let linear = ctx.matmul_bias_add(
+        &x_flat,
+        &TensorType::Dense(&block0.attn_qkv_weight),
+        &block0.attn_qkv_bias,
+        false,
+        false,
+        None,
+    )?;
     ctx.synchronize();
     println!("Linear output dims: {:?}", linear.dims());
     println!(
@@ -739,7 +753,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 
     // Attn out projection (use transpose on weight to match PyTorch Linear semantics)
     let attn_out_flat = attn_out_reshaped.reshape(vec![seq, d_model])?;
-    let attn_out_proj = ctx.matmul(&attn_out_flat, &block0.attn_out_weight, false, true)?;
+    let attn_out_proj = ctx.matmul(&attn_out_flat, &TensorType::Dense(&block0.attn_out_weight), false, true, None)?;
     ctx.synchronize();
     let attn_out = attn_out_proj.reshape(vec![1, seq, d_model])?;
 
@@ -841,7 +855,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     };
     println!("Using transpose_b={} for gate matmul", gate_transpose_b);
     // Gate projection
-    let gate_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_gate, false, gate_transpose_b)?;
+    let gate_proj = ctx.matmul(
+        &x_normed_mlp_flat,
+        &TensorType::Dense(&block0.ffn_gate),
+        false,
+        gate_transpose_b,
+        None,
+    )?;
     let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()))?;
 
     // Up projection
@@ -854,7 +874,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         panic!("Unexpected FFN up dims {:?} for d_model={}", up_dims, d_model);
     };
     println!("Using transpose_b={} for up matmul", up_transpose_b);
-    let up_proj = ctx.matmul(&x_normed_mlp_flat, &block0.ffn_up, false, up_transpose_b)?;
+    let up_proj = ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block0.ffn_up), false, up_transpose_b, None)?;
     let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()))?;
 
     // Silu
@@ -874,7 +894,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         panic!("Unexpected FFN down dims {:?} for ff_dim={}", down_dims, ff_dim);
     };
     println!("Using transpose_b={} for down matmul", down_transpose_b);
-    let down_proj = ctx.matmul(&mul_out, &block0.ffn_down, false, down_transpose_b)?;
+    let down_proj = ctx.matmul(&mul_out, &TensorType::Dense(&block0.ffn_down), false, down_transpose_b, None)?;
     let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()))?;
 
     let ffn_output_flat = down_proj_out.clone();
@@ -1258,7 +1278,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         .permute(&[0, 2, 1, 3], &mut ctx)?
         .reshape(vec![1, seq, d_model])?;
     let attn_out_last = ctx
-        .matmul(&attn_out_last.reshape(vec![m, d_model])?, &block_last.attn_out_weight, false, true)?
+        .matmul(
+            &attn_out_last.reshape(vec![m, d_model])?,
+            &TensorType::Dense(&block_last.attn_out_weight),
+            false,
+            true,
+            None,
+        )?
         .reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
 

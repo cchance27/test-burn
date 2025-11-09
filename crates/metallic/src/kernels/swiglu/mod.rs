@@ -5,7 +5,7 @@ use objc2_metal::MTLComputeCommandEncoder;
 
 use super::*;
 use crate::{
-    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp, operation::ComputeKernelEncoder
+    CommandBuffer, Context, Dtype, MetalError, Tensor, TensorElement, context::GpuProfilerLabel, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp, operation::ComputeKernelEncoder, tensor::TensorType
 };
 
 /// SwiGLU operation that computes: down_proj( SiLU(gate_proj(x)) * up_proj(x) )
@@ -267,10 +267,14 @@ fn execute_swiglu_logic<T: TensorElement>(
             )));
         };
 
-        let fused_temp = match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(x_normed_flat, fused_weight, false, fused_transpose_b, cache)?,
-            None => ctx.matmul(x_normed_flat, fused_weight, false, fused_transpose_b)?,
-        };
+        let cache_for_fused = cache.as_mut().map(|c| &mut **c);
+        let fused_temp = ctx.matmul(
+            x_normed_flat,
+            &TensorType::Dense(fused_weight),
+            false,
+            fused_transpose_b,
+            cache_for_fused,
+        )?;
 
         let gate_view = fused_temp.slice_last_dim(0..hidden_dim)?;
         let up_view = fused_temp.slice_last_dim(hidden_dim..expected_cols)?;
@@ -294,10 +298,10 @@ fn execute_swiglu_logic<T: TensorElement>(
                 actual: gate_dims[0],
             });
         };
-        let gate_temp = match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_gate, false, gate_transpose_b, cache)?,
-            None => ctx.matmul(x_normed_flat, ffn_gate, false, gate_transpose_b)?,
-        };
+        // Prefer quant gate if present on the block via opaque tensor handle attached to up tensor's user data.
+        // DEBT: a cleaner API would thread an explicit Option<QuantizedQ8_0Tensor> here.
+        let cache_for_gate = cache.as_mut().map(|c| &mut **c);
+        let gate_temp = ctx.matmul(x_normed_flat, &TensorType::Dense(ffn_gate), false, gate_transpose_b, cache_for_gate)?;
 
         // up_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_up])?;
@@ -312,10 +316,8 @@ fn execute_swiglu_logic<T: TensorElement>(
                 actual: up_dims[0],
             });
         };
-        let up_temp = match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(x_normed_flat, ffn_up, false, up_transpose_b, cache)?,
-            None => ctx.matmul(x_normed_flat, ffn_up, false, up_transpose_b)?,
-        };
+        let cache_for_up = cache.as_mut().map(|c| &mut **c);
+        let up_temp = ctx.matmul(x_normed_flat, &TensorType::Dense(ffn_up), false, up_transpose_b, cache_for_up)?;
         let gate_stride = leading_stride_as_u32(&gate_temp)?;
         let up_stride = leading_stride_as_u32(&up_temp)?;
 
@@ -351,16 +353,12 @@ fn execute_swiglu_logic<T: TensorElement>(
     let ffn_down_cols = ffn_down.dims()[1];
     let ffn_temp = if hidden_cols == ffn_down_rows {
         // Hidden [m, ff_dim] @ ffn_down [ff_dim, d_model] -> [m, d_model]
-        match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(&hidden, ffn_down, false, false, cache)?,
-            None => ctx.matmul(&hidden, ffn_down, false, false)?,
-        }
+        let cache_for_down = cache.as_mut().map(|c| &mut **c);
+        ctx.matmul(&hidden, &TensorType::Dense(ffn_down), false, false, cache_for_down)?
     } else if hidden_cols == ffn_down_cols {
         // Hidden [m, ff_dim] @ ffn_down^T [ff_dim, d_model] where stored as [d_model, ff_dim]
-        match cache.as_mut() {
-            Some(cache) => ctx.matmul_with_cache(&hidden, ffn_down, false, true, cache)?,
-            None => ctx.matmul(&hidden, ffn_down, false, true)?,
-        }
+        let cache_for_down_t = cache.as_mut().map(|c| &mut **c);
+        ctx.matmul(&hidden, &TensorType::Dense(ffn_down), false, true, cache_for_down_t)?
     } else {
         return Err(MetalError::DimensionMismatch {
             expected: hidden_cols,

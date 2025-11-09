@@ -1,6 +1,6 @@
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, tensor::TensorType};
 
 fn new_context_for_backend(backend: &str) -> Result<Context<F32Element>, MetalError> {
     let previous = FORCE_MATMUL_BACKEND_VAR.get().unwrap_or(None);
@@ -59,9 +59,9 @@ fn test_mlx_kernel_matches_mps_basic_matmul() -> Result<(), MetalError> {
     let a_mlx = tensor_from_data(&ctx_mlx, vec![m, k], &a_data)?;
     let b_mlx = tensor_from_data(&ctx_mlx, vec![k, n], &b_data)?;
 
-    let out_mps = ctx_mps.matmul(&a_mps, &b_mps, false, false)?;
+    let out_mps = ctx_mps.matmul(&a_mps, &TensorType::Dense(&b_mps), false, false, None)?;
     ctx_mps.synchronize();
-    let out_mlx = ctx_mlx.matmul(&a_mlx, &b_mlx, false, false)?;
+    let out_mlx = ctx_mlx.matmul(&a_mlx, &TensorType::Dense(&b_mlx), false, false, None)?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, "basic matmul");
@@ -85,9 +85,9 @@ fn test_mlx_kernel_matches_mps_with_transpositions() -> Result<(), MetalError> {
     let a_left_mlx = tensor_from_data(&ctx_mlx, vec![k1, m1], &a_left_data)?;
     let b_left_mlx = tensor_from_data(&ctx_mlx, vec![k1, n1], &b_left_data)?;
 
-    let out_left_mps = ctx_mps.matmul(&a_left_mps, &b_left_mps, true, false)?;
+    let out_left_mps = ctx_mps.matmul(&a_left_mps, &TensorType::Dense(&b_left_mps), true, false, None)?;
     ctx_mps.synchronize();
-    let out_left_mlx = ctx_mlx.matmul(&a_left_mlx, &b_left_mlx, true, false)?;
+    let out_left_mlx = ctx_mlx.matmul(&a_left_mlx, &TensorType::Dense(&b_left_mlx), true, false, None)?;
     ctx_mlx.synchronize();
     assert_tensors_close(&out_left_mps, &out_left_mlx, 1e-4, "transpose-left matmul");
 
@@ -103,9 +103,9 @@ fn test_mlx_kernel_matches_mps_with_transpositions() -> Result<(), MetalError> {
     let a_right_mlx = tensor_from_data(&ctx_mlx, vec![m2, k2], &a_right_data)?;
     let b_right_mlx = tensor_from_data(&ctx_mlx, vec![n2, k2], &b_right_data)?;
 
-    let out_right_mps = ctx_mps.matmul(&a_right_mps, &b_right_mps, false, true)?;
+    let out_right_mps = ctx_mps.matmul(&a_right_mps, &TensorType::Dense(&b_right_mps), false, true, None)?;
     ctx_mps.synchronize();
-    let out_right_mlx = ctx_mlx.matmul(&a_right_mlx, &b_right_mlx, false, true)?;
+    let out_right_mlx = ctx_mlx.matmul(&a_right_mlx, &TensorType::Dense(&b_right_mlx), false, true, None)?;
     ctx_mlx.synchronize();
     assert_tensors_close(&out_right_mps, &out_right_mlx, 1e-4, "transpose-right matmul");
 
@@ -121,9 +121,9 @@ fn test_mlx_kernel_matches_mps_with_transpositions() -> Result<(), MetalError> {
     let a_both_mlx = tensor_from_data(&ctx_mlx, vec![k3, m3], &a_both_data)?;
     let b_both_mlx = tensor_from_data(&ctx_mlx, vec![n3, k3], &b_both_data)?;
 
-    let out_both_mps = ctx_mps.matmul(&a_both_mps, &b_both_mps, true, true)?;
+    let out_both_mps = ctx_mps.matmul(&a_both_mps, &TensorType::Dense(&b_both_mps), true, true, None)?;
     ctx_mps.synchronize();
-    let out_both_mlx = ctx_mlx.matmul(&a_both_mlx, &b_both_mlx, true, true)?;
+    let out_both_mlx = ctx_mlx.matmul(&a_both_mlx, &TensorType::Dense(&b_both_mlx), true, true, None)?;
     ctx_mlx.synchronize();
     assert_tensors_close(&out_both_mps, &out_both_mlx, 1e-4, "transpose-both matmul");
 
@@ -153,9 +153,9 @@ fn test_mlx_kernel_matches_mps_alpha_beta() -> Result<(), MetalError> {
     let b_mlx = tensor_from_data(&ctx_mlx, vec![k, n], &b_data)?;
     let c_mlx = tensor_from_data(&ctx_mlx, vec![m, n], &c_data)?;
 
-    let out_mps = ctx_mps.matmul_alpha_beta(&a_mps, &b_mps, &c_mps, false, false, alpha, beta)?;
+    let out_mps = ctx_mps.matmul_alpha_beta(&a_mps, &TensorType::Dense(&b_mps), &c_mps, false, false, alpha, beta, None)?;
     ctx_mps.synchronize();
-    let out_mlx = ctx_mlx.matmul_alpha_beta(&a_mlx, &b_mlx, &c_mlx, false, false, alpha, beta)?;
+    let out_mlx = ctx_mlx.matmul_alpha_beta(&a_mlx, &TensorType::Dense(&b_mlx), &c_mlx, false, false, alpha, beta, None)?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, "alpha-beta matmul");
@@ -186,9 +186,9 @@ fn test_mlx_kernel_matches_mps_non_contiguous_views() -> Result<(), MetalError> 
     let a_view_mlx = a_padded_mlx.slice_last_dim(0..k)?;
     let b_view_mlx = b_padded_mlx.slice_last_dim(0..n)?;
 
-    let out_mps = ctx_mps.matmul(&a_view_mps, &b_view_mps, false, false)?;
+    let out_mps = ctx_mps.matmul(&a_view_mps, &TensorType::Dense(&b_view_mps), false, false, None)?;
     ctx_mps.synchronize();
-    let out_mlx = ctx_mlx.matmul(&a_view_mlx, &b_view_mlx, false, false)?;
+    let out_mlx = ctx_mlx.matmul(&a_view_mlx, &TensorType::Dense(&b_view_mlx), false, false, None)?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, "non-contiguous matmul");
@@ -213,9 +213,9 @@ fn test_mlx_kernel_matches_mps_batched_matmul() -> Result<(), MetalError> {
     let a_mlx = tensor_from_data(&ctx_mlx, vec![batch, m, k], &a_data)?;
     let b_mlx = tensor_from_data(&ctx_mlx, vec![batch, k, n], &b_data)?;
 
-    let out_mps = ctx_mps.matmul(&a_mps, &b_mps, false, false)?;
+    let out_mps = ctx_mps.matmul(&a_mps, &TensorType::Dense(&b_mps), false, false, None)?;
     ctx_mps.synchronize();
-    let out_mlx = ctx_mlx.matmul(&a_mlx, &b_mlx, false, false)?;
+    let out_mlx = ctx_mlx.matmul(&a_mlx, &TensorType::Dense(&b_mlx), false, false, None)?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, "batched matmul");
@@ -246,12 +246,12 @@ fn test_mlx_fused_bias_add_matches_mps() -> Result<(), MetalError> {
     let bias_mlx = tensor_from_data(&ctx_mlx, vec![n], &bias_data)?;
 
     // MPS path: matmul + add
-    let out_mps_matmul = ctx_mps.matmul(&a_mps, &b_mps, false, false)?;
+    let out_mps_matmul = ctx_mps.matmul(&a_mps, &TensorType::Dense(&b_mps), false, false, None)?;
     let out_mps = ctx_mps.call::<BroadcastElemwiseAddInplaceOp>((out_mps_matmul, bias_mps))?;
     ctx_mps.synchronize();
 
     // MLX path: fused matmul_bias_add
-    let out_mlx = ctx_mlx.matmul_bias_add(&a_mlx, &b_mlx, &bias_mlx, false, false)?;
+    let out_mlx = ctx_mlx.matmul_bias_add(&a_mlx, &TensorType::Dense(&b_mlx), &bias_mlx, false, false, None)?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, "fused bias-add matmul");

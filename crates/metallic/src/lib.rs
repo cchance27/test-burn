@@ -1,7 +1,9 @@
 pub use context::{Context, SamplerBuffers};
 pub use error::MetalError;
 pub use operation::{CommandBuffer, ComputeKernelEncoder, Operation};
-pub use tensor::{Dtype, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage};
+pub use tensor::{
+    Dtype, F16Element, F32Element, Q8_0_BLOCK_SIZE_BYTES, Q8_0_WEIGHTS_PER_BLOCK, QuantizedQ8_0Tensor, Tensor, TensorElement, TensorInit, TensorStorage
+};
 pub use tokenizer::{SpecialTokens, Tokenizer, TokenizerError};
 
 pub mod alternatives;

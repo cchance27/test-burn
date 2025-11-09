@@ -1,6 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use metallic::{
-    Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp
+    Context, F16Element, F32Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::elemwise_add::BroadcastElemwiseAddInplaceOp, tensor::TensorType
 };
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
@@ -69,12 +69,16 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                 let bias: Tensor<T> = Tensor::new(vec![n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
 
                 // Warmup
-                let mut _warmup_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).expect("warmup");
+                let mut _warmup_out = ctx
+                    .matmul_alpha_beta(&a, &TensorType::Dense(&b), &out, false, false, alpha, beta, None)
+                    .expect("warmup");
                 _warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_warmup_out, bias.clone())).unwrap();
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let mut _iter_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).unwrap();
+                    let mut _iter_out = ctx
+                        .matmul_alpha_beta(&a, &TensorType::Dense(&b), &out, false, false, alpha, beta, None)
+                        .unwrap();
                     _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                     ctx.synchronize();
                 });
@@ -91,12 +95,16 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
                 let bias: Tensor<T> = Tensor::new(vec![n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
 
                 // Warmup
-                let mut _warmup_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).expect("warmup");
+                let mut _warmup_out = ctx
+                    .matmul_alpha_beta(&a, &TensorType::Dense(&b), &out, false, false, alpha, beta, None)
+                    .expect("warmup");
                 _warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_warmup_out, bias.clone())).unwrap();
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let mut _iter_out = ctx.matmul_alpha_beta(&a, &b, &out, false, false, alpha, beta).unwrap();
+                    let mut _iter_out = ctx
+                        .matmul_alpha_beta(&a, &TensorType::Dense(&b), &out, false, false, alpha, beta, None)
+                        .unwrap();
                     _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
                     ctx.synchronize();
                 });
@@ -116,11 +124,13 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
             let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("B");
             let bias: Tensor<T> = Tensor::new(vec![n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
 
-            let _warmup = ctx.matmul_bias_add(&a, &b, &bias, false, false).expect("warmup");
+            let _warmup = ctx
+                .matmul_bias_add(&a, &TensorType::Dense(&b), &bias, false, false, None)
+                .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                let _ = ctx.matmul_bias_add(&a, &b, &bias, false, false).unwrap();
+                let _ = ctx.matmul_bias_add(&a, &TensorType::Dense(&b), &bias, false, false, None).unwrap();
                 ctx.synchronize();
             });
         });
@@ -133,11 +143,13 @@ fn bench_generic_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
             let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("B");
             let bias: Tensor<T> = Tensor::new(vec![n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
 
-            let _warmup = ctx.matmul_bias_add(&a, &b, &bias, false, false).expect("warmup");
+            let _warmup = ctx
+                .matmul_bias_add(&a, &TensorType::Dense(&b), &bias, false, false, None)
+                .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                let _ = ctx.matmul_bias_add(&a, &b, &bias, false, false).unwrap();
+                let _ = ctx.matmul_bias_add(&a, &TensorType::Dense(&b), &bias, false, false, None).unwrap();
                 ctx.synchronize();
             });
         });
@@ -273,22 +285,24 @@ fn bench_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
 
             match case.kind {
                 CaseKind::Matmul => {
-                    let _warmup = ctx.matmul(&a, &b, false, false).expect("warmup matmul");
+                    let _warmup = ctx.matmul(&a, &TensorType::Dense(&b), false, false, None).expect("warmup matmul");
                     ctx.synchronize();
 
                     bencher.iter(|| {
-                        let _ = ctx.matmul(&a, &b, false, false).unwrap();
+                        let _ = ctx.matmul(&a, &TensorType::Dense(&b), false, false, None).unwrap();
                         ctx.synchronize();
                     });
                 }
                 CaseKind::MatmulBias => {
                     let bias: Tensor<T> =
                         Tensor::new(vec![case.n], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).expect("bias");
-                    let _warmup = ctx.matmul_bias_add(&a, &b, &bias, false, false).expect("warmup bias");
+                    let _warmup = ctx
+                        .matmul_bias_add(&a, &TensorType::Dense(&b), &bias, false, false, None)
+                        .expect("warmup bias");
                     ctx.synchronize();
 
                     bencher.iter(|| {
-                        let _ = ctx.matmul_bias_add(&a, &b, &bias, false, false).unwrap();
+                        let _ = ctx.matmul_bias_add(&a, &TensorType::Dense(&b), &bias, false, false, None).unwrap();
                         ctx.synchronize();
                     });
                 }

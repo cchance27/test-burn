@@ -20,6 +20,7 @@ pub use backend_registry::{
 };
 
 // Export our kernels
+pub mod blit_copy;
 pub mod elemwise_abs;
 pub mod elemwise_add;
 pub mod elemwise_div;
@@ -32,9 +33,13 @@ pub mod layernorm;
 pub mod matmul_dispatcher;
 pub mod matmul_gemm_tiled;
 pub mod matmul_gemv;
+pub mod matmul_gemv_qkv_fused;
+pub mod matmul_gemv_smallm;
 pub mod matmul_gemv_smalln;
 pub mod matmul_mlx;
 pub mod matmul_mps;
+pub mod matmul_q8_canonical;
+pub mod matmul_q8_nt;
 pub mod sdpa_mps_graph;
 pub mod softmax_block;
 pub mod softmax_kernel;
@@ -52,9 +57,9 @@ pub mod silu;
 pub mod softmax_dispatcher;
 pub mod swiglu;
 pub use softmax_dispatcher::SoftmaxDispatchOp;
+pub mod embedding_lookup;
 pub mod sample_topk_topp;
 pub mod tensors;
-pub mod embedding_lookup;
 
 /// Used by our Macro to load kernel source or binary
 /// Represents the source of a Metal kernel, either as text source code or as a precompiled
@@ -161,6 +166,11 @@ pub enum KernelFunction {
     MatmulGemvSmallN4,
     MatmulGemvSmallN8,
     MatmulGemvSmallN16,
+    MatmulGemvSmallM,
+    MatmulGemvQkvFused,
+    MatmulQ8Nt,
+    MatmulQ8CanonicalLargeN,
+    MatmulQ8CanonicalRows16LargeN,
     MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
@@ -200,6 +210,11 @@ impl KernelFunction {
             KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemvSmalln,
             KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemvSmalln,
             KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemvQkvFused => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulQ8Nt => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulQ8CanonicalLargeN => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulQ8CanonicalRows16LargeN => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvSmallM => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemmTiled => KernelLibrary::MatmulGemmTiled,
             KernelFunction::SoftmaxBlock => KernelLibrary::SoftmaxBlock,
             KernelFunction::SoftmaxVec => KernelLibrary::SoftmaxVec,
@@ -266,6 +281,11 @@ impl KernelFunction {
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
             (KernelFunction::MatmulGemv, F32) => "gemv_f32",
             (KernelFunction::MatmulGemv, F16) => "gemv_f16",
+            (KernelFunction::MatmulGemvQkvFused, F16) => "gemv_q8_fused3_f16",
+            (KernelFunction::MatmulQ8Nt, F16) => "gemm_q8_nt_f16",
+            (KernelFunction::MatmulQ8CanonicalLargeN, F16) => "gemm_q8_canonical_large_n_f16",
+            (KernelFunction::MatmulQ8CanonicalRows16LargeN, F16) => "gemm_q8_canonical_large_n_rows16_f16",
+            (KernelFunction::MatmulGemvSmallM, F16) => "gemv_q8_rows_f16",
             (KernelFunction::MatmulGemvSmallN1, F16) => "gemv_n1_f16",
             (KernelFunction::MatmulGemvSmallN1, F32) => {
                 return Err(MetalError::UnsupportedDtype {

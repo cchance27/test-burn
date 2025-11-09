@@ -10,7 +10,7 @@ use objc2_metal::{
 use rustc_hash::FxHashMap;
 
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder, tensor::Dtype
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder, tensor::{Dtype, QuantizedTensor, TensorType, quantized::CanonicalQuantTensor}
 };
 
 #[repr(C)]
@@ -51,6 +51,7 @@ struct PipelineKey {
     align_m: bool,
     align_n: bool,
     align_k: bool,
+    loader_mode: LoaderMode,
 }
 
 #[derive(Default)]
@@ -91,6 +92,7 @@ impl MlxKernelCache {
             align_m: constants.align_m,
             align_n: constants.align_n,
             align_k: constants.align_k,
+            loader_mode: constants.loader_mode,
         };
 
         if let Some(pipeline) = self.pipelines.get(&key) {
@@ -111,6 +113,12 @@ impl MlxKernelCache {
     }
 }
 
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum LoaderMode {
+    Dense,
+    Q8NkSplit,
+}
+
 struct MlxConstants {
     has_batch: bool,
     use_out_source: bool,
@@ -119,6 +127,7 @@ struct MlxConstants {
     align_m: bool,
     align_n: bool,
     align_k: bool,
+    loader_mode: LoaderMode,
 }
 
 impl MlxConstants {
@@ -132,6 +141,11 @@ impl MlxConstants {
         set_bool_constant(&constants, 200, self.align_m);
         set_bool_constant(&constants, 201, self.align_n);
         set_bool_constant(&constants, 202, self.align_k);
+        let loader_value = match self.loader_mode {
+            LoaderMode::Dense => 0u32,
+            LoaderMode::Q8NkSplit => 2u32,
+        };
+        set_uint_constant(&constants, 400, loader_value);
         set_bool_constant(&constants, 300, false); // gather_bias
 
         constants
@@ -146,11 +160,24 @@ fn set_bool_constant(constants: &MTLFunctionConstantValues, index: usize, value:
     }
 }
 
+fn set_uint_constant(constants: &MTLFunctionConstantValues, index: usize, value: u32) {
+    let mut raw = value;
+    let ptr = NonNull::new(&mut raw as *mut u32).expect("stack pointer is never null");
+    unsafe {
+        constants.setConstantValue_type_atIndex(ptr.cast::<c_void>(), MTLDataType::UInt, index);
+    }
+}
+
 pub struct MatMulMlxOp;
+
+enum RightMatrix<T: TensorElement> {
+    Dense(Tensor<T>),
+    Quant(CanonicalQuantTensor),
+}
 
 struct MatMulMlx<T: TensorElement> {
     left: Tensor<T>,
-    right: Tensor<T>,
+    right: RightMatrix<T>,
     bias: Option<Tensor<T>>,
     out: Tensor<T>,
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
@@ -167,7 +194,7 @@ struct MatMulMlx<T: TensorElement> {
 impl DefaultKernelInvocable for MatMulMlxOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
-        &'a Tensor<T>,
+        TensorType<'a, T>,
         Option<&'a Tensor<T>>,
         Option<&'a Tensor<T>>,
         bool,
@@ -186,26 +213,48 @@ impl DefaultKernelInvocable for MatMulMlxOp {
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (left, right, bias, existing_out, transpose_left, transpose_right, alpha, beta) = args;
+        let (left, right_any, bias, existing_out, transpose_left, transpose_right, alpha, beta) = args;
         if beta != 0.0 && existing_out.is_none() {
             return Err(MetalError::InvalidOperation("beta requires an existing output tensor".to_string()));
         }
 
         // Avoid MPS-specific batch compaction: MLX GEMM supports arbitrary batch strides directly.
         let left_tensor = left.clone();
-        let right_tensor = right.clone();
         let left_view = left.as_mps_matrix_batch_view()?;
-        let right_view = right.as_mps_matrix_batch_view()?;
+        // Derive RHS info from TensorType
+        let (right_wrapped, b_rows_base, b_cols_base, batch_right) = match right_any {
+            TensorType::Dense(r) => {
+                let v = r.as_mps_matrix_batch_view()?;
+                (RightMatrix::Dense(r.clone()), v.rows, v.columns, v.batch)
+            }
+            TensorType::Quant(QuantizedTensor::Q8_0(q8)) => {
+                if q8.logical_dims.len() != 2 {
+                    return Err(MetalError::InvalidShape("MLX quant GEMM expects 2D RHS".to_string()));
+                }
+                let canonical = CanonicalQuantTensor::from_split_q8_tensor(q8)
+                    .map_err(|e| MetalError::InvalidOperation(format!("MLX quant GEMM requires NkSplit layout: {e}")))?;
+                let rows = canonical.logical_dims[0];
+                let cols = canonical.logical_dims[1];
+                (RightMatrix::Quant(canonical), rows, cols, 1)
+            }
+        };
+        // For dense RHS, keep a real tensor for MPS view; for quant we won't use right_view
+        let (right_tensor_opt, right_view_opt) = match &right_wrapped {
+            RightMatrix::Dense(t) => {
+                let v = t.as_mps_matrix_batch_view()?;
+                (Some(t.clone()), Some(v))
+            }
+            RightMatrix::Quant(_) => (None, None),
+        };
 
         let batch = left_view.batch;
-        if right_view.batch != batch {
+        if batch_right != batch {
             return Err(MetalError::InvalidOperation(
                 "Left and right operands must share the same batch".to_string(),
             ));
         }
 
         let (a_rows_base, a_cols_base) = (left_view.rows, left_view.columns);
-        let (b_rows_base, b_cols_base) = (right_view.rows, right_view.columns);
 
         let (a_rows, a_cols) = if transpose_left {
             (a_cols_base, a_rows_base)
@@ -234,10 +283,15 @@ impl DefaultKernelInvocable for MatMulMlxOp {
                 "[MLX] m={}, n={}, k={}, transpose_left={}, transpose_right={}, layout_a_base=({},{}) layout_b_base=({},{})",
                 m, n, k, transpose_left, transpose_right, a_rows_base, a_cols_base, b_rows_base, b_cols_base
             );
+            let right_strides = if let Some(rt) = &right_tensor_opt {
+                &rt.strides
+            } else {
+                &left_tensor.strides
+            };
             println!(
                 "[MLX] strides left={:?}, right={:?}, dtype={:?}",
                 left_tensor.strides,
-                right_tensor.strides,
+                right_strides,
                 T::DTYPE
             );
         }
@@ -249,7 +303,11 @@ impl DefaultKernelInvocable for MatMulMlxOp {
         let (tile_bm, tile_bn, tile_bk, wm_sel, wn_sel) = select_tile(m, n);
 
         let (lda, layout_a_transposed) = determine_layout(&left_tensor, a_rows_base, a_cols_base)?;
-        let (ldb, layout_b_transposed) = determine_layout(&right_tensor, b_rows_base, b_cols_base)?;
+        let (ldb, layout_b_transposed) = match (&right_wrapped, &right_tensor_opt) {
+            (RightMatrix::Dense(_), Some(rt)) => determine_layout(rt, b_rows_base, b_cols_base)?,
+            (RightMatrix::Quant(_), _) => (b_cols_base as i32, false),
+            _ => (b_cols_base as i32, false),
+        };
 
         let effective_a_trans = layout_a_transposed ^ transpose_left;
         let effective_b_trans = layout_b_transposed ^ transpose_right;
@@ -264,7 +322,7 @@ impl DefaultKernelInvocable for MatMulMlxOp {
         let requires_epilogue = alpha != 1.0 || beta != 0.0;
         let use_out_source = requires_epilogue;
         let do_bias_add = bias.is_some();
-        let constants = MlxConstants {
+        let mut constants = MlxConstants {
             has_batch,
             use_out_source,
             do_axpby: requires_epilogue,
@@ -272,15 +330,43 @@ impl DefaultKernelInvocable for MatMulMlxOp {
             align_m,
             align_n,
             align_k,
+            loader_mode: LoaderMode::Dense,
         };
+        // Enable quant loader when RHS is Q8_0 and transpose_right is false
+        if let RightMatrix::Quant(_q) = &right_wrapped {
+            if transpose_right {
+                return Err(MetalError::OperationNotSupported(
+                    "MLX quant GEMM currently requires transpose_right == false".to_string(),
+                ));
+            }
+            constants.loader_mode = LoaderMode::Q8NkSplit;
+        }
 
         let pipeline = ctx.mlx_kernel_cache.pipeline(&ctx.device, &function_name, &constants)?;
+
+        if std::env::var("METALLIC_DEBUG_MLX_MATMUL").is_ok() {
+            let loader_str = match constants.loader_mode {
+                LoaderMode::Dense => "dense",
+                LoaderMode::Q8NkSplit => "q8nk_split",
+            };
+            let rhs_kind = match &right_wrapped {
+                RightMatrix::Dense(_) => "dense",
+                RightMatrix::Quant(_) => "quant_q8",
+            };
+            println!(
+                "[MLX] pipeline='{}' loader={} rhs={} m={} n={} k={} tA={} tB={}",
+                function_name, loader_str, rhs_kind, m, n, k, effective_a_trans as u8, effective_b_trans as u8
+            );
+        }
 
         let elem_size = dtype.size_bytes();
         let batch_stride_a = isize::try_from(left_view.matrix_bytes / elem_size)
             .map_err(|_| MetalError::InvalidOperation("batch stride for A exceeds isize".to_string()))?;
-        let batch_stride_b = isize::try_from(right_view.matrix_bytes / elem_size)
-            .map_err(|_| MetalError::InvalidOperation("batch stride for B exceeds isize".to_string()))?;
+        let batch_stride_b = match (&right_wrapped, &right_view_opt) {
+            (RightMatrix::Dense(_), Some(v)) => isize::try_from(v.matrix_bytes / elem_size)
+                .map_err(|_| MetalError::InvalidOperation("batch stride for B exceeds isize".to_string()))?,
+            _ => 0,
+        };
 
         let out_dims = output_dims(batch, m, n);
         let out = if let Some(existing) = existing_out {
@@ -301,7 +387,10 @@ impl DefaultKernelInvocable for MatMulMlxOp {
             }
         }
 
-        let mut tensors_to_prepare = vec![&left_tensor, &right_tensor];
+        let mut tensors_to_prepare = vec![&left_tensor];
+        if let Some(rt) = &right_tensor_opt {
+            tensors_to_prepare.push(rt);
+        }
         if use_out_source {
             tensors_to_prepare.push(&out);
         }
@@ -406,8 +495,12 @@ impl DefaultKernelInvocable for MatMulMlxOp {
         // Get the hierarchical scope from context, or create a fallback
         let mut profiler_label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul"));
 
-        // Append op_type/backend to the hierarchical path (no formatting in hot path)
-        profiler_label.op_name = format!("{}/{}/mlx", profiler_label.op_name, op_type);
+        // Append op_type/backend to the hierarchical path; include (D) or (Q) suffix for clarity
+        let dq_suffix = match &right_wrapped {
+            RightMatrix::Quant(_) => " (Q)",
+            RightMatrix::Dense(_) => " (D)",
+        };
+        profiler_label.op_name = format!("{}/{}/mlx{}", profiler_label.op_name, op_type, dq_suffix);
         profiler_label.backend = "mlx".to_string();
 
         // Only construct metadata HashMap when profiling is enabled
@@ -421,12 +514,17 @@ impl DefaultKernelInvocable for MatMulMlxOp {
             data.insert("k".to_string(), k.to_string());
             data.insert("tA".to_string(), if transpose_left { "1".to_string() } else { "0".to_string() });
             data.insert("tB".to_string(), if transpose_right { "1".to_string() } else { "0".to_string() });
+            let loader_str = match constants.loader_mode {
+                LoaderMode::Dense => "dense",
+                LoaderMode::Q8NkSplit => "q8nk_split",
+            };
+            data.insert("loader".to_string(), loader_str.to_string());
             profiler_label.data = Some(data);
         }
 
         let op = MatMulMlx {
             left: left_tensor,
-            right: right_tensor,
+            right: right_wrapped,
             bias: bias.cloned(),
             out: out.clone(),
             pipeline,
@@ -458,7 +556,20 @@ impl<T: TensorElement> Operation for MatMulMlx<T> {
         use crate::encoder::{set_buffer, set_bytes};
 
         set_buffer(encoder, 0, &self.left.buf, self.left.offset);
-        set_buffer(encoder, 1, &self.right.buf, self.right.offset);
+        match &self.right {
+            RightMatrix::Dense(t) => {
+                set_buffer(encoder, 1, &t.buf, t.offset);
+                // Bind placeholder for Bq8 (buffer 9) for kernel signature compatibility
+                set_buffer(encoder, 9, &t.buf, t.offset);
+                set_buffer(encoder, 16, &t.buf, t.offset);
+            }
+            RightMatrix::Quant(c) => {
+                // Dense pointer unused; bind placeholder
+                set_buffer(encoder, 1, &self.out.buf, self.out.offset);
+                set_buffer(encoder, 9, &c.data.buf, c.data.offset);
+                set_buffer(encoder, 16, &c.scales.buf, c.scales.offset);
+            }
+        }
         if self.use_out_source {
             set_buffer(encoder, 2, &self.out.buf, self.out.offset);
         }
@@ -568,6 +679,7 @@ fn gemm_function_name(dtype: Dtype, a_trans: bool, b_trans: bool, m: usize, n: u
     let dtype_str = match dtype {
         Dtype::F32 => "f32",
         Dtype::F16 => "f16",
+        Dtype::U8 => "u8",
         Dtype::U32 => "uint",
     };
 

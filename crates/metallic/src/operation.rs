@@ -376,11 +376,15 @@ impl ComputeKernelEncoder {
     #[inline]
     pub fn new(command_buffer: &CommandBuffer, profiler_label: &GpuProfilerLabel) -> Result<Self, MetalError> {
         let encoder = command_buffer.get_compute_encoder()?;
-        let label = profiler_label.clone();
-        let profiler_scope = if let Some(data) = label.data {
-            GpuProfiler::profile_compute_with_data(command_buffer.raw(), &encoder, label.op_name, label.backend, data)
+        let profiler_scope = if crate::profiling_state::get_profiling_state() {
+            let label = profiler_label.clone();
+            if let Some(data) = label.data.clone() {
+                GpuProfiler::profile_compute_with_data(command_buffer.raw(), &encoder, label.op_name, label.backend, data)
+            } else {
+                GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend)
+            }
         } else {
-            GpuProfiler::profile_compute(command_buffer.raw(), &encoder, label.op_name, label.backend)
+            None
         };
 
         Ok(Self {

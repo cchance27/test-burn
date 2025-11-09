@@ -7,8 +7,8 @@ use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice as _};
 
 use crate::{
     Context, MetalError, Tensor, TensorElement, context::RepeatKvWorkspaceKind, kernels::{
-        backend_registry::KernelBackendKind, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp
-    }
+        backend_registry::KernelBackendKind, embedding_lookup::EmbeddingLookupOp, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::{SwiGLUFusedActivationOp, SwiGLUOp}
+    }, tensor::{QuantizedTensor, TensorType}
 };
 
 mod qwen25_tests;
@@ -37,19 +37,41 @@ pub struct Qwen25<T: TensorElement> {
     pub blocks: Vec<TransformerBlock<T>>,
     pub embed_weight: Tensor<T>,
     pub output_weight: Tensor<T>,
+    /// Optional packed Q8_0 weight for the final output projection (logits).
+    pub output_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub final_norm_gamma: Tensor<T>,
     pub rope_cos_cache: Tensor<T>,
     pub rope_sin_cache: Tensor<T>,
 }
 
 impl<T: TensorElement> Qwen25<T> {
+    fn project_dense_slice(
+        ctx: &mut Context<T>,
+        x_flat: &Tensor<T>,
+        weight: &Tensor<T>,
+        range: std::ops::Range<usize>,
+        bias: Tensor<T>,
+    ) -> Result<Tensor<T>, MetalError> {
+        let slice = weight.slice_last_dim(range)?;
+        ctx.matmul_bias_add(x_flat, &TensorType::Dense(&slice), &bias, false, false, None)
+    }
+
+    fn project_quant(
+        ctx: &mut Context<T>,
+        x_flat: &Tensor<T>,
+        tensor: &crate::tensor::QuantizedQ8_0Tensor,
+        bias: Tensor<T>,
+    ) -> Result<Tensor<T>, MetalError> {
+        ctx.matmul_bias_add(x_flat, &TensorType::Quant(QuantizedTensor::Q8_0(tensor)), &bias, false, false, None)
+    }
+
     /// Embed tokens into d_model dimensional vectors
     pub fn embed(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         let batch = 1; // For now, assume batch size of 1
         let seq = tokens.len();
 
         // Build a small Shared indices tensor so host writes do not force a blit flush.
-        let byte_len = seq * std::mem::size_of::<u32>();
+        let byte_len = std::mem::size_of_val(tokens);
         let buf = ctx
             .device
             .newBufferWithLength_options(byte_len, objc2_metal::MTLResourceOptions::StorageModeShared)
@@ -69,10 +91,7 @@ impl<T: TensorElement> Qwen25<T> {
         }
 
         // Call GPU embedding lookup to produce [batch, seq, d_model] directly on device.
-        let out = ctx.call::<crate::kernels::embedding_lookup::EmbeddingLookupOp>((
-            &self.embed_weight,
-            &indices,
-        ))?;
+        let out = ctx.call::<EmbeddingLookupOp>((&self.embed_weight, &indices))?;
 
         // Ensure expected shape
         debug_assert_eq!(out.dims(), &[batch, seq, self.config.d_model]);
@@ -104,7 +123,8 @@ impl<T: TensorElement> Qwen25<T> {
         let flat_hidden = hidden.reshape(vec![m, d_model])?;
 
         // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
-        let logits_flat = ctx.matmul(&flat_hidden, &self.output_weight, false, true)?;
+        // Use dense for correctness; logits Q8 is disabled for this model since GGUF stores F32 here.
+        let logits_flat = ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None)?;
 
         // Synchronize to ensure matmul is complete before reading values
 
@@ -152,6 +172,7 @@ impl<T: TensorElement> Qwen25<T> {
             blocks,
             embed_weight,
             output_weight,
+            output_weight_q8: None,
             final_norm_gamma,
             rope_cos_cache: cos_cache,
             rope_sin_cache: sin_cache,
@@ -290,14 +311,16 @@ impl<T: TensorElement> Qwen25<T> {
                 .permute(&[0, 2, 1, 3], ctx)?
                 .reshape(vec![batch, seq, d_model])?;
 
-            let attn_out = ctx
-                .matmul(
-                    &attn_out_reshaped.reshape(vec![m, d_model])?,
-                    &block.attn_out_weight,
-                    false,
-                    true, // Transpose the output weight for correct dimensions
-                )?
-                .reshape(vec![batch, seq, d_model])?;
+            // Attention output projection: prefer quant when available
+            let attn_out_flat = {
+                let a = &attn_out_reshaped.reshape(vec![m, d_model])?;
+                if let Some(q8) = &block.attn_out_weight_q8 {
+                    ctx.matmul(a, &TensorType::Quant(QuantizedTensor::Q8_0(q8)), false, true, None)?
+                } else {
+                    ctx.matmul(a, &TensorType::Dense(&block.attn_out_weight), false, true, None)?
+                }
+            };
+            let attn_out = attn_out_flat.reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
             x = resid_attn.add_elem(&attn_out, ctx)?;
@@ -309,17 +332,68 @@ impl<T: TensorElement> Qwen25<T> {
             let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
             let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
-            // FFN using extracted SwiGLU
-            let ffn_output_flat = ctx.call::<SwiGLUOp>((
-                &x_normed_mlp_flat,
-                &block.ffn_gate,
-                &block.ffn_gate_bias,
-                &block.ffn_up,
-                &block.ffn_up_bias,
-                &block.ffn_down,
-                &block.ffn_down_bias,
-                Some(&block.ffn_gate_up_weight),
-            ))?;
+            // FFN using extracted SwiGLU; prefer quant paths if available
+            let ffn_output_flat = if block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some() && block.ffn_down_q8.is_some() {
+                let gate_q8 = block.ffn_gate_q8.as_ref().unwrap();
+                let up_q8 = block.ffn_up_q8.as_ref().unwrap();
+                let down_q8 = block.ffn_down_q8.as_ref().unwrap();
+                // gate and up projections (quant + bias)
+                let gate = ctx.matmul_bias_add(
+                    &x_normed_mlp_flat,
+                    &TensorType::Quant(QuantizedTensor::Q8_0(gate_q8)),
+                    &block.ffn_gate_bias,
+                    false,
+                    false,
+                    None,
+                )?;
+                let up = ctx.matmul_bias_add(
+                    &x_normed_mlp_flat,
+                    &TensorType::Quant(QuantizedTensor::Q8_0(up_q8)),
+                    &block.ffn_up_bias,
+                    false,
+                    false,
+                    None,
+                )?;
+                // fused activation on the intermediate [m, ff_dim]
+                let gate_leading = if gate.dims().len() >= 2 {
+                    gate.dims()[gate.dims().len() - 2] as u32
+                } else {
+                    gate.dims().last().copied().unwrap_or(1) as u32
+                };
+                let up_leading = if up.dims().len() >= 2 {
+                    up.dims()[up.dims().len() - 2] as u32
+                } else {
+                    up.dims().last().copied().unwrap_or(1) as u32
+                };
+                let hidden = ctx.call::<SwiGLUFusedActivationOp>((
+                    gate,
+                    block.ffn_gate_bias.clone(),
+                    up,
+                    block.ffn_up_bias.clone(),
+                    gate_leading,
+                    up_leading,
+                ))?;
+                // down projection (quant) with fused bias add
+                ctx.matmul_bias_add(
+                    &hidden,
+                    &TensorType::Quant(QuantizedTensor::Q8_0(down_q8)),
+                    &block.ffn_down_bias,
+                    false,
+                    false,
+                    None,
+                )?
+            } else {
+                ctx.call::<SwiGLUOp>((
+                    &x_normed_mlp_flat,
+                    &block.ffn_gate,
+                    &block.ffn_gate_bias,
+                    &block.ffn_up,
+                    &block.ffn_up_bias,
+                    &block.ffn_down,
+                    &block.ffn_down_bias,
+                    Some(&block.ffn_gate_up_weight),
+                ))?
+            };
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
             // Residual Add
@@ -375,15 +449,67 @@ impl<T: TensorElement> Qwen25<T> {
                 breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
 
-                // QKV GEMMs for the single token
                 let m = batch * seq; // m is always 1 for a single token
                 let kv_dim = block.kv_dim;
                 let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
                 cpu_accum += cpu_chk.elapsed();
-                let (q_mat, k_mat, v_mat) = ctx.with_gpu_scope(format!("attn_qkv_proj_block_{}_op", layer_idx), |ctx| {
-                    ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)
-                })?;
+                let q_bias = block.attn_qkv_bias.slice(0..d_model)?;
+                let k_bias = block.attn_qkv_bias.slice(d_model..(d_model + kv_dim))?;
+                let v_bias = block.attn_qkv_bias.slice((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+
+                let quant_available =
+                    block.attn_q_weight_q8.is_some() || block.attn_k_weight_q8.is_some() || block.attn_v_weight_q8.is_some();
+                // Allow disabling quant path via env for troubleshooting
+                let disable_quant = std::env::var("METALLIC_DISABLE_MLX_Q8").is_ok() || std::env::var("Q8_DISABLE").is_ok();
+
+                // Prefer quant projections when available; fallback to dense slice or fused path otherwise.
+                let (q_mat, k_mat, v_mat) = if quant_available && !disable_quant {
+                    if let (Some(q8), Some(k8), Some(v8)) = (&block.attn_q_weight_q8, &block.attn_k_weight_q8, &block.attn_v_weight_q8) {
+                        // Try fused Q8 path when shapes are compatible; otherwise fall back to per-projection
+                        match ctx.fused_qkv_projection_q8(&x_flat, q8, k8, v8, q_bias.clone(), k_bias.clone(), v_bias.clone()) {
+                            Ok((q, k, v)) => (q, k, v),
+                            Err(_) => {
+                                // Fall back to mixing quant/dense projections
+                                let q_mat = Self::project_quant(ctx, &x_flat, q8, q_bias.clone())?;
+                                let k_mat = Self::project_quant(ctx, &x_flat, k8, k_bias.clone())?;
+                                let v_mat = Self::project_quant(ctx, &x_flat, v8, v_bias.clone())?;
+                                (q_mat, k_mat, v_mat)
+                            }
+                        }
+                    } else {
+                        let q_mat = match &block.attn_q_weight_q8 {
+                            Some(q8) => Self::project_quant(ctx, &x_flat, q8, q_bias.clone())?,
+                            None => Self::project_dense_slice(ctx, &x_flat, &block.attn_qkv_weight, 0..d_model, q_bias.clone())?,
+                        };
+
+                        let k_mat = match &block.attn_k_weight_q8 {
+                            Some(k8) => Self::project_quant(ctx, &x_flat, k8, k_bias.clone())?,
+                            None => Self::project_dense_slice(
+                                ctx,
+                                &x_flat,
+                                &block.attn_qkv_weight,
+                                d_model..(d_model + kv_dim),
+                                k_bias.clone(),
+                            )?,
+                        };
+
+                        let v_mat = match &block.attn_v_weight_q8 {
+                            Some(v8) => Self::project_quant(ctx, &x_flat, v8, v_bias.clone())?,
+                            None => Self::project_dense_slice(
+                                ctx,
+                                &x_flat,
+                                &block.attn_qkv_weight,
+                                (d_model + kv_dim)..(d_model + 2 * kv_dim),
+                                v_bias.clone(),
+                            )?,
+                        };
+
+                        (q_mat, k_mat, v_mat)
+                    }
+                } else {
+                    ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?
+                };
                 breakdown.insert(
                     "attn_qkv_proj".to_string(),
                     (q_mat.len() * bytes_per_element + k_mat.len() * bytes_per_element + v_mat.len() * bytes_per_element) as u64,
@@ -530,7 +656,12 @@ impl<T: TensorElement> Qwen25<T> {
                 cpu_accum += cpu_chk.elapsed();
                 let attn_out = ctx
                     .with_gpu_scope(format!("attn_output_block_{}_op", layer_idx), |ctx| {
-                        ctx.matmul(&attn_out_reshaped.reshape(vec![m, d_model])?, &block.attn_out_weight, false, true)
+                        let a = &attn_out_reshaped.reshape(vec![m, d_model])?;
+                        if let Some(q8) = &block.attn_out_weight_q8 {
+                            ctx.matmul(a, &TensorType::Quant(QuantizedTensor::Q8_0(q8)), false, true, None)
+                        } else {
+                            ctx.matmul(a, &TensorType::Dense(&block.attn_out_weight), false, true, None)
+                        }
                     })?
                     .reshape(vec![batch, seq, d_model])?;
                 breakdown.insert("attn_output".to_string(), (attn_out.len() * bytes_per_element) as u64);
@@ -552,17 +683,83 @@ impl<T: TensorElement> Qwen25<T> {
                 let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
                 cpu_accum += cpu_chk.elapsed();
+                // FFN with per-projection Q8 fallbacks:
+                // - gate/up: use quant matmul when available, else dense matmul (no bias here)
+                // - fused activation adds biases
+                // - down: use quant matmul when available, else dense matmul; then add bias
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
-                    ctx.call::<SwiGLUOp>((
-                        &x_normed_mlp_flat,
-                        &block.ffn_gate,
-                        &block.ffn_gate_bias,
-                        &block.ffn_up,
-                        &block.ffn_up_bias,
-                        &block.ffn_down,
-                        &block.ffn_down_bias,
-                        Some(&block.ffn_gate_up_weight),
-                    ))
+                    // gate projection -> [m, ff_dim]
+                    ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
+                    let gate_lin = if let Some(gq8) = &block.ffn_gate_q8 {
+                        ctx.matmul(
+                            &x_normed_mlp_flat,
+                            &TensorType::Quant(QuantizedTensor::Q8_0(gq8)),
+                            false,
+                            false,
+                            None,
+                        )?
+                    } else {
+                        // Orient dense gate weight based on dims
+                        let gd = block.ffn_gate.dims();
+                        let gate_t = if gd.len() == 2 && gd[0] == d_model { false } else { true };
+                        ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_gate), false, gate_t, None)?
+                    };
+                    // up projection -> [m, ff_dim]
+                    ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
+                    let up_lin = if let Some(uq8) = &block.ffn_up_q8 {
+                        ctx.matmul(
+                            &x_normed_mlp_flat,
+                            &TensorType::Quant(QuantizedTensor::Q8_0(uq8)),
+                            false,
+                            false,
+                            None,
+                        )?
+                    } else {
+                        // Orient dense up weight based on dims
+                        let ud = block.ffn_up.dims();
+                        let up_t = if ud.len() == 2 && ud[0] == d_model { false } else { true };
+                        ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None)?
+                    };
+
+                    // fused activation on [m, ff_dim]
+                    let gate_leading = if gate_lin.dims().len() >= 2 {
+                        gate_lin.dims()[gate_lin.dims().len() - 2] as u32
+                    } else {
+                        gate_lin.dims().last().copied().unwrap_or(1) as u32
+                    };
+                    let up_leading = if up_lin.dims().len() >= 2 {
+                        up_lin.dims()[up_lin.dims().len() - 2] as u32
+                    } else {
+                        up_lin.dims().last().copied().unwrap_or(1) as u32
+                    };
+                    let hidden = ctx.call::<SwiGLUFusedActivationOp>((
+                        gate_lin,
+                        block.ffn_gate_bias.clone(),
+                        up_lin,
+                        block.ffn_up_bias.clone(),
+                        gate_leading,
+                        up_leading,
+                    ))?;
+
+                    // down projection -> [m, d_model]
+                    ctx.set_pending_gpu_scope(format!("mlp_down_proj_block_{}_op", layer_idx));
+                    if let Some(dq8) = &block.ffn_down_q8 {
+                        // Quant down projection with fused bias.
+                        ctx.matmul_bias_add(
+                            &hidden,
+                            &TensorType::Quant(QuantizedTensor::Q8_0(dq8)),
+                            &block.ffn_down_bias,
+                            false,
+                            false,
+                            None,
+                        )
+                    } else {
+                        // Dense fallback with fused bias; orient based on stored dims vs hidden cols
+                        let dd = block.ffn_down.dims();
+                        let hidden_cols = hidden.dims()[1];
+                        let down_t = if dd.len() == 2 && dd[0] == hidden_cols { false } else { true };
+                        ctx.matmul_bias_add(&hidden, &TensorType::Dense(&block.ffn_down), &block.ffn_down_bias, false, down_t, None)
+                    }
                 })?;
 
                 breakdown.insert("mlp_swiglu".to_string(), (ffn_output_flat.len() * bytes_per_element) as u64);

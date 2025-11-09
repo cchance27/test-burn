@@ -1,7 +1,7 @@
 use std::{any::TypeId, borrow::Cow};
 
 use crate::{
-    Context, Dtype, MetalError, Tensor, TensorElement, gguf::{GGUFValue, model_loader::GGUFModel}, models::{LoadableModel, Qwen25, Qwen25Config}
+    Context, Dtype, MetalError, Tensor, TensorElement, gguf::{GGUFDataType, GGUFValue, model_loader::GGUFModel}, models::{LoadableModel, Qwen25, Qwen25Config}
 };
 
 fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f32]> {
@@ -516,6 +516,114 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
 
         for (name, descriptor) in &gguf_model.tensors {
             let lname = name.to_lowercase();
+            // Capture Q8_0 for final output/logits projection when it appears at top-level (not per-layer)
+            if descriptor.data_type() == GGUFDataType::Q8_0
+                && parse_layer_index(&lname).is_none()
+                && (lname.contains("lm_head")
+                    || lname.contains("lmhead")
+                    || lname.ends_with("output.weight")
+                    || lname.ends_with("lm_head.weight"))
+            {
+                if let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx) {
+                    // Validate dims against expected (K=d_model, N=vocab_size) in either order
+                    let ld = &q8.logical_dims;
+                    if ld.len() == 2
+                        && ((ld[0] == qwen.config.d_model && ld[1] == qwen.config.vocab_size)
+                            || (ld[1] == qwen.config.d_model && ld[0] == qwen.config.vocab_size))
+                    {
+                        qwen.output_weight_q8 = Some(q8);
+                    }
+                }
+            }
+            // Opportunistically capture packed Q8_0 for Q weight.
+            if let Some(layer_idx) = parse_layer_index(&lname) {
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("wq")
+                        || lname.contains("attn.q")
+                        || lname.contains("attn_q")
+                        || lname.contains("q_proj.weight")
+                        || lname.contains("query.weight")
+                        || lname.contains("q.weight")
+                        || lname.contains("attention.query.weight"))
+                {
+                    // Materialize as packed bytes and stash on the block
+                    if let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx) {
+                        qwen.blocks[layer_idx].attn_q_weight_q8 = Some(q8);
+                    }
+                }
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("wk")
+                        || lname.contains("attn.k")
+                        || lname.contains("attn_k")
+                        || lname.contains("k_proj.weight")
+                        || lname.contains("key.weight")
+                        || lname.contains("k.weight")
+                        || lname.contains("attention.key.weight"))
+                    && let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx)
+                {
+                    qwen.blocks[layer_idx].attn_k_weight_q8 = Some(q8);
+                }
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("wv")
+                        || lname.contains("attn.v")
+                        || lname.contains("attn_v")
+                        || lname.contains("v_proj.weight")
+                        || lname.contains("value.weight")
+                        || lname.contains("v.weight")
+                        || lname.contains("attention.value.weight"))
+                    && let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx)
+                {
+                    qwen.blocks[layer_idx].attn_v_weight_q8 = Some(q8);
+                }
+
+                // Capture Q8_0 attention output projection when available
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("wo")
+                        || lname.contains("attn_out")
+                        || lname.contains("attn_output")
+                        || lname.contains("attn.out")
+                        || lname.contains("out_proj")
+                        || lname.contains("o.weight")
+                        || lname.contains("out.weight")
+                        || lname.contains("attention.output.weight"))
+                    && let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx)
+                {
+                    qwen.blocks[layer_idx].attn_out_weight_q8 = Some(q8);
+                }
+
+                // Capture Q8_0 FFN down projection when available
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("mlp.down_proj.weight")
+                        || lname.contains("ffn.down")
+                        || lname.contains("ffn_down")
+                        || lname.contains("down.weight"))
+                    && let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx)
+                {
+                    qwen.blocks[layer_idx].ffn_down_q8 = Some(q8);
+                }
+
+                // Capture Q8_0 FFN gate and up projections when available (separate weights)
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("ffn.gate") || lname.contains("gate_proj.weight") || lname.contains("ffn_gate.weight"))
+                    && let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx)
+                {
+                    qwen.blocks[layer_idx].ffn_gate_q8 = Some(q8);
+                }
+                if layer_idx < qwen.blocks.len()
+                    && descriptor.data_type() == GGUFDataType::Q8_0
+                    && (lname.contains("ffn.up") || lname.contains("up_proj.weight") || lname.contains("ffn_up.weight"))
+                    && let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx)
+                {
+                    qwen.blocks[layer_idx].ffn_up_q8 = Some(q8);
+                }
+            }
+
             let materialized = gguf_model.materialize_tensor::<T>(name, &*ctx).map_err(|err| {
                 MetalError::InvalidOperation(format!(
                     "Failed to materialize tensor '{}' (dtype={:?}): {err}",

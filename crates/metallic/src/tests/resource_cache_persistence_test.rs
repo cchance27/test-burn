@@ -1,6 +1,6 @@
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, tensor::TensorType};
 
 fn build_tensor(ctx: &Context<F32Element>, dims: &[usize], data: &[f32]) -> Result<Tensor<F32Element>, MetalError> {
     Tensor::new(dims.to_vec(), TensorStorage::Dedicated(ctx), TensorInit::CopyFrom(data))
@@ -19,7 +19,7 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
     let b = build_tensor(&ctx, &[3, 2], &b_data)?;
 
     // Populate the cache by issuing a matmul that exercises the MPS backend.
-    let _ = ctx.matmul(&a, &b, false, false)?;
+    let _ = ctx.matmul(&a, &TensorType::Dense(&b), false, false, None)?;
 
     let stats_before = ctx.get_cache_stats().expect("resource cache should be initialized after dispatch");
     assert!(

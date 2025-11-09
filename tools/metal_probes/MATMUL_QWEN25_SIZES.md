@@ -30,26 +30,3 @@ Matmul shape backend summary:
   op=matmul_alpha_beta | batch=14 | m=1 | n=51 | k=64 | tA=0 | tB=1:
     backend=mlx: count=24 | total=5.54ms | avg=0.231ms | min=0.149ms | max=1.810ms | p95_ms=0.205ms, p99_ms=1.442ms
   op=matmul_alpha_beta | batch=14 | m=1 | n=64 | k=88 | tA=0 | tB=0:
-    backend=mlx: count=24 | total=5.27ms | avg=0.219ms | min=0.134ms | max=1.522ms | p95_ms=0.171ms, p99_ms=1.211ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=83 | k=64 | tA=0 | tB=1:
-    backend=mlx: count=24 | total=5.19ms | avg=0.216ms | min=0.133ms | max=1.690ms | p95_ms=0.200ms, p99_ms=1.348ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=90 | k=64 | tA=0 | tB=1:
-    backend=mlx: count=24 | total=5.00ms | avg=0.208ms | min=0.152ms | max=1.295ms | p95_ms=0.169ms, p99_ms=1.036ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=76 | k=64 | tA=0 | tB=1:
-    backend=mlx: count=24 | total=5.00ms | avg=0.208ms | min=0.140ms | max=1.330ms | p95_ms=0.166ms, p99_ms=1.062ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=64 | k=83 | tA=0 | tB=0:
-    backend=mlx: count=24 | total=4.49ms | avg=0.187ms | min=0.138ms | max=0.606ms | p95_ms=0.455ms, p99_ms=0.582ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=64 | k=69 | tA=0 | tB=0:
-    backend=mlx: count=24 | total=4.23ms | avg=0.176ms | min=0.138ms | max=0.433ms | p95_ms=0.363ms, p99_ms=0.425ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=80 | k=64 | tA=0 | tB=1:
-    backend=mlx: count=24 | total=4.22ms | avg=0.176ms | min=0.132ms | max=0.585ms | p95_ms=0.282ms, p99_ms=0.519ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=67 | k=64 | tA=0 | tB=1:
-    backend=mlx: count=24 | total=4.12ms | avg=0.172ms | min=0.133ms | max=0.423ms | p95_ms=0.246ms, p99_ms=0.383ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=64 | k=67 | tA=0 | tB=0:
-    backend=mlx: count=24 | total=4.12ms | avg=0.172ms | min=0.132ms | max=0.654ms | p95_ms=0.172ms, p99_ms=0.543ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=73 | k=64 | tA=0 | tB=1:
-    backend=mlx: count=24 | total=4.12ms | avg=0.172ms | min=0.147ms | max=0.461ms | p95_ms=0.173ms, p99_ms=0.395ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=64 | k=68 | tA=0 | tB=0:
-    backend=mlx: count=24 | total=4.06ms | avg=0.169ms | min=0.137ms | max=0.558ms | p95_ms=0.168ms, p99_ms=0.468ms
-  op=matmul_alpha_beta | batch=14 | m=1 | n=64 | k=84 | tA=0 | tB=0:
-    backend=mlx: count=24 | total=4.05ms | avg=0.169ms | min=0.136ms | max=0.379ms | p95_ms=0.249ms, p99_ms=0.352ms

@@ -8,7 +8,7 @@ use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptio
 use tracing::subscriber;
 
 use crate::{
-    caching::ResourceCache, context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, TestBlitZeroFill}, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage}
+    caching::ResourceCache, context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, TestBlitZeroFill}, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage, TensorType}
 };
 
 // Maintainers: run this test on Apple Silicon hardware before releasing.
@@ -175,7 +175,9 @@ fn matmul_mps_emits_gpu_event() {
         }
 
         ctx.with_gpu_scope("matmul_test_scope", |ctx| {
-            let result = ctx.matmul_alpha_beta(&a, &b, &out, false, false, 1.0, 0.0).expect("matmul call");
+            let result = ctx
+                .matmul_alpha_beta(&a, &TensorType::Dense(&b), &out, false, false, 1.0, 0.0, None)
+                .expect("matmul call");
             ctx.synchronize();
             result
         });

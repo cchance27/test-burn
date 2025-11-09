@@ -5,10 +5,23 @@ pub struct TransformerBlock<T: TensorElement> {
     pub attn_qkv_weight: Tensor<T>,
     pub attn_qkv_bias: Tensor<T>,
     pub attn_out_weight: Tensor<T>,
+    /// Optional packed Q8_0 weight for the attention output projection ([d_model, d_model]).
+    pub attn_out_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
+    /// Optional packed Q8_0 weight for the Q projection (row-major [d_model, d_model]).
+    pub attn_q_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
+    /// Optional packed Q8_0 weight for the K projection ([kv_dim, d_model]).
+    pub attn_k_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
+    /// Optional packed Q8_0 weight for the V projection ([kv_dim, d_model]).
+    pub attn_v_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
 
     // Feedforward
     pub ffn_down: Tensor<T>,
+    /// Optional packed Q8_0 weight for FFN down projection ([ff_dim, d_model]) or transpose-compatible.
+    pub ffn_down_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub ffn_gate_up_weight: Tensor<T>,
+    /// Optional packed Q8_0 weights for separate FFN gate/up projections.
+    pub ffn_gate_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
+    pub ffn_up_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub ffn_gate: Tensor<T>,
     pub ffn_up: Tensor<T>,
     // Biases for the FFN projections
@@ -62,8 +75,15 @@ where
             attn_qkv_weight,
             attn_qkv_bias,
             attn_out_weight,
+            attn_out_weight_q8: None,
+            attn_q_weight_q8: None,
+            attn_k_weight_q8: None,
+            attn_v_weight_q8: None,
             ffn_down,
+            ffn_down_q8: None,
             ffn_gate_up_weight,
+            ffn_gate_q8: None,
+            ffn_up_q8: None,
             ffn_gate,
             ffn_up,
             ffn_gate_bias,
