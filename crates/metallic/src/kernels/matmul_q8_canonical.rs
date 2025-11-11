@@ -32,6 +32,9 @@ struct GemmQ8Canonical<T: TensorElement> {
     pipeline: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     data: CanonicalQuantTensor,
     bias: Option<Tensor<T>>,
+    residual: Option<Tensor<T>>,
+    alpha: f32,
+    beta: f32,
     a: Tensor<T>,
     y: Tensor<T>,
     params: GemmQ8CanonicalParams,
@@ -61,6 +64,16 @@ impl<T: TensorElement> Operation for GemmQ8Canonical<T> {
         } else {
             set_buffer(encoder, 5, &self.a.buf, self.a.offset);
         }
+        // Residual C and alpha/beta for epilogue
+        if let Some(resid) = &self.residual {
+            set_buffer(encoder, 7, &resid.buf, resid.offset);
+        } else {
+            set_buffer(encoder, 7, &self.y.buf, self.y.offset);
+        }
+        let alpha = self.alpha;
+        let beta = self.beta;
+        set_bytes(encoder, 9, &alpha);
+        set_bytes(encoder, 10, &beta);
     }
 }
 
@@ -181,6 +194,9 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalOp {
             pipeline,
             data: canonical,
             bias: bias.cloned(),
+            residual: None,
+            alpha: 1.0,
+            beta: 0.0,
             a: a.clone(),
             y: y.clone(),
             params,
@@ -310,6 +326,9 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalRows16Op {
             pipeline,
             data: canonical,
             bias: bias.cloned(),
+            residual: None,
+            alpha: 1.0,
+            beta: 0.0,
             a: a.clone(),
             y: y.clone(),
             params,

@@ -34,6 +34,7 @@ pub mod matmul_dispatcher;
 pub mod matmul_gemm_tiled;
 pub mod matmul_gemv;
 pub mod matmul_gemv_qkv_fused;
+pub mod matmul_gemv_fused2;
 pub mod matmul_gemv_smallm;
 pub mod matmul_gemv_smalln;
 pub mod matmul_mlx;
@@ -168,6 +169,7 @@ pub enum KernelFunction {
     MatmulGemvSmallN16,
     MatmulGemvSmallM,
     MatmulGemvQkvFused,
+    MatmulGemvQ2Fused,
     MatmulQ8Nt,
     MatmulQ8CanonicalLargeN,
     MatmulQ8CanonicalRows16LargeN,
@@ -211,6 +213,7 @@ impl KernelFunction {
             KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemvSmalln,
             KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemvSmalln,
             KernelFunction::MatmulGemvQkvFused => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ2Fused => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8Nt => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalLargeN => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalRows16LargeN => KernelLibrary::MatmulGemv,
@@ -282,6 +285,7 @@ impl KernelFunction {
             (KernelFunction::MatmulGemv, F32) => "gemv_f32",
             (KernelFunction::MatmulGemv, F16) => "gemv_f16",
             (KernelFunction::MatmulGemvQkvFused, F16) => "gemv_q8_fused3_f16",
+            (KernelFunction::MatmulGemvQ2Fused, F16) => "gemv_q8_fused2_f16",
             (KernelFunction::MatmulQ8Nt, F16) => "gemm_q8_nt_f16",
             (KernelFunction::MatmulQ8CanonicalLargeN, F16) => "gemm_q8_canonical_large_n_f16",
             (KernelFunction::MatmulQ8CanonicalRows16LargeN, F16) => "gemm_q8_canonical_large_n_rows16_f16",

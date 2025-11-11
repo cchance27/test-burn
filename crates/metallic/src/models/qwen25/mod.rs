@@ -658,19 +658,36 @@ impl<T: TensorElement> Qwen25<T> {
                     .with_gpu_scope(format!("attn_output_block_{}_op", layer_idx), |ctx| {
                         let a = &attn_out_reshaped.reshape(vec![m, d_model])?;
                         if let Some(q8) = &block.attn_out_weight_q8 {
-                            ctx.matmul(a, &TensorType::Quant(QuantizedTensor::Q8_0(q8)), false, true, None)
+                            // Fuse residual: y = A*x + residual
+                            ctx.call::<crate::kernels::matmul_gemv::MatmulGemvAddmmOp>((
+                                a,
+                                TensorType::Quant(QuantizedTensor::Q8_0(q8)),
+                                None,
+                                Some(&resid_attn.reshape(vec![m, d_model])?),
+                                1.0,
+                                1.0,
+                            ))
                         } else {
-                            ctx.matmul(a, &TensorType::Dense(&block.attn_out_weight), false, true, None)
+                            // Dense fallback: use backend-heuristic addmm (MPS/MLX) with out=residual
+                            let out = resid_attn.reshape(vec![m, d_model])?;
+                            ctx.matmul_alpha_beta(
+                                a,
+                                &TensorType::Dense(&block.attn_out_weight),
+                                &out,
+                                false,
+                                true,
+                                1.0,
+                                1.0,
+                                None,
+                            )
                         }
                     })?
                     .reshape(vec![batch, seq, d_model])?;
                 breakdown.insert("attn_output".to_string(), (attn_out.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
 
-                // Residual Add
-                ctx.set_pending_gpu_scope(format!("attn_residual_block_{}_op", layer_idx));
-                cpu_accum += cpu_chk.elapsed();
-                let x = resid_attn.add_elem(&attn_out, ctx)?;
+                // Residual already fused
+                let x = attn_out;
                 cpu_chk = Instant::now();
 
                 // --- MLP Block ---
@@ -688,37 +705,49 @@ impl<T: TensorElement> Qwen25<T> {
                 // - fused activation adds biases
                 // - down: use quant matmul when available, else dense matmul; then add bias
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
-                    // gate projection -> [m, ff_dim]
-                    ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
-                    let gate_lin = if let Some(gq8) = &block.ffn_gate_q8 {
-                        ctx.matmul(
-                            &x_normed_mlp_flat,
-                            &TensorType::Quant(QuantizedTensor::Q8_0(gq8)),
-                            false,
-                            false,
-                            None,
-                        )?
+                    // gate/up projections fused (quant) -> [m, ff_dim] each
+                    let (gate_lin, up_lin) = if block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some() {
+                        let gq8 = block.ffn_gate_q8.as_ref().unwrap();
+                        let uq8 = block.ffn_up_q8.as_ref().unwrap();
+                        ctx.set_pending_gpu_scope(format!("mlp_gate_up_fused_block_{}_op", layer_idx));
+                        let packed = ctx.call::<crate::kernels::matmul_gemv_fused2::MatmulGemvQ2FusedOp>(
+                            (
+                                &x_normed_mlp_flat,
+                                (
+                                    &QuantizedTensor::Q8_0(gq8),
+                                    &QuantizedTensor::Q8_0(uq8),
+                                ),
+                                (None, None),
+                            )
+                        )?;
+                        let ff = block.ffn_gate_bias.len();
+                        let elem = T::DTYPE.size_bytes();
+                        let g = packed.build_view(vec![1, ff], vec![ff, 1], packed.offset);
+                        let u = packed.build_view(vec![1, ff], vec![ff, 1], packed.offset + ff * elem);
+                        (g, u)
                     } else {
-                        // Orient dense gate weight based on dims
-                        let gd = block.ffn_gate.dims();
-                        let gate_t = if gd.len() == 2 && gd[0] == d_model { false } else { true };
-                        ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_gate), false, gate_t, None)?
-                    };
-                    // up projection -> [m, ff_dim]
-                    ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
-                    let up_lin = if let Some(uq8) = &block.ffn_up_q8 {
-                        ctx.matmul(
-                            &x_normed_mlp_flat,
-                            &TensorType::Quant(QuantizedTensor::Q8_0(uq8)),
-                            false,
-                            false,
-                            None,
-                        )?
-                    } else {
-                        // Orient dense up weight based on dims
-                        let ud = block.ffn_up.dims();
-                        let up_t = if ud.len() == 2 && ud[0] == d_model { false } else { true };
-                        ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None)?
+                        // Fallback to separate matmuls when either weight is dense
+                        ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
+                        let gate_lin = {
+                            if let Some(gq8) = &block.ffn_gate_q8 {
+                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Quant(QuantizedTensor::Q8_0(gq8)), false, false, None)?
+                            } else {
+                                let gd = block.ffn_gate.dims();
+                                let gate_t = if gd.len() == 2 && gd[0] == d_model { false } else { true };
+                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_gate), false, gate_t, None)?
+                            }
+                        };
+                        ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
+                        let up_lin = {
+                            if let Some(uq8) = &block.ffn_up_q8 {
+                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Quant(QuantizedTensor::Q8_0(uq8)), false, false, None)?
+                            } else {
+                                let ud = block.ffn_up.dims();
+                                let up_t = if ud.len() == 2 && ud[0] == d_model { false } else { true };
+                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None)?
+                            }
+                        };
+                        (gate_lin, up_lin)
                     };
 
                     // fused activation on [m, ff_dim]
@@ -744,21 +773,32 @@ impl<T: TensorElement> Qwen25<T> {
                     // down projection -> [m, d_model]
                     ctx.set_pending_gpu_scope(format!("mlp_down_proj_block_{}_op", layer_idx));
                     if let Some(dq8) = &block.ffn_down_q8 {
-                        // Quant down projection with fused bias.
-                        ctx.matmul_bias_add(
+                        // Quant down projection with fused bias and residual.
+                        let out = ctx.call::<crate::kernels::matmul_gemv::MatmulGemvAddmmOp>((
                             &hidden,
-                            &TensorType::Quant(QuantizedTensor::Q8_0(dq8)),
-                            &block.ffn_down_bias,
-                            false,
-                            false,
-                            None,
-                        )
+                            TensorType::Quant(QuantizedTensor::Q8_0(dq8)),
+                            Some(&block.ffn_down_bias),
+                            Some(&resid_mlp.reshape(vec![m, d_model])?),
+                            1.0,
+                            1.0,
+                        ))?;
+                        Ok(out)
                     } else {
-                        // Dense fallback with fused bias; orient based on stored dims vs hidden cols
+                        // Dense fallback with fused bias+residual using backend-heuristic addmm
                         let dd = block.ffn_down.dims();
                         let hidden_cols = hidden.dims()[1];
                         let down_t = if dd.len() == 2 && dd[0] == hidden_cols { false } else { true };
-                        ctx.matmul_bias_add(&hidden, &TensorType::Dense(&block.ffn_down), &block.ffn_down_bias, false, down_t, None)
+                        let out = resid_mlp.reshape(vec![m, d_model])?;
+                        ctx.matmul_alpha_beta(
+                            &hidden,
+                            &TensorType::Dense(&block.ffn_down),
+                            &out,
+                            false,
+                            down_t,
+                            1.0,
+                            1.0,
+                            None,
+                        )
                     }
                 })?;
 
@@ -767,10 +807,8 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.set_pending_gpu_scope(format!("mlp_reshape_block_{}_op", layer_idx));
                 let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
-                // Residual Add
-                ctx.set_pending_gpu_scope(format!("mlp_residual_block_{}_op", layer_idx));
-                cpu_accum += cpu_chk.elapsed();
-                let x = resid_mlp.add_elem(&ffn_output, ctx)?;
+                // Residual already fused
+                let x = ffn_output;
                 breakdown.insert("mlp_output".to_string(), (x.len() * bytes_per_element) as u64);
 
                 // Record per-block CPU overhead outside GPU calls

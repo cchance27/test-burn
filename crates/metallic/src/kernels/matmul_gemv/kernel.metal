@@ -152,6 +152,42 @@ inline float q8_canonical_block_dot(
         processed += align_count;
     }
 
+    // Unrolled 16-element processing (4 x char4) to reduce loop/control overhead
+    while (processed + 16u <= count) {
+        const uint base_local = local_base + processed;
+        const device char4 *qv = (const device char4 *)(qs);
+        char4 q0 = qv[0];
+        char4 q1 = qv[1];
+        char4 q2 = qv[2];
+        char4 q3 = qv[3];
+        float4 x0 = float4(
+            x_tile[base_local + 0u],
+            x_tile[base_local + 1u],
+            x_tile[base_local + 2u],
+            x_tile[base_local + 3u]);
+        float4 x1 = float4(
+            x_tile[base_local + 4u],
+            x_tile[base_local + 5u],
+            x_tile[base_local + 6u],
+            x_tile[base_local + 7u]);
+        float4 x2 = float4(
+            x_tile[base_local + 8u],
+            x_tile[base_local + 9u],
+            x_tile[base_local + 10u],
+            x_tile[base_local + 11u]);
+        float4 x3 = float4(
+            x_tile[base_local + 12u],
+            x_tile[base_local + 13u],
+            x_tile[base_local + 14u],
+            x_tile[base_local + 15u]);
+        acc_scalar += dot(x0, float4(q0));
+        acc_vec0   += dot(x1, float4(q1));
+        acc_vec1   += dot(x2, float4(q2));
+        acc_scalar += dot(x3, float4(q3));
+        qs += 16u;
+        processed += 16u;
+    }
+
     while (processed + 8u <= count) {
         const device char4 *qv0 = (const device char4 *)(qs);
         const device char4 *qv1 = (const device char4 *)(qs + 4u);
@@ -369,6 +405,9 @@ inline void run_gemv_dense(
     device half *result_y,
     const constant GemvParams *params,
     const device half *bias,
+    const device half *residual,
+    const float alpha,
+    const float beta,
     uint3 gid,
     uint3 lid,
     threadgroup float *x_tile) {
@@ -419,7 +458,9 @@ inline void run_gemv_dense(
 
     if (is_active) {
         float bias_val = GemvBiasReader<HasBias>::template load<half>(bias, out_idx);
-        result_y[out_idx] = static_cast<half>(sum + bias_val);
+        float c = (beta != 0.0f && residual != (const device half*)nullptr) ? static_cast<float>(residual[out_idx]) : 0.0f;
+        float y = alpha * (sum + bias_val) + beta * c;
+        result_y[out_idx] = static_cast<half>(y);
     }
 }
 
@@ -431,6 +472,9 @@ void run_gemv_q8_canonical(
     device half *result_y,
     const constant GemvParams *params,
     const device half *bias,
+    const device half *residual,
+    const float alpha,
+    const float beta,
     const constant uint &diag_col,
     uint3 gid,
     uint3 lid,
@@ -506,7 +550,9 @@ void run_gemv_q8_canonical(
             return;
         }
         float bias_val = GemvBiasReader<HasBias>::template load<half>(bias, out_idx);
-        result_y[out_idx] = static_cast<half>(sum + bias_val);
+        float c = (beta != 0.0f && residual != (const device half*)nullptr) ? static_cast<float>(residual[out_idx]) : 0.0f;
+        float y = alpha * (sum + bias_val) + beta * c;
+        result_y[out_idx] = static_cast<half>(y);
     }
 }
 
@@ -520,7 +566,7 @@ void run_gemv_q8_canonical(
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
     threadgroup float x_tile[TILE_K];
-    run_gemv_dense<false>(matrix_a, vector_x, result_y, params, (const device half *)nullptr, gid, lid, x_tile);
+    run_gemv_dense<false>(matrix_a, vector_x, result_y, params, (const device half *)nullptr, (const device half *)nullptr, 1.0f, 0.0f, gid, lid, x_tile);
 }
 
 // Unified GEMV entry for dense FP16 and Q8 using loader_mode
@@ -533,6 +579,9 @@ void run_gemv_q8_canonical(
     constant uint &loader_mode [[buffer(5)]],
     const device uchar *scale_bytes [[buffer(6)]],
     const constant uint &diag_col [[buffer(8)]],
+    const device half *residual [[buffer(7)]],
+    constant float &alpha [[buffer(9)]],
+    constant float &beta [[buffer(10)]],
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
     threadgroup float x_tile[TILE_K];
@@ -542,42 +591,42 @@ void run_gemv_q8_canonical(
     if (params->weights_per_block != 0u && loader_mode != GemvLoaderQ8CanonicalDebug) {
         if (loader_mode == GemvLoaderQ8CanonicalBias || loader_mode == GemvLoaderDenseBias) {
             run_gemv_q8_canonical<true, false>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, diag_col, gid, lid, x_tile);
+                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid, x_tile);
         } else {
             run_gemv_q8_canonical<false, false>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, diag_col, gid, lid, x_tile);
+                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid, x_tile);
         }
         return;
     }
     switch (loader_mode) {
         case GemvLoaderDense: {
             const device half *matrix_a = (const device half *)matrix_data;
-            run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, gid, lid, x_tile);
+            run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
             return;
         }
         case GemvLoaderDenseBias: {
             const device half *matrix_a = (const device half *)matrix_data;
-            run_gemv_dense<true>(matrix_a, vector_x, result_y, params, bias, gid, lid, x_tile);
+            run_gemv_dense<true>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
             return;
         }
         case GemvLoaderQ8Canonical: {
             run_gemv_q8_canonical<false, false>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, diag_col, gid, lid, x_tile);
+                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid, x_tile);
             return;
         }
         case GemvLoaderQ8CanonicalBias: {
             run_gemv_q8_canonical<true, false>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, diag_col, gid, lid, x_tile);
+                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid, x_tile);
             return;
         }
         case GemvLoaderQ8CanonicalDebug: {
             run_gemv_q8_canonical<false, true>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, diag_col, gid, lid, x_tile);
+                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid, x_tile);
             return;
         }
         default: {
             const device half *matrix_a = (const device half *)matrix_data;
-            run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, gid, lid, x_tile);
+            run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
             return;
         }
     }
@@ -715,6 +764,130 @@ struct GemmQ8NtParams {
             val_v += static_cast<float>(bias_v[out_idx]);
         }
         out_v[out_idx] = static_cast<half>(val_v);
+    }
+}
+
+// Fused 2-output GEMV for canonical Q8 weights (e.g., gate and up projections).
+// Computes two outputs (G0, G1) in a single pass of K, sharing the staged x_tile.
+struct Q2FusedParams {
+    uint K;
+    uint N0;
+    uint N1;
+    uint blocks_per_k;
+    uint weights_per_block;
+    uint has_bias0;
+    uint has_bias1;
+};
+
+[[kernel]] void gemv_q8_fused2_f16(
+    const device uchar *data0 [[buffer(0)]],
+    const device uchar *data1 [[buffer(1)]],
+    const device half *vector_x [[buffer(2)]],
+    device half *out0 [[buffer(3)]],
+    device half *out1 [[buffer(4)]],
+    const constant Q2FusedParams *params [[buffer(5)]],
+    const device uchar *scales0 [[buffer(6)]],
+    const device uchar *scales1 [[buffer(7)]],
+    const device half *bias0 [[buffer(8)]],
+    const device half *bias1 [[buffer(9)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) {
+
+    threadgroup float x_tile[TILE_K];
+
+    const uint K = params->K;
+    const uint N0 = params->N0;
+    const uint N1 = params->N1;
+    const uint blocks_per_k = params->blocks_per_k;
+    const uint weights_per_block = params->weights_per_block;
+    const bool use_bias0 = (params->has_bias0 != 0u) && (bias0 != (const device half*)nullptr);
+    const bool use_bias1 = (params->has_bias1 != 0u) && (bias1 != (const device half*)nullptr);
+
+    // Lane processes one output col across tiles; we cover N0 and N1 in separate loops to keep indexing simple.
+    // First output group (0)
+    {
+        const uint out_idx = gid.x * TILE_N + lid.x;
+        const bool active = out_idx < N0;
+        float sum = 0.0f;
+        if (weights_per_block != 0u) {
+            for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
+                const uint tile_limit = min(TILE_K, K - tile_base);
+                if (lid.x < LOAD_LANES) {
+                    for (uint local = lid.x; local < tile_limit; local += LOAD_LANES) {
+                        const uint gk = tile_base + local;
+                        x_tile[local] = static_cast<float>(vector_x[gk]);
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (active) {
+                    uint k_local = 0;
+                    while (k_local < tile_limit) {
+                        const uint k_abs = tile_base + k_local;
+                        const uint block_idx = k_abs >> 5; // 32 elements per block
+                        const uint inner = k_abs & 31u;
+                        const uint base_idx = block_idx * N0 + out_idx;
+                        const uint sb = base_idx * 2u;
+                        const ushort bits = (ushort)scales0[sb] | ((ushort)scales0[sb + 1] << 8);
+                        const float scale = static_cast<float>(as_type<half>(bits));
+                        const uint base_byte = base_idx * weights_per_block + inner;
+                        const device char *qs = (const device char *)(data0 + base_byte);
+                        const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
+                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, x_tile);
+                        sum += scale * block_sum;
+                        k_local += count;
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (active) {
+                float b = (use_bias0 ? static_cast<float>(bias0[out_idx]) : 0.0f);
+                out0[out_idx] = static_cast<half>(sum + b);
+            }
+        }
+    }
+
+    // Second output group (1)
+    {
+        const uint out_idx1 = gid.x * TILE_N + lid.x;
+        const bool active1 = out_idx1 < N1;
+        float sum1 = 0.0f;
+        if (weights_per_block != 0u) {
+            for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
+                const uint tile_limit = min(TILE_K, K - tile_base);
+                if (lid.x < LOAD_LANES) {
+                    for (uint local = lid.x; local < tile_limit; local += LOAD_LANES) {
+                        const uint gk = tile_base + local;
+                        x_tile[local] = static_cast<float>(vector_x[gk]);
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+
+                if (active1) {
+                    uint k_local = 0;
+                    while (k_local < tile_limit) {
+                        const uint k_abs = tile_base + k_local;
+                        const uint block_idx = k_abs >> 5;
+                        const uint inner = k_abs & 31u;
+                        const uint base_idx = block_idx * N1 + out_idx1;
+                        const uint sb = base_idx * 2u;
+                        const ushort bits = (ushort)scales1[sb] | ((ushort)scales1[sb + 1] << 8);
+                        const float scale = static_cast<float>(as_type<half>(bits));
+                        const uint base_byte = base_idx * weights_per_block + inner;
+                        const device char *qs = (const device char *)(data1 + base_byte);
+                        const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
+                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, x_tile);
+                        sum1 += scale * block_sum;
+                        k_local += count;
+                    }
+                }
+                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            if (active1) {
+                float b1 = (use_bias1 ? static_cast<float>(bias1[out_idx1]) : 0.0f);
+                out1[out_idx1] = static_cast<half>(sum1 + b1);
+            }
+        }
     }
 }
 
