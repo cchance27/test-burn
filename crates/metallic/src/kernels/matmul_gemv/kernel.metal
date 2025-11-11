@@ -152,6 +152,73 @@ inline float q8_canonical_block_dot(
         processed += align_count;
     }
 
+    // Unrolled 32-element processing (8 x char4) to reduce loop/control overhead
+    while (processed + 32u <= count) {
+        const uint base_local = local_base + processed;
+        const device char4 *qv = (const device char4 *)(qs);
+        char4 q0 = qv[0];
+        char4 q1 = qv[1];
+        char4 q2 = qv[2];
+        char4 q3 = qv[3];
+        char4 q4 = qv[4];
+        char4 q5 = qv[5];
+        char4 q6 = qv[6];
+        char4 q7 = qv[7];
+        float4 x0 = float4(
+            x_tile[base_local + 0u],
+            x_tile[base_local + 1u],
+            x_tile[base_local + 2u],
+            x_tile[base_local + 3u]);
+        float4 x1 = float4(
+            x_tile[base_local + 4u],
+            x_tile[base_local + 5u],
+            x_tile[base_local + 6u],
+            x_tile[base_local + 7u]);
+        float4 x2 = float4(
+            x_tile[base_local + 8u],
+            x_tile[base_local + 9u],
+            x_tile[base_local + 10u],
+            x_tile[base_local + 11u]);
+        float4 x3 = float4(
+            x_tile[base_local + 12u],
+            x_tile[base_local + 13u],
+            x_tile[base_local + 14u],
+            x_tile[base_local + 15u]);
+        float4 x4 = float4(
+            x_tile[base_local + 16u],
+            x_tile[base_local + 17u],
+            x_tile[base_local + 18u],
+            x_tile[base_local + 19u]);
+        float4 x5 = float4(
+            x_tile[base_local + 20u],
+            x_tile[base_local + 21u],
+            x_tile[base_local + 22u],
+            x_tile[base_local + 23u]);
+        float4 x6 = float4(
+            x_tile[base_local + 24u],
+            x_tile[base_local + 25u],
+            x_tile[base_local + 26u],
+            x_tile[base_local + 27u]);
+        float4 x7 = float4(
+            x_tile[base_local + 28u],
+            x_tile[base_local + 29u],
+            x_tile[base_local + 30u],
+            x_tile[base_local + 31u]);
+
+        float tmp = 0.0f;
+        tmp += dot(x0, float4(q0));
+        tmp += dot(x1, float4(q1));
+        tmp += dot(x2, float4(q2));
+        tmp += dot(x3, float4(q3));
+        tmp += dot(x4, float4(q4));
+        tmp += dot(x5, float4(q5));
+        tmp += dot(x6, float4(q6));
+        tmp += dot(x7, float4(q7));
+        acc_scalar += tmp;
+        qs += 32u;
+        processed += 32u;
+    }
+
     // Unrolled 16-element processing (4 x char4) to reduce loop/control overhead
     while (processed + 16u <= count) {
         const uint base_local = local_base + processed;
