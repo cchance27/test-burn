@@ -127,7 +127,7 @@ impl DefaultKernelInvocable for MatmulGemvQ2FusedOp {
             label.data = Some(data);
         }
 
-        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed)?;
+        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed("MatmulGemvQ2FusedOp".to_string()))?;
         let op = FusedQ2Op { pipeline, x: x.clone(), w0, w1, bias0: b0_opt.cloned(), bias1: b1_opt.cloned(), y: y.clone(), params, grid, tg, profiler_label: label };
         Ok((Box::new(op), y))
     }

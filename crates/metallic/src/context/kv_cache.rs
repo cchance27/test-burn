@@ -597,7 +597,7 @@ impl<T: TensorElement> Context<T> {
             err,
             MetalError::LibraryCompilationFailed(_)
                 | MetalError::FunctionCreationFailed(_)
-                | MetalError::PipelineCreationFailed
+                | MetalError::PipelineCreationFailed(_)
                 | MetalError::ComputeEncoderCreationFailed
                 | MetalError::UnsupportedDtype { .. }
         )

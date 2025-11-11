@@ -174,7 +174,7 @@ impl KernelManager {
         // 4️⃣ Create the compute pipeline
         let pipeline = device
             .newComputePipelineStateWithFunction_error(&metal_fn)
-            .map_err(|_| MetalError::PipelineCreationFailed)?;
+            .map_err(|_| MetalError::PipelineCreationFailed(fn_name.to_string()))?;
 
         // 5️⃣ Cache and return
         self.pipelines.insert(key, pipeline.clone());

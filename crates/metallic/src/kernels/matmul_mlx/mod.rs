@@ -107,7 +107,7 @@ impl MlxKernelCache {
             .map_err(|err| MetalError::FunctionCreationFailed(err.to_string()))?;
         let pipeline = device
             .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|_err| MetalError::PipelineCreationFailed)?;
+            .map_err(|_err| MetalError::PipelineCreationFailed("MlxKernelCache".to_string()))?;
         self.pipelines.insert(key, pipeline.clone());
         Ok(pipeline)
     }

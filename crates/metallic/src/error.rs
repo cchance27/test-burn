@@ -28,8 +28,8 @@ pub enum MetalError {
     LibraryCompilationFailed(String),
     #[error("Function creation failed: {0}")]
     FunctionCreationFailed(String),
-    #[error("Pipeline creation failed")]
-    PipelineCreationFailed,
+    #[error("Pipeline creation failed: {0}")]
+    PipelineCreationFailed(String),
     #[error("Resource not cached: {0}")]
     ResourceNotCached(String),
     #[error("Operation not supported: {0}")]
