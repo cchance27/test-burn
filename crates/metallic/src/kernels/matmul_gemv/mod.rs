@@ -16,8 +16,9 @@ struct GemvParams {
     weights_per_block: u32,
 }
 
-pub const THREADGROUP_WIDTH: usize = 256;
-const TILE_N: usize = THREADGROUP_WIDTH;
+pub const THREADGROUP_WIDTH: usize = 256; // Needs to be matched to define in gemv kernel.metal
+pub const GEMV_COLS_PER_THREAD: usize = 1; // Needs to be matched to define in gemv kernel.metal, above 1 seems to regress performance
+const TILE_N: usize = THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD;
 
 pub struct MatmulGemvOp;
 pub struct MatmulGemvAddmmOp;

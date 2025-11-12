@@ -15,8 +15,10 @@ struct GemvParams {
     uint weights_per_block;
 };
 
-#define THREADGROUP_WIDTH 256u
-#define TILE_N THREADGROUP_WIDTH
+#define THREADGROUP_WIDTH 256u  // Default of 256 was our base setting
+#define GEMV_COLS_PER_THREAD 1u // Columns computed per thread; above 1 seems to regress performance
+
+#define TILE_N (THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD)
 // Favor single K-pass on decode-sized K (e.g., 4864) by using 8192.
 // Shared memory for x_tile: 8192 * 4 bytes = 32KB (within typical tg limits).
 #define TILE_K 8192u
@@ -310,6 +312,212 @@ ALWAYS_INLINE float q8_canonical_block_dot_wide(
     return acc_scalar + acc_vec0 + acc_vec1;
 }
 
+// Multi-column accumulate: processes COLS columns in lockstep using shared x_tile.
+template <uint COLS>
+ALWAYS_INLINE void q8_block_dot_multi(
+    const device char *qs_ptrs[COLS],
+    const float scales[COLS],
+    uint inner,
+    uint count,
+    uint local_base,
+    threadgroup float *x_tile,
+    float contrib[COLS]) {
+
+    if (count == 0u) {
+        return;
+    }
+
+    // Align to 4-byte boundary
+    const uint misalign = inner & 3u;
+    uint processed = 0u;
+    if (misalign != 0u) {
+        const uint align_count = min(count, 4u - misalign);
+        for (uint i = 0; i < align_count; ++i) {
+            const float x = x_tile[local_base + processed + i];
+            for (uint c = 0; c < COLS; ++c) {
+                contrib[c] = fma(x, (float)qs_ptrs[c][i], contrib[c]);
+            }
+        }
+        for (uint c = 0; c < COLS; ++c) {
+            qs_ptrs[c] += align_count;
+        }
+        processed += align_count;
+    }
+
+    // 8-element vectorized (2 x char4) per column
+    while (processed + 8u <= count) {
+        const uint base_local = local_base + processed;
+        const float4 x0 = float4(
+            x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        const float4 x1 = float4(
+            x_tile[base_local + 4u], x_tile[base_local + 5u], x_tile[base_local + 6u], x_tile[base_local + 7u]);
+        for (uint c = 0; c < COLS; ++c) {
+            const device char4 *qv0 = (const device char4 *)(qs_ptrs[c]);
+            const device char4 *qv1 = (const device char4 *)(qs_ptrs[c] + 4u);
+            const char4 q0 = *qv0;
+            const char4 q1 = *qv1;
+            contrib[c] += dot(x0, float4(q0)) + dot(x1, float4(q1));
+            qs_ptrs[c] += 8u;
+        }
+        processed += 8u;
+    }
+
+    // 4-element vectorized (1 x char4)
+    while (processed + 4u <= count) {
+        const uint base_local = local_base + processed;
+        const float4 x = float4(
+            x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        for (uint c = 0; c < COLS; ++c) {
+            const char4 q = *(const device char4 *)(qs_ptrs[c]);
+            contrib[c] += dot(x, float4(q));
+            qs_ptrs[c] += 4u;
+        }
+        processed += 4u;
+    }
+
+    // Scalar tail
+    while (processed < count) {
+        const float x = x_tile[local_base + processed];
+        for (uint c = 0; c < COLS; ++c) {
+            contrib[c] = fma(x, (float)qs_ptrs[c][0], contrib[c]);
+            qs_ptrs[c] += 1u;
+        }
+        processed += 1u;
+    }
+
+    // Scale contributions per column
+    for (uint c = 0; c < COLS; ++c) {
+        contrib[c] *= scales[c];
+    }
+}
+
+// Wide multi-column accumulate: uses 32/16/8/4 lanes akin to q8_canonical_block_dot_wide
+template <uint COLS>
+ALWAYS_INLINE void q8_block_dot_multi_wide(
+    const device char *qs_ptrs_in[COLS],
+    const float scales[COLS],
+    uint inner,
+    uint count,
+    uint local_base,
+    threadgroup float *x_tile,
+    float contrib[COLS]) {
+    if (count == 0u) return;
+    const uint misalign = inner & 3u;
+    uint processed = 0u;
+    // Make local copies we can advance independently
+    const device char *qs_ptrs[COLS];
+    for (uint c = 0; c < COLS; ++c) qs_ptrs[c] = qs_ptrs_in[c];
+
+    if (misalign != 0u) {
+        const uint align_count = min(count, 4u - misalign);
+        for (uint i = 0; i < align_count; ++i) {
+            const float x = x_tile[local_base + processed + i];
+            for (uint c = 0; c < COLS; ++c) {
+                contrib[c] = fma(x, (float)qs_ptrs[c][0], contrib[c]);
+                qs_ptrs[c] += 1u;
+            }
+        }
+        processed += align_count;
+    }
+
+    // 32 elements (8 x char4)
+    while (processed + 32u <= count) {
+        const uint base_local = local_base + processed;
+        const float4 x0 = float4(x_tile[base_local + 0u],  x_tile[base_local + 1u],  x_tile[base_local + 2u],  x_tile[base_local + 3u]);
+        const float4 x1 = float4(x_tile[base_local + 4u],  x_tile[base_local + 5u],  x_tile[base_local + 6u],  x_tile[base_local + 7u]);
+        const float4 x2 = float4(x_tile[base_local + 8u],  x_tile[base_local + 9u],  x_tile[base_local + 10u], x_tile[base_local + 11u]);
+        const float4 x3 = float4(x_tile[base_local + 12u], x_tile[base_local + 13u], x_tile[base_local + 14u], x_tile[base_local + 15u]);
+        const float4 x4 = float4(x_tile[base_local + 16u], x_tile[base_local + 17u], x_tile[base_local + 18u], x_tile[base_local + 19u]);
+        const float4 x5 = float4(x_tile[base_local + 20u], x_tile[base_local + 21u], x_tile[base_local + 22u], x_tile[base_local + 23u]);
+        const float4 x6 = float4(x_tile[base_local + 24u], x_tile[base_local + 25u], x_tile[base_local + 26u], x_tile[base_local + 27u]);
+        const float4 x7 = float4(x_tile[base_local + 28u], x_tile[base_local + 29u], x_tile[base_local + 30u], x_tile[base_local + 31u]);
+        for (uint c = 0; c < COLS; ++c) {
+            const device char4 *qv = (const device char4 *)(qs_ptrs[c]);
+            const char4 q0 = qv[0];
+            const char4 q1 = qv[1];
+            const char4 q2 = qv[2];
+            const char4 q3 = qv[3];
+            const char4 q4 = qv[4];
+            const char4 q5 = qv[5];
+            const char4 q6 = qv[6];
+            const char4 q7 = qv[7];
+            float tmp = 0.0f;
+            tmp += dot(x0, float4(q0));
+            tmp += dot(x1, float4(q1));
+            tmp += dot(x2, float4(q2));
+            tmp += dot(x3, float4(q3));
+            tmp += dot(x4, float4(q4));
+            tmp += dot(x5, float4(q5));
+            tmp += dot(x6, float4(q6));
+            tmp += dot(x7, float4(q7));
+            contrib[c] += tmp;
+            qs_ptrs[c] += 32u;
+        }
+        processed += 32u;
+    }
+
+    // 16 elements (4 x char4)
+    while (processed + 16u <= count) {
+        const uint base_local = local_base + processed;
+        const float4 x0 = float4(x_tile[base_local + 0u],  x_tile[base_local + 1u],  x_tile[base_local + 2u],  x_tile[base_local + 3u]);
+        const float4 x1 = float4(x_tile[base_local + 4u],  x_tile[base_local + 5u],  x_tile[base_local + 6u],  x_tile[base_local + 7u]);
+        const float4 x2 = float4(x_tile[base_local + 8u],  x_tile[base_local + 9u],  x_tile[base_local + 10u], x_tile[base_local + 11u]);
+        const float4 x3 = float4(x_tile[base_local + 12u], x_tile[base_local + 13u], x_tile[base_local + 14u], x_tile[base_local + 15u]);
+        for (uint c = 0; c < COLS; ++c) {
+            const device char4 *qv = (const device char4 *)(qs_ptrs[c]);
+            const char4 q0 = qv[0];
+            const char4 q1 = qv[1];
+            const char4 q2 = qv[2];
+            const char4 q3 = qv[3];
+            contrib[c] += dot(x0, float4(q0)) + dot(x1, float4(q1)) + dot(x2, float4(q2)) + dot(x3, float4(q3));
+            qs_ptrs[c] += 16u;
+        }
+        processed += 16u;
+    }
+
+    // 8 elements (2 x char4)
+    while (processed + 8u <= count) {
+        const uint base_local = local_base + processed;
+        const float4 x0 = float4(x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        const float4 x1 = float4(x_tile[base_local + 4u], x_tile[base_local + 5u], x_tile[base_local + 6u], x_tile[base_local + 7u]);
+        for (uint c = 0; c < COLS; ++c) {
+            const device char4 *qv0 = (const device char4 *)(qs_ptrs[c]);
+            const device char4 *qv1 = (const device char4 *)(qs_ptrs[c] + 4u);
+            const char4 q0 = *qv0;
+            const char4 q1 = *qv1;
+            contrib[c] += dot(x0, float4(q0)) + dot(x1, float4(q1));
+            qs_ptrs[c] += 8u;
+        }
+        processed += 8u;
+    }
+
+    // 4 elements (1 x char4)
+    while (processed + 4u <= count) {
+        const uint base_local = local_base + processed;
+        const float4 x = float4(x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        for (uint c = 0; c < COLS; ++c) {
+            const char4 q = *(const device char4 *)(qs_ptrs[c]);
+            contrib[c] += dot(x, float4(q));
+            qs_ptrs[c] += 4u;
+        }
+        processed += 4u;
+    }
+
+    // Scalar tail
+    while (processed < count) {
+        const float x = x_tile[local_base + processed];
+        for (uint c = 0; c < COLS; ++c) {
+            contrib[c] = fma(x, (float)qs_ptrs[c][0], contrib[c]);
+            qs_ptrs[c] += 1u;
+        }
+        processed += 1u;
+    }
+
+    for (uint c = 0; c < COLS; ++c) {
+        contrib[c] *= scales[c];
+    }
+}
+
 struct Q8MatrixAccessorKN {
     const device uchar *W;
     uint N;
@@ -390,10 +598,9 @@ inline void gemv_kernel(
     const uint N = params->N;
     const uint K = params->K;
 
-    const uint out_idx = gid.x * TILE_N + lid.x;
-    const bool is_active = out_idx < N;
-
-    float sum = 0.0f;
+    const uint base_col = gid.x * TILE_N + lid.x * GEMV_COLS_PER_THREAD;
+    float sum[GEMV_COLS_PER_THREAD];
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) { sum[c] = 0.0f; }
 
     for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
         const uint tile_limit = min(TILE_K, K - tile_base);
@@ -407,28 +614,34 @@ inline void gemv_kernel(
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (is_active) {
-            matrix_accessor.begin(out_idx, tile_base);
-            const uint tile_limit = min(TILE_K, K - tile_base);
-            uint local = 0;
-            for (; local + 3 < tile_limit; local += 4) {
-                sum = fma(shared_x_tile[local], matrix_accessor.load(), sum);
-                sum = fma(shared_x_tile[local + 1], matrix_accessor.load(), sum);
-                sum = fma(shared_x_tile[local + 2], matrix_accessor.load(), sum);
-                sum = fma(shared_x_tile[local + 3], matrix_accessor.load(), sum);
+        // Process up to GEMV_COLS_PER_THREAD columns per thread
+        for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+            const uint col = base_col + c;
+            if (col >= N) break;
+            const device VectorT *matrix_base = matrix_accessor.matrix;
+            const uint stride = matrix_accessor.stride;
+            const device VectorT *matrix_ptr = matrix_base + tile_base * stride + col;
+            uint local = 0u;
+            for (; local + 3u < tile_limit; local += 4u) {
+                sum[c] = fma(shared_x_tile[local + 0u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += stride;
+                sum[c] = fma(shared_x_tile[local + 1u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += stride;
+                sum[c] = fma(shared_x_tile[local + 2u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += stride;
+                sum[c] = fma(shared_x_tile[local + 3u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += stride;
             }
-
             for (; local < tile_limit; ++local) {
-                sum = fma(shared_x_tile[local], matrix_accessor.load(), sum);
+                sum[c] = fma(shared_x_tile[local], static_cast<float>(matrix_ptr[0]), sum[c]);
+                matrix_ptr += stride;
             }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    if (is_active) {
-        float bias_val = GemvBiasReader<HasBias>::template load<Scalar>(bias_ptr, out_idx);
-        result_y[out_idx] = static_cast<Scalar>(sum + bias_val);
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+        const uint col = base_col + c;
+        if (col >= N) break;
+        float bias_val = GemvBiasReader<HasBias>::template load<Scalar>(bias_ptr, col);
+        result_y[col] = static_cast<Scalar>(sum[c] + bias_val);
     }
 }
 
@@ -493,10 +706,9 @@ inline void run_gemv_dense(
     const uint N = params->N;
     const uint K = params->K;
 
-    const uint out_idx = gid.x * TILE_N + lid.x;
-    const bool is_active = out_idx < N;
-
-    float sum = 0.0f;
+    const uint base_col = gid.x * TILE_N + lid.x * GEMV_COLS_PER_THREAD;
+    float sum[GEMV_COLS_PER_THREAD];
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) { sum[c] = 0.0f; }
 
     for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
         const uint tile_limit = min(TILE_K, K - tile_base);
@@ -509,24 +721,21 @@ inline void run_gemv_dense(
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        if (is_active) {
-            const uint tile_limit = min(TILE_K, K - tile_base);
-            const device half *matrix_ptr = matrix_data + tile_base * N + out_idx;
-
-            uint local = 0;
-            for (; local + 3 < tile_limit; local += 4) {
-                sum = fma(x_tile[local], static_cast<float>(matrix_ptr[0]), sum);
-                matrix_ptr += N;
-                sum = fma(x_tile[local + 1], static_cast<float>(matrix_ptr[0]), sum);
-                matrix_ptr += N;
-                sum = fma(x_tile[local + 2], static_cast<float>(matrix_ptr[0]), sum);
-                matrix_ptr += N;
-                sum = fma(x_tile[local + 3], static_cast<float>(matrix_ptr[0]), sum);
-                matrix_ptr += N;
+        // Accumulate for up to COLS_PER_THREAD columns per thread
+        const uint tl = min(TILE_K, K - tile_base);
+        for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+            const uint col = base_col + c;
+            if (col >= N) break;
+            const device half *matrix_ptr = matrix_data + tile_base * N + col;
+            uint local = 0u;
+            for (; local + 3u < tl; local += 4u) {
+                sum[c] = fma(x_tile[local + 0u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += N;
+                sum[c] = fma(x_tile[local + 1u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += N;
+                sum[c] = fma(x_tile[local + 2u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += N;
+                sum[c] = fma(x_tile[local + 3u], static_cast<float>(matrix_ptr[0]), sum[c]); matrix_ptr += N;
             }
-
-            for (; local < tile_limit; ++local) {
-                sum = fma(x_tile[local], static_cast<float>(matrix_ptr[0]), sum);
+            for (; local < tl; ++local) {
+                sum[c] = fma(x_tile[local], static_cast<float>(matrix_ptr[0]), sum[c]);
                 matrix_ptr += N;
             }
         }
@@ -534,11 +743,13 @@ inline void run_gemv_dense(
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    if (is_active) {
-        float bias_val = GemvBiasReader<HasBias>::template load<half>(bias, out_idx);
-        float c = (beta != 0.0f && residual != (const device half*)nullptr) ? static_cast<float>(residual[out_idx]) : 0.0f;
-        float y = alpha * (sum + bias_val) + beta * c;
-        result_y[out_idx] = static_cast<half>(y);
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+        const uint col = base_col + c;
+        if (col >= N) break;
+        float bias_val = GemvBiasReader<HasBias>::template load<half>(bias, col);
+        float cval = (beta != 0.0f && residual != (const device half*)nullptr) ? static_cast<float>(residual[col]) : 0.0f;
+        float y = alpha * (sum[c] + bias_val) + beta * cval;
+        result_y[col] = static_cast<half>(y);
     }
 }
 
@@ -562,37 +773,37 @@ void run_gemv_q8_canonical(
     const uint K = params->K;
     const uint weights_per_block = params->weights_per_block;
     const uint blocks_per_k = params->blocks_per_k;
-    const uint out_idx = gid.x * TILE_N + lid.x;
-    const bool is_active = out_idx < N;
+    const uint base_col = gid.x * TILE_N + lid.x * GEMV_COLS_PER_THREAD;
     // Do not return early on inactive lanes before threadgroup staging; they must
     // still participate in barriers and cooperative loads to avoid UB on the last tile.
     if (weights_per_block == 0u) {
         return;
     }
 
-    float sum = 0.0f;
-    // Precompute column offsets and typed pointers to reduce inner-loop ALU
+    float sum[GEMV_COLS_PER_THREAD];
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) { sum[c] = 0.0f; }
+    // Precompute typed pointers and strides (column offset applied per column)
     const device ushort *scales_u16 = (const device ushort *)(scale_bytes);
     const device char   *data_char  = (const device char *)(data);
     const uint scale_block_stride_elems = N; // in u16 units
-    const uint scale_col_offset_elems   = out_idx; // in u16 units
     const uint data_block_stride        = N * weights_per_block; // in bytes
-    const uint data_col_offset          = out_idx * weights_per_block; // in bytes
-    const bool is_diag = Debug && (out_idx == diag_col);
 
     if constexpr (Debug) {
-        if (is_diag) {
-            // Compute per-block contributions directly from global memory for robustness
+        // If any owned column matches diag_col, compute its per-block contributions directly
+        for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+            const uint out_idx = base_col + c;
+            if (out_idx >= N) break;
+            if (out_idx != diag_col) continue;
             for (uint block = 0; block < blocks_per_k; ++block) {
                 const uint k_base = block * weights_per_block;
                 if (k_base >= K) {
                     result_y[block] = static_cast<half>(0.0f);
                     continue;
                 }
-                const uint scale_idx_e = block * scale_block_stride_elems + scale_col_offset_elems;
+                const uint scale_idx_e = block * scale_block_stride_elems + out_idx;
                 const ushort bits = scales_u16[scale_idx_e];
                 const float scale = static_cast<float>(as_type<half>(bits));
-                const uint data_idx = block * data_block_stride + data_col_offset;
+                const uint data_idx = block * data_block_stride + out_idx * weights_per_block;
                 const device char *qs = data_char + data_idx;
                 float acc_block = 0.0f;
                 const uint limit = min(weights_per_block, K - k_base);
@@ -638,7 +849,8 @@ void run_gemv_q8_canonical(
             }
         }
 
-        if (is_active) {
+        // Process up to GEMV_COLS_PER_THREAD columns per thread
+        {
             const uint k_remain = cur_limit;
             // Decide wide usage once per tile for active lanes using default heuristics
             const bool use_wide = ((K < 4096u) || (N >= 896u));
@@ -648,33 +860,57 @@ void run_gemv_q8_canonical(
                 const uint block_idx = k_abs >> 5;           // 32-elem block id
                 const uint inner     = k_abs & 31u;           // offset within block
 
-                // Precomputed addressing using typed pointers and strides
-                const uint scale_idx_e = block_idx * scale_block_stride_elems + scale_col_offset_elems;
-                const ushort bits = scales_u16[scale_idx_e];
-                const float scale = static_cast<float>(as_type<half>(bits));
-
-                const uint data_idx = block_idx * data_block_stride + data_col_offset + inner;
-                const device char *qs = data_char + data_idx;
                 // Hoist per-block valid length; avoid recomputing min when starting at block boundary
                 const uint block_base_k = block_idx * weights_per_block;
                 const uint block_valid = min(weights_per_block, K - block_base_k);
-                const uint block_left  = block_valid - inner; // inner < block_valid by construction
+                const uint block_left  = block_valid - inner;
                 const uint tile_left   = k_remain - k_local;
                 const uint count = (block_left < tile_left) ? block_left : tile_left;
 
-                float block_sum = use_wide
-                    ? q8_canonical_block_dot_wide(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x))
-                    : q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
-                const float contrib = scale * block_sum;
-                if constexpr (Debug) {
-                    if (is_diag) {
-                        const float prev = static_cast<float>(result_y[block_idx]);
-                        result_y[block_idx] = static_cast<half>(prev + contrib);
-                    }
-                } else {
-                    sum += contrib;
+#if GEMV_COLS_PER_THREAD == 1
+                // Single-column fast path
+                const uint out_idx = base_col;
+                if (out_idx < N) {
+                    const uint scale_idx_e = block_idx * scale_block_stride_elems + out_idx;
+                    const ushort bits = scales_u16[scale_idx_e];
+                    const float scale = static_cast<float>(as_type<half>(bits));
+                    const uint data_idx = block_idx * data_block_stride + out_idx * weights_per_block + inner;
+                    const device char *qs = data_char + data_idx;
+                    float block_sum = use_wide
+                        ? q8_canonical_block_dot_wide(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x))
+                        : q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
+                    sum[0] += scale * block_sum;
                 }
                 k_local += count;
+#else
+                // Multi-column path: accumulate COLS columns in lockstep
+                const device char *qs_ptrs[GEMV_COLS_PER_THREAD];
+                float scales_blk[GEMV_COLS_PER_THREAD];
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                    const uint out_idx = base_col + c;
+                    if (out_idx < N) {
+                        const uint scale_idx_e = block_idx * scale_block_stride_elems + out_idx;
+                        const ushort bits = scales_u16[scale_idx_e];
+                        scales_blk[c] = static_cast<float>(as_type<half>(bits));
+                        const uint data_idx = block_idx * data_block_stride + out_idx * weights_per_block + inner;
+                        qs_ptrs[c] = data_char + data_idx;
+                    } else {
+                        scales_blk[c] = 0.0f;
+                        qs_ptrs[c] = data_char; // dummy pointer
+                    }
+                }
+                float contrib_blk[GEMV_COLS_PER_THREAD];
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) contrib_blk[c] = 0.0f;
+                if (use_wide) {
+                    q8_block_dot_multi_wide<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, count, k_local, const_cast<threadgroup float *>(cur_x), contrib_blk);
+                } else {
+                    q8_block_dot_multi<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, count, k_local, const_cast<threadgroup float *>(cur_x), contrib_blk);
+                }
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                    sum[c] += contrib_blk[c];
+                }
+                k_local += count;
+#endif
             }
         }
 
@@ -682,13 +918,14 @@ void run_gemv_q8_canonical(
     }
 
     if constexpr (!Debug) {
-        if (!is_active) {
-            return;
+        for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+            const uint out_idx = base_col + c;
+            if (out_idx >= N) break;
+            float bias_val = GemvBiasReader<HasBias>::template load<half>(bias, out_idx);
+            float cval = (beta != 0.0f && residual != (const device half*)nullptr) ? static_cast<float>(residual[out_idx]) : 0.0f;
+            float y = alpha * (sum[c] + bias_val) + beta * cval;
+            result_y[out_idx] = static_cast<half>(y);
         }
-        float bias_val = GemvBiasReader<HasBias>::template load<half>(bias, out_idx);
-        float c = (beta != 0.0f && residual != (const device half*)nullptr) ? static_cast<float>(residual[out_idx]) : 0.0f;
-        float y = alpha * (sum + bias_val) + beta * c;
-        result_y[out_idx] = static_cast<half>(y);
     }
 }
 
@@ -817,14 +1054,17 @@ struct GemmQ8NtParams {
     const uint NV = params->Nv;
     const uint K = params->K;
     const uint weights_per_block = params->weights_per_block;
-    const uint out_idx = gid.x * TILE_N + lid.x;
+    const uint base_col = gid.x * TILE_N + lid.x * GEMV_COLS_PER_THREAD;
     if (weights_per_block == 0u) {
         return;
     }
 
-    float sum_q = 0.0f;
-    float sum_k = 0.0f;
-    float sum_v = 0.0f;
+    float sum_q[GEMV_COLS_PER_THREAD];
+    float sum_k_arr[GEMV_COLS_PER_THREAD];
+    float sum_v_arr[GEMV_COLS_PER_THREAD];
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+        sum_q[c] = 0.0f; sum_k_arr[c] = 0.0f; sum_v_arr[c] = 0.0f;
+    }
 
     // Double-buffered half tiles inside TILE_K space
     threadgroup float *x_buf0 = x_tile;
@@ -842,53 +1082,84 @@ struct GemmQ8NtParams {
     for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
         const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
         const uint k_remain = min(Q8_DBUF_TILE_K, K - tile_base);
-        // Strides/offsets hoisted per tile for each output head
+        // Strides hoisted per tile for each output head
         const uint scale_stride_q = NQ * Q8_CANONICAL_SCALE_BYTES;
         const uint data_stride_q  = NQ * weights_per_block;
-        const uint scale_col_q    = out_idx * Q8_CANONICAL_SCALE_BYTES;
-        const uint data_col_q     = out_idx * weights_per_block;
 
         const uint scale_stride_k = NK * Q8_CANONICAL_SCALE_BYTES;
         const uint data_stride_k  = NK * weights_per_block;
-        const uint scale_col_k    = out_idx * Q8_CANONICAL_SCALE_BYTES;
-        const uint data_col_k     = out_idx * weights_per_block;
 
         const uint scale_stride_v = NV * Q8_CANONICAL_SCALE_BYTES;
         const uint data_stride_v  = NV * weights_per_block;
-        const uint scale_col_v    = out_idx * Q8_CANONICAL_SCALE_BYTES;
-        const uint data_col_v     = out_idx * weights_per_block;
+        const bool use_wide = ((K < 4096u) || (NQ >= 896u) || (NK >= 896u) || (NV >= 896u));
         uint k_local = 0;
         while (k_local < k_remain) {
             const uint k_abs = tile_base + k_local;
             const uint block_idx = k_abs >> 5;           // 32-elem block id
             const uint inner     = k_abs & 31u;           // offset within block
             const uint chunk = min((uint)(weights_per_block - inner), k_remain - k_local);
-            if (out_idx < NQ) {
-                const uint sb_q = block_idx * scale_stride_q + scale_col_q;
-                const ushort bits_q = (ushort)scales_q[sb_q] | ((ushort)scales_q[sb_q + 1u] << 8);
-                const float scale_q = static_cast<float>(as_type<half>(bits_q));
-                const uint base_byte_q = block_idx * data_stride_q + data_col_q + inner;
-                const device char *qs_q = (const device char *)(data_q + base_byte_q);
-                float block_sum_q = q8_canonical_block_dot(qs_q, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x));
-                sum_q = fma(scale_q, block_sum_q, sum_q);
+            // Q head
+            {
+                const device char *qs_ptrs[GEMV_COLS_PER_THREAD];
+                float scales_blk[GEMV_COLS_PER_THREAD];
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                    const uint col = base_col + c;
+                    if (col < NQ) {
+                        const uint sbq = block_idx * scale_stride_q + col * Q8_CANONICAL_SCALE_BYTES;
+                        const ushort bitsq = (ushort)scales_q[sbq] | ((ushort)scales_q[sbq + 1u] << 8);
+                        scales_blk[c] = static_cast<float>(as_type<half>(bitsq));
+                        qs_ptrs[c] = (const device char *)(data_q + block_idx * data_stride_q + col * weights_per_block + inner);
+                    } else {
+                        scales_blk[c] = 0.0f;
+                        qs_ptrs[c] = (const device char *)(data_q);
+                    }
+                }
+                float contrib[GEMV_COLS_PER_THREAD]; for (uint c=0;c<GEMV_COLS_PER_THREAD;++c) contrib[c]=0.0f;
+                if (use_wide) q8_block_dot_multi_wide<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                else q8_block_dot_multi<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) sum_q[c] += contrib[c];
             }
-            if (out_idx < NK) {
-                const uint sb_k = block_idx * scale_stride_k + scale_col_k;
-                const ushort bits_k = (ushort)scales_k[sb_k] | ((ushort)scales_k[sb_k + 1u] << 8);
-                const float scale_k = static_cast<float>(as_type<half>(bits_k));
-                const uint base_byte_k = block_idx * data_stride_k + data_col_k + inner;
-                const device char *qs_k = (const device char *)(data_k + base_byte_k);
-                float block_sum_k = q8_canonical_block_dot(qs_k, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x));
-                sum_k = fma(scale_k, block_sum_k, sum_k);
+            // K head
+            {
+                const device char *qs_ptrs[GEMV_COLS_PER_THREAD];
+                float scales_blk[GEMV_COLS_PER_THREAD];
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                    const uint col = base_col + c;
+                    if (col < NK) {
+                        const uint sbk = block_idx * scale_stride_k + col * Q8_CANONICAL_SCALE_BYTES;
+                        const ushort bitsk = (ushort)scales_k[sbk] | ((ushort)scales_k[sbk + 1u] << 8);
+                        scales_blk[c] = static_cast<float>(as_type<half>(bitsk));
+                        qs_ptrs[c] = (const device char *)(data_k + block_idx * data_stride_k + col * weights_per_block + inner);
+                    } else {
+                        scales_blk[c] = 0.0f;
+                        qs_ptrs[c] = (const device char *)(data_k);
+                    }
+                }
+                float contrib[GEMV_COLS_PER_THREAD]; for (uint c=0;c<GEMV_COLS_PER_THREAD;++c) contrib[c]=0.0f;
+                if (use_wide) q8_block_dot_multi_wide<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                else q8_block_dot_multi<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) sum_k_arr[c] += contrib[c];
             }
-            if (out_idx < NV) {
-                const uint sb_v = block_idx * scale_stride_v + scale_col_v;
-                const ushort bits_v = (ushort)scales_v[sb_v] | ((ushort)scales_v[sb_v + 1u] << 8);
-                const float scale_v = static_cast<float>(as_type<half>(bits_v));
-                const uint base_byte_v = block_idx * data_stride_v + data_col_v + inner;
-                const device char *qs_v = (const device char *)(data_v + base_byte_v);
-                float block_sum_v = q8_canonical_block_dot(qs_v, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x));
-                sum_v = fma(scale_v, block_sum_v, sum_v);
+            // V head
+            {
+                const device char *qs_ptrs[GEMV_COLS_PER_THREAD];
+                float scales_blk[GEMV_COLS_PER_THREAD];
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                    const uint col = base_col + c;
+                    if (col < NV) {
+                        const uint sbv = block_idx * scale_stride_v + col * Q8_CANONICAL_SCALE_BYTES;
+                        const ushort bitsv = (ushort)scales_v[sbv] | ((ushort)scales_v[sbv + 1u] << 8);
+                        scales_blk[c] = static_cast<float>(as_type<half>(bitsv));
+                        qs_ptrs[c] = (const device char *)(data_v + block_idx * data_stride_v + col * weights_per_block + inner);
+                    } else {
+                        scales_blk[c] = 0.0f;
+                        qs_ptrs[c] = (const device char *)(data_v);
+                    }
+                }
+                float contrib[GEMV_COLS_PER_THREAD]; for (uint c=0;c<GEMV_COLS_PER_THREAD;++c) contrib[c]=0.0f;
+                if (use_wide) q8_block_dot_multi_wide<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                else q8_block_dot_multi<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) sum_v_arr[c] += contrib[c];
             }
 
             k_local += chunk;
@@ -910,26 +1181,11 @@ struct GemmQ8NtParams {
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    if (out_idx < NQ) {
-        float val_q = sum_q;
-        if (params->has_bias_q != 0u) {
-            val_q += static_cast<float>(bias_q[out_idx]);
-        }
-        out_q[out_idx] = static_cast<half>(val_q);
-    }
-    if (out_idx < NK) {
-        float val_k = sum_k;
-        if (params->has_bias_k != 0u) {
-            val_k += static_cast<float>(bias_k[out_idx]);
-        }
-        out_k[out_idx] = static_cast<half>(val_k);
-    }
-    if (out_idx < NV) {
-        float val_v = sum_v;
-        if (params->has_bias_v != 0u) {
-            val_v += static_cast<float>(bias_v[out_idx]);
-        }
-        out_v[out_idx] = static_cast<half>(val_v);
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+        const uint col = base_col + c;
+        if (col < NQ) { float vq = sum_q[c]; if (params->has_bias_q != 0u) vq += static_cast<float>(bias_q[col]); out_q[col] = static_cast<half>(vq); }
+        if (col < NK) { float vk = sum_k_arr[c]; if (params->has_bias_k != 0u) vk += static_cast<float>(bias_k[col]); out_k[col] = static_cast<half>(vk); }
+        if (col < NV) { float vv = sum_v_arr[c]; if (params->has_bias_v != 0u) vv += static_cast<float>(bias_v[col]); out_v[col] = static_cast<half>(vv); }
     }
 }
 
@@ -969,135 +1225,135 @@ struct Q2FusedParams {
     const bool use_bias0 = (params->has_bias0 != 0u) && (bias0 != (const device half*)nullptr);
     const bool use_bias1 = (params->has_bias1 != 0u) && (bias1 != (const device half*)nullptr);
 
-    // Lane processes one output col across tiles; we cover N0 and N1 in separate loops to keep indexing simple.
-    // First output group (0)
-    {
-        const uint out_idx = gid.x * TILE_N + lid.x;
-        const bool active = out_idx < N0;
-        float sum = 0.0f;
-        if (weights_per_block != 0u) {
-            // Double-buffered half tiles
-            threadgroup float *x_buf0 = x_tile;
-            threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
-            uint tile_base = 0u;
-            uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
-            if (lid.x < LOAD_LANES) {
-                for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
-                    x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
+    // Per-thread processes up to GEMV_COLS_PER_THREAD columns for both outputs
+    const uint base_col = gid.x * TILE_N + lid.x * GEMV_COLS_PER_THREAD;
+    float sum0[GEMV_COLS_PER_THREAD];
+    float sum1[GEMV_COLS_PER_THREAD];
+    bool active0[GEMV_COLS_PER_THREAD];
+    bool active1[GEMV_COLS_PER_THREAD];
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+        const uint col = base_col + c;
+        active0[c] = (col < N0);
+        active1[c] = (col < N1);
+        sum0[c] = 0.0f;
+        sum1[c] = 0.0f;
+    }
+
+    if (weights_per_block != 0u) {
+        // Double-buffered half tiles
+        threadgroup float *x_buf0 = x_tile;
+        threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
+        uint tile_base = 0u;
+        uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+        if (lid.x < LOAD_LANES) {
+            for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
+                x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        uint buf = 0u;
+        for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
+            const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
+            const uint tile_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+
+            // Group 0 (N0)
+            const uint scale_stride0 = N0 * Q8_CANONICAL_SCALE_BYTES;
+            const uint data_stride0  = N0 * weights_per_block;
+            {
+                const uint k_rem = tile_limit;
+                uint k_local = 0u;
+                while (k_local < k_rem) {
+                    const uint k_abs = tile_base + k_local;
+                    const uint block_idx = k_abs >> 5;
+                    const uint inner = k_abs & 31u;
+                    const uint count = min((uint)(weights_per_block - inner), k_rem - k_local);
+                    const device char *qs_ptrs[GEMV_COLS_PER_THREAD];
+                    float scales_blk[GEMV_COLS_PER_THREAD];
+                    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                        const uint out_idx = base_col + c;
+                        if (active0[c]) {
+                            const uint sb = block_idx * scale_stride0 + out_idx * Q8_CANONICAL_SCALE_BYTES;
+                            const ushort bits = (ushort)scales0[sb] | ((ushort)scales0[sb + 1u] << 8);
+                            scales_blk[c] = static_cast<float>(as_type<half>(bits));
+                            const uint base_byte = block_idx * data_stride0 + out_idx * weights_per_block + inner;
+                            qs_ptrs[c] = (const device char *)(data0 + base_byte);
+                        } else {
+                            scales_blk[c] = 0.0f;
+                            qs_ptrs[c] = (const device char *)(data0);
+                        }
+                    }
+                    float contrib[GEMV_COLS_PER_THREAD];
+                    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) contrib[c] = 0.0f;
+                    q8_block_dot_multi_wide<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, count, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) sum0[c] += contrib[c];
+                    k_local += count;
+                }
+            }
+
+            // Group 1 (N1)
+            const uint scale_stride1 = N1 * Q8_CANONICAL_SCALE_BYTES;
+            const uint data_stride1  = N1 * weights_per_block;
+            {
+                const uint k_rem = tile_limit;
+                uint k_local = 0u;
+                while (k_local < k_rem) {
+                    const uint k_abs = tile_base + k_local;
+                    const uint block_idx = k_abs >> 5;
+                    const uint inner = k_abs & 31u;
+                    const uint count = min((uint)(weights_per_block - inner), k_rem - k_local);
+                    const device char *qs_ptrs[GEMV_COLS_PER_THREAD];
+                    float scales_blk[GEMV_COLS_PER_THREAD];
+                    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+                        const uint out_idx = base_col + c;
+                        if (active1[c]) {
+                            const uint sb = block_idx * scale_stride1 + out_idx * Q8_CANONICAL_SCALE_BYTES;
+                            const ushort bits = (ushort)scales1[sb] | ((ushort)scales1[sb + 1u] << 8);
+                            scales_blk[c] = static_cast<float>(as_type<half>(bits));
+                            const uint base_byte = block_idx * data_stride1 + out_idx * weights_per_block + inner;
+                            qs_ptrs[c] = (const device char *)(data1 + base_byte);
+                        } else {
+                            scales_blk[c] = 0.0f;
+                            qs_ptrs[c] = (const device char *)(data1);
+                        }
+                    }
+                    float contrib[GEMV_COLS_PER_THREAD];
+                    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) contrib[c] = 0.0f;
+                    q8_block_dot_multi_wide<GEMV_COLS_PER_THREAD>(qs_ptrs, scales_blk, inner, count, k_local, const_cast<threadgroup float *>(cur_x), contrib);
+                    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) sum1[c] += contrib[c];
+                    k_local += count;
+                }
+            }
+
+            // Prefetch next half-tile
+            const uint next_base = tile_base + Q8_DBUF_TILE_K;
+            const bool has_next = next_base < K;
+            if (has_next) {
+                const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
+                threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
+                if (lid.x < LOAD_LANES) {
+                    for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
+                        next_x[local] = static_cast<float>(vector_x[next_base + local]);
+                    }
                 }
             }
             threadgroup_barrier(mem_flags::mem_threadgroup);
-
-            uint buf = 0u;
-            for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
-                const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
-                const uint tile_limit = min(Q8_DBUF_TILE_K, K - tile_base);
-
-                if (active) {
-                    // Precompute strides/offsets once per tile
-                    const uint scale_stride0 = N0 * Q8_CANONICAL_SCALE_BYTES;
-                    const uint data_stride0  = N0 * weights_per_block;
-                    const uint scale_col0    = out_idx * Q8_CANONICAL_SCALE_BYTES;
-                    const uint data_col0     = out_idx * weights_per_block;
-                    uint k_local = 0;
-                    while (k_local < tile_limit) {
-                        const uint k_abs = tile_base + k_local;
-                        const uint block_idx = k_abs >> 5; // 32 elements per block
-                        const uint inner = k_abs & 31u;
-                        const uint sb = block_idx * scale_stride0 + scale_col0;
-                        const ushort bits = (ushort)scales0[sb] | ((ushort)scales0[sb + 1u] << 8);
-                        const float scale = static_cast<float>(as_type<half>(bits));
-                        const uint base_byte = block_idx * data_stride0 + data_col0 + inner;
-                        const device char *qs = (const device char *)(data0 + base_byte);
-                        const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
-                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
-                        sum += scale * block_sum;
-                        k_local += count;
-                    }
-                }
-                // Prefetch next half-tile into the other buffer
-                const uint next_base = tile_base + Q8_DBUF_TILE_K;
-                const bool has_next = next_base < K;
-                if (has_next) {
-                    const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
-                    threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
-                    if (lid.x < LOAD_LANES) {
-                        for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
-                            next_x[local] = static_cast<float>(vector_x[next_base + local]);
-                        }
-                    }
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (active) {
-                float b = (use_bias0 ? static_cast<float>(bias0[out_idx]) : 0.0f);
-                out0[out_idx] = static_cast<half>(sum + b);
-            }
         }
     }
 
-    // Second output group (1)
-    {
-        const uint out_idx1 = gid.x * TILE_N + lid.x;
-        const bool active1 = out_idx1 < N1;
-        float sum1 = 0.0f;
-        if (weights_per_block != 0u) {
-            // Double-buffered half tiles
-            threadgroup float *x_buf0 = x_tile;
-            threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
-            uint tile_base = 0u;
-            uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
-            if (lid.x < LOAD_LANES) {
-                for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
-                    x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
-                }
-            }
-            threadgroup_barrier(mem_flags::mem_threadgroup);
-
-            uint buf = 0u;
-            for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
-                const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
-                const uint tile_limit = min(Q8_DBUF_TILE_K, K - tile_base);
-
-                if (active1) {
-                    const uint scale_stride1 = N1 * Q8_CANONICAL_SCALE_BYTES;
-                    const uint data_stride1  = N1 * weights_per_block;
-                    const uint scale_col1    = out_idx1 * Q8_CANONICAL_SCALE_BYTES;
-                    const uint data_col1     = out_idx1 * weights_per_block;
-                    uint k_local = 0;
-                    while (k_local < tile_limit) {
-                        const uint k_abs = tile_base + k_local;
-                        const uint block_idx = k_abs >> 5;
-                        const uint inner = k_abs & 31u;
-                        const uint sb = block_idx * scale_stride1 + scale_col1;
-                        const ushort bits = (ushort)scales1[sb] | ((ushort)scales1[sb + 1u] << 8);
-                        const float scale = static_cast<float>(as_type<half>(bits));
-                        const uint base_byte = block_idx * data_stride1 + data_col1 + inner;
-                        const device char *qs = (const device char *)(data1 + base_byte);
-                        const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
-                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
-                        sum1 += scale * block_sum;
-                        k_local += count;
-                    }
-                }
-                // Prefetch next half-tile into the other buffer
-                const uint next_base = tile_base + Q8_DBUF_TILE_K;
-                const bool has_next = next_base < K;
-                if (has_next) {
-                    const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
-                    threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
-                    if (lid.x < LOAD_LANES) {
-                        for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
-                            next_x[local] = static_cast<float>(vector_x[next_base + local]);
-                        }
-                    }
-                }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
-            }
-            if (active1) {
-                float b1 = (use_bias1 ? static_cast<float>(bias1[out_idx1]) : 0.0f);
-                out1[out_idx1] = static_cast<half>(sum1 + b1);
-            }
+    // Write out
+    for (uint c = 0u; c < GEMV_COLS_PER_THREAD; ++c) {
+        const uint out_idx0 = base_col + c;
+        if (out_idx0 < N0) {
+            float v0 = sum0[c];
+            if (use_bias0) v0 += static_cast<float>(bias0[out_idx0]);
+            out0[out_idx0] = static_cast<half>(v0);
+        }
+        const uint out_idx1 = base_col + c;
+        if (out_idx1 < N1) {
+            float v1 = sum1[c];
+            if (use_bias1) v1 += static_cast<float>(bias1[out_idx1]);
+            out1[out_idx1] = static_cast<half>(v1);
         }
     }
 }
@@ -1654,10 +1910,13 @@ struct Q2FusedParams {
     if (row_tile >= m) return;
     const uint rows_this_tile = min((uint)ROWS_PER_TILE, m - row_tile);
 
-    const uint col = gid.x * TILE_N + tid.x;
-    if (col >= n) return;
-
-    float4 accum = float4(0.0f);
+    const uint base_col = gid.x * TILE_N + tid.x * GEMV_COLS_PER_THREAD;
+    float accum_rows[ROWS_PER_TILE][GEMV_COLS_PER_THREAD];
+    for (uint r = 0; r < ROWS_PER_TILE; ++r) {
+        for (uint c = 0; c < GEMV_COLS_PER_THREAD; ++c) {
+            accum_rows[r][c] = 0.0f;
+        }
+    }
 
     for (uint tile_base = 0; tile_base < k; tile_base += ROWS_TILE_K) {
         const uint tile_limit = min(ROWS_TILE_K, k - tile_base);
@@ -1682,59 +1941,53 @@ struct Q2FusedParams {
             const uint k_abs = tile_base + k_local;
             const uint block_idx = k_abs >> 5;
             const uint inner = k_abs & 31u;
-            const uint base_idx = block_idx * n + col;
-            const uint sb = base_idx * 2u;
-            const ushort bits = (ushort)scale_bytes[sb] | ((ushort)scale_bytes[sb + 1] << 8);
-            const float scale = static_cast<float>(as_type<half>(bits));
             const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
-            const uint base_byte = base_idx * weights_per_block + inner;
-            const device char *qs = (const device char *)(matrix_data + base_byte);
 
-            const uint vec_chunks = count / 4u;
-            const uint tail = count & 3u;
-            float4 q_vecs[Q8_0_WEIGHTS_PER_BLOCK / 4];
-            for (uint vc = 0; vc < vec_chunks; ++vc) {
-                const device char4 *qv = (const device char4 *)(qs + vc * 4u);
-                char4 q = *qv;
-                q_vecs[vc] = float4((float)q.x, (float)q.y, (float)q.z, (float)q.w);
-            }
-            float q_tail[3];
-            for (uint t = 0; t < tail; ++t) {
-                q_tail[t] = (float)qs[vec_chunks * 4u + t];
-            }
+            for (uint c = 0; c < GEMV_COLS_PER_THREAD; ++c) {
+                const uint col = base_col + c;
+                if (col >= n) continue;
+                const uint base_idx = block_idx * n + col;
+                const uint sb = base_idx * 2u;
+                const ushort bits = (ushort)scale_bytes[sb] | ((ushort)scale_bytes[sb + 1] << 8);
+                const float scale = static_cast<float>(as_type<half>(bits));
+                const uint base_byte = base_idx * weights_per_block + inner;
+                const device char *qs = (const device char *)(matrix_data + base_byte);
 
-            for (uint row = 0; row < rows_this_tile; ++row) {
-                const threadgroup float *x_base = x_rows + row * ROWS_TILE_K + k_local;
-                float block_sum = 0.0f;
-                for (uint vc = 0; vc < vec_chunks; ++vc) {
-                    const uint idx = vc * 4u;
-                    float4 x_vec = float4(
-                        x_base[idx + 0u],
-                        x_base[idx + 1u],
-                        x_base[idx + 2u],
-                        x_base[idx + 3u]);
-                    block_sum += dot(x_vec, q_vecs[vc]);
+                const uint vec_chunks = count / 4u;
+                const uint tail = count & 3u;
+                for (uint row = 0; row < rows_this_tile; ++row) {
+                    const threadgroup float *x_base = x_rows + row * ROWS_TILE_K + k_local;
+                    float block_sum = 0.0f;
+                    for (uint vc = 0; vc < vec_chunks; ++vc) {
+                        const uint idx = vc * 4u;
+                        float4 x_vec = float4(
+                            x_base[idx + 0u],
+                            x_base[idx + 1u],
+                            x_base[idx + 2u],
+                            x_base[idx + 3u]);
+                        const device char4 *qv = (const device char4 *)(qs + vc * 4u);
+                        const char4 q = *qv;
+                        const float4 qv4 = float4((float)q.x, (float)q.y, (float)q.z, (float)q.w);
+                        block_sum += dot(x_vec, qv4);
+                    }
+                    for (uint t = 0; t < tail; ++t) {
+                        block_sum = fma(x_base[vec_chunks * 4u + t], (float)qs[vec_chunks * 4u + t], block_sum);
+                    }
+                    accum_rows[row][c] = fma(scale, block_sum, accum_rows[row][c]);
                 }
-                for (uint t = 0; t < tail; ++t) {
-                    block_sum = fma(x_base[vec_chunks * 4u + t], q_tail[t], block_sum);
-                }
-                accum[row] = fma(scale, block_sum, accum[row]);
             }
-
             k_local += count;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
-    if (has_bias != 0u) {
-        accum += float4(
-            static_cast<float>(bias[col]),
-            static_cast<float>(bias[col]),
-            static_cast<float>(bias[col]),
-            static_cast<float>(bias[col]));
+    for (uint row = 0; row < rows_this_tile; ++row) {
+        for (uint c = 0; c < GEMV_COLS_PER_THREAD; ++c) {
+            const uint col = base_col + c;
+            if (col >= n) continue;
+            float v = accum_rows[row][c];
+            if (has_bias != 0u) v += static_cast<float>(bias[col]);
+            result_y[(row_tile + row) * ldc + col] = static_cast<half>(v);
+        }
     }
-    if (rows_this_tile > 0) result_y[(row_tile + 0u) * ldc + col] = static_cast<half>(accum[0]);
-    if (rows_this_tile > 1) result_y[(row_tile + 1u) * ldc + col] = static_cast<half>(accum[1]);
-    if (rows_this_tile > 2) result_y[(row_tile + 2u) * ldc + col] = static_cast<half>(accum[2]);
-    if (rows_this_tile > 3) result_y[(row_tile + 3u) * ldc + col] = static_cast<half>(accum[3]);
 }

@@ -148,16 +148,10 @@ impl DefaultKernelInvocable for MatmulGemvQ2FusedOp {
             has_bias0: (b0_opt.is_some() as u32),
             has_bias1: (b1_opt.is_some() as u32),
         };
-        let tg = MTLSize {
-            width: 256,
-            height: 1,
-            depth: 1,
-        };
-        let grid = MTLSize {
-            width: (n0.max(n1) + 255) / 256,
-            height: 1,
-            depth: 1,
-        };
+        use crate::kernels::matmul_gemv::{THREADGROUP_WIDTH, GEMV_COLS_PER_THREAD};
+        let tg = MTLSize { width: THREADGROUP_WIDTH, height: 1, depth: 1 };
+        let tile_n = THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD;
+        let grid = MTLSize { width: (n0.max(n1)).div_ceil(tile_n), height: 1, depth: 1 };
 
         let mut label = if crate::profiling_state::get_profiling_state() {
             ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("gemv_q8_fused2"))
