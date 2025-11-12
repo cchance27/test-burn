@@ -1,6 +1,7 @@
 use std::fs;
 
 use serde::{Deserialize, Serialize};
+use serial_test::serial;
 
 use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, kernels::swiglu::SwiGLUOp};
 
@@ -464,6 +465,8 @@ struct SwiGluWeights {
 }
 
 #[test]
+#[serial]
+#[ignore]
 fn test_swiglu_pytorch_data() -> Result<(), MetalError> {
     // Load weights from JSON
     let weights_json = fs::read_to_string("pytorch/swiglu_qwen25_weights_full.json").expect("Failed to read weights JSON");

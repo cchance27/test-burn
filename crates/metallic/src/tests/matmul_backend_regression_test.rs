@@ -2,7 +2,7 @@ use half::f16;
 
 use crate::{
     Context, F16Element, MetalError, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
-        elemwise_add::BroadcastElemwiseAddOp, matmul_gemv::MatmulGemvOp, matmul_gemv_smalln::MatmulGemvSmallN8Op, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp
+        elemwise_add::BroadcastElemwiseAddOp, matmul_gemv::{MatmulGemvOp, MatmulGemvSmallN8Op}, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp
     }, tensor::TensorType
 };
 

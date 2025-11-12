@@ -24,7 +24,6 @@ export HOME="${FAKE_HOME}"
 declare -a ORIGINAL_SOURCES=(
   "crates/metallic/src/kernels/matmul_mlx/mlx.metal:original_mlx.metal"
   "crates/metallic/src/kernels/matmul_gemv/kernel.metal:original_gemv.metal"
-  "crates/metallic/src/kernels/matmul_gemv_smalln/kernel.metal:original_gemv_smalln.metal"
   "crates/metallic/src/kernels/matmul_gemm_tiled/kernel.metal:original_gemm_tiled.metal"
 )
 

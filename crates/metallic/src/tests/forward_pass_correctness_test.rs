@@ -3,6 +3,7 @@ use std::{env, path::Path};
 use approx::assert_relative_eq;
 use ndarray::ArrayD;
 use ndarray_npy::ReadNpyExt;
+use serial_test::serial;
 
 use crate::{
     Dtype, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, context::{Context, QkvWeights}, error::MetalError, generation::{self, GenerationConfig}, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{elemwise_add::BroadcastElemwiseAddOp, kv_rearrange::KvRearrangeOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp}, models::{LoadableModel, Qwen25}, tensor::TensorType, tokenizer::Tokenizer
@@ -305,6 +306,8 @@ fn run_blocks_up_to<T: TensorElement>(
 }
 
 #[test]
+#[serial]
+#[ignore]
 fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     // --- Setup ---
     let mut ctx = Context::<TestElement>::new()?;

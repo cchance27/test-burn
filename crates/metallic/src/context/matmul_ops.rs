@@ -1,7 +1,9 @@
 use super::{main::Context, utils::MatMulBackendOverride as InternalMatMulBackendOverride};
 use crate::{
     MetalError, Tensor, caching::ResourceCache, kernels::{
-        elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv::{MatmulGemvAddmmOp, MatmulGemvOp}, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}, matmul_q8_canonical::{MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op}, matmul_q8_nt::{MATMUL_Q8_NT_MAX_ROWS, MatmulQ8NtOp}
+        elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv::{
+            MATMUL_Q8_NT_MAX_ROWS, MatmulGemvAddmmOp, MatmulGemvOp, MatmulGemvSmallMOp, MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op, MatmulQ8NtOp
+        }, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}
     }, tensor::{QuantizedTensor, TensorElement, TensorType}
 };
 
@@ -523,7 +525,7 @@ impl<T: TensorElement> Context<T> {
                     let smallm_use_gemv = std::env::var("METALLIC_Q8_SMALLM_USE_GEMV").ok().map(|s| s != "0").unwrap_or(true);
                     let smallm_fallback_max_n = Self::smallm_fallback_max_n();
                     if smallm_use_gemv && dims.batch == 1 && (2..=4).contains(&dims.m) && !transpose_a && dims.n <= smallm_fallback_max_n {
-                        return self.call::<crate::kernels::matmul_gemv_smallm::MatmulGemvSmallMOp>((a, q8, bias), cache.as_deref_mut());
+                        return self.call::<MatmulGemvSmallMOp>((a, q8, bias), cache.as_deref_mut());
                     }
                     if self.can_use_q8_nt(&dims, transpose_a) {
                         return self.call::<MatmulQ8NtOp>((a, q8, bias), cache.as_deref_mut());

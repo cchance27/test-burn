@@ -3,6 +3,22 @@ use thiserror::Error;
 use crate::tensor::Dtype;
 
 #[derive(Error, Debug)]
+pub enum GemvError {
+    #[error("Invalid GEMV vector shape: {actual:?}, expected (1, K)")]
+    VectorShape { actual: Vec<usize> },
+    #[error("Invalid GEMV matrix shape: {actual:?}, expected (K={expected_k}, N)")]
+    MatrixShape { expected_k: usize, actual: Vec<usize> },
+    #[error("Bias length {actual} must equal N {expected}")]
+    BiasLengthMismatch { expected: usize, actual: usize },
+    #[error("Residual shape {actual:?} must be [1, N={expected}]")]
+    ResidualShapeMismatch { expected: usize, actual: Vec<usize> },
+    #[error("Q8 GEMV expects one dimension equal to K ({expected_k}), got {actual:?}")]
+    QuantShape { expected_k: usize, actual: Vec<usize> },
+    #[error("Q8 canonical weights_per_block cannot be zero")]
+    InvalidQuantParams,
+}
+
+#[derive(Error, Debug)]
 pub enum MetalError {
     #[error("Device not found")]
     DeviceNotFound,
@@ -48,6 +64,8 @@ pub enum MetalError {
     DtypeMismatch { expected: Dtype, actual: Dtype },
     #[error("Operation failed: {0}")]
     OperationFailed(String),
+    #[error("GEMV error: {0}")]
+    Gemv(#[from] GemvError),
 }
 
 impl From<crate::tokenizer::TokenizerError> for MetalError {

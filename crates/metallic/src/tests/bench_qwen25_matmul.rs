@@ -6,7 +6,7 @@ use serial_test::serial;
 
 use crate::{
     Context, MetalError, kernels::{
-        matmul_gemv::MatmulGemvOp, matmul_gemv_smallm::MatmulGemvSmallMOp, matmul_mlx::MatMulMlxOp, matmul_q8_canonical::{MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op}, matmul_q8_nt::MatmulQ8NtOp
+        matmul_gemv::{MatmulGemvOp, MatmulGemvSmallMOp, MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op, MatmulQ8NtOp}, matmul_mlx::MatMulMlxOp
     }, tensor::{
         Q8_0_WEIGHTS_PER_BLOCK, Tensor, TensorStorage, TensorType, quantized::{Q8_0_SCALE_BYTES_PER_BLOCK, QuantizedQ8_0Tensor}
     }

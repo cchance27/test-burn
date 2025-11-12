@@ -56,6 +56,12 @@ fn main() {
             let name = rel_dir.to_string_lossy().replace("\\", "/");
             let air = out_dir.join(format!("{name}.air"));
             let metallib = out_dir.join(format!("{name}.metallib"));
+            if let Some(parent) = air.parent() {
+                fs::create_dir_all(parent).expect("create directories for .air output");
+            }
+            if let Some(parent) = metallib.parent() {
+                fs::create_dir_all(parent).expect("create directories for .metallib output");
+            }
 
             let metal_input = if let Some(sources_manifest) = info.sources_manifest {
                 let generated = out_dir.join(format!("{name}_includes.metal"));

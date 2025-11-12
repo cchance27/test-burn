@@ -33,14 +33,9 @@ pub mod layernorm;
 pub mod matmul_dispatcher;
 pub mod matmul_gemm_tiled;
 pub mod matmul_gemv;
-pub mod matmul_gemv_fused2;
 pub mod matmul_gemv_qkv_fused;
-pub mod matmul_gemv_smallm;
-pub mod matmul_gemv_smalln;
 pub mod matmul_mlx;
 pub mod matmul_mps;
-pub mod matmul_q8_canonical;
-pub mod matmul_q8_nt;
 pub mod sdpa_mps_graph;
 pub mod softmax_block;
 pub mod softmax_kernel;
@@ -92,7 +87,6 @@ pub enum KernelLibrary {
     Swiglu,
     Tensors,
     MatmulGemv,
-    MatmulGemvSmalln,
     MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
@@ -121,8 +115,16 @@ impl KernelLibrary {
             KernelLibrary::SoftmaxKernel => kernel_lib!("softmax_kernel"),
             KernelLibrary::Swiglu => kernel_lib!("swiglu"),
             KernelLibrary::Tensors => kernel_lib!("tensors"),
-            KernelLibrary::MatmulGemv => kernel_lib!("matmul_gemv"),
-            KernelLibrary::MatmulGemvSmalln => kernel_lib!("matmul_gemv_smalln"),
+            KernelLibrary::MatmulGemv => kernel_lib!(
+                "matmul_gemv",
+                "matmul_gemv/kernel/common_defs.metal",
+                "matmul_gemv/kernel/helpers.metal",
+                "matmul_gemv/kernel/smalln_common.metal",
+                "matmul_gemv/kernel/q8_block_common.metal",
+                "matmul_gemv/kernel/dense.metal",
+                "matmul_gemv/kernel/quant.metal",
+                "matmul_gemv/kernel/launcher.metal"
+            ),
             KernelLibrary::MatmulGemmTiled => kernel_lib!("matmul_gemm_tiled"),
             KernelLibrary::SoftmaxBlock => kernel_lib!("softmax_block"),
             KernelLibrary::SoftmaxVec => kernel_lib!("softmax_vec"),
@@ -207,11 +209,11 @@ impl KernelFunction {
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::MatmulGemv => KernelLibrary::MatmulGemv,
-            KernelFunction::MatmulGemvSmallN1 => KernelLibrary::MatmulGemvSmalln,
-            KernelFunction::MatmulGemvSmallN2 => KernelLibrary::MatmulGemvSmalln,
-            KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemvSmalln,
-            KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemvSmalln,
-            KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemvSmalln,
+            KernelFunction::MatmulGemvSmallN1 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvSmallN2 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQkvFused => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQ2Fused => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8Nt => KernelLibrary::MatmulGemv,

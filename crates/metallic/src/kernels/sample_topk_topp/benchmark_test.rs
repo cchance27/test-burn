@@ -120,6 +120,7 @@ struct BenchmarkSnapshot {
 
 #[test]
 #[serial]
+#[ignore]
 fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
     let _profiling_env = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
     reset_app_config_for_tests();

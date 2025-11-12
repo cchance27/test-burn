@@ -788,7 +788,7 @@ impl<T: TensorElement> Qwen25<T> {
                         let gq8 = block.ffn_gate_q8.as_ref().unwrap();
                         let uq8 = block.ffn_up_q8.as_ref().unwrap();
                         ctx.set_pending_gpu_scope(format!("mlp_gate_up_fused_block_{}_op", layer_idx));
-                        let packed = ctx.call::<crate::kernels::matmul_gemv_fused2::MatmulGemvQ2FusedOp>(
+                        let packed = ctx.call::<crate::kernels::matmul_gemv::MatmulGemvQ2FusedOp>(
                             (
                                 &x_normed_mlp_flat,
                                 (&QuantizedTensor::Q8_0(gq8), &QuantizedTensor::Q8_0(uq8)),

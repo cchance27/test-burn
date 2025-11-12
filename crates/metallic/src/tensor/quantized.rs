@@ -135,11 +135,18 @@ impl QuantizedQ8_0Tensor {
             let n1 = logical_dims[0];
             let cand1 = k1.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
             let ok1 = cand1.checked_mul(n1).unwrap_or(usize::MAX) == scales_count;
-            if ok0 && !ok1 { cand0 }
-            else if ok1 && !ok0 { cand1 }
-            else if ok0 && ok1 { cand0 }
-            else { k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK) }
-        } else { 0 };
+            if ok0 && !ok1 {
+                cand0
+            } else if ok1 && !ok0 {
+                cand1
+            } else if ok0 && ok1 {
+                cand0
+            } else {
+                k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK)
+            }
+        } else {
+            0
+        };
         Ok(Self {
             data,
             scales,
@@ -228,11 +235,18 @@ impl CanonicalQuantTensor {
             let n1 = dims[0];
             let cand1 = k1.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
             let ok1 = cand1.checked_mul(n1).unwrap_or(usize::MAX) == scales_count;
-            if ok0 && !ok1 { cand0 }
-            else if ok1 && !ok0 { cand1 }
-            else if ok0 && ok1 { cand0 }
-            else { k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK) }
-        } else { 0 };
+            if ok0 && !ok1 {
+                cand0
+            } else if ok1 && !ok0 {
+                cand1
+            } else if ok0 && ok1 {
+                cand0
+            } else {
+                k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK)
+            }
+        } else {
+            0
+        };
 
         Ok(Self {
             kind: CanonicalQuantKind::Q8_0,

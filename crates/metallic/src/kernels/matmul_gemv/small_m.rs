@@ -1,8 +1,9 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
+use super::helpers::{GEMV_COLS_PER_THREAD, THREADGROUP_WIDTH};
 use crate::{
-    CommandBuffer, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction, matmul_gemv::{THREADGROUP_WIDTH, GEMV_COLS_PER_THREAD}}, operation::ComputeKernelEncoder, tensor::quantized::CanonicalQuantTensor
+    CommandBuffer, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder, tensor::quantized::CanonicalQuantTensor
 };
 
 #[repr(C)]
@@ -132,7 +133,11 @@ impl DefaultKernelInvocable for MatmulGemvSmallMOp {
         };
 
         let tile_n = THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD;
-        let grid = MTLSize { width: n.div_ceil(tile_n), height: m.div_ceil(4), depth: 1 };
+        let grid = MTLSize {
+            width: n.div_ceil(tile_n),
+            height: m.div_ceil(4),
+            depth: 1,
+        };
         let tg = MTLSize {
             width: THREADGROUP_WIDTH,
             height: 1,
