@@ -147,7 +147,7 @@ impl DefaultKernelInvocable for MatmulGemvSmallMOp {
             GpuProfilerLabel::fallback("gemv_q8_rows")
         };
 
-        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed("matmulGemvSmallMOp".to_string()))?;
+        let pipeline = pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("matmulGemvSmallMOp".to_string()))?;
         let op = GemvRowsOp {
             pipeline,
             data: canonical,

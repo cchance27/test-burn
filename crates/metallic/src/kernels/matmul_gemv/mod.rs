@@ -289,7 +289,7 @@ impl DefaultKernelInvocable for MatmulGemvOp {
         // Select pipeline: Dense path reuses provided pipeline. Quantized path always uses the generic GEMV kernel
         // (which internally routes to the canonical Q8 implementation based on params).
         let pipeline = match &matrix {
-            GemvMatrix::Dense(_) => pipeline.ok_or(MetalError::PipelineCreationFailed("matmulGemvOp".to_string()))?,
+            GemvMatrix::Dense(_) => pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("matmulGemvOp".to_string()))?,
             GemvMatrix::QuantCanonical(_) => {
                 if let Some(existing) = pipeline {
                     existing
@@ -501,7 +501,7 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
         };
 
         let pipeline = match &matrix {
-            GemvMatrix::Dense(_) => pipeline.ok_or(MetalError::PipelineCreationFailed("MatmulGemvAddmmOp".to_string()))?,
+            GemvMatrix::Dense(_) => pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatmulGemvAddmmOp".to_string()))?,
             GemvMatrix::QuantCanonical(_) => {
                 if let Some(existing) = pipeline { existing } else { ctx.kernel_manager.get_pipeline(KernelFunction::MatmulGemv, T::DTYPE, &ctx.device)? }
             }

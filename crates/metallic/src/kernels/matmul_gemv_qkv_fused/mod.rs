@@ -183,7 +183,7 @@ impl DefaultKernelInvocable for MatmulGemvQkvFusedOp {
             depth: 1,
         };
 
-        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed("MatmulGemvQkvFusedOp".to_string()))?;
+        let pipeline = pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatmulGemvQkvFusedOp".to_string()))?;
 
         // Build profiler label under current scope for TUI hierarchy
         let mut profiler_label = if crate::profiling_state::get_profiling_state() {

@@ -4,6 +4,10 @@
 
 using namespace metal;
 
+#ifndef ALWAYS_INLINE
+#define ALWAYS_INLINE inline __attribute__((always_inline))
+#endif
+
 struct GemvParams {
     uint K;
     uint N;
@@ -20,6 +24,9 @@ struct GemvParams {
 #define TILE_K 8192u
 // Widen cooperative load lanes to fully utilize the threadgroup for staging x.
 constant uint LOAD_LANES = THREADGROUP_WIDTH;
+
+// Use a split buffer for Q8 GEMV to enable simple double-buffered staging
+#define Q8_DBUF_TILE_K (TILE_K / 2u)
 
 template <typename MatrixT>
 struct MatrixPointerAccessor {
@@ -126,7 +133,7 @@ inline float q8nk_block_dot(
     return scale * (acc_scalar + acc_vec0 + acc_vec1);
 }
 
-inline float q8_canonical_block_dot(
+ALWAYS_INLINE float q8_canonical_block_dot(
     const device char *qs,
     uint inner,
     uint count,
@@ -152,59 +159,26 @@ inline float q8_canonical_block_dot(
         processed += align_count;
     }
 
-    // Unrolled 32-element processing (8 x char4) to reduce loop/control overhead
+    // 32-element processing (8 x char4) — widest legal vector in MSL
     while (processed + 32u <= count) {
         const uint base_local = local_base + processed;
         const device char4 *qv = (const device char4 *)(qs);
-        char4 q0 = qv[0];
-        char4 q1 = qv[1];
-        char4 q2 = qv[2];
-        char4 q3 = qv[3];
-        char4 q4 = qv[4];
-        char4 q5 = qv[5];
-        char4 q6 = qv[6];
-        char4 q7 = qv[7];
-        float4 x0 = float4(
-            x_tile[base_local + 0u],
-            x_tile[base_local + 1u],
-            x_tile[base_local + 2u],
-            x_tile[base_local + 3u]);
-        float4 x1 = float4(
-            x_tile[base_local + 4u],
-            x_tile[base_local + 5u],
-            x_tile[base_local + 6u],
-            x_tile[base_local + 7u]);
-        float4 x2 = float4(
-            x_tile[base_local + 8u],
-            x_tile[base_local + 9u],
-            x_tile[base_local + 10u],
-            x_tile[base_local + 11u]);
-        float4 x3 = float4(
-            x_tile[base_local + 12u],
-            x_tile[base_local + 13u],
-            x_tile[base_local + 14u],
-            x_tile[base_local + 15u]);
-        float4 x4 = float4(
-            x_tile[base_local + 16u],
-            x_tile[base_local + 17u],
-            x_tile[base_local + 18u],
-            x_tile[base_local + 19u]);
-        float4 x5 = float4(
-            x_tile[base_local + 20u],
-            x_tile[base_local + 21u],
-            x_tile[base_local + 22u],
-            x_tile[base_local + 23u]);
-        float4 x6 = float4(
-            x_tile[base_local + 24u],
-            x_tile[base_local + 25u],
-            x_tile[base_local + 26u],
-            x_tile[base_local + 27u]);
-        float4 x7 = float4(
-            x_tile[base_local + 28u],
-            x_tile[base_local + 29u],
-            x_tile[base_local + 30u],
-            x_tile[base_local + 31u]);
-
+        const char4 q0 = qv[0];
+        const char4 q1 = qv[1];
+        const char4 q2 = qv[2];
+        const char4 q3 = qv[3];
+        const char4 q4 = qv[4];
+        const char4 q5 = qv[5];
+        const char4 q6 = qv[6];
+        const char4 q7 = qv[7];
+        const float4 x0 = float4(x_tile[base_local + 0u],  x_tile[base_local + 1u],  x_tile[base_local + 2u],  x_tile[base_local + 3u]);
+        const float4 x1 = float4(x_tile[base_local + 4u],  x_tile[base_local + 5u],  x_tile[base_local + 6u],  x_tile[base_local + 7u]);
+        const float4 x2 = float4(x_tile[base_local + 8u],  x_tile[base_local + 9u],  x_tile[base_local + 10u], x_tile[base_local + 11u]);
+        const float4 x3 = float4(x_tile[base_local + 12u], x_tile[base_local + 13u], x_tile[base_local + 14u], x_tile[base_local + 15u]);
+        const float4 x4 = float4(x_tile[base_local + 16u], x_tile[base_local + 17u], x_tile[base_local + 18u], x_tile[base_local + 19u]);
+        const float4 x5 = float4(x_tile[base_local + 20u], x_tile[base_local + 21u], x_tile[base_local + 22u], x_tile[base_local + 23u]);
+        const float4 x6 = float4(x_tile[base_local + 24u], x_tile[base_local + 25u], x_tile[base_local + 26u], x_tile[base_local + 27u]);
+        const float4 x7 = float4(x_tile[base_local + 28u], x_tile[base_local + 29u], x_tile[base_local + 30u], x_tile[base_local + 31u]);
         float tmp = 0.0f;
         tmp += dot(x0, float4(q0));
         tmp += dot(x1, float4(q1));
@@ -219,34 +193,18 @@ inline float q8_canonical_block_dot(
         processed += 32u;
     }
 
-    // Unrolled 16-element processing (4 x char4) to reduce loop/control overhead
+    // 16-element processing (4 x char4)
     while (processed + 16u <= count) {
         const uint base_local = local_base + processed;
         const device char4 *qv = (const device char4 *)(qs);
-        char4 q0 = qv[0];
-        char4 q1 = qv[1];
-        char4 q2 = qv[2];
-        char4 q3 = qv[3];
-        float4 x0 = float4(
-            x_tile[base_local + 0u],
-            x_tile[base_local + 1u],
-            x_tile[base_local + 2u],
-            x_tile[base_local + 3u]);
-        float4 x1 = float4(
-            x_tile[base_local + 4u],
-            x_tile[base_local + 5u],
-            x_tile[base_local + 6u],
-            x_tile[base_local + 7u]);
-        float4 x2 = float4(
-            x_tile[base_local + 8u],
-            x_tile[base_local + 9u],
-            x_tile[base_local + 10u],
-            x_tile[base_local + 11u]);
-        float4 x3 = float4(
-            x_tile[base_local + 12u],
-            x_tile[base_local + 13u],
-            x_tile[base_local + 14u],
-            x_tile[base_local + 15u]);
+        const char4 q0 = qv[0];
+        const char4 q1 = qv[1];
+        const char4 q2 = qv[2];
+        const char4 q3 = qv[3];
+        const float4 x0 = float4(x_tile[base_local + 0u],  x_tile[base_local + 1u],  x_tile[base_local + 2u],  x_tile[base_local + 3u]);
+        const float4 x1 = float4(x_tile[base_local + 4u],  x_tile[base_local + 5u],  x_tile[base_local + 6u],  x_tile[base_local + 7u]);
+        const float4 x2 = float4(x_tile[base_local + 8u],  x_tile[base_local + 9u],  x_tile[base_local + 10u], x_tile[base_local + 11u]);
+        const float4 x3 = float4(x_tile[base_local + 12u], x_tile[base_local + 13u], x_tile[base_local + 14u], x_tile[base_local + 15u]);
         acc_scalar += dot(x0, float4(q0));
         acc_vec0   += dot(x1, float4(q1));
         acc_vec1   += dot(x2, float4(q2));
@@ -256,21 +214,14 @@ inline float q8_canonical_block_dot(
     }
 
     while (processed + 8u <= count) {
+        const uint base_local = local_base + processed;
+        // Keep conservative 2x char4 path for 8-wide to avoid 8-byte alignment assumptions
         const device char4 *qv0 = (const device char4 *)(qs);
         const device char4 *qv1 = (const device char4 *)(qs + 4u);
-        const uint base_local = local_base + processed;
-        char4 q0 = *qv0;
-        char4 q1 = *qv1;
-        float4 x0 = float4(
-            x_tile[base_local + 0u],
-            x_tile[base_local + 1u],
-            x_tile[base_local + 2u],
-            x_tile[base_local + 3u]);
-        float4 x1 = float4(
-            x_tile[base_local + 4u],
-            x_tile[base_local + 5u],
-            x_tile[base_local + 6u],
-            x_tile[base_local + 7u]);
+        const char4 q0 = *qv0;
+        const char4 q1 = *qv1;
+        const float4 x0 = float4(x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        const float4 x1 = float4(x_tile[base_local + 4u], x_tile[base_local + 5u], x_tile[base_local + 6u], x_tile[base_local + 7u]);
         acc_vec0 += dot(x0, float4(q0));
         acc_vec1 += dot(x1, float4(q1));
         qs += 8u;
@@ -568,34 +519,56 @@ void run_gemv_q8_canonical(
         }
     }
 
-    // Process K in tiles with x staged in shared memory for reuse
-    for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
-        const uint tile_limit = min(TILE_K, K - tile_base);
-        // Stage x into shared memory once per tile
-        if (lid.x < LOAD_LANES) {
-            for (uint local = lid.x; local < tile_limit; local += LOAD_LANES) {
-                const uint gk = tile_base + local;
-                x_tile[local] = static_cast<float>(vector_x[gk]);
+    // Double-buffered half tiles inside the provided TILE_K space
+    threadgroup float *x_buf0 = x_tile;
+    threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
+
+    uint tile_base = 0u;
+    uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+    if (lid.x < LOAD_LANES) {
+        for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
+            x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    uint buf = 0u;
+    for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
+        const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
+        cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+
+        // Prefetch next tile into the other buffer
+        const uint next_base = tile_base + Q8_DBUF_TILE_K;
+        const bool has_next = next_base < K;
+        if (has_next) {
+            const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
+            threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
+            if (lid.x < LOAD_LANES) {
+                for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
+                    next_x[local] = static_cast<float>(vector_x[next_base + local]);
+                }
             }
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
 
         if (is_active) {
-            const uint k_remain = tile_limit;
-            uint k_local = 0;
+            const uint k_remain = cur_limit;
+            const uint scale_block_stride = N * Q8_CANONICAL_SCALE_BYTES;
+            const uint data_block_stride  = N * weights_per_block;
+            const uint scale_col_offset   = out_idx * Q8_CANONICAL_SCALE_BYTES;
+            const uint data_col_offset    = out_idx * weights_per_block;
+            uint k_local = 0u;
             while (k_local < k_remain) {
                 const uint k_abs = tile_base + k_local;
                 const uint block_idx = k_abs >> 5;           // 32-elem block id
                 const uint inner     = k_abs & 31u;           // offset within block
-                const uint base_idx = block_idx * N + out_idx;
-                const uint sb = base_idx * 2u;
-                const ushort bits = (ushort)scale_bytes[sb] | ((ushort)scale_bytes[sb + 1] << 8);
+                const uint sb = block_idx * scale_block_stride + scale_col_offset;
+                const ushort bits = (ushort)scale_bytes[sb] | ((ushort)scale_bytes[sb + 1u] << 8);
                 const float scale = static_cast<float>(as_type<half>(bits));
-                const uint base_byte = base_idx * weights_per_block + inner;
+                const uint base_byte = block_idx * data_block_stride + data_col_offset + inner;
                 const device char *qs = (const device char *)(data + base_byte);
                 const uint count = min((uint)(weights_per_block - inner), k_remain - k_local);
 
-                float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, x_tile);
+                float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
                 const float contrib = scale * block_sum;
                 if constexpr (Debug) {
                     if (is_diag) {
@@ -757,17 +730,37 @@ struct GemmQ8NtParams {
     float sum_k = 0.0f;
     float sum_v = 0.0f;
 
-    for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
-        const uint tile_limit = min(TILE_K, K - tile_base);
-        if (lid.x < LOAD_LANES) {
-            for (uint local = lid.x; local < tile_limit; local += LOAD_LANES) {
-                const uint gk = tile_base + local;
-                x_tile[local] = static_cast<float>(vector_x[gk]);
-            }
+    // Double-buffered half tiles inside TILE_K space
+    threadgroup float *x_buf0 = x_tile;
+    threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
+    uint tile_base = 0u;
+    uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+    if (lid.x < LOAD_LANES) {
+        for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
+            x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        const uint k_remain = tile_limit;
+    uint buf = 0u;
+    for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
+        const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
+        const uint k_remain = min(Q8_DBUF_TILE_K, K - tile_base);
+        // Strides/offsets hoisted per tile for each output head
+        const uint scale_stride_q = NQ * Q8_CANONICAL_SCALE_BYTES;
+        const uint data_stride_q  = NQ * weights_per_block;
+        const uint scale_col_q    = out_idx * Q8_CANONICAL_SCALE_BYTES;
+        const uint data_col_q     = out_idx * weights_per_block;
+
+        const uint scale_stride_k = NK * Q8_CANONICAL_SCALE_BYTES;
+        const uint data_stride_k  = NK * weights_per_block;
+        const uint scale_col_k    = out_idx * Q8_CANONICAL_SCALE_BYTES;
+        const uint data_col_k     = out_idx * weights_per_block;
+
+        const uint scale_stride_v = NV * Q8_CANONICAL_SCALE_BYTES;
+        const uint data_stride_v  = NV * weights_per_block;
+        const uint scale_col_v    = out_idx * Q8_CANONICAL_SCALE_BYTES;
+        const uint data_col_v     = out_idx * weights_per_block;
         uint k_local = 0;
         while (k_local < k_remain) {
             const uint k_abs = tile_base + k_local;
@@ -775,37 +768,47 @@ struct GemmQ8NtParams {
             const uint inner     = k_abs & 31u;           // offset within block
             const uint chunk = min((uint)(weights_per_block - inner), k_remain - k_local);
             if (out_idx < NQ) {
-                const uint base_idx_q = block_idx * NQ + out_idx;
-                const uint sb_q = base_idx_q * 2u;
-                const ushort bits_q = (ushort)scales_q[sb_q] | ((ushort)scales_q[sb_q + 1] << 8);
+                const uint sb_q = block_idx * scale_stride_q + scale_col_q;
+                const ushort bits_q = (ushort)scales_q[sb_q] | ((ushort)scales_q[sb_q + 1u] << 8);
                 const float scale_q = static_cast<float>(as_type<half>(bits_q));
-                const uint base_byte_q = base_idx_q * weights_per_block + inner;
+                const uint base_byte_q = block_idx * data_stride_q + data_col_q + inner;
                 const device char *qs_q = (const device char *)(data_q + base_byte_q);
-                float block_sum_q = q8_canonical_block_dot(qs_q, inner, chunk, k_local, x_tile);
+                float block_sum_q = q8_canonical_block_dot(qs_q, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x));
                 sum_q = fma(scale_q, block_sum_q, sum_q);
             }
             if (out_idx < NK) {
-                const uint base_idx_k = block_idx * NK + out_idx;
-                const uint sb_k = base_idx_k * 2u;
-                const ushort bits_k = (ushort)scales_k[sb_k] | ((ushort)scales_k[sb_k + 1] << 8);
+                const uint sb_k = block_idx * scale_stride_k + scale_col_k;
+                const ushort bits_k = (ushort)scales_k[sb_k] | ((ushort)scales_k[sb_k + 1u] << 8);
                 const float scale_k = static_cast<float>(as_type<half>(bits_k));
-                const uint base_byte_k = base_idx_k * weights_per_block + inner;
+                const uint base_byte_k = block_idx * data_stride_k + data_col_k + inner;
                 const device char *qs_k = (const device char *)(data_k + base_byte_k);
-                float block_sum_k = q8_canonical_block_dot(qs_k, inner, chunk, k_local, x_tile);
+                float block_sum_k = q8_canonical_block_dot(qs_k, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x));
                 sum_k = fma(scale_k, block_sum_k, sum_k);
             }
             if (out_idx < NV) {
-                const uint base_idx_v = block_idx * NV + out_idx;
-                const uint sb_v = base_idx_v * 2u;
-                const ushort bits_v = (ushort)scales_v[sb_v] | ((ushort)scales_v[sb_v + 1] << 8);
+                const uint sb_v = block_idx * scale_stride_v + scale_col_v;
+                const ushort bits_v = (ushort)scales_v[sb_v] | ((ushort)scales_v[sb_v + 1u] << 8);
                 const float scale_v = static_cast<float>(as_type<half>(bits_v));
-                const uint base_byte_v = base_idx_v * weights_per_block + inner;
+                const uint base_byte_v = block_idx * data_stride_v + data_col_v + inner;
                 const device char *qs_v = (const device char *)(data_v + base_byte_v);
-                float block_sum_v = q8_canonical_block_dot(qs_v, inner, chunk, k_local, x_tile);
+                float block_sum_v = q8_canonical_block_dot(qs_v, inner, chunk, k_local, const_cast<threadgroup float *>(cur_x));
                 sum_v = fma(scale_v, block_sum_v, sum_v);
             }
 
             k_local += chunk;
+        }
+
+        // Start prefetch of next tile into the other buffer
+        const uint next_base = tile_base + Q8_DBUF_TILE_K;
+        const bool has_next = next_base < K;
+        if (has_next) {
+            const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
+            threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
+            if (lid.x < LOAD_LANES) {
+                for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
+                    next_x[local] = static_cast<float>(vector_x[next_base + local]);
+                }
+            }
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -877,32 +880,55 @@ struct Q2FusedParams {
         const bool active = out_idx < N0;
         float sum = 0.0f;
         if (weights_per_block != 0u) {
-            for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
-                const uint tile_limit = min(TILE_K, K - tile_base);
-                if (lid.x < LOAD_LANES) {
-                    for (uint local = lid.x; local < tile_limit; local += LOAD_LANES) {
-                        const uint gk = tile_base + local;
-                        x_tile[local] = static_cast<float>(vector_x[gk]);
-                    }
+            // Double-buffered half tiles
+            threadgroup float *x_buf0 = x_tile;
+            threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
+            uint tile_base = 0u;
+            uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+            if (lid.x < LOAD_LANES) {
+                for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
+                    x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            uint buf = 0u;
+            for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
+                const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
+                const uint tile_limit = min(Q8_DBUF_TILE_K, K - tile_base);
 
                 if (active) {
+                    // Precompute strides/offsets once per tile
+                    const uint scale_stride0 = N0 * Q8_CANONICAL_SCALE_BYTES;
+                    const uint data_stride0  = N0 * weights_per_block;
+                    const uint scale_col0    = out_idx * Q8_CANONICAL_SCALE_BYTES;
+                    const uint data_col0     = out_idx * weights_per_block;
                     uint k_local = 0;
                     while (k_local < tile_limit) {
                         const uint k_abs = tile_base + k_local;
                         const uint block_idx = k_abs >> 5; // 32 elements per block
                         const uint inner = k_abs & 31u;
-                        const uint base_idx = block_idx * N0 + out_idx;
-                        const uint sb = base_idx * 2u;
-                        const ushort bits = (ushort)scales0[sb] | ((ushort)scales0[sb + 1] << 8);
+                        const uint sb = block_idx * scale_stride0 + scale_col0;
+                        const ushort bits = (ushort)scales0[sb] | ((ushort)scales0[sb + 1u] << 8);
                         const float scale = static_cast<float>(as_type<half>(bits));
-                        const uint base_byte = base_idx * weights_per_block + inner;
+                        const uint base_byte = block_idx * data_stride0 + data_col0 + inner;
                         const device char *qs = (const device char *)(data0 + base_byte);
                         const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
-                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, x_tile);
+                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
                         sum += scale * block_sum;
                         k_local += count;
+                    }
+                }
+                // Prefetch next half-tile into the other buffer
+                const uint next_base = tile_base + Q8_DBUF_TILE_K;
+                const bool has_next = next_base < K;
+                if (has_next) {
+                    const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
+                    threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
+                    if (lid.x < LOAD_LANES) {
+                        for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
+                            next_x[local] = static_cast<float>(vector_x[next_base + local]);
+                        }
                     }
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -920,32 +946,54 @@ struct Q2FusedParams {
         const bool active1 = out_idx1 < N1;
         float sum1 = 0.0f;
         if (weights_per_block != 0u) {
-            for (uint tile_base = 0; tile_base < K; tile_base += TILE_K) {
-                const uint tile_limit = min(TILE_K, K - tile_base);
-                if (lid.x < LOAD_LANES) {
-                    for (uint local = lid.x; local < tile_limit; local += LOAD_LANES) {
-                        const uint gk = tile_base + local;
-                        x_tile[local] = static_cast<float>(vector_x[gk]);
-                    }
+            // Double-buffered half tiles
+            threadgroup float *x_buf0 = x_tile;
+            threadgroup float *x_buf1 = x_tile + Q8_DBUF_TILE_K;
+            uint tile_base = 0u;
+            uint cur_limit = min(Q8_DBUF_TILE_K, K - tile_base);
+            if (lid.x < LOAD_LANES) {
+                for (uint local = lid.x; local < cur_limit; local += LOAD_LANES) {
+                    x_buf0[local] = static_cast<float>(vector_x[tile_base + local]);
                 }
-                threadgroup_barrier(mem_flags::mem_threadgroup);
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            uint buf = 0u;
+            for (; tile_base < K; tile_base += Q8_DBUF_TILE_K, buf ^= 1u) {
+                const threadgroup float *cur_x = (buf == 0u) ? x_buf0 : x_buf1;
+                const uint tile_limit = min(Q8_DBUF_TILE_K, K - tile_base);
 
                 if (active1) {
+                    const uint scale_stride1 = N1 * Q8_CANONICAL_SCALE_BYTES;
+                    const uint data_stride1  = N1 * weights_per_block;
+                    const uint scale_col1    = out_idx1 * Q8_CANONICAL_SCALE_BYTES;
+                    const uint data_col1     = out_idx1 * weights_per_block;
                     uint k_local = 0;
                     while (k_local < tile_limit) {
                         const uint k_abs = tile_base + k_local;
                         const uint block_idx = k_abs >> 5;
                         const uint inner = k_abs & 31u;
-                        const uint base_idx = block_idx * N1 + out_idx1;
-                        const uint sb = base_idx * 2u;
-                        const ushort bits = (ushort)scales1[sb] | ((ushort)scales1[sb + 1] << 8);
+                        const uint sb = block_idx * scale_stride1 + scale_col1;
+                        const ushort bits = (ushort)scales1[sb] | ((ushort)scales1[sb + 1u] << 8);
                         const float scale = static_cast<float>(as_type<half>(bits));
-                        const uint base_byte = base_idx * weights_per_block + inner;
+                        const uint base_byte = block_idx * data_stride1 + data_col1 + inner;
                         const device char *qs = (const device char *)(data1 + base_byte);
                         const uint count = min((uint)(weights_per_block - inner), tile_limit - k_local);
-                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, x_tile);
+                        float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
                         sum1 += scale * block_sum;
                         k_local += count;
+                    }
+                }
+                // Prefetch next half-tile into the other buffer
+                const uint next_base = tile_base + Q8_DBUF_TILE_K;
+                const bool has_next = next_base < K;
+                if (has_next) {
+                    const uint next_limit = min(Q8_DBUF_TILE_K, K - next_base);
+                    threadgroup float *next_x = (buf == 0u) ? x_buf1 : x_buf0;
+                    if (lid.x < LOAD_LANES) {
+                        for (uint local = lid.x; local < next_limit; local += LOAD_LANES) {
+                            next_x[local] = static_cast<float>(vector_x[next_base + local]);
+                        }
                     }
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);

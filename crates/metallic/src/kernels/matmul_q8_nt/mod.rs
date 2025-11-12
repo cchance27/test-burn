@@ -183,7 +183,7 @@ impl DefaultKernelInvocable for MatmulQ8NtOp {
             label
         };
 
-        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed("MatmulQ8NtOp".to_string()))?;
+        let pipeline = pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatmulQ8NtOp".to_string()))?;
 
         let op = GemmQ8Nt {
             pipeline,

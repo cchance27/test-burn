@@ -189,7 +189,7 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalOp {
             label.data = Some(data);
         }
 
-        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed("MatMulq8CanonicalOp".to_string()))?;
+        let pipeline = pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatMulq8CanonicalOp".to_string()))?;
         let op = GemmQ8Canonical {
             pipeline,
             data: canonical,
@@ -321,7 +321,7 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalRows16Op {
             label.data = Some(data);
         }
 
-        let pipeline = pipeline.ok_or(MetalError::PipelineCreationFailed("matmulQ8CanonicalRows16Op".to_string()))?;
+        let pipeline = pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("matmulQ8CanonicalRows16Op".to_string()))?;
         let op = GemmQ8Canonical {
             pipeline,
             data: canonical,
