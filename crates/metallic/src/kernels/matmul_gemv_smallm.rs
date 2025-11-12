@@ -125,14 +125,15 @@ impl DefaultKernelInvocable for MatmulGemvSmallMOp {
             k: k as u32,
             lda: k as u32,
             ldc: n as u32,
-            blocks_per_k: canonical.blocks_per_k as u32,
+            // Derive blocks_per_k from k to support both [K,N] and [N,K]
+            blocks_per_k: k.div_ceil(canonical.weights_per_block) as u32,
             weights_per_block: canonical.weights_per_block as u32,
             has_bias: if bias.is_some() { 1 } else { 0 },
         };
 
         let grid = MTLSize {
-            width: (n + THREADGROUP_WIDTH - 1) / THREADGROUP_WIDTH,
-            height: (m + 4 - 1) / 4,
+            width: n.div_ceil(THREADGROUP_WIDTH),
+            height: m.div_ceil(4),
             depth: 1,
         };
         let tg = MTLSize {

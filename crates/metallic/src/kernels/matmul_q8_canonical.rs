@@ -151,14 +151,15 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalOp {
             k: k as u32,
             lda: k as u32,
             ldc: n as u32,
-            blocks_per_k: canonical.blocks_per_k as u32,
+            // Derive blocks_per_k from k to support both [K,N] and [N,K]
+            blocks_per_k: k.div_ceil(canonical.weights_per_block) as u32,
             weights_per_block: canonical.weights_per_block as u32,
             has_bias: if bias.is_some() { 1 } else { 0 },
         };
 
         let grid = MTLSize {
-            width: (n + TILE_COLS_PER_TG - 1) / TILE_COLS_PER_TG,
-            height: (m + ROWS_PER_TILE - 1) / ROWS_PER_TILE,
+            width: n.div_ceil(TILE_COLS_PER_TG),
+            height: m.div_ceil(ROWS_PER_TILE),
             depth: 1,
         };
         let tg = MTLSize {
@@ -283,15 +284,15 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalRows16Op {
             k: k as u32,
             lda: k as u32,
             ldc: n as u32,
-            blocks_per_k: canonical.blocks_per_k as u32,
+            blocks_per_k: k.div_ceil(canonical.weights_per_block) as u32,
             weights_per_block: canonical.weights_per_block as u32,
             has_bias: if bias.is_some() { 1 } else { 0 },
         };
 
         const ROWS_PER_TILE_16: usize = 16;
         let grid = MTLSize {
-            width: (n + TILE_COLS_PER_TG - 1) / TILE_COLS_PER_TG,
-            height: (m + ROWS_PER_TILE_16 - 1) / ROWS_PER_TILE_16,
+            width: n.div_ceil(TILE_COLS_PER_TG),
+            height: m.div_ceil(ROWS_PER_TILE_16),
             depth: 1,
         };
         let tg = MTLSize {

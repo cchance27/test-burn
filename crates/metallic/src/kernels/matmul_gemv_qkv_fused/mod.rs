@@ -164,7 +164,8 @@ impl DefaultKernelInvocable for MatmulGemvQkvFusedOp {
             nq: nq as u32,
             nk: nk as u32,
             nv: nv as u32,
-            blocks_per_k: wq.blocks_per_k as u32,
+            // Derive blocks_per_k from k to be robust to logical dim order
+            blocks_per_k: k.div_ceil(wq.weights_per_block) as u32,
             weights_per_block: wq.weights_per_block as u32,
             has_bias_q: bias_q.is_some() as u32,
             has_bias_k: bias_k.is_some() as u32,

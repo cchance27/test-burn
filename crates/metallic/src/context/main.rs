@@ -419,7 +419,7 @@ impl<T: TensorElement> Context<T> {
         // 1) Scope nesting
         let op_type_name = std::any::type_name::<K>();
         self.push_kernel_scope(op_type_name);
-        
+
         // 2) Ensure command buffer
         if cache.is_some() {
             self.ensure_active_cmd_buffer_internal(false)?;

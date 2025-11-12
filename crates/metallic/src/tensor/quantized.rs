@@ -122,21 +122,30 @@ impl QuantizedQ8_0Tensor {
 
         let data = upload_u8_bytes(data_bytes, &ctx.device, &ctx.command_queue)?;
         let scales = upload_u8_bytes(scale_bytes, &ctx.device, &ctx.command_queue)?;
-        let blocks_per_k = Self::compute_blocks_per_k(&logical_dims);
+        // Infer blocks_per_k robustly by validating against actual buffer sizes.
+        // For split canonical layout: scales_count = blocks_per_k * N, data_bytes = blocks_per_k * N * 32.
+        // Evaluate both interpretations of dims: [K,N] and [N,K], and choose the one that matches buffers.
+        let scales_count = scale_bytes.len() / Q8_0_SCALE_BYTES_PER_BLOCK;
+        let blocks_per_k = if logical_dims.len() >= 2 {
+            let k0 = logical_dims[0];
+            let n0 = logical_dims[1];
+            let cand0 = k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
+            let ok0 = cand0.checked_mul(n0).unwrap_or(usize::MAX) == scales_count;
+            let k1 = logical_dims[1];
+            let n1 = logical_dims[0];
+            let cand1 = k1.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
+            let ok1 = cand1.checked_mul(n1).unwrap_or(usize::MAX) == scales_count;
+            if ok0 && !ok1 { cand0 }
+            else if ok1 && !ok0 { cand1 }
+            else if ok0 && ok1 { cand0 }
+            else { k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK) }
+        } else { 0 };
         Ok(Self {
             data,
             scales,
             logical_dims,
             blocks_per_k,
         })
-    }
-
-    fn compute_blocks_per_k(dims: &[usize]) -> usize {
-        if let Some(k) = dims.get(0).copied() {
-            (k + Q8_0_WEIGHTS_PER_BLOCK - 1) / Q8_0_WEIGHTS_PER_BLOCK
-        } else {
-            0
-        }
     }
 }
 
@@ -207,8 +216,23 @@ impl CanonicalQuantTensor {
     }
 
     pub fn from_split_q8_tensor(q8: &QuantizedQ8_0Tensor) -> Result<Self, MetalError> {
-        let k = q8.logical_dims.get(0).copied().unwrap_or(0);
-        let blocks_per_k = (k + Q8_0_WEIGHTS_PER_BLOCK - 1) / Q8_0_WEIGHTS_PER_BLOCK;
+        // Infer blocks_per_k robustly using buffer sizes and dims.
+        let dims = &q8.logical_dims;
+        let scales_count = q8.scales.len() / Q8_0_SCALE_BYTES_PER_BLOCK;
+        let blocks_per_k = if dims.len() >= 2 {
+            let k0 = dims[0];
+            let n0 = dims[1];
+            let cand0 = k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
+            let ok0 = cand0.checked_mul(n0).unwrap_or(usize::MAX) == scales_count;
+            let k1 = dims[1];
+            let n1 = dims[0];
+            let cand1 = k1.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
+            let ok1 = cand1.checked_mul(n1).unwrap_or(usize::MAX) == scales_count;
+            if ok0 && !ok1 { cand0 }
+            else if ok1 && !ok0 { cand1 }
+            else if ok0 && ok1 { cand0 }
+            else { k0.div_ceil(Q8_0_WEIGHTS_PER_BLOCK) }
+        } else { 0 };
 
         Ok(Self {
             kind: CanonicalQuantKind::Q8_0,

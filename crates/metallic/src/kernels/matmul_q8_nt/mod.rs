@@ -142,14 +142,15 @@ impl DefaultKernelInvocable for MatmulQ8NtOp {
             k: k as u32,
             lda: k as u32,
             ldc: n as u32,
-            blocks_per_k: canonical.blocks_per_k as u32,
+            // Derive blocks_per_k from k to support both [K,N] and [N,K] logical dims
+            blocks_per_k: k.div_ceil(canonical.weights_per_block) as u32,
             weights_per_block: canonical.weights_per_block as u32,
             has_bias: if bias.is_some() { 1 } else { 0 },
         };
 
         let grid = MTLSize {
-            width: (n + TILE_COLS - 1) / TILE_COLS,
-            height: (m + MAX_ROWS_TILE - 1) / MAX_ROWS_TILE,
+            width: n.div_ceil(TILE_COLS),
+            height: m.div_ceil(MAX_ROWS_TILE),
             depth: 1,
         };
         let tg = MTLSize {
@@ -183,7 +184,11 @@ impl DefaultKernelInvocable for MatmulQ8NtOp {
             label
         };
 
-        let pipeline = pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatmulQ8NtOp".to_string()))?;
+        let pipeline = if let Some(p) = pipeline {
+            p
+        } else {
+            ctx.kernel_manager.get_pipeline(KernelFunction::MatmulQ8Nt, T::DTYPE, &ctx.device)?
+        };
 
         let op = GemmQ8Nt {
             pipeline,

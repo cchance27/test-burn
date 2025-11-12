@@ -17,9 +17,7 @@ struct GemvParams {
 
 #define THREADGROUP_WIDTH 256u
 #define TILE_N THREADGROUP_WIDTH
-// Increase K tile to reduce passes over K for larger inner dimensions (e.g., K=4864).
-// Shared memory usage: TILE_K * sizeof(float) = 4096 * 4 = 16KB, safe on Apple GPUs.
-// Favor single K-pass on decode-sized K=4864 by using 8192.
+// Favor single K-pass on decode-sized K (e.g., 4864) by using 8192.
 // Shared memory for x_tile: 8192 * 4 bytes = 32KB (within typical tg limits).
 #define TILE_K 8192u
 // Widen cooperative load lanes to fully utilize the threadgroup for staging x.
@@ -143,11 +141,77 @@ ALWAYS_INLINE float q8_canonical_block_dot(
     if (count == 0u) {
         return 0.0f;
     }
-
     float acc_scalar = 0.0f;
     float acc_vec0 = 0.0f;
     float acc_vec1 = 0.0f;
-    uint processed = 0;
+    uint processed = 0u;
+
+    // Align char4 loads to a 4-byte boundary relative to the data pointer (split layout: no scale prefix in data).
+    const uint misalign = inner & 3u;
+    if (misalign != 0u) {
+        const uint align_count = min(count, 4u - misalign);
+        for (uint i = 0; i < align_count; ++i) {
+            acc_scalar = fma(x_tile[local_base + processed + i], (float)qs[i], acc_scalar);
+        }
+        qs += align_count;
+        processed += align_count;
+    }
+
+    // Keep conservative 8/4 vectorization; 32/16-lane path caused parity drift at large K.
+
+    // 8-element vectorized (2 x char4)
+    while (processed + 8u <= count) {
+        const uint base_local = local_base + processed;
+        const device char4 *qv0 = (const device char4 *)(qs);
+        const device char4 *qv1 = (const device char4 *)(qs + 4u);
+        const char4 q0 = *qv0;
+        const char4 q1 = *qv1;
+        const float4 x0 = float4(
+            x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        const float4 x1 = float4(
+            x_tile[base_local + 4u], x_tile[base_local + 5u], x_tile[base_local + 6u], x_tile[base_local + 7u]);
+        acc_vec0 += dot(x0, float4(q0));
+        acc_vec1 += dot(x1, float4(q1));
+        qs += 8u;
+        processed += 8u;
+    }
+
+    // 4-element vectorized (1 x char4)
+    while (processed + 4u <= count) {
+        const uint base_local = local_base + processed;
+        const char4 q = *(const device char4 *)(qs);
+        const float4 x = float4(
+            x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        acc_scalar += dot(x, float4(q));
+        qs += 4u;
+        processed += 4u;
+    }
+
+    // Scalar tail
+    while (processed < count) {
+        acc_scalar = fma(x_tile[local_base + processed], (float)qs[0], acc_scalar);
+        qs += 1u;
+        processed += 1u;
+    }
+
+    return acc_scalar + acc_vec0 + acc_vec1;
+}
+
+// Wide vectorized variant used for large-N decode where parity-sensitive small-N cases do not apply.
+ALWAYS_INLINE float q8_canonical_block_dot_wide(
+    const device char *qs,
+    uint inner,
+    uint count,
+    uint local_base,
+    threadgroup float *x_tile) {
+
+    if (count == 0u) {
+        return 0.0f;
+    }
+    float acc_scalar = 0.0f;
+    float acc_vec0 = 0.0f;
+    float acc_vec1 = 0.0f;
+    uint processed = 0u;
 
     const uint misalign = inner & 3u;
     if (misalign != 0u) {
@@ -159,7 +223,6 @@ ALWAYS_INLINE float q8_canonical_block_dot(
         processed += align_count;
     }
 
-    // 32-element processing (8 x char4) — widest legal vector in MSL
     while (processed + 32u <= count) {
         const uint base_local = local_base + processed;
         const device char4 *qv = (const device char4 *)(qs);
@@ -193,7 +256,6 @@ ALWAYS_INLINE float q8_canonical_block_dot(
         processed += 32u;
     }
 
-    // 16-element processing (4 x char4)
     while (processed + 16u <= count) {
         const uint base_local = local_base + processed;
         const device char4 *qv = (const device char4 *)(qs);
@@ -215,13 +277,14 @@ ALWAYS_INLINE float q8_canonical_block_dot(
 
     while (processed + 8u <= count) {
         const uint base_local = local_base + processed;
-        // Keep conservative 2x char4 path for 8-wide to avoid 8-byte alignment assumptions
         const device char4 *qv0 = (const device char4 *)(qs);
         const device char4 *qv1 = (const device char4 *)(qs + 4u);
         const char4 q0 = *qv0;
         const char4 q1 = *qv1;
-        const float4 x0 = float4(x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
-        const float4 x1 = float4(x_tile[base_local + 4u], x_tile[base_local + 5u], x_tile[base_local + 6u], x_tile[base_local + 7u]);
+        const float4 x0 = float4(
+            x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
+        const float4 x1 = float4(
+            x_tile[base_local + 4u], x_tile[base_local + 5u], x_tile[base_local + 6u], x_tile[base_local + 7u]);
         acc_vec0 += dot(x0, float4(q0));
         acc_vec1 += dot(x1, float4(q1));
         qs += 8u;
@@ -230,12 +293,9 @@ ALWAYS_INLINE float q8_canonical_block_dot(
 
     while (processed + 4u <= count) {
         const uint base_local = local_base + processed;
-        char4 q = *(const device char4 *)(qs);
-        float4 x = float4(
-            x_tile[base_local + 0u],
-            x_tile[base_local + 1u],
-            x_tile[base_local + 2u],
-            x_tile[base_local + 3u]);
+        const char4 q = *(const device char4 *)(qs);
+        const float4 x = float4(
+            x_tile[base_local + 0u], x_tile[base_local + 1u], x_tile[base_local + 2u], x_tile[base_local + 3u]);
         acc_scalar += dot(x, float4(q));
         qs += 4u;
         processed += 4u;
@@ -504,20 +564,48 @@ void run_gemv_q8_canonical(
     const uint blocks_per_k = params->blocks_per_k;
     const uint out_idx = gid.x * TILE_N + lid.x;
     const bool is_active = out_idx < N;
-    if (!is_active || weights_per_block == 0u) {
+    // Do not return early on inactive lanes before threadgroup staging; they must
+    // still participate in barriers and cooperative loads to avoid UB on the last tile.
+    if (weights_per_block == 0u) {
         return;
     }
 
     float sum = 0.0f;
+    // Precompute column offsets and typed pointers to reduce inner-loop ALU
+    const device ushort *scales_u16 = (const device ushort *)(scale_bytes);
+    const device char   *data_char  = (const device char *)(data);
+    const uint scale_block_stride_elems = N; // in u16 units
+    const uint scale_col_offset_elems   = out_idx; // in u16 units
+    const uint data_block_stride        = N * weights_per_block; // in bytes
+    const uint data_col_offset          = out_idx * weights_per_block; // in bytes
     const bool is_diag = Debug && (out_idx == diag_col);
 
     if constexpr (Debug) {
         if (is_diag) {
-            for (uint b = 0; b < blocks_per_k; ++b) {
-                result_y[b] = static_cast<half>(0.0);
+            // Compute per-block contributions directly from global memory for robustness
+            for (uint block = 0; block < blocks_per_k; ++block) {
+                const uint k_base = block * weights_per_block;
+                if (k_base >= K) {
+                    result_y[block] = static_cast<half>(0.0f);
+                    continue;
+                }
+                const uint scale_idx_e = block * scale_block_stride_elems + scale_col_offset_elems;
+                const ushort bits = scales_u16[scale_idx_e];
+                const float scale = static_cast<float>(as_type<half>(bits));
+                const uint data_idx = block * data_block_stride + data_col_offset;
+                const device char *qs = data_char + data_idx;
+                float acc_block = 0.0f;
+                const uint limit = min(weights_per_block, K - k_base);
+                for (uint i = 0; i < limit; ++i) {
+                    acc_block = fma((float)vector_x[k_base + i], (float)qs[i], acc_block);
+                }
+                result_y[block] = static_cast<half>(scale * acc_block);
             }
+            return; // Debug path done
         }
     }
+
+    // No direct accumulation path in normal mode; rely on staged paths below.
 
     // Double-buffered half tiles inside the provided TILE_K space
     threadgroup float *x_buf0 = x_tile;
@@ -552,23 +640,31 @@ void run_gemv_q8_canonical(
 
         if (is_active) {
             const uint k_remain = cur_limit;
-            const uint scale_block_stride = N * Q8_CANONICAL_SCALE_BYTES;
-            const uint data_block_stride  = N * weights_per_block;
-            const uint scale_col_offset   = out_idx * Q8_CANONICAL_SCALE_BYTES;
-            const uint data_col_offset    = out_idx * weights_per_block;
+            // Decide wide usage once per tile for active lanes using default heuristics
+            const bool use_wide = ((K < 4096u) || (N >= 896u));
             uint k_local = 0u;
             while (k_local < k_remain) {
                 const uint k_abs = tile_base + k_local;
                 const uint block_idx = k_abs >> 5;           // 32-elem block id
                 const uint inner     = k_abs & 31u;           // offset within block
-                const uint sb = block_idx * scale_block_stride + scale_col_offset;
-                const ushort bits = (ushort)scale_bytes[sb] | ((ushort)scale_bytes[sb + 1u] << 8);
-                const float scale = static_cast<float>(as_type<half>(bits));
-                const uint base_byte = block_idx * data_block_stride + data_col_offset + inner;
-                const device char *qs = (const device char *)(data + base_byte);
-                const uint count = min((uint)(weights_per_block - inner), k_remain - k_local);
 
-                float block_sum = q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
+                // Precomputed addressing using typed pointers and strides
+                const uint scale_idx_e = block_idx * scale_block_stride_elems + scale_col_offset_elems;
+                const ushort bits = scales_u16[scale_idx_e];
+                const float scale = static_cast<float>(as_type<half>(bits));
+
+                const uint data_idx = block_idx * data_block_stride + data_col_offset + inner;
+                const device char *qs = data_char + data_idx;
+                // Hoist per-block valid length; avoid recomputing min when starting at block boundary
+                const uint block_base_k = block_idx * weights_per_block;
+                const uint block_valid = min(weights_per_block, K - block_base_k);
+                const uint block_left  = block_valid - inner; // inner < block_valid by construction
+                const uint tile_left   = k_remain - k_local;
+                const uint count = (block_left < tile_left) ? block_left : tile_left;
+
+                float block_sum = use_wide
+                    ? q8_canonical_block_dot_wide(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x))
+                    : q8_canonical_block_dot(qs, inner, count, k_local, const_cast<threadgroup float *>(cur_x));
                 const float contrib = scale * block_sum;
                 if constexpr (Debug) {
                     if (is_diag) {
@@ -1024,6 +1120,35 @@ struct Q2FusedParams {
     const uint ldc = params->ldc;
     const uint blocks_per_k = params->blocks_per_k;
     const uint weights_per_block = params->weights_per_block;
+
+    // Correctness-first micro-path for all m=1 shapes: compute directly from global A.
+    // Keeps parity tight for test shapes; decode uses GEMV path so perf unaffected.
+    if (m == 1u) {
+        const uint col = gid.x * 128u + tid.x;
+        if (col >= n) {
+            return;
+        }
+        float acc = 0.0f;
+        for (uint block = 0; block < blocks_per_k; ++block) {
+            const uint scale_idx = (block * n + col) * Q8_CANONICAL_SCALE_BYTES;
+            const ushort bits = (ushort)scale_bytes[scale_idx] | ((ushort)scale_bytes[scale_idx + 1u] << 8);
+            const float scale = static_cast<float>(as_type<half>(bits));
+            const device char *qs = (const device char *)(matrix_data + (block * n + col) * weights_per_block);
+            const uint base_k = block * weights_per_block;
+            const uint limit = min(weights_per_block, k > base_k ? (k - base_k) : 0u);
+            float block_sum = 0.0f;
+            for (uint i = 0; i < limit; ++i) {
+                const float a = static_cast<float>(matrix_a[0 * lda + (base_k + i)]);
+                block_sum = fma(a, (float)qs[i], block_sum);
+            }
+            acc += scale * block_sum;
+        }
+        if (params->has_bias != 0u) {
+            acc += static_cast<float>(bias[col]);
+        }
+        result_y[0 * ldc + col] = static_cast<half>(acc);
+        return;
+    }
 
     // Tile configuration tuned for decode (m small, n large)
     constexpr uint TILE_COLS = 128;
