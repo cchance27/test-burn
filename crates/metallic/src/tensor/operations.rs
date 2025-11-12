@@ -61,7 +61,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
         let permute_u32: Vec<u32> = permute.iter().map(|&x| x as u32).collect();
 
         use crate::kernels::permute::PermuteOp;
-        ctx.call::<PermuteOp>((self.clone(), permute_u32))
+        ctx.call::<PermuteOp>((self.clone(), permute_u32), None)
     }
 
     /// Element-wise add, returns a new tensor on the same device.
@@ -74,7 +74,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
             });
         }
 
-        ctx.call::<ElemwiseAddOp>((self.clone(), other.clone()))
+        ctx.call::<ElemwiseAddOp>((self.clone(), other.clone()), None)
     }
 
     /// Element-wise sub, returns a new tensor on the same device.
@@ -87,7 +87,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
             });
         }
 
-        ctx.call::<ElemwiseSubOp>((self.clone(), other.clone()))
+        ctx.call::<ElemwiseSubOp>((self.clone(), other.clone()), None)
     }
 
     /// Element-wise mul, returns a new tensor on the same device.
@@ -100,7 +100,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
             });
         }
 
-        ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()))
+        ctx.call::<ElemwiseMulOp>((self.clone(), other.clone()), None)
     }
 
     #[inline]
@@ -112,7 +112,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
             });
         }
 
-        ctx.call::<ElemwiseDivOp>((self.clone(), other.clone()))
+        ctx.call::<ElemwiseDivOp>((self.clone(), other.clone()), None)
     }
 
     /// Element-wise scalar add.
@@ -184,7 +184,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
     /// Element-wise absolute value
     pub fn abs(&self, ctx: &mut super::Context<T>) -> Result<Self, crate::MetalError> {
         use crate::kernels::elemwise_abs::ElemwiseAbsOp;
-        ctx.call::<ElemwiseAbsOp>((self.clone(),))
+        ctx.call::<ElemwiseAbsOp>((self.clone(),), None)
     }
 
     /// Find the maximum scalar value in the tensor

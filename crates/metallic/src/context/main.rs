@@ -202,6 +202,7 @@ impl<T: TensorElement> Context<T> {
         self.backend_registry.set_global_override(override_policy);
     }
 
+    #[inline]
     pub fn set_sdpa_backend_override(&mut self, override_policy: KernelBackendOverride) {
         self.backend_registry.set_sdpa_override(override_policy);
     }
@@ -227,6 +228,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     /// Allocate a U32 tensor from the pool
+    #[inline]
     pub fn alloc_u32_tensor(&mut self, dims: Vec<usize>) -> Result<crate::tensor::Tensor<crate::tensor::U32>, MetalError> {
         let pooled_alloc = self.pool.alloc_tensor::<crate::tensor::U32>(dims)?;
         Ok(pooled_alloc.into_tensor())
@@ -247,6 +249,7 @@ impl<T: TensorElement> Context<T> {
         crate::profiling_state::set_profiling_state(true);
     }
 
+    #[inline]
     pub(crate) fn ensure_active_cmd_buffer(&mut self) -> Result<(), MetalError> {
         self.ensure_active_cmd_buffer_internal(true)
     }
@@ -279,6 +282,7 @@ impl<T: TensorElement> Context<T> {
         Ok(())
     }
 
+    #[inline]
     pub(crate) fn wait_for_command_buffer(
         &mut self,
         command_buffer: CommandBuffer,
@@ -287,6 +291,7 @@ impl<T: TensorElement> Context<T> {
         command_buffer_pipeline::wait_with_pipeline(&self.command_queue, &command_buffer, label)
     }
 
+    #[inline]
     pub(crate) fn active_command_buffer_mut(&mut self) -> Result<&mut crate::operation::CommandBuffer, MetalError> {
         self.ensure_active_cmd_buffer()?;
         Ok(self.active_cmd_buffer.as_mut().expect("active command buffer must exist"))
@@ -307,215 +312,205 @@ impl<T: TensorElement> Context<T> {
             tensor.defining_cmd_buffer.borrow_mut().replace(active.clone());
         }
     }
-
-    pub(crate) fn call_with_cache<K: crate::kernels::DefaultKernelInvocable>(
+    pub fn call<K: DefaultKernelInvocable>(
         &mut self,
         args: K::Args<'_, T>,
-        cache: &mut crate::caching::ResourceCache,
+        cache: Option<&mut crate::caching::ResourceCache>,
     ) -> Result<Tensor<T>, MetalError> {
-        // Get the current scope path to potentially nest with the kernel being called
-        let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
-            Some(current_label.op_name)
-        } else {
-            None
-        };
-
-        // Add operation name to current scope if we're already in a scope, creating nested path
-        // Use the full type name in hot path - formatting to extract op name can be done in frontend
+        // 1) Scope nesting (same as before)
         let op_type_name = std::any::type_name::<K>();
+        self.push_kernel_scope(op_type_name);
 
-        if let Some(mut current_path) = current_scope_path {
-            // Append operation name to current scope path to create nested structure
-            current_path.push('/');
-            current_path.push_str(op_type_name);
-            self.set_pending_gpu_scope(current_path);
+        // 2) Ensure command buffer (respect external cache bypass)
+        if cache.is_some() {
+            self.ensure_active_cmd_buffer_internal(false)?;
         } else {
-            // If not in any scope, just set the operation name as pending
-            self.set_pending_gpu_scope(op_type_name);
+            self.ensure_active_cmd_buffer()?;
         }
 
-        self.ensure_active_cmd_buffer_internal(false)?;
-
+        // 3) Pipeline selection
         let pipeline = if let Some(kernel_func) = K::function_id() {
             Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
             None
         };
 
-        let (operation, output) = K::new(self, args, pipeline, Some(cache))?;
+        // 4) Cache selection and kernel build
+        let using_internal = cache.is_none();
+        let mut ext = cache;
+        let mut internal_cache_opt = if using_internal {
+            Some(
+                self.active_resource_cache
+                    .take()
+                    .expect("active resource cache must be initialized"),
+            )
+        } else {
+            None
+        };
 
-        let command_buffer = self.active_command_buffer_mut_without_cache()?;
-        command_buffer.record(&*operation, cache)?;
-        // Consume any pending GPU scope that was set for this call, since operations
-        // may not always consume them (especially when nested scopes are created by call() itself)
+        let (operation, output) = if using_internal {
+            let cache_ref = internal_cache_opt.as_mut().expect("internal cache must exist");
+            K::new(self, args, pipeline, Some(cache_ref))?
+        } else {
+            let cache_ref = ext
+                .as_deref_mut()
+                .expect("external cache reference must exist when using_internal=false");
+            K::new(self, args, pipeline, Some(cache_ref))?
+        };
+
+        // 5) Handle command-buffer rollover for internal cache
+        if using_internal && self.active_cmd_buffer.as_ref().map(|cb| cb.is_committed()).unwrap_or(false) {
+            self.ensure_active_cmd_buffer()?;
+            internal_cache_opt = Some(
+                self.active_resource_cache
+                    .take()
+                    .expect("active resource cache must be initialized after refresh"),
+            );
+        }
+
+        // 6) Ensure a command buffer exists for recording if none is active
+        if self.active_cmd_buffer.is_none() {
+            // Do not force-create a cache here; only a command buffer
+            self.ensure_active_cmd_buffer_internal(false)?;
+        }
+
+        // 7) Record operation
+        let command_buffer = if using_internal {
+            // internal cache still recorded on active command buffer, but when external cache is used,
+            // we bypass the context's cache acquisition
+            self.active_cmd_buffer.as_mut().expect("active command buffer must exist")
+        } else {
+            self.active_command_buffer_mut_without_cache()?
+        };
+        if using_internal {
+            let cache_ref = internal_cache_opt.as_mut().expect("internal cache must exist");
+            command_buffer.record(&*operation, cache_ref)?;
+        } else {
+            let cache_ref = ext
+                .as_deref_mut()
+                .expect("external cache reference must exist when using_internal=false");
+            command_buffer.record(&*operation, cache_ref)?;
+        }
+
+        // 8) Cleanup and mark outputs
         let _profiler_label = self.take_gpu_scope();
-
         debug_assert!(
             self.pending_gpu_scope.is_none(),
             "pending GPU scope should be consumed by kernel operation or by us"
         );
+
+        if using_internal {
+            self.active_resource_cache = internal_cache_opt;
+        }
+
         self.mark_tensor_pending(&output);
-
         self.finalize_active_command_buffer_if_latency();
-
         Ok(output)
     }
 
     pub fn call_custom<K: CustomKernelInvocable>(
         &mut self,
         args: K::Args<'_, T>,
+        cache: Option<&mut crate::caching::ResourceCache>,
     ) -> Result<<K::OutputTuple<T> as MultiTensorOutput<T>>::Tensors, MetalError>
     where
         K::OutputTuple<T>: MultiTensorOutput<T>,
     {
-        // Get the current scope path to potentially nest with the kernel being called
-        let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
-            Some(current_label.op_name)
+        // 1) Scope nesting
+        let op_type_name = std::any::type_name::<K>();
+        self.push_kernel_scope(op_type_name);
+        
+        // 2) Ensure command buffer
+        if cache.is_some() {
+            self.ensure_active_cmd_buffer_internal(false)?;
+        } else {
+            self.ensure_active_cmd_buffer()?;
+        }
+
+        // 3) Pipeline selection
+        let pipeline = if let Some(kernel_func) = K::function_id() {
+            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
         } else {
             None
         };
 
-        // Add operation name to current scope if we're already in a scope, creating nested path
-        // Use the full type name in hot path - formatting to extract op name can be done in frontend
-        let op_type_name = std::any::type_name::<K>();
-
-        if let Some(mut current_path) = current_scope_path {
-            // Append operation name to current scope path to create nested structure
-            current_path.push('/');
-            current_path.push_str(op_type_name);
-            self.set_pending_gpu_scope(current_path);
+        // 4) Cache selection and kernel build
+        let using_internal = cache.is_none();
+        let mut ext = cache;
+        let mut internal_cache_opt = if using_internal {
+            Some(
+                self.active_resource_cache
+                    .take()
+                    .expect("active resource cache must be initialized"),
+            )
         } else {
-            // If not in any scope, just set the operation name as pending
-            self.set_pending_gpu_scope(op_type_name);
-        }
-
-        self.ensure_active_cmd_buffer()?;
-
-        let pipeline = if let Some(kernel_func) = K::function_id() {
-            // Use the input tensor dtype (T) for pipeline selection
-            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
+            None
+        };
+        let (operation, output) = if using_internal {
+            let cache_ref = internal_cache_opt.as_mut().expect("internal cache must exist");
+            K::new(self, args, pipeline, Some(cache_ref))?
         } else {
-            None // For operations that don't need a pipeline
+            let cache_ref = ext
+                .as_deref_mut()
+                .expect("external cache reference must exist when using_internal=false");
+            K::new(self, args, pipeline, Some(cache_ref))?
         };
 
-        let mut cache = self
-            .active_resource_cache
-            .take()
-            .expect("active resource cache must be initialized");
-
-        let (operation, output) = K::new(self, args, pipeline, Some(&mut cache))?;
-
-        if self.active_cmd_buffer.as_ref().map(|cb| cb.is_committed()).unwrap_or(false) {
-            drop(cache);
+        // 5) Handle rollover for internal cache
+        if using_internal && self.active_cmd_buffer.as_ref().map(|cb| cb.is_committed()).unwrap_or(false) {
             self.ensure_active_cmd_buffer()?;
-            cache = self
-                .active_resource_cache
-                .take()
-                .expect("active resource cache must be initialized after refresh");
+            internal_cache_opt = Some(
+                self.active_resource_cache
+                    .take()
+                    .expect("active resource cache must be initialized after refresh"),
+            );
         }
 
+        // 6) Ensure a command buffer exists for recording if none is active
         if self.active_cmd_buffer.is_none() {
-            // `K::new` may materialize resources that require a fresh command buffer,
-            // so ensure one is available without reinitializing the resource cache we
-            // already pulled above.
             self.ensure_active_cmd_buffer_internal(false)?;
         }
 
-        let command_buffer = self.active_cmd_buffer.as_mut().expect("active command buffer must exist");
+        // 7) Record
+        let command_buffer = if using_internal {
+            self.active_cmd_buffer.as_mut().expect("active command buffer must exist")
+        } else {
+            self.active_command_buffer_mut_without_cache()?
+        };
+        if using_internal {
+            let cache_ref = internal_cache_opt.as_mut().expect("internal cache must exist");
+            command_buffer.record(&*operation, cache_ref)?;
+        } else {
+            let cache_ref = ext
+                .as_deref_mut()
+                .expect("external cache reference must exist when using_internal=false");
+            command_buffer.record(&*operation, cache_ref)?;
+        }
 
-        command_buffer.record(&*operation, &mut cache)?;
-
-        // Consume any pending GPU scope that was set for this call, since operations
-        // may not always consume them (especially when nested scopes are created by call() itself)
+        // 8) Cleanup and mark outputs
         let _profiler_label = self.take_gpu_scope();
-
         debug_assert!(
             self.pending_gpu_scope.is_none(),
             "pending GPU scope should be consumed by kernel operation or by us"
         );
 
-        self.active_resource_cache = Some(cache);
+        if using_internal {
+            self.active_resource_cache = internal_cache_opt;
+        }
 
-        // Mark all output tensors as pending
         <K::OutputTuple<T> as MultiTensorOutput<T>>::mark_pending(self, &output);
-
         self.finalize_active_command_buffer_if_latency();
-
         Ok(output)
     }
 
-    pub fn call<K: DefaultKernelInvocable>(&mut self, args: K::Args<'_, T>) -> Result<Tensor<T>, MetalError> {
-        // Get the current scope path to potentially nest with the kernel being called
-        let current_scope_path = if let Some(current_label) = self.current_gpu_scope_label() {
-            Some(current_label.op_name)
-        } else {
-            None
-        };
-
-        // Add operation name to current scope if we're already in a scope, creating nested path
-        // Use the full type name in hot path - formatting to extract op name can be done in frontend
-        let op_type_name = std::any::type_name::<K>();
-
+    fn push_kernel_scope(&mut self, op_type_name: &'static str) {
+        let current_scope_path = self.current_gpu_scope_label().map(|label| label.op_name);
         if let Some(mut current_path) = current_scope_path {
-            // Append operation name to current scope path to create nested structure
             current_path.push('/');
             current_path.push_str(op_type_name);
             self.set_pending_gpu_scope(current_path);
         } else {
-            // If not in any scope, just set the operation name as pending
             self.set_pending_gpu_scope(op_type_name);
         }
-
-        self.ensure_active_cmd_buffer()?;
-
-        let pipeline = if let Some(kernel_func) = K::function_id() {
-            Some(self.kernel_manager.get_pipeline(kernel_func, T::DTYPE, &self.device)?)
-        } else {
-            None // For MPS operations that don't need a pipeline
-        };
-
-        let mut cache = self
-            .active_resource_cache
-            .take()
-            .expect("active resource cache must be initialized");
-
-        let (operation, output) = K::new(self, args, pipeline, Some(&mut cache))?;
-
-        if self.active_cmd_buffer.as_ref().map(|cb| cb.is_committed()).unwrap_or(false) {
-            drop(cache);
-            self.ensure_active_cmd_buffer()?;
-            cache = self
-                .active_resource_cache
-                .take()
-                .expect("active resource cache must be initialized after refresh");
-        }
-
-        if self.active_cmd_buffer.is_none() {
-            // `K::new` may materialize resources that require a fresh command buffer,
-            // so ensure one is available without reinitializing the resource cache we
-            // already pulled above.
-            self.ensure_active_cmd_buffer_internal(false)?;
-        }
-
-        let command_buffer = self.active_cmd_buffer.as_mut().expect("active command buffer must exist");
-
-        command_buffer.record(&*operation, &mut cache)?;
-
-        // Consume any pending GPU scope that was set for this call, since operations
-        // may not always consume them (especially when nested scopes are created by call() itself)
-        let _profiler_label = self.take_gpu_scope();
-
-        debug_assert!(
-            self.pending_gpu_scope.is_none(),
-            "pending GPU scope should be consumed by kernel operation or by us"
-        );
-
-        self.active_resource_cache = Some(cache);
-
-        self.mark_tensor_pending(&output);
-
-        self.finalize_active_command_buffer_if_latency();
-
-        Ok(output)
     }
 }

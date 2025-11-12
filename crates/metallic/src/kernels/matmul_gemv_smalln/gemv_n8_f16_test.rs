@@ -39,7 +39,7 @@ fn test_matmul_gemv_small_n8_correctness() -> Result<()> {
     let a = Tensor::new(vec![m, k], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&a_data))?;
     let b = Tensor::new(vec![k, n], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&b_data))?;
 
-    let out = ctx.call::<MatmulGemvSmallN8Op>((&a, &b))?;
+    let out = ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None)?;
     ctx.synchronize();
 
     let expected_c = matmul_cpu(&a_data, &b_data, m, k, n);

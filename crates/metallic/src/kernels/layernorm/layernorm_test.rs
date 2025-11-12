@@ -64,7 +64,7 @@ fn test_layernorm_basic() -> Result<(), MetalError> {
     let gamma_tensor = Tensor::new(vec![feature_dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&gamma_data))?;
     let beta_tensor = Tensor::new(vec![feature_dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&beta_data))?;
 
-    let output_tensor = context.call::<LayerNormOp>((input_tensor, gamma_tensor, beta_tensor, feature_dim as u32))?;
+    let output_tensor = context.call::<LayerNormOp>((input_tensor, gamma_tensor, beta_tensor, feature_dim as u32), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -113,7 +113,7 @@ fn test_layernorm_identity_transform() -> Result<(), MetalError> {
     let gamma_tensor = Tensor::new(vec![feature_dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&gamma_data))?;
     let beta_tensor = Tensor::new(vec![feature_dim], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&beta_data))?;
 
-    let output_tensor = context.call::<LayerNormOp>((input_tensor, gamma_tensor, beta_tensor, feature_dim as u32))?;
+    let output_tensor = context.call::<LayerNormOp>((input_tensor, gamma_tensor, beta_tensor, feature_dim as u32), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -156,16 +156,16 @@ fn test_layernorm_validation_errors() {
     let beta = Tensor::new(vec![4], TensorStorage::Dedicated(&context), TensorInit::Uninitialized).unwrap();
 
     // Test mismatched feature dimension
-    let result = context.call::<LayerNormOp>((input.clone(), gamma.clone(), beta.clone(), 5)); // Wrong feature dimension
+    let result = context.call::<LayerNormOp>((input.clone(), gamma.clone(), beta.clone(), 5), None); // Wrong feature dimension
     assert!(result.is_err());
 
     // Test mismatched gamma shape
     let wrong_gamma = Tensor::new(vec![3], TensorStorage::Dedicated(&context), TensorInit::Uninitialized).unwrap();
-    let result = context.call::<LayerNormOp>((input.clone(), wrong_gamma, beta.clone(), 4));
+    let result = context.call::<LayerNormOp>((input.clone(), wrong_gamma, beta.clone(), 4), None);
     assert!(result.is_err());
 
     // Test mismatched input feature dimension
     let wrong_input = Tensor::new(vec![2, 2, 5], TensorStorage::Dedicated(&context), TensorInit::Uninitialized).unwrap();
-    let result = context.call::<LayerNormOp>((wrong_input, gamma.clone(), beta.clone(), 4));
+    let result = context.call::<LayerNormOp>((wrong_input, gamma.clone(), beta.clone(), 4), None);
     assert!(result.is_err());
 }

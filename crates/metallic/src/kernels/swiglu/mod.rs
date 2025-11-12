@@ -273,6 +273,8 @@ fn execute_swiglu_logic<T: TensorElement>(
             &TensorType::Dense(fused_weight),
             false,
             fused_transpose_b,
+            None,
+            None,
             cache_for_fused,
         )?;
 
@@ -301,7 +303,15 @@ fn execute_swiglu_logic<T: TensorElement>(
         // Prefer quant gate if present on the block via opaque tensor handle attached to up tensor's user data.
         // DEBT: a cleaner API would thread an explicit Option<QuantizedQ8_0Tensor> here.
         let cache_for_gate = cache.as_mut().map(|c| &mut **c);
-        let gate_temp = ctx.matmul(x_normed_flat, &TensorType::Dense(ffn_gate), false, gate_transpose_b, cache_for_gate)?;
+        let gate_temp = ctx.matmul(
+            x_normed_flat,
+            &TensorType::Dense(ffn_gate),
+            false,
+            gate_transpose_b,
+            None,
+            None,
+            cache_for_gate,
+        )?;
 
         // up_proj: [m, d_model] @ weight -> [m, ff_dim]
         ctx.prepare_tensors_for_active_cmd(&[ffn_up])?;
@@ -317,7 +327,15 @@ fn execute_swiglu_logic<T: TensorElement>(
             });
         };
         let cache_for_up = cache.as_mut().map(|c| &mut **c);
-        let up_temp = ctx.matmul(x_normed_flat, &TensorType::Dense(ffn_up), false, up_transpose_b, cache_for_up)?;
+        let up_temp = ctx.matmul(
+            x_normed_flat,
+            &TensorType::Dense(ffn_up),
+            false,
+            up_transpose_b,
+            None,
+            None,
+            cache_for_up,
+        )?;
         let gate_stride = leading_stride_as_u32(&gate_temp)?;
         let up_stride = leading_stride_as_u32(&up_temp)?;
 
@@ -325,27 +343,17 @@ fn execute_swiglu_logic<T: TensorElement>(
     };
 
     // Fuse bias additions, SiLU, and elementwise multiply
-    let hidden = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<SwiGLUFusedActivationOp>(
-            (
-                gate_temp,
-                ffn_gate_bias.clone(),
-                up_temp,
-                ffn_up_bias.clone(),
-                gate_leading_stride,
-                up_leading_stride,
-            ),
-            cache,
-        )?,
-        None => ctx.call::<SwiGLUFusedActivationOp>((
+    let hidden = ctx.call::<SwiGLUFusedActivationOp>(
+        (
             gate_temp,
             ffn_gate_bias.clone(),
             up_temp,
             ffn_up_bias.clone(),
             gate_leading_stride,
             up_leading_stride,
-        ))?,
-    };
+        ),
+        cache.as_deref_mut(),
+    )?;
 
     // down_proj: [m, ff_dim] @ [ff_dim, d_model] -> [m, d_model]
     let hidden_cols = hidden.dims()[1];
@@ -354,11 +362,11 @@ fn execute_swiglu_logic<T: TensorElement>(
     let ffn_temp = if hidden_cols == ffn_down_rows {
         // Hidden [m, ff_dim] @ ffn_down [ff_dim, d_model] -> [m, d_model]
         let cache_for_down = cache.as_mut().map(|c| &mut **c);
-        ctx.matmul(&hidden, &TensorType::Dense(ffn_down), false, false, cache_for_down)?
+        ctx.matmul(&hidden, &TensorType::Dense(ffn_down), false, false, None, None, cache_for_down)?
     } else if hidden_cols == ffn_down_cols {
         // Hidden [m, ff_dim] @ ffn_down^T [ff_dim, d_model] where stored as [d_model, ff_dim]
         let cache_for_down_t = cache.as_mut().map(|c| &mut **c);
-        ctx.matmul(&hidden, &TensorType::Dense(ffn_down), false, true, cache_for_down_t)?
+        ctx.matmul(&hidden, &TensorType::Dense(ffn_down), false, true, None, None, cache_for_down_t)?
     } else {
         return Err(MetalError::DimensionMismatch {
             expected: hidden_cols,
@@ -367,10 +375,7 @@ fn execute_swiglu_logic<T: TensorElement>(
     };
 
     // Add down bias to final projection output
-    let ffn_out = match cache.as_mut() {
-        Some(cache) => ctx.call_with_cache::<BroadcastElemwiseAddInplaceOp>((ffn_temp, ffn_down_bias.clone()), cache)?,
-        None => ctx.call::<BroadcastElemwiseAddInplaceOp>((ffn_temp, ffn_down_bias.clone()))?,
-    };
+    let ffn_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((ffn_temp, ffn_down_bias.clone()), cache.as_deref_mut())?;
 
     Ok(ffn_out)
 }

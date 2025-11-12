@@ -9,7 +9,7 @@ fn test_permute_2d_transpose() -> Result<(), crate::MetalError> {
 
     // Permute dimensions [1, 0] to transpose: [[1, 4], [2, 5], [3, 6]]
     let permute_indices = vec![1, 0];
-    let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
+    let result_tensor = ctx.call::<PermuteOp>((src, permute_indices), None)?;
 
     // Expected result: [1, 4, 2, 5, 3, 6] (row-major order after transpose)
     let result = result_tensor.as_slice();
@@ -26,7 +26,7 @@ fn test_permute_3d() -> Result<(), crate::MetalError> {
 
     // Permute dimensions [2, 0, 1]
     let permute_indices = vec![2, 0, 1];
-    let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
+    let result_tensor = ctx.call::<PermuteOp>((src, permute_indices), None)?;
 
     // The result should have shape [2, 2, 2] but with dimensions permuted
     assert_eq!(result_tensor.dims(), &[2, 2, 2]);
@@ -42,7 +42,7 @@ fn test_permute_identity() -> Result<(), crate::MetalError> {
 
     // Permute with identity: [0, 1] - should be unchanged
     let permute_indices = vec![0, 1];
-    let result_tensor = ctx.call::<PermuteOp>((src, permute_indices))?;
+    let result_tensor = ctx.call::<PermuteOp>((src, permute_indices), None)?;
 
     let result = result_tensor.as_slice();
     assert_eq!(result, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);

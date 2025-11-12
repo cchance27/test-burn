@@ -44,12 +44,12 @@ fn mlx_gate_projection_matches_mps_baseline() -> Result<(), MetalError> {
     let bias = make_tensor(&mut ctx, vec![N], deterministic_f16(N, 13))?;
 
     // MLX path (transpose_right=true so we treat W as (K, N))
-    let mlx_out = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&w), None, None, false, true, 1.0, 0.0))?;
-    let mlx_out = ctx.call::<BroadcastElemwiseAddOp>((mlx_out, bias.clone()))?;
+    let mlx_out = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&w), None, None, false, true, 1.0, 0.0), None)?;
+    let mlx_out = ctx.call::<BroadcastElemwiseAddOp>((mlx_out, bias.clone()), None)?;
 
     // Legacy baseline: MPS matmul + bias add
-    let mps_out = ctx.call::<MatMulMpsOp>((&x, &w, false, true))?;
-    let mps_out = ctx.call::<BroadcastElemwiseAddOp>((mps_out, bias))?;
+    let mps_out = ctx.call::<MatMulMpsOp>((&x, &w, false, true), None)?;
+    let mps_out = ctx.call::<BroadcastElemwiseAddOp>((mps_out, bias), None)?;
 
     ctx.synchronize();
 
@@ -72,8 +72,8 @@ fn small_n8_gemv_matches_generic_gemv() -> Result<(), MetalError> {
     let a = make_tensor(&mut ctx, vec![M, K], deterministic_f16(M * K, 23))?;
     let b = make_tensor(&mut ctx, vec![K, N], deterministic_f16(K * N, 31))?;
 
-    let small_n = ctx.call::<MatmulGemvSmallN8Op>((&a, &b))?;
-    let generic = ctx.call::<MatmulGemvOp>((&a, TensorType::Dense(&b), None))?;
+    let small_n = ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None)?;
+    let generic = ctx.call::<MatmulGemvOp>((&a, TensorType::Dense(&b), None), None)?;
     ctx.synchronize();
 
     let diff = max_abs_diff(&small_n, &generic);
@@ -101,8 +101,11 @@ fn mlx_attention_oproj_matches_mps_baseline() -> Result<(), MetalError> {
     // Flatten input to [seq, d_model] to match how the model uses it.
     let attn_flat = attn_heads.reshape(vec![SEQ, D_MODEL])?;
 
-    let mlx_proj = ctx.call::<MatMulMlxOp>((&attn_flat, TensorType::Dense(&attn_weight), None, None, false, true, 1.0, 0.0))?;
-    let mps_proj = ctx.call::<MatMulMpsOp>((&attn_flat, &attn_weight, false, true))?;
+    let mlx_proj = ctx.call::<MatMulMlxOp>(
+        (&attn_flat, TensorType::Dense(&attn_weight), None, None, false, true, 1.0, 0.0),
+        None,
+    )?;
+    let mps_proj = ctx.call::<MatMulMpsOp>((&attn_flat, &attn_weight, false, true), None)?;
 
     ctx.synchronize();
 

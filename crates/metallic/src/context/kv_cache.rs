@@ -441,13 +441,10 @@ impl<T: TensorElement> Context<T> {
             }
         }
 
-        match self.call::<crate::kernels::kv_cache_write::KvCacheWriteOp>((
-            k_src.clone(),
-            v_src.clone(),
-            k_cache.clone(),
-            v_cache.clone(),
-            config.clone(),
-        )) {
+        match self.call::<crate::kernels::kv_cache_write::KvCacheWriteOp>(
+            (k_src.clone(), v_src.clone(), k_cache.clone(), v_cache.clone(), config.clone()),
+            None,
+        ) {
             Ok(_) => {
                 metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuKernelDispatched {
                     kernel_name: "kv_cache_write".to_string(),

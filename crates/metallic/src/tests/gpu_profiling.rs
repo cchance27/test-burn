@@ -8,7 +8,7 @@ use objc2_metal::{MTLCreateSystemDefaultDevice, MTLDevice as _, MTLResourceOptio
 use tracing::subscriber;
 
 use crate::{
-    caching::ResourceCache, context::Context, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, TestBlitZeroFill}, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage, TensorType}
+    caching::ResourceCache, context::{Context, MatmulAlphaBeta}, kernels::elemwise_add::ElemwiseAddOp, operation::{CommandBuffer, TestBlitZeroFill}, tensor::{Dtype, F32Element, Tensor, TensorInit, TensorStorage, TensorType}
 };
 
 // Maintainers: run this test on Apple Silicon hardware before releasing.
@@ -116,7 +116,7 @@ fn context_call_attaches_gpu_profiler() {
         }
 
         ctx.with_gpu_scope("elemwise_add_op", |ctx| {
-            let out = ctx.call::<ElemwiseAddOp>((a.clone(), b.clone())).expect("elemwise add call");
+            let out = ctx.call::<ElemwiseAddOp>((a.clone(), b.clone()), None).expect("elemwise add call");
             ctx.synchronize();
             out
         });
@@ -176,7 +176,19 @@ fn matmul_mps_emits_gpu_event() {
 
         ctx.with_gpu_scope("matmul_test_scope", |ctx| {
             let result = ctx
-                .matmul_alpha_beta(&a, &TensorType::Dense(&b), &out, false, false, 1.0, 0.0, None)
+                .matmul(
+                    &a,
+                    &TensorType::Dense(&b),
+                    false,
+                    false,
+                    None,
+                    Some(MatmulAlphaBeta {
+                        output: &out,
+                        alpha: 1.0,
+                        beta: 0.0,
+                    }),
+                    None,
+                )
                 .expect("matmul call");
             ctx.synchronize();
             result

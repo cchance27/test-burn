@@ -6,7 +6,7 @@ use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice as _};
 
 use crate::{
-    Context, MetalError, Tensor, TensorElement, context::RepeatKvWorkspaceKind, kernels::{
+    Context, MetalError, Tensor, TensorElement, context::{MatmulAlphaBeta, QkvWeights, RepeatKvWorkspaceKind}, kernels::{
         backend_registry::KernelBackendKind, embedding_lookup::EmbeddingLookupOp, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::{SwiGLUFusedActivationOp, SwiGLUOp}
     }, tensor::{QuantizedTensor, TensorType}
 };
@@ -53,7 +53,7 @@ impl<T: TensorElement> Qwen25<T> {
         bias: Tensor<T>,
     ) -> Result<Tensor<T>, MetalError> {
         let slice = weight.slice_last_dim(range)?;
-        ctx.matmul_bias_add(x_flat, &TensorType::Dense(&slice), &bias, false, false, None)
+        ctx.matmul(x_flat, &TensorType::Dense(&slice), false, false, Some(&bias), None, None)
     }
 
     fn project_quant(
@@ -62,7 +62,15 @@ impl<T: TensorElement> Qwen25<T> {
         tensor: &crate::tensor::QuantizedQ8_0Tensor,
         bias: Tensor<T>,
     ) -> Result<Tensor<T>, MetalError> {
-        ctx.matmul_bias_add(x_flat, &TensorType::Quant(QuantizedTensor::Q8_0(tensor)), &bias, false, false, None)
+        ctx.matmul(
+            x_flat,
+            &TensorType::Quant(QuantizedTensor::Q8_0(tensor)),
+            false,
+            false,
+            Some(&bias),
+            None,
+            None,
+        )
     }
 
     /// Embed tokens into d_model dimensional vectors
@@ -91,7 +99,7 @@ impl<T: TensorElement> Qwen25<T> {
         }
 
         // Call GPU embedding lookup to produce [batch, seq, d_model] directly on device.
-        let out = ctx.call::<EmbeddingLookupOp>((&self.embed_weight, &indices))?;
+        let out = ctx.call::<EmbeddingLookupOp>((&self.embed_weight, &indices), None)?;
 
         // Ensure expected shape
         debug_assert_eq!(out.dims(), &[batch, seq, self.config.d_model]);
@@ -124,7 +132,7 @@ impl<T: TensorElement> Qwen25<T> {
 
         // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
         // Use dense for correctness; logits Q8 is disabled for this model since GGUF stores F32 here.
-        let logits_flat = ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None)?;
+        let logits_flat = ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None, None, None)?;
 
         // Synchronize to ensure matmul is complete before reading values
 
@@ -210,13 +218,21 @@ impl<T: TensorElement> Qwen25<T> {
             let resid_attn = x.clone();
 
             // RMSNorm before Attention
-            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
+            let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
 
             // QKV GEMMs
             let m = batch * seq;
             let kv_dim = block.kv_dim;
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
-            let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
+            let (q_mat, k_mat, v_mat) = ctx.qkv(
+                &x_flat,
+                QkvWeights::Dense {
+                    fused_weight: &block.attn_qkv_weight,
+                    fused_bias: &block.attn_qkv_bias,
+                    d_model,
+                    kv_dim,
+                },
+            )?;
 
             // Defer RoPE until after head rearrangement
             let (q_after, k_after) = (q_mat.clone(), k_mat.clone());
@@ -226,51 +242,66 @@ impl<T: TensorElement> Qwen25<T> {
             let head_dim = d_model / n_heads;
             let kv_head_dim = kv_dim / n_kv_heads;
 
-            let q_heads = ctx.call::<KvRearrangeOp>((
-                q_after,
-                d_model as u32,
-                head_dim as u32,
-                n_heads as u32,
-                n_heads as u32,
-                head_dim as u32,
-                seq as u32,
-            ))?;
-            let k_heads = ctx.call::<KvRearrangeOp>((
-                k_after,
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-            ))?;
-            let v_heads = ctx.call::<KvRearrangeOp>((
-                v_mat,
-                kv_dim as u32,
-                kv_head_dim as u32,
-                n_kv_heads as u32,
-                n_kv_heads as u32,
-                kv_head_dim as u32,
-                seq as u32,
-            ))?;
+            let q_heads = ctx.call::<KvRearrangeOp>(
+                (
+                    q_after,
+                    d_model as u32,
+                    head_dim as u32,
+                    n_heads as u32,
+                    n_heads as u32,
+                    head_dim as u32,
+                    seq as u32,
+                ),
+                None,
+            )?;
+            let k_heads = ctx.call::<KvRearrangeOp>(
+                (
+                    k_after,
+                    kv_dim as u32,
+                    kv_head_dim as u32,
+                    n_kv_heads as u32,
+                    n_kv_heads as u32,
+                    kv_head_dim as u32,
+                    seq as u32,
+                ),
+                None,
+            )?;
+            let v_heads = ctx.call::<KvRearrangeOp>(
+                (
+                    v_mat,
+                    kv_dim as u32,
+                    kv_head_dim as u32,
+                    n_kv_heads as u32,
+                    n_kv_heads as u32,
+                    kv_head_dim as u32,
+                    seq as u32,
+                ),
+                None,
+            )?;
 
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
-            let q_heads_after_rope = ctx.call::<RoPEOp>((
-                q_heads,
-                self.rope_cos_cache.clone(),
-                self.rope_sin_cache.clone(),
-                head_dim as u32,
-                seq as u32,
-                0,
-            ))?;
-            let k_heads_after_rope = ctx.call::<RoPEOp>((
-                k_heads,
-                self.rope_cos_cache.clone(),
-                self.rope_sin_cache.clone(),
-                kv_head_dim as u32,
-                seq as u32,
-                0,
-            ))?;
+            let q_heads_after_rope = ctx.call::<RoPEOp>(
+                (
+                    q_heads,
+                    self.rope_cos_cache.clone(),
+                    self.rope_sin_cache.clone(),
+                    head_dim as u32,
+                    seq as u32,
+                    0,
+                ),
+                None,
+            )?;
+            let k_heads_after_rope = ctx.call::<RoPEOp>(
+                (
+                    k_heads,
+                    self.rope_cos_cache.clone(),
+                    self.rope_sin_cache.clone(),
+                    kv_head_dim as u32,
+                    seq as u32,
+                    0,
+                ),
+                None,
+            )?;
 
             // Repeat K and V to match Q head count for SDPA (GQA)
             let group_size = n_heads / n_kv_heads;
@@ -315,9 +346,9 @@ impl<T: TensorElement> Qwen25<T> {
             let attn_out_flat = {
                 let a = &attn_out_reshaped.reshape(vec![m, d_model])?;
                 if let Some(q8) = &block.attn_out_weight_q8 {
-                    ctx.matmul(a, &TensorType::Quant(QuantizedTensor::Q8_0(q8)), false, true, None)?
+                    ctx.matmul(a, &TensorType::Quant(QuantizedTensor::Q8_0(q8)), false, true, None, None, None)?
                 } else {
-                    ctx.matmul(a, &TensorType::Dense(&block.attn_out_weight), false, true, None)?
+                    ctx.matmul(a, &TensorType::Dense(&block.attn_out_weight), false, true, None, None, None)?
                 }
             };
             let attn_out = attn_out_flat.reshape(vec![batch, seq, d_model])?;
@@ -329,7 +360,7 @@ impl<T: TensorElement> Qwen25<T> {
             let resid_mlp = x.clone();
 
             // RMSNorm before MLP
-            let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
+            let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32), None)?;
             let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
             // FFN using extracted SwiGLU; prefer quant paths if available
@@ -338,20 +369,22 @@ impl<T: TensorElement> Qwen25<T> {
                 let up_q8 = block.ffn_up_q8.as_ref().unwrap();
                 let down_q8 = block.ffn_down_q8.as_ref().unwrap();
                 // gate and up projections (quant + bias)
-                let gate = ctx.matmul_bias_add(
+                let gate = ctx.matmul(
                     &x_normed_mlp_flat,
                     &TensorType::Quant(QuantizedTensor::Q8_0(gate_q8)),
-                    &block.ffn_gate_bias,
                     false,
                     false,
+                    Some(&block.ffn_gate_bias),
+                    None,
                     None,
                 )?;
-                let up = ctx.matmul_bias_add(
+                let up = ctx.matmul(
                     &x_normed_mlp_flat,
                     &TensorType::Quant(QuantizedTensor::Q8_0(up_q8)),
-                    &block.ffn_up_bias,
                     false,
                     false,
+                    Some(&block.ffn_up_bias),
+                    None,
                     None,
                 )?;
                 // fused activation on the intermediate [m, ff_dim]
@@ -365,34 +398,41 @@ impl<T: TensorElement> Qwen25<T> {
                 } else {
                     up.dims().last().copied().unwrap_or(1) as u32
                 };
-                let hidden = ctx.call::<SwiGLUFusedActivationOp>((
-                    gate,
-                    block.ffn_gate_bias.clone(),
-                    up,
-                    block.ffn_up_bias.clone(),
-                    gate_leading,
-                    up_leading,
-                ))?;
+                let hidden = ctx.call::<SwiGLUFusedActivationOp>(
+                    (
+                        gate,
+                        block.ffn_gate_bias.clone(),
+                        up,
+                        block.ffn_up_bias.clone(),
+                        gate_leading,
+                        up_leading,
+                    ),
+                    None,
+                )?;
                 // down projection (quant) with fused bias add
-                ctx.matmul_bias_add(
+                ctx.matmul(
                     &hidden,
                     &TensorType::Quant(QuantizedTensor::Q8_0(down_q8)),
-                    &block.ffn_down_bias,
                     false,
                     false,
+                    Some(&block.ffn_down_bias),
+                    None,
                     None,
                 )?
             } else {
-                ctx.call::<SwiGLUOp>((
-                    &x_normed_mlp_flat,
-                    &block.ffn_gate,
-                    &block.ffn_gate_bias,
-                    &block.ffn_up,
-                    &block.ffn_up_bias,
-                    &block.ffn_down,
-                    &block.ffn_down_bias,
-                    Some(&block.ffn_gate_up_weight),
-                ))?
+                ctx.call::<SwiGLUOp>(
+                    (
+                        &x_normed_mlp_flat,
+                        &block.ffn_gate,
+                        &block.ffn_gate_bias,
+                        &block.ffn_up,
+                        &block.ffn_up_bias,
+                        &block.ffn_down,
+                        &block.ffn_down_bias,
+                        Some(&block.ffn_gate_up_weight),
+                    ),
+                    None,
+                )?
             };
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
@@ -401,7 +441,7 @@ impl<T: TensorElement> Qwen25<T> {
         }
 
         // Final RMSNorm after all blocks
-        let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
+        let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32), None)?;
 
         Ok(final_normed)
     }
@@ -445,7 +485,7 @@ impl<T: TensorElement> Qwen25<T> {
                 // RMSNorm before Attention
                 ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
                 cpu_accum += cpu_chk.elapsed();
-                let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
+                let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
                 breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                 cpu_chk = Instant::now();
 
@@ -467,7 +507,17 @@ impl<T: TensorElement> Qwen25<T> {
                 let (q_mat, k_mat, v_mat) = if quant_available && !disable_quant {
                     if let (Some(q8), Some(k8), Some(v8)) = (&block.attn_q_weight_q8, &block.attn_k_weight_q8, &block.attn_v_weight_q8) {
                         // Try fused Q8 path when shapes are compatible; otherwise fall back to per-projection
-                        match ctx.fused_qkv_projection_q8(&x_flat, q8, k8, v8, q_bias.clone(), k_bias.clone(), v_bias.clone()) {
+                        match ctx.qkv(
+                            &x_flat,
+                            QkvWeights::Quantized {
+                                wq: q8,
+                                wk: k8,
+                                wv: v8,
+                                q_bias: &q_bias,
+                                k_bias: &k_bias,
+                                v_bias: &v_bias,
+                            },
+                        ) {
                             Ok((q, k, v)) => (q, k, v),
                             Err(_) => {
                                 // Fall back to mixing quant/dense projections
@@ -508,7 +558,15 @@ impl<T: TensorElement> Qwen25<T> {
                         (q_mat, k_mat, v_mat)
                     }
                 } else {
-                    ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?
+                    ctx.qkv(
+                        &x_flat,
+                        QkvWeights::Dense {
+                            fused_weight: &block.attn_qkv_weight,
+                            fused_bias: &block.attn_qkv_bias,
+                            d_model,
+                            kv_dim,
+                        },
+                    )?
                 };
                 breakdown.insert(
                     "attn_qkv_proj".to_string(),
@@ -524,33 +582,42 @@ impl<T: TensorElement> Qwen25<T> {
 
                 cpu_accum += cpu_chk.elapsed();
                 let (q_heads, k_heads, v_heads) = ctx.with_gpu_scope(format!("attn_rearrange_block_{}_op", layer_idx), |ctx| {
-                    let q_heads = ctx.call::<KvRearrangeOp>((
-                        q_mat,
-                        d_model as u32,
-                        head_dim as u32,
-                        n_heads as u32,
-                        n_heads as u32,
-                        head_dim as u32,
-                        seq as u32,
-                    ))?;
-                    let k_heads = ctx.call::<KvRearrangeOp>((
-                        k_mat,
-                        kv_dim as u32,
-                        kv_head_dim as u32,
-                        n_kv_heads as u32,
-                        n_kv_heads as u32,
-                        kv_head_dim as u32,
-                        seq as u32,
-                    ))?;
-                    let v_heads = ctx.call::<KvRearrangeOp>((
-                        v_mat,
-                        kv_dim as u32,
-                        kv_head_dim as u32,
-                        n_kv_heads as u32,
-                        n_kv_heads as u32,
-                        kv_head_dim as u32,
-                        seq as u32,
-                    ))?;
+                    let q_heads = ctx.call::<KvRearrangeOp>(
+                        (
+                            q_mat,
+                            d_model as u32,
+                            head_dim as u32,
+                            n_heads as u32,
+                            n_heads as u32,
+                            head_dim as u32,
+                            seq as u32,
+                        ),
+                        None,
+                    )?;
+                    let k_heads = ctx.call::<KvRearrangeOp>(
+                        (
+                            k_mat,
+                            kv_dim as u32,
+                            kv_head_dim as u32,
+                            n_kv_heads as u32,
+                            n_kv_heads as u32,
+                            kv_head_dim as u32,
+                            seq as u32,
+                        ),
+                        None,
+                    )?;
+                    let v_heads = ctx.call::<KvRearrangeOp>(
+                        (
+                            v_mat,
+                            kv_dim as u32,
+                            kv_head_dim as u32,
+                            n_kv_heads as u32,
+                            n_kv_heads as u32,
+                            kv_head_dim as u32,
+                            seq as u32,
+                        ),
+                        None,
+                    )?;
                     Ok::<_, MetalError>((q_heads, k_heads, v_heads))
                 })?;
                 breakdown.insert(
@@ -563,22 +630,28 @@ impl<T: TensorElement> Qwen25<T> {
                 let position_offset = pos as u32;
                 cpu_accum += cpu_chk.elapsed();
                 let (q_heads_after_rope, k_heads_after_rope) = ctx.with_gpu_scope(format!("rope_block_{}_op", layer_idx), |ctx| {
-                    let q_heads_after_rope = ctx.call::<RoPEOp>((
-                        q_heads,
-                        self.rope_cos_cache.clone(),
-                        self.rope_sin_cache.clone(),
-                        head_dim as u32,
-                        seq as u32,
-                        position_offset,
-                    ))?;
-                    let k_heads_after_rope = ctx.call::<RoPEOp>((
-                        k_heads,
-                        self.rope_cos_cache.clone(),
-                        self.rope_sin_cache.clone(),
-                        kv_head_dim as u32,
-                        seq as u32,
-                        position_offset,
-                    ))?;
+                    let q_heads_after_rope = ctx.call::<RoPEOp>(
+                        (
+                            q_heads,
+                            self.rope_cos_cache.clone(),
+                            self.rope_sin_cache.clone(),
+                            head_dim as u32,
+                            seq as u32,
+                            position_offset,
+                        ),
+                        None,
+                    )?;
+                    let k_heads_after_rope = ctx.call::<RoPEOp>(
+                        (
+                            k_heads,
+                            self.rope_cos_cache.clone(),
+                            self.rope_sin_cache.clone(),
+                            kv_head_dim as u32,
+                            seq as u32,
+                            position_offset,
+                        ),
+                        None,
+                    )?;
                     Ok::<_, MetalError>((q_heads_after_rope, k_heads_after_rope))
                 })?;
                 breakdown.insert(
@@ -659,25 +732,31 @@ impl<T: TensorElement> Qwen25<T> {
                         let a = &attn_out_reshaped.reshape(vec![m, d_model])?;
                         if let Some(q8) = &block.attn_out_weight_q8 {
                             // Fuse residual: y = A*x + residual
-                            ctx.call::<crate::kernels::matmul_gemv::MatmulGemvAddmmOp>((
-                                a,
-                                TensorType::Quant(QuantizedTensor::Q8_0(q8)),
+                            ctx.call::<crate::kernels::matmul_gemv::MatmulGemvAddmmOp>(
+                                (
+                                    a,
+                                    TensorType::Quant(QuantizedTensor::Q8_0(q8)),
+                                    None,
+                                    Some(&resid_attn.reshape(vec![m, d_model])?),
+                                    1.0,
+                                    1.0,
+                                ),
                                 None,
-                                Some(&resid_attn.reshape(vec![m, d_model])?),
-                                1.0,
-                                1.0,
-                            ))
+                            )
                         } else {
                             // Dense fallback: use backend-heuristic addmm (MPS/MLX) with out=residual
                             let out = resid_attn.reshape(vec![m, d_model])?;
-                            ctx.matmul_alpha_beta(
+                            ctx.matmul(
                                 a,
                                 &TensorType::Dense(&block.attn_out_weight),
-                                &out,
                                 false,
                                 true,
-                                1.0,
-                                1.0,
+                                None,
+                                Some(MatmulAlphaBeta {
+                                    output: &out,
+                                    alpha: 1.0,
+                                    beta: 1.0,
+                                }),
                                 None,
                             )
                         }
@@ -694,7 +773,7 @@ impl<T: TensorElement> Qwen25<T> {
                 let resid_mlp = x.clone();
                 ctx.set_pending_gpu_scope(format!("mlp_norm_block_{}_op", layer_idx));
                 cpu_accum += cpu_chk.elapsed();
-                let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
+                let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32), None)?;
                 cpu_chk = Instant::now();
                 let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
@@ -712,12 +791,10 @@ impl<T: TensorElement> Qwen25<T> {
                         let packed = ctx.call::<crate::kernels::matmul_gemv_fused2::MatmulGemvQ2FusedOp>(
                             (
                                 &x_normed_mlp_flat,
-                                (
-                                    &QuantizedTensor::Q8_0(gq8),
-                                    &QuantizedTensor::Q8_0(uq8),
-                                ),
+                                (&QuantizedTensor::Q8_0(gq8), &QuantizedTensor::Q8_0(uq8)),
                                 (None, None),
-                            )
+                            ),
+                            None,
                         )?;
                         let ff = block.ffn_gate_bias.len();
                         let elem = T::DTYPE.size_bytes();
@@ -729,21 +806,45 @@ impl<T: TensorElement> Qwen25<T> {
                         ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
                         let gate_lin = {
                             if let Some(gq8) = &block.ffn_gate_q8 {
-                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Quant(QuantizedTensor::Q8_0(gq8)), false, false, None)?
+                                ctx.matmul(
+                                    &x_normed_mlp_flat,
+                                    &TensorType::Quant(QuantizedTensor::Q8_0(gq8)),
+                                    false,
+                                    false,
+                                    None,
+                                    None,
+                                    None,
+                                )?
                             } else {
                                 let gd = block.ffn_gate.dims();
                                 let gate_t = if gd.len() == 2 && gd[0] == d_model { false } else { true };
-                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_gate), false, gate_t, None)?
+                                ctx.matmul(
+                                    &x_normed_mlp_flat,
+                                    &TensorType::Dense(&block.ffn_gate),
+                                    false,
+                                    gate_t,
+                                    None,
+                                    None,
+                                    None,
+                                )?
                             }
                         };
                         ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
                         let up_lin = {
                             if let Some(uq8) = &block.ffn_up_q8 {
-                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Quant(QuantizedTensor::Q8_0(uq8)), false, false, None)?
+                                ctx.matmul(
+                                    &x_normed_mlp_flat,
+                                    &TensorType::Quant(QuantizedTensor::Q8_0(uq8)),
+                                    false,
+                                    false,
+                                    None,
+                                    None,
+                                    None,
+                                )?
                             } else {
                                 let ud = block.ffn_up.dims();
                                 let up_t = if ud.len() == 2 && ud[0] == d_model { false } else { true };
-                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None)?
+                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None, None, None)?
                             }
                         };
                         (gate_lin, up_lin)
@@ -760,27 +861,33 @@ impl<T: TensorElement> Qwen25<T> {
                     } else {
                         up_lin.dims().last().copied().unwrap_or(1) as u32
                     };
-                    let hidden = ctx.call::<SwiGLUFusedActivationOp>((
-                        gate_lin,
-                        block.ffn_gate_bias.clone(),
-                        up_lin,
-                        block.ffn_up_bias.clone(),
-                        gate_leading,
-                        up_leading,
-                    ))?;
+                    let hidden = ctx.call::<SwiGLUFusedActivationOp>(
+                        (
+                            gate_lin,
+                            block.ffn_gate_bias.clone(),
+                            up_lin,
+                            block.ffn_up_bias.clone(),
+                            gate_leading,
+                            up_leading,
+                        ),
+                        None,
+                    )?;
 
                     // down projection -> [m, d_model]
                     ctx.set_pending_gpu_scope(format!("mlp_down_proj_block_{}_op", layer_idx));
                     if let Some(dq8) = &block.ffn_down_q8 {
                         // Quant down projection with fused bias and residual.
-                        let out = ctx.call::<crate::kernels::matmul_gemv::MatmulGemvAddmmOp>((
-                            &hidden,
-                            TensorType::Quant(QuantizedTensor::Q8_0(dq8)),
-                            Some(&block.ffn_down_bias),
-                            Some(&resid_mlp.reshape(vec![m, d_model])?),
-                            1.0,
-                            1.0,
-                        ))?;
+                        let out = ctx.call::<crate::kernels::matmul_gemv::MatmulGemvAddmmOp>(
+                            (
+                                &hidden,
+                                TensorType::Quant(QuantizedTensor::Q8_0(dq8)),
+                                Some(&block.ffn_down_bias),
+                                Some(&resid_mlp.reshape(vec![m, d_model])?),
+                                1.0,
+                                1.0,
+                            ),
+                            None,
+                        )?;
                         Ok(out)
                     } else {
                         // Dense fallback with fused bias+residual using backend-heuristic addmm
@@ -788,14 +895,17 @@ impl<T: TensorElement> Qwen25<T> {
                         let hidden_cols = hidden.dims()[1];
                         let down_t = if dd.len() == 2 && dd[0] == hidden_cols { false } else { true };
                         let out = resid_mlp.reshape(vec![m, d_model])?;
-                        ctx.matmul_alpha_beta(
+                        ctx.matmul(
                             &hidden,
                             &TensorType::Dense(&block.ffn_down),
-                            &out,
                             false,
                             down_t,
-                            1.0,
-                            1.0,
+                            None,
+                            Some(MatmulAlphaBeta {
+                                output: &out,
+                                alpha: 1.0,
+                                beta: 1.0,
+                            }),
                             None,
                         )
                     }
@@ -833,7 +943,7 @@ impl<T: TensorElement> Qwen25<T> {
         }
 
         // Final RMSNorm after all blocks
-        let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32))?;
+        let final_normed = ctx.call::<RMSNormOp>((x, self.final_norm_gamma.clone(), self.config.d_model as u32), None)?;
 
         Ok((final_normed, forward_pass_breakdown))
     }
@@ -878,19 +988,22 @@ impl<T: TensorElement> Qwen25<T> {
         let repeated_heads = batch * n_heads;
 
         match input_dims[0] {
-            heads if heads == canonical_heads => ctx.call::<RepeatKvHeadsOp>((
-                input,
-                group_size as u32,
-                batch as u32,
-                n_kv_heads as u32,
-                n_heads as u32,
-                history.active_seq as u32,
-                head_dim as u32,
-                history.cache_capacity as u32,
-                layer_idx as u32,
-                workspace_kind,
-                prefer_shared,
-            )),
+            heads if heads == canonical_heads => ctx.call::<RepeatKvHeadsOp>(
+                (
+                    input,
+                    group_size as u32,
+                    batch as u32,
+                    n_kv_heads as u32,
+                    n_heads as u32,
+                    history.active_seq as u32,
+                    head_dim as u32,
+                    history.cache_capacity as u32,
+                    layer_idx as u32,
+                    workspace_kind,
+                    prefer_shared,
+                ),
+                None,
+            ),
             heads if heads == repeated_heads => {
                 // Check which backend is currently selected
                 let current_backend = ctx.backend_registry().select_sdpa(KernelBackendKind::Legacy).backend;

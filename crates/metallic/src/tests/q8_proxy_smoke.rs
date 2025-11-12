@@ -80,14 +80,14 @@ mod tests {
         let x_tensor = Tensor::<crate::tensor::F16>::from_f32_slice(vec![1, input_dim], TensorStorage::Pooled(ctx), x_f32)?;
         let bias = Tensor::<crate::tensor::F16>::from_f32_slice(vec![output_dim], TensorStorage::Pooled(ctx), bias_f32)?;
 
-        let q8_y = ctx.call::<MatmulGemvOp>((&x_tensor.clone(), TensorType::Quant(QuantizedTensor::Q8_0(&q8)), None))?;
-        let q8_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((q8_y, bias.clone()))?;
+        let q8_y = ctx.call::<MatmulGemvOp>((&x_tensor.clone(), TensorType::Quant(QuantizedTensor::Q8_0(&q8)), None), None)?;
+        let q8_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((q8_y, bias.clone()), None)?;
 
         let weights_f32: Vec<f32> = weights.iter().map(|&v| v as f32).collect();
         let weight_tensor =
             Tensor::<crate::tensor::F16>::from_f32_slice(vec![input_dim, output_dim], TensorStorage::Pooled(ctx), &weights_f32)?;
-        let fp16_y = ctx.call::<MatmulGemvOp>((&x_tensor, TensorType::Dense(&weight_tensor), None))?;
-        let fp16_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((fp16_y, bias))?;
+        let fp16_y = ctx.call::<MatmulGemvOp>((&x_tensor, TensorType::Dense(&weight_tensor), None), None)?;
+        let fp16_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((fp16_y, bias), None)?;
 
         let q8_slice = q8_y.as_slice();
         let fp16_slice = fp16_y.as_slice();
@@ -141,7 +141,7 @@ mod tests {
         let x_f32: Vec<f32> = (0..k).map(|i| ((i % 5) as f32) - 1.5).collect();
         let x = Tensor::<crate::tensor::F16>::from_f32_slice(vec![1, k], TensorStorage::Pooled(&mut ctx), &x_f32)?;
 
-        let q8_result = ctx.call::<MatmulGemvOp>((&x, TensorType::Quant(QuantizedTensor::Q8_0(&q8)), None))?;
+        let q8_result = ctx.call::<MatmulGemvOp>((&x, TensorType::Quant(QuantizedTensor::Q8_0(&q8)), None), None)?;
 
         let y_ref = cpu_gemv(n, k, &weights, &x_f32);
         for (i, &v) in q8_result.as_slice().iter().enumerate() {
@@ -242,8 +242,8 @@ mod tests {
         let bias = Tensor::<crate::tensor::F16>::from_f32_slice(vec![output_dim], TensorStorage::Pooled(&mut ctx), &bias_f32)?;
 
         // Proxy result using NK layout should match FP16 GEMV with A = transpose(weights_nk) to [K,N]
-        let q8_y = ctx.call::<MatmulGemvOp>((&x.clone(), TensorType::Quant(QuantizedTensor::Q8_0(&q8)), None))?;
-        let q8_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((q8_y, bias.clone()))?;
+        let q8_y = ctx.call::<MatmulGemvOp>((&x.clone(), TensorType::Quant(QuantizedTensor::Q8_0(&q8)), None), None)?;
+        let q8_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((q8_y, bias.clone()), None)?;
 
         // Construct FP16 [K,N] tensor from NK weights
         let mut weights_kn = Vec::with_capacity(input_dim * output_dim);
@@ -254,8 +254,8 @@ mod tests {
         }
         let a_fp16 =
             Tensor::<crate::tensor::F16>::from_f32_slice(vec![input_dim, output_dim], TensorStorage::Pooled(&mut ctx), &weights_kn)?;
-        let fp16_y = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&a_fp16), None))?;
-        let fp16_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((fp16_y, bias))?;
+        let fp16_y = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&a_fp16), None), None)?;
+        let fp16_y = ctx.call::<BroadcastElemwiseAddInplaceOp>((fp16_y, bias), None)?;
 
         let q8_slice = q8_y.as_slice();
         let fp16_slice = fp16_y.as_slice();

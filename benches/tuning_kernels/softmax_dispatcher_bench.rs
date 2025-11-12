@@ -43,11 +43,11 @@ fn bench_softmax_dispatcher_seq_lengths<T: TensorElement>(c: &mut Criterion, dty
                         Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                     // Warmup
-                    let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
+                    let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).expect("warmup");
                     ctx.synchronize();
 
                     bi.iter(|| {
-                        let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
+                        let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).unwrap();
                         ctx.synchronize();
                     });
 
@@ -93,11 +93,11 @@ fn bench_softmax_dispatcher_batch_variants<T: TensorElement>(c: &mut Criterion, 
             .expect("input");
 
             // Warmup
-            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
+                let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).unwrap();
                 ctx.synchronize();
             });
 
@@ -133,11 +133,11 @@ fn bench_softmax_dispatcher_causal_vs_normal<T: TensorElement>(c: &mut Criterion
                 Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
             // Warmup
-            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
+                let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).unwrap();
                 ctx.synchronize();
             });
 
@@ -155,11 +155,11 @@ fn bench_softmax_dispatcher_causal_vs_normal<T: TensorElement>(c: &mut Criterion
                 Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
             // Warmup
-            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, true, 0)).expect("warmup");
+            let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, true, 0), None).expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, true, 0)).unwrap();
+                let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, true, 0), None).unwrap();
                 ctx.synchronize();
             });
 
@@ -206,11 +206,11 @@ fn bench_softmax_dispatcher_variant_selection<T: TensorElement>(c: &mut Criterio
                     Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                 // Warmup
-                let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
+                let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
+                    let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).unwrap();
                     ctx.synchronize();
                 });
 
@@ -257,11 +257,11 @@ fn bench_softmax_dispatcher_crossover_analysis<T: TensorElement>(c: &mut Criteri
                     Tensor::new(vec![rows_total, seq_k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("input");
 
                 // Warmup
-                let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).expect("warmup");
+                let _warmup_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0)).unwrap();
+                    let _iter_out = ctx.call::<SoftmaxDispatchOp>((&input, false, 0), None).unwrap();
                     ctx.synchronize();
                 });
 

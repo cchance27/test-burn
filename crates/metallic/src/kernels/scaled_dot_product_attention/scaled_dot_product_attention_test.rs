@@ -26,7 +26,7 @@ fn test_scaled_dot_product_attention_kernel() -> Result<(), MetalError> {
     )?;
 
     // Use the kernel via the generic `call` method.
-    let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, false, 0))?;
+    let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, false, 0), None)?;
     ctx.synchronize();
 
     // We expect some output, but the exact values depend on the implementation
@@ -58,7 +58,7 @@ fn test_scaled_dot_product_attention_kernel_causal() -> Result<(), MetalError> {
     )?;
 
     // Use the kernel via the generic `call` method with causal attention.
-    let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, true, 0))?;
+    let result_tensor = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, true, 0), None)?;
     ctx.synchronize();
 
     // We expect some output, but the exact values depend on the implementation

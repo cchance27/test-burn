@@ -82,13 +82,10 @@ pub fn apply_softmax<T: TensorElement>(
         return Ok(attn.clone());
     }
 
-    let result = match cache {
-        Some(cache_ref) => ctx.call_with_cache::<SoftmaxKernelOp>(
-            (attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset),
-            cache_ref,
-        )?,
-        None => ctx.call::<SoftmaxKernelOp>((attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset))?,
-    };
+    let result = ctx.call::<SoftmaxKernelOp>(
+        (attn, rows_total as u32, rows as u32, columns as u32, causal as u32, query_offset),
+        cache,
+    )?;
     Ok(result)
 }
 

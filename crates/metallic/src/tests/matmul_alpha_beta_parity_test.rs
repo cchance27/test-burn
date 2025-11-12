@@ -15,9 +15,13 @@ fn alpha_beta_parity_mlx() {
     let a = make_tensor_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let b = make_tensor_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], &[2, 2]);
 
-    let fused = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 0.5, 0.0)).unwrap();
+    let fused = ctx
+        .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 0.5, 0.0), None)
+        .unwrap();
     let unfused = {
-        let tmp = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0)).unwrap();
+        let tmp = ctx
+            .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0), None)
+            .unwrap();
         tmp.mul_scalar(0.5, &mut ctx).unwrap()
     };
 
@@ -35,9 +39,13 @@ fn alpha_beta_parity_mps() {
     let a = make_tensor_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let b = make_tensor_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], &[2, 2]);
 
-    let fused = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 0.5, 0.0)).unwrap();
+    let fused = ctx
+        .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 0.5, 0.0), None)
+        .unwrap();
     let unfused = {
-        let tmp = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0)).unwrap();
+        let tmp = ctx
+            .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0), None)
+            .unwrap();
         tmp.mul_scalar(0.5, &mut ctx).unwrap()
     };
 
@@ -60,7 +68,7 @@ fn alpha_beta_parity_with_beta_mlx() {
     let c = make_tensor_f32(&ctx, &c_data, &[2, 2]);
 
     let fused = ctx
-        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0))
+        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0), None)
         .unwrap();
 
     let mut unfused_data = vec![0.0; 4];
@@ -89,7 +97,7 @@ fn alpha_beta_parity_with_beta_mps() {
     let c = make_tensor_f32(&ctx, &c_data, &[2, 2]);
 
     let fused = ctx
-        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0))
+        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0), None)
         .unwrap();
 
     let mut unfused_data = vec![0.0; 4];
@@ -116,7 +124,7 @@ fn alpha_beta_parity_with_beta_auto() {
     let c = make_tensor_f32(&ctx, &c_data, &[2, 2]);
 
     let fused = ctx
-        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0))
+        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0), None)
         .unwrap();
 
     let mut unfused_data = vec![0.0; 4];
@@ -145,7 +153,7 @@ fn alpha_beta_gpu_parity_with_beta_mlx() {
     let c = make_tensor_f32(&ctx, &c_data, &[2, 2]);
 
     let fused = ctx
-        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0))
+        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0), None)
         .unwrap();
 
     let mut unfused_data = vec![0.0; 4];
@@ -174,7 +182,7 @@ fn alpha_beta_gpu_parity_with_beta_mps() {
     let c = make_tensor_f32(&ctx, &c_data, &[2, 2]);
 
     let fused = ctx
-        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0))
+        .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0, 1.0), None)
         .unwrap();
 
     let mut unfused_data = vec![0.0; 4];

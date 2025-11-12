@@ -165,7 +165,7 @@ fn test_matmul_determinism() -> Result<(), MetalError> {
         let _result_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&result_data))?;
 
         // Use the new kernel system
-        let result = context.matmul(&a_tensor, &TensorType::Dense(&b_tensor), false, false, None)?;
+        let result = context.matmul(&a_tensor, &TensorType::Dense(&b_tensor), false, false, None, None, None)?;
         context.synchronize();
 
         results.push(result.as_slice().to_vec());
@@ -220,14 +220,8 @@ fn test_softmax_determinism() -> Result<(), MetalError> {
 
         // Apply softmax using the new kernel system (in-place operation)
         let rows_total = softmax_rows_total(&attn_tensor, seq_k);
-        let result = context.call::<crate::kernels::softmax_kernel::SoftmaxKernelOp>((
-            &attn_tensor,
-            rows_total,
-            seq_q as u32,
-            seq_k as u32,
-            0,
-            0,
-        ))?;
+        let result = context
+            .call::<crate::kernels::softmax_kernel::SoftmaxKernelOp>((&attn_tensor, rows_total, seq_q as u32, seq_k as u32, 0, 0), None)?;
         context.synchronize();
 
         results.push(result.as_slice().to_vec());

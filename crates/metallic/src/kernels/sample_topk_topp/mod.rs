@@ -53,8 +53,10 @@ impl CustomKernelInvocable for SampleTopKTopPOp {
         let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
         let varied_seed = base_seed.wrapping_add(counter);
 
-        let (output_token,) =
-            ctx.call_custom::<SampleTopKFusedOp>((logits.clone(), vocab_size, k, top_p, temperature, varied_seed, per_thread_m_clamp))?;
+        let (output_token,) = ctx.call_custom::<SampleTopKFusedOp>(
+            (logits.clone(), vocab_size, k, top_p, temperature, varied_seed, per_thread_m_clamp),
+            None,
+        )?;
         let op = Box::new(SampleTopKWrapper);
         Ok((op, (output_token,)))
     }

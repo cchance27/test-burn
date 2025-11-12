@@ -21,7 +21,7 @@ fn test_silu_basic() -> Result<(), MetalError> {
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -51,7 +51,7 @@ fn test_silu_numerical_stability() -> Result<(), MetalError> {
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -114,7 +114,7 @@ fn test_silu_extreme_positive_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -184,7 +184,7 @@ fn test_silu_extreme_negative_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -263,7 +263,7 @@ fn test_silu_mixed_extreme_values() -> Result<(), MetalError> {
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
     let cpu_output = cpu_silu_extreme(&input_data);
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -329,7 +329,7 @@ fn test_silu_edge_values_around_thresholds() -> Result<(), MetalError> {
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -393,7 +393,7 @@ fn test_silu_large_tensor_extreme_values() -> Result<(), MetalError> {
 
     let cpu_output = cpu_silu_extreme(&input_data);
 
-    let output_tensor = context.call::<SiluOp>(input_tensor)?;
+    let output_tensor = context.call::<SiluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -440,7 +440,7 @@ fn test_silu_logic() -> Result<(), MetalError> {
     let input_data = vec![1.0, -1.0, 0.0, 2.0];
     let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
-    let result = ctx.call::<SiluOp>(input)?;
+    let result = ctx.call::<SiluOp>(input, None)?;
 
     // SiLU(x) = x * sigmoid(x)
     let expected: Vec<f32> = input_data.iter().map(|&x| x * (1.0 / (1.0 + (-x).exp()))).collect();

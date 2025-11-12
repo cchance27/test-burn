@@ -102,12 +102,12 @@ fn qkv_fused_parity_vs_fp16() -> Result<(), MetalError> {
     let v_bias = make_fp16_tensor(&mut ctx, vec![n], 0x7777_CCCC)?;
 
     // FP16 refs via MPS baseline
-    let yq_fp16 = ctx.call::<MatMulMpsOp>((&x, &wq, false, false))?;
-    let yq_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yq_fp16, q_bias.clone()))?;
-    let yk_fp16 = ctx.call::<MatMulMpsOp>((&x, &wk, false, false))?;
-    let yk_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yk_fp16, k_bias.clone()))?;
-    let yv_fp16 = ctx.call::<MatMulMpsOp>((&x, &wv, false, false))?;
-    let yv_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yv_fp16, v_bias.clone()))?;
+    let yq_fp16 = ctx.call::<MatMulMpsOp>((&x, &wq, false, false), None)?;
+    let yq_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yq_fp16, q_bias.clone()), None)?;
+    let yk_fp16 = ctx.call::<MatMulMpsOp>((&x, &wk, false, false), None)?;
+    let yk_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yk_fp16, k_bias.clone()), None)?;
+    let yv_fp16 = ctx.call::<MatMulMpsOp>((&x, &wv, false, false), None)?;
+    let yv_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yv_fp16, v_bias.clone()), None)?;
 
     let fq = yq_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
     let fk = yk_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
@@ -118,15 +118,18 @@ fn qkv_fused_parity_vs_fp16() -> Result<(), MetalError> {
     let (wk_q, _, _) = quantize_q8_0_canonical_from_f32(&ctx, k, n, &wk.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>())?;
     let (wv_q, _, _) = quantize_q8_0_canonical_from_f32(&ctx, k, n, &wv.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>())?;
 
-    let y_packed = ctx.call::<MatmulGemvQkvFusedOp>((
-        &x,
+    let y_packed = ctx.call::<MatmulGemvQkvFusedOp>(
         (
-            &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
-            &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
-            &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+            &x,
+            (
+                &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
+                &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
+                &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+            ),
+            (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
         ),
-        (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
-    ))?;
+        None,
+    )?;
     ctx.synchronize();
     let elem = crate::tensor::Dtype::F16.size_bytes();
     let yq_tensor = y_packed.build_view(vec![1, n], vec![n, 1], y_packed.offset);
@@ -161,9 +164,9 @@ fn bench_qkv_fused_vs_fp16() -> Result<(), MetalError> {
     // FP16 baseline: three matmuls per iteration
     let t0 = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wq), Some(&q_bias), None, false, false, 1.0, 0.0))?;
-        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wk), Some(&k_bias), None, false, false, 1.0, 0.0))?;
-        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wv), Some(&v_bias), None, false, false, 1.0, 0.0))?;
+        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wq), Some(&q_bias), None, false, false, 1.0, 0.0), None)?;
+        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wk), Some(&k_bias), None, false, false, 1.0, 0.0), None)?;
+        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wv), Some(&v_bias), None, false, false, 1.0, 0.0), None)?;
     }
     ctx.synchronize();
     let t_fp16 = t0.elapsed().as_secs_f64();
@@ -174,15 +177,18 @@ fn bench_qkv_fused_vs_fp16() -> Result<(), MetalError> {
     let (wv_q, _, _) = quantize_q8_0_canonical_from_f32(&ctx, k, n, &wv.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>())?;
     let t1 = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulGemvQkvFusedOp>((
-            &x,
+        let _ = ctx.call::<MatmulGemvQkvFusedOp>(
             (
-                &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
-                &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
-                &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+                &x,
+                (
+                    &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
+                    &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
+                    &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+                ),
+                (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
             ),
-            (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
-        ))?;
+            None,
+        )?;
     }
     ctx.synchronize();
     let t_q8 = t1.elapsed().as_secs_f64();
@@ -210,12 +216,12 @@ fn qkv_fused_parity_vs_fp16_mixed_dims() -> Result<(), MetalError> {
     let v_bias = make_fp16_tensor(&mut ctx, vec![n_kv], 0x9999_5555)?;
 
     // FP16 refs via MPS baseline
-    let yq_fp16 = ctx.call::<MatMulMpsOp>((&x, &wq, false, false))?;
-    let yq_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yq_fp16, q_bias.clone()))?;
-    let yk_fp16 = ctx.call::<MatMulMpsOp>((&x, &wk, false, false))?;
-    let yk_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yk_fp16, k_bias.clone()))?;
-    let yv_fp16 = ctx.call::<MatMulMpsOp>((&x, &wv, false, false))?;
-    let yv_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yv_fp16, v_bias.clone()))?;
+    let yq_fp16 = ctx.call::<MatMulMpsOp>((&x, &wq, false, false), None)?;
+    let yq_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yq_fp16, q_bias.clone()), None)?;
+    let yk_fp16 = ctx.call::<MatMulMpsOp>((&x, &wk, false, false), None)?;
+    let yk_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yk_fp16, k_bias.clone()), None)?;
+    let yv_fp16 = ctx.call::<MatMulMpsOp>((&x, &wv, false, false), None)?;
+    let yv_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yv_fp16, v_bias.clone()), None)?;
     let fq = yq_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
     let fk = yk_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
     let fv = yv_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
@@ -225,15 +231,18 @@ fn qkv_fused_parity_vs_fp16_mixed_dims() -> Result<(), MetalError> {
     let (wk_q, _, _) = quantize_q8_0_canonical_from_f32(&ctx, k, n_kv, &wk.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>())?;
     let (wv_q, _, _) = quantize_q8_0_canonical_from_f32(&ctx, k, n_kv, &wv.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>())?;
 
-    let y_packed = ctx.call::<MatmulGemvQkvFusedOp>((
-        &x,
+    let y_packed = ctx.call::<MatmulGemvQkvFusedOp>(
         (
-            &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
-            &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
-            &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+            &x,
+            (
+                &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
+                &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
+                &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+            ),
+            (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
         ),
-        (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
-    ))?;
+        None,
+    )?;
     ctx.synchronize();
     let elem = crate::tensor::Dtype::F16.size_bytes();
     let yq_tensor = y_packed.build_view(vec![1, n_q], vec![n_q, 1], y_packed.offset);
@@ -269,9 +278,9 @@ fn bench_qkv_fused_vs_fp16_mixed_dims() -> Result<(), MetalError> {
 
     let t0 = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wq), Some(&q_bias), None, false, false, 1.0, 0.0))?;
-        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wk), Some(&k_bias), None, false, false, 1.0, 0.0))?;
-        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wv), Some(&v_bias), None, false, false, 1.0, 0.0))?;
+        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wq), Some(&q_bias), None, false, false, 1.0, 0.0), None)?;
+        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wk), Some(&k_bias), None, false, false, 1.0, 0.0), None)?;
+        let _ = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wv), Some(&v_bias), None, false, false, 1.0, 0.0), None)?;
     }
     ctx.synchronize();
     let t_fp16 = t0.elapsed().as_secs_f64();
@@ -282,15 +291,18 @@ fn bench_qkv_fused_vs_fp16_mixed_dims() -> Result<(), MetalError> {
 
     let t1 = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulGemvQkvFusedOp>((
-            &x,
+        let _ = ctx.call::<MatmulGemvQkvFusedOp>(
             (
-                &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
-                &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
-                &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+                &x,
+                (
+                    &crate::tensor::QuantizedTensor::Q8_0(&wq_q),
+                    &crate::tensor::QuantizedTensor::Q8_0(&wk_q),
+                    &crate::tensor::QuantizedTensor::Q8_0(&wv_q),
+                ),
+                (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
             ),
-            (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
-        ))?;
+            None,
+        )?;
     }
     ctx.synchronize();
     let t_q8 = t1.elapsed().as_secs_f64();

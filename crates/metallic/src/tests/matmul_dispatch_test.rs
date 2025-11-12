@@ -24,7 +24,9 @@ fn dispatch_routes_to_mlx_when_forced() {
     let a = make_tensor_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let b = make_tensor_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], &[2, 2]);
 
-    let out = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0)).unwrap();
+    let out = ctx
+        .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0), None)
+        .unwrap();
     assert_eq!(out.dims(), &[2, 2]);
 }
 
@@ -36,7 +38,9 @@ fn dispatch_routes_to_mps_when_forced() {
     let a = make_tensor_f32(&ctx, &[1.0, 2.0, 3.0, 4.0], &[2, 2]);
     let b = make_tensor_f32(&ctx, &[5.0, 6.0, 7.0, 8.0], &[2, 2]);
 
-    let out = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0)).unwrap();
+    let out = ctx
+        .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0), None)
+        .unwrap();
     assert_eq!(out.dims(), &[2, 2]);
 }
 
@@ -49,7 +53,9 @@ fn dispatch_routes_to_gemv_when_forced() {
     let a = make_tensor_f32(&ctx, &[1.0, 2.0], &[1, 2]);
     let b = make_tensor_f32(&ctx, &[5.0, 6.0], &[2, 1]);
 
-    let out = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0)).unwrap();
+    let out = ctx
+        .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0), None)
+        .unwrap();
     assert_eq!(out.dims(), &[1, 1]);
 }
 
@@ -67,7 +73,9 @@ fn dispatch_routes_to_smalln_when_forced() {
     let a = make_tensor_f16(&ctx, &a_data, &[1, 16]);
     let b = make_tensor_f16(&ctx, &b_data, &[16, 8]);
 
-    let out = ctx.call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0)).unwrap();
+    let out = ctx
+        .call::<MatmulDispatchOp>((&a, &b, None, None, false, false, 1.0, 0.0), None)
+        .unwrap();
     assert_eq!(out.dims(), &[1, 8]);
 
     // Clean up env var

@@ -38,12 +38,12 @@ fn bench_gemm_tiled_configurations<T: TensorElement>(c: &mut Criterion, dtype_na
             let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
             let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
 
-            ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+            ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                     .unwrap();
                 ctx.synchronize();
             });
@@ -64,13 +64,13 @@ fn bench_gemm_tiled_configurations<T: TensorElement>(c: &mut Criterion, dtype_na
 
             // Warmup
             let _warmup_out = ctx
-                .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _result = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                     .unwrap();
                 ctx.synchronize();
             });
@@ -110,12 +110,12 @@ fn bench_gemm_tiled_tuning<T: TensorElement>(c: &mut Criterion, dtype_name: &str
             let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
             let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
 
-            ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+            ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                ctx.call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                     .unwrap();
                 ctx.synchronize();
             });

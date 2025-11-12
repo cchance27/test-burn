@@ -196,14 +196,14 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
 
         let base_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
         let ones = Tensor::ones(vec![vocab_size], &mut ctx)?;
-        let mut sync_tensor = ctx.call::<ElemwiseAddOp>((base_logits.clone(), ones.clone()))?;
+        let mut sync_tensor = ctx.call::<ElemwiseAddOp>((base_logits.clone(), ones.clone()), None)?;
         ctx.synchronize();
 
         println!("Measuring GPU->CPU sync times...");
         let sync_iterations = 1000;
         let mut sync_times = Vec::with_capacity(sync_iterations);
         for _ in 0..sync_iterations {
-            sync_tensor = ctx.call::<ElemwiseAddOp>((sync_tensor.clone(), ones.clone()))?;
+            sync_tensor = ctx.call::<ElemwiseAddOp>((sync_tensor.clone(), ones.clone()), None)?;
             ctx.synchronize();
 
             let sync_start = Instant::now();
@@ -217,7 +217,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
         let mut cpu_total_times = Vec::with_capacity(cpu_iterations);
         let cpu_logits = create_test_logits::<F16Element>(&mut ctx, vocab_size)?;
         for i in 0..cpu_iterations {
-            let staged = ctx.call::<ElemwiseAddOp>((cpu_logits.clone(), ones.clone()))?;
+            let staged = ctx.call::<ElemwiseAddOp>((cpu_logits.clone(), ones.clone()), None)?;
             ctx.synchronize();
             let start = Instant::now();
             let logits_slice = staged.as_slice();
@@ -274,7 +274,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
 
                 let mut gpu_times = Vec::with_capacity(gpu_iterations);
                 for i in 0..gpu_iterations {
-                    let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()))?;
+                    let staged = ctx.call::<ElemwiseAddOp>((gpu_logits.clone(), ones.clone()), None)?;
                     ctx.synchronize();
 
                     let start = Instant::now();

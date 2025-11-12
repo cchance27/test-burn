@@ -49,16 +49,18 @@ fn bench_matmul_dispatcher_smalln<T: TensorElement>(c: &mut Criterion, dtype_nam
 
                     // Warmup
                     let mut _warmup_out = ctx
-                        .call::<MatmulDispatchOp>((&a, &b, Some(&bias), Some(&out), false, false, alpha, beta))
+                        .call::<MatmulDispatchOp>((&a, &b, Some(&bias), Some(&out), false, false, alpha, beta), None)
                         .expect("warmup");
-                    _warmup_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_warmup_out, bias.clone())).unwrap();
+                    _warmup_out = ctx
+                        .call::<BroadcastElemwiseAddInplaceOp>((_warmup_out, bias.clone()), None)
+                        .unwrap();
                     ctx.synchronize();
 
                     bi.iter(|| {
                         let mut _iter_out = ctx
-                            .call::<MatmulDispatchOp>((&a, &b, Some(&bias), Some(&out), false, false, alpha, beta))
+                            .call::<MatmulDispatchOp>((&a, &b, Some(&bias), Some(&out), false, false, alpha, beta), None)
                             .unwrap();
-                        _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone())).unwrap();
+                        _iter_out = ctx.call::<BroadcastElemwiseAddInplaceOp>((_iter_out, bias.clone()), None).unwrap();
                         ctx.synchronize();
                     });
 
@@ -113,13 +115,13 @@ fn bench_matmul_dispatcher_dispatcher_tuning<T: TensorElement>(c: &mut Criterion
 
                 // Warmup
                 let _warmup_out = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                     .expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
                     let _iter_out = ctx
-                        .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                        .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                         .unwrap();
                     ctx.synchronize();
                 });
@@ -170,13 +172,13 @@ fn bench_matmul_dispatcher_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtyp
 
             // Warmup
             let _warmup_out = ctx
-                .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                     .unwrap();
                 ctx.synchronize();
             });
@@ -205,13 +207,13 @@ fn bench_matmul_dispatcher_qwen_shapes<T: TensorElement>(c: &mut Criterion, dtyp
 
             // Warmup
             let _warmup_out = ctx
-                .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                     .unwrap();
                 ctx.synchronize();
             });
@@ -252,13 +254,13 @@ fn bench_matmul_dispatcher_gemm_shapes<T: TensorElement>(c: &mut Criterion, dtyp
 
                     // Warmup
                     let _warmup_out = ctx
-                        .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                        .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                         .expect("warmup");
                     ctx.synchronize();
 
                     bi.iter(|| {
                         let _iter_out = ctx
-                            .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0))
+                            .call::<MatmulDispatchOp>((&a, &b, None, Some(&out), false, false, 1.0, 0.0), None)
                             .unwrap();
                         ctx.synchronize();
                     });

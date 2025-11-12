@@ -1,5 +1,5 @@
 use super::*;
-use crate::{F32Element, TensorInit, TensorStorage, tensor::TensorType};
+use crate::{F32Element, TensorInit, TensorStorage, context::MatmulAlphaBeta, tensor::TensorType};
 
 #[test]
 fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
@@ -27,7 +27,19 @@ fn test_matmul_alpha_beta_accumulation() -> Result<(), MetalError> {
     let expected_result = [15.625, 9.875, 43.125, 28.375];
 
     // Use the new kernel system with alpha/beta scaling
-    let result_tensor = context.matmul_alpha_beta(&a_tensor, &TensorType::Dense(&b_tensor), &c_tensor, false, false, alpha, beta, None)?;
+    let result_tensor = context.matmul(
+        &a_tensor,
+        &TensorType::Dense(&b_tensor),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &c_tensor,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -86,7 +98,19 @@ fn test_matmul_alpha_beta_with_different_values() -> Result<(), MetalError> {
     let expected_result = [1.2, 1.45, 1.7, 1.95, 3.4, 4.85, 6.3, 7.75, 5.6, 8.25, 10.9, 13.55];
 
     // Use the new kernel system with alpha/beta scaling
-    let result_tensor = context.matmul_alpha_beta(&a_tensor, &TensorType::Dense(&b_tensor), &c_tensor, false, false, alpha, beta, None)?;
+    let result_tensor = context.matmul(
+        &a_tensor,
+        &TensorType::Dense(&b_tensor),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &c_tensor,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -139,7 +163,19 @@ fn test_matmul_alpha_zero_beta_one() -> Result<(), MetalError> {
     let expected_result = c_data.clone();
 
     // Use the new kernel system with alpha/beta scaling
-    let result_tensor = context.matmul_alpha_beta(&a_tensor, &TensorType::Dense(&b_tensor), &c_tensor, false, false, alpha, beta, None)?;
+    let result_tensor = context.matmul(
+        &a_tensor,
+        &TensorType::Dense(&b_tensor),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &c_tensor,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -193,7 +229,19 @@ fn test_matmul_alpha_one_beta_zero() -> Result<(), MetalError> {
     let expected_result = [19.0, 22.0, 43.0, 50.0];
 
     // Use the new kernel system with alpha/beta scaling
-    let result_tensor = context.matmul_alpha_beta(&a_tensor, &TensorType::Dense(&b_tensor), &c_tensor, false, false, alpha, beta, None)?;
+    let result_tensor = context.matmul(
+        &a_tensor,
+        &TensorType::Dense(&b_tensor),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &c_tensor,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();

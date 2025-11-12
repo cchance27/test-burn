@@ -44,22 +44,22 @@ fn bench_smalln_gemv_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype
 
             // Warmup - use correct interface for Small-N GEMV operations
             let _warmup_out = match n {
-                1 => ctx.call::<MatmulGemvSmallN1Op>((&a, &b)).expect("warmup"),
-                2 => ctx.call::<MatmulGemvSmallN2Op>((&a, &b)).expect("warmup"),
-                4 => ctx.call::<MatmulGemvSmallN4Op>((&a, &b)).expect("warmup"),
-                8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b)).expect("warmup"),
-                16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b)).expect("warmup"),
+                1 => ctx.call::<MatmulGemvSmallN1Op>((&a, &b), None).expect("warmup"),
+                2 => ctx.call::<MatmulGemvSmallN2Op>((&a, &b), None).expect("warmup"),
+                4 => ctx.call::<MatmulGemvSmallN4Op>((&a, &b), None).expect("warmup"),
+                8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None).expect("warmup"),
+                16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b), None).expect("warmup"),
                 _ => unreachable!(),
             };
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = match n {
-                    1 => ctx.call::<MatmulGemvSmallN1Op>((&a, &b)).unwrap(),
-                    2 => ctx.call::<MatmulGemvSmallN2Op>((&a, &b)).unwrap(),
-                    4 => ctx.call::<MatmulGemvSmallN4Op>((&a, &b)).unwrap(),
-                    8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b)).unwrap(),
-                    16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b)).unwrap(),
+                    1 => ctx.call::<MatmulGemvSmallN1Op>((&a, &b), None).unwrap(),
+                    2 => ctx.call::<MatmulGemvSmallN2Op>((&a, &b), None).unwrap(),
+                    4 => ctx.call::<MatmulGemvSmallN4Op>((&a, &b), None).unwrap(),
+                    8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None).unwrap(),
+                    16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b), None).unwrap(),
                     _ => unreachable!(),
                 };
                 ctx.synchronize();
@@ -98,13 +98,13 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
 
                 // Warmup
                 let _warmup_out = ctx
-                    .call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, false, false, 1.0f32, 0.0f32))
+                    .call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, false, false, 1.0f32, 0.0f32), None)
                     .expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
                     let _iter_out = ctx
-                        .call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, false, false, 1.0f32, 0.0f32))
+                        .call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, false, false, 1.0f32, 0.0f32), None)
                         .unwrap();
                     ctx.synchronize();
                 });
@@ -123,11 +123,11 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
 
                 // Warmup
-                let _warmup_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false)).expect("warmup");
+                let _warmup_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false), None).expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let _iter_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false)).unwrap();
+                    let _iter_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false), None).unwrap();
                     ctx.synchronize();
                 });
 
@@ -145,13 +145,13 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
 
                 let _warmup_out = ctx
-                    .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32))
+                    .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32), None)
                     .expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
                     let _iter_out = ctx
-                        .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32))
+                        .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32), None)
                         .unwrap();
                     ctx.synchronize();
                 });
@@ -200,11 +200,13 @@ fn bench_softmax_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_nam
             let seq_k = seq_k as u32;
 
             // Warmup
-            let _warmup_out = ctx.call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0)).expect("warmup");
+            let _warmup_out = ctx
+                .call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0), None)
+                .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
-                let _iter_out = ctx.call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0)).unwrap();
+                let _iter_out = ctx.call::<SoftmaxVecOp>((&input, rows_total, seq_q, seq_k, 0, 0), None).unwrap();
                 ctx.synchronize();
             });
 
@@ -228,12 +230,14 @@ fn bench_softmax_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_nam
 
                 // Warmup
                 let _warmup_out = ctx
-                    .call::<SoftmaxBlockOp>((&input, rows_total, seq_q, seq_k, 0, 0, 0))
+                    .call::<SoftmaxBlockOp>((&input, rows_total, seq_q, seq_k, 0, 0, 0), None)
                     .expect("warmup");
                 ctx.synchronize();
 
                 bi.iter(|| {
-                    let _iter_out = ctx.call::<SoftmaxBlockOp>((&input, rows_total, seq_q, seq_k, 0, 0, 0)).unwrap();
+                    let _iter_out = ctx
+                        .call::<SoftmaxBlockOp>((&input, rows_total, seq_q, seq_k, 0, 0, 0), None)
+                        .unwrap();
                     ctx.synchronize();
                 });
 
@@ -272,16 +276,16 @@ fn bench_smalln_vs_dispatcher_comparison<T: TensorElement>(c: &mut Criterion, dt
 
             // Warmup - use correct interface for Small-N GEMV operations
             let _warmup_out = match n {
-                8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b)).expect("warmup"),
-                16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b)).expect("warmup"),
+                8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None).expect("warmup"),
+                16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b), None).expect("warmup"),
                 _ => unreachable!(),
             };
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = match n {
-                    8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b)).unwrap(),
-                    16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b)).unwrap(),
+                    8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None).unwrap(),
+                    16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b), None).unwrap(),
                     _ => unreachable!(),
                 };
                 ctx.synchronize();
@@ -303,13 +307,13 @@ fn bench_smalln_vs_dispatcher_comparison<T: TensorElement>(c: &mut Criterion, dt
 
             // Warmup - use dispatcher with correct signature
             let _warmup_out = ctx
-                .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32))
+                .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32), None)
                 .expect("warmup");
             ctx.synchronize();
 
             bi.iter(|| {
                 let _iter_out = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32))
+                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32), None)
                     .unwrap();
                 ctx.synchronize();
             });

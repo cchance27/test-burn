@@ -19,7 +19,7 @@ fn resource_cache_survives_synchronize() -> Result<(), MetalError> {
     let b = build_tensor(&ctx, &[3, 2], &b_data)?;
 
     // Populate the cache by issuing a matmul that exercises the MPS backend.
-    let _ = ctx.matmul(&a, &TensorType::Dense(&b), false, false, None)?;
+    let _ = ctx.matmul(&a, &TensorType::Dense(&b), false, false, None, None, None)?;
 
     let stats_before = ctx.get_cache_stats().expect("resource cache should be initialized after dispatch");
     assert!(

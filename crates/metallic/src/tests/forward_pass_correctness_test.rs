@@ -5,7 +5,7 @@ use ndarray::ArrayD;
 use ndarray_npy::ReadNpyExt;
 
 use crate::{
-    Dtype, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, context::Context, error::MetalError, generation::{self, GenerationConfig}, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{elemwise_add::BroadcastElemwiseAddOp, kv_rearrange::KvRearrangeOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp}, models::{LoadableModel, Qwen25}, tensor::TensorType, tokenizer::Tokenizer
+    Dtype, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, context::{Context, QkvWeights}, error::MetalError, generation::{self, GenerationConfig}, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{elemwise_add::BroadcastElemwiseAddOp, kv_rearrange::KvRearrangeOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::SwiGLUOp}, models::{LoadableModel, Qwen25}, tensor::TensorType, tokenizer::Tokenizer
 };
 
 #[allow(clippy::too_many_arguments)]
@@ -147,7 +147,7 @@ fn run_blocks_up_to<T: TensorElement>(
         let resid_attn = x.clone();
 
         // Attention RMSNorm
-        let x_normed = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32))?;
+        let x_normed = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
         ctx.synchronize();
 
         let m = batch * seq;
@@ -155,37 +155,54 @@ fn run_blocks_up_to<T: TensorElement>(
         let kv_head_dim = kv_dim / n_kv_heads;
         let x_flat = x_normed.reshape(vec![m, d_model])?;
 
-        let (q_mat, k_mat, v_mat) = ctx.fused_qkv_projection(&x_flat, &block.attn_qkv_weight, &block.attn_qkv_bias, d_model, kv_dim)?;
+        let (q_mat, k_mat, v_mat) = ctx.qkv(
+            &x_flat,
+            QkvWeights::Dense {
+                fused_weight: &block.attn_qkv_weight,
+                fused_bias: &block.attn_qkv_bias,
+                d_model,
+                kv_dim,
+            },
+        )?;
         ctx.synchronize();
 
         // Rearrange into heads
-        let q_heads = ctx.call::<KvRearrangeOp>((
-            q_mat.clone(),
-            d_model as u32,
-            head_dim as u32,
-            n_heads as u32,
-            n_heads as u32,
-            head_dim as u32,
-            seq as u32,
-        ))?;
-        let k_heads = ctx.call::<KvRearrangeOp>((
-            k_mat.clone(),
-            kv_dim as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-        ))?;
-        let v_heads = ctx.call::<KvRearrangeOp>((
-            v_mat.clone(),
-            kv_dim as u32,
-            kv_head_dim as u32,
-            n_kv_heads as u32,
-            n_kv_heads as u32,
-            kv_head_dim as u32,
-            seq as u32,
-        ))?;
+        let q_heads = ctx.call::<KvRearrangeOp>(
+            (
+                q_mat.clone(),
+                d_model as u32,
+                head_dim as u32,
+                n_heads as u32,
+                n_heads as u32,
+                head_dim as u32,
+                seq as u32,
+            ),
+            None,
+        )?;
+        let k_heads = ctx.call::<KvRearrangeOp>(
+            (
+                k_mat.clone(),
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ),
+            None,
+        )?;
+        let v_heads = ctx.call::<KvRearrangeOp>(
+            (
+                v_mat.clone(),
+                kv_dim as u32,
+                kv_head_dim as u32,
+                n_kv_heads as u32,
+                n_kv_heads as u32,
+                kv_head_dim as u32,
+                seq as u32,
+            ),
+            None,
+        )?;
         ctx.synchronize();
 
         // RoPE for Q
@@ -204,7 +221,10 @@ fn run_blocks_up_to<T: TensorElement>(
         }
         let cos_q = Tensor::<T>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &cos_buf)?;
         let sin_q = Tensor::<T>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(ctx), &sin_buf)?;
-        let q_heads_after_rope = ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?;
+        let q_heads_after_rope = ctx.call::<RoPEOp>(
+            (q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0),
+            None,
+        )?;
         ctx.synchronize();
 
         // RoPE for K
@@ -223,7 +243,7 @@ fn run_blocks_up_to<T: TensorElement>(
         }
         let cos_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &cos_buf_k)?;
         let sin_k = Tensor::<T>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(ctx), &sin_buf_k)?;
-        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0))?;
+        let k_heads_after_rope = ctx.call::<RoPEOp>((k_heads, cos_k, sin_k, kv_head_dim as u32, seq as u32, 0), None)?;
         ctx.synchronize();
 
         // Repeat KV heads for SDPA (GQA)
@@ -245,6 +265,8 @@ fn run_blocks_up_to<T: TensorElement>(
                 false,
                 true,
                 None,
+                None,
+                None,
             )?
             .reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
@@ -254,20 +276,23 @@ fn run_blocks_up_to<T: TensorElement>(
 
         // MLP block
         let resid_mlp = x.clone();
-        let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32))?;
+        let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32), None)?;
         ctx.synchronize();
         let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
-        let ffn_output_flat = ctx.call::<SwiGLUOp>((
-            &x_normed_mlp_flat,
-            &block.ffn_gate,
-            &block.ffn_gate_bias,
-            &block.ffn_up,
-            &block.ffn_up_bias,
-            &block.ffn_down,
-            &block.ffn_down_bias,
-            Some(&block.ffn_gate_up_weight),
-        ))?;
+        let ffn_output_flat = ctx.call::<SwiGLUOp>(
+            (
+                &x_normed_mlp_flat,
+                &block.ffn_gate,
+                &block.ffn_gate_bias,
+                &block.ffn_up,
+                &block.ffn_up_bias,
+                &block.ffn_down,
+                &block.ffn_down_bias,
+                Some(&block.ffn_gate_up_weight),
+            ),
+            None,
+        )?;
         ctx.synchronize();
         let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
@@ -350,7 +375,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     // --- 2. Test First Block Attn Norm ---
     println!("--- 2. Testing First Block Attn Norm ---");
     let block0 = &model.blocks[0];
-    let x_normed_attn = ctx.call::<RMSNormOp>((rust_embeddings.clone(), block0.attn_norm_gamma.clone(), model.config.d_model as u32))?;
+    let x_normed_attn = ctx.call::<RMSNormOp>(
+        (rust_embeddings.clone(), block0.attn_norm_gamma.clone(), model.config.d_model as u32),
+        None,
+    )?;
     ctx.synchronize();
     let rust_attn_norm_slice = x_normed_attn.as_slice();
     println!(
@@ -407,12 +435,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     println!("x_flat (input) dims: {:?}", x_flat.dims());
     println!("Expected fused output dims: [{}, {}]", m, d_model + 2 * block0.kv_dim);
 
-    let linear = ctx.matmul_bias_add(
+    let linear = ctx.matmul(
         &x_flat,
         &TensorType::Dense(&block0.attn_qkv_weight),
-        &block0.attn_qkv_bias,
         false,
         false,
+        Some(&block0.attn_qkv_bias),
+        None,
         None,
     )?;
     ctx.synchronize();
@@ -422,8 +451,15 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         take_first_as_f32::<TestElement>(&linear.as_slice()[..10], 10)
     );
 
-    let (q_mat, k_mat, v_mat) =
-        ctx.fused_qkv_projection(&x_flat, &block0.attn_qkv_weight, &block0.attn_qkv_bias, d_model, block0.kv_dim)?;
+    let (q_mat, k_mat, v_mat) = ctx.qkv(
+        &x_flat,
+        QkvWeights::Dense {
+            fused_weight: &block0.attn_qkv_weight,
+            fused_bias: &block0.attn_qkv_bias,
+            d_model,
+            kv_dim: block0.kv_dim,
+        },
+    )?;
     ctx.synchronize();
 
     let rust_q_proj = q_mat.try_to_vec()?;
@@ -650,33 +686,42 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let v_after = v_mat.clone();
 
     // Create heads tensors [num_heads, seq, head_dim]
-    let q_heads = ctx.call::<KvRearrangeOp>((
-        q_after,
-        d_model as u32,
-        head_dim as u32,
-        n_heads as u32,
-        n_heads as u32,
-        head_dim as u32,
-        seq as u32,
-    ))?;
-    let k_heads = ctx.call::<KvRearrangeOp>((
-        k_after,
-        kv_dim as u32,
-        kv_head_dim as u32,
-        n_kv_heads as u32,
-        n_kv_heads as u32,
-        kv_head_dim as u32,
-        seq as u32,
-    ))?;
-    let v_heads = ctx.call::<KvRearrangeOp>((
-        v_after,
-        kv_dim as u32,
-        kv_head_dim as u32,
-        n_kv_heads as u32,
-        n_kv_heads as u32,
-        kv_head_dim as u32,
-        seq as u32,
-    ))?;
+    let q_heads = ctx.call::<KvRearrangeOp>(
+        (
+            q_after,
+            d_model as u32,
+            head_dim as u32,
+            n_heads as u32,
+            n_heads as u32,
+            head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
+    let k_heads = ctx.call::<KvRearrangeOp>(
+        (
+            k_after,
+            kv_dim as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
+    let v_heads = ctx.call::<KvRearrangeOp>(
+        (
+            v_after,
+            kv_dim as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
     ctx.synchronize();
 
     // RoPE for Q
@@ -697,7 +742,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let sin_q = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &sin_buf)?;
     let q_heads_after_rope = {
         let _out = Tensor::new(q_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
-        ctx.call::<RoPEOp>((q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0))?
+        ctx.call::<RoPEOp>(
+            (q_heads.clone(), cos_q.clone(), sin_q.clone(), head_dim as u32, seq as u32, 0),
+            None,
+        )?
     };
     ctx.synchronize();
 
@@ -719,7 +767,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let sin_k = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half_k], TensorStorage::Dedicated(&ctx), &sin_buf_k)?;
     let k_heads_after_rope = {
         let _out = Tensor::new(k_heads.dims().to_vec(), TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized)?;
-        ctx.call::<RoPEOp>((k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0))?
+        ctx.call::<RoPEOp>(
+            (k_heads.clone(), cos_k.clone(), sin_k.clone(), kv_head_dim as u32, seq as u32, 0),
+            None,
+        )?
     };
     ctx.synchronize();
 
@@ -753,7 +804,15 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 
     // Attn out projection (use transpose on weight to match PyTorch Linear semantics)
     let attn_out_flat = attn_out_reshaped.reshape(vec![seq, d_model])?;
-    let attn_out_proj = ctx.matmul(&attn_out_flat, &TensorType::Dense(&block0.attn_out_weight), false, true, None)?;
+    let attn_out_proj = ctx.matmul(
+        &attn_out_flat,
+        &TensorType::Dense(&block0.attn_out_weight),
+        false,
+        true,
+        None,
+        None,
+        None,
+    )?;
     ctx.synchronize();
     let attn_out = attn_out_proj.reshape(vec![1, seq, d_model])?;
 
@@ -805,7 +864,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let resid_mlp = attn_residual.clone();
 
     // FFN norm
-    let x_normed_mlp = ctx.call::<RMSNormOp>((attn_residual, block0.ffn_norm_gamma.clone(), d_model as u32))?;
+    let x_normed_mlp = ctx.call::<RMSNormOp>((attn_residual, block0.ffn_norm_gamma.clone(), d_model as u32), None)?;
     ctx.synchronize();
 
     // Compare x_normed_mlp against PyTorch mlp_norm dump if available
@@ -861,8 +920,10 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         false,
         gate_transpose_b,
         None,
+        None,
+        None,
     )?;
-    let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()))?;
+    let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()), None)?;
 
     // Up projection
     let up_dims = block0.ffn_up.dims();
@@ -874,14 +935,22 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         panic!("Unexpected FFN up dims {:?} for d_model={}", up_dims, d_model);
     };
     println!("Using transpose_b={} for up matmul", up_transpose_b);
-    let up_proj = ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block0.ffn_up), false, up_transpose_b, None)?;
-    let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()))?;
+    let up_proj = ctx.matmul(
+        &x_normed_mlp_flat,
+        &TensorType::Dense(&block0.ffn_up),
+        false,
+        up_transpose_b,
+        None,
+        None,
+        None,
+    )?;
+    let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()), None)?;
 
     // Silu
-    let silu_out = ctx.call::<crate::kernels::silu::SiluOp>(gate_proj_out.clone())?;
+    let silu_out = ctx.call::<crate::kernels::silu::SiluOp>(gate_proj_out.clone(), None)?;
     ctx.synchronize();
 
-    let mul_out = ctx.call::<crate::kernels::elemwise_mul::ElemwiseMulOp>((silu_out.clone(), up_proj_out.clone()))?;
+    let mul_out = ctx.call::<crate::kernels::elemwise_mul::ElemwiseMulOp>((silu_out.clone(), up_proj_out.clone()), None)?;
 
     // Down projection
     let ff_dim = model.config.ff_dim;
@@ -894,8 +963,16 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         panic!("Unexpected FFN down dims {:?} for ff_dim={}", down_dims, ff_dim);
     };
     println!("Using transpose_b={} for down matmul", down_transpose_b);
-    let down_proj = ctx.matmul(&mul_out, &TensorType::Dense(&block0.ffn_down), false, down_transpose_b, None)?;
-    let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()))?;
+    let down_proj = ctx.matmul(
+        &mul_out,
+        &TensorType::Dense(&block0.ffn_down),
+        false,
+        down_transpose_b,
+        None,
+        None,
+        None,
+    )?;
+    let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()), None)?;
 
     let ffn_output_flat = down_proj_out.clone();
 
@@ -1147,7 +1224,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let resid_attn_last = final_block_input.clone();
 
     // Final block attention norm
-    let x_normed_attn_last = ctx.call::<RMSNormOp>((final_block_input, block_last.attn_norm_gamma.clone(), d_model as u32))?;
+    let x_normed_attn_last = ctx.call::<RMSNormOp>((final_block_input, block_last.attn_norm_gamma.clone(), d_model as u32), None)?;
     ctx.synchronize();
 
     let (py_attn_norm_last, py_attn_norm_shape) =
@@ -1174,43 +1251,54 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let m = attn_norm_last_view.dims()[0];
     let x_flat_last = attn_norm_last_view.reshape(vec![m, d_model])?;
 
-    let (q_mat_last, k_mat_last, v_mat_last) = ctx.fused_qkv_projection(
+    let (q_mat_last, k_mat_last, v_mat_last) = ctx.qkv(
         &x_flat_last,
-        &block_last.attn_qkv_weight,
-        &block_last.attn_qkv_bias,
-        d_model,
-        kv_dim_last,
+        QkvWeights::Dense {
+            fused_weight: &block_last.attn_qkv_weight,
+            fused_bias: &block_last.attn_qkv_bias,
+            d_model,
+            kv_dim: kv_dim_last,
+        },
     )?;
     ctx.synchronize();
 
     // Rearrangement into heads
-    let q_heads_last = ctx.call::<KvRearrangeOp>((
-        q_mat_last.clone(),
-        d_model as u32,
-        head_dim as u32,
-        n_heads as u32,
-        n_heads as u32,
-        head_dim as u32,
-        seq as u32,
-    ))?;
-    let k_heads_last = ctx.call::<KvRearrangeOp>((
-        k_mat_last.clone(),
-        kv_dim_last as u32,
-        kv_head_dim as u32,
-        n_kv_heads as u32,
-        n_kv_heads as u32,
-        kv_head_dim as u32,
-        seq as u32,
-    ))?;
-    let v_heads_last = ctx.call::<KvRearrangeOp>((
-        v_mat_last.clone(),
-        kv_dim_last as u32,
-        kv_head_dim as u32,
-        n_kv_heads as u32,
-        n_kv_heads as u32,
-        kv_head_dim as u32,
-        seq as u32,
-    ))?;
+    let q_heads_last = ctx.call::<KvRearrangeOp>(
+        (
+            q_mat_last.clone(),
+            d_model as u32,
+            head_dim as u32,
+            n_heads as u32,
+            n_heads as u32,
+            head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
+    let k_heads_last = ctx.call::<KvRearrangeOp>(
+        (
+            k_mat_last.clone(),
+            kv_dim_last as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
+    let v_heads_last = ctx.call::<KvRearrangeOp>(
+        (
+            v_mat_last.clone(),
+            kv_dim_last as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
     ctx.synchronize();
 
     // Apply RoPE
@@ -1229,7 +1317,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     }
     let cos_q_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &cos_buf)?;
     let sin_q_last = Tensor::<TestElement>::from_f32_slice(vec![seq, dim_half], TensorStorage::Dedicated(&ctx), &sin_buf)?;
-    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0))? };
+    let q_heads_after_rope_last = { ctx.call::<RoPEOp>((q_heads_last, cos_q_last, sin_q_last, head_dim as u32, seq as u32, 0), None)? };
     ctx.synchronize();
 
     let dim_half_k = kv_head_dim / 2;
@@ -1253,7 +1341,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
             TensorStorage::Pooled(&mut ctx),
             TensorInit::Uninitialized,
         )?;
-        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32, 0))?
+        ctx.call::<RoPEOp>((k_heads_last, cos_k_last, sin_k_last, kv_head_dim as u32, seq as u32, 0), None)?
     };
     ctx.synchronize();
 
@@ -1284,6 +1372,8 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
             false,
             true,
             None,
+            None,
+            None,
         )?
         .reshape(vec![1, seq, d_model])?;
     ctx.synchronize();
@@ -1305,7 +1395,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 
     // Final block MLP
     let resid_mlp_last = attn_residual_last.clone();
-    let x_normed_mlp_last = ctx.call::<RMSNormOp>((attn_residual_last, block_last.ffn_norm_gamma.clone(), d_model as u32))?;
+    let x_normed_mlp_last = ctx.call::<RMSNormOp>((attn_residual_last, block_last.ffn_norm_gamma.clone(), d_model as u32), None)?;
     ctx.synchronize();
 
     let (py_mlp_norm_last, py_mlp_norm_shape) =
@@ -1326,16 +1416,19 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     );
 
     let mlp_norm_flat_last = mlp_norm_last_view.reshape(vec![m, d_model])?;
-    let ffn_output_flat_last = ctx.call::<SwiGLUOp>((
-        &mlp_norm_flat_last,
-        &block_last.ffn_gate,
-        &block_last.ffn_gate_bias,
-        &block_last.ffn_up,
-        &block_last.ffn_up_bias,
-        &block_last.ffn_down,
-        &block_last.ffn_down_bias,
-        Some(&block_last.ffn_gate_up_weight),
-    ))?;
+    let ffn_output_flat_last = ctx.call::<SwiGLUOp>(
+        (
+            &mlp_norm_flat_last,
+            &block_last.ffn_gate,
+            &block_last.ffn_gate_bias,
+            &block_last.ffn_up,
+            &block_last.ffn_up_bias,
+            &block_last.ffn_down,
+            &block_last.ffn_down_bias,
+            Some(&block_last.ffn_gate_up_weight),
+        ),
+        None,
+    )?;
     ctx.synchronize();
     let ffn_output_last = ffn_output_flat_last.reshape(vec![1, seq, d_model])?;
     ctx.synchronize();

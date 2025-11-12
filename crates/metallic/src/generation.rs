@@ -358,15 +358,18 @@ pub(crate) fn gpu_sample_top_k_top_p_async<T: TensorElement>(
     // Generate a random seed for the GPU kernel.
     let seed = rand::rng().next_u32();
 
-    let (output_token,) = ctx.call_custom::<SampleTopKTopPOp>((
-        logits_tensor.clone(),
-        vocab_size as u32,
-        top_k as u32,
-        top_p,
-        temperature,
-        seed,
-        40u32,
-    ))?;
+    let (output_token,) = ctx.call_custom::<SampleTopKTopPOp>(
+        (
+            logits_tensor.clone(),
+            vocab_size as u32,
+            top_k as u32,
+            top_p,
+            temperature,
+            seed,
+            40u32,
+        ),
+        None,
+    )?;
 
     let command_buffer = output_token
         .defining_cmd_buffer

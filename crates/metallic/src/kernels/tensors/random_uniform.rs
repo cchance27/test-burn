@@ -116,7 +116,7 @@ mod random_uniform_test {
     #[test]
     fn test_random_uniform() -> Result<(), MetalError> {
         let mut ctx = Context::<F32Element>::new()?;
-        let result = ctx.call::<RandomUniformOp>((vec![5], 0.0, 1.0, Some(42)))?;
+        let result = ctx.call::<RandomUniformOp>((vec![5], 0.0, 1.0, Some(42)), None)?;
 
         let values = result.as_slice();
         assert_eq!(values.len(), 5);

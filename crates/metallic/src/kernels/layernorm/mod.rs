@@ -115,7 +115,7 @@ mod layernorm_test {
         let beta_data = vec![0.0, 0.0, 0.0];
         let beta = Tensor::new(vec![3], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&beta_data))?;
 
-        let result = ctx.call::<LayerNormOp>((input, gamma, beta, 3))?;
+        let result = ctx.call::<LayerNormOp>((input, gamma, beta, 3), None)?;
 
         // The result should have mean 0 and variance 1 for each row after normalization
         let result_slice = result.as_slice();

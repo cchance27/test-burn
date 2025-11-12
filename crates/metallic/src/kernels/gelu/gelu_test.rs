@@ -7,7 +7,7 @@ fn test_gelu_logic() -> Result<(), MetalError> {
     let input = Tensor::new(vec![4], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data))?;
 
     // Use the kernel via the generic `call` method.
-    let result_tensor = ctx.call::<GeluOp>(input)?;
+    let result_tensor = ctx.call::<GeluOp>(input, None)?;
     // Get the actual results
     let result_slice = result_tensor.as_slice();
 
@@ -47,7 +47,7 @@ fn test_gelu_basic() -> Result<(), MetalError> {
     let dims = vec![2, 5];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
-    let output_tensor = context.call::<GeluOp>(input_tensor)?;
+    let output_tensor = context.call::<GeluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -84,7 +84,7 @@ fn test_gelu_extremes() -> Result<(), MetalError> {
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
-    let output_tensor = context.call::<GeluOp>(input_tensor)?;
+    let output_tensor = context.call::<GeluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -131,7 +131,7 @@ fn test_gelu_zero_and_symmetry() -> Result<(), MetalError> {
     let dims = vec![input_data.len()];
     let input_tensor = Tensor::new(dims.clone(), TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&input_data))?;
 
-    let output_tensor = context.call::<GeluOp>(input_tensor)?;
+    let output_tensor = context.call::<GeluOp>(input_tensor, None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -175,5 +175,5 @@ fn test_gelu_validation_errors() {
 
     // The new kernel system handles validation at the call site automatically
     // This test is now implicitly covered through the kernel system
-    let _result = context.call::<GeluOp>(input);
+    let _result = context.call::<GeluOp>(input, None);
 }

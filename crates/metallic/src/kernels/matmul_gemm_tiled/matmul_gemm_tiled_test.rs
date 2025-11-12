@@ -16,7 +16,7 @@ mod tests {
         let b_tensor = Tensor::from_f32_slice(vec![4, 4], TensorStorage::Pooled(&mut ctx), &b_data)?;
 
         // Perform the matmul using the dispatcher (which may route to our new kernel for large enough matrices)
-        let result = ctx.call::<MatmulDispatchOp>((&a_tensor, &b_tensor, None, None, false, false, 1.0, 0.0))?;
+        let result = ctx.call::<MatmulDispatchOp>((&a_tensor, &b_tensor, None, None, false, false, 1.0, 0.0), None)?;
         ctx.synchronize();
 
         // Validate basic properties: result should be 4x4 and have valid values
@@ -48,7 +48,7 @@ mod tests {
             let a_tensor = Tensor::from_f32_slice(vec![m, k], TensorStorage::Pooled(&mut ctx), &a_data)?;
             let b_tensor = Tensor::from_f32_slice(vec![k, n], TensorStorage::Pooled(&mut ctx), &b_data)?;
 
-            let result = ctx.call::<MatmulDispatchOp>((&a_tensor, &b_tensor, None, None, false, false, 1.0, 0.0))?;
+            let result = ctx.call::<MatmulDispatchOp>((&a_tensor, &b_tensor, None, None, false, false, 1.0, 0.0), None)?;
             ctx.synchronize();
 
             assert_eq!(result.dims(), &[m, n]);
@@ -73,7 +73,7 @@ mod tests {
         // Test with alpha=2.0, beta=1.0: result = 2.0 * A * B + 1.0 * C
         // where C starts as zeros
         let c_tensor = Tensor::zeros(vec![2, 2], &mut ctx, true)?;
-        let result = ctx.call::<MatmulDispatchOp>((&a_tensor, &b_tensor, None, Some(&c_tensor), false, false, 2.0, 1.0))?;
+        let result = ctx.call::<MatmulDispatchOp>((&a_tensor, &b_tensor, None, Some(&c_tensor), false, false, 2.0, 1.0), None)?;
         ctx.synchronize();
 
         assert_eq!(result.dims(), &[2, 2]);
@@ -109,7 +109,7 @@ mod tests {
             let bias = Tensor::from_f32_slice(vec![n], TensorStorage::Pooled(&mut ctx), bias_data)?;
             let out = Tensor::from_f32_slice(vec![m, n], TensorStorage::Pooled(&mut ctx), out_data)?;
 
-            let result = ctx.call::<MatmulDispatchOp>((&a, &b, Some(&bias), Some(&out), false, false, alpha, beta))?;
+            let result = ctx.call::<MatmulDispatchOp>((&a, &b, Some(&bias), Some(&out), false, false, alpha, beta), None)?;
             ctx.synchronize();
 
             let host: Vec<half::f16> = result.to_vec();

@@ -20,7 +20,7 @@ fn test_sdpa_mpsgraph_parity_matrix_representative() -> Result<(), MetalError> {
         let v = Tensor::<F16Element>::random_uniform(vec![batch, seq_k, dim], &mut ctx)?;
 
         for &causal in &[false, true] {
-            let ref_out = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, causal, 0))?;
+            let ref_out = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q, &k, &v, causal, 0), None)?;
             let graph_out = ctx.call::<SdpaMpsGraphOp>(&q, &k, &v, causal, 0)?;
             let diffs: Vec<f32> = ref_out
                 .as_slice()

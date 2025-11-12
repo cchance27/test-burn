@@ -93,7 +93,7 @@ mod ones_test {
     #[test]
     fn test_ones() -> Result<(), MetalError> {
         let mut ctx: Context<F32Element> = Context::<F32Element>::new()?;
-        let result = ctx.call::<OnesOp>(vec![5])?;
+        let result = ctx.call::<OnesOp>(vec![5], None)?;
 
         assert_eq!(result.as_slice(), &[1.0, 1.0, 1.0, 1.0, 1.0]);
         Ok(())

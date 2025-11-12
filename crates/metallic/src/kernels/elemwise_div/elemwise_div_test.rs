@@ -17,7 +17,7 @@ fn test_elemwise_div_basic() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -39,7 +39,7 @@ fn test_elemwise_div_1d() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -61,7 +61,7 @@ fn test_elemwise_div_3d() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -83,7 +83,7 @@ fn test_elemwise_div_by_one() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -105,7 +105,7 @@ fn test_elemwise_div_with_fractions() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -139,7 +139,7 @@ fn test_elemwise_div_large_tensor() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -174,7 +174,7 @@ fn test_elemwise_div_floating_precision() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_div(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseDivOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();

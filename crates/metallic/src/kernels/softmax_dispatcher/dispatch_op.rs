@@ -12,7 +12,7 @@ use crate::{
 
 /// A public, zero-sized struct that acts as the entry point for the softmax dispatcher.
 ///
-/// This can be called via `ctx.call::<SoftmaxDispatchOp>(...)`.
+/// This can be called via `ctx.call::<SoftmaxDispatchOp>(..., None)`.
 pub struct SoftmaxDispatchOp;
 
 impl DefaultKernelInvocable for SoftmaxDispatchOp {

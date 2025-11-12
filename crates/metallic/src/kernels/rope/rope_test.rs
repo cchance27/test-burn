@@ -61,7 +61,7 @@ fn test_rope_basic() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&sin_data),
     )?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -128,7 +128,7 @@ fn test_rope_extreme_large_position_values() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&sin_data),
     )?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -200,7 +200,7 @@ fn test_rope_extreme_angle_values() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&sin_data),
     )?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -272,7 +272,7 @@ fn test_rope_extreme_input_values() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&sin_data),
     )?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -326,7 +326,7 @@ fn test_rope_extreme_cos_sin_values() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&sin_data),
     )?;
 
-    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0))?;
+    let output_tensor = context.call::<RoPEOp>((input_tensor, cos_tensor, sin_tensor, dim as u32, seq_len as u32, 0), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();

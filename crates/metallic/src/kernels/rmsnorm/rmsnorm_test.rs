@@ -15,7 +15,7 @@ fn test_rmsnorm_logic() -> Result<(), MetalError> {
     let feature_dim = 4u32;
 
     // Use the kernel via the generic `call` method.
-    let result_tensor = ctx.call::<RMSNormOp>((input, gamma, feature_dim))?;
+    let result_tensor = ctx.call::<RMSNormOp>((input, gamma, feature_dim), None)?;
 
     // Verify the output shape matches input shape
     assert_eq!(result_tensor.dims(), &[2, 4]);
@@ -75,7 +75,7 @@ fn test_rmsnorm_basic() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&gamma_data),
     )?;
 
-    let output_tensor = context.call::<RMSNormOp>((input_tensor, gamma_tensor, feature_dim as u32))?;
+    let output_tensor = context.call::<RMSNormOp>((input_tensor, gamma_tensor, feature_dim as u32), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();
@@ -126,7 +126,7 @@ fn test_rmsnorm_numerical_stability() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&gamma_data),
     )?;
 
-    let output_tensor = context.call::<RMSNormOp>((input_tensor, gamma_tensor, feature_dim as u32))?;
+    let output_tensor = context.call::<RMSNormOp>((input_tensor, gamma_tensor, feature_dim as u32), None)?;
     context.synchronize();
 
     let metal_output = output_tensor.as_slice();

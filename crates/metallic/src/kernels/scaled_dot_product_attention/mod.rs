@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
 use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}, tensor::TensorType
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::MatmulAlphaBeta, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}, tensor::TensorType
 };
 
 #[cfg(test)]
@@ -201,14 +201,17 @@ fn create_sdpa_operation<T: TensorElement>(
     };
 
     let cache_for_qk = cache.as_mut().map(|c| &mut **c);
-    let qk_scaled_result = ctx.matmul_alpha_beta(
+    let qk_scaled_result = ctx.matmul(
         &q_active,
         &TensorType::Dense(&k_operand),
-        &attention,
         false,
         transpose_b,
-        scale,
-        0.0,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &attention,
+            alpha: scale,
+            beta: 0.0,
+        }),
         cache_for_qk,
     )?;
 
@@ -220,24 +223,25 @@ fn create_sdpa_operation<T: TensorElement>(
         ))
     })?;
 
-    let softmax_result = {
-        // Use the softmax dispatcher to select optimal backend/variant
-        if let Some(cache_ref) = cache.as_mut() {
-            ctx.call_with_cache::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>(
-                (&qk_scaled_result, causal, adjusted_query_offset),
-                cache_ref,
-            )?
-        } else {
-            ctx.call::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>((
-                &qk_scaled_result,
-                causal,
-                adjusted_query_offset,
-            ))?
-        }
-    };
+    let softmax_result = ctx.call::<crate::kernels::softmax_dispatcher::dispatch_op::SoftmaxDispatchOp>(
+        (&qk_scaled_result, causal, adjusted_query_offset),
+        cache.as_deref_mut(),
+    )?;
 
     let cache_for_v = cache.as_mut().map(|c| &mut **c);
-    ctx.matmul_alpha_beta(&softmax_result, &TensorType::Dense(v), &out, false, false, 1.0, 0.0, cache_for_v)?;
+    ctx.matmul(
+        &softmax_result,
+        &TensorType::Dense(v),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &out,
+            alpha: 1.0,
+            beta: 0.0,
+        }),
+        cache_for_v,
+    )?;
 
     // Create a dummy operation since all work is done in this function
     Ok((

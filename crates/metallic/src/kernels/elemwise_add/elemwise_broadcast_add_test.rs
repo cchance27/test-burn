@@ -18,7 +18,7 @@ fn test_broadcast_add_1d_bias() -> Result<(), MetalError> {
 
     let cpu_result = cpu_broadcast_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<BroadcastElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<BroadcastElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -39,8 +39,8 @@ fn test_broadcast_add_inplace_matches_out_of_place() -> Result<(), MetalError> {
     let a_inplace = Tensor::new(vec![2, 2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data))?;
     let b_tensor = Tensor::new(vec![2], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data))?;
 
-    let expected = context.call::<BroadcastElemwiseAddOp>((a_out_of_place, b_tensor.clone()))?;
-    let inplace = context.call::<BroadcastElemwiseAddInplaceOp>((a_inplace, b_tensor))?;
+    let expected = context.call::<BroadcastElemwiseAddOp>((a_out_of_place, b_tensor.clone()), None)?;
+    let inplace = context.call::<BroadcastElemwiseAddInplaceOp>((a_inplace, b_tensor), None)?;
 
     context.synchronize();
 
@@ -61,7 +61,7 @@ fn test_broadcast_add_2d_bias() -> Result<(), MetalError> {
 
     let cpu_result = cpu_broadcast_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<BroadcastElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<BroadcastElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -83,7 +83,7 @@ fn test_broadcast_add_singleton_broadcast() -> Result<(), MetalError> {
 
     let cpu_result = cpu_broadcast_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<BroadcastElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<BroadcastElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();

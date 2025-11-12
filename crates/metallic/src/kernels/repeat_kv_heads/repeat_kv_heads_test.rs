@@ -50,19 +50,22 @@ fn test_repeat_kv_heads_kernel_matches_cpu() -> Result<(), MetalError> {
 
     let expected = cpu_repeat_kv_heads(&input_data, group_size, batch, n_kv_heads, n_heads, seq, head_dim);
 
-    let output = ctx.call::<RepeatKvHeadsOp>((
-        input,
-        group_size as u32,
-        batch as u32,
-        n_kv_heads as u32,
-        n_heads as u32,
-        seq as u32,
-        head_dim as u32,
-        cache_capacity as u32,
-        0u32,
-        RepeatKvWorkspaceKind::Key,
-        false,
-    ))?;
+    let output = ctx.call::<RepeatKvHeadsOp>(
+        (
+            input,
+            group_size as u32,
+            batch as u32,
+            n_kv_heads as u32,
+            n_heads as u32,
+            seq as u32,
+            head_dim as u32,
+            cache_capacity as u32,
+            0u32,
+            RepeatKvWorkspaceKind::Key,
+            false,
+        ),
+        None,
+    )?;
     ctx.synchronize();
 
     assert_eq!(output.dims(), &[batch * n_heads, seq, head_dim]);
@@ -138,32 +141,38 @@ fn test_incremental_repeated_cache_matches_kernel() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&canonical_v),
     )?;
 
-    let expected_k = ctx.call::<RepeatKvHeadsOp>((
-        canonical_k_tensor.clone(),
-        group_size as u32,
-        batch as u32,
-        n_kv_heads as u32,
-        n_heads as u32,
-        seq as u32,
-        head_dim as u32,
-        seq as u32,
-        layer_idx as u32,
-        RepeatKvWorkspaceKind::Key,
-        false,
-    ))?;
-    let expected_v = ctx.call::<RepeatKvHeadsOp>((
-        canonical_v_tensor.clone(),
-        group_size as u32,
-        batch as u32,
-        n_kv_heads as u32,
-        n_heads as u32,
-        seq as u32,
-        head_dim as u32,
-        seq as u32,
-        layer_idx as u32,
-        RepeatKvWorkspaceKind::Value,
-        false,
-    ))?;
+    let expected_k = ctx.call::<RepeatKvHeadsOp>(
+        (
+            canonical_k_tensor.clone(),
+            group_size as u32,
+            batch as u32,
+            n_kv_heads as u32,
+            n_heads as u32,
+            seq as u32,
+            head_dim as u32,
+            seq as u32,
+            layer_idx as u32,
+            RepeatKvWorkspaceKind::Key,
+            false,
+        ),
+        None,
+    )?;
+    let expected_v = ctx.call::<RepeatKvHeadsOp>(
+        (
+            canonical_v_tensor.clone(),
+            group_size as u32,
+            batch as u32,
+            n_kv_heads as u32,
+            n_heads as u32,
+            seq as u32,
+            head_dim as u32,
+            seq as u32,
+            layer_idx as u32,
+            RepeatKvWorkspaceKind::Value,
+            false,
+        ),
+        None,
+    )?;
 
     ctx.synchronize();
 

@@ -330,10 +330,10 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         TensorType<'a, T>,
-        Option<&'a Tensor<T>>,         // bias
-        Option<&'a Tensor<T>>,         // residual C
-        f32,                           // alpha
-        f32,                           // beta
+        Option<&'a Tensor<T>>, // bias
+        Option<&'a Tensor<T>>, // residual C
+        f32,                   // alpha
+        f32,                   // beta
     );
 
     fn function_id() -> Option<KernelFunction> {
@@ -434,19 +434,13 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
 
         if let Some(bias) = &bias_tensor {
             if bias.len() != n {
-                return Err(MetalError::InvalidShape(format!(
-                    "Bias len {} does not match N {}",
-                    bias.len(), n
-                )));
+                return Err(MetalError::InvalidShape(format!("Bias len {} does not match N {}", bias.len(), n)));
             }
         }
         if let Some(resid) = &residual_tensor {
             let rd = resid.dims();
             if rd.len() != 2 || rd[0] != 1 || rd[1] != n {
-                return Err(MetalError::InvalidShape(format!(
-                    "Residual shape {:?} must be [1, N={}]",
-                    rd, n
-                )));
+                return Err(MetalError::InvalidShape(format!("Residual shape {:?} must be [1, N={}]", rd, n)));
             }
         }
 
@@ -455,14 +449,22 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
         match &matrix {
             GemvMatrix::Dense(a_tensor) => {
                 let mut inputs: Vec<&Tensor<T>> = vec![x, a_tensor, &y];
-                if let Some(b) = &bias_tensor { inputs.push(b); }
-                if let Some(r) = &residual_tensor { inputs.push(r); }
+                if let Some(b) = &bias_tensor {
+                    inputs.push(b);
+                }
+                if let Some(r) = &residual_tensor {
+                    inputs.push(r);
+                }
                 ctx.prepare_tensors_for_active_cmd(&inputs)?;
             }
             GemvMatrix::QuantCanonical(_) => {
                 let mut inputs: Vec<&Tensor<T>> = vec![x, &y];
-                if let Some(b) = &bias_tensor { inputs.push(b); }
-                if let Some(r) = &residual_tensor { inputs.push(r); }
+                if let Some(b) = &bias_tensor {
+                    inputs.push(b);
+                }
+                if let Some(r) = &residual_tensor {
+                    inputs.push(r);
+                }
                 ctx.prepare_tensors_for_active_cmd(&inputs)?;
             }
         }
@@ -474,10 +476,21 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
             weights_per_block: canonical_weights_per_block,
         };
 
-        let threadgroup_size = MTLSize { width: THREADGROUP_WIDTH, height: 1, depth: 1 };
-        let grid_size = MTLSize { width: n.div_ceil(TILE_N), height: 1, depth: 1 };
+        let threadgroup_size = MTLSize {
+            width: THREADGROUP_WIDTH,
+            height: 1,
+            depth: 1,
+        };
+        let grid_size = MTLSize {
+            width: n.div_ceil(TILE_N),
+            height: 1,
+            depth: 1,
+        };
 
-        let dq_suffix = match &matrix { GemvMatrix::Dense(_) => " (D)", GemvMatrix::QuantCanonical(_) => " (Q)" };
+        let dq_suffix = match &matrix {
+            GemvMatrix::Dense(_) => " (D)",
+            GemvMatrix::QuantCanonical(_) => " (Q)",
+        };
         let profiler_label = if crate::profiling_state::get_profiling_state() {
             let mut label = ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("matmul"));
             label.op_name = format!("{}/matmul/gemv_addmm{}", label.op_name, dq_suffix);
@@ -503,7 +516,11 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
         let pipeline = match &matrix {
             GemvMatrix::Dense(_) => pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatmulGemvAddmmOp".to_string()))?,
             GemvMatrix::QuantCanonical(_) => {
-                if let Some(existing) = pipeline { existing } else { ctx.kernel_manager.get_pipeline(KernelFunction::MatmulGemv, T::DTYPE, &ctx.device)? }
+                if let Some(existing) = pipeline {
+                    existing
+                } else {
+                    ctx.kernel_manager.get_pipeline(KernelFunction::MatmulGemv, T::DTYPE, &ctx.device)?
+                }
             }
         };
 

@@ -16,7 +16,7 @@ fn test_elemwise_add_basic() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -38,7 +38,7 @@ fn test_elemwise_add_1d() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -60,7 +60,7 @@ fn test_elemwise_add_3d() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();
@@ -83,7 +83,7 @@ fn test_elemwise_add_large_tensor() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_add(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseAddOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();

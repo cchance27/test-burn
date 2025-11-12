@@ -62,27 +62,33 @@ fn test_softmax_kernel_numerical_consistency() {
 
         // Test original softmax kernel
         let original_result = ctx
-            .call::<SoftmaxKernelOp>((
-                &input_orig,
-                (batch_size * seq_len) as u32,
-                seq_len as u32,
-                head_dim as u32,
-                causal as u32,
-                0u32,
-            ))
-            .unwrap();
-
-        // Test vec-softmax (for seq_len <= 1024)
-        if seq_len <= 1024 {
-            let vec_result = ctx
-                .call::<SoftmaxVecOp>((
-                    &input_vec,
+            .call::<SoftmaxKernelOp>(
+                (
+                    &input_orig,
                     (batch_size * seq_len) as u32,
                     seq_len as u32,
                     head_dim as u32,
                     causal as u32,
                     0u32,
-                ))
+                ),
+                None,
+            )
+            .unwrap();
+
+        // Test vec-softmax (for seq_len <= 1024)
+        if seq_len <= 1024 {
+            let vec_result = ctx
+                .call::<SoftmaxVecOp>(
+                    (
+                        &input_vec,
+                        (batch_size * seq_len) as u32,
+                        seq_len as u32,
+                        head_dim as u32,
+                        causal as u32,
+                        0u32,
+                    ),
+                    None,
+                )
                 .unwrap();
 
             // Row width is the last dimension (seq_k/head_dim)
@@ -98,15 +104,18 @@ fn test_softmax_kernel_numerical_consistency() {
             )
             .unwrap();
             let block_result = ctx
-                .call::<SoftmaxBlockOp>((
-                    &input_block,
-                    (batch_size * seq_len) as u32,
-                    seq_len as u32,
-                    head_dim as u32,
-                    32u32,
-                    causal as u32,
-                    0u32,
-                ))
+                .call::<SoftmaxBlockOp>(
+                    (
+                        &input_block,
+                        (batch_size * seq_len) as u32,
+                        seq_len as u32,
+                        head_dim as u32,
+                        32u32,
+                        causal as u32,
+                        0u32,
+                    ),
+                    None,
+                )
                 .unwrap();
 
             // Row width is the last dimension (seq_k/head_dim)
@@ -153,9 +162,13 @@ fn test_softmax_kernel_edge_cases() {
         let input_vec = Tensor::new(vec![1, 128, 1], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
 
         // Test original vs vec-softmax
-        let original_result = ctx.call::<SoftmaxKernelOp>((&input_orig, 128, 128, 1, false as u32, 0)).unwrap();
+        let original_result = ctx
+            .call::<SoftmaxKernelOp>((&input_orig, 128, 128, 1, false as u32, 0), None)
+            .unwrap();
 
-        let vec_result = ctx.call::<SoftmaxVecOp>((&input_vec, 128u32, 128u32, 1u32, 0u32, 0u32)).unwrap();
+        let vec_result = ctx
+            .call::<SoftmaxVecOp>((&input_vec, 128u32, 128u32, 1u32, 0u32, 0u32), None)
+            .unwrap();
 
         // Row width is the last dimension (seq_k = 1)
         compare_softmax_results(&original_result, &vec_result, &format!("edge_case_{}", i), 1);
@@ -196,11 +209,14 @@ fn test_softmax_causal_masking_consistency() {
 
     // Test non-causal case
     let non_causal_original = ctx
-        .call::<SoftmaxKernelOp>((&input_nc_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0))
+        .call::<SoftmaxKernelOp>(
+            (&input_nc_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0),
+            None,
+        )
         .unwrap();
 
     let non_causal_vec = ctx
-        .call::<SoftmaxVecOp>((&input_nc_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32))
+        .call::<SoftmaxVecOp>((&input_nc_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32), None)
         .unwrap();
 
     // Row width is the last dimension (seq_k = 1)
@@ -214,7 +230,10 @@ fn test_softmax_causal_masking_consistency() {
     )
     .unwrap();
     let causal_original = ctx
-        .call::<SoftmaxKernelOp>((&input_c_orig, seq_len as u32, seq_len as u32, head_dim as u32, true as u32, 0))
+        .call::<SoftmaxKernelOp>(
+            (&input_c_orig, seq_len as u32, seq_len as u32, head_dim as u32, true as u32, 0),
+            None,
+        )
         .unwrap();
 
     let input_c_vec = Tensor::new(
@@ -224,7 +243,7 @@ fn test_softmax_causal_masking_consistency() {
     )
     .unwrap();
     let causal_vec = ctx
-        .call::<SoftmaxVecOp>((&input_c_vec, seq_len as u32, seq_len as u32, head_dim as u32, 1u32, 0u32))
+        .call::<SoftmaxVecOp>((&input_c_vec, seq_len as u32, seq_len as u32, head_dim as u32, 1u32, 0u32), None)
         .unwrap();
 
     // Row width is the last dimension (seq_k = 1)
@@ -354,10 +373,14 @@ fn test_softmax_kernel_dtype_consistency() {
     let input_vec = Tensor::new(vec![1, 128, 2], TensorStorage::Dedicated(&ctx), TensorInit::CopyFrom(&input_data)).unwrap();
 
     // Test original kernel
-    let original_result = ctx.call::<SoftmaxKernelOp>((&input_orig, 128, 128, 2, false as u32, 0)).unwrap();
+    let original_result = ctx
+        .call::<SoftmaxKernelOp>((&input_orig, 128, 128, 2, false as u32, 0), None)
+        .unwrap();
 
     // Test vec kernel
-    let vec_result = ctx.call::<SoftmaxVecOp>((&input_vec, 128u32, 128u32, 2u32, 0u32, 0u32)).unwrap();
+    let vec_result = ctx
+        .call::<SoftmaxVecOp>((&input_vec, 128u32, 128u32, 2u32, 0u32, 0u32), None)
+        .unwrap();
 
     // Row width is the last dimension (seq_k = 2)
     compare_softmax_results(&original_result, &vec_result, "vec-softmax-dtype", 2);
@@ -394,11 +417,14 @@ fn test_softmax_f32_dtypes() {
 
     // Test original vs vec-softmax for F32
     let original_result = ctx
-        .call::<SoftmaxKernelOp>((&input_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0))
+        .call::<SoftmaxKernelOp>(
+            (&input_orig, seq_len as u32, seq_len as u32, head_dim as u32, false as u32, 0),
+            None,
+        )
         .unwrap();
 
     let vec_result = ctx
-        .call::<SoftmaxVecOp>((&input_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32))
+        .call::<SoftmaxVecOp>((&input_vec, seq_len as u32, seq_len as u32, head_dim as u32, 0u32, 0u32), None)
         .unwrap();
 
     compare_softmax_results_f32(&original_result, &vec_result, "vec-softmax-f32", head_dim);
@@ -425,26 +451,32 @@ fn test_softmax_f32_dtypes() {
 
     // Test original vs block-softmax for F32
     let original_long_result = ctx
-        .call::<SoftmaxKernelOp>((
-            &input_orig_long,
-            long_seq_len as u32,
-            long_seq_len as u32,
-            head_dim as u32,
-            false as u32,
-            0,
-        ))
+        .call::<SoftmaxKernelOp>(
+            (
+                &input_orig_long,
+                long_seq_len as u32,
+                long_seq_len as u32,
+                head_dim as u32,
+                false as u32,
+                0,
+            ),
+            None,
+        )
         .unwrap();
 
     let block_result = ctx
-        .call::<SoftmaxBlockOp>((
-            &input_block,
-            long_seq_len as u32,
-            long_seq_len as u32,
-            head_dim as u32,
-            1024u32,
-            0u32,
-            0u32,
-        ))
+        .call::<SoftmaxBlockOp>(
+            (
+                &input_block,
+                long_seq_len as u32,
+                long_seq_len as u32,
+                head_dim as u32,
+                1024u32,
+                0u32,
+                0u32,
+            ),
+            None,
+        )
         .unwrap();
 
     compare_softmax_results_f32(&original_long_result, &block_result, "block-softmax-f32", head_dim);
@@ -542,7 +574,10 @@ fn test_softmax_block_causal_masking_consistency() {
     )
     .unwrap();
     let original = ctx
-        .call::<SoftmaxKernelOp>((&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0))
+        .call::<SoftmaxKernelOp>(
+            (&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0),
+            None,
+        )
         .unwrap();
 
     // Test with block-softmax kernel
@@ -553,15 +588,18 @@ fn test_softmax_block_causal_masking_consistency() {
     )
     .unwrap();
     let block = ctx
-        .call::<SoftmaxBlockOp>((
-            &input_block,
-            (batch * seq_q) as u32,
-            seq_q as u32,
-            seq_k as u32,
-            1024u32,
-            causal as u32,
-            0,
-        ))
+        .call::<SoftmaxBlockOp>(
+            (
+                &input_block,
+                (batch * seq_q) as u32,
+                seq_q as u32,
+                seq_k as u32,
+                1024u32,
+                causal as u32,
+                0,
+            ),
+            None,
+        )
         .unwrap();
 
     // Compare results
@@ -658,10 +696,16 @@ fn test_softmax_vec_debug_small() {
 
     // Run original and vec-softmax
     let original = ctx
-        .call::<SoftmaxKernelOp>((&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0))
+        .call::<SoftmaxKernelOp>(
+            (&input_orig, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0),
+            None,
+        )
         .unwrap();
     let vec = ctx
-        .call::<SoftmaxVecOp>((&input_vec, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0))
+        .call::<SoftmaxVecOp>(
+            (&input_vec, (batch * seq_q) as u32, seq_q as u32, seq_k as u32, causal as u32, 0),
+            None,
+        )
         .unwrap();
 
     let o = original.as_slice();

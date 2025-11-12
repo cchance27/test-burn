@@ -87,6 +87,6 @@ impl<T: TensorElement> Context<T> {
         query_offset: usize,
     ) -> Result<Tensor<T>, MetalError> {
         // Use the kernel system for SDPA
-        self.call::<ScaledDotProductAttentionDispatchOp>((q, k, v, causal, query_offset as u32))
+        self.call::<ScaledDotProductAttentionDispatchOp>((q, k, v, causal, query_offset as u32), None)
     }
 }

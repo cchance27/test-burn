@@ -89,7 +89,7 @@ fn test_sdpa_mpsgraph_basic_functionality() -> Result<(), MetalError> {
     let v_tensor = Tensor::<F16Element>::random_uniform(vec![batch, seq_k, dim], &mut ctx)?;
 
     // Test non-causal SDPA
-    let result_tensor = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, false, 0u32))?;
+    let result_tensor = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, false, 0u32), None)?;
 
     // Verify output shape
     assert_eq!(result_tensor.dims(), &[batch, seq_q, dim]);
@@ -99,7 +99,7 @@ fn test_sdpa_mpsgraph_basic_functionality() -> Result<(), MetalError> {
     assert!(sum != 0.0, "Output should not be all zeros");
 
     // Test causal SDPA
-    let causal_result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0))?;
+    let causal_result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0), None)?;
 
     // Verify causal output shape
     assert_eq!(causal_result.dims(), &[batch, seq_q, dim]);
@@ -130,7 +130,7 @@ fn test_sdpa_mpsgraph_different_shapes() -> Result<(), MetalError> {
 
         // Test both causal and non-causal
         for &causal in &[false, true] {
-            let result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, causal, 0))?;
+            let result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, causal, 0), None)?;
 
             // Verify output shape
             assert_eq!(result.dims(), &[batch, seq_q, dim]);
@@ -195,8 +195,8 @@ fn test_sdpa_mpsgraph_vs_optimized_comparison() -> Result<(), MetalError> {
     )?;
 
     // Test non-causal comparison
-    let optimized_result = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, false, 0))?;
-    let mpsgraph_result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, false, 0))?;
+    let optimized_result = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, false, 0), None)?;
+    let mpsgraph_result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, false, 0), None)?;
 
     // Compare outputs element by element
     let diff_data: Vec<f32> = optimized_result
@@ -228,8 +228,8 @@ fn test_sdpa_mpsgraph_vs_optimized_comparison() -> Result<(), MetalError> {
     );
 
     // Test causal comparison
-    let optimized_causal = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, true, 0))?;
-    let mpsgraph_causal = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0))?;
+    let optimized_causal = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, true, 0), None)?;
+    let mpsgraph_causal = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0), None)?;
 
     let causal_diff_data: Vec<f32> = optimized_causal
         .as_slice()
@@ -295,8 +295,8 @@ fn test_sdpa_mpsgraph_incremental_query_offset() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&make_tensor(batch * seq_k * dim, 0.03)),
     )?;
 
-    let optimized = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, true, query_offset))?;
-    let graph = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, query_offset))?;
+    let optimized = ctx.call::<ScaledDotProductAttentionOptimizedOp>((&q_tensor, &k_tensor, &v_tensor, true, query_offset), None)?;
+    let graph = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, query_offset), None)?;
 
     let diffs = optimized
         .as_slice()
@@ -346,7 +346,7 @@ fn test_sdpa_mpsgraph_extreme_values() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&vec![F16Element::from_f32(1e-4); batch * seq_k * dim]),
     )?;
 
-    let small_result = ctx.call::<SdpaMpsGraphOp>((&small_q, &small_k, &small_v, false, 0))?;
+    let small_result = ctx.call::<SdpaMpsGraphOp>((&small_q, &small_k, &small_v, false, 0), None)?;
 
     // Should still produce finite values
     let small_slice = small_result.as_slice();
@@ -388,7 +388,7 @@ fn test_sdpa_mpsgraph_extreme_values() -> Result<(), MetalError> {
         ),
     )?;
 
-    let large_result = ctx.call::<SdpaMpsGraphOp>((&large_q, &large_k, &large_v, false, 0))?;
+    let large_result = ctx.call::<SdpaMpsGraphOp>((&large_q, &large_k, &large_v, false, 0), None)?;
 
     // Should still produce finite values
     let large_slice = large_result.as_slice();
@@ -419,7 +419,7 @@ fn test_sdpa_mpsgraph_memory_efficiency() -> Result<(), MetalError> {
     // Run multiple sequential calls
     let mut last_result = None;
     for i in 0..5 {
-        let result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, i % 2 == 0, 0))?;
+        let result = ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, i % 2 == 0, 0), None)?;
         last_result = Some(result);
     }
 

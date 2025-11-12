@@ -1,6 +1,6 @@
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
-use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, tensor::TensorType};
+use crate::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, context::MatmulAlphaBeta, tensor::TensorType};
 
 fn new_context_for_backend(backend: &str) -> Result<Context<F32Element>, MetalError> {
     let previous = FORCE_MATMUL_BACKEND_VAR.get().unwrap_or(None);
@@ -77,9 +77,25 @@ fn run_matmul_backend_comparison(index: usize, scenario: &MatmulScenario) -> Res
     let a_mlx = tensor_from_data(&ctx_mlx, &scenario.a_dims, &a_data)?;
     let b_mlx = tensor_from_data(&ctx_mlx, &scenario.b_dims, &b_data)?;
 
-    let out_mps = ctx_mps.matmul(&a_mps, &TensorType::Dense(&b_mps), scenario.transpose_a, scenario.transpose_b, None)?;
+    let out_mps = ctx_mps.matmul(
+        &a_mps,
+        &TensorType::Dense(&b_mps),
+        scenario.transpose_a,
+        scenario.transpose_b,
+        None,
+        None,
+        None,
+    )?;
     ctx_mps.synchronize();
-    let out_mlx = ctx_mlx.matmul(&a_mlx, &TensorType::Dense(&b_mlx), scenario.transpose_a, scenario.transpose_b, None)?;
+    let out_mlx = ctx_mlx.matmul(
+        &a_mlx,
+        &TensorType::Dense(&b_mlx),
+        scenario.transpose_a,
+        scenario.transpose_b,
+        None,
+        None,
+        None,
+    )?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-3, 1e-6, scenario.description);
@@ -106,9 +122,33 @@ fn run_alpha_beta_case(index: usize, alpha: f32, beta: f32) -> Result<(), MetalE
     let b_mlx = tensor_from_data(&ctx_mlx, &[k, n], &b_data)?;
     let c_mlx = tensor_from_data(&ctx_mlx, &[m, n], &c_data)?;
 
-    let out_mps = ctx_mps.matmul_alpha_beta(&a_mps, &TensorType::Dense(&b_mps), &c_mps, false, false, alpha, beta, None)?;
+    let out_mps = ctx_mps.matmul(
+        &a_mps,
+        &TensorType::Dense(&b_mps),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &c_mps,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
     ctx_mps.synchronize();
-    let out_mlx = ctx_mlx.matmul_alpha_beta(&a_mlx, &TensorType::Dense(&b_mlx), &c_mlx, false, false, alpha, beta, None)?;
+    let out_mlx = ctx_mlx.matmul(
+        &a_mlx,
+        &TensorType::Dense(&b_mlx),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &c_mlx,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
     ctx_mlx.synchronize();
 
     assert_tensors_close(&out_mps, &out_mlx, 1e-4, 1e-6, &format!("alpha={} beta={}", alpha, beta));
@@ -145,7 +185,7 @@ fn test_strided_kv_history_prefers_mlx_backend() -> Result<(), MetalError> {
         TensorInit::CopyFrom(&query_data),
     )?;
 
-    let result = ctx.matmul(&queries, &TensorType::Dense(&history_view), false, true, None)?;
+    let result = ctx.matmul(&queries, &TensorType::Dense(&history_view), false, true, None, None, None)?;
     ctx.synchronize();
 
     // The old test checked matmul samples to verify MLX backend was used

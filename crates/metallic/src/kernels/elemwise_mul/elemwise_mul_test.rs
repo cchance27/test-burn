@@ -16,7 +16,7 @@ fn test_elemwise_mul_basic() -> Result<(), MetalError> {
 
     let cpu_result = cpu_elemwise_mul(&a_data, &b_data);
 
-    let result_tensor = context.call::<ElemwiseMulOp>((a_tensor, b_tensor))?;
+    let result_tensor = context.call::<ElemwiseMulOp>((a_tensor, b_tensor), None)?;
     context.synchronize();
 
     let metal_output = result_tensor.as_slice();

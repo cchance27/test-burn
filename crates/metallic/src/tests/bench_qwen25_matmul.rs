@@ -119,7 +119,7 @@ fn bench_mlx_gemm_fp16(shape: MatmulShape, iters: usize) -> Result<f64, MetalErr
     let b = make_fp16_tensor(&mut ctx, b_dims, 0xDEAD_BEEF)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, shape.t_a, shape.t_b, 1.0, 0.0))?;
+        let _ = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b), None, None, shape.t_a, shape.t_b, 1.0, 0.0), None)?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -131,7 +131,19 @@ fn bench_mlx_gemm_q8(shape: MatmulShape, iters: usize) -> Result<f64, MetalError
     let q8 = make_q8_canonical(&ctx, shape.k, shape.n, 0xFEED_BA65)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatMulMlxOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None, None, shape.t_a, shape.t_b, 1.0, 0.0))?;
+        let _ = ctx.call::<MatMulMlxOp>(
+            (
+                &a,
+                TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)),
+                None,
+                None,
+                shape.t_a,
+                shape.t_b,
+                1.0,
+                0.0,
+            ),
+            None,
+        )?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -144,7 +156,7 @@ fn bench_quant_dispatch(shape: MatmulShape, iters: usize) -> Result<f64, MetalEr
     let quant = TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8));
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.matmul(&a, &quant, shape.t_a, shape.t_b, None)?;
+        let _ = ctx.matmul(&a, &quant, shape.t_a, shape.t_b, None, None, None)?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -156,7 +168,7 @@ fn bench_q8_direct_gemv(shape: MatmulShape, iters: usize) -> Result<f64, MetalEr
     let q8 = make_q8_canonical(&ctx, shape.k, shape.n, 0xFACE_FEED)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None))?;
+        let _ = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -170,9 +182,9 @@ fn bench_q8_smallm_kernel_direct(shape: MatmulShape, iters: usize) -> Result<f64
     let start = Instant::now();
     for _ in 0..iters {
         if shape.m == 1 {
-            let _ = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None))?;
+            let _ = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
         } else {
-            let _ = ctx.call::<MatmulGemvSmallMOp>((&a, &q8, None))?;
+            let _ = ctx.call::<MatmulGemvSmallMOp>((&a, &q8, None), None)?;
         }
     }
     ctx.synchronize();
@@ -186,7 +198,7 @@ fn bench_q8_canonical_direct(shape: MatmulShape, iters: usize) -> Result<f64, Me
     let q8 = make_q8_canonical(&ctx, shape.k, shape.n, 0xA6A6_FFFF)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulQ8CanonicalOp>((&a, &q8, None))?;
+        let _ = ctx.call::<MatmulQ8CanonicalOp>((&a, &q8, None), None)?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -199,7 +211,7 @@ fn bench_q8_canonical_rows16_direct(shape: MatmulShape, iters: usize) -> Result<
     let q8 = make_q8_canonical(&ctx, shape.k, shape.n, 0xB6B6_3333)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulQ8CanonicalRows16Op>((&a, &q8, None))?;
+        let _ = ctx.call::<MatmulQ8CanonicalRows16Op>((&a, &q8, None), None)?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -212,7 +224,7 @@ fn bench_q8_nt_direct(shape: MatmulShape, iters: usize) -> Result<f64, MetalErro
     let q8 = make_q8_canonical(&ctx, shape.k, shape.n, 0xC8C8_0002)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulQ8NtOp>((&a, &q8, None))?;
+        let _ = ctx.call::<MatmulQ8NtOp>((&a, &q8, None), None)?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -238,7 +250,7 @@ fn bench_decode_sequence_fp16(iters: usize) -> Result<f64, MetalError> {
             let a = &inputs[idx];
             let b = &weights[idx];
             let dense = TensorType::Dense(b);
-            let _ = ctx.matmul(a, &dense, shape.t_a, shape.t_b, None)?;
+            let _ = ctx.matmul(a, &dense, shape.t_a, shape.t_b, None, None, None)?;
         }
     }
     ctx.synchronize();
@@ -260,7 +272,7 @@ fn bench_decode_sequence_q8(iters: usize) -> Result<f64, MetalError> {
             let a = &inputs[idx];
             let q8 = &weights[idx];
             let quant = TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(q8));
-            let _ = ctx.matmul(a, &quant, shape.t_a, shape.t_b, None)?;
+            let _ = ctx.matmul(a, &quant, shape.t_a, shape.t_b, None, None, None)?;
         }
     }
     ctx.synchronize();
@@ -549,7 +561,6 @@ fn bench_nt_crossover_m1_to_m4() -> Result<(), MetalError> {
     Ok(())
 }
 
-
 #[test]
 #[serial]
 #[ignore]
@@ -780,8 +791,12 @@ fn bench_crossover_m1_to_m4() -> Result<(), MetalError> {
         let t_q8_gemm = bench_mlx_gemm_q8(shape, iters)?;
         let iters_f = iters as f64;
         println!("FP16 MLX GEMM:       total={:.3}s avg={:.6}ms", t_fp16, 1e3 * t_fp16 / iters_f);
-        println!("Q8 MLX GEMM:         total={:.3}s avg={:.6}ms", t_q8_gemm, 1e3 * t_q8_gemm / iters_f);
-        
+        println!(
+            "Q8 MLX GEMM:         total={:.3}s avg={:.6}ms",
+            t_q8_gemm,
+            1e3 * t_q8_gemm / iters_f
+        );
+
         println!(
             "Q8  small-m kernel:     total={:.3}s avg={:.6}ms",
             t_q8_smallm_kernel,

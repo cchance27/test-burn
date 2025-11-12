@@ -30,7 +30,10 @@ fn benchmark_sdpa_vs_fused(c: &mut Criterion) {
             let v_tensor = Tensor::from_f32_slice(vec![batch, seq_k, dim], metallic::TensorStorage::Pooled(&mut ctx), &v_data).unwrap();
 
             // Run SDPA operation
-            let _result = black_box(ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0)).unwrap());
+            let _result = black_box(
+                ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0), None)
+                    .unwrap(),
+            );
         })
     });
 
@@ -60,7 +63,10 @@ fn benchmark_sdpa_vs_fused(c: &mut Criterion) {
             // In a real implementation, this would call a fused kernel
             // that performs both SDPA and projection in a single graph
             // For now, simulate the performance characteristics
-            let _result = black_box(ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0)).unwrap());
+            let _result = black_box(
+                ctx.call::<SdpaMpsGraphOp>((&q_tensor, &k_tensor, &v_tensor, true, 0), None)
+                    .unwrap(),
+            );
         })
     });
 

@@ -27,33 +27,42 @@ fn test_kv_rearrange_logic() -> Result<(), MetalError> {
     let k_mat = fused.slice_last_dim(d_model..d_model + kv_dim)?;
     let v_mat = fused.slice_last_dim(d_model + kv_dim..fused_dim)?;
 
-    let q_result = ctx.call::<KvRearrangeOp>((
-        q_mat.clone(),
-        d_model as u32,
-        head_dim as u32,
-        n_heads as u32,
-        n_heads as u32,
-        head_dim as u32,
-        seq as u32,
-    ))?;
-    let k_result = ctx.call::<KvRearrangeOp>((
-        k_mat.clone(),
-        kv_dim as u32,
-        kv_head_dim as u32,
-        n_kv_heads as u32,
-        n_kv_heads as u32,
-        kv_head_dim as u32,
-        seq as u32,
-    ))?;
-    let v_result = ctx.call::<KvRearrangeOp>((
-        v_mat.clone(),
-        kv_dim as u32,
-        kv_head_dim as u32,
-        n_kv_heads as u32,
-        n_kv_heads as u32,
-        kv_head_dim as u32,
-        seq as u32,
-    ))?;
+    let q_result = ctx.call::<KvRearrangeOp>(
+        (
+            q_mat.clone(),
+            d_model as u32,
+            head_dim as u32,
+            n_heads as u32,
+            n_heads as u32,
+            head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
+    let k_result = ctx.call::<KvRearrangeOp>(
+        (
+            k_mat.clone(),
+            kv_dim as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
+    let v_result = ctx.call::<KvRearrangeOp>(
+        (
+            v_mat.clone(),
+            kv_dim as u32,
+            kv_head_dim as u32,
+            n_kv_heads as u32,
+            n_kv_heads as u32,
+            kv_head_dim as u32,
+            seq as u32,
+        ),
+        None,
+    )?;
 
     ctx.synchronize();
 

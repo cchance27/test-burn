@@ -63,7 +63,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
     /// Create a tensor of all ones with the given shape.
     #[inline]
     pub fn ones(dims: Vec<usize>, context: &mut super::Context<T>) -> Result<Self, crate::MetalError> {
-        context.call::<OnesOp>(dims)
+        context.call::<OnesOp>(dims, None)
     }
 
     /// Create an arange tensor (0..n as f32) with the given shape.
@@ -71,7 +71,7 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
         if dims.iter().product::<usize>() != num_elements {
             return Err(crate::MetalError::InvalidShape("dims product must match num_elements".to_string()));
         }
-        let mut tensor = context.call::<ArangeOp>(num_elements)?;
+        let mut tensor = context.call::<ArangeOp>(num_elements, None)?;
         tensor.dims = dims;
         tensor.strides = Self::compute_strides(&tensor.dims);
         Ok(tensor)
@@ -93,14 +93,14 @@ impl<T: crate::tensor::TensorElement> super::Tensor<T> {
     #[inline]
     pub fn random_uniform(dims: Vec<usize>, context: &mut super::Context<T>) -> Result<Self, crate::MetalError> {
         // Backwards-compatible simple random uniform in [0,1)
-        context.call::<RandomUniformOp>((dims, 0.0, 1.0, None))
+        context.call::<RandomUniformOp>((dims, 0.0, 1.0, None), None)
     }
 
     /// Fill a new tensor with uniform random values in [min, max).
     /// Uses the device random pipeline for best performance.
     #[inline]
     pub fn random_uniform_range(dims: Vec<usize>, min: f32, max: f32, context: &mut super::Context<T>) -> Result<Self, crate::MetalError> {
-        let tensor = context.call::<RandomUniformOp>((dims, min, max, None))?;
+        let tensor = context.call::<RandomUniformOp>((dims, min, max, None), None)?;
         Ok(tensor)
     }
 

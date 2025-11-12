@@ -149,19 +149,22 @@ fn q8_gemm_parity_non_transposed() -> Result<(), MetalError> {
     let mut ctx = Context::<crate::tensor::F16>::new()?;
     let a = make_fp16_tensor(&mut ctx, vec![1, s.k], 0x7777_ABCD)?;
     let b_dense = make_fp16_tensor(&mut ctx, vec![s.k, s.n], 0x1357_2468)?;
-    let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, false, 1.0, 0.0))?;
+    let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, false, 1.0, 0.0), None)?;
     let b_f32: Vec<f32> = b_dense.as_slice().iter().map(|v| v.to_f32()).collect();
     let q8 = quantize_q8_0_canonical_from_f32(&ctx, s.k, s.n, &b_f32)?;
-    let y_q8_gemm = ctx.call::<MatMulMlxOp>((
-        &a,
-        TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)),
+    let y_q8_gemm = ctx.call::<MatMulMlxOp>(
+        (
+            &a,
+            TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)),
+            None,
+            None,
+            false,
+            false,
+            1.0,
+            0.0,
+        ),
         None,
-        None,
-        false,
-        false,
-        1.0,
-        0.0,
-    ))?;
+    )?;
     ctx.synchronize();
     assert_close_slice(&y_fp16, &y_q8_gemm, s.name);
     Ok(())
@@ -177,7 +180,7 @@ fn q8_gemv_parity_qwen25_shapes() -> Result<(), MetalError> {
         // Build dense B as (k, n)
         let b_dense = make_fp16_tensor(&mut ctx, vec![s.k, s.n], 0x3333_4444)?;
         // Baseline FP16 (tA=false, tB=false)
-        let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, false, 1.0, 0.0))?;
+        let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, false, 1.0, 0.0), None)?;
         // Quantize B to Q8 canonical
         let b_f32: Vec<f32> = b_dense.as_slice().iter().map(|v| v.to_f32()).collect();
         let q8 = quantize_q8_0_canonical_from_f32(&ctx, s.k, s.n, &b_f32)?;
@@ -186,7 +189,7 @@ fn q8_gemv_parity_qwen25_shapes() -> Result<(), MetalError> {
         unsafe {
             std::env::set_var("METALLIC_GEMV_DEBUG_COL", diag_col.to_string());
         }
-        let y_q8 = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None))?;
+        let y_q8 = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
         ctx.synchronize();
         // CPU reference dequant + GEMV (per-block contributions for diag_col)
         let a_f: Vec<f32> = a.as_slice().iter().map(|v| v.to_f32()).collect();
@@ -277,7 +280,7 @@ fn q8_gemv_parity_qwen25_shapes() -> Result<(), MetalError> {
             std::env::remove_var("METALLIC_GEMV_DEBUG_COL");
         }
         // Recompute y_q8 normal (no debug)
-        let y_q8_norm = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None))?;
+        let y_q8_norm = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
         ctx.synchronize();
         // Log the diag column for normal run vs CPU quant and FP16
         let y_q8_norm_f: Vec<f32> = y_q8_norm.as_slice().iter().map(|v| v.to_f32()).collect();
@@ -303,11 +306,11 @@ fn q8_gemm_nt_parity_qwen25_shapes() -> Result<(), MetalError> {
         let mut ctx = Context::<crate::tensor::F16>::new()?;
         let a = make_fp16_tensor(&mut ctx, vec![1, s.k], 0x6666_7777)?;
         let b_dense = make_fp16_tensor(&mut ctx, vec![s.n, s.k], 0x9999_AAAA)?;
-        let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, true, 1.0, 0.0))?;
+        let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, true, 1.0, 0.0), None)?;
         let b_kn = dense_nt_to_kn(&b_dense, s.n, s.k);
         let q8 = quantize_q8_0_canonical_from_f32(&ctx, s.k, s.n, &b_kn)?;
         let quant = TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8));
-        let y_q8 = ctx.matmul(&a, &quant, false, true, None)?;
+        let y_q8 = ctx.matmul(&a, &quant, false, true, None, None, None)?;
         ctx.synchronize();
         assert_close_slice(&y_fp16, &y_q8, &format!("{}_nt", s.name));
     }
@@ -330,7 +333,7 @@ fn q8_canonical_parity_m2_to_m4_nt() -> Result<(), MetalError> {
             let a = make_fp16_tensor(&mut ctx, vec![m, k], 0xCAFE_BABE ^ ((m as u64) << 8) ^ (n as u64))?;
             // B dense NT storage: [n, k], so tB=true yields shape (k,n)
             let b_dense = make_fp16_tensor(&mut ctx, vec![n, k], 0xDEAD_BEEF ^ ((n as u64) << 8) ^ (m as u64))?;
-            let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, true, 1.0, 0.0))?;
+            let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, true, 1.0, 0.0), None)?;
             // Quantize B to canonical (K,N)
             let b_kn = dense_nt_to_kn(&b_dense, n, k);
             let q8 = quantize_q8_0_canonical_from_f32(&ctx, k, n, &b_kn)?;
@@ -339,7 +342,7 @@ fn q8_canonical_parity_m2_to_m4_nt() -> Result<(), MetalError> {
                 std::env::set_var("METALLIC_Q8_CANONICAL_N", "1");
                 std::env::set_var("METALLIC_Q8_SMALLM_USE_GEMV", "0");
             }
-            let y_q8 = ctx.matmul(&a, &quant, false, true, None)?;
+            let y_q8 = ctx.matmul(&a, &quant, false, true, None, None, None)?;
             ctx.synchronize();
             unsafe {
                 std::env::remove_var("METALLIC_Q8_CANONICAL_N");
@@ -367,7 +370,7 @@ fn q8_gemm_nt_kernel_parity_m2_to_m4_nt() -> Result<(), MetalError> {
             let mut ctx = Context::<crate::tensor::F16>::new()?;
             let a = make_fp16_tensor(&mut ctx, vec![m, k], 0x2222_4444 ^ ((m as u64) << 8) ^ (n as u64))?;
             let b_dense = make_fp16_tensor(&mut ctx, vec![n, k], 0x6666_8888 ^ ((n as u64) << 8) ^ (m as u64))?;
-            let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, true, 1.0, 0.0))?;
+            let y_fp16 = ctx.call::<MatMulMlxOp>((&a, TensorType::Dense(&b_dense), None, None, false, true, 1.0, 0.0), None)?;
             let b_kn = dense_nt_to_kn(&b_dense, n, k);
             let q8 = quantize_q8_0_canonical_from_f32(&ctx, k, n, &b_kn)?;
             let quant = TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8));
@@ -375,7 +378,7 @@ fn q8_gemm_nt_kernel_parity_m2_to_m4_nt() -> Result<(), MetalError> {
                 std::env::set_var("METALLIC_Q8_CANONICAL_N", "0");
                 std::env::set_var("METALLIC_Q8_SMALLM_USE_GEMV", "0");
             }
-            let y_q8 = ctx.matmul(&a, &quant, false, true, None)?;
+            let y_q8 = ctx.matmul(&a, &quant, false, true, None, None, None)?;
             ctx.synchronize();
             unsafe {
                 std::env::remove_var("METALLIC_Q8_CANONICAL_N");

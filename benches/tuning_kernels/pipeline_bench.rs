@@ -9,7 +9,7 @@ fn benchmark_noop<T: TensorElement>(c: &mut Criterion) {
         let tensor = Tensor::new(vec![1, 1], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).unwrap();
         b.iter(|| {
             for _i in 0..100 {
-                ctx.call::<NoopOp>(tensor.clone()).unwrap();
+                ctx.call::<NoopOp>(tensor.clone(), None).unwrap();
             }
             ctx.synchronize();
         })
@@ -19,7 +19,7 @@ fn benchmark_noop<T: TensorElement>(c: &mut Criterion) {
         let mut ctx = Context::<T>::new().unwrap();
         let tensor = Tensor::new(vec![1, 1], TensorStorage::Dedicated(&ctx), TensorInit::Uninitialized).unwrap();
         b.iter(|| {
-            ctx.call::<NoopOp>(tensor.clone()).unwrap();
+            ctx.call::<NoopOp>(tensor.clone(), None).unwrap();
             ctx.synchronize();
         })
     });
