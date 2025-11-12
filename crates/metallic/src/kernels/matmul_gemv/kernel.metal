@@ -1474,7 +1474,8 @@ struct Q2FusedParams {
     const uint has_bias = params->has_bias;
 
     constexpr uint ROWS_PER_TILE = 4;
-    threadgroup float x_rows[ROWS_PER_TILE * TILE_K];
+    constexpr uint ROWS_TILE_K = TILE_K / ROWS_PER_TILE; // resized TILE_K to fit in threadgroup memory limit
+    threadgroup float x_rows[ROWS_PER_TILE * ROWS_TILE_K];
 
     const uint row_tile = gid.y * ROWS_PER_TILE;
     if (row_tile >= m) return;
@@ -1485,8 +1486,8 @@ struct Q2FusedParams {
 
     float4 accum = float4(0.0f);
 
-    for (uint tile_base = 0; tile_base < k; tile_base += TILE_K) {
-        const uint tile_limit = min(TILE_K, k - tile_base);
+    for (uint tile_base = 0; tile_base < k; tile_base += ROWS_TILE_K) {
+        const uint tile_limit = min(ROWS_TILE_K, k - tile_base);
 
         if (tid.x < LOAD_LANES) {
             for (uint row = 0; row < rows_this_tile; ++row) {
@@ -1497,7 +1498,7 @@ struct Q2FusedParams {
                         const uint g_row = row_tile + row;
                         val = static_cast<float>(matrix_a[g_row * lda + gk]);
                     }
-                    x_rows[row * TILE_K + local] = val;
+                    x_rows[row * ROWS_TILE_K + local] = val;
                 }
             }
         }
@@ -1530,7 +1531,7 @@ struct Q2FusedParams {
             }
 
             for (uint row = 0; row < rows_this_tile; ++row) {
-                const threadgroup float *x_base = x_rows + row * TILE_K + k_local;
+                const threadgroup float *x_base = x_rows + row * ROWS_TILE_K + k_local;
                 float block_sum = 0.0f;
                 for (uint vc = 0; vc < vec_chunks; ++vc) {
                     const uint idx = vc * 4u;

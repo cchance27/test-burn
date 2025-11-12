@@ -141,7 +141,7 @@ impl DefaultKernelInvocable for MatmulGemvSmallMOp {
             depth: 1,
         };
 
-        let mut label = if crate::profiling_state::get_profiling_state() {
+        let label = if crate::profiling_state::get_profiling_state() {
             ctx.take_gpu_scope().unwrap_or_else(|| GpuProfilerLabel::fallback("gemv_q8_rows"))
         } else {
             GpuProfilerLabel::fallback("gemv_q8_rows")

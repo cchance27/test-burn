@@ -688,7 +688,6 @@ impl<T: TensorElement> Qwen25<T> {
 
                 // Residual already fused
                 let x = attn_out;
-                cpu_chk = Instant::now();
 
                 // --- MLP Block ---
                 ctx.set_pending_gpu_scope(format!("mlp_residual_clone_block_{}_op", layer_idx));
@@ -803,7 +802,6 @@ impl<T: TensorElement> Qwen25<T> {
                 })?;
 
                 breakdown.insert("mlp_swiglu".to_string(), (ffn_output_flat.len() * bytes_per_element) as u64);
-                cpu_chk = Instant::now();
                 ctx.set_pending_gpu_scope(format!("mlp_reshape_block_{}_op", layer_idx));
                 let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
