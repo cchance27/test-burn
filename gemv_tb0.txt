@@ -1,0 +1,185 @@
+== Crossover m1_n512_k896_tb0: m=1 n=512 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.084s avg=0.083701ms
+Q8 MLX GEMM:         total=0.067s avg=0.066691ms
+Q8  small-m kernel:     total=0.063s avg=0.063085ms
+Q8  direct GEMV:        total=0.063s avg=0.063215ms
+Q8  forced GEMM-NT:  total=0.127s avg=0.127408ms
+
+== Crossover m1_n896_k896_tb0: m=1 n=896 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.062s avg=0.061856ms
+Q8 MLX GEMM:         total=0.066s avg=0.066047ms
+Q8  small-m kernel:     total=0.061s avg=0.061440ms
+Q8  direct GEMV:        total=0.062s avg=0.061671ms
+Q8  forced GEMM-NT:  total=0.126s avg=0.125742ms
+
+== Crossover m1_n1536_k896_tb0: m=1 n=1536 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.063s avg=0.062581ms
+Q8 MLX GEMM:         total=0.065s avg=0.065329ms
+Q8  small-m kernel:     total=0.062s avg=0.062334ms
+Q8  direct GEMV:        total=0.062s avg=0.062480ms
+Q8  forced GEMM-NT:  total=0.126s avg=0.125638ms
+
+== Crossover m1_n2048_k896_tb0: m=1 n=2048 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.060s avg=0.059962ms
+Q8 MLX GEMM:         total=0.066s avg=0.065573ms
+Q8  small-m kernel:     total=0.062s avg=0.061824ms
+Q8  direct GEMV:        total=0.063s avg=0.063085ms
+Q8  forced GEMM-NT:  total=0.126s avg=0.125641ms
+
+== Crossover m1_n4096_k896_tb0: m=1 n=4096 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.092s avg=0.092067ms
+Q8 MLX GEMM:         total=0.069s avg=0.068820ms
+Q8  small-m kernel:     total=0.063s avg=0.062857ms
+Q8  direct GEMV:        total=0.061s avg=0.061356ms
+Q8  forced GEMM-NT:  total=0.126s avg=0.126454ms
+
+== Crossover m1_n9728_k896_tb0: m=1 n=9728 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.174s avg=0.173976ms
+Q8 MLX GEMM:         total=0.111s avg=0.111316ms
+Q8  small-m kernel:     total=0.132s avg=0.131592ms
+Q8  direct GEMV:        total=0.130s avg=0.129997ms
+Q8  forced GEMM-NT:  total=0.147s avg=0.147285ms
+
+== Crossover m2_n512_k896_tb0: m=2 n=512 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.066s avg=0.066132ms
+Q8 MLX GEMM:         total=0.091s avg=0.091235ms
+Q8  small-m kernel:     total=0.111s avg=0.111333ms
+Q8  canonical kernel:  total=0.086s avg=0.085654ms
+Q8  canonical r16:     total=0.083s avg=0.082500ms
+Q8  forced GEMM-NT:  total=0.197s avg=0.197049ms
+
+== Crossover m2_n896_k896_tb0: m=2 n=896 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.065s avg=0.065462ms
+Q8 MLX GEMM:         total=0.088s avg=0.088422ms
+Q8  small-m kernel:     total=0.110s avg=0.110152ms
+Q8  canonical kernel:  total=0.084s avg=0.084110ms
+Q8  canonical r16:     total=0.083s avg=0.083435ms
+Q8  forced GEMM-NT:  total=0.199s avg=0.198727ms
+
+== Crossover m2_n1536_k896_tb0: m=2 n=1536 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.067s avg=0.067109ms
+Q8 MLX GEMM:         total=0.090s avg=0.090401ms
+Q8  small-m kernel:     total=0.111s avg=0.110794ms
+Q8  canonical kernel:  total=0.084s avg=0.084485ms
+Q8  canonical r16:     total=0.084s avg=0.083576ms
+Q8  forced GEMM-NT:  total=0.199s avg=0.198626ms
+
+== Crossover m2_n2048_k896_tb0: m=2 n=2048 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.068s avg=0.068014ms
+Q8 MLX GEMM:         total=0.088s avg=0.088395ms
+Q8  small-m kernel:     total=0.112s avg=0.111507ms
+Q8  canonical kernel:  total=0.085s avg=0.084936ms
+Q8  canonical r16:     total=0.082s avg=0.082278ms
+Q8  forced GEMM-NT:  total=0.200s avg=0.200316ms
+
+== Crossover m2_n4096_k896_tb0: m=2 n=4096 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.085s avg=0.084864ms
+Q8 MLX GEMM:         total=0.096s avg=0.096371ms
+Q8  small-m kernel:     total=0.111s avg=0.110815ms
+Q8  canonical kernel:  total=0.086s avg=0.086138ms
+Q8  canonical r16:     total=0.087s avg=0.087137ms
+Q8  forced GEMM-NT:  total=0.199s avg=0.198985ms
+
+== Crossover m2_n9728_k896_tb0: m=2 n=9728 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.170s avg=0.170202ms
+Q8 MLX GEMM:         total=0.133s avg=0.133217ms
+Q8  small-m kernel:     total=0.235s avg=0.234956ms
+Q8  canonical kernel:  total=0.115s avg=0.114660ms
+Q8  canonical r16:     total=0.156s avg=0.155826ms
+Q8  forced GEMM-NT:  total=0.220s avg=0.220004ms
+
+== Crossover m3_n512_k896_tb0: m=3 n=512 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.066s avg=0.065641ms
+Q8 MLX GEMM:         total=0.089s avg=0.089282ms
+Q8  small-m kernel:     total=0.133s avg=0.132534ms
+Q8  canonical kernel:  total=0.085s avg=0.084938ms
+Q8  canonical r16:     total=0.082s avg=0.082195ms
+Q8  forced GEMM-NT:  total=0.267s avg=0.266754ms
+
+== Crossover m3_n896_k896_tb0: m=3 n=896 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.065s avg=0.065448ms
+Q8 MLX GEMM:         total=0.088s avg=0.087891ms
+Q8  small-m kernel:     total=0.132s avg=0.132456ms
+Q8  canonical kernel:  total=0.084s avg=0.084433ms
+Q8  canonical r16:     total=0.082s avg=0.082089ms
+Q8  forced GEMM-NT:  total=0.270s avg=0.269730ms
+
+== Crossover m3_n1536_k896_tb0: m=3 n=1536 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.067s avg=0.066728ms
+Q8 MLX GEMM:         total=0.088s avg=0.088152ms
+Q8  small-m kernel:     total=0.131s avg=0.131369ms
+Q8  canonical kernel:  total=0.085s avg=0.085440ms
+Q8  canonical r16:     total=0.085s avg=0.084700ms
+Q8  forced GEMM-NT:  total=0.270s avg=0.270220ms
+
+== Crossover m3_n2048_k896_tb0: m=3 n=2048 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.067s avg=0.066836ms
+Q8 MLX GEMM:         total=0.088s avg=0.088327ms
+Q8  small-m kernel:     total=0.133s avg=0.133197ms
+Q8  canonical kernel:  total=0.085s avg=0.084607ms
+Q8  canonical r16:     total=0.084s avg=0.084367ms
+Q8  forced GEMM-NT:  total=0.271s avg=0.271238ms
+
+== Crossover m3_n4096_k896_tb0: m=3 n=4096 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.084s avg=0.084001ms
+Q8 MLX GEMM:         total=0.095s avg=0.095119ms
+Q8  small-m kernel:     total=0.132s avg=0.131900ms
+Q8  canonical kernel:  total=0.092s avg=0.091514ms
+Q8  canonical r16:     total=0.096s avg=0.095921ms
+Q8  forced GEMM-NT:  total=0.272s avg=0.272109ms
+
+== Crossover m3_n9728_k896_tb0: m=3 n=9728 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.170s avg=0.170052ms
+Q8 MLX GEMM:         total=0.137s avg=0.136905ms
+Q8  small-m kernel:     total=0.298s avg=0.298405ms
+Q8  canonical kernel:  total=0.132s avg=0.132340ms
+Q8  canonical r16:     total=0.173s avg=0.173369ms
+Q8  forced GEMM-NT:  total=0.292s avg=0.292415ms
+
+== Crossover m4_n512_k896_tb0: m=4 n=512 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.065s avg=0.064673ms
+Q8 MLX GEMM:         total=0.088s avg=0.088160ms
+Q8  small-m kernel:     total=0.156s avg=0.155777ms
+Q8  canonical kernel:  total=0.085s avg=0.084535ms
+Q8  canonical r16:     total=0.084s avg=0.083787ms
+Q8  forced GEMM-NT:  total=0.342s avg=0.341774ms
+
+== Crossover m4_n896_k896_tb0: m=4 n=896 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.066s avg=0.065666ms
+Q8 MLX GEMM:         total=0.087s avg=0.087222ms
+Q8  small-m kernel:     total=0.153s avg=0.152843ms
+Q8  canonical kernel:  total=0.084s avg=0.084323ms
+Q8  canonical r16:     total=0.083s avg=0.082795ms
+Q8  forced GEMM-NT:  total=0.341s avg=0.341352ms
+
+== Crossover m4_n1536_k896_tb0: m=4 n=1536 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.067s avg=0.067041ms
+Q8 MLX GEMM:         total=0.089s avg=0.089114ms
+Q8  small-m kernel:     total=0.153s avg=0.153055ms
+Q8  canonical kernel:  total=0.085s avg=0.085451ms
+Q8  canonical r16:     total=0.087s avg=0.087175ms
+Q8  forced GEMM-NT:  total=0.341s avg=0.341385ms
+
+== Crossover m4_n2048_k896_tb0: m=4 n=2048 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.068s avg=0.067735ms
+Q8 MLX GEMM:         total=0.089s avg=0.089260ms
+Q8  small-m kernel:     total=0.154s avg=0.154147ms
+Q8  canonical kernel:  total=0.087s avg=0.086808ms
+Q8  canonical r16:     total=0.087s avg=0.086841ms
+Q8  forced GEMM-NT:  total=0.341s avg=0.341080ms
+
+== Crossover m4_n4096_k896_tb0: m=4 n=4096 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.081s avg=0.080768ms
+Q8 MLX GEMM:         total=0.097s avg=0.096982ms
+Q8  small-m kernel:     total=0.153s avg=0.153048ms
+Q8  canonical kernel:  total=0.095s avg=0.094560ms
+Q8  canonical r16:     total=0.107s avg=0.106534ms
+Q8  forced GEMM-NT:  total=0.343s avg=0.343026ms
+
+== Crossover m4_n9728_k896_tb0: m=4 n=9728 k=896 tA=0 tB=0 (iters=1000)
+FP16 MLX GEMM:       total=0.152s avg=0.152119ms
+Q8 MLX GEMM:         total=0.136s avg=0.136235ms
+Q8  small-m kernel:     total=0.358s avg=0.357712ms
+Q8  canonical kernel:  total=0.153s avg=0.153062ms
+Q8  canonical r16:     total=0.194s avg=0.194140ms
+Q8  forced GEMM-NT:  total=0.369s avg=0.368507ms

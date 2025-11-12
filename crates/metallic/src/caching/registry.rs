@@ -462,24 +462,6 @@ impl CacheRegistry {
     }
 
     /// Set the eviction policy for a specific kernel type.
-    ///
-    /// # Example
-    /// ```ignore
-    /// use metallic::caching::{CacheRegistry, EvictionPolicy};
-    /// use std::time::Duration;
-    ///
-    /// let mut registry = CacheRegistry::new();
-    ///
-    /// // Set size limit for GEMM cache
-    /// registry.set_eviction_policy::<MpsGemmKernel>(
-    ///     EvictionPolicy::size_limited_lru(1000)
-    /// );
-    ///
-    /// // Set idle timeout for softmax cache
-    /// registry.set_eviction_policy::<SoftmaxMpsKernel>(
-    ///     EvictionPolicy::idle_timeout(Duration::from_secs(300))
-    /// );
-    /// ```
     #[inline]
     pub fn set_eviction_policy<K: CacheableKernel>(&mut self, policy: EvictionPolicy) {
         let cache = self.typed_cache_mut::<K>();

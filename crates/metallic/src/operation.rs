@@ -353,19 +353,6 @@ impl ProfiledCommandBuffer for CommandBuffer {
 /// 3. Setting pipeline state
 /// 4. Setting buffers and bytes
 /// 5. Dispatching threadgroups
-///
-/// # Example
-/// ```ignore
-/// impl Operation for MyKernel {
-///     fn encode(&self, command_buffer: &CommandBuffer, _cache: &mut ResourceCache) -> Result<(), MetalError> {
-///         ComputeKernelEncoder::new(command_buffer, &self.profiler_label)?
-///             .pipeline(&self.pipeline)
-///             .bind_args(&self.args)  // Type-safe binding of all kernel arguments
-///             .dispatch_1d(self.total_elements as u32, 256);
-///         Ok(())
-///     }
-/// }
-/// ```
 pub struct ComputeKernelEncoder {
     encoder: Retained<ProtocolObject<dyn MTLComputeCommandEncoder>>,
     _profiler_scope: Option<metallic_instrumentation::gpu_profiler::GpuProfilerScope>,
