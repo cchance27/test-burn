@@ -164,6 +164,7 @@ pub enum KernelFunction {
     Ones,
     RandomUniform,
     MatmulGemv,
+    MatmulGemvQ8,
     MatmulGemvSmallN1,
     MatmulGemvSmallN2,
     MatmulGemvSmallN4,
@@ -209,6 +210,7 @@ impl KernelFunction {
             KernelFunction::SwigluFusedActivation => KernelLibrary::Swiglu,
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::MatmulGemv => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ8 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN1 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN2 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemv,
@@ -286,6 +288,13 @@ impl KernelFunction {
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
             (KernelFunction::MatmulGemv, F32) => "gemv_f32",
             (KernelFunction::MatmulGemv, F16) => "gemv_f16",
+            (KernelFunction::MatmulGemvQ8, F16) => "gemv_q8_entry",
+            (KernelFunction::MatmulGemvQ8, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvQ8",
+                });
+            }
             (KernelFunction::MatmulGemvQkvFused, F16) => "gemv_q8_fused3_f16",
             (KernelFunction::MatmulGemvQ2Fused, F16) => "gemv_q8_fused2_f16",
             (KernelFunction::MatmulQ8Nt, F16) => "gemm_q8_nt_f16",

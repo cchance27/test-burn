@@ -90,16 +90,35 @@ pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_b
     match rhs {
         TensorType::Dense(a) => {
             let a_dims = a.dims();
-            if a_dims.len() != 2 || a_dims[0] != k {
+            if a_dims.len() != 2 {
                 return Err(GemvError::MatrixShape {
                     expected_k: k,
                     actual: a_dims.to_vec(),
                 }
                 .into());
             }
+
+            // Check for K in either dimension
+            let (is_k, is_n_rows) = if a_dims[0] == k {
+                (true, false) // [K, N]
+            } else if a_dims[1] == k {
+                (false, true) // [N, K]
+            } else {
+                return Err(GemvError::MatrixShape {
+                    expected_k: k,
+                    actual: a_dims.to_vec(),
+                }
+                .into());
+            };
+
+            let n = if is_n_rows { a_dims[0] } else { a_dims[1] };
+
+            // To suppress unused warning effectively while keeping logic clear:
+            let _ = is_k;
+
             Ok(ResolvedGemvRhs {
                 binding: GemvRhsBinding::Dense(a.clone()),
-                n: a_dims[1],
+                n,
                 loader_mode: if has_bias {
                     GemvLoaderMode::DenseBias
                 } else {

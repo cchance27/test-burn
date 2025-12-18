@@ -14,7 +14,7 @@ MATMUL_SCOPE_KEYS = MATMUL_BASE_KEYS + ("backend",)
 
 def parse_matmul_scope(op_name: str, data: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
     """Parse matmul metadata from either the data field (new) or op_name path (legacy)."""
-    if "/cb_wait" in op_name:
+    if "/cb_wait" in op_name or "/cb_gpu" in op_name:
         return None
 
     # New format: matmul parameters are in a nested data field
@@ -136,11 +136,16 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
 
     event_counts: Counter[str] = Counter()
     event_duration_samples: Dict[str, List[int]] = defaultdict(list)
+    backend_selection_by_backend: Counter[str] = Counter()
+    backend_selection_by_reason: Counter[str] = Counter()
+    backend_selection_by_op: Counter[str] = Counter()
+    backend_selection_by_op_backend: Counter[Tuple[str, str]] = Counter()
 
     internal_parent_samples: Dict[str, List[int]] = defaultdict(list)
     internal_kernel_samples: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     kernel_samples: Dict[str, List[int]] = defaultdict(list)
     gpu_wait_samples: Dict[str, List[int]] = defaultdict(list)
+    cb_gpu_samples: Dict[str, List[int]] = defaultdict(list)
     gpu_kernel_samples: Dict[str, List[int]] = defaultdict(list)
     gpu_kernel_base_samples: Dict[str, List[int]] = defaultdict(list)
     matmul_shape_samples: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
@@ -189,6 +194,9 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
             if event_type == "GpuOpCompleted" and duration_us is not None:
                 op_name = data.get("op_name", "<unknown>")
                 duration_int = int(duration_us)
+                if "/cb_gpu" in op_name:
+                    cb_gpu_samples[op_name].append(duration_int)
+                    continue
                 if "cb_wait" in op_name or op_name.endswith("wait"):
                     gpu_wait_samples[op_name].append(duration_int)
                 else:
@@ -215,11 +223,34 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
                     base_name = base_name.rstrip("_")
                     gpu_kernel_base_samples[base_name].append(duration_int)
 
+            if event_type == "KernelBackendSelected":
+                op_name = data.get("op_name", "<unknown>")
+                backend = data.get("backend", "<unknown>")
+                reason = data.get("reason", "<unknown>")
+
+                backend_selection_by_backend[backend] += 1
+                backend_selection_by_reason[reason] += 1
+                backend_selection_by_op[op_name] += 1
+                backend_selection_by_op_backend[(op_name, backend)] += 1
+
     print(f"Total events: {total_events}")
     print("\nEvent type summary:")
     for event_type, count in event_counts.most_common():
         stats = summarize(event_duration_samples[event_type])
         print(render_summary(f"{event_type} (count={count})", stats, indent=2))
+
+    if backend_selection_by_backend:
+        print("\nBackend selection summary:")
+        for backend, count in backend_selection_by_backend.most_common(top_n):
+            print(f"  backend={backend}: count={count}")
+
+        print("\nBackend selection reasons:")
+        for reason, count in backend_selection_by_reason.most_common(top_n):
+            print(f"  reason={reason}: count={count}")
+
+        print("\nBackend selection by op/backend:")
+        for (op_name, backend), count in backend_selection_by_op_backend.most_common(top_n):
+            print(f"  op={op_name} backend={backend}: count={count}")
 
     if internal_parent_samples:
         print("\nInternal kernel by parent:")
@@ -349,6 +380,15 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
         ]
         gpu_totals.sort(key=lambda item: item[1]["total_ms"], reverse=True)
         for op_name, stats in gpu_totals[:top_n]:
+            print(render_summary(op_name, stats, indent=2))
+
+    if cb_gpu_samples:
+        print("\nCommand buffer GPU timing:")
+        cb_totals = [
+            (op_name, summarize(samples)) for op_name, samples in cb_gpu_samples.items()
+        ]
+        cb_totals.sort(key=lambda item: item[1]["total_ms"], reverse=True)
+        for op_name, stats in cb_totals[:top_n]:
             print(render_summary(op_name, stats, indent=2))
 
     print("\nSync operations:")

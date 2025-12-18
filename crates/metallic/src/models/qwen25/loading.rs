@@ -4,6 +4,70 @@ use crate::{
     Context, Dtype, MetalError, Tensor, TensorElement, gguf::{GGUFDataType, GGUFValue, model_loader::GGUFModel}, models::{LoadableModel, Qwen25, Qwen25Config}
 };
 
+fn materialize_output_weight_q8_0_packed<T: TensorElement>(
+    gguf_model: &GGUFModel,
+    name: &str,
+    ctx: &Context<T>,
+    d_model: usize,
+    vocab_size: usize,
+) -> Result<crate::tensor::QuantizedQ8_0Tensor, MetalError> {
+    use crate::tensor::{Q8_0_BLOCK_SIZE_BYTES, quantized::swizzle_q8_0_blocks_nk};
+
+    let raw_view = gguf_model
+        .tensor_raw_view(name)
+        .map_err(|e| MetalError::InvalidOperation(format!("Failed to read raw GGUF tensor '{name}': {e}")))?;
+
+    let raw = match raw_view {
+        crate::gguf::tensor_info::GGUFRawTensor::Bytes(bytes, GGUFDataType::Q8_0) => bytes,
+        _ => {
+            return Err(MetalError::InvalidOperation(format!("Tensor '{name}' is not Q8_0 bytes")));
+        }
+    };
+
+    if gguf_model.layout_hint != crate::gguf::model_loader::GGUFLayoutHint::Nk {
+        return Err(MetalError::OperationNotSupported(format!(
+            "Q8 output weight requires NK layout (got {:?})",
+            gguf_model.layout_hint
+        )));
+    }
+
+    let blocks_per_row = d_model.div_ceil(crate::tensor::Q8_0_WEIGHTS_PER_BLOCK);
+    let expected_blocks = vocab_size
+        .checked_mul(blocks_per_row)
+        .ok_or_else(|| MetalError::InvalidOperation("output q8 expected blocks overflow".into()))?;
+    let expected_bytes = expected_blocks
+        .checked_mul(Q8_0_BLOCK_SIZE_BYTES)
+        .ok_or_else(|| MetalError::InvalidOperation("output q8 expected bytes overflow".into()))?;
+
+    if raw.len() != expected_bytes {
+        return Err(MetalError::InvalidShape(format!(
+            "Output Q8_0 tensor '{name}' has {} bytes; expected {} for vocab={} d_model={}",
+            raw.len(),
+            expected_bytes,
+            vocab_size,
+            d_model
+        )));
+    }
+
+    // Raw GGUF is NK row-major (rows=N=vocab, cols=K=d_model). Swizzle into k-block-major split layout.
+    let swizzled = swizzle_q8_0_blocks_nk(vocab_size, d_model, raw).ok_or_else(|| {
+        MetalError::InvalidOperation(format!(
+            "Failed to swizzle Q8_0 blocks for '{name}' (vocab={vocab_size}, d_model={d_model})"
+        ))
+    })?;
+
+    // Split [scale(2) | qs(32)] blocks into separate buffers.
+    let blocks = swizzled.len() / Q8_0_BLOCK_SIZE_BYTES;
+    let mut data_bytes = Vec::with_capacity(blocks * crate::tensor::Q8_0_WEIGHTS_PER_BLOCK);
+    let mut scale_bytes = Vec::with_capacity(blocks * crate::tensor::quantized::Q8_0_SCALE_BYTES_PER_BLOCK);
+    for chunk in swizzled.chunks_exact(Q8_0_BLOCK_SIZE_BYTES) {
+        scale_bytes.extend_from_slice(&chunk[0..crate::tensor::quantized::Q8_0_SCALE_BYTES_PER_BLOCK]);
+        data_bytes.extend_from_slice(&chunk[crate::tensor::quantized::Q8_0_SCALE_BYTES_PER_BLOCK..Q8_0_BLOCK_SIZE_BYTES]);
+    }
+
+    crate::tensor::QuantizedQ8_0Tensor::from_split_bytes_in_context(vec![d_model, vocab_size], &data_bytes, &scale_bytes, ctx)
+}
+
 fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f32]> {
     if T::DTYPE == Dtype::F32 {
         debug_assert_eq!(std::mem::size_of::<T::Scalar>(), std::mem::size_of::<f32>());
@@ -516,23 +580,23 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
 
         for (name, descriptor) in &gguf_model.tensors {
             let lname = name.to_lowercase();
-            // Capture Q8_0 for final output/logits projection when it appears at top-level (not per-layer)
+            // Capture Q8_0 for final output/logits projection when it appears at top-level (not per-layer).
+            // Some GGUFs tie `lm_head` to `token_embd.weight` and omit an explicit `lm_head.weight`.
+            // We materialize into a consistent logical layout of [K=d_model, N=vocab] so downstream
+            // kernels can run with transpose_b=false and avoid layout ambiguity in packed Q8 metadata.
             if descriptor.data_type() == GGUFDataType::Q8_0
                 && parse_layer_index(&lname).is_none()
                 && (lname.contains("lm_head")
                     || lname.contains("lmhead")
                     || lname.ends_with("output.weight")
-                    || lname.ends_with("lm_head.weight"))
+                    || lname.ends_with("lm_head.weight")
+                    || (lname.contains("token") && lname.contains("emb") && lname.contains("weight"))
+                    || (lname.contains("tok_emb") && lname.contains("weight"))
+                    || lname == "token_embd.weight")
             {
-                if let Ok(q8) = gguf_model.materialize_q8_0_packed::<T>(name, &*ctx) {
-                    // Validate dims against expected (K=d_model, N=vocab_size) in either order
-                    let ld = &q8.logical_dims;
-                    if ld.len() == 2
-                        && ((ld[0] == qwen.config.d_model && ld[1] == qwen.config.vocab_size)
-                            || (ld[1] == qwen.config.d_model && ld[0] == qwen.config.vocab_size))
-                    {
-                        qwen.output_weight_q8 = Some(q8);
-                    }
+                if let Ok(q8) = materialize_output_weight_q8_0_packed(gguf_model, name, &*ctx, qwen.config.d_model, qwen.config.vocab_size)
+                {
+                    qwen.output_weight_q8 = Some(q8);
                 }
             }
             // Opportunistically capture packed Q8_0 for Q weight.

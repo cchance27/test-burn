@@ -45,6 +45,24 @@ pub struct Qwen25<T: TensorElement> {
 }
 
 impl<T: TensorElement> Qwen25<T> {
+    #[inline]
+    fn output_weight_q8_transpose_b(logical_dims: &[usize], d_model: usize, vocab_size: usize) -> Option<bool> {
+        if logical_dims.len() != 2 {
+            return None;
+        }
+        let a = logical_dims[0];
+        let b = logical_dims[1];
+        if a == d_model && b == vocab_size {
+            // Stored as [K, N] (d_model, vocab) already.
+            Some(false)
+        } else if a == vocab_size && b == d_model {
+            // Stored as [N, K] (vocab, d_model) -> transpose to [K, N].
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     fn project_dense_slice(
         ctx: &mut Context<T>,
         x_flat: &Tensor<T>,
@@ -131,8 +149,22 @@ impl<T: TensorElement> Qwen25<T> {
         let flat_hidden = hidden.reshape(vec![m, d_model])?;
 
         // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
-        // Use dense for correctness; logits Q8 is disabled for this model since GGUF stores F32 here.
-        let logits_flat = ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None, None, None)?;
+        let logits_flat = if let Some(q8) = self.output_weight_q8.as_ref()
+            && T::DTYPE == crate::tensor::Dtype::F16
+            && let Some(transpose_b) = Self::output_weight_q8_transpose_b(&q8.logical_dims, d_model, self.config.vocab_size)
+        {
+            ctx.matmul(
+                &flat_hidden,
+                &TensorType::Quant(QuantizedTensor::Q8_0(q8)),
+                false,
+                transpose_b,
+                None,
+                None,
+                None,
+            )?
+        } else {
+            ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None, None, None)?
+        };
 
         // Synchronize to ensure matmul is complete before reading values
 

@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell, collections::VecDeque, rc::{Rc, Weak}, sync::{
-        Arc, Mutex, atomic::{AtomicBool, Ordering}
+        Arc, Mutex, OnceLock, atomic::{AtomicBool, Ordering}
     }, time::Instant
 };
 
@@ -13,6 +13,21 @@ use super::utils::{GPU_PROFILER_BACKEND, GpuProfilerLabel};
 use crate::{error::MetalError, operation::CommandBuffer};
 
 const DEFAULT_MAX_INFLIGHT: usize = 3;
+const METALLIC_RECORD_CB_GPU_TIMING_ENV: &str = "METALLIC_RECORD_CB_GPU_TIMING";
+
+#[inline]
+fn record_cb_gpu_timing_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(METALLIC_RECORD_CB_GPU_TIMING_ENV)
+            .ok()
+            .map(|value| {
+                let value = value.trim();
+                !value.is_empty() && value != "0" && value.to_ascii_lowercase() != "false"
+            })
+            .unwrap_or(false)
+    })
+}
 
 thread_local! {
     static PIPELINE_REGISTRY: RefCell<FxHashMap<usize, PipelineRegistration>> =
@@ -235,8 +250,15 @@ impl CommandBufferPipelineState {
     fn wait_oldest_locked(&mut self) -> Option<PipelineCompletion> {
         self.inflight.pop_front().map(|entry| {
             entry.command_buffer.wait();
+            let wait_duration = entry
+                .completion_time
+                .lock()
+                .ok()
+                .and_then(|mut slot| slot.take())
+                .map(|finished| finished.saturating_duration_since(entry.commit_instant))
+                .unwrap_or_else(|| entry.commit_instant.elapsed());
             PipelineCompletion {
-                wait_duration: entry.commit_instant.elapsed(),
+                wait_duration,
                 label: entry.label,
                 command_buffer: entry.command_buffer,
             }
@@ -323,6 +345,7 @@ pub fn dispatch_completions(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>
 
     let key = queue_key(queue);
     let observer = PIPELINE_REGISTRY.with(|registry| registry.borrow().get(&key).and_then(|entry| entry.completion_observer.clone()));
+    let record_cb_gpu = record_cb_gpu_timing_enabled();
 
     for completion in completions {
         let waited = completion.wait_duration;
@@ -336,11 +359,33 @@ pub fn dispatch_completions(queue: &Retained<ProtocolObject<dyn MTLCommandQueue>
                 });
             } else {
                 metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
-                    op_name: "Generation Loop/cb_wait".to_string(),
+                    op_name: "Unscoped/cb_wait".to_string(),
                     backend: GPU_PROFILER_BACKEND.to_string(),
                     duration_us: (waited.as_secs_f64() * 1e6).round() as u64,
                     data: None,
                 });
+            }
+        }
+
+        if record_cb_gpu {
+            let cb = completion.command_buffer.raw();
+            let cb_us = metallic_instrumentation::gpu_profiler::command_buffer_best_duration_us(cb.as_ref());
+            if let Some(duration_us) = cb_us {
+                if let Some(label) = completion.label.as_ref() {
+                    metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
+                        op_name: format!("{}/cb_gpu", label.op_name),
+                        backend: label.backend.clone(),
+                        duration_us,
+                        data: None,
+                    });
+                } else {
+                    metallic_instrumentation::record_metric_async!(MetricEvent::GpuOpCompleted {
+                        op_name: "Unscoped/cb_gpu".to_string(),
+                        backend: GPU_PROFILER_BACKEND.to_string(),
+                        duration_us,
+                        data: None,
+                    });
+                }
             }
         }
     }

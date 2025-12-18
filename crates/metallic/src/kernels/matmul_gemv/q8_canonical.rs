@@ -107,6 +107,16 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalOp {
             return Err(MetalError::InvalidShape("MatmulQ8Canonical: m must be > 0".into()));
         }
 
+        // Delegate small-M (mv) operations to the optimized GEMV kernel (SIMD-Parallel)
+        // This ensures prompt decoding (M=1) runs on the fast path.
+        if m == 1 {
+            use super::base::MatmulGemvOp;
+            use crate::tensor::{QuantizedTensor, TensorType};
+
+            let rhs = TensorType::Quant(QuantizedTensor::Q8_0(q8));
+            return MatmulGemvOp::new(ctx, (a, rhs, bias), None, _cache);
+        }
+
         let canonical = CanonicalQuantTensor::from_split_q8_tensor(q8)
             .map_err(|e| MetalError::InvalidOperation(format!("Failed to canonicalize Q8 tensor: {e}")))?;
 

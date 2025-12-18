@@ -1,7 +1,7 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState, MTLSize};
 
-use super::helpers::{GEMV_COLS_PER_THREAD, THREADGROUP_WIDTH};
+// use super::helpers::{GEMV_COLS_PER_THREAD, THREADGROUP_WIDTH};
 use crate::{
     CommandBuffer, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, context::GpuProfilerLabel, kernels::{DefaultKernelInvocable, KernelFunction}, operation::ComputeKernelEncoder, tensor::{Dtype, QuantizedTensor, quantized::CanonicalQuantTensor}
 };
@@ -150,13 +150,14 @@ impl DefaultKernelInvocable for MatmulGemvQ2FusedOp {
             has_bias1: (b1_opt.is_some() as u32),
         };
         let tg = MTLSize {
-            width: THREADGROUP_WIDTH,
+            width: 128,
             height: 1,
             depth: 1,
         };
-        let tile_n = THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD;
+        // SIMD-Parallel: 128 threads (4 Warps) process 4 output columns (N) per ThreadGroup
+        let tile_n = 4;
         let grid = MTLSize {
-            width: (n0.max(n1)).div_ceil(tile_n),
+            width: (n0.max(n1)).div_ceil(tile_n) as usize,
             height: 1,
             depth: 1,
         };

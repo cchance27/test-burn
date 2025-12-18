@@ -73,6 +73,8 @@ pub struct Context<T: TensorElement> {
     pub(crate) mlx_kernel_cache: MlxKernelCache,
     pub(crate) sdpa_workspaces: FxHashMap<super::sdpa_workspace::SdpaWorkspaceKey, super::sdpa_workspace::SdpaWorkspaceState>,
     pub(crate) kv_repeat_workspaces: FxHashMap<RepeatKvWorkspaceKey, RepeatKvWorkspaceEntry<T>>,
+    /// Reusable host-visible U32 scratch buffer (e.g. token id indices) to avoid per-step allocations.
+    pub(crate) shared_u32_scratch: Option<Tensor<crate::tensor::dtypes::U32>>,
     pub(crate) pending_gpu_scope: Option<super::utils::GpuProfilerLabel>,
     pub(crate) gpu_scope_stack: Vec<super::utils::GpuProfilerLabel>,
 }
@@ -131,6 +133,7 @@ impl<T: TensorElement> Context<T> {
             mlx_kernel_cache: MlxKernelCache::default(),
             sdpa_workspaces: FxHashMap::default(),
             kv_repeat_workspaces: FxHashMap::default(),
+            shared_u32_scratch: None,
             pending_gpu_scope: None,
             gpu_scope_stack: Vec::new(),
         })
@@ -232,6 +235,64 @@ impl<T: TensorElement> Context<T> {
     pub fn alloc_u32_tensor(&mut self, dims: Vec<usize>) -> Result<crate::tensor::Tensor<crate::tensor::U32>, MetalError> {
         let pooled_alloc = self.pool.alloc_tensor::<crate::tensor::U32>(dims)?;
         Ok(pooled_alloc.into_tensor())
+    }
+
+    /// Returns a host-visible contiguous `U32` tensor view of length `len`, backed by a reusable Shared buffer.
+    /// Intended for tiny per-step inputs (e.g. token indices) to avoid repeated `newBufferWithLength` calls.
+    ///
+    /// Safety/perf note: callers must not overwrite the returned buffer contents while any GPU work
+    /// that reads it is still in-flight (Shared memory is not snapshotted at encode time).
+    pub(crate) fn shared_u32_host_tensor(&mut self, len: usize) -> Result<Tensor<crate::tensor::dtypes::U32>, MetalError> {
+        use objc2_metal::{MTLDevice as _, MTLResourceOptions};
+
+        if len == 0 {
+            // Keep behavior predictable; callers can special-case empty inputs.
+            return Ok(Tensor::<crate::tensor::dtypes::U32>::from_existing_buffer(
+                self.device
+                    .newBufferWithLength_options(0, MTLResourceOptions::StorageModeShared)
+                    .ok_or(MetalError::BufferCreationFailed(0))?,
+                vec![0],
+                crate::tensor::dtypes::U32::DTYPE,
+                &self.device,
+                &self.command_queue,
+                0,
+                true,
+            )?);
+        }
+
+        let elem_bytes = std::mem::size_of::<u32>();
+        let required_bytes = len
+            .checked_mul(elem_bytes)
+            .ok_or_else(|| MetalError::InvalidOperation("shared_u32_host_tensor: length overflow".into()))?;
+
+        let needs_new = match self.shared_u32_scratch.as_ref() {
+            Some(tensor) => tensor.size_bytes() < required_bytes,
+            None => true,
+        };
+
+        if needs_new {
+            let buffer = self
+                .device
+                .newBufferWithLength_options(required_bytes, MTLResourceOptions::StorageModeShared)
+                .ok_or(MetalError::BufferCreationFailed(required_bytes))?;
+            let scratch = Tensor::<crate::tensor::dtypes::U32>::from_existing_buffer(
+                buffer,
+                vec![len],
+                crate::tensor::dtypes::U32::DTYPE,
+                &self.device,
+                &self.command_queue,
+                0,
+                true,
+            )?;
+            self.shared_u32_scratch = Some(scratch);
+        }
+
+        let scratch = self
+            .shared_u32_scratch
+            .as_ref()
+            .expect("shared_u32_scratch must exist after allocation");
+
+        Ok(scratch.build_view(vec![len], vec![1], scratch.offset))
     }
 
     #[inline]

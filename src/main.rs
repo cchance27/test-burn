@@ -435,14 +435,29 @@ fn run_text_mode(
 ) -> AppResult<()> {
     use tracing::{debug, error, info, warn};
 
+    let mut generated_tokens: u64 = 0;
+    let mut prompt_processing: Option<Duration> = None;
+    let mut total_generation_time: Option<Duration> = None;
+
     // Process all events until generation is done
     while !generation_handle.is_finished() || rx.recv_timeout(Duration::from_millis(100)).is_ok() {
         // Process any pending app events
         while let Ok(event) = rx.try_recv() {
             match event {
-                AppEvent::Token { text, .. } => {
+                AppEvent::Token {
+                    text,
+                    prompt_processing: prompt,
+                    ..
+                } => {
                     print!("{}", text);
                     std::io::stdout().flush().unwrap();
+                    generated_tokens = generated_tokens.saturating_add(1);
+                    prompt_processing.get_or_insert(prompt);
+                }
+                AppEvent::GenerationComplete {
+                    total_generation_time: total,
+                } => {
+                    total_generation_time = Some(total);
                 }
                 AppEvent::StatusUpdate(status) => {
                     // Only log status updates if we're in verbose mode
@@ -469,6 +484,22 @@ fn run_text_mode(
     }
 
     generation_handle.join().unwrap()?;
+
+    if let Some(total) = total_generation_time {
+        let total_s = total.as_secs_f64().max(1e-9);
+        let tps_total = (generated_tokens as f64) / total_s;
+        eprintln!("\n\n[metallic] generated_tokens={generated_tokens} total_s={total_s:.3} tps_total={tps_total:.2}");
+
+        if let Some(prompt) = prompt_processing {
+            let decode_s = total.saturating_sub(prompt).as_secs_f64().max(1e-9);
+            let tps_decode = (generated_tokens as f64) / decode_s;
+            eprintln!(
+                "[metallic] prompt_s={:.3} decode_s={decode_s:.3} tps_decode={tps_decode:.2}",
+                prompt.as_secs_f64()
+            );
+        }
+    }
+
     Ok(())
 }
 

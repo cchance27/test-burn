@@ -110,6 +110,32 @@ fn host_interval(start: f64, end: f64) -> Option<Duration> {
     Some(Duration::from_secs_f64(delta))
 }
 
+/// Best-effort GPU runtime for a completed command buffer (microseconds).
+///
+/// This reads timing metadata reported by Metal (`GPUStartTime/GPUEndTime` or
+/// `kernelStartTime/kernelEndTime`). Returns `None` when timing is unavailable.
+#[inline]
+pub fn command_buffer_best_duration_us(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> Option<u64> {
+    let timing = CommandBufferTiming::from_command_buffer(command_buffer);
+    timing.best_duration().map(|duration| {
+        let us = (duration.as_secs_f64() * 1e6).round();
+        us.max(1.0) as u64
+    })
+}
+
+/// Best-effort (gpu_us, kernel_us) timing tuple for a completed command buffer (microseconds).
+///
+/// This is mainly intended for diagnostics and should be treated as optional telemetry.
+#[inline]
+pub fn command_buffer_timing_us(command_buffer: &ProtocolObject<dyn MTLCommandBuffer>) -> (Option<u64>, Option<u64>) {
+    let timing = CommandBufferTiming::from_command_buffer(command_buffer);
+    let gpu_us = timing.gpu.map(|duration| ((duration.as_secs_f64() * 1e6).round().max(1.0)) as u64);
+    let kernel_us = timing
+        .kernel
+        .map(|duration| ((duration.as_secs_f64() * 1e6).round().max(1.0)) as u64);
+    (gpu_us, kernel_us)
+}
+
 impl GpuProfilerState {
     fn new(key: usize, dispatch: Dispatch, record_command_buffer_timing: bool) -> Self {
         Self {

@@ -20,7 +20,7 @@ struct QkvParams {
 }
 
 // Reuse GEMV tiling constants to stay consistent with kernel.metal TILE_N
-use crate::kernels::matmul_gemv::{GEMV_COLS_PER_THREAD, THREADGROUP_WIDTH};
+// use crate::kernels::matmul_gemv::{GEMV_COLS_PER_THREAD, THREADGROUP_WIDTH};
 
 pub struct MatmulGemvQkvFusedOp;
 
@@ -174,14 +174,14 @@ impl DefaultKernelInvocable for MatmulGemvQkvFusedOp {
         };
 
         let tg = MTLSize {
-            width: THREADGROUP_WIDTH,
+            width: 128,
             height: 1,
             depth: 1,
         };
         let max_n = nq.max(nk.max(nv));
-        let tile_n = THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD;
+        let tile_n = 4;
         let grid = MTLSize {
-            width: max_n.div_ceil(tile_n),
+            width: max_n.div_ceil(tile_n) as usize,
             height: 1,
             depth: 1,
         };

@@ -1,0 +1,105 @@
+
+=== Analyzing /tmp/metallic-throughput-q8.jsonl ===
+Total events: 46607
+
+Event type summary:
+  InternalKernelCompleted (count=16759): count=16759 | total=10858.68ms | avg=0.648ms | min=0.000ms | max=480.239ms | p95_ms=1.169ms, p99_ms=12.039ms
+  GpuKernelDispatched (count=7477): no samples
+  ResourceCacheAccess (count=7222): no samples
+  KernelBackendSelected (count=7222): no samples
+  GpuOpCompleted (count=4011): count=4011 | total=9091.34ms | avg=2.267ms | min=0.000ms | max=480.098ms | p95_ms=10.998ms, p99_ms=11.902ms
+  TensorPreparationStats (count=3841): no samples
+  ResourceCacheSummary (count=72): no samples
+  GgufFileMmap (count=1): no samples
+  ModelWeights (count=1): no samples
+  ForwardStep (count=1): no samples
+
+Backend selection summary:
+  backend=legacy: count=7222
+
+Backend selection reasons:
+  reason=default_auto: count=7222
+
+Backend selection by op/backend:
+  op=sdpa backend=legacy: count=7222
+
+Internal kernel by parent:
+  sampling: count=508 | total=6553.48ms | avg=12.901ms | min=10.398ms | max=480.102ms | p95_ms=12.135ms, p99_ms=12.580ms
+  generation_loop: count=15997 | total=4304.91ms | avg=0.269ms | min=0.000ms | max=480.239ms | p95_ms=0.061ms, p99_ms=11.901ms
+  decoding: count=254 | total=0.29ms | avg=0.001ms | min=0.001ms | max=0.004ms | p95_ms=0.002ms, p99_ms=0.003ms
+
+Internal kernel by parent/op:
+  generation_loop :: iteration_total: count=254 | total=3574.86ms | avg=14.074ms | min=11.541ms | max=480.239ms | p95_ms=13.294ms, p99_ms=13.682ms
+  sampling :: next_token_ready_latency: count=254 | total=3277.08ms | avg=12.902ms | min=10.400ms | max=480.102ms | p95_ms=12.126ms, p99_ms=12.561ms
+  sampling :: next_token_wait: count=254 | total=3276.40ms | avg=12.899ms | min=10.398ms | max=480.101ms | p95_ms=12.125ms, p99_ms=12.558ms
+  generation_loop :: forward_step_total: count=254 | total=291.73ms | avg=1.149ms | min=1.030ms | max=1.627ms | p95_ms=1.312ms, p99_ms=1.493ms
+  generation_loop :: block_0_total: count=301 | total=27.29ms | avg=0.091ms | min=0.044ms | max=6.374ms | p95_ms=0.113ms, p99_ms=0.202ms
+  generation_loop :: block_1_total: count=301 | total=15.70ms | avg=0.052ms | min=0.044ms | max=0.488ms | p95_ms=0.060ms, p99_ms=0.073ms
+  generation_loop :: block_13_total: count=301 | total=15.26ms | avg=0.051ms | min=0.040ms | max=1.492ms | p95_ms=0.054ms, p99_ms=0.061ms
+  generation_loop :: block_14_total: count=301 | total=15.03ms | avg=0.050ms | min=0.041ms | max=1.159ms | p95_ms=0.054ms, p99_ms=0.067ms
+  generation_loop :: block_2_total: count=301 | total=14.95ms | avg=0.050ms | min=0.041ms | max=0.483ms | p95_ms=0.056ms, p99_ms=0.082ms
+  generation_loop :: block_3_total: count=301 | total=14.87ms | avg=0.049ms | min=0.041ms | max=0.460ms | p95_ms=0.056ms, p99_ms=0.066ms
+  generation_loop :: block_5_total: count=301 | total=14.60ms | avg=0.048ms | min=0.040ms | max=0.491ms | p95_ms=0.055ms, p99_ms=0.069ms
+  generation_loop :: block_6_total: count=301 | total=14.52ms | avg=0.048ms | min=0.041ms | max=0.469ms | p95_ms=0.055ms, p99_ms=0.064ms
+  generation_loop :: block_7_total: count=301 | total=14.46ms | avg=0.048ms | min=0.041ms | max=0.437ms | p95_ms=0.054ms, p99_ms=0.065ms
+  generation_loop :: block_8_total: count=301 | total=14.43ms | avg=0.048ms | min=0.041ms | max=0.437ms | p95_ms=0.056ms, p99_ms=0.063ms
+  generation_loop :: block_22_total: count=300 | total=14.39ms | avg=0.048ms | min=0.039ms | max=0.446ms | p95_ms=0.055ms, p99_ms=0.062ms
+  generation_loop :: block_4_total: count=301 | total=14.38ms | avg=0.048ms | min=0.041ms | max=0.464ms | p95_ms=0.054ms, p99_ms=0.063ms
+  generation_loop :: block_20_total: count=301 | total=14.36ms | avg=0.048ms | min=0.041ms | max=0.458ms | p95_ms=0.055ms, p99_ms=0.062ms
+  generation_loop :: block_16_total: count=301 | total=14.34ms | avg=0.048ms | min=0.041ms | max=0.446ms | p95_ms=0.054ms, p99_ms=0.066ms
+  generation_loop :: block_23_total: count=300 | total=14.32ms | avg=0.048ms | min=0.039ms | max=0.391ms | p95_ms=0.055ms, p99_ms=0.062ms
+  generation_loop :: block_15_total: count=301 | total=14.31ms | avg=0.048ms | min=0.038ms | max=0.455ms | p95_ms=0.053ms, p99_ms=0.062ms
+
+Kernel aggregate (all parents):
+  next_token_ready_latency: count=254 | total=3277.08ms | avg=12.902ms | min=10.400ms | max=480.102ms | p95_ms=12.126ms, p99_ms=12.561ms
+  next_token_wait: count=254 | total=3276.40ms | avg=12.899ms | min=10.398ms | max=480.101ms | p95_ms=12.125ms, p99_ms=12.558ms
+  forward_cpu_block_0: count=301 | total=5.32ms | avg=0.018ms | min=0.008ms | max=0.085ms | p95_ms=0.026ms, p99_ms=0.032ms
+  forward_cpu_block_1: count=301 | total=3.41ms | avg=0.011ms | min=0.008ms | max=0.045ms | p95_ms=0.014ms, p99_ms=0.019ms
+  embedding: count=255 | total=3.19ms | avg=0.013ms | min=0.006ms | max=0.089ms | p95_ms=0.028ms, p99_ms=0.044ms
+  forward_cpu_block_2: count=301 | total=3.12ms | avg=0.010ms | min=0.008ms | max=0.049ms | p95_ms=0.013ms, p99_ms=0.017ms
+  forward_cpu_block_22: count=300 | total=3.12ms | avg=0.010ms | min=0.008ms | max=0.022ms | p95_ms=0.013ms, p99_ms=0.016ms
+  forward_cpu_block_3: count=301 | total=3.11ms | avg=0.010ms | min=0.008ms | max=0.024ms | p95_ms=0.013ms, p99_ms=0.015ms
+  forward_cpu_block_15: count=301 | total=3.07ms | avg=0.010ms | min=0.008ms | max=0.063ms | p95_ms=0.013ms, p99_ms=0.015ms
+  forward_cpu_block_20: count=301 | total=3.05ms | avg=0.010ms | min=0.008ms | max=0.021ms | p95_ms=0.013ms, p99_ms=0.017ms
+  forward_cpu_block_14: count=301 | total=2.99ms | avg=0.010ms | min=0.008ms | max=0.025ms | p95_ms=0.013ms, p99_ms=0.018ms
+  forward_cpu_block_8: count=301 | total=2.98ms | avg=0.010ms | min=0.008ms | max=0.021ms | p95_ms=0.013ms, p99_ms=0.017ms
+  forward_cpu_block_18: count=301 | total=2.98ms | avg=0.010ms | min=0.008ms | max=0.029ms | p95_ms=0.013ms, p99_ms=0.017ms
+  forward_cpu_block_7: count=301 | total=2.98ms | avg=0.010ms | min=0.008ms | max=0.020ms | p95_ms=0.013ms, p99_ms=0.016ms
+  forward_cpu_block_16: count=301 | total=2.95ms | avg=0.010ms | min=0.008ms | max=0.022ms | p95_ms=0.013ms, p99_ms=0.015ms
+  forward_cpu_block_23: count=300 | total=2.95ms | avg=0.010ms | min=0.008ms | max=0.028ms | p95_ms=0.012ms, p99_ms=0.015ms
+  forward_cpu_block_21: count=301 | total=2.93ms | avg=0.010ms | min=0.008ms | max=0.019ms | p95_ms=0.013ms, p99_ms=0.015ms
+  forward_cpu_block_6: count=301 | total=2.92ms | avg=0.010ms | min=0.008ms | max=0.030ms | p95_ms=0.012ms, p99_ms=0.019ms
+  forward_cpu_block_19: count=301 | total=2.92ms | avg=0.010ms | min=0.008ms | max=0.024ms | p95_ms=0.013ms, p99_ms=0.016ms
+  forward_cpu_block_12: count=301 | total=2.90ms | avg=0.010ms | min=0.008ms | max=0.027ms | p95_ms=0.013ms, p99_ms=0.017ms
+  forward_cpu_block_17: count=301 | total=2.90ms | avg=0.010ms | min=0.008ms | max=0.021ms | p95_ms=0.012ms, p99_ms=0.016ms
+  forward_cpu_block_13: count=301 | total=2.89ms | avg=0.010ms | min=0.008ms | max=0.017ms | p95_ms=0.013ms, p99_ms=0.014ms
+  forward_cpu_block_9: count=301 | total=2.88ms | avg=0.010ms | min=0.008ms | max=0.017ms | p95_ms=0.013ms, p99_ms=0.015ms
+  forward_cpu_block_5: count=301 | total=2.87ms | avg=0.010ms | min=0.007ms | max=0.027ms | p95_ms=0.012ms, p99_ms=0.016ms
+  forward_cpu_block_10: count=301 | total=2.85ms | avg=0.009ms | min=0.008ms | max=0.022ms | p95_ms=0.012ms, p99_ms=0.015ms
+  forward_cpu_block_11: count=301 | total=2.85ms | avg=0.009ms | min=0.008ms | max=0.019ms | p95_ms=0.012ms, p99_ms=0.016ms
+  forward_cpu_block_4: count=301 | total=2.82ms | avg=0.009ms | min=0.007ms | max=0.020ms | p95_ms=0.012ms, p99_ms=0.016ms
+  token_decode: count=254 | total=0.29ms | avg=0.001ms | min=0.001ms | max=0.004ms | p95_ms=0.002ms, p99_ms=0.003ms
+  token_push: count=125 | total=0.03ms | avg=0.000ms | min=0.000ms | max=0.030ms | p95_ms=0.000ms, p99_ms=0.002ms
+  pool_reset: count=134 | total=0.00ms | avg=0.000ms | min=0.000ms | max=0.000ms | p95_ms=0.000ms, p99_ms=0.000ms
+  cache_logging: count=159 | total=0.00ms | avg=0.000ms | min=0.000ms | max=0.000ms | p95_ms=0.000ms, p99_ms=0.000ms
+  token_callback: count=254 | total=0.00ms | avg=0.000ms | min=0.000ms | max=0.000ms | p95_ms=0.000ms, p99_ms=0.000ms
+  eos_check: count=119 | total=0.00ms | avg=0.000ms | min=0.000ms | max=0.000ms | p95_ms=0.000ms, p99_ms=0.000ms
+
+GPU kernel durations (excluding waits):
+  tensor_staging_prepare: count=464 | total=225.45ms | avg=0.486ms | min=0.101ms | max=20.837ms | p95_ms=1.073ms, p99_ms=2.454ms
+  tensor_staging_flush: count=367 | total=108.25ms | avg=0.295ms | min=0.101ms | max=9.545ms | p95_ms=0.627ms, p99_ms=1.382ms
+
+GPU kernel aggregate (by kernel type):
+  tensor_staging_prepare: count=464 | total=225.45ms | avg=0.486ms | min=0.101ms | max=20.837ms | p95_ms=1.073ms, p99_ms=2.454ms
+  tensor_staging_flush: count=367 | total=108.25ms | avg=0.295ms | min=0.101ms | max=9.545ms | p95_ms=0.627ms, p99_ms=1.382ms
+
+GPU wait breakdown:
+  Generation Loop/cb_wait: count=254 | total=2806.37ms | avg=11.049ms | min=10.395ms | max=13.123ms | p95_ms=12.108ms, p99_ms=12.427ms
+  Unscoped/cb_wait: count=1326 | total=978.62ms | avg=0.738ms | min=0.000ms | max=480.098ms | p95_ms=0.807ms, p99_ms=2.324ms
+
+Command buffer GPU timing:
+  Generation Loop/cb_gpu: count=254 | total=2746.39ms | avg=10.813ms | min=10.161ms | max=12.910ms | p95_ms=11.890ms, p99_ms=12.234ms
+  Unscoped/cb_gpu: count=1346 | total=2226.28ms | avg=1.654ms | min=0.003ms | max=473.946ms | p95_ms=9.504ms, p99_ms=9.504ms
+
+Sync operations:
+  sync kernels: no samples

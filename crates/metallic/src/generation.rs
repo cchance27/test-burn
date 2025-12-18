@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::{Arc, mpsc}, thread, time::{Duration, Instant}
+    collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::{Arc, mpsc}, time::{Duration, Instant}
 };
 
 use metallic_cli_helpers::app_event::AppEvent;
@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 
 use super::{Context, MetalError, SamplerBuffers, Tensor};
 use crate::{
-    TensorElement, Tokenizer, caching::CacheMetrics, kernels::sample_topk_topp::SampleTopKTopPOp, models::qwen25::Qwen25, operation::CommandBuffer, tensor::dtypes::U32
+    TensorElement, Tokenizer, caching::CacheMetrics, kernels::{embedding_lookup::EmbeddingLookupOp, sample_topk_topp::SampleTopKTopPOp}, models::qwen25::Qwen25, operation::CommandBuffer, tensor::dtypes::U32
 };
 
 const IM_START: &str = "[:1]";
@@ -17,6 +17,14 @@ const IM_END: &str = "[:2]";
 
 const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
 const METALLIC_LOG_CACHE_STATS_DEFAULT_FILE: &str = "metal-cache-stats.log";
+
+fn embed_single_token_cached<T: TensorElement>(qwen: &Qwen25<T>, token_id: u32, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
+    let mut indices = ctx.shared_u32_host_tensor(1)?;
+    indices.as_mut_slice()[0] = token_id;
+    let out = ctx.call::<EmbeddingLookupOp>((&qwen.embed_weight, &indices), None)?;
+    debug_assert_eq!(out.dims(), &[1, 1, qwen.config.d_model]);
+    Ok(out)
+}
 
 struct CacheStatsLogger {
     file: Option<std::sync::Mutex<std::fs::File>>,
@@ -238,6 +246,7 @@ struct SampleResult {
     token: u32,
     sample_duration: Duration,
     iteration_duration: Duration,
+    wait_duration: Duration,
 }
 
 pub(crate) struct GpuSampleFuture {
@@ -245,6 +254,7 @@ pub(crate) struct GpuSampleFuture {
     command_buffer: Option<CommandBuffer>,
     iteration_start: Instant,
     sample_start: Instant,
+    submitted: bool,
     ready_token: Option<u32>,
     ready_sample_duration: Duration,
 }
@@ -256,6 +266,7 @@ impl GpuSampleFuture {
             command_buffer: Some(command_buffer),
             iteration_start,
             sample_start,
+            submitted: false,
             ready_token: None,
             ready_sample_duration: Duration::ZERO,
         }
@@ -267,9 +278,18 @@ impl GpuSampleFuture {
             command_buffer: None,
             iteration_start,
             sample_start: iteration_start,
+            submitted: true,
             ready_token: Some(token),
             ready_sample_duration: sample_duration,
         }
+    }
+
+    fn mark_submitted(&mut self) {
+        if self.submitted {
+            return;
+        }
+        self.sample_start = Instant::now();
+        self.submitted = true;
     }
 
     fn finalize(&mut self) -> Result<SampleResult, MetalError> {
@@ -285,39 +305,8 @@ impl GpuSampleFuture {
             token,
             sample_duration,
             iteration_duration,
+            wait_duration: Duration::ZERO,
         })
-    }
-
-    fn try_complete<T: TensorElement>(&mut self, ctx: &mut Context<T>) -> Result<Option<SampleResult>, MetalError> {
-        if let Some(token) = self.ready_token {
-            return Ok(Some(SampleResult {
-                token,
-                sample_duration: self.ready_sample_duration,
-                iteration_duration: self.iteration_start.elapsed(),
-            }));
-        }
-
-        let completions = ctx.poll_command_buffer_completions();
-        let Some(command_buffer) = self.command_buffer.as_ref() else {
-            return Ok(None);
-        };
-
-        let completed = completions
-            .iter()
-            .any(|completion| completion.command_buffer.ptr_eq(command_buffer));
-
-        if !completed {
-            if command_buffer.is_completed() {
-                self.command_buffer = None;
-                let sample = self.finalize()?;
-                return Ok(Some(sample));
-            }
-            return Ok(None);
-        }
-
-        self.command_buffer = None;
-        let sample = self.finalize()?;
-        Ok(Some(sample))
     }
 
     fn wait<T: TensorElement>(mut self, ctx: &mut Context<T>) -> Result<SampleResult, MetalError> {
@@ -326,15 +315,24 @@ impl GpuSampleFuture {
                 token,
                 sample_duration: self.ready_sample_duration,
                 iteration_duration: self.iteration_start.elapsed(),
+                wait_duration: Duration::ZERO,
             });
         }
 
-        loop {
-            if let Some(sample) = self.try_complete(ctx)? {
-                return Ok(sample);
-            }
-            thread::yield_now();
+        let wait_start = Instant::now();
+        if let Some(command_buffer) = self.command_buffer.take() {
+            let completions = ctx.wait_for_command_buffer(command_buffer, None);
+            ctx.process_pipeline_completions(completions);
         }
+
+        if let Some(token_tensor) = self.token_tensor.as_ref() {
+            token_tensor.defining_cmd_buffer.borrow_mut().take();
+        }
+
+        let wait_duration = wait_start.elapsed();
+        let mut result = self.finalize()?;
+        result.wait_duration = wait_duration;
+        Ok(result)
     }
 }
 
@@ -393,8 +391,9 @@ pub fn gpu_sample_top_k_top_p<T: TensorElement>(
     temperature: f32,
     ctx: &mut Context<T>,
 ) -> Result<u32, MetalError> {
-    let future = gpu_sample_top_k_top_p_async(logits_tensor, vocab_size, top_k, top_p, temperature, ctx, Instant::now())?;
+    let mut future = gpu_sample_top_k_top_p_async(logits_tensor, vocab_size, top_k, top_p, temperature, ctx, Instant::now())?;
     ctx.submit_active_command_buffer();
+    future.mark_submitted();
     ctx.poll_command_buffer_completions();
     let result = future.wait(ctx)?;
     Ok(result.token)
@@ -404,6 +403,7 @@ struct CompletedToken {
     token_id: u32,
     sample_duration: Duration,
     iteration_duration: Duration,
+    sample_wait_duration: Duration,
 }
 
 impl CompletedToken {
@@ -412,6 +412,7 @@ impl CompletedToken {
             token_id: sample.token,
             sample_duration: sample.sample_duration,
             iteration_duration: sample.iteration_duration,
+            sample_wait_duration: sample.wait_duration,
         }
     }
 }
@@ -437,10 +438,20 @@ where
     let sample_metric_start = Instant::now();
     record_metric_async!(MetricEvent::InternalKernelCompleted {
         parent_op_name: "sampling".to_string(),
-        internal_kernel_name: "gpu_top_k_top_p".to_string(),
+        internal_kernel_name: "next_token_ready_latency".to_string(),
         duration_us: token.sample_duration.as_micros().max(1) as u64,
     });
     *metric_recording_overhead += sample_metric_start.elapsed();
+
+    if !token.sample_wait_duration.is_zero() {
+        let metric_start = Instant::now();
+        record_metric_async!(MetricEvent::InternalKernelCompleted {
+            parent_op_name: "sampling".to_string(),
+            internal_kernel_name: "next_token_wait".to_string(),
+            duration_us: token.sample_wait_duration.as_micros().max(1) as u64,
+        });
+        *metric_recording_overhead += metric_start.elapsed();
+    }
 
     if !token.iteration_duration.is_zero() {
         let metric_start = Instant::now();
@@ -869,7 +880,7 @@ where
 
     let mut pending_output = if let Some(logits_tensor) = logits_tensor {
         let iteration_start = Instant::now();
-        let initial_future = gpu_sample_top_k_top_p_async::<T>(
+        let mut initial_future = gpu_sample_top_k_top_p_async::<T>(
             &logits_tensor,
             vocab_size,
             cfg.top_k,
@@ -879,6 +890,7 @@ where
             iteration_start,
         )?;
         ctx.submit_active_command_buffer();
+        initial_future.mark_submitted();
         ctx.poll_command_buffer_completions();
         let initial_sample = initial_future.wait(ctx)?;
         Some(CompletedToken::from_sample(initial_sample))
@@ -887,6 +899,7 @@ where
             token_id: 0,
             sample_duration: Duration::ZERO,
             iteration_duration: Duration::ZERO,
+            sample_wait_duration: Duration::ZERO,
         })
     };
 
@@ -920,7 +933,7 @@ where
             let current_pos = prompt_len + i;
 
             let embed_start = Instant::now();
-            let input_tensor = qwen.embed(&[current_input_token], ctx)?;
+            let input_tensor = embed_single_token_cached(qwen, current_input_token, ctx)?;
             let embed_duration = embed_start.elapsed();
             if !embed_duration.is_zero() {
                 let metric_start = Instant::now();
@@ -989,7 +1002,7 @@ where
                 });
             }
 
-            let sample_future = gpu_sample_top_k_top_p_async::<T>(
+            let mut sample_future = gpu_sample_top_k_top_p_async::<T>(
                 &logits_tensor,
                 vocab_size,
                 cfg.top_k,
@@ -999,6 +1012,7 @@ where
                 iteration_start,
             )?;
             ctx.submit_active_command_buffer();
+            sample_future.mark_submitted();
             ctx.poll_command_buffer_completions();
 
             let completed_token = pending_output.take().expect("pending output token must exist before processing");

@@ -1,3 +1,7 @@
+use std::sync::OnceLock;
+
+use metallic_instrumentation::{MetricEvent, record_metric_async};
+
 use super::{main::Context, utils::MatMulBackendOverride as InternalMatMulBackendOverride};
 use crate::{
     MetalError, Tensor, caching::ResourceCache, kernels::{
@@ -6,6 +10,95 @@ use crate::{
         }, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}
     }, tensor::{QuantizedTensor, TensorElement, TensorType}
 };
+
+const METALLIC_Q8_M1_MLX_MIN_N_ENV: &str = "METALLIC_Q8_M1_MLX_MIN_N";
+
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[cfg(test)]
+static Q8_M1_MLX_MIN_N_OVERRIDE: AtomicUsize = AtomicUsize::new(usize::MAX);
+
+#[inline]
+fn q8_m1_mlx_min_n() -> usize {
+    #[cfg(test)]
+    {
+        let v = Q8_M1_MLX_MIN_N_OVERRIDE.load(Ordering::Relaxed);
+        if v != usize::MAX {
+            return v;
+        }
+    }
+
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var(METALLIC_Q8_M1_MLX_MIN_N_ENV)
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            // Default: only prefer MLX for very large `n` (e.g. FFN up/gate at 4864, logits at vocab).
+            .unwrap_or(4096)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn set_q8_m1_mlx_min_n_override_for_tests(value: Option<usize>) {
+    Q8_M1_MLX_MIN_N_OVERRIDE.store(value.unwrap_or(usize::MAX), Ordering::Relaxed);
+}
+
+#[inline]
+pub(crate) fn q8_should_use_mlx_for_m1(dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
+    dims.batch == 1 && dims.m == 1 && !transpose_a && !transpose_b && dims.n >= q8_m1_mlx_min_n()
+}
+
+#[inline]
+fn matmul_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("METALLIC_TRACE_MATMUL_DISPATCH")
+            .ok()
+            .map(|v| v.trim() != "0")
+            .unwrap_or(false)
+    })
+}
+
+#[inline]
+fn emit_matmul_backend_selected(
+    rhs: &'static str,
+    dims: Option<MatmulDims>,
+    transpose_a: bool,
+    transpose_b: bool,
+    backend: &'static str,
+    reason: impl Into<String>,
+) {
+    if !matmul_trace_enabled() {
+        return;
+    }
+
+    let op_name = if let Some(d) = dims {
+        format!(
+            "matmul_{rhs}(m={m},n={n},k={k},ta={ta},tb={tb},b={batch})",
+            rhs = rhs,
+            m = d.m,
+            n = d.n,
+            k = d.k,
+            ta = transpose_a as u8,
+            tb = transpose_b as u8,
+            batch = d.batch
+        )
+    } else {
+        format!(
+            "matmul_{rhs}(ta={ta},tb={tb})",
+            rhs = rhs,
+            ta = transpose_a as u8,
+            tb = transpose_b as u8
+        )
+    };
+
+    record_metric_async!(MetricEvent::KernelBackendSelected {
+        op_name,
+        backend: backend.to_string(),
+        reason: reason.into(),
+    });
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct MatmulDims {
@@ -273,7 +366,12 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     fn can_use_gemv(&self, dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
-        if transpose_a || transpose_b {
+        if transpose_a {
+            return false;
+        }
+        // Allow transpose_b (standard linear layer) because our kernel supports [N, K] weights
+        // which matches the execution semantic of `x @ W^T` with contiguous K.
+        if !transpose_b {
             return false;
         }
 
@@ -354,40 +452,47 @@ impl<T: TensorElement> Context<T> {
             Ok(d) => Some(*d),
             Err(_) => None,
         };
-        // Match previous behavior: only consider GEMV for pure matmul (no bias, no alpha/beta)
-        let can_gemv = alpha_beta.is_none()
-            && bias.is_none()
-            && dims_ok
-                .as_ref()
-                .map(|dims| self.can_use_gemv(dims, transpose_a, transpose_b))
-                .unwrap_or(false);
+        // Enable GEMV even if bias/alpha_beta present (our kernels support them)
+        let can_gemv = dims_ok
+            .as_ref()
+            .map(|dims| self.can_use_gemv(dims, transpose_a, transpose_b))
+            .unwrap_or(false);
 
         match self.forced_matmul_backend {
             InternalMatMulBackendOverride::Force(MatMulBackend::Mlx) => {
+                emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mlx", "forced_backend");
                 return self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
             }
             InternalMatMulBackendOverride::Force(MatMulBackend::Gemv) => {
                 if can_gemv {
+                    emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "forced_backend");
                     return self.launch_gemv(a, TensorType::Dense(b), bias, alpha_beta, cache.as_deref_mut());
                 }
+                emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mlx", "forced_backend_gemv_unsupported");
                 return self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
             }
             InternalMatMulBackendOverride::Force(MatMulBackend::Mps) => {
                 if can_gemv {
+                    emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "forced_backend");
                     return self.launch_gemv(a, TensorType::Dense(b), bias, alpha_beta, cache.as_deref_mut());
                 }
+                emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mps", "forced_backend");
                 return self.matmul_dense_mps(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
             }
             InternalMatMulBackendOverride::Default | InternalMatMulBackendOverride::Auto => {}
         }
 
         if can_gemv {
+            emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "heuristic_m1");
             return self.launch_gemv(a, TensorType::Dense(b), bias, alpha_beta, cache.as_deref_mut());
         }
 
         let dims = match dims_result {
             Ok(d) => d,
-            Err(_) => return self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut()),
+            Err(_) => {
+                emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mlx", "dims_inference_failed");
+                return self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
+            }
         };
 
         let has_strided_batch = {
@@ -407,8 +512,36 @@ impl<T: TensorElement> Context<T> {
         };
 
         if use_mlx {
+            emit_matmul_backend_selected(
+                "dense",
+                Some(dims),
+                transpose_a,
+                transpose_b,
+                "Mlx",
+                if bias.is_some() {
+                    "heuristic_bias"
+                } else if alpha_beta.is_some() {
+                    "heuristic_alpha_beta"
+                } else {
+                    "heuristic"
+                },
+            );
             self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut())
         } else {
+            emit_matmul_backend_selected(
+                "dense",
+                Some(dims),
+                transpose_a,
+                transpose_b,
+                "Mps",
+                if bias.is_some() {
+                    "heuristic_bias"
+                } else if alpha_beta.is_some() {
+                    "heuristic_alpha_beta"
+                } else {
+                    "heuristic"
+                },
+            );
             self.matmul_dense_mps(a, b, transpose_a, transpose_b, bias, alpha_beta, cache)
         }
     }
@@ -506,57 +639,67 @@ impl<T: TensorElement> Context<T> {
                         ));
                     }
 
-                    if dims.batch == 1 && dims.m == 1 && dims.k <= 1024 && dims.n >= 2048 {
-                        return self.call::<MatMulMlxOp>(
-                            (a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), bias, None, false, false, 1.0, 0.0),
-                            cache.as_deref_mut(),
-                        );
-                    }
-
                     if dims.batch == 1 && dims.m == 1 {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
                         return self.call::<MatmulGemvOp>((a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), bias), cache.as_deref_mut());
                     }
                     if self.should_use_q8_canonical_rows16(&dims, transpose_a) {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8CanonicalRows16", "heuristic");
                         return self.call::<MatmulQ8CanonicalRows16Op>((a, q8, bias), cache.as_deref_mut());
                     }
                     if self.should_use_q8_canonical(&dims, transpose_a) {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8Canonical", "heuristic");
                         return self.call::<MatmulQ8CanonicalOp>((a, q8, bias), cache.as_deref_mut());
                     }
                     let smallm_use_gemv = std::env::var("METALLIC_Q8_SMALLM_USE_GEMV").ok().map(|s| s != "0").unwrap_or(true);
                     let smallm_fallback_max_n = Self::smallm_fallback_max_n();
                     if smallm_use_gemv && dims.batch == 1 && (2..=4).contains(&dims.m) && !transpose_a && dims.n <= smallm_fallback_max_n {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "GemvSmallM", "heuristic");
                         return self.call::<MatmulGemvSmallMOp>((a, q8, bias), cache.as_deref_mut());
                     }
                     if self.can_use_q8_nt(&dims, transpose_a) {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8Nt", "heuristic");
                         return self.call::<MatmulQ8NtOp>((a, q8, bias), cache.as_deref_mut());
                     }
-                    return self.call::<MatMulMlxOp>(
-                        (
-                            a,
-                            TensorType::Quant(QuantizedTensor::Q8_0(q8)),
-                            bias,
-                            None,
-                            transpose_a,
-                            transpose_b,
-                            1.0,
-                            0.0,
-                        ),
-                        None,
-                    );
+                    emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Unsupported", "no_supported_kernel");
+                    return Err(MetalError::OperationNotSupported(
+                        "quant matmul with transpose_b=true is not supported for this shape (try keeping weights in [K,N] and calling with transpose_b=false, or reduce m<=4 so MatmulQ8Nt can be used)".into(),
+                    ));
                 }
 
                 if dims.batch == 1 && dims.m == 1 && !transpose_a {
+                    if q8_should_use_mlx_for_m1(&dims, transpose_a, transpose_b) {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Mlx", "heuristic_m1_large_n");
+                        return self.call::<MatMulMlxOp>(
+                            (
+                                a,
+                                TensorType::Quant(QuantizedTensor::Q8_0(q8)),
+                                bias,
+                                None,
+                                transpose_a,
+                                false,
+                                1.0,
+                                0.0,
+                            ),
+                            None,
+                        );
+                    }
+                    emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
                     return self.call::<MatmulGemvOp>((a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), bias), cache.as_deref_mut());
                 }
                 if dims.batch == 1 && (2..=4).contains(&dims.m) && !transpose_a {
                     if self.should_use_q8_canonical_rows16(&dims, transpose_a) {
+                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8CanonicalRows16", "heuristic");
                         return self.call::<MatmulQ8CanonicalRows16Op>((a, q8, bias), cache.as_deref_mut());
                     }
+                    emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8Canonical", "heuristic_smallm");
                     return self.call::<MatmulQ8CanonicalOp>((a, q8, bias), cache.as_deref_mut());
                 }
                 if self.should_use_q8_canonical(&dims, transpose_a) {
+                    emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8Canonical", "heuristic");
                     return self.call::<MatmulQ8CanonicalOp>((a, q8, bias), cache.as_deref_mut());
                 }
+                emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Mlx", "fallback");
                 self.call::<MatMulMlxOp>(
                     (
                         a,

@@ -67,6 +67,12 @@ pub struct TensorPreparationMetrics {
 pub struct TensorPreparationCache<T: TensorElement> {
     /// Cache of tensor preparation states
     tensor_states: Arc<Mutex<FxHashMap<TensorCacheKey, TensorPreparationState>>>,
+    /// Per-command-buffer index to allow O(k) invalidation on completion.
+    ///
+    /// We intentionally tolerate duplicate keys in these lists and validate against
+    /// `tensor_states` during invalidation to avoid expensive removals when entries
+    /// are updated (e.g., a tensor gets prepared again for a new command buffer).
+    cmd_buffer_keys: Arc<Mutex<FxHashMap<usize, Vec<TensorCacheKey>>>>,
     /// Performance metrics tracking
     metrics: Arc<Mutex<TensorPreparationMetrics>>,
     _phantom: std::marker::PhantomData<T>,
@@ -76,6 +82,7 @@ impl<T: TensorElement> TensorPreparationCache<T> {
     pub fn new() -> Self {
         Self {
             tensor_states: Arc::new(Mutex::new(FxHashMap::default())),
+            cmd_buffer_keys: Arc::new(Mutex::new(FxHashMap::default())),
             metrics: Arc::new(Mutex::new(TensorPreparationMetrics::default())),
             _phantom: std::marker::PhantomData,
         }
@@ -99,9 +106,20 @@ impl<T: TensorElement> TensorPreparationCache<T> {
     pub fn mark_prepared(&self, tensor: &Tensor<T>, cmd_buffer: &CommandBuffer) {
         let key = TensorCacheKey::from_tensor(tensor);
         let state = TensorPreparationState::new(cmd_buffer);
+        let cmd_buffer_ptr = state.cmd_buffer_ptr;
 
-        let mut lock = self.tensor_states.lock().expect("Tensor preparation cache mutex poisoned");
-        lock.insert(key, state);
+        {
+            let mut lock = self.tensor_states.lock().expect("Tensor preparation cache mutex poisoned");
+            // Avoid redundant writes in the common case.
+            if lock.get(&key).is_some_and(|existing| existing.cmd_buffer_ptr == cmd_buffer_ptr) {
+                return;
+            }
+            lock.insert(key, state);
+        }
+
+        if let Ok(mut index) = self.cmd_buffer_keys.lock() {
+            index.entry(cmd_buffer_ptr).or_default().push(key);
+        }
     }
 
     /// Clear the preparation state for a tensor (e.g., when it's modified)
@@ -115,6 +133,9 @@ impl<T: TensorElement> TensorPreparationCache<T> {
     pub fn clear(&self) {
         let mut lock = self.tensor_states.lock().expect("Tensor preparation cache mutex poisoned");
         lock.clear();
+        if let Ok(mut index) = self.cmd_buffer_keys.lock() {
+            index.clear();
+        }
 
         // Also reset metrics
         let mut metrics = self.metrics.lock().expect("Metrics mutex poisoned");
@@ -124,19 +145,21 @@ impl<T: TensorElement> TensorPreparationCache<T> {
     /// Validate that cached tensors are still valid (e.g., after command buffer completion)
     pub fn validate_states(&self, cmd_buffer: &CommandBuffer) {
         let cmd_buffer_ptr = cmd_buffer as *const CommandBuffer as usize;
-        let mut lock = self.tensor_states.lock().expect("Tensor preparation cache mutex poisoned");
+        let keys = self
+            .cmd_buffer_keys
+            .lock()
+            .ok()
+            .and_then(|mut index| index.remove(&cmd_buffer_ptr))
+            .unwrap_or_default();
+        if keys.is_empty() {
+            return;
+        }
 
-        // Remove states for the completed command buffer to force re-preparation
-        // This ensures tensors prepared for a completed command buffer are prepared again
-        // for new command buffers
-        let keys_to_remove: Vec<_> = lock
-            .iter()
-            .filter(|(_, state)| state.cmd_buffer_ptr == cmd_buffer_ptr)
-            .map(|(k, _)| *k)
-            .collect();
-
-        for key in keys_to_remove {
-            lock.remove(&key);
+        let mut states = self.tensor_states.lock().expect("Tensor preparation cache mutex poisoned");
+        for key in keys {
+            if states.get(&key).is_some_and(|state| state.cmd_buffer_ptr == cmd_buffer_ptr) {
+                states.remove(&key);
+            }
         }
     }
 
@@ -197,6 +220,7 @@ impl<T: TensorElement> Clone for TensorPreparationCache<T> {
     fn clone(&self) -> Self {
         Self {
             tensor_states: self.tensor_states.clone(),
+            cmd_buffer_keys: self.cmd_buffer_keys.clone(),
             metrics: self.metrics.clone(),
             _phantom: std::marker::PhantomData,
         }

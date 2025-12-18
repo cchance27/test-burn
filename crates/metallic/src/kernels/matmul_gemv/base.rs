@@ -154,13 +154,32 @@ fn build_operation<'a, T: TensorElement>(
     };
     let dispatch = GemvDispatch::new(loader_mode, needs_bias_buffer, diag_col);
 
+    // Grid configuration depends on the kernel loader mode.
+    // Q8Canonical kernels use our new SIMD-Parallel logic (4 cols per 128-thread TG).
+    // Grid configuration depends on the kernel loader mode.
+    // Q8Canonical kernels use our new SIMD-Parallel logic (4 cols per 128-thread TG).
+    // Dense kernels use legacy Thread-Per-Col logic (256 cols per 256-thread TG).
+    // UPDATE: Dense now uses SIMD-Parallel logic too (via run_simd_f16_gemv).
+    let lid = dispatch.loader_id();
+    let is_simd_q8 = lid == (GemvLoaderMode::Q8Canonical as u32)
+        || lid == (GemvLoaderMode::Q8CanonicalBias as u32)
+        || lid == (GemvLoaderMode::Q8CanonicalDebug as u32)
+        || lid == (GemvLoaderMode::Dense as u32)
+        || lid == (GemvLoaderMode::DenseBias as u32);
+
+    let (tg_width, tile_cols) = if is_simd_q8 {
+        (128usize, 4usize)
+    } else {
+        (THREADGROUP_WIDTH, TILE_N) // Should be unreachable for Gemv modes now
+    };
+
     let threadgroup_size = MTLSize {
-        width: THREADGROUP_WIDTH,
+        width: tg_width as usize,
         height: 1,
         depth: 1,
     };
     let grid_size = MTLSize {
-        width: n.div_ceil(TILE_N),
+        width: n.div_ceil(tile_cols) as usize,
         height: 1,
         depth: 1,
     };
@@ -193,13 +212,18 @@ fn build_operation<'a, T: TensorElement>(
 
     let pipeline = match &binding {
         GemvRhsBinding::Dense(_) => {
-            pipeline.ok_or_else(|| MetalError::PipelineCreationFailed("MatmulGemv pipeline missing".to_string()))?
+            if let Some(existing) = pipeline {
+                existing
+            } else {
+                ctx.kernel_manager.get_pipeline(KernelFunction::MatmulGemv, T::DTYPE, &ctx.device)?
+            }
         }
         GemvRhsBinding::QuantCanonical(_) => {
             if let Some(existing) = pipeline {
                 existing
             } else {
-                ctx.kernel_manager.get_pipeline(KernelFunction::MatmulGemv, T::DTYPE, &ctx.device)?
+                ctx.kernel_manager
+                    .get_pipeline(KernelFunction::MatmulGemvQ8, T::DTYPE, &ctx.device)?
             }
         }
     };

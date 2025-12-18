@@ -59,6 +59,31 @@ fn test_qwen25_embed() -> Result<(), MetalError> {
 }
 
 #[test]
+fn test_output_weight_q8_transpose_detection() {
+    let d_model = 896usize;
+    let vocab = 151_936usize;
+
+    // Common GGUF layout: [vocab, d_model] -> needs transpose.
+    assert_eq!(
+        Qwen25::<F32Element>::output_weight_q8_transpose_b(&[vocab, d_model], d_model, vocab),
+        Some(true)
+    );
+
+    // Alternative layout: [d_model, vocab] -> already canonical.
+    assert_eq!(
+        Qwen25::<F32Element>::output_weight_q8_transpose_b(&[d_model, vocab], d_model, vocab),
+        Some(false)
+    );
+
+    // Mismatched dims -> ignore.
+    assert_eq!(
+        Qwen25::<F32Element>::output_weight_q8_transpose_b(&[vocab, d_model + 1], d_model, vocab),
+        None
+    );
+    assert_eq!(Qwen25::<F32Element>::output_weight_q8_transpose_b(&[vocab], d_model, vocab), None);
+}
+
+#[test]
 fn test_kv_cache_correctness() -> Result<(), MetalError> {
     let mut ctx = Context::<F32Element>::new()?;
     let cfg = Qwen25Config {
