@@ -5,4 +5,5 @@ matmul_gemv/kernel/q8_block_common.metal
 matmul_gemv/kernel/gemv_simd_impl.metal
 matmul_gemv/kernel/dense.metal
 matmul_gemv/kernel/quant.metal
+matmul_gemv/kernel/gemv_fused.metal
 matmul_gemv/kernel/launcher.metal

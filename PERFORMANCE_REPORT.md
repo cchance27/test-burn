@@ -2,19 +2,35 @@
 
 ## Performance History (Latest First)
 
-### Refactored Helpers & Pointer Optimizations
+### Fused SwiGLU & Occupancy Tuning
 * **Change Summary**:
-    * Refactored `dense.metal` and `quant.metal` to use shared `gemv_simd_impl.metal` template.
-    * **Optimization**: Pre-calculated thread offsets in `init` to reduce ALU ops in the inner loop (SimdGemvPolicyF16 and SimdGemvPolicyQ8).
-    * **Optimization**: Enabled "Fast Path" loop in template to remove bounds checking for bulk processing (Hot path optimization).
+    * Implemented `gemv_q8_swiglu_f16`, fusing Gate, Up, and SiLU into a single kernel launch.
+    * Replaced 3 discrete kernel calls (Gate, Up, Act) with 1 fused call per MLP layer.
+    * Verified 128-thread occupancy remains optimal.
 * **Results (M3 Pro)**:
-    * **FP16 Decode**: **69.14 tok/s**
-    * **Q8 Decode**: **92.76 tok/s** (+8.7 tok/s)
+    * **FP16 Decode**: **71.62 tok/s** (+1 tok/s)
+    * **Q8 Decode**: **97.75 tok/s** (+1.3 tok/s)
+
+### "Fast Path" & Pointer Optimizations
+* **Change Summary**:
+    * **Build Fixed**: Resolved header guard and redefinition errors.
+    * **Optimization**: `SimdGemvPolicyQ8` now absorbs thread offsets into base pointers and uses unchecked `load_x_fast` for bulk processing.
+* **Results (M3 Pro)**:
+    * **FP16 Decode**: **70.68 tok/s** (Stable)
+    * **Q8 Decode**: **96.48 tok/s** (+29.5 tok/s from baseline!) 
+        * *Note*: Improvement from ~84 to ~96 tok/s solely from pointer/loop optimizations.
+
+### Refactored Helpers & Pointer Optimizations (Initial Attempt)
+* **Change Summary**:
+    * Refactored `dense.metal` and `quant.metal` to use shared `gemv_simd_impl.metal`.
+    * Pre-calculated thread offsets.
+* **Results (M3 Pro)**:
+    * **FP16 Decode**: 69.14 tok/s
+    * **Q8 Decode**: 92.76 tok/s
 
 ### Phase 1 Completion (SIMD Kernels)
 * **Change Summary**:
     * Replaced legacy scalar kernels with Vectorized/Unrolled SIMD kernels.
-    * Implemented `run_simd_f16_gemv` and `run_simd_q8_gemv`.
 * **Results (M3 Pro)**:
     * **FP16 Decode**: ~70.5 tok/s
     * **Q8 Decode**: ~84.0 tok/s
@@ -28,34 +44,23 @@
 
 ## The "Race to 105/160" (Phase 3 Roadmap)
 
-To close the remaining gap, we must move beyond single-kernel optimization and look at the **graph level**.
+To close the remaining gap (~96 -> 160), we must move beyond single-kernel optimization.
 
-### 1. Kernel Fusion (High Impact)
+### 1. WMMA/AMX and Layout Optimizations
+**Theory**: WMMA/AMX can provide significant performance improvements for GEMV and related operations.
+**Target**: Implement WMMA/AMX for GEMV and related operations.
+
+### 2. Kernel Fusion 
 **Theory**: Every kernel launch reads inputs from RAM and writes outputs to RAM.
-- Current: `Input -> RMSNorm -> RAM -> Matmul -> RAM`.
-- Fused: `Input -> RMSNorm -> Regs -> Matmul -> RAM`.
-**Target**: Fuse `RMSNorm` into the start of the `GEMV` kernel (Fused Add-RMSNorm-Gemv).
-**Potential Gain**: +15-20%.
+**Target**: Fuse `RMSNorm` into `GEMV` or `SwiGLU` (Gate+Up+Act) into single kernel.
 
-### 2. Dispatch Overhead Reduction (High Impact)
-**Theory**: We launch kernels individually using CPU encodings (`compute_encoder.dispatch(...)`).
-- Overhead can be 5-10µs per launch. A single token generation involves ~100 launches (Layers * Ops).
-- 100 * 10µs = 1ms overhead per token alone.
-- Competitors use `MTLHeap` or **MPSGraph** / **Metal Command Buffer Reuse** to pre-record the graph and replay it with zero CPU cost.
-**Target**: Implement `Graph Capture` or `MPSGraph` backend for the model execution loop.
-**Potential Gain**: +10-20% (Crucial for small batch inference).
+### 3. Dispatch Overhead Reduction (High Impact)
+**Theory**: CPU dispatch overhead is significant (~10µs/launch).
+**Target**: Implement `MPSGraph` or `Metal Graph Capture`.
 
-### 3. Occupancy & Grid Tuning (Medium Impact)
-**Theory**: Our current `128 threads per group` with `4 cols per group` might utilize the GPU well, but maybe `256` or `512` threads (common in Llama.cpp/MLX) would provide better latency hiding.
+### 4. Occupancy & Grid Tuning (Medium Impact)
 **Target**: Auto-tune `THREADGROUP_SIZE` and `COLS_PER_THREAD`.
 
-### 4. Advanced Q8 Kernels
-**Theory**: Q8 at 92 tok/s vs 160 tok/s implies we are processing at ~60% potential speed.
-- Competitors might use `M=32` or `M=64` tile processing even for `M=1` decoding (fetching more batches or speculative decoding).
-- Or they use specific `simd_permute` tricks to utilize the M3's specific ALU pipelines better.
-**Target**: Deep dive into M3 ISA optimization / Assembly analysis.
-
-## Next Steps
-
-1.  **Phase 2**: Implement `gemv_fused.sources` to formalize kernel composition and begin Fusion work.
-2.  **Profiling**: Measure CPU dispatch overhead.
+### 5. Advanced Q8 Kernels
+**Theory**: Q8 at 96 tok/s vs 160 tok/s implies we are processing at ~60% potential speed.
+**Target**: Deep dive into M3 ISA optimization.

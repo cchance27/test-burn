@@ -816,23 +816,19 @@ impl<T: TensorElement> Qwen25<T> {
                 // - down: use quant matmul when available, else dense matmul; then add bias
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
                     // gate/up projections fused (quant) -> [m, ff_dim] each
-                    let (gate_lin, up_lin) = if block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some() {
+                    // gate/up projections fused (quant) -> [m, ff_dim] each
+                    let hidden = if block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some() {
                         let gq8 = block.ffn_gate_q8.as_ref().unwrap();
                         let uq8 = block.ffn_up_q8.as_ref().unwrap();
-                        ctx.set_pending_gpu_scope(format!("mlp_gate_up_fused_block_{}_op", layer_idx));
-                        let packed = ctx.call::<crate::kernels::matmul_gemv::MatmulGemvQ2FusedOp>(
+                        ctx.set_pending_gpu_scope(format!("mlp_swiglu_fused_block_{}_op", layer_idx));
+                        ctx.call::<crate::kernels::matmul_gemv::MatmulGemvQ8SwiGluOp>(
                             (
                                 &x_normed_mlp_flat,
                                 (&QuantizedTensor::Q8_0(gq8), &QuantizedTensor::Q8_0(uq8)),
-                                (None, None),
+                                (Some(&block.ffn_gate_bias), Some(&block.ffn_up_bias)),
                             ),
                             None,
-                        )?;
-                        let ff = block.ffn_gate_bias.len();
-                        let elem = T::DTYPE.size_bytes();
-                        let g = packed.build_view(vec![1, ff], vec![ff, 1], packed.offset);
-                        let u = packed.build_view(vec![1, ff], vec![ff, 1], packed.offset + ff * elem);
-                        (g, u)
+                        )?
                     } else {
                         // Fallback to separate matmuls when either weight is dense
                         ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
@@ -879,31 +875,30 @@ impl<T: TensorElement> Qwen25<T> {
                                 ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None, None, None)?
                             }
                         };
-                        (gate_lin, up_lin)
-                    };
 
-                    // fused activation on [m, ff_dim]
-                    let gate_leading = if gate_lin.dims().len() >= 2 {
-                        gate_lin.dims()[gate_lin.dims().len() - 2] as u32
-                    } else {
-                        gate_lin.dims().last().copied().unwrap_or(1) as u32
+                        // fused activation on [m, ff_dim]
+                        let gate_leading = if gate_lin.dims().len() >= 2 {
+                            gate_lin.dims()[gate_lin.dims().len() - 2] as u32
+                        } else {
+                            gate_lin.dims().last().copied().unwrap_or(1) as u32
+                        };
+                        let up_leading = if up_lin.dims().len() >= 2 {
+                            up_lin.dims()[up_lin.dims().len() - 2] as u32
+                        } else {
+                            up_lin.dims().last().copied().unwrap_or(1) as u32
+                        };
+                        ctx.call::<SwiGLUFusedActivationOp>(
+                            (
+                                gate_lin,
+                                block.ffn_gate_bias.clone(),
+                                up_lin,
+                                block.ffn_up_bias.clone(),
+                                gate_leading,
+                                up_leading,
+                            ),
+                            None,
+                        )?
                     };
-                    let up_leading = if up_lin.dims().len() >= 2 {
-                        up_lin.dims()[up_lin.dims().len() - 2] as u32
-                    } else {
-                        up_lin.dims().last().copied().unwrap_or(1) as u32
-                    };
-                    let hidden = ctx.call::<SwiGLUFusedActivationOp>(
-                        (
-                            gate_lin,
-                            block.ffn_gate_bias.clone(),
-                            up_lin,
-                            block.ffn_up_bias.clone(),
-                            gate_leading,
-                            up_leading,
-                        ),
-                        None,
-                    )?;
 
                     // down projection -> [m, d_model]
                     ctx.set_pending_gpu_scope(format!("mlp_down_proj_block_{}_op", layer_idx));

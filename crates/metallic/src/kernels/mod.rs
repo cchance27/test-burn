@@ -174,6 +174,7 @@ pub enum KernelFunction {
     MatmulGemvSmallM,
     MatmulGemvQkvFused,
     MatmulGemvQ2Fused,
+    MatmulGemvQ8SwiGlu,
     MatmulQ8Nt,
     MatmulQ8CanonicalLargeN,
     MatmulQ8CanonicalRows16LargeN,
@@ -219,6 +220,7 @@ impl KernelFunction {
             KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQkvFused => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQ2Fused => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ8SwiGlu => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8Nt => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalLargeN => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalRows16LargeN => KernelLibrary::MatmulGemv,
@@ -298,6 +300,7 @@ impl KernelFunction {
             }
             (KernelFunction::MatmulGemvQkvFused, F16) => "gemv_q8_fused3_f16",
             (KernelFunction::MatmulGemvQ2Fused, F16) => "gemv_q8_fused2_f16",
+            (KernelFunction::MatmulGemvQ8SwiGlu, F16) => "gemv_q8_swiglu_f16",
             (KernelFunction::MatmulQ8Nt, F16) => "gemm_q8_nt_f16",
             (KernelFunction::MatmulQ8CanonicalLargeN, F16) => "gemm_q8_canonical_large_n_f16",
             (KernelFunction::MatmulQ8CanonicalRows16LargeN, F16) => "gemm_q8_canonical_large_n_rows16_f16",

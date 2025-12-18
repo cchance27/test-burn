@@ -1,3 +1,4 @@
+#pragma once
 #include <metal_stdlib>
 using namespace metal;
 
@@ -21,7 +22,75 @@ using namespace metal;
 //     void advance_pointers(uint k_step);
 // };
 
-template <typename Policy, uint HEADS, bool HasBias>
+// =================================================================================================
+// Epilogue Policies
+// =================================================================================================
+
+struct DefaultEpilogue {
+    template<uint HEADS>
+    static void apply(
+        float acc[HEADS],
+        uint lane_id,
+        uint logical_col,
+        const uint N[HEADS],
+        const device half *bias[HEADS],
+        const uint has_bias_flags[HEADS],
+        const float alpha,
+        const float beta,
+        const device half *residual,
+        device half *result_y[HEADS]
+    ) {
+        for (uint h = 0; h < HEADS; ++h) {
+            // Mask out inactive heads/columns
+            // Note: logical_col < N[h] check should be done here or passed in.
+            if (logical_col >= N[h]) continue;
+
+            float val = acc[h];
+            
+            // Full warp reduction
+            val += simd_shuffle_xor(val, 16u);
+            val += simd_shuffle_xor(val, 8u);
+            val += simd_shuffle_xor(val, 4u);
+            val += simd_shuffle_xor(val, 2u);
+            val += simd_shuffle_xor(val, 1u);
+            
+            if (lane_id == 0) {
+                float val_acc = val;
+                if (has_bias_flags[h] && bias[h]) {
+                    val_acc += (float)bias[h][logical_col];
+                }
+
+                // Standard Gemv Epilogue (Alpha/Beta/Residual)
+                // Note: Generic template used alpha/beta only for standard gemv. 
+                // fused/multi-head usually ignores alpha/beta or sets 1/0.
+                // We'll use the helper.
+                
+                // Limitation: gemv_epilogue_value helper takes `residual_ptr`.
+                // In multi-head, we usually don't support residual per head unless passed as array.
+                // The template passed `residual` as single ptr. 
+                // We'll assume residual applies to head 0 or we pass nullptr for >1 heads (as handled in original code).
+                
+                const device half* res_ptr = (HEADS == 1) ? residual : (const device half*)nullptr;
+                
+                const float val_computed = gemv_epilogue_value<false>(
+                    val_acc,
+                    (const device half*)nullptr, // Bias already added manually above
+                    res_ptr,
+                    alpha,
+                    beta,
+                    logical_col
+                );
+                result_y[h][logical_col] = (half)val_computed;
+            }
+        }
+    }
+};
+
+// =================================================================================================
+// Generic SIMD GEMV Template
+// =================================================================================================
+
+template <typename Policy, uint HEADS, uint COLS_PER_TG, bool HasBias, typename EpiloguePolicy = DefaultEpilogue>
 void run_simd_gemv_template(
     typename Policy::Params params,
     const device half *vector_x,
@@ -40,7 +109,7 @@ void run_simd_gemv_template(
     const uint warp_id = lid.x / 32u;
     
     // Each Warp processes 1 Logical Output Column.
-    const uint logical_col = gid.x * 4u + warp_id;
+    const uint logical_col = gid.x * COLS_PER_TG + warp_id;
     
     bool head_active[HEADS];
     for (uint h = 0; h < HEADS; ++h) {
@@ -58,14 +127,12 @@ void run_simd_gemv_template(
     uint k_base = 0;
 
     // 1. Fast Path Loop (No Bounds Checks)
-    // Runs while we have full chunks available
     while (k_base + Policy::FAST_K_CHUNK_SIZE <= K) {
-        
         policy.load_x_fast(vector_x, k_base);
 
         for (uint h = 0; h < HEADS; ++h) {
             if (head_active[h]) {
-                acc[h] += policy.compute_dot(h, true); // true = fast mode
+                acc[h] += policy.compute_dot(h, true); 
             }
         }
         
@@ -73,19 +140,13 @@ void run_simd_gemv_template(
         k_base += Policy::FAST_K_CHUNK_SIZE;
     }
 
-    // 2. Safe/Tail Loop (With Bounds Checks)
-    // Runs the remaining elements using the safe stride
-    while (k_base < K) { // Iterate until done, policy handles detailed stepping/masking if needed
-         
-        // Note: The safe chunk size might be smaller or same. 
-        // Here we assume the policy might handle partial tiles or we just step by SAFE_K_CHUNK_SIZE
-        // and let load_x_safe handle boundaries.
-        
+    // 2. Safe/Tail Loop
+    while (k_base < K) { 
         policy.load_x_safe(vector_x, k_base, K);
         
         for (uint h = 0; h < HEADS; ++h) {
             if (head_active[h]) {
-                acc[h] += policy.compute_dot(h, false); // false = safe mode
+                acc[h] += policy.compute_dot(h, false); 
             }
         }
         
@@ -93,48 +154,10 @@ void run_simd_gemv_template(
         k_base += Policy::SAFE_K_CHUNK_SIZE;
     }
 
-    // 3. Final Reduction & Epilogue
-    for (uint h = 0; h < HEADS; ++h) {
-        if (!head_active[h]) continue;
-        
-        float val = acc[h];
-        
-        // Full warp reduction
-        val += simd_shuffle_xor(val, 16u);
-        val += simd_shuffle_xor(val, 8u);
-        val += simd_shuffle_xor(val, 4u);
-        val += simd_shuffle_xor(val, 2u);
-        val += simd_shuffle_xor(val, 1u);
-        
-        if (lane_id == 0) {
-            float val_acc = val;
-            if (has_bias_flags[h] && bias[h]) {
-                val_acc += (float)bias[h][logical_col];
-            }
-
-            if (HEADS == 1) {
-                const float val_computed = gemv_epilogue_value<false>(
-                    val_acc,
-                    (const device half*)nullptr,
-                    residual,
-                    alpha,
-                    beta,
-                    logical_col
-                );
-                result_y[h][logical_col] = (half)val_computed;
-            } else {
-                const float val_computed = gemv_epilogue_value<false>(
-                    val_acc,
-                    (const device half*)nullptr,
-                    (const device half*)nullptr,
-                    1.0f,
-                    0.0f,
-                    logical_col
-                );
-                result_y[h][logical_col] = (half)val_computed;
-            }
-        }
-    }
+    // 3. Final Reduction & Epilogue delegated to Policy
+    EpiloguePolicy::template apply<HEADS>(
+        acc, lane_id, logical_col, N, bias, has_bias_flags, alpha, beta, residual, result_y
+    );
 }
 
 // =================================================================================================
@@ -402,7 +425,7 @@ void run_simd_f16_gemv(
     uint3 lid
 ) {
     SimdGemvPolicyF16::Params p = { matrix };
-    run_simd_gemv_template<SimdGemvPolicyF16, HEADS, HasBias>(
+    run_simd_gemv_template<SimdGemvPolicyF16, HEADS, 4, HasBias>(
         p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
     );
 }
@@ -435,86 +458,9 @@ void run_simd_q8_gemv(
         weights_per_block 
     };
     
-    run_simd_gemv_template<SimdGemvPolicyQ8, HEADS, HasBias>(
+    run_simd_gemv_template<SimdGemvPolicyQ8, HEADS, 4, HasBias>(
         p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
     );
 }
 
-// Specialization for Policy Loop:
-// We need to resolve the `init` needing `N`.
-// I will update the Template to call `policy.init(..., N)`.
-// And update F16 to ignore it.
 
-// Re-writing template segment specifically for this file content...
-
-template <typename Policy, uint HEADS, bool HasBias>
-void run_simd_gemv_template_final( // Renamed to avoid confusion in thought process, will use real name in file
-    typename Policy::Params params,
-    const device half *vector_x,
-    device half *result_y[HEADS],
-    const uint N[HEADS],
-    const uint K,
-    const device half *bias[HEADS],
-    const uint has_bias_flags[HEADS],
-    const float alpha,
-    const float beta,
-    const device half *residual,
-    uint3 gid,
-    uint3 lid
-) {
-    const uint lane_id = lid.x & 31u;
-    const uint warp_id = lid.x / 32u;
-    const uint logical_col = gid.x * 4u + warp_id;
-    
-    bool head_active[HEADS];
-    for (uint h = 0; h < HEADS; ++h) head_active[h] = (logical_col < N[h]);
-
-    Policy policy;
-    // Pass N to init
-    policy.init(params, gid, lid, logical_col, K, N);
-
-    float acc[HEADS];
-    for (uint h = 0; h < HEADS; ++h) acc[h] = 0.0f;
-
-    uint k_base = 0;
-    while (k_base + Policy::FAST_K_CHUNK_SIZE <= K) {
-        policy.load_x_fast(vector_x, k_base);
-        for (uint h = 0; h < HEADS; ++h) {
-            if (head_active[h]) acc[h] += policy.compute_dot(h, true);
-        }
-        policy.advance_pointers(Policy::FAST_K_CHUNK_SIZE);
-        k_base += Policy::FAST_K_CHUNK_SIZE;
-    }
-
-    while (k_base < K) {
-        policy.load_x_safe(vector_x, k_base, K);
-        for (uint h = 0; h < HEADS; ++h) {
-            if (head_active[h]) acc[h] += policy.compute_dot(h, false);
-        }
-        policy.advance_pointers(Policy::SAFE_K_CHUNK_SIZE);
-        k_base += Policy::SAFE_K_CHUNK_SIZE;
-    }
-
-    for (uint h = 0; h < HEADS; ++h) {
-        if (!head_active[h]) continue;
-        float val = acc[h];
-        val += simd_shuffle_xor(val, 16u);
-        val += simd_shuffle_xor(val, 8u);
-        val += simd_shuffle_xor(val, 4u);
-        val += simd_shuffle_xor(val, 2u);
-        val += simd_shuffle_xor(val, 1u);
-        
-        if (lane_id == 0) {
-            float val_acc = val;
-            if (has_bias_flags[h] && bias[h]) val_acc += (float)bias[h][logical_col];
-
-            if (HEADS == 1) {
-                const float val_computed = gemv_epilogue_value<false>(val_acc, (const device half*)nullptr, residual, alpha, beta, logical_col);
-                result_y[h][logical_col] = (half)val_computed;
-            } else {
-                const float val_computed = gemv_epilogue_value<false>(val_acc, (const device half*)nullptr, (const device half*)nullptr, 1.0f, 0.0f, logical_col);
-                result_y[h][logical_col] = (half)val_computed;
-            }
-        }
-    }
-}

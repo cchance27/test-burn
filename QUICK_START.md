@@ -18,6 +18,40 @@ This guide is designed to get a new developer up to speed on the Metallic kernel
 | **Dispatch (Metal)** | `crates/metallic/src/kernels/matmul_gemv/kernel/launcher.metal` | Switch-statement that routes `LoaderMode` to specific kernels. |
 | **Benchmarks** | `tools/run_throughput.sh` | Main script to measure tok/s. |
 
+## Audited and Analyzed benchmarks 
+
+
+## 🛠️ Kernel Build System
+
+Metallic uses a custom build system to manage Metal kernels, enabling both modular development (includes) and optimized release packaging (precompiled binaries).
+
+### 1. The `.sources` Manifest
+Instead of writing monolithic Metal files, we use `kernel.sources` manifests to stitch together reusable components.
+- **File:** `crates/metallic/src/kernels/.../kernel.sources`
+- **Format:** A simple list of relative paths to other `.metal` files (e.g., `../common/helpers.metal`).
+- **Build Process:** `build.rs` reads this manifest and generates a temporary `{kernel_name}_includes.metal` file containing `#include` directives for every listed file. This allows multiple kernels to share common logic without code duplication.
+
+### 2. `build.rs` Logic
+The `build.rs` script performs the following steps:
+1.  **Discovery:** Recursively scans `crates/metallic/src/kernels` for `kernel.metal` (standalone) or `kernel.sources` (composite).
+2.  **Generation:** For `.sources`, it generates the include file.
+3.  **Compilation:** Invokes `xcrun metal` to compile `.metal` to `.air`, and then `xcrun metallib` to link `.air` to `.metallib`.
+4.  **Output:** All compiled binaries are placed in the `OUT_DIR` environment directory.
+
+### 3. The `kernel_lib!` Macro
+To support both rapid development and optimized releases, we use the `kernel_lib!` macro (defined in `crates/metallic/src/macros.rs`) to load kernels:
+
+| Mode | Feature Flag | Behavior |
+| :--- | :--- | :--- |
+| **Development** | `src_kernels` (or debug) | Loads the kernel source code as a string using `include_str!`. Compiles at runtime (JIT). Allows hot-reloading/fast iteration. |
+| **Release** | `built_kernels` (default) | Loads the precompiled `.metallib` binary using `include_bytes!`. Fast startup, no runtime compilation overhead. |
+
+**Example Usage in `mod.rs`:**
+```rust
+KernelLibrary::MatmulGemv => kernel_lib!("matmul_gemv"),
+```
+This automatically switches between source and binary loading based on your Cargo features.
+
 ## 🧠 Core Concepts & Learnings
 
 ### 1. The "SIMD-Parallel" Architecture
@@ -38,7 +72,7 @@ We moved away from "Thread-per-Column" (Legislacy) to **"Warp-per-Column"** (Mod
 ```
 *Look for `TPS (Total)` and `TPS (Decode)` output.*
 
-## 🔮 Next Steps (Roadmap to 105/160)
+## 🔮 Ideas for Next Steps (Roadmap to 105/160)
 
 The current kernels are efficient, The remaining gap is likely **Overhead** and **Lack of Fusion**.
 
@@ -56,7 +90,12 @@ We currently launch ~100 kernels sequentially per token.
 Experiment with `THREADGROUP_SIZE` (currently 128) in `base.rs`. Try 256 or 512 to see if it hides latency better.
 
 ## Testing Performance
-Always request that someone with a M3 Pro performs the run_throughput.sh script, and processes the results with the analyze_tmpfiles.sh to aggregate the txt files.
+Always request that someone with a M3 Pro performs the run_throughput.sh and run_throughput_w_prof.sh scripts, and processes the results with the analyze_tmpfiles.sh to aggregate the txt files. For your review with full performance mode and the prof_ files that include the kernel materialization (much slower but allows us to see individual step/kernel comparisons and % of time spent in each step/kernel)
+
+metallic-throughput-fp16.txt = FP16 throughput
+metallic-throughput-q8.txt = Q8 throughput
+prof-metallic-throughput-fp16.txt = FP16 throughput with kernel materialization
+prof-metallic-throughput-q8.txt = Q8 throughput with kernel materialization
 
 ---
 *Reference `PERFORMANCE_REPORT.md` for detailed analysis.*
