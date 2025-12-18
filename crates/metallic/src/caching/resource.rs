@@ -4,10 +4,8 @@ use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplicati
 
 use crate::{
     caching::{CacheMetrics, CacheRegistry, CacheableKernel}, error::MetalError, kernels::{
-        kv_cache_write::cache::{CacheableMpsGraphKvWrite, KvWriteGraphKernel, MpsGraphKvWriteKey}, matmul_mps::cache::{MpsGemmKernel, MpsGemmKey, MpsMatrixDescriptorKernel, MpsMatrixDescriptorKey}, scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKernel, SdpaKey}, sdpa_mps_graph::cache::{
-            CacheableMpsGraphSdpa, CacheableMpsGraphSdpaMask, MaskSizeBucket, MpsGraphSdpaKernel, MpsGraphSdpaKey, MpsGraphSdpaMaskKernel, MpsGraphSdpaMaskKey
-        }, softmax_mps::cache::{MpsSoftMaxKey, SeqKBucket, SoftmaxMpsKernel}
-    }, mps_graph::cache::{CacheableMpsGraphFused, FusedOperationType, MpsGraphFusedKernel, MpsGraphFusedKey}, tensor::dtypes::Dtype
+        matmul_mps::cache::{MpsGemmKernel, MpsGemmKey, MpsMatrixDescriptorKernel, MpsMatrixDescriptorKey}, scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKernel, SdpaKey}, softmax_mps::cache::{MpsSoftMaxKey, SeqKBucket, SoftmaxMpsKernel}
+    }, tensor::dtypes::Dtype
 };
 
 /// Unified resource cache facade that wraps the generic kernel registry.
@@ -138,121 +136,6 @@ impl ResourceCache {
             .clone()
     }
 
-    /// Retrieve or create a cached MPSGraph SDPA executable.
-    #[inline]
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_or_create_mpsgraph_sdpa(
-        &mut self,
-        batch: usize,
-        _seq_q: usize,
-        _seq_k: usize,
-        dim: usize,
-        causal: bool,
-        dtype: Dtype,
-        accumulator_dtype: Option<Dtype>,
-    ) -> Result<&mut CacheableMpsGraphSdpa, MetalError> {
-        let key = MpsGraphSdpaKey {
-            batch,
-            dim,
-            causal,
-            dtype,
-            accumulator_dtype,
-        };
-        self.get_or_create_entry::<MpsGraphSdpaKernel>(&key, None)
-    }
-
-    /// Retrieve or create the cached SDPA mask tensor arena entry.
-    #[inline]
-    pub fn get_or_create_mpsgraph_sdpa_mask(
-        &mut self,
-        seq_q: usize,
-        seq_k: usize,
-        dim: usize,
-        causal: bool,
-        dtype: Dtype,
-    ) -> Result<&mut CacheableMpsGraphSdpaMask, MetalError> {
-        let key = MpsGraphSdpaMaskKey {
-            causal,
-            dtype,
-            head_dim: dim,
-            seq_q_bucket: MaskSizeBucket::from(seq_q.max(seq_k)),
-            seq_k_bucket: MaskSizeBucket::from(seq_k),
-        };
-        self.get_or_create_entry::<MpsGraphSdpaMaskKernel>(&key, None)
-    }
-
-    /// Retrieve both SDPA executable and mask in a single call to minimize borrow churn.
-    #[inline]
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_or_create_mpsgraph_sdpa_and_mask(
-        &mut self,
-        batch: usize,
-        seq_q: usize,
-        seq_k: usize,
-        dim: usize,
-        causal: bool,
-        dtype: Dtype,
-        accumulator_dtype: Option<Dtype>,
-    ) -> Result<(CacheableMpsGraphSdpa, Option<CacheableMpsGraphSdpaMask>), MetalError> {
-        let sdpa_entry = self.get_or_create_mpsgraph_sdpa(batch, seq_q, seq_k, dim, causal, dtype, accumulator_dtype)?;
-        let sdpa_clone = sdpa_entry.clone();
-
-        let mask_clone = if causal {
-            Some(self.get_or_create_mpsgraph_sdpa_mask(seq_q, seq_k, dim, causal, dtype)?.clone())
-        } else {
-            None
-        };
-
-        Ok((sdpa_clone, mask_clone))
-    }
-
-    /// Retrieve or create a cached fused MPSGraph executable.
-    #[inline]
-    #[allow(clippy::too_many_arguments)]
-    pub fn get_or_create_mpsgraph_fused(
-        &mut self,
-        batch: usize,
-        seq_q: usize,
-        seq_k: usize,
-        dim: usize,
-        output_dim: usize,
-        causal: bool,
-        operation_type: FusedOperationType,
-        dtype: Dtype,
-        accumulator_dtype: Option<Dtype>,
-    ) -> Result<&mut CacheableMpsGraphFused, MetalError> {
-        let key = MpsGraphFusedKey {
-            batch,
-            seq_q,
-            seq_k,
-            dim,
-            output_dim,
-            causal,
-            operation_type,
-            dtype,
-            accumulator_dtype,
-        };
-        self.get_or_create_entry::<MpsGraphFusedKernel>(&key, None)
-    }
-
-    /// Retrieve or create the cached MPSGraph KV write executable.
-    #[inline]
-    pub fn get_or_create_mpsgraph_kv_write(
-        &mut self,
-        heads: usize,
-        seq_bucket: usize,
-        head_dim: usize,
-        dtype: Dtype,
-    ) -> Result<&mut CacheableMpsGraphKvWrite, MetalError> {
-        let key = MpsGraphKvWriteKey {
-            heads,
-            seq_bucket,
-            head_dim,
-            dtype,
-        };
-        self.get_or_create_entry::<KvWriteGraphKernel>(&key, None)
-    }
-
     /// Snapshot metrics for the known cache categories.
     #[inline]
     pub fn get_stats(&self) -> CacheStats {
@@ -261,10 +144,6 @@ impl ResourceCache {
             descriptor: self.metrics::<MpsMatrixDescriptorKernel>(),
             softmax: self.metrics::<SoftmaxMpsKernel>(),
             sdpa: self.metrics::<SdpaKernel>(),
-            mpsgraph_sdpa: self.metrics::<MpsGraphSdpaKernel>(),
-            mpsgraph_mask: self.metrics::<MpsGraphSdpaMaskKernel>(),
-            mpsgraph_fused: self.metrics::<MpsGraphFusedKernel>(),
-            mpsgraph_kv_write: self.metrics::<KvWriteGraphKernel>(),
         }
     }
 
@@ -287,10 +166,6 @@ pub struct CacheStats {
     pub descriptor: CacheMetrics,
     pub softmax: CacheMetrics,
     pub sdpa: CacheMetrics,
-    pub mpsgraph_sdpa: CacheMetrics,
-    pub mpsgraph_mask: CacheMetrics,
-    pub mpsgraph_fused: CacheMetrics,
-    pub mpsgraph_kv_write: CacheMetrics,
 }
 
 #[cfg(test)]
@@ -359,9 +234,5 @@ mod tests {
         assert_eq!(stats.descriptor.size, 0);
         assert_eq!(stats.softmax.size, 0);
         assert_eq!(stats.sdpa.size, 0);
-        assert_eq!(stats.mpsgraph_sdpa.size, 0);
-        assert_eq!(stats.mpsgraph_mask.size, 0);
-        assert_eq!(stats.mpsgraph_fused.size, 0);
-        assert_eq!(stats.mpsgraph_kv_write.size, 0);
     }
 }

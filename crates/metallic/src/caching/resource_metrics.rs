@@ -6,9 +6,6 @@ pub struct CacheMetricsSnapshot {
     pub descriptor: CacheMetrics,
     pub softmax: CacheMetrics,
     pub sdpa: CacheMetrics,
-    pub mpsgraph_sdpa: CacheMetrics,
-    pub mpsgraph_mask: CacheMetrics,
-    pub mpsgraph_fused: CacheMetrics,
 }
 
 impl From<&ResourceCache> for CacheMetricsSnapshot {
@@ -19,9 +16,6 @@ impl From<&ResourceCache> for CacheMetricsSnapshot {
             descriptor: stats.descriptor,
             softmax: stats.softmax,
             sdpa: stats.sdpa,
-            mpsgraph_sdpa: stats.mpsgraph_sdpa,
-            mpsgraph_mask: stats.mpsgraph_mask,
-            mpsgraph_fused: stats.mpsgraph_fused,
         }
     }
 }

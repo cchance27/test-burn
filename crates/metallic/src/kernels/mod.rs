@@ -36,7 +36,7 @@ pub mod matmul_gemv;
 pub mod matmul_gemv_qkv_fused;
 pub mod matmul_mlx;
 pub mod matmul_mps;
-pub mod sdpa_mps_graph;
+
 pub mod softmax_block;
 pub mod softmax_kernel;
 pub mod softmax_mps;
@@ -44,7 +44,7 @@ pub mod softmax_vec;
 pub use matmul_dispatcher::dispatch_op::MatmulDispatchOp;
 pub mod permute;
 pub mod repeat_kv_heads;
-pub mod repeat_kv_heads_graph;
+
 pub mod rmsnorm;
 pub mod rope;
 pub mod scaled_dot_product_attention;
@@ -121,6 +121,7 @@ impl KernelLibrary {
                 "matmul_gemv/kernel/helpers.metal",
                 "matmul_gemv/kernel/smalln_common.metal",
                 "matmul_gemv/kernel/q8_block_common.metal",
+                "matmul_gemv/kernel/gemv_simd_impl.metal",
                 "matmul_gemv/kernel/dense.metal",
                 "matmul_gemv/kernel/quant.metal",
                 "matmul_gemv/kernel/launcher.metal"

@@ -53,7 +53,12 @@ tui-markdown = "0.3.6"
 anyhow = "1.0.100"
 arboard = "3.4"
 chrono = { version = "0.4", features = ["clock", "serde"] }
-half = { version = "2.7.0", features = ["zerocopy", "bytemuck", "num-traits", "use-intrinsics"] }
+half = { version = "2.7.0", features = [
+    "zerocopy",
+    "bytemuck",
+    "num-traits",
+    "use-intrinsics",
+] }
 num-traits = "0.2.19"
 libc = { version = "0.2.177", optional = false }
 mach2 = "0.5"
@@ -126,8 +131,4 @@ harness = false
 
 [[bench]]
 name = "gemm_tiled_benchmark"
-harness = false
-
-[[bench]]
-name = "sdpa_mpsgraph_vs_current_benchmark"
 harness = false

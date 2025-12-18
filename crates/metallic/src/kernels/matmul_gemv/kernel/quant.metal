@@ -25,171 +25,6 @@ inline float simd_sum_float(float val) {
 //   So HEADS=3 means "Compute 3 Dot Products (Q, K, V) for logic-col X using 3 different Weight matrices".
 //   This fits perfectly.
 // 
-template <uint HEADS, bool HasBias>
-void run_simd_q8_gemv(
-    const device uchar *data[HEADS],
-    const device uchar *scale_bytes[HEADS],
-    const device half *vector_x,
-    device half *result_y[HEADS],
-    const uint N[HEADS],
-    const uint K,
-    const uint weights_per_block,
-    const device half *bias[HEADS],
-    const uint has_bias_flags[HEADS],
-    const float alpha,
-    const float beta,
-    const device half *residual,
-    uint3 gid,
-    uint3 lid
-) {
-    const uint lane_id = lid.x & 31u; // 0..31
-    const uint warp_id = lid.x / 32u; // 0..3
-    
-    // Each Warp processes 1 Logical Output Column.
-    const uint logical_col = gid.x * 4u + warp_id;
-    
-    bool head_active[HEADS];
-    for (uint h = 0; h < HEADS; ++h) {
-        head_active[h] = (logical_col < N[h]);
-    }
-    
-    // Accumulators for partial sums
-    float acc[HEADS];
-    for (uint h = 0; h < HEADS; ++h) acc[h] = 0.0f;
-
-    // Per-head pointers and strides
-    const device uchar *ptr_q[HEADS];
-    const device uchar *ptr_s[HEADS];
-    uint stride_q[HEADS];
-    uint stride_s[HEADS];
-
-    for (uint h = 0; h < HEADS; ++h) {
-        if (head_active[h]) {
-            // Address Calculation:
-            // Column-Major layout conceptualized as [N columns x K rows]
-            // Stored as Block-Major. [Block 0 of Col 0], [Block 0 of Col 1] ...
-            ptr_q[h] = data[h] + logical_col * 32u;
-            ptr_s[h] = scale_bytes[h] + logical_col * 2u;
-            stride_q[h] = N[h] * 32u;
-            stride_s[h] = N[h] * 2u;
-        }
-    }
-
-    // Warp Parallelism:
-    // We process 8 Blocks (256 weights) per loop iteration (2x unroll).
-    // Thread T (0..31) handles 4 elements of Block (T/8) and of Block (T/8 + 4).
-    const uint block_in_group = lane_id / 8u; // 0..3
-    const uint sub_lane = lane_id % 8u;       // 0..7
-    const uint sub_offset = sub_lane * 4u;    // 0,4,8,12,16,20,24,28
-
-    // Iterate over K in chunks of 256 (8 blocks)
-    // Bounds check handled by checking limit
-    
-    const uint total_blocks = (K + 31u) / 32u;
-
-    for (uint k_base = 0; k_base < K; k_base += 256u) {
-        
-        // --- Load X (Shared across all heads) ---
-        // Load two vectors: xv0 (at k_base) and xv1 (at k_base + 128)
-        uint k_idx_0 = k_base + block_in_group * 32u + sub_offset;
-        uint k_idx_1 = k_idx_0 + 128u;
-        
-        uint block_idx_0 = (k_base / 32u) + block_in_group;
-        uint block_idx_1 = block_idx_0 + 4u;
-
-        float4 xv0 = float4(0.0f);
-        float4 xv1 = float4(0.0f);
-
-        // Precise bounds check for X (half4 load)
-        if (k_idx_0 + 4 <= K) {
-             xv0 = float4(*(const device half4*)(vector_x + k_idx_0));
-        }
-        if (k_idx_1 + 4 <= K) {
-             xv1 = float4(*(const device half4*)(vector_x + k_idx_1));
-        }
-
-        for (uint h = 0; h < HEADS; ++h) {
-            if (!head_active[h]) continue;
-
-            float partial = 0.0f;
-
-            // --- Part 0 (Blocks 0..3) ---
-            if (block_idx_0 < total_blocks) {
-                const device uchar *s_ptr_0 = ptr_s[h] + (block_in_group * stride_s[h]);
-                const device uchar *q_ptr_0 = ptr_q[h] + (block_in_group * stride_q[h]);
-                
-                ushort s_bits_0 = *(const device ushort*)s_ptr_0;
-                float scale_0 = (float)as_type<half>(s_bits_0);
-                uchar4 q_bytes_0 = *(const device uchar4*)(q_ptr_0 + sub_offset);
-                float4 w_vec_0 = float4(char4(q_bytes_0));
-                
-                partial += dot(xv0, w_vec_0) * scale_0;
-            }
-
-            // --- Part 1 (Blocks 4..7) ---
-            if (block_idx_1 < total_blocks) {
-                // Stride is 4 blocks away (128 elements)
-                // Use base pointers passed in if safer, but offset logic is robust.
-                // Re-calculating to be sure we use consistent striding:
-                const device uchar *s_ptr_1 = ptr_s[h] + (block_in_group * stride_s[h]) + (4u * stride_s[h]);
-                const device uchar *q_ptr_1 = ptr_q[h] + (block_in_group * stride_q[h]) + (4u * stride_q[h]);
-
-                ushort s_bits_1 = *(const device ushort*)s_ptr_1;
-                float scale_1 = (float)as_type<half>(s_bits_1);
-                uchar4 q_bytes_1 = *(const device uchar4*)(q_ptr_1 + sub_offset);
-                float4 w_vec_1 = float4(char4(q_bytes_1));
-
-                partial += dot(xv1, w_vec_1) * scale_1;
-            }
-            
-            // --- SIMD Shuffle Reduction ---
-            partial += simd_shuffle_xor(partial, 4u);
-            partial += simd_shuffle_xor(partial, 2u);
-            partial += simd_shuffle_xor(partial, 1u);
-            
-            if (sub_lane == 0) {
-                acc[h] += partial;
-            }
-        }
-        
-        // Advance Base Pointers by 8 Blocks (256 K)
-        for (uint h = 0; h < HEADS; ++h) {
-            if (head_active[h]) {
-                const uint step_q = stride_q[h] * 8u;
-                const uint step_s = stride_s[h] * 8u;
-                ptr_q[h] += step_q;
-                ptr_s[h] += step_s;
-            }
-        }
-    }
-
-    // Final Reduction & Write
-    for (uint h = 0; h < HEADS; ++h) {
-        if (!head_active[h]) continue;
-        
-        float val = acc[h];
-        // Reduce the partial sums from threads 0, 8, 16, 24
-        float total = simd_sum(val);
-        
-        if (lane_id == 0) {
-            if (has_bias_flags[h] && bias[h]) {
-                total += (float)bias[h][logical_col];
-            }
-            if (HEADS == 1) {
-                float final = total;
-                if (residual) {
-                    final = alpha * final + beta * (float)residual[logical_col];
-                } else {
-                    final = alpha * final; 
-                }
-                result_y[h][logical_col] = (half)final;
-            } else {
-                result_y[h][logical_col] = (half)total;
-            }
-        }
-    }
-}
-
 
 template <bool HasBias, bool Debug>
 void run_gemv_q8_canonical(
@@ -326,7 +161,6 @@ struct GemmQ8NtParams {
     uint has_bias;
 };
 
-// ... [Rest of the file can be kept or trimmed. I will append the rest of the original file content here]
 // Actually, `gemm_q8_nt_f16`, `gemm_q8_canonical_large_n_f16` etc use different logic.
 // I will keep them for safety as `gemv` is the target.
 
@@ -339,11 +173,6 @@ struct GemmQ8NtParams {
     const device half *bias [[buffer(5)]],
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 tid [[thread_position_in_threadgroup]]) {
-    // ... [Original content of gemm_q8_nt_f16 logic]
-    // To ensure I don't break the file, I need to reproduce the rest of the file exactly 
-    // OR just use `replace_file_content` if it was small enough. 
-    // But I'm doing a full overwrite. So I will paste the original `gemm_q8_nt_f16` and subsequent kernels.
-    // Copying lines 240-721 from the view_file output in Step 100.
     
     // START COPY FROM ORIGINAL
     const uint m = params->m;
@@ -550,12 +379,6 @@ inline void gemm_q8_canonical_large_n_impl(
     threadgroup float a_tile[2][16u * Q8_0_WEIGHTS_PER_BLOCK];
     gemm_q8_canonical_large_n_impl<16u>(data, scale, a, y, p, b, gid, tid3, a_tile);
 }
-
-// Keeping the rest as is...
-// Actually I am replacing the file, so I need to preserve `gemv_q8_rows_f16` too.
-// Copy/Paste gemv_q8_rows_f16 logic from original...
-// It uses `q8_for_each_block_k`...
-// I will keep it mostly identical but condense due to space.
 
 [[kernel]] void gemv_q8_rows_f16(
     const device uchar *matrix_data [[buffer(0)]],

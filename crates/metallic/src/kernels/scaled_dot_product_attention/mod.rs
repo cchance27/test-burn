@@ -2,9 +2,9 @@ use metallic_instrumentation::{MetricEvent, record_metric_async};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
-use super::{DefaultKernelInvocable, KernelBackendKind, KernelFunction};
+use super::{DefaultKernelInvocable, KernelFunction};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::MatmulAlphaBeta, kernels::{scaled_dot_product_attention::cache::SdpaKey, sdpa_mps_graph::SdpaMpsGraphOp, softmax_mps::cache::SeqKBucket}, tensor::TensorType
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::MatmulAlphaBeta, kernels::{scaled_dot_product_attention::cache::SdpaKey, softmax_mps::cache::SeqKBucket}, tensor::TensorType
 };
 
 #[cfg(test)]
@@ -375,23 +375,13 @@ impl DefaultKernelInvocable for ScaledDotProductAttentionDispatchOp {
         _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let selection = ctx.backend_registry().select_sdpa(KernelBackendKind::Legacy);
-
-        let profiler_backend = match selection.backend {
-            KernelBackendKind::Legacy => "Metal",
-            KernelBackendKind::Graph => "MPSGraph",
-        };
-        ctx.override_pending_gpu_backend(profiler_backend);
-
-        let result = match selection.backend {
-            KernelBackendKind::Legacy => ScaledDotProductAttentionOptimizedOp::new(ctx, args, None, cache),
-            KernelBackendKind::Graph => SdpaMpsGraphOp::new(ctx, args, None, cache),
-        }?;
+        // Legacy backend is now the only backend
+        let result = ScaledDotProductAttentionOptimizedOp::new(ctx, args, None, cache)?;
 
         record_metric_async!(MetricEvent::KernelBackendSelected {
             op_name: "sdpa".to_string(),
-            backend: selection.backend.as_str().to_string(),
-            reason: selection.reason.as_str().to_string(),
+            backend: "Metal".to_string(),
+            reason: "OnlyAvailable".to_string(),
         });
 
         Ok(result)

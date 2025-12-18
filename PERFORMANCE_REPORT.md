@@ -1,43 +1,28 @@
 # Inference Framework Performance Evaluation
 
-## Executive Summary
+## Performance History (Latest First)
 
-**Current Status (M3 Pro):**
-- **FP16 Decode:** **~70.5 tok/s** (Improved from ~60 tok/s baseline).
-    - *Competitor Target:* 105 tok/s.
-    - *Gap:* ~33%.
-- **Q8 Decode:** **~84.0 tok/s** (Improved from ~67 tok/s baseline).
-    - *Competitor Target:* 160 tok/s.
-    - *Gap:* ~47%.
+### Refactored Helpers & Pointer Optimizations
+* **Change Summary**:
+    * Refactored `dense.metal` and `quant.metal` to use shared `gemv_simd_impl.metal` template.
+    * **Optimization**: Pre-calculated thread offsets in `init` to reduce ALU ops in the inner loop (SimdGemvPolicyF16 and SimdGemvPolicyQ8).
+    * **Optimization**: Enabled "Fast Path" loop in template to remove bounds checking for bulk processing (Hot path optimization).
+* **Results (M3 Pro)**:
+    * **FP16 Decode**: **69.14 tok/s**
+    * **Q8 Decode**: **92.76 tok/s** (+8.7 tok/s)
 
-**Conclusion:**
-We have successfully moved from legacy "Thread-per-Column" kernels to optimized "SIMD-Parallel" kernels (Vectorized, Unrolled, Warp-per-Column). This yielded solid gains (+17% for FP16, +25% for Q8).
+### Phase 1 Completion (SIMD Kernels)
+* **Change Summary**:
+    * Replaced legacy scalar kernels with Vectorized/Unrolled SIMD kernels.
+    * Implemented `run_simd_f16_gemv` and `run_simd_q8_gemv`.
+* **Results (M3 Pro)**:
+    * **FP16 Decode**: ~70.5 tok/s
+    * **Q8 Decode**: ~84.0 tok/s
 
-However, we are still significantly slower than state-of-the-art implementations on the same hardware. This indicates that while our **compute/bandwidth efficiency** is improving, we are hitting secondary bottlenecks, likely:
-1.  **Kernel Launch Overhead**: Dispatching thousands of small kernels (Matmul, RMSNorm, RoPE, etc.) serially from CPU.
-2.  **Lack of Fusion**: Competitors likely fuse `RMSNorm + Matmul` or `Matmul + Residual + Activation` to reduce memory round-trips.
-3.  **Occupancy Limits**: Our 128-thread/group setup might not fully hide latency compared to larger threadgroups or different grid strategies.
-
----
-
-## Detailed Analysis
-
-### 1. Improvements Delivered (Phase 1 & 2)
-
-#### FP16 Optimization (`gemv_f16_dense`)
-- **Strategy**: Replaced legacy scalar kernel with `run_simd_f16_gemv`.
-- **Techniques**:
-    - **Vectorization**: 128-bit loads (`float4`) fetching 8 `half` values per op.
-    - **Unrolling**: 2x Unroll (Stride 512) to hide global memory latency.
-    - **Reduction Hoisting**: Moved `simd_shuffle` out of the inner loop (huge instruction saving).
-- **Result**: **70.53 tok/s**.
-
-#### Q8 Optimization (`gemv_q8_canonical`)
-- **Strategy**: Replaced legacy kernel with `run_simd_q8_gemv`.
-- **Techniques**:
-    - **Block-Parallelism**: Processing Q8 blocks (32 weights) utilizing `uchar4` and `dot` products.
-    - **Unrolling**: 4x Unroll for maximum throughput.
-- **Result**: **84.02 tok/s**.
+### Baseline
+* **Results (M3 Pro)**:
+    * **FP16 Decode**: ~60.0 tok/s
+    * **Q8 Decode**: ~67.0 tok/s
 
 ---
 
@@ -65,13 +50,12 @@ To close the remaining gap, we must move beyond single-kernel optimization and l
 **Target**: Auto-tune `THREADGROUP_SIZE` and `COLS_PER_THREAD`.
 
 ### 4. Advanced Q8 Kernels
-**Theory**: Q8 at 84 tok/s vs 160 tok/s implies we are processing at half the potential speed.
+**Theory**: Q8 at 92 tok/s vs 160 tok/s implies we are processing at ~60% potential speed.
 - Competitors might use `M=32` or `M=64` tile processing even for `M=1` decoding (fetching more batches or speculative decoding).
 - Or they use specific `simd_permute` tricks to utilize the M3's specific ALU pipelines better.
 **Target**: Deep dive into M3 ISA optimization / Assembly analysis.
 
 ## Next Steps
 
-1.  **Profiling**: Use "Metal System Trace" (Instruments) to measure exact "Gap" time between kernel executions (CPU Overhead).
-2.  **Experiment**: Implement a `FusedRMSNormGemv` kernel as a proof-of-concept.
-3.  **Experiment**: Investigate `MPSGraph` for the Attention mechanism (SDPA).
+1.  **Phase 2**: Implement `gemv_fused.sources` to formalize kernel composition and begin Fusion work.
+2.  **Profiling**: Measure CPU dispatch overhead.

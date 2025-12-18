@@ -22,8 +22,6 @@ pub mod softmax_utils;
 pub mod tensor;
 pub mod tokenizer;
 
-pub mod mps_graph;
-
 pub mod macros;
 
 pub mod kernels;
