@@ -22,5 +22,6 @@ mod q8_parity_qwen25;
 mod q8_proxy_smoke;
 mod q8_qkv_fused;
 mod resource_cache_persistence_test;
+mod rmsnorm_gemv_fused;
 mod softmax_kernel_consistency_test;
 mod tensor_test;

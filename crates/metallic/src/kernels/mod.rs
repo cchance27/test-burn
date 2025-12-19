@@ -124,6 +124,7 @@ impl KernelLibrary {
                 "matmul_gemv/kernel/gemv_simd_impl.metal",
                 "matmul_gemv/kernel/dense.metal",
                 "matmul_gemv/kernel/quant.metal",
+                "matmul_gemv/kernel/gemv_fused.metal",
                 "matmul_gemv/kernel/launcher.metal"
             ),
             KernelLibrary::MatmulGemmTiled => kernel_lib!("matmul_gemm_tiled"),
@@ -166,6 +167,12 @@ pub enum KernelFunction {
     RandomUniform,
     MatmulGemv,
     MatmulGemvQ8,
+    MatmulGemvCols2,
+    MatmulGemvCols8,
+    MatmulGemvQ8Cols2,
+    MatmulGemvQ8Cols8,
+    MatmulGemvRmsnorm,
+    MatmulGemvQ8Rmsnorm,
     MatmulGemvSmallN1,
     MatmulGemvSmallN2,
     MatmulGemvSmallN4,
@@ -173,8 +180,10 @@ pub enum KernelFunction {
     MatmulGemvSmallN16,
     MatmulGemvSmallM,
     MatmulGemvQkvFused,
+    MatmulGemvQkvFusedRmsnorm,
     MatmulGemvQ2Fused,
     MatmulGemvQ8SwiGlu,
+    MatmulGemvQ8SwiGluRmsnorm,
     MatmulQ8Nt,
     MatmulQ8CanonicalLargeN,
     MatmulQ8CanonicalRows16LargeN,
@@ -213,14 +222,22 @@ impl KernelFunction {
             KernelFunction::Arange | KernelFunction::Ones | KernelFunction::RandomUniform => KernelLibrary::Tensors,
             KernelFunction::MatmulGemv => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQ8 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvCols2 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvCols8 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ8Cols2 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ8Cols8 => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvRmsnorm => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ8Rmsnorm => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN1 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN2 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN4 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN8 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallN16 => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQkvFused => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQkvFusedRmsnorm => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQ2Fused => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvQ8SwiGlu => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulGemvQ8SwiGluRmsnorm => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8Nt => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalLargeN => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalRows16LargeN => KernelLibrary::MatmulGemv,
@@ -292,15 +309,59 @@ impl KernelFunction {
             (KernelFunction::MatmulGemv, F32) => "gemv_f32",
             (KernelFunction::MatmulGemv, F16) => "gemv_f16",
             (KernelFunction::MatmulGemvQ8, F16) => "gemv_q8_entry",
+            (KernelFunction::MatmulGemvCols2, F16) => "gemv_f16_cols2",
+            (KernelFunction::MatmulGemvCols8, F16) => "gemv_f16_cols8",
+            (KernelFunction::MatmulGemvQ8Cols2, F16) => "gemv_q8_entry_cols2",
+            (KernelFunction::MatmulGemvQ8Cols8, F16) => "gemv_q8_entry_cols8",
+            (KernelFunction::MatmulGemvRmsnorm, F16) => "gemv_f16_rmsnorm",
+            (KernelFunction::MatmulGemvQ8Rmsnorm, F16) => "gemv_q8_rmsnorm_entry",
             (KernelFunction::MatmulGemvQ8, F32) => {
                 return Err(MetalError::UnsupportedDtype {
                     dtype: Dtype::F32,
                     operation: "MatmulGemvQ8",
                 });
             }
+            (KernelFunction::MatmulGemvCols2, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvCols2",
+                });
+            }
+            (KernelFunction::MatmulGemvCols8, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvCols8",
+                });
+            }
+            (KernelFunction::MatmulGemvQ8Cols2, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvQ8Cols2",
+                });
+            }
+            (KernelFunction::MatmulGemvQ8Cols8, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvQ8Cols8",
+                });
+            }
+            (KernelFunction::MatmulGemvRmsnorm, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvRmsnorm",
+                });
+            }
+            (KernelFunction::MatmulGemvQ8Rmsnorm, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemvQ8Rmsnorm",
+                });
+            }
             (KernelFunction::MatmulGemvQkvFused, F16) => "gemv_q8_fused3_f16",
+            (KernelFunction::MatmulGemvQkvFusedRmsnorm, F16) => "gemv_q8_fused3_rmsnorm_f16",
             (KernelFunction::MatmulGemvQ2Fused, F16) => "gemv_q8_fused2_f16",
             (KernelFunction::MatmulGemvQ8SwiGlu, F16) => "gemv_q8_swiglu_f16",
+            (KernelFunction::MatmulGemvQ8SwiGluRmsnorm, F16) => "gemv_q8_swiglu_rmsnorm_f16",
             (KernelFunction::MatmulQ8Nt, F16) => "gemm_q8_nt_f16",
             (KernelFunction::MatmulQ8CanonicalLargeN, F16) => "gemm_q8_canonical_large_n_f16",
             (KernelFunction::MatmulQ8CanonicalRows16LargeN, F16) => "gemm_q8_canonical_large_n_rows16_f16",

@@ -514,62 +514,81 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.set_pending_gpu_scope(format!("attn_residual_clone_block_{}_op", layer_idx));
                 let resid_attn = x.clone();
 
-                // RMSNorm before Attention
-                ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
-                cpu_accum += cpu_chk.elapsed();
-                let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
-                breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
-                cpu_chk = Instant::now();
-
                 let m = batch * seq; // m is always 1 for a single token
                 let kv_dim = block.kv_dim;
-                let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
+                let x_flat = x.reshape(vec![m, d_model])?;
 
-                cpu_accum += cpu_chk.elapsed();
                 let q_bias = block.attn_qkv_bias.slice(0..d_model)?;
                 let k_bias = block.attn_qkv_bias.slice(d_model..(d_model + kv_dim))?;
                 let v_bias = block.attn_qkv_bias.slice((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
 
                 let quant_available =
                     block.attn_q_weight_q8.is_some() || block.attn_k_weight_q8.is_some() || block.attn_v_weight_q8.is_some();
-                // Allow disabling quant path via env for troubleshooting
                 let disable_quant = std::env::var("METALLIC_DISABLE_MLX_Q8").is_ok() || std::env::var("Q8_DISABLE").is_ok();
 
-                // Prefer quant projections when available; fallback to dense slice or fused path otherwise.
+                cpu_accum += cpu_chk.elapsed();
+                let mut used_fused_norm = false;
                 let (q_mat, k_mat, v_mat) = if quant_available && !disable_quant {
                     if let (Some(q8), Some(k8), Some(v8)) = (&block.attn_q_weight_q8, &block.attn_k_weight_q8, &block.attn_v_weight_q8) {
-                        // Try fused Q8 path when shapes are compatible; otherwise fall back to per-projection
-                        match ctx.qkv(
-                            &x_flat,
-                            QkvWeights::Quantized {
-                                wq: q8,
-                                wk: k8,
-                                wv: v8,
-                                q_bias: &q_bias,
-                                k_bias: &k_bias,
-                                v_bias: &v_bias,
-                            },
+                        ctx.set_pending_gpu_scope(format!("attn_norm_fused_block_{}_op", layer_idx));
+                        match ctx.call::<crate::kernels::matmul_gemv_qkv_fused::MatmulGemvQkvFusedRmsnormOp>(
+                            (
+                                &x_flat,
+                                &block.attn_norm_gamma,
+                                (&QuantizedTensor::Q8_0(q8), &QuantizedTensor::Q8_0(k8), &QuantizedTensor::Q8_0(v8)),
+                                (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
+                            ),
+                            None,
                         ) {
-                            Ok((q, k, v)) => (q, k, v),
+                            Ok(y_packed) => {
+                                used_fused_norm = true;
+                                let elem = T::DTYPE.size_bytes();
+                                let nq = q_bias.len();
+                                let nk = k_bias.len();
+                                let q_out = y_packed.build_view(vec![1, nq], vec![nq, 1], y_packed.offset);
+                                let k_out = y_packed.build_view(vec![1, nk], vec![nk, 1], y_packed.offset + nq * elem);
+                                let v_out = y_packed.build_view(vec![1, kv_dim], vec![kv_dim, 1], y_packed.offset + (nq + nk) * elem);
+                                (q_out, k_out, v_out)
+                            }
                             Err(_) => {
-                                // Fall back to mixing quant/dense projections
-                                let q_mat = Self::project_quant(ctx, &x_flat, q8, q_bias.clone())?;
-                                let k_mat = Self::project_quant(ctx, &x_flat, k8, k_bias.clone())?;
-                                let v_mat = Self::project_quant(ctx, &x_flat, v8, v_bias.clone())?;
-                                (q_mat, k_mat, v_mat)
+                                let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
+                                breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
+                                let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
+                                match ctx.qkv(
+                                    &x_normed_flat,
+                                    QkvWeights::Quantized {
+                                        wq: q8,
+                                        wk: k8,
+                                        wv: v8,
+                                        q_bias: &q_bias,
+                                        k_bias: &k_bias,
+                                        v_bias: &v_bias,
+                                    },
+                                ) {
+                                    Ok((q, k, v)) => (q, k, v),
+                                    Err(_) => {
+                                        let q_mat = Self::project_quant(ctx, &x_normed_flat, q8, q_bias.clone())?;
+                                        let k_mat = Self::project_quant(ctx, &x_normed_flat, k8, k_bias.clone())?;
+                                        let v_mat = Self::project_quant(ctx, &x_normed_flat, v8, v_bias.clone())?;
+                                        (q_mat, k_mat, v_mat)
+                                    }
+                                }
                             }
                         }
                     } else {
+                        let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
+                        breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
+                        let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
                         let q_mat = match &block.attn_q_weight_q8 {
-                            Some(q8) => Self::project_quant(ctx, &x_flat, q8, q_bias.clone())?,
-                            None => Self::project_dense_slice(ctx, &x_flat, &block.attn_qkv_weight, 0..d_model, q_bias.clone())?,
+                            Some(q8) => Self::project_quant(ctx, &x_normed_flat, q8, q_bias.clone())?,
+                            None => Self::project_dense_slice(ctx, &x_normed_flat, &block.attn_qkv_weight, 0..d_model, q_bias.clone())?,
                         };
 
                         let k_mat = match &block.attn_k_weight_q8 {
-                            Some(k8) => Self::project_quant(ctx, &x_flat, k8, k_bias.clone())?,
+                            Some(k8) => Self::project_quant(ctx, &x_normed_flat, k8, k_bias.clone())?,
                             None => Self::project_dense_slice(
                                 ctx,
-                                &x_flat,
+                                &x_normed_flat,
                                 &block.attn_qkv_weight,
                                 d_model..(d_model + kv_dim),
                                 k_bias.clone(),
@@ -577,10 +596,10 @@ impl<T: TensorElement> Qwen25<T> {
                         };
 
                         let v_mat = match &block.attn_v_weight_q8 {
-                            Some(v8) => Self::project_quant(ctx, &x_flat, v8, v_bias.clone())?,
+                            Some(v8) => Self::project_quant(ctx, &x_normed_flat, v8, v_bias.clone())?,
                             None => Self::project_dense_slice(
                                 ctx,
-                                &x_flat,
+                                &x_normed_flat,
                                 &block.attn_qkv_weight,
                                 (d_model + kv_dim)..(d_model + 2 * kv_dim),
                                 v_bias.clone(),
@@ -590,8 +609,14 @@ impl<T: TensorElement> Qwen25<T> {
                         (q_mat, k_mat, v_mat)
                     }
                 } else {
+                    // Dense path: weights are stored in row-major [K, N] layout, which is not
+                    // compatible with GEMV's column-major expectation. Keep the safe path.
+                    ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
+                    let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
+                    breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
+                    let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
                     ctx.qkv(
-                        &x_flat,
+                        &x_normed_flat,
                         QkvWeights::Dense {
                             fused_weight: &block.attn_qkv_weight,
                             fused_bias: &block.attn_qkv_bias,
@@ -600,6 +625,9 @@ impl<T: TensorElement> Qwen25<T> {
                         },
                     )?
                 };
+                if used_fused_norm {
+                    breakdown.insert("attn_norm_fused".to_string(), (x_flat.len() * bytes_per_element) as u64);
+                }
                 breakdown.insert(
                     "attn_qkv_proj".to_string(),
                     (q_mat.len() * bytes_per_element + k_mat.len() * bytes_per_element + v_mat.len() * bytes_per_element) as u64,
@@ -803,11 +831,18 @@ impl<T: TensorElement> Qwen25<T> {
                 // --- MLP Block ---
                 ctx.set_pending_gpu_scope(format!("mlp_residual_clone_block_{}_op", layer_idx));
                 let resid_mlp = x.clone();
-                ctx.set_pending_gpu_scope(format!("mlp_norm_block_{}_op", layer_idx));
-                cpu_accum += cpu_chk.elapsed();
-                let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32), None)?;
-                cpu_chk = Instant::now();
-                let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
+                let x_mlp_flat = x.reshape(vec![m, d_model])?;
+                let use_fused_swiglu = block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some();
+                let x_normed_mlp_flat = if use_fused_swiglu {
+                    None
+                } else {
+                    ctx.set_pending_gpu_scope(format!("mlp_norm_block_{}_op", layer_idx));
+                    cpu_accum += cpu_chk.elapsed();
+                    let x_normed_mlp = ctx.call::<RMSNormOp>((x, block.ffn_norm_gamma.clone(), d_model as u32), None)?;
+                    breakdown.insert("mlp_norm".to_string(), (x_normed_mlp.len() * bytes_per_element) as u64);
+                    cpu_chk = Instant::now();
+                    Some(x_normed_mlp.reshape(vec![m, d_model])?)
+                };
 
                 cpu_accum += cpu_chk.elapsed();
                 // FFN with per-projection Q8 fallbacks:
@@ -817,13 +852,14 @@ impl<T: TensorElement> Qwen25<T> {
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
                     // gate/up projections fused (quant) -> [m, ff_dim] each
                     // gate/up projections fused (quant) -> [m, ff_dim] each
-                    let hidden = if block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some() {
+                    let hidden = if use_fused_swiglu {
                         let gq8 = block.ffn_gate_q8.as_ref().unwrap();
                         let uq8 = block.ffn_up_q8.as_ref().unwrap();
                         ctx.set_pending_gpu_scope(format!("mlp_swiglu_fused_block_{}_op", layer_idx));
-                        ctx.call::<crate::kernels::matmul_gemv::MatmulGemvQ8SwiGluOp>(
+                        ctx.call::<crate::kernels::matmul_gemv::MatmulGemvQ8SwiGluRmsnormOp>(
                             (
-                                &x_normed_mlp_flat,
+                                &x_mlp_flat,
+                                &block.ffn_norm_gamma,
                                 (&QuantizedTensor::Q8_0(gq8), &QuantizedTensor::Q8_0(uq8)),
                                 (Some(&block.ffn_gate_bias), Some(&block.ffn_up_bias)),
                             ),
@@ -835,7 +871,7 @@ impl<T: TensorElement> Qwen25<T> {
                         let gate_lin = {
                             if let Some(gq8) = &block.ffn_gate_q8 {
                                 ctx.matmul(
-                                    &x_normed_mlp_flat,
+                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
                                     &TensorType::Quant(QuantizedTensor::Q8_0(gq8)),
                                     false,
                                     false,
@@ -847,7 +883,7 @@ impl<T: TensorElement> Qwen25<T> {
                                 let gd = block.ffn_gate.dims();
                                 let gate_t = if gd.len() == 2 && gd[0] == d_model { false } else { true };
                                 ctx.matmul(
-                                    &x_normed_mlp_flat,
+                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
                                     &TensorType::Dense(&block.ffn_gate),
                                     false,
                                     gate_t,
@@ -861,7 +897,7 @@ impl<T: TensorElement> Qwen25<T> {
                         let up_lin = {
                             if let Some(uq8) = &block.ffn_up_q8 {
                                 ctx.matmul(
-                                    &x_normed_mlp_flat,
+                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
                                     &TensorType::Quant(QuantizedTensor::Q8_0(uq8)),
                                     false,
                                     false,
@@ -872,7 +908,15 @@ impl<T: TensorElement> Qwen25<T> {
                             } else {
                                 let ud = block.ffn_up.dims();
                                 let up_t = if ud.len() == 2 && ud[0] == d_model { false } else { true };
-                                ctx.matmul(&x_normed_mlp_flat, &TensorType::Dense(&block.ffn_up), false, up_t, None, None, None)?
+                                ctx.matmul(
+                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
+                                    &TensorType::Dense(&block.ffn_up),
+                                    false,
+                                    up_t,
+                                    None,
+                                    None,
+                                    None,
+                                )?
                             }
                         };
 
@@ -938,6 +982,9 @@ impl<T: TensorElement> Qwen25<T> {
                     }
                 })?;
 
+                if use_fused_swiglu {
+                    breakdown.insert("mlp_norm_fused".to_string(), (x_mlp_flat.len() * bytes_per_element) as u64);
+                }
                 breakdown.insert("mlp_swiglu".to_string(), (ffn_output_flat.len() * bytes_per_element) as u64);
                 ctx.set_pending_gpu_scope(format!("mlp_reshape_block_{}_op", layer_idx));
                 let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;

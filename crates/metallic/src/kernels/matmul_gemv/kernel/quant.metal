@@ -110,6 +110,57 @@ void run_gemv_q8_canonical(
     );
 }
 
+[[kernel]] void gemv_q8_fused3_rmsnorm_f16(
+    const device uchar *data_q [[buffer(0)]],
+    const device uchar *data_k [[buffer(1)]],
+    const device uchar *data_v [[buffer(2)]],
+    const device half *vector_x [[buffer(3)]],
+    device half *out_q [[buffer(4)]],
+    device half *out_k [[buffer(5)]],
+    device half *out_v [[buffer(6)]],
+    const constant QkvFusedParams *params [[buffer(7)]],
+    const device uchar *scales_q [[buffer(8)]],
+    const device uchar *scales_k [[buffer(9)]],
+    const device uchar *scales_v [[buffer(10)]],
+    const device half *bias_q [[buffer(11)]],
+    const device half *bias_k [[buffer(12)]],
+    const device half *bias_v [[buffer(13)]],
+    const device half *gamma [[buffer(14)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) {
+
+    const device uchar *data_arr[3] = {data_q, data_k, data_v};
+    const device uchar *scale_arr[3] = {scales_q, scales_k, scales_v};
+    device half *res_arr[3] = {out_q, out_k, out_v};
+    const uint N_arr[3] = {params->Nq, params->Nk, params->Nv};
+    const device half *bias_arr[3] = {bias_q, bias_k, bias_v};
+    const uint bias_flags[3] = {params->has_bias_q, params->has_bias_k, params->has_bias_v};
+
+    threadgroup float inv_rms_s;
+    const uint lane_id = lid.x & 31u;
+    const uint warp_id = lid.x / 32u;
+    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s);
+
+    run_simd_q8_gemv_rmsnorm<3, true>(
+        data_arr,
+        scale_arr,
+        vector_x,
+        gamma,
+        inv_rms,
+        res_arr,
+        N_arr,
+        params->K,
+        params->weights_per_block,
+        bias_arr,
+        bias_flags,
+        1.0f,
+        0.0f,
+        (const device half*)nullptr,
+        gid,
+        lid
+    );
+}
+
 [[kernel]] void gemv_q8_fused2_f16(
     const device uchar *data0 [[buffer(0)]],
     const device uchar *data1 [[buffer(1)]],
@@ -396,4 +447,3 @@ inline void gemm_q8_canonical_large_n_impl(
     // I'll assume users only care about gemv M=1 for now.
     // But to be safe, I've preserved `gemm_q8_nt_f16` fully. 
 }
-

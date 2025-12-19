@@ -1,7 +1,7 @@
 # Metallic Performance Optimization - Quick Start Guide
 
 **Goal:** Reach **105 tok/s (FP16)** and **160 tok/s (Q8)** on M3 Pro.
-**Current:** ~70.5 tok/s (FP16) | ~84 tok/s (Q8).
+**Current:** ~63–65 tok/s (FP16) | ~130–133 tok/s (Q8) using `MAX_TOKENS=256` on M3 Pro.
 
 This guide is designed to get a new developer up to speed on the Metallic kernel architecture and the "Race to 105/160".
 
@@ -18,7 +18,13 @@ This guide is designed to get a new developer up to speed on the Metallic kernel
 | **Dispatch (Metal)** | `crates/metallic/src/kernels/matmul_gemv/kernel/launcher.metal` | Switch-statement that routes `LoaderMode` to specific kernels. |
 | **Benchmarks** | `tools/run_throughput.sh` | Main script to measure tok/s. |
 
-## Audited and Analyzed benchmarks 
+## Audited and Analyzed benchmarks
+Latest non-prof runs are tracked in:
+- `metallic-throughput-fp16.txt`
+- `metallic-throughput-q8.txt`
+Profiling runs (much slower, for attribution only):
+- `prof-metallic-throughput-fp16.txt`
+- `prof-metallic-throughput-q8.txt`
 
 
 ## 🛠️ Kernel Build System
@@ -72,9 +78,23 @@ We moved away from "Thread-per-Column" (Legislacy) to **"Warp-per-Column"** (Mod
 ```
 *Look for `TPS (Total)` and `TPS (Decode)` output.*
 
+**2. Variant Tuning (GEMV cols per threadgroup):**
+```bash
+METALLIC_GEMV_COLS_PER_TG=2 ./tools/run_throughput.sh
+METALLIC_GEMV_COLS_PER_TG=4 ./tools/run_throughput.sh
+METALLIC_GEMV_COLS_PER_TG=8 ./tools/run_throughput.sh
+```
+
+**Note:** `run_throughput_w_prof.sh` is intentionally slow and should only be used for per-kernel attribution.
+
 ## 🔮 Ideas for Next Steps (Roadmap to 105/160)
 
 The current kernels are efficient, The remaining gap is likely **Overhead** and **Lack of Fusion**.
+
+### 0. Unify Dense/Q8 Layouts (Blocker)
+Dense weights are row-major [K,N] while GEMV expects column-major [N,K]. This blocks FP16 RMSNorm fusion and creates code divergence.
+- **Option A:** Store dense weights transposed at load time.
+- **Option B:** Add a strided GEMV path that reads row-major efficiently.
 
 ### 1. Kernel Fusion (Start Here)
 Fuse `RMSNorm` into the `GEMV` kernel input.
@@ -88,6 +108,11 @@ We currently launch ~100 kernels sequentially per token.
 
 ### 3. Occupancy Tuning
 Experiment with `THREADGROUP_SIZE` (currently 128) in `base.rs`. Try 256 or 512 to see if it hides latency better.
+We now support `METALLIC_GEMV_COLS_PER_TG=2|4|8` (maps to threadgroup widths 64/128/256) for GEMV variants.
+Use `cargo bench -q --bench gemv_variant_bench -- --warm-up-time 1 --measurement-time 3` and compare runs with different env values.
+
+## Known Issues
+- **FP16 fused GEMV is disabled** due to dense weight layout mismatch. Enabling it yields corrupted output. Fix by unifying layouts (see roadmap).
 
 ## Testing Performance
 Always request that someone with a M3 Pro performs the run_throughput.sh and run_throughput_w_prof.sh scripts, and processes the results with the analyze_tmpfiles.sh to aggregate the txt files. For your review with full performance mode and the prof_ files that include the kernel materialization (much slower but allows us to see individual step/kernel comparisons and % of time spent in each step/kernel)
@@ -99,5 +124,3 @@ prof-metallic-throughput-q8.txt = Q8 throughput with kernel materialization
 
 ---
 *Reference `PERFORMANCE_REPORT.md` for detailed analysis.*
-
-

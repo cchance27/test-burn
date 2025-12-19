@@ -2,6 +2,18 @@
 
 ## Performance History (Latest First)
 
+### RMSNorm-GEMV Fusion (Q8) + GEMV Variants
+* **Change Summary**:
+    * Added RMSNorm-fused GEMV for Q8 paths (QKV + SwiGLU), reducing extra read/write traffic.
+    * Added `METALLIC_GEMV_COLS_PER_TG=2|4|8` variants for GEMV tuning.
+    * **Important:** Dense FP16 fused GEMV is **disabled** due to weight layout mismatch (row-major [K,N] vs GEMV column-major). Enabling it produces corrupted output.
+* **Results (M3 Pro, MAX_TOKENS=256, run_throughput.sh)**:
+    * **FP16 Decode**: **~63–65 tok/s** (regression vs prior ~70 tok/s)
+    * **Q8 Decode**: **~130–133 tok/s** (+~35 tok/s vs prior)
+* **Notes**:
+    * Profiling runs (`run_throughput_w_prof.sh`) are **much slower** and should not be compared to non-prof throughput numbers.
+    * Current divergence: Q8 benefits from fused path, FP16 does not until layout is unified.
+
 ### Fused SwiGLU & Occupancy Tuning
 * **Change Summary**:
     * Implemented `gemv_q8_swiglu_f16`, fusing Gate, Up, and SiLU into a single kernel launch.
@@ -46,6 +58,11 @@
 
 To close the remaining gap (~96 -> 160), we must move beyond single-kernel optimization.
 
+### 0. Unify Dense/Q8 GEMV Layouts (Blocker)
+**Theory**: Dense weights are row-major [K,N], while GEMV kernels expect column-major [N,K].
+**Target**: Choose one: (A) store dense weights transposed at load time, or (B) add a strided GEMV path that reads row-major efficiently.
+**Impact**: Unlocks FP16 RMSNorm fusion and prevents dense/quant code divergence.
+
 ### 1. WMMA/AMX and Layout Optimizations
 **Theory**: WMMA/AMX can provide significant performance improvements for GEMV and related operations.
 **Target**: Implement WMMA/AMX for GEMV and related operations.
@@ -53,6 +70,7 @@ To close the remaining gap (~96 -> 160), we must move beyond single-kernel optim
 ### 2. Kernel Fusion 
 **Theory**: Every kernel launch reads inputs from RAM and writes outputs to RAM.
 **Target**: Fuse `RMSNorm` into `GEMV` or `SwiGLU` (Gate+Up+Act) into single kernel.
+**Status**: Q8 RMSNorm fusion is live; FP16 fusion blocked by layout mismatch above.
 
 ### 3. Dispatch Overhead Reduction (High Impact)
 **Theory**: CPU dispatch overhead is significant (~10µs/launch).

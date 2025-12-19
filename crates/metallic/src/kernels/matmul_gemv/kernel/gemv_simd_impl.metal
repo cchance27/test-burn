@@ -2,6 +2,45 @@
 #include <metal_stdlib>
 using namespace metal;
 
+constant float GEMV_RMSNORM_EPS = 1e-6f;
+
+ALWAYS_INLINE float gemv_compute_inv_rms(
+    const device half *vector_x,
+    const uint K,
+    const uint lane_id,
+    const uint warp_id,
+    threadgroup float *tg_inv_rms
+) {
+    if (K == 0u) {
+        if (warp_id == 0u && lane_id == 0u) {
+            tg_inv_rms[0] = 0.0f;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        return tg_inv_rms[0];
+    }
+
+    float sum = 0.0f;
+    if (warp_id == 0u) {
+        uint k = lane_id * 4u;
+        const uint stride = 32u * 4u;
+        for (; k + 4u <= K; k += stride) {
+            half4 hv = *(const device half4 *)(vector_x + k);
+            float4 fv = float4(hv);
+            sum += dot(fv, fv);
+        }
+        for (; k < K; k += 32u) {
+            float v = (float)vector_x[k];
+            sum += v * v;
+        }
+        sum = simd_sum(sum);
+        if (lane_id == 0u) {
+            tg_inv_rms[0] = rsqrt(sum / (float)K + GEMV_RMSNORM_EPS);
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    return tg_inv_rms[0];
+}
+
 
 // =================================================================================================
 // Generic SIMD GEMV Template
@@ -269,6 +308,121 @@ struct SimdGemvPolicyF16 {
     }
 };
 
+// =================================================================================================
+// FP16 Policy (RMSNorm fused)
+// =================================================================================================
+
+struct SimdGemvPolicyF16Rmsnorm {
+    struct Params {
+        const device half *matrix;
+        const device half *gamma;
+        float inv_rms;
+    };
+
+    static constant uint FAST_K_CHUNK_SIZE = 512;
+    static constant uint SAFE_K_CHUNK_SIZE = 256;
+
+    uint lane_id;
+    uint k_thread_offset;
+
+    const device half *ptr_a[3];
+    const device half *gamma_ptr;
+    float inv_rms;
+
+    float4 xv_f32_0_lo, xv_f32_0_hi;
+    float4 xv_f32_1_lo, xv_f32_1_hi;
+    float4 xv_safe_lo, xv_safe_hi;
+    uint safe_n;
+
+    template<uint HEADS>
+    void init(Params p, uint3 gid, uint3 lid, uint logical_col, uint K, const uint N[HEADS]) {
+        lane_id = lid.x & 31u;
+        k_thread_offset = lane_id * 8u;
+        gamma_ptr = p.gamma;
+        inv_rms = p.inv_rms;
+
+        for (uint h = 0; h < HEADS; ++h) {
+            ptr_a[h] = p.matrix + (ulong)logical_col * K + k_thread_offset;
+        }
+    }
+
+    void load_x_fast(const device half* vector_x, uint k_base) {
+        uint k_0 = k_base + k_thread_offset;
+        uint k_1 = k_0 + 256u;
+
+        float4 xv_raw_0 = *(const device float4*)(vector_x + k_0);
+        float4 xv_raw_1 = *(const device float4*)(vector_x + k_1);
+        float4 gv_raw_0 = *(const device float4*)(gamma_ptr + k_0);
+        float4 gv_raw_1 = *(const device float4*)(gamma_ptr + k_1);
+
+        half4 xv_lo_0 = as_type<half4>(xv_raw_0.xy); half4 xv_hi_0 = as_type<half4>(xv_raw_0.zw);
+        half4 xv_lo_1 = as_type<half4>(xv_raw_1.xy); half4 xv_hi_1 = as_type<half4>(xv_raw_1.zw);
+        half4 gv_lo_0 = as_type<half4>(gv_raw_0.xy); half4 gv_hi_0 = as_type<half4>(gv_raw_0.zw);
+        half4 gv_lo_1 = as_type<half4>(gv_raw_1.xy); half4 gv_hi_1 = as_type<half4>(gv_raw_1.zw);
+
+        float inv = inv_rms;
+        xv_f32_0_lo = float4(xv_lo_0) * float4(gv_lo_0) * inv;
+        xv_f32_0_hi = float4(xv_hi_0) * float4(gv_hi_0) * inv;
+        xv_f32_1_lo = float4(xv_lo_1) * float4(gv_lo_1) * inv;
+        xv_f32_1_hi = float4(xv_hi_1) * float4(gv_hi_1) * inv;
+    }
+
+    void load_x_safe(const device half* vector_x, uint k_base, uint K) {
+        uint k = k_base + k_thread_offset;
+
+        float4 xv_raw = float4(0.0f);
+        float4 gv_raw = float4(0.0f);
+        if (k + 8 <= K) {
+            xv_raw = *(const device float4*)(vector_x + k);
+            gv_raw = *(const device float4*)(gamma_ptr + k);
+            safe_n = 8;
+        } else {
+            safe_n = 0;
+            for (uint i = 0; i < 8 && k + i < K; ++i) {
+                ((thread half*)&xv_raw)[i] = vector_x[k + i];
+                ((thread half*)&gv_raw)[i] = gamma_ptr[k + i];
+                safe_n++;
+            }
+        }
+
+        half4 xv_lo = as_type<half4>(xv_raw.xy); half4 xv_hi = as_type<half4>(xv_raw.zw);
+        half4 gv_lo = as_type<half4>(gv_raw.xy); half4 gv_hi = as_type<half4>(gv_raw.zw);
+        float inv = inv_rms;
+        xv_safe_lo = float4(xv_lo) * float4(gv_lo) * inv;
+        xv_safe_hi = float4(xv_hi) * float4(gv_hi) * inv;
+    }
+
+    float compute_dot(uint h, bool fast_mode) {
+        if (fast_mode) {
+            float4 w_raw_0 = *(const device float4*)(ptr_a[h]);
+            float4 w_raw_1 = *(const device float4*)(ptr_a[h] + 256u);
+
+            half4 w_lo_0 = as_type<half4>(w_raw_0.xy); half4 w_hi_0 = as_type<half4>(w_raw_0.zw);
+            half4 w_lo_1 = as_type<half4>(w_raw_1.xy); half4 w_hi_1 = as_type<half4>(w_raw_1.zw);
+
+            float sum0 = dot(xv_f32_0_lo, float4(w_lo_0)) + dot(xv_f32_0_hi, float4(w_hi_0));
+            float sum1 = dot(xv_f32_1_lo, float4(w_lo_1)) + dot(xv_f32_1_hi, float4(w_hi_1));
+            return sum0 + sum1;
+        }
+
+        float4 w_raw = float4(0.0f);
+        if (safe_n == 8) {
+            w_raw = *(const device float4*)(ptr_a[h]);
+        } else {
+            for (uint i = 0; i < safe_n; ++i) {
+                ((thread half*)&w_raw)[i] = (ptr_a[h])[i];
+            }
+        }
+
+        half4 w_lo = as_type<half4>(w_raw.xy); half4 w_hi = as_type<half4>(w_raw.zw);
+        return dot(xv_safe_lo, float4(w_lo)) + dot(xv_safe_hi, float4(w_hi));
+    }
+
+    void advance_pointers(uint k_step) {
+        for (int h = 0; h < 3; ++h) ptr_a[h] += k_step;
+    }
+};
+
 
 // =================================================================================================
 // Q8 Policy
@@ -406,6 +560,163 @@ struct SimdGemvPolicyQ8 {
 };
 
 // =================================================================================================
+// Q8 Policy (RMSNorm fused)
+// =================================================================================================
+
+struct SimdGemvPolicyQ8Rmsnorm {
+    struct Params {
+        const device uchar **data;
+        const device uchar **scale_bytes;
+        const device half *gamma;
+        uint weights_per_block;
+        float inv_rms;
+    };
+
+    static constant uint FAST_K_CHUNK_SIZE = 256;
+    static constant uint SAFE_K_CHUNK_SIZE = 256;
+
+    uint lane_id;
+    uint block_in_group;
+    uint sub_offset;
+    uint sub_lane;
+
+    const device uchar *ptr_q[3];
+    const device uchar *ptr_s[3];
+    uint stride_q[3];
+    uint stride_s[3];
+
+    const device half *gamma_ptr;
+    float inv_rms;
+
+    float4 xv0, xv1;
+    uint k_curr_0, k_curr_1;
+    uint block_idx_0, block_idx_1, total_blocks;
+
+    template<uint HEADS>
+    void init(Params p, uint3 gid, uint3 lid, uint logical_col, uint K, const uint N[HEADS]) {
+        lane_id = lid.x & 31u;
+        block_in_group = lane_id / 8u;
+        sub_lane = lane_id % 8u;
+        sub_offset = sub_lane * 4u;
+        gamma_ptr = p.gamma;
+        inv_rms = p.inv_rms;
+
+        for (uint h = 0; h < HEADS; ++h) {
+            stride_q[h] = N[h] * 32u;
+            stride_s[h] = N[h] * 2u;
+
+            ptr_q[h] = p.data[h] + logical_col * 32u + (block_in_group * stride_q[h]);
+            ptr_s[h] = p.scale_bytes[h] + logical_col * 2u + (block_in_group * stride_s[h]);
+        }
+        total_blocks = (K + 31u) / 32u;
+    }
+
+    void load_x_fast(const device half* vector_x, uint k_base) {
+        uint k_idx_0 = k_base + block_in_group * 32u + sub_offset;
+        uint k_idx_1 = k_idx_0 + 128u;
+
+        xv0 = float4(*(const device half4*)(vector_x + k_idx_0));
+        xv1 = float4(*(const device half4*)(vector_x + k_idx_1));
+
+        float4 g0 = float4(*(const device half4*)(gamma_ptr + k_idx_0));
+        float4 g1 = float4(*(const device half4*)(gamma_ptr + k_idx_1));
+        float inv = inv_rms;
+        xv0 = xv0 * g0 * inv;
+        xv1 = xv1 * g1 * inv;
+
+        block_idx_0 = (k_base / 32u) + block_in_group;
+        block_idx_1 = block_idx_0 + 4u;
+    }
+
+    void load_x_safe(const device half* vector_x, uint k_base, uint K) {
+        uint k_idx_0 = k_base + block_in_group * 32u + sub_offset;
+        uint k_idx_1 = k_idx_0 + 128u;
+
+        xv0 = float4(0.0f);
+        xv1 = float4(0.0f);
+        float4 g0 = float4(0.0f);
+        float4 g1 = float4(0.0f);
+
+        if (k_idx_0 + 4 <= K) {
+            xv0 = float4(*(const device half4*)(vector_x + k_idx_0));
+            g0 = float4(*(const device half4*)(gamma_ptr + k_idx_0));
+        } else {
+            half4 xv_half = half4(0.0h);
+            half4 gv_half = half4(0.0h);
+            for (uint i = 0; i < 4 && k_idx_0 + i < K; ++i) {
+                ((thread half*)&xv_half)[i] = vector_x[k_idx_0 + i];
+                ((thread half*)&gv_half)[i] = gamma_ptr[k_idx_0 + i];
+            }
+            xv0 = float4(xv_half);
+            g0 = float4(gv_half);
+        }
+        if (k_idx_1 + 4 <= K) {
+            xv1 = float4(*(const device half4*)(vector_x + k_idx_1));
+            g1 = float4(*(const device half4*)(gamma_ptr + k_idx_1));
+        } else {
+            half4 xv_half = half4(0.0h);
+            half4 gv_half = half4(0.0h);
+            for (uint i = 0; i < 4 && k_idx_1 + i < K; ++i) {
+                ((thread half*)&xv_half)[i] = vector_x[k_idx_1 + i];
+                ((thread half*)&gv_half)[i] = gamma_ptr[k_idx_1 + i];
+            }
+            xv1 = float4(xv_half);
+            g1 = float4(gv_half);
+        }
+
+        float inv = inv_rms;
+        xv0 = xv0 * g0 * inv;
+        xv1 = xv1 * g1 * inv;
+
+        block_idx_0 = (k_base / 32u) + block_in_group;
+        block_idx_1 = block_idx_0 + 4u;
+        total_blocks = (K + 31u) / 32u;
+    }
+
+    float compute_dot(uint h, bool fast_mode) {
+        float partial = 0.0f;
+
+        if (fast_mode || block_idx_0 < total_blocks) {
+            const device uchar *s_ptr = ptr_s[h];
+            const device uchar *q_ptr = ptr_q[h];
+
+            ushort s_bits = *(const device ushort*)s_ptr;
+            float scale = (float)as_type<half>(s_bits);
+            uchar4 q_bytes = *(const device uchar4*)(q_ptr + sub_offset);
+            float4 w_vec = float4(char4(q_bytes));
+
+            partial += dot(xv0, w_vec) * scale;
+        }
+
+        if (fast_mode || block_idx_1 < total_blocks) {
+            const device uchar *s_ptr = ptr_s[h] + (4u * stride_s[h]);
+            const device uchar *q_ptr = ptr_q[h] + (4u * stride_q[h]);
+
+            ushort s_bits = *(const device ushort*)s_ptr;
+            float scale = (float)as_type<half>(s_bits);
+            uchar4 q_bytes = *(const device uchar4*)(q_ptr + sub_offset);
+            float4 w_vec = float4(char4(q_bytes));
+
+            partial += dot(xv1, w_vec) * scale;
+        }
+
+        partial += simd_shuffle_xor(partial, 4u);
+        partial += simd_shuffle_xor(partial, 2u);
+        partial += simd_shuffle_xor(partial, 1u);
+
+        if (sub_lane == 0) return partial;
+        return 0.0f;
+    }
+
+    void advance_pointers(uint k_step) {
+        for (uint h = 0; h < 3; ++h) {
+            ptr_q[h] += stride_q[h] * 8u;
+            ptr_s[h] += stride_s[h] * 8u;
+        }
+    }
+};
+
+// =================================================================================================
 // Wrappers
 // =================================================================================================
 
@@ -426,6 +737,71 @@ void run_simd_f16_gemv(
 ) {
     SimdGemvPolicyF16::Params p = { matrix };
     run_simd_gemv_template<SimdGemvPolicyF16, HEADS, 4, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_f16_gemv_rmsnorm(
+    const device half *matrix,
+    const device half *vector_x,
+    const device half *gamma,
+    const float inv_rms,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    SimdGemvPolicyF16Rmsnorm::Params p = { matrix, gamma, inv_rms };
+    run_simd_gemv_template<SimdGemvPolicyF16Rmsnorm, HEADS, 4, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_f16_gemv_cols2(
+    const device half *matrix,
+    const device half *vector_x,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    SimdGemvPolicyF16::Params p = { matrix };
+    run_simd_gemv_template<SimdGemvPolicyF16, HEADS, 2, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_f16_gemv_cols8(
+    const device half *matrix,
+    const device half *vector_x,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    SimdGemvPolicyF16::Params p = { matrix };
+    run_simd_gemv_template<SimdGemvPolicyF16, HEADS, 8, HasBias>(
         p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
     );
 }
@@ -463,4 +839,90 @@ void run_simd_q8_gemv(
     );
 }
 
+template <uint HEADS, bool HasBias>
+void run_simd_q8_gemv_cols2(
+    const device uchar *data[HEADS],
+    const device uchar *scale_bytes[HEADS],
+    const device half *vector_x,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const uint weights_per_block,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    SimdGemvPolicyQ8::Params p = {
+        (const device uchar**)data,
+        (const device uchar**)scale_bytes,
+        weights_per_block
+    };
 
+    run_simd_gemv_template<SimdGemvPolicyQ8, HEADS, 2, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_q8_gemv_cols8(
+    const device uchar *data[HEADS],
+    const device uchar *scale_bytes[HEADS],
+    const device half *vector_x,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const uint weights_per_block,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    SimdGemvPolicyQ8::Params p = {
+        (const device uchar**)data,
+        (const device uchar**)scale_bytes,
+        weights_per_block
+    };
+
+    run_simd_gemv_template<SimdGemvPolicyQ8, HEADS, 8, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_q8_gemv_rmsnorm(
+    const device uchar *data[HEADS],
+    const device uchar *scale_bytes[HEADS],
+    const device half *vector_x,
+    const device half *gamma,
+    const float inv_rms,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const uint weights_per_block,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    SimdGemvPolicyQ8Rmsnorm::Params p = {
+        (const device uchar**)data,
+        (const device uchar**)scale_bytes,
+        gamma,
+        weights_per_block,
+        inv_rms
+    };
+
+    run_simd_gemv_template<SimdGemvPolicyQ8Rmsnorm, HEADS, 4, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}

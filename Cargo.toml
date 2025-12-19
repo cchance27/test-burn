@@ -132,3 +132,8 @@ harness = false
 [[bench]]
 name = "gemm_tiled_benchmark"
 harness = false
+
+[[bench]]
+name = "gemv_variant_bench"
+path = "benches/tuning_kernels/gemv_variant_bench.rs"
+harness = false
