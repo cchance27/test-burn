@@ -366,6 +366,10 @@ impl<T: TensorElement> Context<T> {
 
     #[inline]
     fn can_use_gemv(&self, dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
+        // SIMD GEMV kernels (MatmulGemvCols8) only support F16, not F32.
+        if T::DTYPE != crate::tensor::Dtype::F16 {
+            return false;
+        }
         if transpose_a {
             return false;
         }
