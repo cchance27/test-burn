@@ -25,4 +25,5 @@ run_one() {
 }
 
 run_one "fp16" "${MODEL_FP16}"
-run_one "q8" "${MODEL_Q8}"
+#disabled while we debug fp16
+#run_one "q8" "${MODEL_Q8}"

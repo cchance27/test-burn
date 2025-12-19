@@ -256,6 +256,50 @@ fn copy_bias_into_fused<TSrc: TensorElement, TDst: TensorElement>(
     copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
 }
 
+// ============================================================================
+// FP16 Transposed Weight Helpers
+// ============================================================================
+
+/// Create a column-major transposed tensor [N, K] from a row-major source [K, N].
+/// This layout matches Q8's streaming pattern for optimal GEMV performance.
+fn create_transposed_weight<T: TensorElement>(src: &Tensor<T>, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
+    use crate::tensor::{TensorInit, TensorStorage};
+
+    let src_dims = src.dims();
+    if src_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "create_transposed_weight expects 2D tensor, got {:?}",
+            src_dims
+        )));
+    }
+
+    let rows = src_dims[0]; // K
+    let cols = src_dims[1]; // N
+
+    // Create output tensor with transposed dims [N, K]
+    let mut dst = Tensor::new(vec![cols, rows], TensorStorage::Dedicated(&*ctx), TensorInit::Uninitialized)?;
+
+    // Transpose: dst[n, k] = src[k, n]
+    let src_slice = src.as_slice();
+    let dst_slice = dst.as_mut_slice();
+
+    for k in 0..rows {
+        for n in 0..cols {
+            let src_idx = k * cols + n;
+            let dst_idx = n * rows + k;
+            dst_slice[dst_idx] = src_slice[src_idx];
+        }
+    }
+
+    Ok(dst)
+}
+
+/// Create a transposed weight from the fused QKV weight tensor.
+/// Source is [K, Q+KV+KV], output is [Q+KV+KV, K] in column-major layout.
+fn create_transposed_qkv_weight<T: TensorElement>(src: &Tensor<T>, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
+    create_transposed_weight(src, ctx)
+}
+
 fn parse_layer_index(name: &str) -> Option<usize> {
     let patterns = ["layers.", "layer.", "blocks.", "block.", "layer_", "layers_"];
     let lname = name.to_lowercase();
@@ -698,6 +742,61 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
 
             load_tensor_into_model(&lname, &materialized, &mut qwen)
                 .map_err(|err| MetalError::InvalidOperation(format!("Failed to load tensor '{}' into model: {err}", name)))?;
+        }
+
+        // ====================================================================
+        // Create transposed FP16 weights for unified layout with Q8
+        // This makes FP16 use column-major [N, K] layout like Q8
+        // ====================================================================
+        {
+            for block in &mut qwen.blocks {
+                // Only create transposed weights for non-Q8 dense weights
+                // (Q8 path already has optimal layout)
+                if block.attn_q_weight_q8.is_none() && block.attn_k_weight_q8.is_none() && block.attn_v_weight_q8.is_none() {
+                    if let Ok(transposed) = create_transposed_qkv_weight(&block.attn_qkv_weight, ctx) {
+                        block.attn_qkv_weight_transposed = Some(transposed);
+                    }
+                }
+
+                // NOTE: attn_out_weight is NOT transposed because legacy path already uses
+                // transpose_b=true, meaning the weight is already in [N, K] GEMV-compatible layout.
+                // We skip transposition here to avoid double-transpose issues.
+
+                // For FFN gate/up: only transpose if original is [d_model, ff_dim]
+                // If already [ff_dim, d_model], it's GEMV-compatible with transpose_right=true
+                if block.ffn_gate_q8.is_none() {
+                    let gd = block.ffn_gate.dims();
+                    let needs_transpose = gd.len() == 2 && gd[0] == qwen.config.d_model;
+                    if needs_transpose {
+                        if let Ok(transposed) = create_transposed_weight(&block.ffn_gate, ctx) {
+                            block.ffn_gate_transposed = Some(transposed);
+                        }
+                    }
+                }
+
+                if block.ffn_up_q8.is_none() {
+                    let ud = block.ffn_up.dims();
+                    let needs_transpose = ud.len() == 2 && ud[0] == qwen.config.d_model;
+                    if needs_transpose {
+                        if let Ok(transposed) = create_transposed_weight(&block.ffn_up, ctx) {
+                            block.ffn_up_transposed = Some(transposed);
+                        }
+                    }
+                }
+
+                // For FFN down: opposite logic - input is ff_dim, output is d_model
+                // Original should be [ff_dim, d_model], transpose to [d_model, ff_dim]
+                if block.ffn_down_q8.is_none() {
+                    let dd = block.ffn_down.dims();
+                    let hidden_dim = qwen.config.ff_dim;
+                    let needs_transpose = dd.len() == 2 && dd[0] == hidden_dim;
+                    if needs_transpose {
+                        if let Ok(transposed) = create_transposed_weight(&block.ffn_down, ctx) {
+                            block.ffn_down_transposed = Some(transposed);
+                        }
+                    }
+                }
+            }
         }
 
         Ok(qwen)

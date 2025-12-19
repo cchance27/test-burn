@@ -91,6 +91,29 @@ impl<T: TensorElement> Qwen25<T> {
         )
     }
 
+    // =========================================================================
+    // FP16 Transposed Weight Helpers (Unified with Q8 Layout)
+    // =========================================================================
+
+    /// Project using a transposed weight matrix [N, K] with transpose_right=true.
+    /// This leverages the optimized GEMV path when weights are in column-major layout.
+    fn project_transposed(
+        ctx: &mut Context<T>,
+        x_flat: &Tensor<T>,
+        weight_transposed: &Tensor<T>,
+        bias: Option<&Tensor<T>>,
+    ) -> Result<Tensor<T>, MetalError> {
+        ctx.matmul(
+            x_flat,
+            &TensorType::Dense(weight_transposed),
+            false,
+            true, // transpose_right because weight is [N, K]
+            bias,
+            None,
+            None,
+        )
+    }
+
     /// Embed tokens into d_model dimensional vectors
     pub fn embed(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         let batch = 1; // For now, assume batch size of 1
@@ -609,21 +632,21 @@ impl<T: TensorElement> Qwen25<T> {
                         (q_mat, k_mat, v_mat)
                     }
                 } else {
-                    // Dense path: weights are stored in row-major [K, N] layout, which is not
-                    // compatible with GEMV's column-major expectation. Keep the safe path.
+                    // Dense path: prefer transposed weights when METALLIC_FP16_FUSED is enabled
                     ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
                     let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
                     breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                     let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
-                    ctx.qkv(
-                        &x_normed_flat,
-                        QkvWeights::Dense {
-                            fused_weight: &block.attn_qkv_weight,
-                            fused_bias: &block.attn_qkv_bias,
-                            d_model,
-                            kv_dim,
-                        },
-                    )?
+
+                    // Use transposed weights (unified layout with Q8)
+                    let w_t = block.attn_qkv_weight_transposed.as_ref().expect("FP16 transposed weights missing");
+                    // Transposed weight is [qkv_out_dim, d_model], use with transpose_right=true
+                    let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w_t, Some(&block.attn_qkv_bias))?;
+                    // Split into Q, K, V using slice_last_dim (same pattern as qkv_dense)
+                    let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
+                    let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
+                    let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+                    (q_mat, k_mat, v_mat)
                 };
                 if used_fused_norm {
                     breakdown.insert("attn_norm_fused".to_string(), (x_flat.len() * bytes_per_element) as u64);
@@ -805,7 +828,8 @@ impl<T: TensorElement> Qwen25<T> {
                                 None,
                             )
                         } else {
-                            // Dense fallback: use backend-heuristic addmm (MPS/MLX) with out=residual
+                            // Dense path: attn_out uses transpose_b=true in legacy path
+                            // (weight already in [N, K] layout), no transposed variant needed
                             let out = resid_attn.reshape(vec![m, d_model])?;
                             ctx.matmul(
                                 a,
@@ -881,13 +905,13 @@ impl<T: TensorElement> Qwen25<T> {
                                     None,
                                 )?
                             } else {
-                                let gd = block.ffn_gate.dims();
-                                let gate_t = if gd.len() == 2 && gd[0] == d_model { false } else { true };
+                                // Dense path: use transposed weights (unified with Q8)
+                                let w_t = block.ffn_gate_transposed.as_ref().unwrap_or(&block.ffn_gate);
                                 ctx.matmul(
                                     x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Dense(&block.ffn_gate),
+                                    &TensorType::Dense(w_t),
                                     false,
-                                    gate_t,
+                                    true, // transpose_right for column-major weights
                                     None,
                                     None,
                                     None,
@@ -907,13 +931,13 @@ impl<T: TensorElement> Qwen25<T> {
                                     None,
                                 )?
                             } else {
-                                let ud = block.ffn_up.dims();
-                                let up_t = if ud.len() == 2 && ud[0] == d_model { false } else { true };
+                                // Dense path: use transposed weights (unified with Q8)
+                                let w_t = block.ffn_up_transposed.as_ref().unwrap_or(&block.ffn_up);
                                 ctx.matmul(
                                     x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Dense(&block.ffn_up),
+                                    &TensorType::Dense(w_t),
                                     false,
-                                    up_t,
+                                    true, // transpose_right for column-major weights
                                     None,
                                     None,
                                     None,
@@ -963,16 +987,14 @@ impl<T: TensorElement> Qwen25<T> {
                         )?;
                         Ok(out)
                     } else {
-                        // Dense fallback with fused bias+residual using backend-heuristic addmm
-                        let dd = block.ffn_down.dims();
-                        let hidden_cols = hidden.dims()[1];
-                        let down_t = if dd.len() == 2 && dd[0] == hidden_cols { false } else { true };
+                        // Dense path: use transposed weights (unified with Q8)
                         let out = resid_mlp.reshape(vec![m, d_model])?;
+                        let w_t = block.ffn_down_transposed.as_ref().unwrap_or(&block.ffn_down);
                         ctx.matmul(
                             &hidden,
-                            &TensorType::Dense(&block.ffn_down),
+                            &TensorType::Dense(w_t),
                             false,
-                            down_t,
+                            true, // transpose_right for column-major weights
                             None,
                             Some(MatmulAlphaBeta {
                                 output: &out,

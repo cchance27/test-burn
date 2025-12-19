@@ -14,6 +14,22 @@ pub struct TransformerBlock<T: TensorElement> {
     /// Optional packed Q8_0 weight for the V projection ([kv_dim, d_model]).
     pub attn_v_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
 
+    // =====================================================
+    // EXPERIMENTAL: Transposed FP16 weights for GEMV optimization
+    // These use column-major [N, K] layout matching Q8's streaming pattern.
+    // Populated when METALLIC_FP16_TRANSPOSED=1 is set at load time.
+    // =====================================================
+    /// Transposed QKV weight in GEMV-compatible layout [qkv_out_dim, d_model]
+    pub attn_qkv_weight_transposed: Option<Tensor<T>>,
+    /// Transposed attention output weight [d_model, d_model] in column-major
+    pub attn_out_weight_transposed: Option<Tensor<T>>,
+    /// Transposed FFN gate weight [ff_dim, d_model] in column-major  
+    pub ffn_gate_transposed: Option<Tensor<T>>,
+    /// Transposed FFN up weight [ff_dim, d_model] in column-major
+    pub ffn_up_transposed: Option<Tensor<T>>,
+    /// Transposed FFN down weight [d_model, ff_dim] in column-major
+    pub ffn_down_transposed: Option<Tensor<T>>,
+
     // Feedforward
     pub ffn_down: Tensor<T>,
     /// Optional packed Q8_0 weight for FFN down projection ([ff_dim, d_model]) or transpose-compatible.
@@ -79,6 +95,12 @@ where
             attn_q_weight_q8: None,
             attn_k_weight_q8: None,
             attn_v_weight_q8: None,
+            // Transposed weights start as None; populated by loading.rs when METALLIC_FP16_TRANSPOSED=1
+            attn_qkv_weight_transposed: None,
+            attn_out_weight_transposed: None,
+            ffn_gate_transposed: None,
+            ffn_up_transposed: None,
+            ffn_down_transposed: None,
             ffn_down,
             ffn_down_q8: None,
             ffn_gate_up_weight,

@@ -10,6 +10,7 @@ mod clamping_extreme_test;
 mod determinism_test;
 mod error_path_test;
 mod forward_pass_correctness_test;
+mod fp16_transposed_parity;
 mod generation_test;
 mod gpu_profiling;
 mod matmul;
