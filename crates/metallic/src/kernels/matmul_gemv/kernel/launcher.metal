@@ -30,61 +30,14 @@ ALWAYS_INLINE void gemv_run_loader_mode(
 
     switch (loader_mode) {
         case GemvLoaderDense: {
-            // Map single-head inputs to array for template
-            // const device half *m_arr[1] = { (const device half *)matrix_data };
-            device half *r_arr[1] = { result_y };
-            const uint n_arr[1] = { params->N };
-            const device half *b_arr[1] = { bias }; 
-            const uint hb_arr[1] = { 0 }; // No bias for Dense (loader mode specific?)
-            // Actually DenseBias means bias.
-            
-            run_simd_f16_gemv<1, false>(
-                (const device half *)matrix_data, // Helper handles single ptr? No, checking impl.
-                // My impl expects "const device half *matrix". Single ptr.
-                // Wait. My impl in `dense.metal` step 504:
-                // `const device half *matrix`.
-                // `ptr_a[h] = matrix + logical_col * K`.
-                // So it takes single pointer.
-                // But it takes `result_y[HEADS]`, `bias[HEADS]`.
-                // Ah.
-                // `device half *result_y[HEADS]`
-                // I need to pass `r_arr`.
-                
-                vector_x,
-                r_arr,
-                n_arr,
-                params->K,
-                b_arr,
-                hb_arr,
-                alpha,
-                beta,
-                residual,
-                gid,
-                lid
-            );
-            return;
+             const device half *matrix_a = (const device half *)matrix_data;
+             run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
+             return;
         }
         case GemvLoaderDenseBias: {
-            device half *r_arr[1] = { result_y };
-            const uint n_arr[1] = { params->N };
-            const device half *b_arr[1] = { bias };
-            const uint hb_arr[1] = { 1 };
-            
-            run_simd_f16_gemv<1, true>(
-                (const device half *)matrix_data,
-                vector_x,
-                r_arr,
-                n_arr,
-                params->K,
-                b_arr,
-                hb_arr,
-                alpha,
-                beta,
-                residual,
-                gid,
-                lid
-            );
-            return;
+             const device half *matrix_a = (const device half *)matrix_data;
+             run_gemv_dense<true>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
+             return;
         }
         case GemvLoaderQ8Canonical: {
             run_gemv_q8_canonical<false, false>(

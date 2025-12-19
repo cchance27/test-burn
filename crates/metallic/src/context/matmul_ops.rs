@@ -466,7 +466,7 @@ impl<T: TensorElement> Context<T> {
             InternalMatMulBackendOverride::Force(MatMulBackend::Gemv) => {
                 if can_gemv {
                     emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "forced_backend");
-                    return self.launch_gemv(a, TensorType::Dense(b), bias, alpha_beta, cache.as_deref_mut());
+                    return self.launch_gemv(a, TensorType::Dense(b), transpose_b, bias, alpha_beta, cache.as_deref_mut());
                 }
                 emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mlx", "forced_backend_gemv_unsupported");
                 return self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
@@ -474,7 +474,7 @@ impl<T: TensorElement> Context<T> {
             InternalMatMulBackendOverride::Force(MatMulBackend::Mps) => {
                 if can_gemv {
                     emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "forced_backend");
-                    return self.launch_gemv(a, TensorType::Dense(b), bias, alpha_beta, cache.as_deref_mut());
+                    return self.launch_gemv(a, TensorType::Dense(b), transpose_b, bias, alpha_beta, cache.as_deref_mut());
                 }
                 emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mps", "forced_backend");
                 return self.matmul_dense_mps(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
@@ -484,7 +484,7 @@ impl<T: TensorElement> Context<T> {
 
         if can_gemv {
             emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "heuristic_m1");
-            return self.launch_gemv(a, TensorType::Dense(b), bias, alpha_beta, cache.as_deref_mut());
+            return self.launch_gemv(a, TensorType::Dense(b), transpose_b, bias, alpha_beta, cache.as_deref_mut());
         }
 
         let dims = match dims_result {
@@ -594,15 +594,19 @@ impl<T: TensorElement> Context<T> {
         &mut self,
         a: &Tensor<T>,
         rhs: TensorType<'_, T>,
+        transpose_right: bool,
         bias: Option<&Tensor<T>>,
         alpha_beta: Option<MatmulAlphaBeta<'_, T>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<Tensor<T>, MetalError> {
         let mut cache = cache;
         if let Some(ep) = alpha_beta {
-            self.call::<MatmulGemvAddmmOp>((a, rhs, bias, Some(ep.output), ep.alpha, ep.beta), cache.as_deref_mut())
+            self.call::<MatmulGemvAddmmOp>(
+                (a, rhs, bias, Some(ep.output), transpose_right, ep.alpha, ep.beta),
+                cache.as_deref_mut(),
+            )
         } else {
-            self.call::<MatmulGemvOp>((a, rhs, bias), cache.as_deref_mut())
+            self.call::<MatmulGemvOp>((a, rhs, transpose_right, bias), cache.as_deref_mut())
         }
     }
 
@@ -641,7 +645,10 @@ impl<T: TensorElement> Context<T> {
 
                     if dims.batch == 1 && dims.m == 1 {
                         emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
-                        return self.call::<MatmulGemvOp>((a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), bias), cache.as_deref_mut());
+                        return self.call::<MatmulGemvOp>(
+                            (a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), transpose_b, bias),
+                            cache.as_deref_mut(),
+                        );
                     }
                     if self.should_use_q8_canonical_rows16(&dims, transpose_a) {
                         emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Q8CanonicalRows16", "heuristic");
@@ -685,7 +692,10 @@ impl<T: TensorElement> Context<T> {
                         );
                     }
                     emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
-                    return self.call::<MatmulGemvOp>((a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), bias), cache.as_deref_mut());
+                    return self.call::<MatmulGemvOp>(
+                        (a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), transpose_b, bias),
+                        cache.as_deref_mut(),
+                    );
                 }
                 if dims.batch == 1 && (2..=4).contains(&dims.m) && !transpose_a {
                     if self.should_use_q8_canonical_rows16(&dims, transpose_a) {

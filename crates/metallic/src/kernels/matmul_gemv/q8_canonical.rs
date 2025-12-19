@@ -114,7 +114,7 @@ impl DefaultKernelInvocable for MatmulQ8CanonicalOp {
             use crate::tensor::{QuantizedTensor, TensorType};
 
             let rhs = TensorType::Quant(QuantizedTensor::Q8_0(q8));
-            return MatmulGemvOp::new(ctx, (a, rhs, bias), None, _cache);
+            return MatmulGemvOp::new(ctx, (a, rhs, false, bias), None, _cache);
         }
 
         let canonical = CanonicalQuantTensor::from_split_q8_tensor(q8)

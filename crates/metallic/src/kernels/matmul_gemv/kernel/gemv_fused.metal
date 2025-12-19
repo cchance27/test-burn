@@ -1,5 +1,4 @@
 // Fused GEMV kernels (SwiGLU, etc)
-#include "gemv_simd_impl.metal"
 
 // =================================================================================================
 // SwiGLU Epilogue

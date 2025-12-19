@@ -196,7 +196,7 @@ fn dense_gemv_rmsnorm_parity() -> Result<(), MetalError> {
     let bias = make_fp16_tensor(&mut ctx, vec![n], 0x2222_2222)?;
 
     let x_normed = ctx.call::<RMSNormOp>((x.clone(), gamma.clone(), k as u32), None)?;
-    let y_ref = ctx.call::<MatmulGemvOp>((&x_normed, TensorType::Dense(&w), Some(&bias)), None)?;
+    let y_ref = ctx.call::<MatmulGemvOp>((&x_normed, TensorType::Dense(&w), false, Some(&bias)), None)?;
     let y_fused = ctx.call::<MatmulGemvRmsnormOp>((&x, &gamma, TensorType::Dense(&w), Some(&bias)), None)?;
     ctx.synchronize();
 

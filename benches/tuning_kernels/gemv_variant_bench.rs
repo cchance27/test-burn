@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use half::f16;
 use metallic::{
-    Context, F16Element, Tensor, TensorInit, TensorStorage, kernels::matmul_gemv::MatmulGemvOp, tensor::{
+    Context, F16Element, Tensor, TensorStorage, kernels::matmul_gemv::MatmulGemvOp, tensor::{
         QuantizedTensor, TensorType, quantized::{Q8_0_SCALE_BYTES_PER_BLOCK, QuantizedQ8_0Tensor}
     }
 };
@@ -66,11 +66,13 @@ fn bench_gemv_variants(c: &mut Criterion) {
             let x = make_f16(&mut ctx, vec![1, k], 0x1111_2222);
             let w = make_f16(&mut ctx, vec![k, n], 0x3333_4444);
 
-            let _warm = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&w), None), None).expect("warm");
+            let _warm = ctx
+                .call::<MatmulGemvOp>((&x, TensorType::Dense(&w), false, None), None)
+                .expect("warm");
             ctx.synchronize();
 
             b.iter(|| {
-                let _out = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&w), None), None).unwrap();
+                let _out = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&w), false, None), None).unwrap();
                 ctx.synchronize();
             });
         });
@@ -84,13 +86,13 @@ fn bench_gemv_variants(c: &mut Criterion) {
             let w_q8 = quantize_q8_0_canonical_from_f32(&ctx, k, n, &w.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>());
 
             let _warm = ctx
-                .call::<MatmulGemvOp>((&x, TensorType::Quant(QuantizedTensor::Q8_0(&w_q8)), None), None)
+                .call::<MatmulGemvOp>((&x, TensorType::Quant(QuantizedTensor::Q8_0(&w_q8)), false, None), None)
                 .expect("warm");
             ctx.synchronize();
 
             b.iter(|| {
                 let _out = ctx
-                    .call::<MatmulGemvOp>((&x, TensorType::Quant(QuantizedTensor::Q8_0(&w_q8)), None), None)
+                    .call::<MatmulGemvOp>((&x, TensorType::Quant(QuantizedTensor::Q8_0(&w_q8)), false, None), None)
                     .unwrap();
                 ctx.synchronize();
             });

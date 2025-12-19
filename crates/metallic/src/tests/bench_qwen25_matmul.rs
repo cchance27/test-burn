@@ -168,7 +168,10 @@ fn bench_q8_direct_gemv(shape: MatmulShape, iters: usize) -> Result<f64, MetalEr
     let q8 = make_q8_canonical(&ctx, shape.k, shape.n, 0xFACE_FEED)?;
     let start = Instant::now();
     for _ in 0..iters {
-        let _ = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
+        let _ = ctx.call::<MatmulGemvOp>(
+            (&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), false, None),
+            None,
+        )?;
     }
     ctx.synchronize();
     Ok(start.elapsed().as_secs_f64())
@@ -182,7 +185,10 @@ fn bench_q8_smallm_kernel_direct(shape: MatmulShape, iters: usize) -> Result<f64
     let start = Instant::now();
     for _ in 0..iters {
         if shape.m == 1 {
-            let _ = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
+            let _ = ctx.call::<MatmulGemvOp>(
+                (&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), false, None),
+                None,
+            )?;
         } else {
             let _ = ctx.call::<MatmulGemvSmallMOp>((&a, &q8, None), None)?;
         }

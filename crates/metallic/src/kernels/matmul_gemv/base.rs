@@ -189,6 +189,7 @@ fn build_operation<'a, T: TensorElement>(
     pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     profiler_tag: &'static str,
     diag_col: u32,
+    transpose_right: bool,
 ) -> Result<(MatMulGemv<T>, Tensor<T>), MetalError> {
     let ResolvedGemvRhs {
         binding,
@@ -252,15 +253,21 @@ fn build_operation<'a, T: TensorElement>(
     let lid = dispatch.loader_id();
     let is_simd_q8 = lid == (GemvLoaderMode::Q8Canonical as u32)
         || lid == (GemvLoaderMode::Q8CanonicalBias as u32)
-        || lid == (GemvLoaderMode::Q8CanonicalDebug as u32)
-        || lid == (GemvLoaderMode::Dense as u32)
-        || lid == (GemvLoaderMode::DenseBias as u32);
+        || lid == (GemvLoaderMode::Q8CanonicalDebug as u32);
 
-    let (tg_width, tile_cols) = if is_simd_q8 {
-        let cols = match gemv_cols_variant() {
-            GemvColsVariant::Cols2 => 2usize,
-            GemvColsVariant::Cols4 => 4usize,
-            GemvColsVariant::Cols8 => 8usize,
+    // Dense FP16 with transpose_right MUST use SIMD kernel (layout [Out, In]).
+    // Dense FP16 without transpose_right MUST use Legacy kernel (layout [In, Out]).
+    let use_simd_dense = matches!(binding, GemvRhsBinding::Dense(_)) && transpose_right;
+
+    let (tg_width, tile_cols) = if is_simd_q8 || use_simd_dense {
+        let cols = if use_simd_dense {
+            8usize // Force Cols8 for SIMD Dense
+        } else {
+            match gemv_cols_variant() {
+                GemvColsVariant::Cols2 => 2usize,
+                GemvColsVariant::Cols4 => 4usize,
+                GemvColsVariant::Cols8 => 8usize,
+            }
         };
         (cols * 32usize, cols)
     } else {
@@ -305,9 +312,13 @@ fn build_operation<'a, T: TensorElement>(
     }
 
     let kernel_fn = match (&binding, gemv_cols_variant()) {
-        (GemvRhsBinding::Dense(_), GemvColsVariant::Cols2) => KernelFunction::MatmulGemvCols2,
-        (GemvRhsBinding::Dense(_), GemvColsVariant::Cols4) => KernelFunction::MatmulGemv,
-        (GemvRhsBinding::Dense(_), GemvColsVariant::Cols8) => KernelFunction::MatmulGemvCols8,
+        (GemvRhsBinding::Dense(_), _) => {
+            if transpose_right {
+                KernelFunction::MatmulGemvCols8
+            } else {
+                KernelFunction::MatmulGemv
+            }
+        }
         (GemvRhsBinding::QuantCanonical(_), GemvColsVariant::Cols2) => KernelFunction::MatmulGemvQ8Cols2,
         (GemvRhsBinding::QuantCanonical(_), GemvColsVariant::Cols4) => KernelFunction::MatmulGemvQ8,
         (GemvRhsBinding::QuantCanonical(_), GemvColsVariant::Cols8) => KernelFunction::MatmulGemvQ8Cols8,
@@ -518,7 +529,7 @@ fn gemv_debug_column() -> u32 {
 }
 
 impl DefaultKernelInvocable for MatmulGemvOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, TensorType<'a, T>, Option<&'a Tensor<T>>);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, TensorType<'a, T>, bool, Option<&'a Tensor<T>>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::MatmulGemv)
@@ -530,7 +541,7 @@ impl DefaultKernelInvocable for MatmulGemvOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (x, rhs, bias) = args;
+        let (x, rhs, transpose_right, bias) = args;
         let k = validate_x_shape(x)?;
         let bias_tensor = bias.cloned();
         let resolved = resolve_rhs(rhs, k, bias_tensor.is_some())?;
@@ -547,7 +558,20 @@ impl DefaultKernelInvocable for MatmulGemvOp {
             }
         }
 
-        let (op, y) = build_operation(ctx, x, k, resolved, bias, None, 1.0, 0.0, pipeline, "gemv", gemv_debug_column())?;
+        let (op, y) = build_operation(
+            ctx,
+            x,
+            k,
+            resolved,
+            bias,
+            None,
+            1.0,
+            0.0,
+            pipeline,
+            "gemv",
+            gemv_debug_column(),
+            transpose_right,
+        )?;
         Ok((Box::new(op), y))
     }
 }
@@ -558,6 +582,7 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
         TensorType<'a, T>,
         Option<&'a Tensor<T>>,
         Option<&'a Tensor<T>>,
+        bool,
         f32,
         f32,
     );
@@ -572,12 +597,25 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
         pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        let (x, rhs, bias, residual, alpha, beta) = args;
+        let (x, rhs, bias, residual, transpose_right, alpha, beta) = args;
         let k = validate_x_shape(x)?;
         let bias_tensor = bias.cloned();
         let resolved = resolve_rhs(rhs, k, bias_tensor.is_some())?;
 
-        let (op, y) = build_operation(ctx, x, k, resolved, bias, residual, alpha, beta, pipeline, "gemv_addmm", u32::MAX)?;
+        let (op, y) = build_operation(
+            ctx,
+            x,
+            k,
+            resolved,
+            bias,
+            residual,
+            alpha,
+            beta,
+            pipeline,
+            "gemv_addmm",
+            u32::MAX,
+            transpose_right,
+        )?;
         Ok((Box::new(op), y))
     }
 }

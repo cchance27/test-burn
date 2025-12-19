@@ -80,9 +80,10 @@ pub fn execute<'a, T: TensorElement>(
             }
             DispatchPlan::Gemv(variant) => {
                 // Legacy GEMV path currently only handles non-transposed inputs.
-                if args.transpose_left || args.transpose_right {
+                // We are enabling transpose_right for Dense FP16 via SIMD kernel.
+                if args.transpose_left {
                     return Err(MetalError::InvalidOperation(
-                        "GEMV dispatch does not support transpose flags".to_string(),
+                        "GEMV dispatch does not support transpose_left".to_string(),
                     ));
                 }
 
@@ -121,16 +122,6 @@ pub fn execute<'a, T: TensorElement>(
                                 .kernel_manager
                                 .get_pipeline(KernelFunction::MatmulGemvSmallN8, args.dtype, &ctx.device)?;
                             MatmulGemvSmallN8Op::new(ctx, (args.left, args.right), Some(pipeline), cache.as_deref_mut())
-                        } else if is_vector_shape {
-                            let pipeline = ctx
-                                .kernel_manager
-                                .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
-                            MatmulGemvOp::new(
-                                ctx,
-                                (args.left, TensorType::Dense(args.right), None),
-                                Some(pipeline),
-                                cache.as_deref_mut(),
-                            )
                         } else {
                             MatMulMlxOp::new(ctx, gemm_args, None, cache.as_deref_mut())
                         }
@@ -147,7 +138,7 @@ pub fn execute<'a, T: TensorElement>(
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
                             MatmulGemvOp::new(
                                 ctx,
-                                (args.left, TensorType::Dense(args.right), None),
+                                (args.left, TensorType::Dense(args.right), args.transpose_right, None),
                                 Some(pipeline),
                                 cache.as_deref_mut(),
                             )
@@ -167,7 +158,7 @@ pub fn execute<'a, T: TensorElement>(
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
                             MatmulGemvOp::new(
                                 ctx,
-                                (args.left, TensorType::Dense(args.right), None),
+                                (args.left, TensorType::Dense(args.right), args.transpose_right, None),
                                 Some(pipeline),
                                 cache.as_deref_mut(),
                             )
@@ -187,7 +178,7 @@ pub fn execute<'a, T: TensorElement>(
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
                             MatmulGemvOp::new(
                                 ctx,
-                                (args.left, TensorType::Dense(args.right), None),
+                                (args.left, TensorType::Dense(args.right), args.transpose_right, None),
                                 Some(pipeline),
                                 cache.as_deref_mut(),
                             )
@@ -207,7 +198,7 @@ pub fn execute<'a, T: TensorElement>(
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
                             MatmulGemvOp::new(
                                 ctx,
-                                (args.left, TensorType::Dense(args.right), None),
+                                (args.left, TensorType::Dense(args.right), args.transpose_right, None),
                                 Some(pipeline),
                                 cache.as_deref_mut(),
                             )
@@ -227,7 +218,7 @@ pub fn execute<'a, T: TensorElement>(
                                 .get_pipeline(KernelFunction::MatmulGemv, args.dtype, &ctx.device)?;
                             MatmulGemvOp::new(
                                 ctx,
-                                (args.left, TensorType::Dense(args.right), None),
+                                (args.left, TensorType::Dense(args.right), args.transpose_right, None),
                                 Some(pipeline),
                                 cache.as_deref_mut(),
                             )

@@ -189,7 +189,10 @@ fn q8_gemv_parity_qwen25_shapes() -> Result<(), MetalError> {
         unsafe {
             std::env::set_var("METALLIC_GEMV_DEBUG_COL", diag_col.to_string());
         }
-        let y_q8 = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
+        let y_q8 = ctx.call::<MatmulGemvOp>(
+            (&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), false, None),
+            None,
+        )?;
         ctx.synchronize();
         // CPU reference dequant + GEMV (per-block contributions for diag_col)
         let a_f: Vec<f32> = a.as_slice().iter().map(|v| v.to_f32()).collect();
@@ -280,7 +283,10 @@ fn q8_gemv_parity_qwen25_shapes() -> Result<(), MetalError> {
             std::env::remove_var("METALLIC_GEMV_DEBUG_COL");
         }
         // Recompute y_q8 normal (no debug)
-        let y_q8_norm = ctx.call::<MatmulGemvOp>((&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), None), None)?;
+        let y_q8_norm = ctx.call::<MatmulGemvOp>(
+            (&a, TensorType::Quant(crate::tensor::QuantizedTensor::Q8_0(&q8)), false, None),
+            None,
+        )?;
         ctx.synchronize();
         // Log the diag column for normal run vs CPU quant and FP16
         let y_q8_norm_f: Vec<f32> = y_q8_norm.as_slice().iter().map(|v| v.to_f32()).collect();

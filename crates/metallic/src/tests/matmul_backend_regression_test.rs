@@ -73,7 +73,7 @@ fn small_n8_gemv_matches_generic_gemv() -> Result<(), MetalError> {
     let b = make_tensor(&mut ctx, vec![K, N], deterministic_f16(K * N, 31))?;
 
     let small_n = ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None)?;
-    let generic = ctx.call::<MatmulGemvOp>((&a, TensorType::Dense(&b), None), None)?;
+    let generic = ctx.call::<MatmulGemvOp>((&a, TensorType::Dense(&b), false, None), None)?;
     ctx.synchronize();
 
     let diff = max_abs_diff(&small_n, &generic);
