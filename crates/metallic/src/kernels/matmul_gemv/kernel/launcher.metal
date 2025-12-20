@@ -13,15 +13,19 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     float beta,
     const constant uint &diag_col,
     uint3 gid,
-    uint3 lid,
-    threadgroup float *x_tile) {
+    uint3 lid) {
 
     const bool is_q8 = (loader_mode == GemvLoaderQ8Canonical)
         || (loader_mode == GemvLoaderQ8CanonicalBias)
         || (loader_mode == GemvLoaderQ8CanonicalDebug);
+    
     if (is_q8) {
         const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias);
-        if (wants_bias) {
+        const bool debug = (loader_mode == GemvLoaderQ8CanonicalDebug);
+        if (debug) {
+             run_gemv_q8_canonical<false, true>(
+                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
+        } else if (wants_bias) {
             run_gemv_q8_canonical<true, false>(
                 matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
         } else {
@@ -31,44 +35,55 @@ ALWAYS_INLINE void gemv_run_loader_mode(
         return;
     }
 
+    // FP16 Dense & Canonical Dispatch (SIMD Paths)
+    device half *res_arr[1] = {result_y};
+    const uint N_arr[1] = {params->N};
+
     switch (loader_mode) {
         case GemvLoaderDense: {
-             const device half *matrix_a = (const device half *)matrix_data;
-             run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
+             // Unified SIMD Path (Dense)
+             const device half *bias_arr[1] = {bias}; // Unused but passed
+             const uint bias_flags[1] = {0u};
+             run_simd_f16_gemv<1, false>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+             );
              return;
         }
         case GemvLoaderDenseBias: {
-             const device half *matrix_a = (const device half *)matrix_data;
-             run_gemv_dense<true>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
+             const device half *bias_arr[1] = {bias};
+             const uint bias_flags[1] = {1u};
+             run_simd_f16_gemv<1, true>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+             );
              return;
         }
-        case GemvLoaderDenseCanonical:
+        case GemvLoaderDenseCanonical: {
+            const device half *data_arr[1] = { (const device half *)matrix_data };
+            const device half *bias_arr[1] = {bias};
+            const uint bias_flags[1] = {0u};
+            SimdGemvPolicyF16Canonical::Params p = { (const device half **)data_arr, params->weights_per_block };
+            run_simd_gemv_template<SimdGemvPolicyF16Canonical, 1, 4, false>(
+                p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+            );
+            return;
+        }
         case GemvLoaderDenseCanonicalBias: {
-            // Canonical layout is only supported by SIMD kernels.
-            return;
-        }
-        case GemvLoaderQ8Canonical: {
-            run_gemv_q8_canonical<false, false>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
-            return;
-        }
-        case GemvLoaderQ8CanonicalBias: {
-            run_gemv_q8_canonical<true, false>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
-            return;
-        }
-        case GemvLoaderQ8CanonicalDebug: {
-            run_gemv_q8_canonical<false, true>(
-                matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
+            const device half *data_arr[1] = { (const device half *)matrix_data };
+            const device half *bias_arr[1] = {bias};
+            const uint bias_flags[1] = {1u};
+            SimdGemvPolicyF16Canonical::Params p = { (const device half **)data_arr, params->weights_per_block };
+            run_simd_gemv_template<SimdGemvPolicyF16Canonical, 1, 4, true>(
+                p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+            );
             return;
         }
         default: {
-             // Fallback to legacy or error?
-             // Legacy required X_tile.
-             // But we are in gemv_run_loader_mode which has x_tile arg.
-             // We can keep legacy fallback for default?
-             const device half *matrix_a = (const device half *)matrix_data;
-             run_gemv_dense<false>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
+             // Fallback to Dense (No Bias)
+             const device half *bias_arr[1] = {bias};
+             const uint bias_flags[1] = {0u};
+             run_simd_f16_gemv<1, false>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+             );
              return;
         }
     }
@@ -89,8 +104,6 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     constant float &beta [[buffer(10)]],
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
-    threadgroup float x_tile[TILE_K];
-
     gemv_run_loader_mode(
         static_cast<GemvLoaderMode>(loader_mode),
         matrix_data,
@@ -104,8 +117,7 @@ ALWAYS_INLINE void gemv_run_loader_mode(
         beta,
         diag_col,
         gid,
-        lid,
-        x_tile);
+        lid);
 }
 
 // Dense GEMV entry tuned for COLS_PER_TG=2 (threadgroup width 64)

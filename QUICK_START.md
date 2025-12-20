@@ -1,8 +1,8 @@
 # Metallic Performance Optimization - Quick Start Guide
 
 **Goal:** Reach **105 tok/s (FP16)** and **160 tok/s (Q8)** on M3 Pro.
-**Current (Post-KV Optimization):** ~94 tok/s (FP16 decode) | ~140 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
-**Latest Status:** KV cache $O(n)$ repetition bottleneck removed. Deterministic benchmarking enabled via `--seed`. Terminal I/O contention eliminated via `output-format=none`.
+**Current (Post-Unification):** ~100 tok/s (FP16 decode) | ~150 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
+**Latest Status:** Unified FP16/Q8 backends on SIMD architecture. Legacy dense kernels removed. Deterministic benchmarking enabled.
 
 This guide is designed to get a new developer up to speed on the Metallic kernel architecture and the "Race to 105/160".
 

@@ -267,9 +267,9 @@ fn build_operation<'a, T: TensorElement>(
         || lid == (GemvLoaderMode::Q8CanonicalBias as u32)
         || lid == (GemvLoaderMode::Q8CanonicalDebug as u32);
 
-    // Dense FP16 with transpose_right MUST use SIMD kernel (layout [Out, In]).
-    // Dense FP16 without transpose_right MUST use Legacy kernel (layout [In, Out]).
-    let use_simd_dense = matches!(binding, GemvRhsBinding::Dense(_)) && transpose_right;
+    // Dense FP16 now always uses SIMD-Parallel kernel (layout [Out, In]).
+    // We unified the backend to remove legacy Thread-per-Column.
+    let use_simd_dense = matches!(binding, GemvRhsBinding::Dense(_));
     let use_simd_canonical = matches!(binding, GemvRhsBinding::DenseCanonical(_));
 
     let (tg_width, tile_cols) = if is_simd_q8 || use_simd_dense || use_simd_canonical {
