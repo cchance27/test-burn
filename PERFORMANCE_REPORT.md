@@ -2,14 +2,18 @@
 
 ## Performance History (Latest First)
 
-### FP16 Canonical SIMD & Legacy Cleanup
+### FP16 Canonical SIMD & Parity Resolution
 * **Change Summary**:
-    * **Kernel Optimization**: Implemented `SimdGemvPolicyF16Canonical` using a specialized blocked layout (K-major, 32-element blocks) to enable 128-bit vectorized loads and SIMD reduction.
-    * **Legacy Removal**: Removed duplicate memory representations. `TransformerBlock` and `Qwen25` now strictly use `CanonicalF16Tensor` for the optimized path, and legacy `Tensor<T>` fields are `Option<args>` initialized to `None`.
-    * **Fusion**: Integrated `RMSNorm` and `SwiGLU` fusion into the FP16 canonical path, matching Q8 architecture.
+    * **GEMM Parity Fixed**: Resolved a critical bug in `gemm_f16_canonical_large_n_impl` where an early return prevented threads from participating in the shared A-matrix load. Achieved bit-perfect parity (`max_diff=0`) for $m > 1$.
+    * **MLP Down Projection**: Fixed `bias + residual` panics by decoupling additions into two operations, bypassing MPS backend limitations.
+    * **Kernel Optimization**: `SimdGemvPolicyF16Canonical` now delivers near-peak bandwidth utilization on M3 Pro.
+    * **Fusion**: Fully integrated `RMSNorm` and `SwiGLU` fusion into the FP16 canonical path for $m=1$.
 * **Results (M3 Pro, MAX_TOKENS=256)**:
-    * **FP16 Decode**: **~71.6 tok/s** (Up from ~60-70 tok/s)
-    * **Impact**: Significantly reduced memory overhead by removing duplicate weights and improved throughput via SIMD-optimized kernels.
+    * **FP16 Decode**: **~95-99 tok/s** (Up from ~71.6 tok/s)
+    * **Q8 Decode**: **~136-146 tok/s** (Up from ~131 tok/s)
+    * **Impact**: Bit-perfect correctness achieved for the optimized canonical path. High-speed FP16 inference is now stable for both prefill and decode.
+
+### FP16 Canonical SIMD & Legacy Cleanup (Prior)
 
 
 ### RMSNorm-GEMV Fusion (Q8) + GEMV Variants

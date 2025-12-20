@@ -9,7 +9,8 @@ ALWAYS_INLINE float gemv_compute_inv_rms(
     const uint K,
     const uint lane_id,
     const uint warp_id,
-    threadgroup float *tg_inv_rms
+    threadgroup float *tg_inv_rms,
+    float epsilon
 ) {
     if (K == 0u) {
         if (warp_id == 0u && lane_id == 0u) {
@@ -34,11 +35,21 @@ ALWAYS_INLINE float gemv_compute_inv_rms(
         }
         sum = simd_sum(sum);
         if (lane_id == 0u) {
-            tg_inv_rms[0] = rsqrt(sum / (float)K + GEMV_RMSNORM_EPS);
+            tg_inv_rms[0] = rsqrt(sum / (float)K + epsilon);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
     return tg_inv_rms[0];
+}
+
+ALWAYS_INLINE float gemv_compute_inv_rms(
+    const device half *vector_x,
+    const uint K,
+    const uint lane_id,
+    const uint warp_id,
+    threadgroup float *tg_inv_rms
+) {
+    return gemv_compute_inv_rms(vector_x, K, lane_id, warp_id, tg_inv_rms, GEMV_RMSNORM_EPS);
 }
 
 

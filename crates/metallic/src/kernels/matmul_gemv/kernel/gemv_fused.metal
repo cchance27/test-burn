@@ -191,6 +191,7 @@ struct SwiGluEpilogue {
     const device half *bias_k [[buffer(9)]],
     const device half *bias_v [[buffer(10)]],
     const device half *gamma [[buffer(11)]],
+    const constant float &epsilon [[buffer(12)]],
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
 
@@ -203,7 +204,7 @@ struct SwiGluEpilogue {
     threadgroup float inv_rms_s;
     const uint lane_id = lid.x & 31u;
     const uint warp_id = lid.x / 32u;
-    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s);
+    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s, epsilon);
 
     SimdGemvPolicyF16CanonicalRmsnorm::Params p = {
         (const device half**)data_arr,
@@ -255,6 +256,7 @@ struct SwiGluEpilogue {
     const device half *bias_g [[buffer(5)]],
     const device half *bias_u [[buffer(6)]],
     const device half *gamma [[buffer(7)]],
+    const constant float &epsilon [[buffer(8)]],
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
 
@@ -267,7 +269,7 @@ struct SwiGluEpilogue {
     threadgroup float inv_rms_s;
     const uint lane_id = lid.x & 31u;
     const uint warp_id = lid.x / 32u;
-    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s);
+    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s, epsilon);
 
     SimdGemvPolicyF16CanonicalRmsnorm::Params p = {
         (const device half**)data_arr,

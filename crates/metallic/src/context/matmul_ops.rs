@@ -494,10 +494,6 @@ impl<T: TensorElement> Context<T> {
         alpha_beta: Option<MatmulAlphaBeta<'_, T>>,
         cache: Option<&mut ResourceCache>,
     ) -> Result<Tensor<T>, MetalError> {
-        if bias.is_some() && alpha_beta.is_some() {
-            todo!("bias + alpha/beta epilogues are not implemented yet");
-        }
-
         let mut cache = cache;
 
         match b_any {
@@ -509,7 +505,7 @@ impl<T: TensorElement> Context<T> {
         }
     }
 
-    fn matmul_dense_canonical(
+    pub fn matmul_dense_canonical(
         &mut self,
         a: &Tensor<T>,
         b: &CanonicalF16Tensor<T>,
@@ -768,6 +764,11 @@ impl<T: TensorElement> Context<T> {
     ) -> Result<Tensor<T>, MetalError> {
         let mut cache = cache;
         if let Some(ep) = alpha_beta {
+            if bias.is_some() {
+                return Err(MetalError::OperationNotSupported(
+                    "MPS matmul does not support bias + alpha/beta epilogue yet".into(),
+                ));
+            }
             return self.call::<MatMulMpsAlphaBetaOp>((a, b, ep.output, transpose_a, transpose_b, ep.alpha, ep.beta), cache.as_deref_mut());
         }
 
@@ -1054,10 +1055,11 @@ impl<T: TensorElement> Context<T> {
         // e.g. batch=1, m=1. For now, canonical kernels are strict about this.
         let x_dims = x_flat.dims();
         if x_dims.len() != 2 || x_dims[0] != 1 {
-            // Fallback? Or generic Matmul?
-            // println!("Fallback: qkv_dense_canonical called with x_dims={:?}", x_dims);
-        } else {
-            // println!("HIT: qkv_dense_canonical");
+            // Fallback to separate matmuls
+            let yq = self.matmul_dense_canonical(x_flat, wq, false, false, Some(q_bias), None, None)?;
+            let yk = self.matmul_dense_canonical(x_flat, wk, false, false, Some(k_bias), None, None)?;
+            let yv = self.matmul_dense_canonical(x_flat, wv, false, false, Some(v_bias), None, None)?;
+            return Ok((yq, yk, yv));
         }
 
         let (yq, yk, yv) =
@@ -1072,11 +1074,24 @@ impl<T: TensorElement> Context<T> {
         gate: &crate::tensor::TensorType<T>,
         up: &crate::tensor::TensorType<T>,
         gate_bias: Option<&Tensor<T>>,
-        bias_down: Option<&Tensor<T>>,
+        up_bias: Option<&Tensor<T>>,
     ) -> Result<Tensor<T>, MetalError> {
         match (gate, up) {
             (crate::tensor::TensorType::DenseCanonical(wg), crate::tensor::TensorType::DenseCanonical(wu)) => {
-                self.call::<MatmulF16CanonicalSwiGluOp>((x, (wg, wu), (gate_bias, bias_down)), None)
+                let x_dims = x.dims();
+                if x_dims.len() != 2 || x_dims[0] != 1 {
+                    // Fallback to separate matmuls + silu + mul
+                    let g_out = self.matmul_dense_canonical(x, wg, false, false, gate_bias, None, None)?;
+                    let u_out = self.matmul_dense_canonical(x, wu, false, false, up_bias, None, None)?;
+
+                    use crate::kernels::{elemwise_mul::ElemwiseMulOp, silu::SiluOp};
+
+                    let g_silu = self.call::<SiluOp>(g_out, None)?;
+                    let y = self.call::<ElemwiseMulOp>((g_silu, u_out), None)?;
+                    Ok(y)
+                } else {
+                    self.call::<MatmulF16CanonicalSwiGluOp>((x, (wg, wu), (gate_bias, up_bias)), None)
+                }
             }
             _ => Err(MetalError::InvalidOperation(
                 "SwiGLU only supported for DenseCanonical F16 currently".into(),

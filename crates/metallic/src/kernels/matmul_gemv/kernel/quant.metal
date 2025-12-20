@@ -350,7 +350,6 @@ inline void gemm_q8_canonical_large_n_impl(
     const uint lane_x = tid3.x;
     const uint lane_y = tid3.y;
     const uint col_block = gid.x * TILE_COLS_PER_TG + lane_x * COLS_PER_THREAD;
-    if (col_block >= n) return;
 
     float accum[ROWS_PER_TILE][COLS_PER_THREAD];
     for (uint r=0;r<rows_this_tile;++r) for(uint c=0;c<COLS_PER_THREAD;++c) accum[r][c] = 0.0f;
@@ -472,7 +471,6 @@ inline void gemm_f16_canonical_large_n_impl(
     const uint lane_x = tid3.x;
     const uint lane_y = tid3.y;
     const uint col_block = gid.x * TILE_COLS_PER_TG + lane_x * COLS_PER_THREAD;
-    if (col_block >= n) return;
 
     float accum[ROWS_PER_TILE][COLS_PER_THREAD];
     for (uint r=0;r<rows_this_tile;++r) for(uint c=0;c<COLS_PER_THREAD;++c) accum[r][c] = 0.0f;

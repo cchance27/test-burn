@@ -1590,19 +1590,36 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     );
 
     let mlp_norm_flat_last = mlp_norm_last_view.reshape(vec![m, d_model])?;
-    let ffn_output_flat_last = ctx.call::<SwiGLUOp>(
-        (
+    let ffn_output_flat_last = if let (Some(gate), Some(up), Some(down)) = (&block_last.ffn_gate, &block_last.ffn_up, &block_last.ffn_down)
+    {
+        ctx.call::<SwiGLUOp>(
+            (
+                &mlp_norm_flat_last,
+                gate,
+                &block_last.ffn_gate_bias,
+                up,
+                &block_last.ffn_up_bias,
+                down,
+                &block_last.ffn_down_bias,
+                block_last.ffn_gate_up_weight.as_ref(),
+            ),
+            None,
+        )?
+    } else if let (Some(g_canon), Some(u_canon), Some(d_canon)) =
+        (&block_last.ffn_gate_canon, &block_last.ffn_up_canon, &block_last.ffn_down_canon)
+    {
+        let hidden = ctx.swiglu(
             &mlp_norm_flat_last,
-            block_last.ffn_gate.as_ref().unwrap(),
-            &block_last.ffn_gate_bias,
-            block_last.ffn_up.as_ref().unwrap(),
-            &block_last.ffn_up_bias,
-            block_last.ffn_down.as_ref().unwrap(),
-            &block_last.ffn_down_bias,
-            block_last.ffn_gate_up_weight.as_ref(), // pass Option directly as it's Option<&Tensor>
-        ),
-        None,
-    )?;
+            &TensorType::DenseCanonical(g_canon),
+            &TensorType::DenseCanonical(u_canon),
+            Some(&block_last.ffn_gate_bias),
+            Some(&block_last.ffn_up_bias),
+        )?;
+        // Down proj
+        ctx.matmul_dense_canonical(&hidden, d_canon, false, false, Some(&block_last.ffn_down_bias), None, None)?
+    } else {
+        panic!("Missing FFN weights in final block test!");
+    };
     ctx.synchronize();
     let ffn_output_last = ffn_output_flat_last.reshape(vec![1, seq, d_model])?;
     ctx.synchronize();

@@ -77,6 +77,7 @@ struct F16CanonicalQkvFusedRmsnormOp<T: TensorElement> {
     grid: MTLSize,
     tg: MTLSize,
     profiler_label: GpuProfilerLabel,
+    eps: f32,
 }
 
 impl<T: TensorElement> Operation for F16CanonicalQkvFusedOp<T> {
@@ -165,6 +166,7 @@ impl<T: TensorElement> Operation for F16CanonicalQkvFusedRmsnormOp<T> {
         set_buffer(encoder, 9, bk, bk_off);
         set_buffer(encoder, 10, bv, bv_off);
         set_buffer(encoder, 11, &self.gamma.buf, self.gamma.offset);
+        set_bytes(encoder, 12, &self.eps);
     }
 }
 
@@ -199,6 +201,7 @@ struct F16CanonicalSwiGluRmsnormOp<T: TensorElement> {
     grid: MTLSize,
     tg: MTLSize,
     profiler_label: GpuProfilerLabel,
+    eps: f32,
 }
 
 impl<T: TensorElement> Operation for F16CanonicalSwiGluOp<T> {
@@ -269,6 +272,7 @@ impl<T: TensorElement> Operation for F16CanonicalSwiGluRmsnormOp<T> {
         set_buffer(encoder, 5, bg, bg_off);
         set_buffer(encoder, 6, bu, bu_off);
         set_buffer(encoder, 7, &self.gamma.buf, self.gamma.offset);
+        set_bytes(encoder, 8, &self.eps);
     }
 }
 
@@ -385,6 +389,7 @@ impl CustomKernelInvocable for MatmulF16CanonicalQkvFusedRmsnormOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         &'a Tensor<T>, // Gamma
+        f32,           // Epsilon
         (&'a CanonicalF16Tensor<T>, &'a CanonicalF16Tensor<T>, &'a CanonicalF16Tensor<T>),
         (Option<&'a Tensor<T>>, Option<&'a Tensor<T>>, Option<&'a Tensor<T>>),
     );
@@ -407,7 +412,7 @@ impl CustomKernelInvocable for MatmulF16CanonicalQkvFusedRmsnormOp {
                 dtype: T::DTYPE,
             });
         }
-        let (x, gamma, (wq, wk, wv), (bq, bk, bv)) = args;
+        let (x, gamma, eps, (wq, wk, wv), (bq, bk, bv)) = args;
         let k = x.dims().last().copied().unwrap_or(0);
         let nq = wq.logical_dims[1];
         let nk = wk.logical_dims[1];
@@ -479,6 +484,7 @@ impl CustomKernelInvocable for MatmulF16CanonicalQkvFusedRmsnormOp {
             grid,
             tg,
             profiler_label: label,
+            eps,
         };
         Ok((Box::new(op), (out_q, out_k, out_v)))
     }
@@ -574,6 +580,7 @@ impl DefaultKernelInvocable for MatmulF16CanonicalSwiGluRmsnormOp {
     type Args<'a, T: TensorElement> = (
         &'a Tensor<T>,
         &'a Tensor<T>,
+        f32,
         (&'a CanonicalF16Tensor<T>, &'a CanonicalF16Tensor<T>),
         (Option<&'a Tensor<T>>, Option<&'a Tensor<T>>),
     );
@@ -594,7 +601,7 @@ impl DefaultKernelInvocable for MatmulF16CanonicalSwiGluRmsnormOp {
                 dtype: T::DTYPE,
             });
         }
-        let (x, gamma, (wg, wu), (bg, bu)) = args;
+        let (x, gamma, eps, (wg, wu), (bg, bu)) = args;
         let k = x.dims().last().copied().unwrap_or(0);
         let n0 = wg.logical_dims[1];
         let n1 = wu.logical_dims[1];
@@ -653,6 +660,7 @@ impl DefaultKernelInvocable for MatmulF16CanonicalSwiGluRmsnormOp {
             grid,
             tg,
             profiler_label: label,
+            eps,
         };
         Ok((Box::new(op), y))
     }

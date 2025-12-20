@@ -731,49 +731,112 @@ impl<T: TensorElement> Qwen25<T> {
                     }
                 } else {
                     // Dense path: prefer transposed weights when METALLIC_FP16_FUSED is enabled
-                    ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
-                    let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
-                    breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
-                    let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
-                    let (q_mat, k_mat, v_mat) = if f16_canonical {
+                    // Try to use Fused FP16 Canonical Kernel (RMSNorm + GEMV)
+                    let fused_f16_result = if f16_canonical {
                         if let (Some(wq), Some(wk), Some(wv)) =
                             (&block.attn_q_weight_canon, &block.attn_k_weight_canon, &block.attn_v_weight_canon)
                         {
-                            ctx.qkv(
-                                &x_normed_flat,
-                                QkvWeights::DenseCanonical {
-                                    wq,
-                                    wk,
-                                    wv,
-                                    q_bias: &q_bias,
-                                    k_bias: &k_bias,
-                                    v_bias: &v_bias,
-                                },
-                            )?
+                            ctx.set_pending_gpu_scope(format!("attn_norm_fused_block_{}_op", layer_idx));
+                            let x_flat = x.reshape(vec![m, d_model])?;
+
+                            // Call fused kernel
+                            // Args: (x, gamma, eps, (wq, wk, wv), (bq, bk, bv))
+                            let q_bias = block.attn_qkv_bias.slice(0..d_model)?;
+                            let k_bias = block.attn_qkv_bias.slice(d_model..(d_model + kv_dim))?;
+                            let v_bias = block.attn_qkv_bias.slice((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+
+                            let (q, k, v) = if m == 1 {
+                                let (q, k, v) = ctx.call_custom::<crate::kernels::matmul_gemv::MatmulF16CanonicalQkvFusedRmsnormOp>(
+                                    (
+                                        &x_flat,
+                                        &block.attn_norm_gamma,
+                                        self.config.rms_eps,
+                                        (wq, wk, wv),
+                                        (Some(&q_bias), Some(&k_bias), Some(&v_bias)),
+                                    ),
+                                    None,
+                                )?;
+                                (q, k, v)
+                            } else {
+                                // Fallback for m > 1: Run RMSNorm then QKV
+                                let x_normed = ctx.call::<RMSNormOp>((x.clone(), block.attn_norm_gamma.clone(), d_model as u32), None)?;
+                                let x_flat_normed = x_normed.reshape(vec![m, d_model])?;
+                                let (q, k, v) = ctx.qkv(
+                                    &x_flat_normed,
+                                    QkvWeights::DenseCanonical {
+                                        wq,
+                                        wk,
+                                        wv,
+                                        q_bias: &q_bias,
+                                        k_bias: &k_bias,
+                                        v_bias: &v_bias,
+                                    },
+                                )?;
+                                (q, k, v)
+                            };
+
+                            used_fused_norm = true;
+                            Some((q, k, v))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(res) = fused_f16_result {
+                        res
+                    } else {
+                        // Fallback: Standalone RMSNorm + GEMV
+                        ctx.set_pending_gpu_scope(format!("attn_norm_block_{}_op", layer_idx));
+                        let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
+                        breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
+                        let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
+
+                        if f16_canonical {
+                            if let (Some(wq), Some(wk), Some(wv)) =
+                                (&block.attn_q_weight_canon, &block.attn_k_weight_canon, &block.attn_v_weight_canon)
+                            {
+                                // Pass references to biases
+                                let q_bias = block.attn_qkv_bias.slice(0..d_model)?;
+                                let k_bias = block.attn_qkv_bias.slice(d_model..(d_model + kv_dim))?;
+                                let v_bias = block.attn_qkv_bias.slice((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+
+                                ctx.qkv(
+                                    &x_normed_flat,
+                                    QkvWeights::DenseCanonical {
+                                        wq,
+                                        wk,
+                                        wv,
+                                        q_bias: &q_bias,
+                                        k_bias: &k_bias,
+                                        v_bias: &v_bias,
+                                    },
+                                )?
+                            } else if let Some(w) = &block.attn_qkv_weight {
+                                // Fallback to separate/manual
+                                let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w, Some(&block.attn_qkv_bias))?;
+                                let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
+                                let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
+                                let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+                                (q_mat, k_mat, v_mat)
+                            } else {
+                                return Err(MetalError::InvalidOperation("Missing attn_qkv_weight for F16 fallback".to_string()));
+                            }
                         } else if let Some(w) = &block.attn_qkv_weight {
-                            // Fallback to separate/manual
+                            // QKV weight is already transposed during loading via copy_weight_transposed_into_fused
                             let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w, Some(&block.attn_qkv_bias))?;
                             let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
                             let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
                             let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
                             (q_mat, k_mat, v_mat)
                         } else {
-                            return Err(MetalError::InvalidOperation("Missing attn_qkv_weight for F16 fallback".to_string()));
+                            return Err(MetalError::InvalidOperation(
+                                "Missing attn_qkv_weight for F32 fallback in qkv".to_string(),
+                            ));
                         }
-                    } else if let Some(w) = &block.attn_qkv_weight {
-                        // QKV weight is already transposed during loading via copy_weight_transposed_into_fused
-                        let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w, Some(&block.attn_qkv_bias))?;
-                        let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
-                        let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
-                        let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
-                        (q_mat, k_mat, v_mat)
-                    } else {
-                        return Err(MetalError::InvalidOperation(
-                            "Missing attn_qkv_weight for F32 fallback in qkv".to_string(),
-                        ));
-                    };
-                    (q_mat, k_mat, v_mat)
+                    }
                 };
                 if used_fused_norm {
                     breakdown.insert("attn_norm_fused".to_string(), (x_flat.len() * bytes_per_element) as u64);
@@ -1000,7 +1063,9 @@ impl<T: TensorElement> Qwen25<T> {
                 ctx.set_pending_gpu_scope(format!("mlp_residual_clone_block_{}_op", layer_idx));
                 let resid_mlp = x.clone();
                 let x_mlp_flat = x.reshape(vec![m, d_model])?;
-                let use_fused_swiglu = block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some();
+                let use_fused_swiglu_q8 = block.ffn_gate_q8.is_some() && block.ffn_up_q8.is_some();
+                let use_fused_swiglu_f16 = f16_canonical && block.ffn_gate_canon.is_some() && block.ffn_up_canon.is_some();
+                let use_fused_swiglu = use_fused_swiglu_q8 || use_fused_swiglu_f16;
                 let x_normed_mlp_flat = if use_fused_swiglu {
                     None
                 } else {
@@ -1020,7 +1085,7 @@ impl<T: TensorElement> Qwen25<T> {
                 let ffn_output_flat = ctx.with_gpu_scope(format!("mlp_swiglu_block_{}_op", layer_idx), |ctx| {
                     // gate/up projections fused (quant) -> [m, ff_dim] each
                     // gate/up projections fused (quant) -> [m, ff_dim] each
-                    let hidden = if use_fused_swiglu {
+                    let hidden = if use_fused_swiglu_q8 {
                         let gq8 = block.ffn_gate_q8.as_ref().unwrap();
                         let uq8 = block.ffn_up_q8.as_ref().unwrap();
                         ctx.set_pending_gpu_scope(format!("mlp_swiglu_fused_block_{}_op", layer_idx));
@@ -1029,6 +1094,21 @@ impl<T: TensorElement> Qwen25<T> {
                                 &x_mlp_flat,
                                 &block.ffn_norm_gamma,
                                 (&QuantizedTensor::Q8_0(gq8), &QuantizedTensor::Q8_0(uq8)),
+                                (Some(&block.ffn_gate_bias), Some(&block.ffn_up_bias)),
+                            ),
+                            None,
+                        )?
+                    } else if use_fused_swiglu_f16 && m == 1 {
+                        let wg = block.ffn_gate_canon.as_ref().unwrap();
+                        let wu = block.ffn_up_canon.as_ref().unwrap();
+                        ctx.set_pending_gpu_scope(format!("mlp_swiglu_fused_block_{}_op", layer_idx));
+                        // Args: (x, gamma, eps, (wg, wu), (bg, bu))
+                        ctx.call::<crate::kernels::matmul_gemv::MatmulF16CanonicalSwiGluRmsnormOp>(
+                            (
+                                &x_mlp_flat,
+                                &block.ffn_norm_gamma,
+                                self.config.rms_eps,
+                                (wg, wu),
                                 (Some(&block.ffn_gate_bias), Some(&block.ffn_up_bias)),
                             ),
                             None,
@@ -1155,19 +1235,17 @@ impl<T: TensorElement> Qwen25<T> {
                                 None,
                             )
                         } else {
-                            ctx.matmul(
+                            let dense_out = ctx.matmul(
                                 &hidden,
                                 &TensorType::Dense(block.ffn_down.as_ref().unwrap()),
                                 false,
                                 false, // Already [Out, In] layout like Q8
                                 Some(&block.ffn_down_bias),
-                                Some(MatmulAlphaBeta {
-                                    output: &out,
-                                    alpha: 1.0,
-                                    beta: 1.0,
-                                }),
                                 None,
-                            )
+                                None,
+                            )?;
+                            let out_new = ctx.call::<crate::kernels::elemwise_add::ElemwiseAddOp>((out, dense_out), None)?;
+                            Ok(out_new)
                         }
                     }
                 })?;

@@ -1,8 +1,8 @@
 # Metallic Performance Optimization - Quick Start Guide
 
 **Goal:** Reach **105 tok/s (FP16)** and **160 tok/s (Q8)** on M3 Pro.
-**Current (after Canonical Opt):** ~71.6 tok/s (FP16 decode) | ~131 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
-**Latest Status:** FP16 Canonical Kernels implemented and active. Parity with Q8 SIMD architecture achieved.
+**Current (after Bit-Perfect Parity Fix):** ~95-99 tok/s (FP16 decode) | ~136-146 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
+**Latest Status:** FP16 Canonical Kernels fully integrated with bit-perfect parity (`max_diff=0`) for GEMM. Fused RMSNorm kernels active. Near-peak bandwidth utilization achieved.
 
 This guide is designed to get a new developer up to speed on the Metallic kernel architecture and the "Race to 105/160".
 
@@ -113,12 +113,12 @@ We now support `METALLIC_GEMV_COLS_PER_TG=2|4|8` (maps to threadgroup widths 64/
 Use `cargo bench -q --bench gemv_variant_bench -- --warm-up-time 1 --measurement-time 3` and compare runs with different env values.
 
 ## Known Issues & Parity Gaps
-- **Output Projection (Prefill)**: Still uses dense `[N,K]` + `transpose_b=true` when `m>1`.
+- **Output Projection (Prefill)**: Still uses dense `[N,K]` + `transpose_b=true` when `m>1` - however, bit-perfect parity is now achieved.
 - **Fused Kernels (Decode)**:
-    - **RMSNorm+QKV**: Implemented for FP16 Canonical.
-    - **RMSNorm+SwiGLU**: Implemented for FP16 Canonical.
-- **Prefill GEMM**: Canonical path slower than MLX/MPS; needs tuning.
-- **Dispatcher**: Generic dispatcher doesn't yet auto-select canonical FP16 kernels; manually selected in model code.
+    - **RMSNorm+QKV**: Fully implemented and verified for FP16 Canonical.
+    - **RMSNorm+SwiGLU**: Fully implemented and verified for FP16 Canonical.
+- **Prefill GEMM**: Optimization needed; FP16 prefill is currently ~1.5x slower than Q8.
+- **Dispatcher**: Manual selection remains in model code for the absolute fastest path, though canonical support is broadening, This is critical to finish
 
 ## Testing Performance
 Always request that someone with a M3 Pro performs the run_throughput.sh and run_throughput_w_prof.sh scripts, and processes the results with the analyze_tmpfiles.sh to aggregate the txt files. For your review with full performance mode and the prof_ files that include the kernel materialization (much slower but allows us to see individual step/kernel comparisons and % of time spent in each step/kernel)
