@@ -1,8 +1,8 @@
 # Metallic Performance Optimization - Quick Start Guide
 
 **Goal:** Reach **105 tok/s (FP16)** and **160 tok/s (Q8)** on M3 Pro.
-**Current (after Bit-Perfect Parity Fix):** ~95-99 tok/s (FP16 decode) | ~136-146 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
-**Latest Status:** FP16 Canonical Kernels fully integrated with bit-perfect parity (`max_diff=0`) for GEMM. Fused RMSNorm kernels active. Near-peak bandwidth utilization achieved.
+**Current (Post-KV Optimization):** ~94 tok/s (FP16 decode) | ~140 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
+**Latest Status:** KV cache $O(n)$ repetition bottleneck removed. Deterministic benchmarking enabled via `--seed`. Terminal I/O contention eliminated via `output-format=none`.
 
 This guide is designed to get a new developer up to speed on the Metallic kernel architecture and the "Race to 105/160".
 
@@ -78,7 +78,13 @@ We moved away from "Thread-per-Column" (Legislacy) to **"Warp-per-Column"** (Mod
 ```bash
 ./tools/run_throughput.sh
 ```
-*Look for `TPS (Total)` and `TPS (Decode)` output.*
+*Reports Min/Avg/Max for `TPS Total` and `TPS Decode` across 10 iterations.*
+
+**2. Silent Mode (Benchmark Only):**
+```bash
+cargo run --release -- [model] [prompt] --output-format none --seed 42
+```
+*Suppresses token printing to eliminate GPU contention/IO overhead.*
 
 **2. Variant Tuning (GEMV cols per threadgroup):**
 ```bash

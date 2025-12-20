@@ -163,7 +163,7 @@ fn main() -> AppResult<()> {
     // Based on output format, run the appropriate mode
     match cli_config.output_format {
         cli::config::OutputFormat::Tui => run_tui_mode(&receiver, &rx, generation_handle)?,
-        cli::config::OutputFormat::Text => run_text_mode(&cli_config, &receiver, &rx, generation_handle)?,
+        cli::config::OutputFormat::Text | cli::config::OutputFormat::None => run_text_mode(&cli_config, &receiver, &rx, generation_handle)?,
         cli::config::OutputFormat::Json => run_json_mode(&receiver, &rx, generation_handle)?,
     }
 
@@ -467,7 +467,7 @@ fn run_text_mode(
                     prompt_processing: prompt,
                     ..
                 } => {
-                    if !cli_config.quiet {
+                    if !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
                         print!("{}", text);
                         // Only flush on newlines to reduce terminal I/O and GPU contention
                         if text.contains('\n') || generated_tokens % 16 == 0 {

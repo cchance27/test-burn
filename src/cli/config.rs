@@ -25,10 +25,6 @@ pub struct CliConfig {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Suppress token output (metrics only)
-    #[arg(short, long)]
-    pub quiet: bool,
-
     /// Output format (json, text, tui)
     #[arg(long, value_enum, default_value_t = OutputFormat::Tui)]
     pub output_format: OutputFormat,
@@ -71,6 +67,8 @@ pub enum OutputFormat {
     Text,
     /// JSON output mode
     Json,
+    /// No token output (metrics only)
+    None,
 }
 
 /// Global backend override that applies to all kernels when supported.
@@ -128,7 +126,6 @@ mod tests {
             generation: GenerationConfig::default(),
             backend: None,
             verbose: 0,
-            quiet: false,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
         };
@@ -144,7 +141,6 @@ mod tests {
             generation: GenerationConfig::default(),
             backend: None,
             verbose: 0,
-            quiet: false,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
         };

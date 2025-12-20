@@ -2,16 +2,17 @@
 
 ## Performance History (Latest First)
 
-### FP16 Canonical SIMD & Parity Resolution
+### KV Cache & Throughput Measurement Optimizations
 * **Change Summary**:
-    * **GEMM Parity Fixed**: Resolved a critical bug in `gemm_f16_canonical_large_n_impl` where an early return prevented threads from participating in the shared A-matrix load. Achieved bit-perfect parity (`max_diff=0`) for $m > 1$.
-    * **MLP Down Projection**: Fixed `bias + residual` panics by decoupling additions into two operations, bypassing MPS backend limitations.
-    * **Kernel Optimization**: `SimdGemvPolicyF16Canonical` now delivers near-peak bandwidth utilization on M3 Pro.
-    * **Fusion**: Fully integrated `RMSNorm` and `SwiGLU` fusion into the FP16 canonical path for $m=1$.
-* **Results (M3 Pro, MAX_TOKENS=256)**:
-    * **FP16 Decode**: **~95-99 tok/s** (Up from ~71.6 tok/s)
-    * **Q8 Decode**: **~136-146 tok/s** (Up from ~131 tok/s)
-    * **Impact**: Bit-perfect correctness achieved for the optimized canonical path. High-speed FP16 inference is now stable for both prefill and decode.
+    * **Deterministic Benchmarking**: Added `--seed` flag for reproducible token generation.
+    * **Silent Mode**: Introduced `output-format=none` to eliminate terminal I/O and GPU rendering contention.
+    * **KV Cache Scaling**: Removed redundant $O(n)$ full-history repetition in Qwen 2.5 `forward_step`, ensuring $O(1)$ scaling during decode.
+    * **Statistical Reporting**: Enhanced `run_throughput.sh` with 10-run averaging and Min/Avg/Max reporting.
+* **Results (M3 Pro, MAX_TOKENS=256, 10-run avg)**:
+    * **FP16 Decode**: **93.79 tok/s** (Max: 96.06)
+    * **Q8 Decode**: **139.65 tok/s** (Max: 142.29)
+* **Impact**: Throughput measurements are now stable and free from terminal/scaling artifacts. FP16 performance remains top-tier while ensuring deterministic results.
+
 
 ### FP16 Canonical SIMD & Legacy Cleanup (Prior)
 

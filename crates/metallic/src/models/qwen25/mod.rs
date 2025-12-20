@@ -954,34 +954,11 @@ impl<T: TensorElement> Qwen25<T> {
                 let k_repeated_history = Qwen25::gather_cache_history(&cache_entry.k, pos + 1, ctx)?;
                 let v_repeated_history = Qwen25::gather_cache_history(&cache_entry.v, pos + 1, ctx)?;
                 cpu_accum += cpu_chk.elapsed();
-                let (k_repeated, v_repeated) = ctx.with_gpu_scope(format!("kv_repeat_block_{}_op", layer_idx), |ctx| {
-                    let k_repeated = Qwen25::repeat_kv_heads(
-                        &k_repeated_history,
-                        group_size,
-                        batch,
-                        n_kv_heads,
-                        n_heads,
-                        kv_head_dim,
-                        layer_idx,
-                        RepeatKvWorkspaceKind::Key,
-                        ctx,
-                    )?;
-                    let v_repeated = Qwen25::repeat_kv_heads(
-                        &v_repeated_history,
-                        group_size,
-                        batch,
-                        n_kv_heads,
-                        n_heads,
-                        kv_head_dim,
-                        layer_idx,
-                        RepeatKvWorkspaceKind::Value,
-                        ctx,
-                    )?;
-                    Ok::<_, MetalError>((k_repeated, v_repeated))
-                })?;
+                let (k_repeated, v_repeated) = (k_repeated_history.tensor.clone(), v_repeated_history.tensor.clone());
+
                 breakdown.insert(
                     "kv_repeat".to_string(),
-                    (k_repeated.len() * bytes_per_element + v_repeated.len() * bytes_per_element) as u64,
+                    0, // No work done here as heads are already repeated in the cache
                 );
                 cpu_chk = Instant::now();
 
