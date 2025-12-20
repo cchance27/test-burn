@@ -2,17 +2,29 @@
 
 ## Performance History (Latest First)
 
+### Layout Unification (Dense/Q8 Unified)
+* **Change Summary**:
+    * Unified dense FP16 weight layouts with Q8 by transposing during loading via `copy_weight_transposed_into_fused`.
+    * All weights now stored in `[In, Out]` layout with `transpose_right=false` throughout.
+    * Removed redundant `_transposed` optional fields and post-load transpose step.
+    * FFN gate/up/down now use separate tensor allocations instead of fused slices.
+* **Results (M3 Pro, MAX_TOKENS=256, run_throughput.sh)**:
+    * **FP16 Total**: **57.74 tok/s** | **Decode**: **69.38 tok/s**
+    * **Q8 Total**: **125.13 tok/s** | **Decode**: **149.56 tok/s**
+* **Notes**:
+    * Dense path now unified with Q8 layout, enabling future kernel code deduplication.
+    * Next step: FP16 can now use the same SIMD helpers as Q8.
+
 ### RMSNorm-GEMV Fusion (Q8) + GEMV Variants
 * **Change Summary**:
     * Added RMSNorm-fused GEMV for Q8 paths (QKV + SwiGLU), reducing extra read/write traffic.
     * Added `METALLIC_GEMV_COLS_PER_TG=2|4|8` variants for GEMV tuning.
-    * **Important:** Dense FP16 fused GEMV is **disabled** due to weight layout mismatch (row-major [K,N] vs GEMV column-major). Enabling it produces corrupted output.
+    * **Important:** Dense FP16 fused GEMV was disabled due to weight layout mismatch - now resolved in Layout Unification above.
 * **Results (M3 Pro, MAX_TOKENS=256, run_throughput.sh)**:
     * **FP16 Decode**: **~63–65 tok/s** (regression vs prior ~70 tok/s)
     * **Q8 Decode**: **~130–133 tok/s** (+~35 tok/s vs prior)
 * **Notes**:
     * Profiling runs (`run_throughput_w_prof.sh`) are **much slower** and should not be compared to non-prof throughput numbers.
-    * Current divergence: Q8 benefits from fused path, FP16 does not until layout is unified.
 
 ### Fused SwiGLU & Occupancy Tuning
 * **Change Summary**:
@@ -58,10 +70,10 @@
 
 To close the remaining gap (~96 -> 160), we must move beyond single-kernel optimization.
 
-### 0. Unify Dense/Q8 GEMV Layouts (Blocker)
-**Theory**: Dense weights are row-major [K,N], while GEMV kernels expect column-major [N,K].
-**Target**: Choose one: (A) store dense weights transposed at load time, or (B) add a strided GEMV path that reads row-major efficiently.
-**Impact**: Unlocks FP16 RMSNorm fusion and prevents dense/quant code divergence.
+### 0. ~~Unify Dense/Q8 GEMV Layouts~~ ✅ RESOLVED
+**Status**: Completed in Layout Unification update.
+**Summary**: All dense weights now transposed during loading via `copy_weight_transposed_into_fused`, producing `[In, Out]` layout. Dense path uses `transpose_right=false` matching Q8.
+**Impact**: FP16 can now use the same SIMD helpers and fused kernels as Q8.
 
 ### 1. WMMA/AMX and Layout Optimizations
 **Theory**: WMMA/AMX can provide significant performance improvements for GEMV and related operations.

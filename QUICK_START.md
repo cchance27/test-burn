@@ -1,7 +1,7 @@
 # Metallic Performance Optimization - Quick Start Guide
 
 **Goal:** Reach **105 tok/s (FP16)** and **160 tok/s (Q8)** on M3 Pro.
-**Current:** ~63–65 tok/s (FP16) | ~130–133 tok/s (Q8) using `MAX_TOKENS=256` on M3 Pro.
+**Current (after Layout Unification):** ~69 tok/s (FP16 decode) | ~150 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
 
 This guide is designed to get a new developer up to speed on the Metallic kernel architecture and the "Race to 105/160".
 
@@ -91,10 +91,9 @@ METALLIC_GEMV_COLS_PER_TG=8 ./tools/run_throughput.sh
 
 The current kernels are efficient, The remaining gap is likely **Overhead** and **Lack of Fusion**.
 
-### 0. Unify Dense/Q8 Layouts (Blocker)
-Dense weights are row-major [K,N] while GEMV expects column-major [N,K]. This blocks FP16 RMSNorm fusion and creates code divergence.
-- **Option A:** Store dense weights transposed at load time.
-- **Option B:** Add a strided GEMV path that reads row-major efficiently.
+### 0. ~~Unify Dense/Q8 Layouts~~ ✅ RESOLVED
+Dense weights now transposed during loading via `copy_weight_transposed_into_fused`, producing `[In, Out]` layout. Dense path uses `transpose_right=false` matching Q8.
+- **Result:** FP16 can now use same SIMD helpers and fused kernels as Q8.
 
 ### 1. Kernel Fusion (Start Here)
 Fuse `RMSNorm` into the `GEMV` kernel input.
@@ -112,7 +111,7 @@ We now support `METALLIC_GEMV_COLS_PER_TG=2|4|8` (maps to threadgroup widths 64/
 Use `cargo bench -q --bench gemv_variant_bench -- --warm-up-time 1 --measurement-time 3` and compare runs with different env values.
 
 ## Known Issues
-- **FP16 fused GEMV is disabled** due to dense weight layout mismatch. Enabling it yields corrupted output. Fix by unifying layouts (see roadmap).
+- ~~**FP16 fused GEMV was disabled**~~ - Now resolved. Dense weight layout unified with Q8 via `copy_weight_transposed_into_fused`.
 
 ## Testing Performance
 Always request that someone with a M3 Pro performs the run_throughput.sh and run_throughput_w_prof.sh scripts, and processes the results with the analyze_tmpfiles.sh to aggregate the txt files. For your review with full performance mode and the prof_ files that include the kernel materialization (much slower but allows us to see individual step/kernel comparisons and % of time spent in each step/kernel)

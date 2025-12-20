@@ -107,7 +107,7 @@ impl<T: TensorElement> Qwen25<T> {
             x_flat,
             &TensorType::Dense(weight_transposed),
             false,
-            true, // transpose_right because weight is [N, K]
+            false, // QKV loading already produces [Out, In] layout
             bias,
             None,
             None,
@@ -638,10 +638,8 @@ impl<T: TensorElement> Qwen25<T> {
                     breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                     let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
-                    // Use transposed weights (unified layout with Q8)
-                    let w_t = block.attn_qkv_weight_transposed.as_ref().expect("FP16 transposed weights missing");
-                    // Transposed weight is [qkv_out_dim, d_model], use with transpose_right=true
-                    let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w_t, Some(&block.attn_qkv_bias))?;
+                    // QKV weight is already transposed during loading via copy_weight_transposed_into_fused
+                    let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, &block.attn_qkv_weight, Some(&block.attn_qkv_bias))?;
                     // Split into Q, K, V using slice_last_dim (same pattern as qkv_dense)
                     let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
                     let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
@@ -905,13 +903,12 @@ impl<T: TensorElement> Qwen25<T> {
                                     None,
                                 )?
                             } else {
-                                // Dense path: use transposed weights (unified with Q8)
-                                let w_t = block.ffn_gate_transposed.as_ref().unwrap_or(&block.ffn_gate);
+                                // Dense path: loading already transposes to [Out, In] layout
                                 ctx.matmul(
                                     x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Dense(w_t),
+                                    &TensorType::Dense(&block.ffn_gate),
                                     false,
-                                    true, // transpose_right for column-major weights
+                                    false, // Already [Out, In] layout like Q8
                                     None,
                                     None,
                                     None,
@@ -931,13 +928,12 @@ impl<T: TensorElement> Qwen25<T> {
                                     None,
                                 )?
                             } else {
-                                // Dense path: use transposed weights (unified with Q8)
-                                let w_t = block.ffn_up_transposed.as_ref().unwrap_or(&block.ffn_up);
+                                // Dense path: loading already transposes to [Out, In] layout
                                 ctx.matmul(
                                     x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Dense(w_t),
+                                    &TensorType::Dense(&block.ffn_up),
                                     false,
-                                    true, // transpose_right for column-major weights
+                                    false, // Already [Out, In] layout like Q8
                                     None,
                                     None,
                                     None,
@@ -987,14 +983,13 @@ impl<T: TensorElement> Qwen25<T> {
                         )?;
                         Ok(out)
                     } else {
-                        // Dense path: use transposed weights (unified with Q8)
+                        // Dense path: loading already transposes to [Out, In] layout
                         let out = resid_mlp.reshape(vec![m, d_model])?;
-                        let w_t = block.ffn_down_transposed.as_ref().unwrap_or(&block.ffn_down);
                         ctx.matmul(
                             &hidden,
-                            &TensorType::Dense(w_t),
+                            &TensorType::Dense(&block.ffn_down),
                             false,
-                            true, // transpose_right for column-major weights
+                            false, // Already [Out, In] layout like Q8
                             None,
                             Some(MatmulAlphaBeta {
                                 output: &out,

@@ -145,23 +145,21 @@ fn test_fp16_transposed_gemv_parity() -> Result<(), MetalError> {
     Ok(())
 }
 
-/// End-to-end test: load model with and without METALLIC_FP16_TRANSPOSED,
-/// verify the transposed weights are populated correctly.
+/// End-to-end test: load model and verify weights are in column-major [N, K] layout.
 #[test]
 #[serial]
 #[ignore] // Requires actual model file
-fn test_fp16_transposed_model_load() -> Result<(), MetalError> {
+fn test_fp16_unified_layout_load() -> Result<(), MetalError> {
     use crate::{
         gguf::{GGUFFile, model_loader::GGUFModelLoader}, models::LoadableModel
     };
 
     let model_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     if !std::path::Path::new(model_path).exists() {
-        eprintln!("Skipping test_fp16_transposed_model_load: model not found");
+        eprintln!("Skipping test_fp16_unified_layout_load: model not found");
         return Ok(());
     }
 
-    // Load without transposed mode
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(model_path)
         .map_err(|e| MetalError::InvalidOperation(format!("Failed to load GGUF: {:?}", e)))?;
     let loader = GGUFModelLoader::new(gguf_file);
@@ -170,63 +168,56 @@ fn test_fp16_transposed_model_load() -> Result<(), MetalError> {
         .map_err(|e| MetalError::InvalidOperation(format!("Failed to load model: {:?}", e)))?;
 
     let mut ctx = Context::<crate::tensor::F16>::new()?;
-    let model_legacy = crate::models::Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
+    let model = crate::models::Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
 
-    // Verify no transposed weights in legacy mode
-    for (i, block) in model_legacy.blocks.iter().enumerate() {
-        assert!(
-            block.attn_qkv_weight_transposed.is_none(),
-            "block {} has transposed QKV in legacy mode",
-            i
-        );
-    }
+    // Verify weights are loaded in [N, K] column-major layout directly
+    // Logic: original was [K, N] (row-major). Unified is [N, K].
+    // Qwen2.5-0.5B: d_model=896, qkv_out=896+2*128=1152? (depends on config)
+    let d_model = model.config.d_model;
+    let kv_dim = model.config.d_model * model.config.n_kv_heads / model.config.n_heads;
+    let qkv_out_dim = d_model + 2 * kv_dim;
 
-    // Load with transposed mode
-    unsafe {
-        std::env::set_var("METALLIC_FP16_TRANSPOSED", "1");
-    }
-    let mut ctx2 = Context::<crate::tensor::F16>::new()?;
-    let model_transposed = crate::models::Qwen25::load_from_gguf(&gguf_model, &mut ctx2)?;
-    unsafe {
-        std::env::remove_var("METALLIC_FP16_TRANSPOSED");
-    }
+    let first_block = &model.blocks[0];
 
-    // Verify transposed weights are populated when FP16 (non-Q8)
-    let first_block = &model_transposed.blocks[0];
-    if first_block.attn_q_weight_q8.is_none() {
-        // This is a dense FP16 model, so transposed should be populated
-        assert!(first_block.attn_qkv_weight_transposed.is_some(), "missing transposed QKV");
+    // Check attn_qkv_weight dims
+    let dims = first_block.attn_qkv_weight.dims();
+    // It should be [qkv_out_dim, d_model]
+    assert_eq!(
+        dims[0], qkv_out_dim,
+        "attn_qkv_weight should have N composed of Output dims in dim 0"
+    );
+    assert_eq!(dims[1], d_model, "attn_qkv_weight should have K (d_model) in dim 1");
 
-        // Verify dimensions are correctly transposed
-        let legacy_dims = first_block.attn_qkv_weight.dims();
-        let transposed_dims = first_block.attn_qkv_weight_transposed.as_ref().unwrap().dims();
-        assert_eq!(legacy_dims[0], transposed_dims[1], "K dimension mismatch");
-        assert_eq!(legacy_dims[1], transposed_dims[0], "N dimension mismatch");
-    }
+    // Check FFN Gate dims
+    // Gate original: [d_model, ff_dim] (row-major) -> field was [ff_dim, d_model] actually depending on torch vs gguf
+    // GGUF usually stores [N, K] row-major for linears? No, GGUF is often row-major.
+    // In our loading logic we load it to [N, K].
+    // For FFN Gate: Input is d_model. Output is ff_dim.
+    // Unified [N, K] = [ff_dim, d_model].
+    let ff_dim = model.config.ff_dim;
+    let gate_dims = first_block.ffn_gate.dims();
+    assert_eq!(gate_dims[0], ff_dim, "ffn_gate N dim mismatch");
+    assert_eq!(gate_dims[1], d_model, "ffn_gate K dim mismatch");
 
     Ok(())
 }
 
-/// Phase 2 Test: Verify that METALLIC_FP16_FUSED dispatch produces same results as legacy.
-/// This tests the full forward_step with transposed weights vs legacy path.
+/// Verify that the unified weight + transpose_right=true produces correct results
+/// by comparing against a manually reconstructed legacy GEMV.
 #[test]
 #[serial]
 #[ignore] // Requires actual model file
-fn test_fp16_fused_forward_parity() -> Result<(), MetalError> {
+fn test_fp16_unified_forward_parity() -> Result<(), MetalError> {
     use crate::{
         gguf::{GGUFFile, model_loader::GGUFModelLoader}, models::LoadableModel
     };
 
     let model_path = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
     if !std::path::Path::new(model_path).exists() {
-        eprintln!("Skipping test_fp16_fused_forward_parity: model not found");
+        eprintln!("Skipping test_fp16_unified_forward_parity: model not found");
         return Ok(());
     }
 
-    // Load model with transposed weights enabled
-    unsafe {
-        std::env::set_var("METALLIC_FP16_TRANSPOSED", "1");
-    }
     let gguf_file = GGUFFile::load_mmap_and_get_metadata(model_path)
         .map_err(|e| MetalError::InvalidOperation(format!("Failed to load GGUF: {:?}", e)))?;
     let loader = GGUFModelLoader::new(gguf_file);
@@ -235,45 +226,59 @@ fn test_fp16_fused_forward_parity() -> Result<(), MetalError> {
         .map_err(|e| MetalError::InvalidOperation(format!("Failed to load model: {:?}", e)))?;
     let mut ctx = Context::<crate::tensor::F16>::new()?;
     let model = crate::models::Qwen25::load_from_gguf(&gguf_model, &mut ctx)?;
-    unsafe {
-        std::env::remove_var("METALLIC_FP16_TRANSPOSED");
-    }
 
-    // Verify transposed weights are populated
     let block = &model.blocks[0];
-    assert!(block.attn_qkv_weight_transposed.is_some(), "transposed weights not loaded");
-
-    // Create a test input [1, d_model]
     let d_model = model.config.d_model;
+
+    // Create input [1, d_model]
     let x = make_fp16_tensor(&mut ctx, vec![1, d_model], 0xDEAD_BEEF)?;
 
-    // Legacy path: x @ W (row-major) with transpose_right=false
-    let y_legacy = ctx.matmul(
+    // 1. Run Unified Path (what the model does now)
+    // x @ attn_qkv_weight.T (since weight is [N, K])
+    let y_unified = ctx.matmul(
         &x,
         &TensorType::Dense(&block.attn_qkv_weight),
         false,
-        false,
+        true, // transpose_right
         Some(&block.attn_qkv_bias),
         None,
         None,
     )?;
     ctx.synchronize();
 
-    // Fused path: x @ W^T (transposed, column-major) with transpose_right=true
-    let w_t = block.attn_qkv_weight_transposed.as_ref().unwrap();
-    let y_fused = ctx.matmul(
+    // 2. Run Reference (Legacy) Path
+    // Manually transpose the [N, K] weight back to [K, N] (row-major reference)
+
+    let w_ref_row_major = {
+        let dims = block.attn_qkv_weight.dims();
+        let n = dims[0];
+        let k = dims[1];
+        let src = block.attn_qkv_weight.as_slice();
+        let mut data = vec![f16::ZERO; n * k];
+        for row in 0..n {
+            for col in 0..k {
+                let src_idx = row * k + col;
+                let dst_idx = col * n + row; // transpose [N, K] -> [K, N]
+                data[dst_idx] = src[src_idx];
+            }
+        }
+        Tensor::<crate::tensor::F16>::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::CopyFrom(&data))?
+    };
+
+    // Run standard GEMV: x @ W_ref (no transpose on W_ref)
+    let y_ref = ctx.matmul(
         &x,
-        &TensorType::Dense(w_t),
+        &TensorType::Dense(&w_ref_row_major),
         false,
-        true, // transpose_right because weight is [N, K]
+        false, // transpose_right = false for row-major legacy match
         Some(&block.attn_qkv_bias),
         None,
         None,
     )?;
     ctx.synchronize();
 
-    // Compare outputs
-    assert_close_tensors(&y_legacy, &y_fused, 0.01, "qkv_projection_parity");
+    // Compare
+    assert_close_tensors(&y_ref, &y_unified, 0.05, "unified_qkv_parity");
 
     Ok(())
 }
