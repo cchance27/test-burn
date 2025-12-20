@@ -423,6 +423,222 @@ struct SimdGemvPolicyF16Rmsnorm {
     }
 };
 
+// =================================================================================================
+// FP16 Canonical Policy (k-block-major layout)
+// =================================================================================================
+
+struct SimdGemvPolicyF16Canonical {
+    struct Params {
+        const device half **data;
+        uint weights_per_block;
+    };
+
+    static constant uint FAST_K_CHUNK_SIZE = 256;
+    static constant uint SAFE_K_CHUNK_SIZE = 256;
+
+    uint lane_id;
+    uint block_in_group;
+    uint sub_offset;
+    uint sub_lane;
+
+    const device half *ptr_w[3];
+    uint stride_w[3];
+
+    float4 xv0, xv1;
+    uint block_idx_0, block_idx_1, total_blocks;
+    uint weights_per_block;
+
+    template<uint HEADS>
+    void init(Params p, uint3 gid, uint3 lid, uint logical_col, uint K, const uint N[HEADS]) {
+        lane_id = lid.x & 31u;
+        block_in_group = lane_id / 8u;
+        sub_lane = lane_id % 8u;
+        sub_offset = sub_lane * 4u;
+        weights_per_block = p.weights_per_block;
+
+        for (uint h = 0; h < HEADS; ++h) {
+            stride_w[h] = N[h] * weights_per_block;
+            ptr_w[h] = p.data[h] + logical_col * weights_per_block + (block_in_group * stride_w[h]);
+        }
+        total_blocks = (K + weights_per_block - 1u) / weights_per_block;
+    }
+
+    void load_x_fast(const device half* vector_x, uint k_base) {
+        uint k_idx_0 = k_base + block_in_group * weights_per_block + sub_offset;
+        uint k_idx_1 = k_idx_0 + 4u * weights_per_block;
+
+        xv0 = float4(*(const device half4*)(vector_x + k_idx_0));
+        xv1 = float4(*(const device half4*)(vector_x + k_idx_1));
+
+        block_idx_0 = (k_base / weights_per_block) + block_in_group;
+        block_idx_1 = block_idx_0 + 4u;
+    }
+
+    void load_x_safe(const device half* vector_x, uint k_base, uint K) {
+        uint k_idx_0 = k_base + block_in_group * weights_per_block + sub_offset;
+        uint k_idx_1 = k_idx_0 + 4u * weights_per_block;
+
+        xv0 = float4(0.0f);
+        xv1 = float4(0.0f);
+
+        if (k_idx_0 + 4u <= K) {
+            xv0 = float4(*(const device half4*)(vector_x + k_idx_0));
+        }
+        if (k_idx_1 + 4u <= K) {
+            xv1 = float4(*(const device half4*)(vector_x + k_idx_1));
+        }
+
+        block_idx_0 = (k_base / weights_per_block) + block_in_group;
+        block_idx_1 = block_idx_0 + 4u;
+        total_blocks = (K + weights_per_block - 1u) / weights_per_block;
+    }
+
+    float compute_dot(uint h, bool fast_mode) {
+        float partial = 0.0f;
+
+        if (fast_mode || block_idx_0 < total_blocks) {
+            const device half *w_ptr = ptr_w[h] + sub_offset;
+            half4 w_vec = *(const device half4*)(w_ptr);
+            partial += dot(xv0, float4(w_vec));
+        }
+
+        if (fast_mode || block_idx_1 < total_blocks) {
+            const device half *w_ptr = ptr_w[h] + (4u * stride_w[h]) + sub_offset;
+            half4 w_vec = *(const device half4*)(w_ptr);
+            partial += dot(xv1, float4(w_vec));
+        }
+
+        partial += simd_shuffle_xor(partial, 4u);
+        partial += simd_shuffle_xor(partial, 2u);
+        partial += simd_shuffle_xor(partial, 1u);
+
+        if (sub_lane == 0u) return partial;
+        return 0.0f;
+    }
+
+    void advance_pointers(uint k_step) {
+        for (uint h = 0; h < 3; ++h) {
+            ptr_w[h] += stride_w[h] * 8u;
+        }
+    }
+};
+
+// =================================================================================================
+// FP16 Canonical Policy (RMSNorm fused)
+// =================================================================================================
+
+struct SimdGemvPolicyF16CanonicalRmsnorm {
+    struct Params {
+        const device half **data;
+        const device half *gamma;
+        float inv_rms;
+        uint weights_per_block;
+    };
+
+    static constant uint FAST_K_CHUNK_SIZE = 256;
+    static constant uint SAFE_K_CHUNK_SIZE = 256;
+
+    uint lane_id;
+    uint block_in_group;
+    uint sub_offset;
+    uint sub_lane;
+
+    const device half *ptr_w[3];
+    uint stride_w[3];
+    const device half *gamma_ptr;
+    float inv_rms;
+
+    float4 xv0, xv1;
+    uint block_idx_0, block_idx_1, total_blocks;
+    uint weights_per_block;
+
+    template<uint HEADS>
+    void init(Params p, uint3 gid, uint3 lid, uint logical_col, uint K, const uint N[HEADS]) {
+        lane_id = lid.x & 31u;
+        block_in_group = lane_id / 8u;
+        sub_lane = lane_id % 8u;
+        sub_offset = sub_lane * 4u;
+        gamma_ptr = p.gamma;
+        inv_rms = p.inv_rms;
+        weights_per_block = p.weights_per_block;
+
+        for (uint h = 0; h < HEADS; ++h) {
+            stride_w[h] = N[h] * weights_per_block;
+            ptr_w[h] = p.data[h] + logical_col * weights_per_block + (block_in_group * stride_w[h]);
+        }
+        total_blocks = (K + weights_per_block - 1u) / weights_per_block;
+    }
+
+    void load_x_fast(const device half* vector_x, uint k_base) {
+        uint k_idx_0 = k_base + block_in_group * weights_per_block + sub_offset;
+        uint k_idx_1 = k_idx_0 + 4u * weights_per_block;
+
+        half4 x0 = *(const device half4*)(vector_x + k_idx_0);
+        half4 x1 = *(const device half4*)(vector_x + k_idx_1);
+        half4 g0 = *(const device half4*)(gamma_ptr + k_idx_0);
+        half4 g1 = *(const device half4*)(gamma_ptr + k_idx_1);
+
+        float inv = inv_rms;
+        xv0 = float4(x0) * float4(g0) * inv;
+        xv1 = float4(x1) * float4(g1) * inv;
+
+        block_idx_0 = (k_base / weights_per_block) + block_in_group;
+        block_idx_1 = block_idx_0 + 4u;
+    }
+
+    void load_x_safe(const device half* vector_x, uint k_base, uint K) {
+        uint k_idx_0 = k_base + block_in_group * weights_per_block + sub_offset;
+        uint k_idx_1 = k_idx_0 + 4u * weights_per_block;
+
+        xv0 = float4(0.0f);
+        xv1 = float4(0.0f);
+
+        if (k_idx_0 + 4u <= K) {
+            half4 x0 = *(const device half4*)(vector_x + k_idx_0);
+            half4 g0 = *(const device half4*)(gamma_ptr + k_idx_0);
+            xv0 = float4(x0) * float4(g0) * inv_rms;
+        }
+        if (k_idx_1 + 4u <= K) {
+            half4 x1 = *(const device half4*)(vector_x + k_idx_1);
+            half4 g1 = *(const device half4*)(gamma_ptr + k_idx_1);
+            xv1 = float4(x1) * float4(g1) * inv_rms;
+        }
+
+        block_idx_0 = (k_base / weights_per_block) + block_in_group;
+        block_idx_1 = block_idx_0 + 4u;
+        total_blocks = (K + weights_per_block - 1u) / weights_per_block;
+    }
+
+    float compute_dot(uint h, bool fast_mode) {
+        float partial = 0.0f;
+
+        if (fast_mode || block_idx_0 < total_blocks) {
+            const device half *w_ptr = ptr_w[h] + sub_offset;
+            half4 w_vec = *(const device half4*)(w_ptr);
+            partial += dot(xv0, float4(w_vec));
+        }
+
+        if (fast_mode || block_idx_1 < total_blocks) {
+            const device half *w_ptr = ptr_w[h] + (4u * stride_w[h]) + sub_offset;
+            half4 w_vec = *(const device half4*)(w_ptr);
+            partial += dot(xv1, float4(w_vec));
+        }
+
+        partial += simd_shuffle_xor(partial, 4u);
+        partial += simd_shuffle_xor(partial, 2u);
+        partial += simd_shuffle_xor(partial, 1u);
+
+        if (sub_lane == 0u) return partial;
+        return 0.0f;
+    }
+
+    void advance_pointers(uint k_step) {
+        for (uint h = 0; h < 3; ++h) {
+            ptr_w[h] += stride_w[h] * 8u;
+        }
+    }
+};
+
 
 // =================================================================================================
 // Q8 Policy
@@ -802,6 +1018,77 @@ void run_simd_f16_gemv_cols8(
 ) {
     SimdGemvPolicyF16::Params p = { matrix };
     run_simd_gemv_template<SimdGemvPolicyF16, HEADS, 8, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_f16_canonical_gemv_cols2(
+    const device half *matrix,
+    const device half *vector_x,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const uint weights_per_block,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    const device half *data_arr[HEADS] = { matrix };
+    SimdGemvPolicyF16Canonical::Params p = { (const device half **)data_arr, weights_per_block };
+    run_simd_gemv_template<SimdGemvPolicyF16Canonical, HEADS, 2, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_f16_canonical_gemv_cols8(
+    const device half *matrix,
+    const device half *vector_x,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const uint weights_per_block,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    const device half *data_arr[HEADS] = { matrix };
+    SimdGemvPolicyF16Canonical::Params p = { (const device half **)data_arr, weights_per_block };
+    run_simd_gemv_template<SimdGemvPolicyF16Canonical, HEADS, 8, HasBias>(
+        p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
+    );
+}
+
+template <uint HEADS, bool HasBias>
+void run_simd_f16_canonical_gemv_rmsnorm(
+    const device half *matrix,
+    const device half *vector_x,
+    const device half *gamma,
+    const float inv_rms,
+    device half *result_y[HEADS],
+    const uint N[HEADS],
+    const uint K,
+    const uint weights_per_block,
+    const device half *bias[HEADS],
+    const uint has_bias_flags[HEADS],
+    const float alpha,
+    const float beta,
+    const device half *residual,
+    uint3 gid,
+    uint3 lid
+) {
+    const device half *data_arr[HEADS] = { matrix };
+    SimdGemvPolicyF16CanonicalRmsnorm::Params p = { (const device half **)data_arr, gamma, inv_rms, weights_per_block };
+    run_simd_gemv_template<SimdGemvPolicyF16CanonicalRmsnorm, HEADS, 4, HasBias>(
         p, vector_x, result_y, N, K, bias, has_bias_flags, alpha, beta, residual, gid, lid
     );
 }

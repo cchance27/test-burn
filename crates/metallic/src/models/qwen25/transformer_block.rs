@@ -1,10 +1,14 @@
-use crate::{Context, MetalError, TensorElement, tensor::Tensor};
+use crate::{
+    Context, MetalError, TensorElement, tensor::{CanonicalF16Tensor, Dtype, Tensor}
+};
 
 pub struct TransformerBlock<T: TensorElement> {
     // Attention weights (placeholders matching GGUF shapes)
     pub attn_qkv_weight: Tensor<T>,
+    pub attn_qkv_weight_canon: Option<CanonicalF16Tensor<T>>,
     pub attn_qkv_bias: Tensor<T>,
     pub attn_out_weight: Tensor<T>,
+    pub attn_out_weight_canon: Option<CanonicalF16Tensor<T>>,
     /// Optional packed Q8_0 weight for the attention output projection ([d_model, d_model]).
     pub attn_out_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     /// Optional packed Q8_0 weight for the Q projection (row-major [d_model, d_model]).
@@ -25,6 +29,7 @@ pub struct TransformerBlock<T: TensorElement> {
 
     // Feedforward
     pub ffn_down: Tensor<T>,
+    pub ffn_down_canon: Option<CanonicalF16Tensor<T>>,
     /// Optional packed Q8_0 weight for FFN down projection ([ff_dim, d_model]) or transpose-compatible.
     pub ffn_down_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub ffn_gate_up_weight: Tensor<T>,
@@ -33,6 +38,8 @@ pub struct TransformerBlock<T: TensorElement> {
     pub ffn_up_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub ffn_gate: Tensor<T>,
     pub ffn_up: Tensor<T>,
+    pub ffn_gate_canon: Option<CanonicalF16Tensor<T>>,
+    pub ffn_up_canon: Option<CanonicalF16Tensor<T>>,
     // Biases for the FFN projections
     pub ffn_gate_bias: Tensor<T>,
     pub ffn_up_bias: Tensor<T>,
@@ -59,6 +66,15 @@ where
 
         let attn_out_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?;
 
+        let (attn_qkv_weight_canon, attn_out_weight_canon) = if T::DTYPE == Dtype::F16 {
+            (
+                Some(CanonicalF16Tensor::new(vec![cfg.d_model, qkv_out_dim], ctx)?),
+                Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.d_model], ctx)?),
+            )
+        } else {
+            (None, None)
+        };
+
         // FFN (SwiGLU)
         // Allocate FFN weights in [In, Out] = [d_model, ff_dim] layout (matching QKV)
         // This allows transposed loading to work correctly with transpose_right=false
@@ -68,6 +84,16 @@ where
         // Allocate separate gate/up with [In, Out] dims for transposed loading
         let ffn_gate = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
         let ffn_up = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
+
+        let (ffn_gate_canon, ffn_up_canon, ffn_down_canon) = if T::DTYPE == Dtype::F16 {
+            (
+                Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.ff_dim], ctx)?),
+                Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.ff_dim], ctx)?),
+                Some(CanonicalF16Tensor::new(vec![cfg.ff_dim, cfg.d_model], ctx)?),
+            )
+        } else {
+            (None, None, None)
+        };
 
         // FFN biases
         let ffn_gate_bias = Tensor::zeros(vec![cfg.ff_dim], ctx, false)?;
@@ -81,8 +107,10 @@ where
 
         Ok(Self {
             attn_qkv_weight,
+            attn_qkv_weight_canon,
             attn_qkv_bias,
             attn_out_weight,
+            attn_out_weight_canon,
             attn_out_weight_q8: None,
             attn_q_weight_q8: None,
             attn_k_weight_q8: None,
@@ -90,12 +118,15 @@ where
             // Transposed weights: none needed since all weights now transposed during load
             attn_out_weight_transposed: None,
             ffn_down,
+            ffn_down_canon,
             ffn_down_q8: None,
             ffn_gate_up_weight,
             ffn_gate_q8: None,
             ffn_up_q8: None,
             ffn_gate,
             ffn_up,
+            ffn_gate_canon,
+            ffn_up_canon,
             ffn_gate_bias,
             ffn_up_bias,
             ffn_down_bias,

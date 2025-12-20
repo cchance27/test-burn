@@ -21,6 +21,8 @@ enum GemvLoaderMode : uint {
     GemvLoaderQ8Canonical = 2,
     GemvLoaderQ8CanonicalBias = 3,
     GemvLoaderQ8CanonicalDebug = 4,
+    GemvLoaderDenseCanonical = 5,
+    GemvLoaderDenseCanonicalBias = 6,
 };
 
 struct QkvFusedParams {

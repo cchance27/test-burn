@@ -16,8 +16,11 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     uint3 lid,
     threadgroup float *x_tile) {
 
-    if (params->weights_per_block != 0u && loader_mode != GemvLoaderQ8CanonicalDebug) {
-        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias) || (loader_mode == GemvLoaderDenseBias);
+    const bool is_q8 = (loader_mode == GemvLoaderQ8Canonical)
+        || (loader_mode == GemvLoaderQ8CanonicalBias)
+        || (loader_mode == GemvLoaderQ8CanonicalDebug);
+    if (is_q8) {
+        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias);
         if (wants_bias) {
             run_gemv_q8_canonical<true, false>(
                 matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
@@ -38,6 +41,11 @@ ALWAYS_INLINE void gemv_run_loader_mode(
              const device half *matrix_a = (const device half *)matrix_data;
              run_gemv_dense<true>(matrix_a, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, x_tile);
              return;
+        }
+        case GemvLoaderDenseCanonical:
+        case GemvLoaderDenseCanonicalBias: {
+            // Canonical layout is only supported by SIMD kernels.
+            return;
         }
         case GemvLoaderQ8Canonical: {
             run_gemv_q8_canonical<false, false>(
@@ -160,6 +168,50 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             );
             return;
         }
+        case GemvLoaderDenseCanonical: {
+            device half *r_arr[1] = { result_y };
+            const uint n_arr[1] = { params->N };
+            const device half *b_arr[1] = { bias };
+            const uint hb_arr[1] = { 0 };
+            run_simd_f16_canonical_gemv_cols2<1, false>(
+                (const device half *)matrix_data,
+                vector_x,
+                r_arr,
+                n_arr,
+                params->K,
+                params->weights_per_block,
+                b_arr,
+                hb_arr,
+                alpha,
+                beta,
+                residual,
+                gid,
+                lid
+            );
+            return;
+        }
+        case GemvLoaderDenseCanonicalBias: {
+            device half *r_arr[1] = { result_y };
+            const uint n_arr[1] = { params->N };
+            const device half *b_arr[1] = { bias };
+            const uint hb_arr[1] = { 1 };
+            run_simd_f16_canonical_gemv_cols2<1, true>(
+                (const device half *)matrix_data,
+                vector_x,
+                r_arr,
+                n_arr,
+                params->K,
+                params->weights_per_block,
+                b_arr,
+                hb_arr,
+                alpha,
+                beta,
+                residual,
+                gid,
+                lid
+            );
+            return;
+        }
         default: {
             return;
         }
@@ -216,6 +268,50 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 r_arr,
                 n_arr,
                 params->K,
+                b_arr,
+                hb_arr,
+                alpha,
+                beta,
+                residual,
+                gid,
+                lid
+            );
+            return;
+        }
+        case GemvLoaderDenseCanonical: {
+            device half *r_arr[1] = { result_y };
+            const uint n_arr[1] = { params->N };
+            const device half *b_arr[1] = { bias };
+            const uint hb_arr[1] = { 0 };
+            run_simd_f16_canonical_gemv_cols8<1, false>(
+                (const device half *)matrix_data,
+                vector_x,
+                r_arr,
+                n_arr,
+                params->K,
+                params->weights_per_block,
+                b_arr,
+                hb_arr,
+                alpha,
+                beta,
+                residual,
+                gid,
+                lid
+            );
+            return;
+        }
+        case GemvLoaderDenseCanonicalBias: {
+            device half *r_arr[1] = { result_y };
+            const uint n_arr[1] = { params->N };
+            const device half *b_arr[1] = { bias };
+            const uint hb_arr[1] = { 1 };
+            run_simd_f16_canonical_gemv_cols8<1, true>(
+                (const device half *)matrix_data,
+                vector_x,
+                r_arr,
+                n_arr,
+                params->K,
+                params->weights_per_block,
                 b_arr,
                 hb_arr,
                 alpha,
@@ -302,6 +398,54 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             );
             return;
         }
+        case GemvLoaderDenseCanonical: {
+            device half *r_arr[1] = { result_y };
+            const uint n_arr[1] = { params->N };
+            const device half *b_arr[1] = { bias };
+            const uint hb_arr[1] = { 0 };
+            run_simd_f16_canonical_gemv_rmsnorm<1, false>(
+                (const device half *)matrix_data,
+                vector_x,
+                gamma,
+                inv_rms,
+                r_arr,
+                n_arr,
+                params->K,
+                params->weights_per_block,
+                b_arr,
+                hb_arr,
+                alpha,
+                beta,
+                residual,
+                gid,
+                lid
+            );
+            return;
+        }
+        case GemvLoaderDenseCanonicalBias: {
+            device half *r_arr[1] = { result_y };
+            const uint n_arr[1] = { params->N };
+            const device half *b_arr[1] = { bias };
+            const uint hb_arr[1] = { 1 };
+            run_simd_f16_canonical_gemv_rmsnorm<1, true>(
+                (const device half *)matrix_data,
+                vector_x,
+                gamma,
+                inv_rms,
+                r_arr,
+                n_arr,
+                params->K,
+                params->weights_per_block,
+                b_arr,
+                hb_arr,
+                alpha,
+                beta,
+                residual,
+                gid,
+                lid
+            );
+            return;
+        }
         default: {
             return;
         }
@@ -327,8 +471,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     // NO x_tile allocation.
     
     // Direct dispatch to Q8 Canonical logic
-    if (params->weights_per_block != 0u && loader_mode != GemvLoaderQ8CanonicalDebug) {
-        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias) || (loader_mode == GemvLoaderDenseBias);
+    if (loader_mode == GemvLoaderQ8Canonical || loader_mode == GemvLoaderQ8CanonicalBias) {
+        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias);
         if (wants_bias) {
             run_gemv_q8_canonical<true, false>(
                 matrix_data, scale_bytes, vector_x, result_y, params, bias, residual, alpha, beta, diag_col, gid, lid);
@@ -375,8 +519,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
 
-    if (params->weights_per_block != 0u && loader_mode != GemvLoaderQ8CanonicalDebug) {
-        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias) || (loader_mode == GemvLoaderDenseBias);
+    if (loader_mode == GemvLoaderQ8Canonical || loader_mode == GemvLoaderQ8CanonicalBias) {
+        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias);
         const device uchar *data_arr[1] = { matrix_data };
         const device uchar *scale_arr[1] = { scale_bytes };
         device half *res_arr[1] = { result_y };
@@ -452,8 +596,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]) {
 
-    if (params->weights_per_block != 0u && loader_mode != GemvLoaderQ8CanonicalDebug) {
-        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias) || (loader_mode == GemvLoaderDenseBias);
+    if (loader_mode == GemvLoaderQ8Canonical || loader_mode == GemvLoaderQ8CanonicalBias) {
+        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias);
         const device uchar *data_arr[1] = { matrix_data };
         const device uchar *scale_arr[1] = { scale_bytes };
         device half *res_arr[1] = { result_y };
@@ -535,8 +679,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
     const uint warp_id = lid.x / 32u;
     const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s);
 
-    if (params->weights_per_block != 0u && loader_mode != GemvLoaderQ8CanonicalDebug) {
-        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias) || (loader_mode == GemvLoaderDenseBias);
+    if (loader_mode == GemvLoaderQ8Canonical || loader_mode == GemvLoaderQ8CanonicalBias) {
+        const bool wants_bias = (loader_mode == GemvLoaderQ8CanonicalBias);
         const device uchar *data_arr[1] = { matrix_data };
         const device uchar *scale_arr[1] = { scale_bytes };
         device half *res_arr[1] = { result_y };

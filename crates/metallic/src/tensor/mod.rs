@@ -9,6 +9,7 @@ use super::{Context, MetalError, operation::CommandBuffer};
 
 pub type RetainedBuffer = Retained<ProtocolObject<dyn objc2_metal::MTLBuffer>>;
 
+pub mod canonical;
 pub mod dtypes;
 pub mod enums;
 pub mod generation;
@@ -20,6 +21,7 @@ pub mod quantized;
 pub mod storage;
 pub mod utility_methods;
 
+pub use canonical::{CanonicalF16Tensor, F16_CANONICAL_WEIGHTS_PER_BLOCK};
 pub use dtypes::*;
 pub use enums::{TensorInit, TensorStorage};
 use host_access::DEFAULT_CPU_FILL_THRESHOLD_MB;
@@ -71,5 +73,6 @@ pub enum QuantizedTensor<'a> {
 
 pub enum TensorType<'a, T: TensorElement> {
     Dense(&'a Tensor<T>),
+    DenseCanonical(&'a CanonicalF16Tensor<T>),
     Quant(QuantizedTensor<'a>),
 }

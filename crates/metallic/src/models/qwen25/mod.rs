@@ -8,7 +8,7 @@ use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice as _};
 use crate::{
     Context, MetalError, Tensor, TensorElement, context::{MatmulAlphaBeta, QkvWeights, RepeatKvWorkspaceKind}, kernels::{
         backend_registry::KernelBackendKind, embedding_lookup::EmbeddingLookupOp, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::{SwiGLUFusedActivationOp, SwiGLUOp}
-    }, tensor::{QuantizedTensor, TensorType}
+    }, tensor::{CanonicalF16Tensor, Dtype, QuantizedTensor, TensorType}
 };
 
 mod qwen25_tests;
@@ -37,6 +37,7 @@ pub struct Qwen25<T: TensorElement> {
     pub blocks: Vec<TransformerBlock<T>>,
     pub embed_weight: Tensor<T>,
     pub output_weight: Tensor<T>,
+    pub output_weight_canon: Option<CanonicalF16Tensor<T>>,
     /// Optional packed Q8_0 weight for the final output projection (logits).
     pub output_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub final_norm_gamma: Tensor<T>,
@@ -114,6 +115,15 @@ impl<T: TensorElement> Qwen25<T> {
         )
     }
 
+    fn project_canonical(
+        ctx: &mut Context<T>,
+        x_flat: &Tensor<T>,
+        weight_canon: &CanonicalF16Tensor<T>,
+        bias: Option<&Tensor<T>>,
+    ) -> Result<Tensor<T>, MetalError> {
+        ctx.matmul(x_flat, &TensorType::DenseCanonical(weight_canon), false, false, bias, None, None)
+    }
+
     /// Embed tokens into d_model dimensional vectors
     pub fn embed(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         let batch = 1; // For now, assume batch size of 1
@@ -185,6 +195,11 @@ impl<T: TensorElement> Qwen25<T> {
                 None,
                 None,
             )?
+        } else if let Some(canon) = &self.output_weight_canon
+            && T::DTYPE == Dtype::F16
+            && m == 1
+        {
+            ctx.matmul(&flat_hidden, &TensorType::DenseCanonical(canon), false, false, None, None, None)?
         } else {
             ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None, None, None)?
         };
@@ -201,6 +216,11 @@ impl<T: TensorElement> Qwen25<T> {
         // allocate embed and output weights
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
         let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
+        let output_weight_canon = if T::DTYPE == Dtype::F16 {
+            Some(CanonicalF16Tensor::new(vec![config.d_model, config.vocab_size], ctx)?)
+        } else {
+            None
+        };
         let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx, false)?;
 
         let mut blocks = Vec::with_capacity(config.n_layers);
@@ -235,6 +255,7 @@ impl<T: TensorElement> Qwen25<T> {
             blocks,
             embed_weight,
             output_weight,
+            output_weight_canon,
             output_weight_q8: None,
             final_norm_gamma,
             rope_cos_cache: cos_cache,
@@ -638,8 +659,12 @@ impl<T: TensorElement> Qwen25<T> {
                     breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                     let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
-                    // QKV weight is already transposed during loading via copy_weight_transposed_into_fused
-                    let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, &block.attn_qkv_weight, Some(&block.attn_qkv_bias))?;
+                    let qkv_proj = if let Some(canon) = &block.attn_qkv_weight_canon {
+                        Self::project_canonical(ctx, &x_normed_flat, canon, Some(&block.attn_qkv_bias))?
+                    } else {
+                        // QKV weight is already transposed during loading via copy_weight_transposed_into_fused
+                        Self::project_transposed(ctx, &x_normed_flat, &block.attn_qkv_weight, Some(&block.attn_qkv_bias))?
+                    };
                     // Split into Q, K, V using slice_last_dim (same pattern as qkv_dense)
                     let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
                     let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
@@ -825,6 +850,21 @@ impl<T: TensorElement> Qwen25<T> {
                                 ),
                                 None,
                             )
+                        } else if let Some(canon) = &block.attn_out_weight_canon {
+                            let out = resid_attn.reshape(vec![m, d_model])?;
+                            ctx.matmul(
+                                a,
+                                &TensorType::DenseCanonical(canon),
+                                false,
+                                false,
+                                None,
+                                Some(MatmulAlphaBeta {
+                                    output: &out,
+                                    alpha: 1.0,
+                                    beta: 1.0,
+                                }),
+                                None,
+                            )
                         } else {
                             // Dense path: attn_out uses transpose_b=true in legacy path
                             // (weight already in [N, K] layout), no transposed variant needed
@@ -904,15 +944,27 @@ impl<T: TensorElement> Qwen25<T> {
                                 )?
                             } else {
                                 // Dense path: loading already transposes to [Out, In] layout
-                                ctx.matmul(
-                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Dense(&block.ffn_gate),
-                                    false,
-                                    false, // Already [Out, In] layout like Q8
-                                    None,
-                                    None,
-                                    None,
-                                )?
+                                if let Some(canon) = &block.ffn_gate_canon {
+                                    ctx.matmul(
+                                        x_normed_mlp_flat.as_ref().expect("mlp norm"),
+                                        &TensorType::DenseCanonical(canon),
+                                        false,
+                                        false,
+                                        None,
+                                        None,
+                                        None,
+                                    )?
+                                } else {
+                                    ctx.matmul(
+                                        x_normed_mlp_flat.as_ref().expect("mlp norm"),
+                                        &TensorType::Dense(&block.ffn_gate),
+                                        false,
+                                        false, // Already [Out, In] layout like Q8
+                                        None,
+                                        None,
+                                        None,
+                                    )?
+                                }
                             }
                         };
                         ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
@@ -929,15 +981,27 @@ impl<T: TensorElement> Qwen25<T> {
                                 )?
                             } else {
                                 // Dense path: loading already transposes to [Out, In] layout
-                                ctx.matmul(
-                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Dense(&block.ffn_up),
-                                    false,
-                                    false, // Already [Out, In] layout like Q8
-                                    None,
-                                    None,
-                                    None,
-                                )?
+                                if let Some(canon) = &block.ffn_up_canon {
+                                    ctx.matmul(
+                                        x_normed_mlp_flat.as_ref().expect("mlp norm"),
+                                        &TensorType::DenseCanonical(canon),
+                                        false,
+                                        false,
+                                        None,
+                                        None,
+                                        None,
+                                    )?
+                                } else {
+                                    ctx.matmul(
+                                        x_normed_mlp_flat.as_ref().expect("mlp norm"),
+                                        &TensorType::Dense(&block.ffn_up),
+                                        false,
+                                        false, // Already [Out, In] layout like Q8
+                                        None,
+                                        None,
+                                        None,
+                                    )?
+                                }
                             }
                         };
 
@@ -985,19 +1049,35 @@ impl<T: TensorElement> Qwen25<T> {
                     } else {
                         // Dense path: loading already transposes to [Out, In] layout
                         let out = resid_mlp.reshape(vec![m, d_model])?;
-                        ctx.matmul(
-                            &hidden,
-                            &TensorType::Dense(&block.ffn_down),
-                            false,
-                            false, // Already [Out, In] layout like Q8
-                            None,
-                            Some(MatmulAlphaBeta {
-                                output: &out,
-                                alpha: 1.0,
-                                beta: 1.0,
-                            }),
-                            None,
-                        )
+                        if let Some(canon) = &block.ffn_down_canon {
+                            ctx.matmul(
+                                &hidden,
+                                &TensorType::DenseCanonical(canon),
+                                false,
+                                false,
+                                None,
+                                Some(MatmulAlphaBeta {
+                                    output: &out,
+                                    alpha: 1.0,
+                                    beta: 1.0,
+                                }),
+                                None,
+                            )
+                        } else {
+                            ctx.matmul(
+                                &hidden,
+                                &TensorType::Dense(&block.ffn_down),
+                                false,
+                                false, // Already [Out, In] layout like Q8
+                                None,
+                                Some(MatmulAlphaBeta {
+                                    output: &out,
+                                    alpha: 1.0,
+                                    beta: 1.0,
+                                }),
+                                None,
+                            )
+                        }
                     }
                 })?;
 

@@ -227,6 +227,11 @@ impl DefaultKernelInvocable for MatMulMlxOp {
                 let v = r.as_mps_matrix_batch_view()?;
                 (RightMatrix::Dense(r.clone()), v.rows, v.columns, v.batch)
             }
+            TensorType::DenseCanonical(_) => {
+                return Err(MetalError::OperationNotSupported(
+                    "MLX matmul does not support canonical FP16 layout".to_string(),
+                ));
+            }
             TensorType::Quant(QuantizedTensor::Q8_0(q8)) => {
                 if q8.logical_dims.len() != 2 {
                     return Err(MetalError::InvalidShape("MLX quant GEMM expects 2D RHS".to_string()));

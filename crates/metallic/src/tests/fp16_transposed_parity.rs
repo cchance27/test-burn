@@ -2,10 +2,11 @@
 
 //! FP16 Transposed Weight Parity Tests
 //!
-//! These tests verify that the transposed FP16 weight storage (column-major [N, K])
+//! These tests verify that the legacy transposed FP16 weight storage (column-major [N, K])
 //! produces mathematically equivalent results to the legacy row-major layout.
 //!
-//! FP16 now uses the same column-major layout as Q8 for unified kernel dispatch.
+//! Canonical k-block layout is used by the decode GEMV path; full-forward still
+//! relies on the transposed dense layout validated here.
 //!
 //! Run with: `cargo test -p metallic --features metal fp16_transposed_parity`
 
@@ -13,7 +14,7 @@ use half::f16;
 use serial_test::serial;
 
 use crate::{
-    Context, MetalError, Tensor, TensorStorage, kernels::matmul_gemv::MatmulGemvOp, tensor::{TensorInit, TensorType}
+    Context, MetalError, Tensor, TensorStorage, kernels::matmul_gemv::MatmulGemvOp, tensor::{CanonicalF16Tensor, TensorInit, TensorType}
 };
 
 fn make_fp16_tensor(ctx: &mut Context<crate::tensor::F16>, dims: Vec<usize>, seed: u64) -> Result<Tensor<crate::tensor::F16>, MetalError> {
@@ -141,6 +142,41 @@ fn test_fp16_transposed_gemv_parity() -> Result<(), MetalError> {
         // Results should match within tolerance
         assert_close_tensors(&y_legacy, &y_transposed, 0.01, &format!("gemv_{}", name));
     }
+
+    Ok(())
+}
+
+/// Test that canonical FP16 layout matches row-major GEMV math.
+#[test]
+#[serial]
+fn test_fp16_canonical_gemv_parity() -> Result<(), MetalError> {
+    let mut ctx = Context::<crate::tensor::F16>::new()?;
+
+    let k = 64usize;
+    let n = 48usize;
+
+    let x = make_fp16_tensor(&mut ctx, vec![1, k], 0xFACE_B00C)?;
+    let w_kn = make_fp16_tensor(&mut ctx, vec![k, n], 0x1234_5678)?;
+
+    let src = w_kn.as_slice();
+    let mut w_nk_data = vec![f16::ZERO; k * n];
+    for row in 0..k {
+        for col in 0..n {
+            let src_idx = row * n + col;
+            let dst_idx = col * k + row;
+            w_nk_data[dst_idx] = src[src_idx];
+        }
+    }
+    let w_nk = Tensor::<crate::tensor::F16>::new(vec![n, k], TensorStorage::Pooled(&mut ctx), TensorInit::CopyFrom(&w_nk_data))?;
+
+    let mut w_canon = CanonicalF16Tensor::new(vec![k, n], &mut ctx)?;
+    w_canon.write_from_nk_tensor(&w_nk, 0)?;
+
+    let y_ref = ctx.matmul(&x, &TensorType::Dense(&w_kn), false, false, None, None, None)?;
+    let y_canon = ctx.matmul(&x, &TensorType::DenseCanonical(&w_canon), false, false, None, None, None)?;
+    ctx.synchronize();
+
+    assert_close_tensors(&y_ref, &y_canon, 0.01, "canonical_gemv");
 
     Ok(())
 }

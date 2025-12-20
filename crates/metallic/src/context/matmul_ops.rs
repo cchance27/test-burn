@@ -8,7 +8,7 @@ use crate::{
         elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv::{
             MATMUL_Q8_NT_MAX_ROWS, MatmulGemvAddmmOp, MatmulGemvOp, MatmulGemvSmallMOp, MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op, MatmulQ8NtOp
         }, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}
-    }, tensor::{QuantizedTensor, TensorElement, TensorType}
+    }, tensor::{CanonicalF16Tensor, QuantizedTensor, TensorElement, TensorType}
 };
 
 const METALLIC_Q8_M1_MLX_MIN_N_ENV: &str = "METALLIC_Q8_M1_MLX_MIN_N";
@@ -259,6 +259,33 @@ impl<T: TensorElement> Context<T> {
                     k: a_cols,
                 })
             }
+            TensorType::DenseCanonical(bc) => {
+                if transpose_b {
+                    return Err(MetalError::OperationNotSupported(
+                        "canonical matmul does not support transpose_b".into(),
+                    ));
+                }
+                let a_view = a.as_mps_matrix_batch_view()?;
+                let (a_rows, a_cols) = if transpose_a {
+                    (a_view.columns, a_view.rows)
+                } else {
+                    (a_view.rows, a_view.columns)
+                };
+                if bc.logical_dims.len() != 2 {
+                    return Err(MetalError::InvalidShape("Canonical RHS must be 2D".into()));
+                }
+                let b_rows = bc.logical_dims[0];
+                let b_cols = bc.logical_dims[1];
+                if a_cols != b_rows {
+                    return Err(MetalError::InvalidOperation("matmul dims mismatch (canonical)".into()));
+                }
+                Ok(MatmulDims {
+                    batch: a_view.batch,
+                    m: a_rows,
+                    n: b_cols,
+                    k: a_cols,
+                })
+            }
             TensorType::Quant(qrhs) => {
                 // a is dense; use its view to get (batch, rows, cols)
                 let a_view = a.as_mps_matrix_batch_view()?;
@@ -387,6 +414,20 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[inline]
+    fn can_use_gemv_canonical(&self, dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
+        if T::DTYPE != crate::tensor::Dtype::F16 {
+            return false;
+        }
+        if transpose_a || transpose_b {
+            return false;
+        }
+        if dims.batch != 1 {
+            return false;
+        }
+        dims.m == 1
+    }
+
+    #[inline]
     fn can_use_q8_nt(&self, dims: &MatmulDims, transpose_a: bool) -> bool {
         if transpose_a {
             return false;
@@ -416,8 +457,54 @@ impl<T: TensorElement> Context<T> {
 
         match b_any {
             TensorType::Dense(bd) => self.matmul_dense(a, bd, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut()),
+            TensorType::DenseCanonical(bc) => {
+                self.matmul_dense_canonical(a, bc, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut())
+            }
             TensorType::Quant(qrhs) => self.matmul_quant(a, qrhs, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut()),
         }
+    }
+
+    fn matmul_dense_canonical(
+        &mut self,
+        a: &Tensor<T>,
+        b: &CanonicalF16Tensor<T>,
+        transpose_a: bool,
+        transpose_b: bool,
+        bias: Option<&Tensor<T>>,
+        alpha_beta: Option<MatmulAlphaBeta<'_, T>>,
+        cache: Option<&mut ResourceCache>,
+    ) -> Result<Tensor<T>, MetalError> {
+        let mut cache = cache;
+        if T::DTYPE != crate::tensor::Dtype::F16 {
+            return Err(MetalError::UnsupportedDtype {
+                operation: "dense canonical matmul",
+                dtype: T::DTYPE,
+            });
+        }
+        if transpose_b {
+            return Err(MetalError::OperationNotSupported(
+                "canonical matmul does not support transpose_b".into(),
+            ));
+        }
+
+        let rhs = TensorType::DenseCanonical(b);
+        let dims = self.compute_matmul_dims(a, &rhs, transpose_a, transpose_b)?;
+        if !self.can_use_gemv_canonical(&dims, transpose_a, transpose_b) {
+            emit_matmul_backend_selected(
+                "dense_canonical",
+                Some(dims),
+                transpose_a,
+                transpose_b,
+                "Unsupported",
+                "canonical_requires_gemv_m1",
+            );
+            return Err(MetalError::OperationNotSupported(
+                "canonical matmul only supports GEMV m=1 without transposes".into(),
+            ));
+        }
+
+        emit_matmul_backend_selected("dense_canonical", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
+        self.launch_gemv(a, rhs, transpose_b, bias, alpha_beta, cache.as_deref_mut())
     }
 
     pub fn qkv(&mut self, x_flat: &Tensor<T>, weights: QkvWeights<'_, T>) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>), MetalError> {

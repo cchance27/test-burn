@@ -80,6 +80,10 @@ impl<T: TensorElement> Operation for MatMulGemv<T> {
                 set_buffer(encoder, 0, &mat.buf, mat.offset);
                 set_buffer(encoder, 6, &self.x.buf, self.x.offset);
             }
+            GemvRhsBinding::DenseCanonical(canon) => {
+                set_buffer(encoder, 0, &canon.data.buf, canon.data.offset);
+                set_buffer(encoder, 6, &self.x.buf, self.x.offset);
+            }
             GemvRhsBinding::QuantCanonical(c) => {
                 set_buffer(encoder, 0, &c.data.buf, c.data.offset);
                 set_buffer(encoder, 6, &c.scales.buf, c.scales.offset);
@@ -130,6 +134,10 @@ impl<T: TensorElement> Operation for MatMulGemvRmsnorm<T> {
         match &self.rhs {
             GemvRhsBinding::Dense(mat) => {
                 set_buffer(encoder, 0, &mat.buf, mat.offset);
+                set_buffer(encoder, 6, &self.x.buf, self.x.offset);
+            }
+            GemvRhsBinding::DenseCanonical(canon) => {
+                set_buffer(encoder, 0, &canon.data.buf, canon.data.offset);
                 set_buffer(encoder, 6, &self.x.buf, self.x.offset);
             }
             GemvRhsBinding::QuantCanonical(c) => {
@@ -197,6 +205,8 @@ fn build_operation<'a, T: TensorElement>(
         loader_mode,
         needs_bias_buffer,
         quant_meta,
+        blocks_per_k,
+        weights_per_block,
     } = rhs;
 
     if let Some(bias_tensor) = &bias {
@@ -223,8 +233,10 @@ fn build_operation<'a, T: TensorElement>(
     let y = Tensor::new(vec![1, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
     let mut inputs: Vec<&Tensor<T>> = vec![x, &y];
-    if let GemvRhsBinding::Dense(rhs_tensor) = &binding {
-        inputs.push(rhs_tensor);
+    match &binding {
+        GemvRhsBinding::Dense(rhs_tensor) => inputs.push(rhs_tensor),
+        GemvRhsBinding::DenseCanonical(rhs_tensor) => inputs.push(&rhs_tensor.data),
+        GemvRhsBinding::QuantCanonical(_) => {}
     }
     if let Some(b) = &bias {
         inputs.push(b);
@@ -234,7 +246,7 @@ fn build_operation<'a, T: TensorElement>(
     }
     ctx.prepare_tensors_for_active_cmd(&inputs)?;
 
-    let (blocks_per_k, weights_per_block) = quant_meta.map(|meta| (meta.blocks_per_k, meta.weights_per_block)).unwrap_or((0, 0));
+    let _ = quant_meta;
 
     let params = GemvParams {
         k: k as u32,
@@ -258,10 +270,11 @@ fn build_operation<'a, T: TensorElement>(
     // Dense FP16 with transpose_right MUST use SIMD kernel (layout [Out, In]).
     // Dense FP16 without transpose_right MUST use Legacy kernel (layout [In, Out]).
     let use_simd_dense = matches!(binding, GemvRhsBinding::Dense(_)) && transpose_right;
+    let use_simd_canonical = matches!(binding, GemvRhsBinding::DenseCanonical(_));
 
-    let (tg_width, tile_cols) = if is_simd_q8 || use_simd_dense {
-        let cols = if use_simd_dense {
-            8usize // Force Cols8 for SIMD Dense
+    let (tg_width, tile_cols) = if is_simd_q8 || use_simd_dense || use_simd_canonical {
+        let cols = if use_simd_dense || use_simd_canonical {
+            8usize
         } else {
             match gemv_cols_variant() {
                 GemvColsVariant::Cols2 => 2usize,
@@ -287,6 +300,7 @@ fn build_operation<'a, T: TensorElement>(
 
     let dq_suffix = match &binding {
         GemvRhsBinding::Dense(_) => " (D)",
+        GemvRhsBinding::DenseCanonical(_) => " (C)",
         GemvRhsBinding::QuantCanonical(_) => " (Q)",
     };
 
@@ -319,13 +333,14 @@ fn build_operation<'a, T: TensorElement>(
                 KernelFunction::MatmulGemv
             }
         }
+        (GemvRhsBinding::DenseCanonical(_), _) => KernelFunction::MatmulGemvCols8,
         (GemvRhsBinding::QuantCanonical(_), GemvColsVariant::Cols2) => KernelFunction::MatmulGemvQ8Cols2,
         (GemvRhsBinding::QuantCanonical(_), GemvColsVariant::Cols4) => KernelFunction::MatmulGemvQ8,
         (GemvRhsBinding::QuantCanonical(_), GemvColsVariant::Cols8) => KernelFunction::MatmulGemvQ8Cols8,
     };
 
     let pipeline = match &binding {
-        GemvRhsBinding::Dense(_) => {
+        GemvRhsBinding::Dense(_) | GemvRhsBinding::DenseCanonical(_) => {
             if let Some(existing) = pipeline {
                 if kernel_fn == KernelFunction::MatmulGemv {
                     existing
@@ -377,6 +392,8 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
         loader_mode,
         needs_bias_buffer,
         quant_meta,
+        blocks_per_k,
+        weights_per_block,
     } = rhs;
 
     if gamma.dims() != [k] {
@@ -411,8 +428,10 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
     let y = Tensor::new(vec![1, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
     let mut inputs: Vec<&Tensor<T>> = vec![x, gamma, &y];
-    if let GemvRhsBinding::Dense(rhs_tensor) = &binding {
-        inputs.push(rhs_tensor);
+    match &binding {
+        GemvRhsBinding::Dense(rhs_tensor) => inputs.push(rhs_tensor),
+        GemvRhsBinding::DenseCanonical(rhs_tensor) => inputs.push(&rhs_tensor.data),
+        GemvRhsBinding::QuantCanonical(_) => {}
     }
     if let Some(b) = &bias {
         inputs.push(b);
@@ -422,7 +441,7 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
     }
     ctx.prepare_tensors_for_active_cmd(&inputs)?;
 
-    let (blocks_per_k, weights_per_block) = quant_meta.map(|meta| (meta.blocks_per_k, meta.weights_per_block)).unwrap_or((0, 0));
+    let _ = quant_meta;
 
     let params = GemvParams {
         k: k as u32,
@@ -437,7 +456,9 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
         || lid == (GemvLoaderMode::Q8CanonicalBias as u32)
         || lid == (GemvLoaderMode::Q8CanonicalDebug as u32)
         || lid == (GemvLoaderMode::Dense as u32)
-        || lid == (GemvLoaderMode::DenseBias as u32);
+        || lid == (GemvLoaderMode::DenseBias as u32)
+        || lid == (GemvLoaderMode::DenseCanonical as u32)
+        || lid == (GemvLoaderMode::DenseCanonicalBias as u32);
 
     let (tg_width, tile_cols) = if is_simd_q8 {
         (128usize, 4usize)
@@ -458,6 +479,7 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
 
     let dq_suffix = match &binding {
         GemvRhsBinding::Dense(_) => " (D)",
+        GemvRhsBinding::DenseCanonical(_) => " (C)",
         GemvRhsBinding::QuantCanonical(_) => " (Q)",
     };
 
@@ -483,7 +505,7 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
     }
 
     let pipeline = match &binding {
-        GemvRhsBinding::Dense(_) => {
+        GemvRhsBinding::Dense(_) | GemvRhsBinding::DenseCanonical(_) => {
             if let Some(existing) = pipeline {
                 existing
             } else {

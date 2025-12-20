@@ -1,5 +1,5 @@
 use crate::{
-    GemvError, MetalError, Tensor, TensorElement, tensor::{Dtype, QuantizedQ8_0Tensor, QuantizedTensor, TensorType, quantized::CanonicalQuantTensor}
+    GemvError, MetalError, Tensor, TensorElement, tensor::{CanonicalF16Tensor, Dtype, QuantizedQ8_0Tensor, QuantizedTensor, TensorType, quantized::CanonicalQuantTensor}
 };
 
 pub const THREADGROUP_WIDTH: usize = 256; // Keep in sync with `kernel.metal`
@@ -22,6 +22,8 @@ pub enum GemvLoaderMode {
     Q8Canonical,
     Q8CanonicalBias,
     Q8CanonicalDebug,
+    DenseCanonical,
+    DenseCanonicalBias,
 }
 
 impl GemvLoaderMode {
@@ -32,6 +34,8 @@ impl GemvLoaderMode {
             GemvLoaderMode::Q8Canonical => 2,
             GemvLoaderMode::Q8CanonicalBias => 3,
             GemvLoaderMode::Q8CanonicalDebug => 4,
+            GemvLoaderMode::DenseCanonical => 5,
+            GemvLoaderMode::DenseCanonicalBias => 6,
         }
     }
 }
@@ -39,14 +43,13 @@ impl GemvLoaderMode {
 #[derive(Clone)]
 pub enum GemvRhsBinding<T: TensorElement> {
     Dense(Tensor<T>),
+    DenseCanonical(CanonicalF16Tensor<T>),
     QuantCanonical(CanonicalQuantTensor),
 }
 
 #[derive(Clone, Copy)]
 pub struct QuantMeta<'a> {
     pub source: &'a QuantizedQ8_0Tensor,
-    pub blocks_per_k: u32,
-    pub weights_per_block: u32,
 }
 
 pub struct ResolvedGemvRhs<'a, T: TensorElement> {
@@ -55,6 +58,8 @@ pub struct ResolvedGemvRhs<'a, T: TensorElement> {
     pub loader_mode: GemvLoaderMode,
     pub needs_bias_buffer: bool,
     pub quant_meta: Option<QuantMeta<'a>>,
+    pub blocks_per_k: u32,
+    pub weights_per_block: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +131,47 @@ pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_b
                 },
                 needs_bias_buffer: has_bias,
                 quant_meta: None,
+                blocks_per_k: 0,
+                weights_per_block: 0,
+            })
+        }
+        TensorType::DenseCanonical(a) => {
+            if T::DTYPE != Dtype::F16 {
+                return Err(MetalError::UnsupportedDtype {
+                    operation: "MatmulGemv/DenseCanonical",
+                    dtype: T::DTYPE,
+                });
+            }
+            if a.logical_dims.len() != 2 {
+                return Err(GemvError::MatrixShape {
+                    expected_k: k,
+                    actual: a.logical_dims.to_vec(),
+                }
+                .into());
+            }
+            let k_dim = a.logical_dims[0];
+            if k_dim != k {
+                return Err(GemvError::MatrixShape {
+                    expected_k: k,
+                    actual: a.logical_dims.to_vec(),
+                }
+                .into());
+            }
+            let n = a.logical_dims[1];
+            let blocks_per_k = a.blocks_per_k as u32;
+            let weights_per_block = crate::tensor::F16_CANONICAL_WEIGHTS_PER_BLOCK as u32;
+            Ok(ResolvedGemvRhs {
+                binding: GemvRhsBinding::DenseCanonical(a.clone()),
+                n,
+                loader_mode: if has_bias {
+                    GemvLoaderMode::DenseCanonicalBias
+                } else {
+                    GemvLoaderMode::DenseCanonical
+                },
+                needs_bias_buffer: has_bias,
+                quant_meta: None,
+                blocks_per_k,
+                weights_per_block,
             })
         }
         TensorType::Quant(qrhs) => {
@@ -178,11 +224,9 @@ pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_b
                         n,
                         loader_mode,
                         needs_bias_buffer: has_bias,
-                        quant_meta: Some(QuantMeta {
-                            source: q8,
-                            blocks_per_k,
-                            weights_per_block,
-                        }),
+                        quant_meta: Some(QuantMeta { source: q8 }),
+                        blocks_per_k,
+                        weights_per_block,
                     })
                 }
             }

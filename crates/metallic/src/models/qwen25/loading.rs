@@ -295,6 +295,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         && tensor.len() == qwen.output_weight.len()
     {
         copy_tensor_into(tensor, &mut qwen.output_weight)?;
+        if let Some(canon) = qwen.output_weight_canon.as_mut() {
+            canon.write_from_nk_tensor(tensor, 0)?;
+        }
         return Ok(());
     }
 
@@ -314,6 +317,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
 
         if is_output_unset && tensor.len() == qwen.output_weight.len() {
             copy_tensor_into(tensor, &mut qwen.output_weight)?;
+            if let Some(canon) = qwen.output_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
+            }
         } else if is_output_unset {
             return Err(MetalError::InvalidOperation(format!(
                 "MAPPING -> token_embd.weight size mismatch: {} vs {}",
@@ -347,6 +353,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             && tensor.len() == d_model_layer * d_model_layer
         {
             copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, q_offset)?;
+            if let Some(canon) = block.attn_qkv_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, q_offset)?;
+            }
             return Ok(());
         }
 
@@ -360,6 +369,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             && tensor.len() == kv_dim * d_model_layer
         {
             copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, k_offset)?;
+            if let Some(canon) = block.attn_qkv_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, k_offset)?;
+            }
             return Ok(());
         }
 
@@ -373,6 +385,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             && tensor.len() == kv_dim * d_model_layer
         {
             copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, v_offset)?;
+            if let Some(canon) = block.attn_qkv_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, v_offset)?;
+            }
             return Ok(());
         }
 
@@ -386,6 +401,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             && tensor.len() == block.attn_out_weight.len()
         {
             copy_tensor_into(tensor, &mut block.attn_out_weight)?;
+            if let Some(canon) = block.attn_out_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
+            }
             return Ok(());
         }
 
@@ -432,6 +450,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         {
             // Use transposed loading for unified [Out, In] layout (matching QKV pattern)
             copy_weight_transposed_into_fused(tensor, &mut block.ffn_gate, 0)?;
+            if let Some(canon) = block.ffn_gate_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
+            }
             return Ok(());
         }
 
@@ -444,6 +465,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         {
             // Use transposed loading for unified [Out, In] layout (matching QKV pattern)
             copy_weight_transposed_into_fused(tensor, &mut block.ffn_up, 0)?;
+            if let Some(canon) = block.ffn_up_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
+            }
             return Ok(());
         }
 
@@ -458,6 +482,9 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         {
             // Use transposed loading for unified [Out, In] layout (matching QKV pattern)
             copy_weight_transposed_into_fused(tensor, &mut block.ffn_down, 0)?;
+            if let Some(canon) = block.ffn_down_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
+            }
             return Ok(());
         }
 
@@ -658,9 +685,9 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
                 .map_err(|err| MetalError::InvalidOperation(format!("Failed to load tensor '{}' into model: {err}", name)))?;
         }
 
-        // NOTE: All dense weights (QKV, FFN gate/up/down) are now transposed during loading
-        // via copy_weight_transposed_into_fused, producing [In, Out] layout.
-        // No post-load transpose step is needed.
+        // NOTE: Dense weights (QKV, FFN gate/up/down) are transposed during loading
+        // via copy_weight_transposed_into_fused, producing [In, Out] layout for full-forward.
+        // Canonical FP16 weights are swizzled separately for decode GEMV.
         Ok(qwen)
     }
 }
