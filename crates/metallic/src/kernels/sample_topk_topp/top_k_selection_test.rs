@@ -34,7 +34,7 @@ fn test_gpu_cpu_sampling_parity() -> Result<(), MetalError> {
     let cpu_token = sample_top_k_top_p::<F32Element>(vocab_logits, k, top_p, temperature, &mut sampler_buffers) as u32;
 
     // Test GPU sampling
-    let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+    let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
 
     // Note: Due to randomization, exact equality may not hold.
     // For a fair comparison, we need to use fixed seeds or compare probability distributions
@@ -63,7 +63,7 @@ fn test_gpu_cpu_sampling_parity_fixed_seed() -> Result<(), MetalError> {
     let cpu_token = sample_top_k_top_p::<F32Element>(vocab_logits, k, top_p, temperature, &mut sampler_buffers) as u32;
 
     // Set seed for context before GPU sampling to make it more predictable
-    let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+    let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
 
     assert!(cpu_token < vocab_size as u32, "CPU token ID out of range");
     assert!(gpu_token < vocab_size as u32, "GPU token ID out of range");
@@ -90,7 +90,7 @@ fn test_gpu_sampling_basic_functionality() -> Result<(), MetalError> {
     let top_p = 0.8;
     let temperature = 1.0;
 
-    let token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+    let token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
 
     // Should return a valid token ID within range
     assert!(token < vocab_size as u32);
@@ -123,7 +123,7 @@ fn test_gpu_sampling_edge_cases() -> Result<(), MetalError> {
     ];
 
     for (k, top_p, temperature) in configs {
-        let token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+        let token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
         assert!(token < vocab_size as u32);
         println!("Config (k={}, top_p={}, temp={}): token={}", k, top_p, temperature, token);
     }

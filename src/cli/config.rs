@@ -25,6 +25,10 @@ pub struct CliConfig {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
+    /// Suppress token output (metrics only)
+    #[arg(short, long)]
+    pub quiet: bool,
+
     /// Output format (json, text, tui)
     #[arg(long, value_enum, default_value_t = OutputFormat::Tui)]
     pub output_format: OutputFormat,
@@ -52,6 +56,10 @@ pub struct GenerationConfig {
     /// Top-k sampling parameter (0-100)
     #[arg(long, default_value_t = 40)]
     pub top_k: usize,
+
+    /// Random seed for sampling (optional)
+    #[arg(long)]
+    pub seed: Option<u32>,
 }
 
 /// Output format options
@@ -103,6 +111,7 @@ impl Default for GenerationConfig {
             temperature: 0.7,
             top_p: 0.95,
             top_k: 40,
+            seed: None,
         }
     }
 }
@@ -119,6 +128,7 @@ mod tests {
             generation: GenerationConfig::default(),
             backend: None,
             verbose: 0,
+            quiet: false,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
         };
@@ -134,6 +144,7 @@ mod tests {
             generation: GenerationConfig::default(),
             backend: None,
             verbose: 0,
+            quiet: false,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
         };

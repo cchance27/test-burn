@@ -280,7 +280,7 @@ fn benchmark_cpu_vs_gpu_sampling() -> Result<(), MetalError> {
 
                     let start = Instant::now();
                     let _gpu_token = ctx.with_gpu_scope("sample_topk_topp_benchmark", |ctx| {
-                        gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, ctx)
+                        gpu_sample_top_k_top_p::<F16Element>(&staged, vocab_size, k, top_p, temperature, None, ctx)
                     })?;
                     gpu_times.push(start.elapsed());
 

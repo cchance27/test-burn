@@ -44,6 +44,7 @@ fn test_generation_pipeline() {
         top_p: 0.95,
         top_k: 40,
         kv_initial_headroom_tokens: 256,
+        seed: None,
     };
 
     // This test just verifies that the generation pipeline can be called
@@ -94,6 +95,7 @@ fn test_full_generation_correctness() -> Result<(), crate::MetalError> {
         top_p: 1.0,
         top_k: 1,
         kv_initial_headroom_tokens: 256,
+        seed: None,
     };
 
     // --- Run 1: No-Cache Reference Implementation ---

@@ -133,6 +133,7 @@ fn main() -> AppResult<()> {
                     top_p: cli_config.generation.top_p as f32,
                     top_k: cli_config.generation.top_k,
                     kv_initial_headroom_tokens: (cli_config.generation.max_tokens / 4).max(32),
+                    seed: cli_config.generation.seed,
                 };
 
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
@@ -162,7 +163,7 @@ fn main() -> AppResult<()> {
     // Based on output format, run the appropriate mode
     match cli_config.output_format {
         cli::config::OutputFormat::Tui => run_tui_mode(&receiver, &rx, generation_handle)?,
-        cli::config::OutputFormat::Text => run_text_mode(&receiver, &rx, generation_handle)?,
+        cli::config::OutputFormat::Text => run_text_mode(&cli_config, &receiver, &rx, generation_handle)?,
         cli::config::OutputFormat::Json => run_json_mode(&receiver, &rx, generation_handle)?,
     }
 
@@ -442,7 +443,8 @@ fn run_tui_mode(
 }
 
 fn run_text_mode(
-    _receiver: &std::sync::mpsc::Receiver<EnrichedMetricEvent>,
+    cli_config: &cli::CliConfig,
+    metrics_receiver: &std::sync::mpsc::Receiver<EnrichedMetricEvent>,
     rx: &std::sync::mpsc::Receiver<AppEvent>,
     generation_handle: thread::JoinHandle<Result<()>>,
 ) -> AppResult<()> {
@@ -454,6 +456,9 @@ fn run_text_mode(
 
     // Process all events until generation is done
     while !generation_handle.is_finished() || rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+        // Drain metrics channel to prevent memory leak and unnecessary buffering overhead
+        while let Ok(_metric) = metrics_receiver.try_recv() {}
+
         // Process any pending app events
         while let Ok(event) = rx.try_recv() {
             match event {
@@ -462,8 +467,13 @@ fn run_text_mode(
                     prompt_processing: prompt,
                     ..
                 } => {
-                    print!("{}", text);
-                    std::io::stdout().flush().unwrap();
+                    if !cli_config.quiet {
+                        print!("{}", text);
+                        // Only flush on newlines to reduce terminal I/O and GPU contention
+                        if text.contains('\n') || generated_tokens % 16 == 0 {
+                            std::io::stdout().flush().unwrap();
+                        }
+                    }
                     generated_tokens = generated_tokens.saturating_add(1);
                     prompt_processing.get_or_insert(prompt);
                 }

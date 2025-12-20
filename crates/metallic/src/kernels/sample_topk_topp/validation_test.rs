@@ -56,7 +56,7 @@ fn benchmark_cpu_vs_gpu_with_sync_overhead() -> Result<(), MetalError> {
         let start = Instant::now();
 
         // GPU sampling - no sync for main computation, only to read single token
-        let _gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
 
         let duration = start.elapsed();
         gpu_times.push(duration);
@@ -133,7 +133,7 @@ fn test_deterministic_sampling_comparison() -> Result<(), MetalError> {
         cpu_tokens.push(cpu_token);
 
         // GPU path
-        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
         gpu_tokens.push(gpu_token);
     }
 
@@ -189,7 +189,7 @@ fn debug_gpu_sampler_issue() -> Result<(), MetalError> {
 
     // Multiple test runs to check for consistency
     for i in 0..10 {
-        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
         println!(
             "Run {}: GPU token = {}, token as char = {:?}",
             i,
@@ -236,7 +236,7 @@ fn compare_gpu_vs_cpu_sampling() -> Result<(), MetalError> {
 
     // GPU sampling (multiple times to check consistency)
     for i in 0..5 {
-        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, &mut ctx)?;
+        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
         println!("Run {}: CPU token = {}, GPU token = {}", i, cpu_token, gpu_token);
 
         // Both should be within range

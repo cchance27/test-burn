@@ -175,6 +175,8 @@ pub struct GenerationConfig {
     /// This lets us avoid over-allocating the KV pool when typical generations are short.
     /// If generation exceeds this, we currently do not grow the KV cache mid-run.
     pub kv_initial_headroom_tokens: usize,
+    /// Random seed for sampling. If None, a random seed will be generated.
+    pub seed: Option<u32>,
 }
 
 impl Default for GenerationConfig {
@@ -185,6 +187,7 @@ impl Default for GenerationConfig {
             top_p: 0.95,
             top_k: 40,
             kv_initial_headroom_tokens: 256,
+            seed: None,
         }
     }
 }
@@ -343,6 +346,7 @@ pub(crate) fn gpu_sample_top_k_top_p_async<T: TensorElement>(
     top_k: usize,
     top_p: f32,
     temperature: f32,
+    seed: Option<u32>,
     ctx: &mut Context<T>,
     iteration_start: Instant,
 ) -> Result<GpuSampleFuture, MetalError> {
@@ -353,8 +357,8 @@ pub(crate) fn gpu_sample_top_k_top_p_async<T: TensorElement>(
         return Ok(GpuSampleFuture::ready(token, iteration_start, sample_start.elapsed()));
     }
 
-    // Generate a random seed for the GPU kernel.
-    let seed = rand::rng().next_u32();
+    // Use the provided seed or generate a new one.
+    let seed = seed.unwrap_or_else(|| rand::rng().next_u32());
 
     let (output_token,) = ctx.call_custom::<SampleTopKTopPOp>(
         (
@@ -389,9 +393,10 @@ pub fn gpu_sample_top_k_top_p<T: TensorElement>(
     top_k: usize,
     top_p: f32,
     temperature: f32,
+    seed: Option<u32>,
     ctx: &mut Context<T>,
 ) -> Result<u32, MetalError> {
-    let mut future = gpu_sample_top_k_top_p_async(logits_tensor, vocab_size, top_k, top_p, temperature, ctx, Instant::now())?;
+    let mut future = gpu_sample_top_k_top_p_async(logits_tensor, vocab_size, top_k, top_p, temperature, seed, ctx, Instant::now())?;
     ctx.submit_active_command_buffer();
     future.mark_submitted();
     ctx.poll_command_buffer_completions();
@@ -886,6 +891,7 @@ where
             cfg.top_k,
             cfg.top_p,
             cfg.temperature,
+            cfg.seed,
             ctx,
             iteration_start,
         )?;
@@ -1008,6 +1014,7 @@ where
                 cfg.top_k,
                 cfg.top_p,
                 cfg.temperature,
+                cfg.seed,
                 ctx,
                 iteration_start,
             )?;
