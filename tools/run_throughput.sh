@@ -25,4 +25,4 @@ run_one() {
 }
 
 run_one "fp16" "${MODEL_FP16}"
-run_one "q8" "${MODEL_Q8}"
+run_one "q8" "${MODEL_Q8}" ### Disable when we're working on FP16 to speed up iterating

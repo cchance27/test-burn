@@ -1,7 +1,8 @@
 # Metallic Performance Optimization - Quick Start Guide
 
 **Goal:** Reach **105 tok/s (FP16)** and **160 tok/s (Q8)** on M3 Pro.
-**Current (after Layout Unification):** ~69 tok/s (FP16 decode) | ~150 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
+**Current (after Canonical Opt):** ~71.6 tok/s (FP16 decode) | ~131 tok/s (Q8 decode) using `MAX_TOKENS=256` on M3 Pro.
+**Latest Status:** FP16 Canonical Kernels implemented and active. Parity with Q8 SIMD architecture achieved.
 
 This guide is designed to get a new developer up to speed on the Metallic kernel architecture and the "Race to 105/160".
 
@@ -64,6 +65,7 @@ This automatically switches between source and binary loading based on your Carg
 We moved away from "Thread-per-Column" (Legislacy) to **"Warp-per-Column"** (Modern).
 - **Old Way:** 1 Thread loops `K` times. (Latency bound, low bandwidth).
 - **New Way:** 32 Threads (1 Warp) collaborate on `K`. They load vector chunks, accumulate partially, and reduce via `simd_shuffle`.
+- **Layouts:** Q8 uses transposing (`transpose_right=false`). FP16 now uses **Canonical Blocked Layout** (K-major blocks) to maximize 128-bit vector load efficiency on M3.
 
 ### 2. Optimization Techniques Used
 - **Vectorized Loads:** Always use `float4` (128-bit) loads. Reinterpret as `half` or `uchar` vectors. This is critical for M3 bandwidth.
@@ -92,8 +94,8 @@ METALLIC_GEMV_COLS_PER_TG=8 ./tools/run_throughput.sh
 The current kernels are efficient, The remaining gap is likely **Overhead** and **Lack of Fusion**.
 
 ### 0. ~~Unify Dense/Q8 Layouts~~ ✅ RESOLVED
-Dense weights now transposed during loading via `copy_weight_transposed_into_fused`, producing `[In, Out]` layout. Dense path uses `transpose_right=false` matching Q8.
-- **Result:** FP16 can now use same SIMD helpers and fused kernels as Q8.
+Dense weights now loaded into optimized `CanonicalF16Tensor` format.
+- **Result:** FP16 now uses the same SIMD helpers and fused kernel architecture as Q8. Legacy layouts removed.
 
 ### 1. Kernel Fusion (Start Here)
 Fuse `RMSNorm` into the `GEMV` kernel input.
@@ -110,8 +112,13 @@ Experiment with `THREADGROUP_SIZE` (currently 128) in `base.rs`. Try 256 or 512 
 We now support `METALLIC_GEMV_COLS_PER_TG=2|4|8` (maps to threadgroup widths 64/128/256) for GEMV variants.
 Use `cargo bench -q --bench gemv_variant_bench -- --warm-up-time 1 --measurement-time 3` and compare runs with different env values.
 
-## Known Issues
-- ~~**FP16 fused GEMV was disabled**~~ - Now resolved. Dense weight layout unified with Q8 via `copy_weight_transposed_into_fused`.
+## Known Issues & Parity Gaps
+- **Output Projection (Prefill)**: Still uses dense `[N,K]` + `transpose_b=true` when `m>1`.
+- **Fused Kernels (Decode)**:
+    - **RMSNorm+QKV**: Implemented for FP16 Canonical.
+    - **RMSNorm+SwiGLU**: Implemented for FP16 Canonical.
+- **Prefill GEMM**: Canonical path slower than MLX/MPS; needs tuning.
+- **Dispatcher**: Generic dispatcher doesn't yet auto-select canonical FP16 kernels; manually selected in model code.
 
 ## Testing Performance
 Always request that someone with a M3 Pro performs the run_throughput.sh and run_throughput_w_prof.sh scripts, and processes the results with the analyze_tmpfiles.sh to aggregate the txt files. For your review with full performance mode and the prof_ files that include the kernel materialization (much slower but allows us to see individual step/kernel comparisons and % of time spent in each step/kernel)

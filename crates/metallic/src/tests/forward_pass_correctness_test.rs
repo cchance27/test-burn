@@ -156,15 +156,45 @@ fn run_blocks_up_to<T: TensorElement>(
         let kv_head_dim = kv_dim / n_kv_heads;
         let x_flat = x_normed.reshape(vec![m, d_model])?;
 
-        let (q_mat, k_mat, v_mat) = ctx.qkv(
-            &x_flat,
-            QkvWeights::Dense {
-                fused_weight: &block.attn_qkv_weight,
-                fused_bias: &block.attn_qkv_bias,
-                d_model,
-                kv_dim,
-            },
-        )?;
+        let f16_canonical = crate::context::f16_canonical_gemm_enabled();
+        let (q_mat, k_mat, v_mat) = if f16_canonical {
+            let q_bias = block.attn_qkv_bias.slice(0..d_model)?;
+            let k_bias = block.attn_qkv_bias.slice(d_model..(d_model + kv_dim))?;
+            let v_bias = block.attn_qkv_bias.slice((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+            if let (Some(wq), Some(wk), Some(wv)) = (&block.attn_q_weight_canon, &block.attn_k_weight_canon, &block.attn_v_weight_canon) {
+                ctx.qkv(
+                    &x_flat,
+                    QkvWeights::DenseCanonical {
+                        wq,
+                        wk,
+                        wv,
+                        q_bias: &q_bias,
+                        k_bias: &k_bias,
+                        v_bias: &v_bias,
+                    },
+                )?
+            } else {
+                ctx.qkv(
+                    &x_flat,
+                    QkvWeights::Dense {
+                        fused_weight: block.attn_qkv_weight.as_ref().unwrap(),
+                        fused_bias: &block.attn_qkv_bias,
+                        d_model,
+                        kv_dim,
+                    },
+                )?
+            }
+        } else {
+            ctx.qkv(
+                &x_flat,
+                QkvWeights::Dense {
+                    fused_weight: block.attn_qkv_weight.as_ref().unwrap(),
+                    fused_bias: &block.attn_qkv_bias,
+                    d_model,
+                    kv_dim,
+                },
+            )?
+        };
         ctx.synchronize();
 
         // Rearrange into heads
@@ -259,17 +289,29 @@ fn run_blocks_up_to<T: TensorElement>(
             .permute(&[0, 2, 1, 3], ctx)?
             .reshape(vec![batch, seq, d_model])?;
 
-        let attn_out = ctx
-            .matmul(
+        let attn_out = if let Some(canon) = &block.attn_out_weight_canon {
+            ctx.matmul(
                 &attn_out_reshaped.reshape(vec![m, d_model])?,
-                &TensorType::Dense(&block.attn_out_weight),
+                &TensorType::DenseCanonical(canon),
+                false,
+                false,
+                None,
+                None,
+                None,
+            )?
+            .reshape(vec![batch, seq, d_model])?
+        } else {
+            ctx.matmul(
+                &attn_out_reshaped.reshape(vec![m, d_model])?,
+                &TensorType::Dense(block.attn_out_weight.as_ref().unwrap()),
                 false,
                 true,
                 None,
                 None,
                 None,
             )?
-            .reshape(vec![batch, seq, d_model])?;
+            .reshape(vec![batch, seq, d_model])?
+        };
         ctx.synchronize();
 
         x = resid_attn.add_elem(&attn_out, ctx)?;
@@ -281,19 +323,51 @@ fn run_blocks_up_to<T: TensorElement>(
         ctx.synchronize();
         let x_normed_mlp_flat = x_normed_mlp.reshape(vec![m, d_model])?;
 
-        let ffn_output_flat = ctx.call::<SwiGLUOp>(
-            (
-                &x_normed_mlp_flat,
-                &block.ffn_gate,
-                &block.ffn_gate_bias,
-                &block.ffn_up,
-                &block.ffn_up_bias,
-                &block.ffn_down,
-                &block.ffn_down_bias,
-                Some(&block.ffn_gate_up_weight),
-            ),
-            None,
-        )?;
+        let ffn_output_flat = if f16_canonical {
+            if let (Some(g), Some(u), Some(d)) = (&block.ffn_gate_canon, &block.ffn_up_canon, &block.ffn_down_canon) {
+                let hidden = ctx.swiglu(
+                    &x_normed_mlp_flat,
+                    &TensorType::DenseCanonical(g),
+                    &TensorType::DenseCanonical(u),
+                    Some(&block.ffn_gate_bias),
+                    Some(&block.ffn_up_bias),
+                )?;
+                ctx.matmul(&hidden, &TensorType::DenseCanonical(d), false, false, None, None, None)?
+            } else {
+                // Fallback to dense if canonical missing
+                // Note: SwiGLUOp usually expects fused, but passing 3 options simulates it?
+                // Or we replicate swiglu + down manually like mod.rs if SwiGLUOp fails.
+                // For now, assume SwiGLUOp works if weights are present.
+                ctx.call::<SwiGLUOp>(
+                    (
+                        &x_normed_mlp_flat,
+                        block.ffn_gate.as_ref().unwrap(),
+                        &block.ffn_gate_bias,
+                        block.ffn_up.as_ref().unwrap(),
+                        &block.ffn_up_bias,
+                        block.ffn_down.as_ref().unwrap(),
+                        &block.ffn_down_bias,
+                        block.ffn_gate_up_weight.as_ref(),
+                    ),
+                    None,
+                )?
+            }
+        } else {
+            // Legacy
+            ctx.call::<SwiGLUOp>(
+                (
+                    &x_normed_mlp_flat,
+                    block.ffn_gate.as_ref().unwrap(),
+                    &block.ffn_gate_bias,
+                    block.ffn_up.as_ref().unwrap(),
+                    &block.ffn_up_bias,
+                    block.ffn_down.as_ref().unwrap(),
+                    &block.ffn_down_bias,
+                    block.ffn_gate_up_weight.as_ref(),
+                ),
+                None,
+            )?
+        };
         ctx.synchronize();
         let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
         ctx.synchronize();
@@ -433,20 +507,29 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let d_model = model.config.d_model;
     let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
     // Check the dimensions of the weight tensor to see if it needs to be handled differently
-    println!("Fused QKV weight dims: {:?}", block0.attn_qkv_weight.dims());
+    println!("Fused QKV weight dims: {:?}", block0.attn_qkv_weight.as_ref().map(|w| w.dims()));
     println!("Fused QKV bias dims: {:?}", block0.attn_qkv_bias.dims());
     println!("x_flat (input) dims: {:?}", x_flat.dims());
     println!("Expected fused output dims: [{}, {}]", m, d_model + 2 * block0.kv_dim);
 
-    let linear = ctx.matmul(
-        &x_flat,
-        &TensorType::Dense(&block0.attn_qkv_weight),
-        false,
-        false,
-        Some(&block0.attn_qkv_bias),
-        None,
-        None,
-    )?;
+    let linear = if let Some(w) = &block0.attn_qkv_weight {
+        ctx.matmul(
+            &x_flat,
+            &TensorType::Dense(w),
+            false,
+            false,
+            Some(&block0.attn_qkv_bias),
+            None,
+            None,
+        )?
+    } else {
+        // Skip fused linear check for F16 canonical, strictly
+        // Or construct dummy result if needed, but the test uses it later?
+        // Actually, the test logic below prints summary for `linear`.
+        // If we skip, we should print that.
+        println!("Skipping fused QKV linear check (F16 canonical)");
+        Tensor::zeros(vec![m, d_model + 2 * block0.kv_dim], &mut ctx, false)?
+    };
     ctx.synchronize();
     println!("Linear output dims: {:?}", linear.dims());
     println!(
@@ -454,15 +537,38 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
         take_first_as_f32::<TestElement>(&linear.as_slice()[..10], 10)
     );
 
-    let (q_mat, k_mat, v_mat) = ctx.qkv(
-        &x_flat,
-        QkvWeights::Dense {
-            fused_weight: &block0.attn_qkv_weight,
-            fused_bias: &block0.attn_qkv_bias,
-            d_model,
-            kv_dim: block0.kv_dim,
-        },
-    )?;
+    let (q_mat, k_mat, v_mat) = if let (Some(wq), Some(wk), Some(wv)) = (
+        &block0.attn_q_weight_canon,
+        &block0.attn_k_weight_canon,
+        &block0.attn_v_weight_canon,
+    ) {
+        let q_bias = block0.attn_qkv_bias.slice(0..d_model)?;
+        let k_bias = block0.attn_qkv_bias.slice(d_model..(d_model + block0.kv_dim))?;
+        let v_bias = block0
+            .attn_qkv_bias
+            .slice((d_model + block0.kv_dim)..(d_model + 2 * block0.kv_dim))?;
+        ctx.qkv(
+            &x_flat,
+            QkvWeights::DenseCanonical {
+                wq,
+                wk,
+                wv,
+                q_bias: &q_bias,
+                k_bias: &k_bias,
+                v_bias: &v_bias,
+            },
+        )?
+    } else {
+        ctx.qkv(
+            &x_flat,
+            QkvWeights::Dense {
+                fused_weight: block0.attn_qkv_weight.as_ref().unwrap(),
+                fused_bias: &block0.attn_qkv_bias,
+                d_model,
+                kv_dim: block0.kv_dim,
+            },
+        )?
+    };
     ctx.synchronize();
 
     let rust_q_proj = q_mat.try_to_vec()?;
@@ -807,15 +913,19 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 
     // Attn out projection (use transpose on weight to match PyTorch Linear semantics)
     let attn_out_flat = attn_out_reshaped.reshape(vec![seq, d_model])?;
-    let attn_out_proj = ctx.matmul(
-        &attn_out_flat,
-        &TensorType::Dense(&block0.attn_out_weight),
-        false,
-        true,
-        None,
-        None,
-        None,
-    )?;
+    let attn_out_proj = if let Some(canon) = &block0.attn_out_weight_canon {
+        ctx.matmul(&attn_out_flat, &TensorType::DenseCanonical(canon), false, false, None, None, None)?
+    } else {
+        ctx.matmul(
+            &attn_out_flat,
+            &TensorType::Dense(block0.attn_out_weight.as_ref().unwrap()),
+            false,
+            true,
+            None,
+            None,
+            None,
+        )?
+    };
     ctx.synchronize();
     let attn_out = attn_out_proj.reshape(vec![1, seq, d_model])?;
 
@@ -904,49 +1014,72 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let x_normed_mlp_flat = x_normed_mlp.reshape(vec![seq, d_model])?;
 
     // Step-by-step SwiGLU FFN for debugging
-    println!("FFN gate weight dims: {:?}", block0.ffn_gate.dims());
-    println!("FFN up weight dims: {:?}", block0.ffn_up.dims());
-    println!("FFN down weight dims: {:?}", block0.ffn_down.dims());
-    let gate_dims = block0.ffn_gate.dims();
-    let gate_transpose_b = if gate_dims[0] == d_model {
-        false
-    } else if gate_dims[1] == d_model {
-        true
-    } else {
-        panic!("Unexpected FFN gate dims {:?} for d_model={}", gate_dims, d_model);
-    };
-    println!("Using transpose_b={} for gate matmul", gate_transpose_b);
+    println!("FFN gate weight dims: {:?}", block0.ffn_gate.as_ref().map(|w| w.dims()));
+    println!("FFN up weight dims: {:?}", block0.ffn_up.as_ref().map(|w| w.dims()));
+    println!("FFN down weight dims: {:?}", block0.ffn_down.as_ref().map(|w| w.dims()));
+
     // Gate projection
-    let gate_proj = ctx.matmul(
-        &x_normed_mlp_flat,
-        &TensorType::Dense(&block0.ffn_gate),
-        false,
-        gate_transpose_b,
-        None,
-        None,
-        None,
-    )?;
+    let gate_proj = if let Some(canon) = &block0.ffn_gate_canon {
+        ctx.matmul(
+            &x_normed_mlp_flat,
+            &TensorType::DenseCanonical(canon),
+            false,
+            false,
+            None,
+            None,
+            None,
+        )?
+    } else {
+        let gate_dims = block0.ffn_gate.as_ref().unwrap().dims();
+        let gate_transpose_b = if gate_dims[0] == d_model {
+            false
+        } else if gate_dims[1] == d_model {
+            true
+        } else {
+            panic!("Unexpected FFN gate dims {:?} for d_model={}", gate_dims, d_model);
+        };
+        ctx.matmul(
+            &x_normed_mlp_flat,
+            &TensorType::Dense(block0.ffn_gate.as_ref().unwrap()),
+            false,
+            gate_transpose_b,
+            None,
+            None,
+            None,
+        )?
+    };
     let gate_proj_out = ctx.call::<BroadcastElemwiseAddOp>((gate_proj, block0.ffn_gate_bias.clone()), None)?;
 
     // Up projection
-    let up_dims = block0.ffn_up.dims();
-    let up_transpose_b = if up_dims[0] == d_model {
-        false
-    } else if up_dims[1] == d_model {
-        true
+    let up_proj = if let Some(canon) = &block0.ffn_up_canon {
+        ctx.matmul(
+            &x_normed_mlp_flat,
+            &TensorType::DenseCanonical(canon),
+            false,
+            false,
+            None,
+            None,
+            None,
+        )?
     } else {
-        panic!("Unexpected FFN up dims {:?} for d_model={}", up_dims, d_model);
+        let up_dims = block0.ffn_up.as_ref().unwrap().dims();
+        let up_transpose_b = if up_dims[0] == d_model {
+            false
+        } else if up_dims[1] == d_model {
+            true
+        } else {
+            panic!("Unexpected FFN up dims {:?} for d_model={}", up_dims, d_model);
+        };
+        ctx.matmul(
+            &x_normed_mlp_flat,
+            &TensorType::Dense(block0.ffn_up.as_ref().unwrap()),
+            false,
+            up_transpose_b,
+            None,
+            None,
+            None,
+        )?
     };
-    println!("Using transpose_b={} for up matmul", up_transpose_b);
-    let up_proj = ctx.matmul(
-        &x_normed_mlp_flat,
-        &TensorType::Dense(&block0.ffn_up),
-        false,
-        up_transpose_b,
-        None,
-        None,
-        None,
-    )?;
     let up_proj_out = ctx.call::<BroadcastElemwiseAddOp>((up_proj, block0.ffn_up_bias.clone()), None)?;
 
     // Silu
@@ -957,24 +1090,27 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 
     // Down projection
     let ff_dim = model.config.ff_dim;
-    let down_dims = block0.ffn_down.dims();
-    let down_transpose_b = if down_dims[0] == ff_dim {
-        false
-    } else if down_dims[1] == ff_dim {
-        true
+    let down_proj = if let Some(canon) = &block0.ffn_down_canon {
+        ctx.matmul(&mul_out, &TensorType::DenseCanonical(canon), false, false, None, None, None)?
     } else {
-        panic!("Unexpected FFN down dims {:?} for ff_dim={}", down_dims, ff_dim);
+        let down_dims = block0.ffn_down.as_ref().unwrap().dims();
+        let down_transpose_b = if down_dims[0] == ff_dim {
+            false
+        } else if down_dims[1] == ff_dim {
+            true
+        } else {
+            panic!("Unexpected FFN down dims {:?} for ff_dim={}", down_dims, ff_dim);
+        };
+        ctx.matmul(
+            &mul_out,
+            &TensorType::Dense(block0.ffn_down.as_ref().unwrap()),
+            false,
+            down_transpose_b,
+            None,
+            None,
+            None,
+        )?
     };
-    println!("Using transpose_b={} for down matmul", down_transpose_b);
-    let down_proj = ctx.matmul(
-        &mul_out,
-        &TensorType::Dense(&block0.ffn_down),
-        false,
-        down_transpose_b,
-        None,
-        None,
-        None,
-    )?;
     let down_proj_out = ctx.call::<BroadcastElemwiseAddOp>((down_proj, block0.ffn_down_bias.clone()), None)?;
 
     let ffn_output_flat = down_proj_out.clone();
@@ -1254,15 +1390,38 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let m = attn_norm_last_view.dims()[0];
     let x_flat_last = attn_norm_last_view.reshape(vec![m, d_model])?;
 
-    let (q_mat_last, k_mat_last, v_mat_last) = ctx.qkv(
-        &x_flat_last,
-        QkvWeights::Dense {
-            fused_weight: &block_last.attn_qkv_weight,
-            fused_bias: &block_last.attn_qkv_bias,
-            d_model,
-            kv_dim: kv_dim_last,
-        },
-    )?;
+    let (q_mat_last, k_mat_last, v_mat_last) = if let (Some(wq), Some(wk), Some(wv)) = (
+        &block_last.attn_q_weight_canon,
+        &block_last.attn_k_weight_canon,
+        &block_last.attn_v_weight_canon,
+    ) {
+        let q_bias = block_last.attn_qkv_bias.slice(0..d_model)?;
+        let k_bias = block_last.attn_qkv_bias.slice(d_model..(d_model + block_last.kv_dim))?;
+        let v_bias = block_last
+            .attn_qkv_bias
+            .slice((d_model + block_last.kv_dim)..(d_model + 2 * block_last.kv_dim))?;
+        ctx.qkv(
+            &x_flat_last,
+            QkvWeights::DenseCanonical {
+                wq,
+                wk,
+                wv,
+                q_bias: &q_bias,
+                k_bias: &k_bias,
+                v_bias: &v_bias,
+            },
+        )?
+    } else {
+        ctx.qkv(
+            &x_flat_last,
+            QkvWeights::Dense {
+                fused_weight: block_last.attn_qkv_weight.as_ref().unwrap(),
+                fused_bias: &block_last.attn_qkv_bias,
+                d_model,
+                kv_dim: block_last.kv_dim,
+            },
+        )?
+    };
     ctx.synchronize();
 
     // Rearrangement into heads
@@ -1364,21 +1523,33 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 
     let attn_out_heads_last = ctx.scaled_dot_product_attention(&q_heads_after_rope_last, &k_repeated_last, &v_repeated_last, true)?;
 
-    let attn_out_last = attn_out_heads_last
+    let attn_out_reshaped_last = attn_out_heads_last
         .reshape(vec![1, n_heads, seq, head_dim])?
         .permute(&[0, 2, 1, 3], &mut ctx)?
         .reshape(vec![1, seq, d_model])?;
-    let attn_out_last = ctx
-        .matmul(
-            &attn_out_last.reshape(vec![m, d_model])?,
-            &TensorType::Dense(&block_last.attn_out_weight),
+    let attn_out_last = if let Some(canon) = &block_last.attn_out_weight_canon {
+        ctx.matmul(
+            &attn_out_reshaped_last.reshape(vec![seq, d_model])?,
+            &TensorType::DenseCanonical(canon),
+            false,
+            false,
+            None,
+            None,
+            None,
+        )?
+        .reshape(vec![1, seq, d_model])?
+    } else {
+        ctx.matmul(
+            &attn_out_reshaped_last.reshape(vec![seq, d_model])?,
+            &TensorType::Dense(block_last.attn_out_weight.as_ref().unwrap()),
             false,
             true,
             None,
             None,
             None,
         )?
-        .reshape(vec![1, seq, d_model])?;
+        .reshape(vec![1, seq, d_model])?
+    };
     ctx.synchronize();
 
     let (py_attn_out_last, py_attn_out_shape) =
@@ -1422,13 +1593,13 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
     let ffn_output_flat_last = ctx.call::<SwiGLUOp>(
         (
             &mlp_norm_flat_last,
-            &block_last.ffn_gate,
+            block_last.ffn_gate.as_ref().unwrap(),
             &block_last.ffn_gate_bias,
-            &block_last.ffn_up,
+            block_last.ffn_up.as_ref().unwrap(),
             &block_last.ffn_up_bias,
-            &block_last.ffn_down,
+            block_last.ffn_down.as_ref().unwrap(),
             &block_last.ffn_down_bias,
-            Some(&block_last.ffn_gate_up_weight),
+            block_last.ffn_gate_up_weight.as_ref(), // pass Option directly as it's Option<&Tensor>
         ),
         None,
     )?;

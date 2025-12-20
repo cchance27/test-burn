@@ -140,3 +140,143 @@ struct SwiGluEpilogue {
         p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
     );
 }
+
+// =================================================================================================
+// FP16 Canonical Fused Kernels
+// =================================================================================================
+
+// FP16 Canonical QKV Kernel (Fused 3 Heads)
+[[kernel]] void gemv_f16_canonical_qkv_f16(
+    const device half *data_q [[buffer(0)]],
+    const device half *data_k [[buffer(1)]],
+    const device half *data_v [[buffer(2)]],
+    const device half *vector_x [[buffer(3)]],
+    device half *out_q [[buffer(4)]],
+    device half *out_k [[buffer(5)]],
+    device half *out_v [[buffer(6)]],
+    const constant QkvFusedParams *params [[buffer(7)]],
+    const device half *bias_q [[buffer(8)]],
+    const device half *bias_k [[buffer(9)]],
+    const device half *bias_v [[buffer(10)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) {
+
+    const device half *data_arr[3] = {data_q, data_k, data_v};
+    device half *res_arr[3] = {out_q, out_k, out_v};
+    const uint N_arr[3] = {params->Nq, params->Nk, params->Nv};
+    const device half *bias_arr[3] = {bias_q, bias_k, bias_v};
+    const uint bias_flags[3] = {params->has_bias_q, params->has_bias_k, params->has_bias_v};
+
+    SimdGemvPolicyF16Canonical::Params p = {
+        (const device half**)data_arr,
+        params->weights_per_block
+    };
+
+    run_simd_gemv_template<SimdGemvPolicyF16Canonical, 3, 8, true>(
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+    );
+}
+
+// FP16 Canonical QKV Kernel (Fused 3 Heads + RMSNorm)
+[[kernel]] void gemv_f16_canonical_qkv_rmsnorm_f16(
+    const device half *data_q [[buffer(0)]],
+    const device half *data_k [[buffer(1)]],
+    const device half *data_v [[buffer(2)]],
+    const device half *vector_x [[buffer(3)]],
+    device half *out_q [[buffer(4)]],
+    device half *out_k [[buffer(5)]],
+    device half *out_v [[buffer(6)]],
+    const constant QkvFusedParams *params [[buffer(7)]],
+    const device half *bias_q [[buffer(8)]],
+    const device half *bias_k [[buffer(9)]],
+    const device half *bias_v [[buffer(10)]],
+    const device half *gamma [[buffer(11)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) {
+
+    const device half *data_arr[3] = {data_q, data_k, data_v};
+    device half *res_arr[3] = {out_q, out_k, out_v};
+    const uint N_arr[3] = {params->Nq, params->Nk, params->Nv};
+    const device half *bias_arr[3] = {bias_q, bias_k, bias_v};
+    const uint bias_flags[3] = {params->has_bias_q, params->has_bias_k, params->has_bias_v};
+
+    threadgroup float inv_rms_s;
+    const uint lane_id = lid.x & 31u;
+    const uint warp_id = lid.x / 32u;
+    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s);
+
+    SimdGemvPolicyF16CanonicalRmsnorm::Params p = {
+        (const device half**)data_arr,
+        gamma,
+        inv_rms,
+        params->weights_per_block
+    };
+
+    run_simd_gemv_template<SimdGemvPolicyF16CanonicalRmsnorm, 3, 8, true>(
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+    );
+}
+
+// FP16 Canonical SwiGLU Kernel
+[[kernel]] void gemv_f16_canonical_swiglu_f16(
+    const device half *data_g [[buffer(0)]],
+    const device half *data_u [[buffer(1)]],
+    const device half *vector_x [[buffer(2)]],
+    device half *out_res [[buffer(3)]],
+    const constant Q2FusedParams *params [[buffer(4)]],
+    const device half *bias_g [[buffer(5)]],
+    const device half *bias_u [[buffer(6)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) {
+
+    const device half *data_arr[2] = {data_g, data_u};
+    device half *res_arr[2] = {out_res, nullptr};
+    const uint N_arr[2] = {params->N0, params->N1};
+    const device half *bias_arr[2] = {bias_g, bias_u};
+    const uint bias_flags[2] = {params->has_bias0, params->has_bias1};
+
+    SimdGemvPolicyF16Canonical::Params p = {
+        (const device half**)data_arr,
+        params->weights_per_block
+    };
+
+    run_simd_gemv_template<SimdGemvPolicyF16Canonical, 2, 8, true, SwiGluEpilogue>(
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+    );
+}
+
+// FP16 Canonical SwiGLU Kernel (Fused RMSNorm)
+[[kernel]] void gemv_f16_canonical_swiglu_rmsnorm_f16(
+    const device half *data_g [[buffer(0)]],
+    const device half *data_u [[buffer(1)]],
+    const device half *vector_x [[buffer(2)]],
+    device half *out_res [[buffer(3)]],
+    const constant Q2FusedParams *params [[buffer(4)]],
+    const device half *bias_g [[buffer(5)]],
+    const device half *bias_u [[buffer(6)]],
+    const device half *gamma [[buffer(7)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]]) {
+
+    const device half *data_arr[2] = {data_g, data_u};
+    device half *res_arr[2] = {out_res, nullptr};
+    const uint N_arr[2] = {params->N0, params->N1};
+    const device half *bias_arr[2] = {bias_g, bias_u};
+    const uint bias_flags[2] = {params->has_bias0, params->has_bias1};
+
+    threadgroup float inv_rms_s;
+    const uint lane_id = lid.x & 31u;
+    const uint warp_id = lid.x / 32u;
+    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lane_id, warp_id, &inv_rms_s);
+
+    SimdGemvPolicyF16CanonicalRmsnorm::Params p = {
+        (const device half**)data_arr,
+        gamma,
+        inv_rms,
+        params->weights_per_block
+    };
+
+    run_simd_gemv_template<SimdGemvPolicyF16CanonicalRmsnorm, 2, 8, true, SwiGluEpilogue>(
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+    );
+}

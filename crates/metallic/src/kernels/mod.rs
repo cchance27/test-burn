@@ -187,6 +187,12 @@ pub enum KernelFunction {
     MatmulQ8Nt,
     MatmulQ8CanonicalLargeN,
     MatmulQ8CanonicalRows16LargeN,
+    MatmulF16CanonicalLargeN,
+    MatmulF16CanonicalRows16LargeN,
+    MatmulF16CanonicalQkvFused,
+    MatmulF16CanonicalQkvFusedRmsnorm,
+    MatmulF16CanonicalSwiGlu,
+    MatmulF16CanonicalSwiGluRmsnorm,
     MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
@@ -241,6 +247,12 @@ impl KernelFunction {
             KernelFunction::MatmulQ8Nt => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalLargeN => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulQ8CanonicalRows16LargeN => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulF16CanonicalLargeN => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulF16CanonicalRows16LargeN => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulF16CanonicalQkvFused => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulF16CanonicalQkvFusedRmsnorm => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulF16CanonicalSwiGlu => KernelLibrary::MatmulGemv,
+            KernelFunction::MatmulF16CanonicalSwiGluRmsnorm => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallM => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemmTiled => KernelLibrary::MatmulGemmTiled,
             KernelFunction::SoftmaxBlock => KernelLibrary::SoftmaxBlock,
@@ -365,6 +377,24 @@ impl KernelFunction {
             (KernelFunction::MatmulQ8Nt, F16) => "gemm_q8_nt_f16",
             (KernelFunction::MatmulQ8CanonicalLargeN, F16) => "gemm_q8_canonical_large_n_f16",
             (KernelFunction::MatmulQ8CanonicalRows16LargeN, F16) => "gemm_q8_canonical_large_n_rows16_f16",
+            (KernelFunction::MatmulF16CanonicalLargeN, F16) => "gemm_f16_canonical_large_n_f16",
+            (KernelFunction::MatmulF16CanonicalLargeN, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulF16CanonicalLargeN",
+                });
+            }
+            (KernelFunction::MatmulF16CanonicalRows16LargeN, F16) => "gemm_f16_canonical_large_n_rows16_f16",
+            (KernelFunction::MatmulF16CanonicalRows16LargeN, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulF16CanonicalRows16LargeN",
+                });
+            }
+            (KernelFunction::MatmulF16CanonicalQkvFused, F16) => "gemv_f16_canonical_qkv_f16",
+            (KernelFunction::MatmulF16CanonicalQkvFusedRmsnorm, F16) => "gemv_f16_canonical_qkv_rmsnorm_f16",
+            (KernelFunction::MatmulF16CanonicalSwiGlu, F16) => "gemv_f16_canonical_swiglu_f16",
+            (KernelFunction::MatmulF16CanonicalSwiGluRmsnorm, F16) => "gemv_f16_canonical_swiglu_rmsnorm_f16",
             (KernelFunction::MatmulGemvSmallM, F16) => "gemv_q8_rows_f16",
             (KernelFunction::MatmulGemvSmallN1, F16) => "gemv_n1_f16",
             (KernelFunction::MatmulGemvSmallN1, F32) => {

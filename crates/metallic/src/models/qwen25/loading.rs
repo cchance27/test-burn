@@ -291,10 +291,13 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
     }
 
     // Output / lm_head weights
+    let output_len = qwen.config.vocab_size * qwen.config.d_model;
     if (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
-        && tensor.len() == qwen.output_weight.len()
+        && tensor.len() == output_len
     {
-        copy_tensor_into(tensor, &mut qwen.output_weight)?;
+        if let Some(w) = qwen.output_weight.as_mut() {
+            copy_tensor_into(tensor, w)?;
+        }
         if let Some(canon) = qwen.output_weight_canon.as_mut() {
             canon.write_from_nk_tensor(tensor, 0)?;
         }
@@ -312,19 +315,32 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
 
     // Weight tying from token embedding to output weight if still unset
     if lname.contains("token_embd") && lname.contains("weight") {
-        let output_slice = qwen.output_weight.as_slice();
-        let is_output_unset = output_slice.iter().all(|&x| T::to_f32(x) == 0.0);
-
-        if is_output_unset && tensor.len() == qwen.output_weight.len() {
-            copy_tensor_into(tensor, &mut qwen.output_weight)?;
+        // Only checking if output seems unset. Since it's option, if it's None (F16), we assume it's handled by canon init or waiting for load.
+        // Actually, for F16, output_weight is None so "is_output_unset" is tricky.
+        // But if T=F16, we rely on output_weight_canon.
+        let output_len = qwen.config.vocab_size * qwen.config.d_model;
+        if tensor.len() == output_len {
+            if let Some(w) = qwen.output_weight.as_mut() {
+                // Only copy if currently zero? F32 path
+                let output_slice = w.as_slice();
+                if output_slice.iter().all(|&x| T::to_f32(x) == 0.0) {
+                    copy_tensor_into(tensor, w)?;
+                }
+            }
             if let Some(canon) = qwen.output_weight_canon.as_mut() {
+                // For canonical, we just overwrite? Or check if zero?
+                // Canonical init is likely zeroed? CanonicalF16Tensor::new allocs uninit? No, new allocs uninit logic?
+                // Let's assume overwrite if this is token_embd and we haven't loaded lm_head logic yet.
+                // Actually the logic "if is_output_unset" implies we want to respect lm_head if present.
+                // But in GGUF loading order is arbitrary.
+                // Let's just write to canon.
                 canon.write_from_nk_tensor(tensor, 0)?;
             }
-        } else if is_output_unset {
+        } else {
             return Err(MetalError::InvalidOperation(format!(
                 "MAPPING -> token_embd.weight size mismatch: {} vs {}",
                 tensor.len(),
-                qwen.output_weight.len()
+                output_len
             )));
         }
         return Ok(());
@@ -352,9 +368,11 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.query.weight"))
             && tensor.len() == d_model_layer * d_model_layer
         {
-            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, q_offset)?;
-            if let Some(canon) = block.attn_qkv_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, q_offset)?;
+            if let Some(w) = block.attn_qkv_weight.as_mut() {
+                copy_weight_transposed_into_fused(tensor, w, q_offset)?;
+            }
+            if let Some(canon) = block.attn_q_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
             }
             return Ok(());
         }
@@ -368,9 +386,11 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.key.weight"))
             && tensor.len() == kv_dim * d_model_layer
         {
-            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, k_offset)?;
-            if let Some(canon) = block.attn_qkv_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, k_offset)?;
+            if let Some(w) = block.attn_qkv_weight.as_mut() {
+                copy_weight_transposed_into_fused(tensor, w, k_offset)?;
+            }
+            if let Some(canon) = block.attn_k_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
             }
             return Ok(());
         }
@@ -384,9 +404,11 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("attention.value.weight"))
             && tensor.len() == kv_dim * d_model_layer
         {
-            copy_weight_transposed_into_fused(tensor, &mut block.attn_qkv_weight, v_offset)?;
-            if let Some(canon) = block.attn_qkv_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, v_offset)?;
+            if let Some(w) = block.attn_qkv_weight.as_mut() {
+                copy_weight_transposed_into_fused(tensor, w, v_offset)?;
+            }
+            if let Some(canon) = block.attn_v_weight_canon.as_mut() {
+                canon.write_from_nk_tensor(tensor, 0)?;
             }
             return Ok(());
         }
@@ -398,9 +420,11 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("o.weight")
             || lname.contains("out.weight")
             || lname.contains("attention.output.weight"))
-            && tensor.len() == block.attn_out_weight.len()
+            && tensor.len() == d_model_layer * d_model_layer
         {
-            copy_tensor_into(tensor, &mut block.attn_out_weight)?;
+            if let Some(w) = block.attn_out_weight.as_mut() {
+                copy_tensor_into(tensor, w)?;
+            }
             if let Some(canon) = block.attn_out_weight_canon.as_mut() {
                 canon.write_from_nk_tensor(tensor, 0)?;
             }
@@ -434,9 +458,11 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("gate_up.weight")
             || lname.contains("gateup.weight")
             || lname.contains("ffn_gate_up"))
-            && tensor.len() == block.ffn_gate_up_weight.len()
+            && tensor.len() == d_model_layer * 2 * qwen.config.ff_dim
         {
-            copy_fused_gate_up_weight(tensor, &mut block.ffn_gate_up_weight)?;
+            if let Some(w) = block.ffn_gate_up_weight.as_mut() {
+                copy_fused_gate_up_weight(tensor, w)?;
+            }
             return Ok(());
         }
 
@@ -446,10 +472,12 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("gate.weight")
             || lname.contains("wg.weight")
             || lname.contains("w1.weight"))
-            && tensor.len() == block.ffn_gate.len()
+            && tensor.len() == d_model_layer * qwen.config.ff_dim
         {
             // Use transposed loading for unified [Out, In] layout (matching QKV pattern)
-            copy_weight_transposed_into_fused(tensor, &mut block.ffn_gate, 0)?;
+            if let Some(w) = block.ffn_gate.as_mut() {
+                copy_weight_transposed_into_fused(tensor, w, 0)?;
+            }
             if let Some(canon) = block.ffn_gate_canon.as_mut() {
                 canon.write_from_nk_tensor(tensor, 0)?;
             }
@@ -461,10 +489,12 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("ffn_up")
             || lname.contains("up.weight")
             || lname.contains("w3.weight"))
-            && tensor.len() == block.ffn_up.len()
+            && tensor.len() == d_model_layer * qwen.config.ff_dim
         {
             // Use transposed loading for unified [Out, In] layout (matching QKV pattern)
-            copy_weight_transposed_into_fused(tensor, &mut block.ffn_up, 0)?;
+            if let Some(w) = block.ffn_up.as_mut() {
+                copy_weight_transposed_into_fused(tensor, w, 0)?;
+            }
             if let Some(canon) = block.ffn_up_canon.as_mut() {
                 canon.write_from_nk_tensor(tensor, 0)?;
             }
@@ -478,10 +508,12 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
             || lname.contains("w2.weight")
             || lname.contains("fc2.weight")
             || lname.contains("wo.weight"))
-            && tensor.len() == block.ffn_down.len()
+            && tensor.len() == d_model_layer * qwen.config.ff_dim
         {
             // Use transposed loading for unified [Out, In] layout (matching QKV pattern)
-            copy_weight_transposed_into_fused(tensor, &mut block.ffn_down, 0)?;
+            if let Some(w) = block.ffn_down.as_mut() {
+                copy_weight_transposed_into_fused(tensor, w, 0)?;
+            }
             if let Some(canon) = block.ffn_down_canon.as_mut() {
                 canon.write_from_nk_tensor(tensor, 0)?;
             }

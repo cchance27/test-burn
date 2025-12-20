@@ -45,6 +45,14 @@ impl<T: TensorElement> CanonicalF16Tensor<T> {
         })
     }
 
+    pub fn len(&self) -> usize {
+        self.data.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.data.is_empty()
+    }
+
     pub fn write_from_nk_tensor(&mut self, src: &Tensor<T>, dst_col_offset: usize) -> Result<(), MetalError> {
         self.write_from_nk_slice(src.as_slice(), src.dims(), dst_col_offset)
     }

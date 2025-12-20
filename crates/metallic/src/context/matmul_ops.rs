@@ -6,12 +6,13 @@ use super::{main::Context, utils::MatMulBackendOverride as InternalMatMulBackend
 use crate::{
     MetalError, Tensor, caching::ResourceCache, kernels::{
         elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv::{
-            MATMUL_Q8_NT_MAX_ROWS, MatmulGemvAddmmOp, MatmulGemvOp, MatmulGemvSmallMOp, MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op, MatmulQ8NtOp
+            MATMUL_Q8_NT_MAX_ROWS, MatmulF16CanonicalOp, MatmulF16CanonicalQkvFusedOp, MatmulF16CanonicalRows16Op, MatmulF16CanonicalSwiGluOp, MatmulGemvAddmmOp, MatmulGemvOp, MatmulGemvSmallMOp, MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op, MatmulQ8NtOp
         }, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}
     }, tensor::{CanonicalF16Tensor, QuantizedTensor, TensorElement, TensorType}
 };
 
 const METALLIC_Q8_M1_MLX_MIN_N_ENV: &str = "METALLIC_Q8_M1_MLX_MIN_N";
+const METALLIC_F16_CANONICAL_GEMM_ENV: &str = "METALLIC_F16_CANONICAL_GEMM";
 
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -42,6 +43,14 @@ fn q8_m1_mlx_min_n() -> usize {
 #[cfg(test)]
 pub(crate) fn set_q8_m1_mlx_min_n_override_for_tests(value: Option<usize>) {
     Q8_M1_MLX_MIN_N_OVERRIDE.store(value.unwrap_or(usize::MAX), Ordering::Relaxed);
+}
+
+#[inline]
+pub(crate) fn f16_canonical_gemm_enabled() -> bool {
+    std::env::var(METALLIC_F16_CANONICAL_GEMM_ENV)
+        .ok()
+        .map(|s| s.trim() != "0")
+        .unwrap_or(true)
 }
 
 #[inline]
@@ -130,6 +139,14 @@ pub enum QkvWeights<'a, T: TensorElement> {
         k_bias: &'a Tensor<T>,
         v_bias: &'a Tensor<T>,
     },
+    DenseCanonical {
+        wq: &'a CanonicalF16Tensor<T>,
+        wk: &'a CanonicalF16Tensor<T>,
+        wv: &'a CanonicalF16Tensor<T>,
+        q_bias: &'a Tensor<T>,
+        k_bias: &'a Tensor<T>,
+        v_bias: &'a Tensor<T>,
+    },
 }
 
 impl<T: TensorElement> Context<T> {
@@ -205,6 +222,34 @@ impl<T: TensorElement> Context<T> {
             return false;
         }
         let cutoff = Self::canonical_rows16_cutoff_n(dims.m);
+        if cutoff == 0 {
+            return false;
+        }
+        dims.n <= cutoff
+    }
+
+    #[inline]
+    fn f16_canonical_rows16_cutoff_n(m: usize) -> usize {
+        if let Ok(s) = std::env::var("METALLIC_F16_CANONICAL_R16_MAX_N")
+            && let Ok(val) = s.parse::<usize>()
+        {
+            return val;
+        }
+        match m {
+            2..=4 => 0,
+            _ => 0,
+        }
+    }
+
+    #[inline]
+    fn should_use_f16_canonical_rows16(&self, dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
+        if transpose_a || transpose_b || dims.batch != 1 {
+            return false;
+        }
+        if dims.m < 2 || dims.m > 4 {
+            return false;
+        }
+        let cutoff = Self::f16_canonical_rows16_cutoff_n(dims.m);
         if cutoff == 0 {
             return false;
         }
@@ -489,22 +534,67 @@ impl<T: TensorElement> Context<T> {
 
         let rhs = TensorType::DenseCanonical(b);
         let dims = self.compute_matmul_dims(a, &rhs, transpose_a, transpose_b)?;
-        if !self.can_use_gemv_canonical(&dims, transpose_a, transpose_b) {
+        if dims.m == 1 {
+            if !self.can_use_gemv_canonical(&dims, transpose_a, transpose_b) {
+                emit_matmul_backend_selected(
+                    "dense_canonical",
+                    Some(dims),
+                    transpose_a,
+                    transpose_b,
+                    "Unsupported",
+                    "canonical_requires_gemv_m1",
+                );
+                return Err(MetalError::OperationNotSupported(
+                    "canonical matmul only supports GEMV m=1 without transposes".into(),
+                ));
+            }
+
+            emit_matmul_backend_selected("dense_canonical", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
+            return self.launch_gemv(a, rhs, transpose_b, bias, alpha_beta, cache.as_deref_mut());
+        }
+
+        if transpose_a || transpose_b || dims.batch != 1 {
             emit_matmul_backend_selected(
                 "dense_canonical",
                 Some(dims),
                 transpose_a,
                 transpose_b,
                 "Unsupported",
-                "canonical_requires_gemv_m1",
+                "canonical_requires_no_transpose_batch1",
             );
             return Err(MetalError::OperationNotSupported(
-                "canonical matmul only supports GEMV m=1 without transposes".into(),
+                "canonical GEMM requires batch=1 and no transposes".into(),
             ));
         }
 
-        emit_matmul_backend_selected("dense_canonical", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
-        self.launch_gemv(a, rhs, transpose_b, bias, alpha_beta, cache.as_deref_mut())
+        if alpha_beta.is_some() {
+            emit_matmul_backend_selected(
+                "dense_canonical",
+                Some(dims),
+                transpose_a,
+                transpose_b,
+                "Unsupported",
+                "canonical_gemm_no_alpha_beta",
+            );
+            return Err(MetalError::OperationNotSupported(
+                "canonical GEMM does not support alpha/beta epilogue yet".into(),
+            ));
+        }
+
+        if self.should_use_f16_canonical_rows16(&dims, transpose_a, transpose_b) {
+            emit_matmul_backend_selected(
+                "dense_canonical",
+                Some(dims),
+                transpose_a,
+                transpose_b,
+                "F16CanonicalRows16",
+                "heuristic",
+            );
+            return self.call::<MatmulF16CanonicalRows16Op>((a, b, bias), cache.as_deref_mut());
+        }
+
+        emit_matmul_backend_selected("dense_canonical", Some(dims), transpose_a, transpose_b, "F16Canonical", "heuristic");
+        self.call::<MatmulF16CanonicalOp>((a, b, bias), cache.as_deref_mut())
     }
 
     pub fn qkv(&mut self, x_flat: &Tensor<T>, weights: QkvWeights<'_, T>) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>), MetalError> {
@@ -523,6 +613,14 @@ impl<T: TensorElement> Context<T> {
                 k_bias,
                 v_bias,
             } => ctx.qkv_quant(x_flat, wq, wk, wv, q_bias, k_bias, v_bias),
+            QkvWeights::DenseCanonical {
+                wq,
+                wk,
+                wv,
+                q_bias,
+                k_bias,
+                v_bias,
+            } => ctx.qkv_dense_canonical(x_flat, wq, wk, wv, q_bias, k_bias, v_bias),
         })
     }
 
@@ -933,5 +1031,56 @@ impl<T: TensorElement> Context<T> {
         let v_out = y.build_view(vec![1, nv], vec![nv, 1], y.offset + (nq + nk) * elem);
 
         Ok((q_out, k_out, v_out))
+    }
+
+    fn qkv_dense_canonical(
+        &mut self,
+        x_flat: &Tensor<T>,
+        wq: &CanonicalF16Tensor<T>,
+        wk: &CanonicalF16Tensor<T>,
+        wv: &CanonicalF16Tensor<T>,
+        q_bias: &Tensor<T>,
+        k_bias: &Tensor<T>,
+        v_bias: &Tensor<T>,
+    ) -> Result<(Tensor<T>, Tensor<T>, Tensor<T>), MetalError> {
+        if T::DTYPE != crate::tensor::Dtype::F16 {
+            return Err(MetalError::UnsupportedDtype {
+                operation: "qkv/dense_canonical",
+                dtype: T::DTYPE,
+            });
+        }
+
+        // Ensure we are in a supported shape/config for canonical fused kernel
+        // e.g. batch=1, m=1. For now, canonical kernels are strict about this.
+        let x_dims = x_flat.dims();
+        if x_dims.len() != 2 || x_dims[0] != 1 {
+            // Fallback? Or generic Matmul?
+            // println!("Fallback: qkv_dense_canonical called with x_dims={:?}", x_dims);
+        } else {
+            // println!("HIT: qkv_dense_canonical");
+        }
+
+        let (yq, yk, yv) =
+            self.call_custom::<MatmulF16CanonicalQkvFusedOp>((x_flat, (wq, wk, wv), (Some(q_bias), Some(k_bias), Some(v_bias))), None)?;
+
+        Ok((yq, yk, yv))
+    }
+
+    pub fn swiglu(
+        &mut self,
+        x: &Tensor<T>,
+        gate: &crate::tensor::TensorType<T>,
+        up: &crate::tensor::TensorType<T>,
+        gate_bias: Option<&Tensor<T>>,
+        bias_down: Option<&Tensor<T>>,
+    ) -> Result<Tensor<T>, MetalError> {
+        match (gate, up) {
+            (crate::tensor::TensorType::DenseCanonical(wg), crate::tensor::TensorType::DenseCanonical(wu)) => {
+                self.call::<MatmulF16CanonicalSwiGluOp>((x, (wg, wu), (gate_bias, bias_down)), None)
+            }
+            _ => Err(MetalError::InvalidOperation(
+                "SwiGLU only supported for DenseCanonical F16 currently".into(),
+            )),
+        }
     }
 }

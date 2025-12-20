@@ -4,10 +4,14 @@ use crate::{
 
 pub struct TransformerBlock<T: TensorElement> {
     // Attention weights (placeholders matching GGUF shapes)
-    pub attn_qkv_weight: Tensor<T>,
-    pub attn_qkv_weight_canon: Option<CanonicalF16Tensor<T>>,
+    pub attn_qkv_weight: Option<Tensor<T>>,
+    // Canonical weights must be separate for Q, K, V to allow correct GEMV dispatch
+    // because the canonical layout interleaves columns within K-blocks.
+    pub attn_q_weight_canon: Option<CanonicalF16Tensor<T>>,
+    pub attn_k_weight_canon: Option<CanonicalF16Tensor<T>>,
+    pub attn_v_weight_canon: Option<CanonicalF16Tensor<T>>,
     pub attn_qkv_bias: Tensor<T>,
-    pub attn_out_weight: Tensor<T>,
+    pub attn_out_weight: Option<Tensor<T>>,
     pub attn_out_weight_canon: Option<CanonicalF16Tensor<T>>,
     /// Optional packed Q8_0 weight for the attention output projection ([d_model, d_model]).
     pub attn_out_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
@@ -28,16 +32,16 @@ pub struct TransformerBlock<T: TensorElement> {
     pub attn_out_weight_transposed: Option<Tensor<T>>,
 
     // Feedforward
-    pub ffn_down: Tensor<T>,
+    pub ffn_down: Option<Tensor<T>>,
     pub ffn_down_canon: Option<CanonicalF16Tensor<T>>,
     /// Optional packed Q8_0 weight for FFN down projection ([ff_dim, d_model]) or transpose-compatible.
     pub ffn_down_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
-    pub ffn_gate_up_weight: Tensor<T>,
+    pub ffn_gate_up_weight: Option<Tensor<T>>,
     /// Optional packed Q8_0 weights for separate FFN gate/up projections.
     pub ffn_gate_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
     pub ffn_up_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
-    pub ffn_gate: Tensor<T>,
-    pub ffn_up: Tensor<T>,
+    pub ffn_gate: Option<Tensor<T>>,
+    pub ffn_up: Option<Tensor<T>>,
     pub ffn_gate_canon: Option<CanonicalF16Tensor<T>>,
     pub ffn_up_canon: Option<CanonicalF16Tensor<T>>,
     // Biases for the FFN projections
@@ -58,41 +62,51 @@ where
 {
     pub fn new(cfg: &super::Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         let kv_dim = cfg.d_model * cfg.n_kv_heads / cfg.n_heads;
-
-        // Q, K, V projections packed into a single fused matrix stored in row-major layout
         let qkv_out_dim = cfg.d_model + 2 * kv_dim;
-        let attn_qkv_weight = Tensor::zeros(vec![cfg.d_model, qkv_out_dim], ctx, false)?;
         let attn_qkv_bias = Tensor::zeros(vec![qkv_out_dim], ctx, false)?;
 
-        let attn_out_weight = Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?;
+        // Q, K, V projections packed into a single fused matrix stored in row-major layout
+        let (attn_qkv_weight, attn_out_weight, attn_q_weight_canon, attn_k_weight_canon, attn_v_weight_canon, attn_out_weight_canon) =
+            if T::DTYPE == Dtype::F16 {
+                (
+                    None,
+                    None,
+                    Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.d_model], ctx)?),
+                    Some(CanonicalF16Tensor::new(vec![cfg.d_model, kv_dim], ctx)?),
+                    Some(CanonicalF16Tensor::new(vec![cfg.d_model, kv_dim], ctx)?),
+                    Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.d_model], ctx)?),
+                )
+            } else {
+                (
+                    Some(Tensor::zeros(vec![cfg.d_model, qkv_out_dim], ctx, false)?),
+                    Some(Tensor::zeros(vec![cfg.d_model, cfg.d_model], ctx, false)?),
+                    None,
+                    None,
+                    None,
+                    None,
+                )
+            };
 
-        let (attn_qkv_weight_canon, attn_out_weight_canon) = if T::DTYPE == Dtype::F16 {
+        let (ffn_down, ffn_gate_up_weight, ffn_gate, ffn_up, ffn_gate_canon, ffn_up_canon, ffn_down_canon) = if T::DTYPE == Dtype::F16 {
             (
-                Some(CanonicalF16Tensor::new(vec![cfg.d_model, qkv_out_dim], ctx)?),
-                Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.d_model], ctx)?),
-            )
-        } else {
-            (None, None)
-        };
-
-        // FFN (SwiGLU)
-        // Allocate FFN weights in [In, Out] = [d_model, ff_dim] layout (matching QKV)
-        // This allows transposed loading to work correctly with transpose_right=false
-        let ffn_down = Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?;
-        // NOTE: ffn_gate_up_weight kept for backward compat but not used in unified path
-        let ffn_gate_up_weight = Tensor::zeros(vec![cfg.d_model, 2 * cfg.ff_dim], ctx, false)?;
-        // Allocate separate gate/up with [In, Out] dims for transposed loading
-        let ffn_gate = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
-        let ffn_up = Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?;
-
-        let (ffn_gate_canon, ffn_up_canon, ffn_down_canon) = if T::DTYPE == Dtype::F16 {
-            (
+                None,
+                None,
+                None,
+                None,
                 Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.ff_dim], ctx)?),
                 Some(CanonicalF16Tensor::new(vec![cfg.d_model, cfg.ff_dim], ctx)?),
                 Some(CanonicalF16Tensor::new(vec![cfg.ff_dim, cfg.d_model], ctx)?),
             )
         } else {
-            (None, None, None)
+            (
+                Some(Tensor::zeros(vec![cfg.ff_dim, cfg.d_model], ctx, false)?),
+                Some(Tensor::zeros(vec![cfg.d_model, 2 * cfg.ff_dim], ctx, false)?),
+                Some(Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?),
+                Some(Tensor::zeros(vec![cfg.d_model, cfg.ff_dim], ctx, false)?),
+                None,
+                None,
+                None,
+            )
         };
 
         // FFN biases
@@ -107,7 +121,9 @@ where
 
         Ok(Self {
             attn_qkv_weight,
-            attn_qkv_weight_canon,
+            attn_q_weight_canon,
+            attn_k_weight_canon,
+            attn_v_weight_canon,
             attn_qkv_bias,
             attn_out_weight,
             attn_out_weight_canon,

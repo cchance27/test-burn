@@ -181,7 +181,8 @@ fn report_model_weight_breakdown(qwen: &metallic::models::Qwen25<F16Element>) {
     total_weights_size += embed_size;
 
     // Output Projection
-    let output_size = (qwen.output_weight.len() * bytes_per_element) as u64;
+    let output_size = (qwen.output_weight.as_ref().map(|w| w.len()).unwrap_or(0) * bytes_per_element
+        + qwen.output_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0) * bytes_per_element) as u64;
     breakdown.insert("Output Projection".to_string(), output_size);
     total_weights_size += output_size;
 
@@ -201,12 +202,18 @@ fn report_model_weight_breakdown(qwen: &metallic::models::Qwen25<F16Element>) {
         let block_base_key = format!("Transformer Blocks.Weight Block {}", i + 1);
 
         // Attention Projections
-        let fused_qkv_weight_size = (block.attn_qkv_weight.len() * bytes_per_element) as u64;
+        let legacy_qkv_size = block.attn_qkv_weight.as_ref().map(|w| w.len()).unwrap_or(0);
+        let canon_q_size = block.attn_q_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0);
+        let canon_k_size = block.attn_k_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0);
+        let canon_v_size = block.attn_v_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0);
+        let fused_qkv_weight_size = ((legacy_qkv_size + canon_q_size + canon_k_size + canon_v_size) * bytes_per_element) as u64;
         breakdown.insert(
             format!("{}.Attention Projections.Fused QKV weight", block_base_key),
             fused_qkv_weight_size,
         );
-        let output_weight_size = (block.attn_out_weight.len() * bytes_per_element) as u64;
+        let output_weight_size = ((block.attn_out_weight.as_ref().map(|w| w.len()).unwrap_or(0)
+            + block.attn_out_weight_canon.as_ref().map(|w| w.len()).unwrap_or(0))
+            * bytes_per_element) as u64;
         breakdown.insert(
             format!("{}.Attention Projections.Output weight", block_base_key),
             output_weight_size,
@@ -220,11 +227,17 @@ fn report_model_weight_breakdown(qwen: &metallic::models::Qwen25<F16Element>) {
         breakdown.insert(format!("{}.Attention Biases", block_base_key), fused_qkv_bias_size);
 
         // Feedforward Projections
-        let gate_weight_size = (block.ffn_gate.len() * bytes_per_element) as u64;
+        let gate_weight_size = ((block.ffn_gate.as_ref().map(|w| w.len()).unwrap_or(0)
+            + block.ffn_gate_canon.as_ref().map(|w| w.len()).unwrap_or(0))
+            * bytes_per_element) as u64;
         breakdown.insert(format!("{}.Feedforward Projections.Gate weight", block_base_key), gate_weight_size);
-        let up_weight_size = (block.ffn_up.len() * bytes_per_element) as u64;
+        let up_weight_size = ((block.ffn_up.as_ref().map(|w| w.len()).unwrap_or(0)
+            + block.ffn_up_canon.as_ref().map(|w| w.len()).unwrap_or(0))
+            * bytes_per_element) as u64;
         breakdown.insert(format!("{}.Feedforward Projections.Up weight", block_base_key), up_weight_size);
-        let down_weight_size = (block.ffn_down.len() * bytes_per_element) as u64;
+        let down_weight_size = ((block.ffn_down.as_ref().map(|w| w.len()).unwrap_or(0)
+            + block.ffn_down_canon.as_ref().map(|w| w.len()).unwrap_or(0))
+            * bytes_per_element) as u64;
         breakdown.insert(format!("{}.Feedforward Projections.Down weight", block_base_key), down_weight_size);
         let total_ffn_proj_size = gate_weight_size + up_weight_size + down_weight_size;
         breakdown.insert(format!("{}.Feedforward Projections", block_base_key), total_ffn_proj_size);

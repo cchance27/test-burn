@@ -3,6 +3,9 @@
 #include <metal_stdlib>
 using namespace metal;
 
+// Canonical FP16 layout uses the same 32-wide K blocks as Q8.
+#define F16_CANONICAL_WEIGHTS_PER_BLOCK 32u
+
 // Helper to sum across a SIMD group
 inline float simd_sum_float(float val) {
     return simd_sum(val);
@@ -202,6 +205,17 @@ void run_gemv_q8_canonical(
 
 // Retaining existing NT and Large-N kernels as-is (or should be updated later if needed)
 struct GemmQ8NtParams {
+    uint m;
+    uint n;
+    uint k;
+    uint lda;
+    uint ldc;
+    uint blocks_per_k;
+    uint weights_per_block;
+    uint has_bias;
+};
+
+struct GemmF16CanonicalParams {
     uint m;
     uint n;
     uint k;
@@ -429,6 +443,119 @@ inline void gemm_q8_canonical_large_n_impl(
     uint3 gid [[threadgroup_position_in_grid]], uint3 tid3 [[thread_position_in_threadgroup]]) {
     threadgroup float a_tile[2][16u * Q8_0_WEIGHTS_PER_BLOCK];
     gemm_q8_canonical_large_n_impl<16u>(data, scale, a, y, p, b, gid, tid3, a_tile);
+}
+
+template <uint ROWS_PER_TILE>
+inline void gemm_f16_canonical_large_n_impl(
+    const device half *matrix_data, const device half *matrix_a, device half *result_y,
+    const constant GemmF16CanonicalParams *params, const device half *bias, uint3 gid, uint3 tid3,
+    threadgroup float (&a_tile)[2][ROWS_PER_TILE * F16_CANONICAL_WEIGHTS_PER_BLOCK]) {
+    constexpr uint TILE_COLS_TOTAL = 128u;
+    constexpr uint TILE_COLS_PER_TG = TILE_COLS_TOTAL / 2u;
+    constexpr uint COLS_PER_THREAD = 2u;
+    constexpr uint TG_ROWS = 4u;
+    constexpr uint TG_COL_LANES = TILE_COLS_PER_TG / COLS_PER_THREAD;
+    constexpr uint THREADS_PER_TG = TG_COL_LANES * TG_ROWS;
+
+    const uint m = params->m;
+    const uint n = params->n;
+    const uint k = params->k;
+    const uint lda = params->lda;
+    const uint ldc = params->ldc;
+    const uint blocks_per_k = params->blocks_per_k;
+    const uint weights_per_block = params->weights_per_block;
+
+    const uint row_tile = gid.y * ROWS_PER_TILE;
+    if (row_tile >= m) return;
+    const uint rows_this_tile = min((uint)ROWS_PER_TILE, m - row_tile);
+
+    const uint lane_x = tid3.x;
+    const uint lane_y = tid3.y;
+    const uint col_block = gid.x * TILE_COLS_PER_TG + lane_x * COLS_PER_THREAD;
+    if (col_block >= n) return;
+
+    float accum[ROWS_PER_TILE][COLS_PER_THREAD];
+    for (uint r=0;r<rows_this_tile;++r) for(uint c=0;c<COLS_PER_THREAD;++c) accum[r][c] = 0.0f;
+
+    const uint block_stride = n * weights_per_block;
+    const device half *data_lane_ptrs[COLS_PER_THREAD];
+    for (uint c = 0; c < COLS_PER_THREAD; ++c) {
+        const uint col = col_block + c;
+        if (col < n) {
+            data_lane_ptrs[c] = matrix_data + col * weights_per_block;
+        } else {
+            data_lane_ptrs[c] = matrix_data;
+        }
+    }
+
+    const uint linear_tid = lane_y * TG_COL_LANES + lane_x;
+    q8_for_each_block_k(blocks_per_k, weights_per_block, k, [&](uint block, uint block_k_start, uint valid) {
+        const uint buffer_idx = block & 1u;
+        for (uint idx = linear_tid; idx < rows_this_tile * weights_per_block; idx += THREADS_PER_TG) {
+            const uint local_row = idx / weights_per_block;
+            const uint offset = idx % weights_per_block;
+            const uint global_k = block_k_start + offset;
+            float val = 0.0f;
+            if (global_k < k) {
+                const uint global_row = row_tile + local_row;
+                val = static_cast<float>(matrix_a[global_row * lda + global_k]);
+            }
+            a_tile[buffer_idx][local_row * weights_per_block + offset] = val;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        for (uint local_row = lane_y; local_row < rows_this_tile; local_row += TG_ROWS) {
+            threadgroup float *a_base = &a_tile[buffer_idx][local_row * weights_per_block];
+            for (uint i = 0; i < valid; ++i) {
+                float x = a_base[i];
+                for (uint c = 0; c < COLS_PER_THREAD; ++c) {
+                    accum[local_row][c] = fma(x, static_cast<float>(data_lane_ptrs[c][i]), accum[local_row][c]);
+                }
+            }
+        }
+
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint c = 0; c < COLS_PER_THREAD; ++c) {
+            if (col_block + c < n) {
+                data_lane_ptrs[c] += block_stride;
+            }
+        }
+    });
+
+    for (uint local_row = lane_y; local_row < rows_this_tile; local_row += TG_ROWS) {
+        const uint out_row = row_tile + local_row;
+        for (uint c = 0; c < COLS_PER_THREAD; ++c) {
+            const uint col = col_block + c;
+            if (col >= n) continue;
+            float value = accum[local_row][c];
+            if (params->has_bias != 0u) value += static_cast<float>(bias[col]);
+            result_y[out_row * ldc + col] = static_cast<half>(value);
+        }
+    }
+}
+
+[[kernel]] void gemm_f16_canonical_large_n_f16(
+    const device half *data [[buffer(0)]],
+    const device half *a [[buffer(1)]],
+    device half *y [[buffer(2)]],
+    const constant GemmF16CanonicalParams *p [[buffer(3)]],
+    const device half *b [[buffer(4)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]]) {
+    threadgroup float a_tile[2][32u * F16_CANONICAL_WEIGHTS_PER_BLOCK];
+    gemm_f16_canonical_large_n_impl<32u>(data, a, y, p, b, gid, tid3, a_tile);
+}
+
+[[kernel]] void gemm_f16_canonical_large_n_rows16_f16(
+    const device half *data [[buffer(0)]],
+    const device half *a [[buffer(1)]],
+    device half *y [[buffer(2)]],
+    const constant GemmF16CanonicalParams *p [[buffer(3)]],
+    const device half *b [[buffer(4)]],
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 tid3 [[thread_position_in_threadgroup]]) {
+    threadgroup float a_tile[2][16u * F16_CANONICAL_WEIGHTS_PER_BLOCK];
+    gemm_f16_canonical_large_n_impl<16u>(data, a, y, p, b, gid, tid3, a_tile);
 }
 
 [[kernel]] void gemv_q8_rows_f16(

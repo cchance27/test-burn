@@ -2,18 +2,15 @@
 
 ## Performance History (Latest First)
 
-### Layout Unification (Dense/Q8 Unified)
+### FP16 Canonical SIMD & Legacy Cleanup
 * **Change Summary**:
-    * Unified dense FP16 weight layouts with Q8 by transposing during loading via `copy_weight_transposed_into_fused`.
-    * All weights now stored in `[In, Out]` layout with `transpose_right=false` throughout.
-    * Removed redundant `_transposed` optional fields and post-load transpose step.
-    * FFN gate/up/down now use separate tensor allocations instead of fused slices.
-* **Results (M3 Pro, MAX_TOKENS=256, run_throughput.sh)**:
-    * **FP16 Total**: **57.74 tok/s** | **Decode**: **69.38 tok/s**
-    * **Q8 Total**: **125.13 tok/s** | **Decode**: **149.56 tok/s**
-* **Notes**:
-    * Dense path now unified with Q8 layout, enabling future kernel code deduplication.
-    * Next step: FP16 can now use the same SIMD helpers as Q8.
+    * **Kernel Optimization**: Implemented `SimdGemvPolicyF16Canonical` using a specialized blocked layout (K-major, 32-element blocks) to enable 128-bit vectorized loads and SIMD reduction.
+    * **Legacy Removal**: Removed duplicate memory representations. `TransformerBlock` and `Qwen25` now strictly use `CanonicalF16Tensor` for the optimized path, and legacy `Tensor<T>` fields are `Option<args>` initialized to `None`.
+    * **Fusion**: Integrated `RMSNorm` and `SwiGLU` fusion into the FP16 canonical path, matching Q8 architecture.
+* **Results (M3 Pro, MAX_TOKENS=256)**:
+    * **FP16 Decode**: **~71.6 tok/s** (Up from ~60-70 tok/s)
+    * **Impact**: Significantly reduced memory overhead by removing duplicate weights and improved throughput via SIMD-optimized kernels.
+
 
 ### RMSNorm-GEMV Fusion (Q8) + GEMV Variants
 * **Change Summary**:
@@ -82,7 +79,14 @@ To close the remaining gap (~96 -> 160), we must move beyond single-kernel optim
 ### 2. Kernel Fusion 
 **Theory**: Every kernel launch reads inputs from RAM and writes outputs to RAM.
 **Target**: Fuse `RMSNorm` into `GEMV` or `SwiGLU` (Gate+Up+Act) into single kernel.
-**Status**: Q8 RMSNorm fusion is live; FP16 fusion blocked by layout mismatch above.
+**Status**:
+*   **Q8**: Fused RMSNorm+QKV and SwiGLU live.
+*   **FP16**: Fused RMSNorm+GEMV and SwiGLU+GEMV are now implemented for the Canonical path.
+
+### 3. Canonical Dispatch Completeness
+**Status**: **Mostly Complete**.
+*   **Prefill (M>1)**: Dispatcher now supports `DenseCanonical` for M>1 via blocked-row-major decoding in `gemm`.
+*   **Selection**: `TransformerBlock` now conditionally loads *only* canonical weights when enabled, enforcing the optimized path at the data level.
 
 ### 3. Dispatch Overhead Reduction (High Impact)
 **Theory**: CPU dispatch overhead is significant (~10µs/launch).

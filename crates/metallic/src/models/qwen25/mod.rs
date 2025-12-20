@@ -7,7 +7,7 @@ use objc2_metal::{MTLBlitCommandEncoder as _, MTLDevice as _};
 
 use crate::{
     Context, MetalError, Tensor, TensorElement, context::{MatmulAlphaBeta, QkvWeights, RepeatKvWorkspaceKind}, kernels::{
-        backend_registry::KernelBackendKind, embedding_lookup::EmbeddingLookupOp, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::{SwiGLUFusedActivationOp, SwiGLUOp}
+        backend_registry::KernelBackendKind, elemwise_add::BroadcastElemwiseAddInplaceOp, embedding_lookup::EmbeddingLookupOp, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, swiglu::{SwiGLUFusedActivationOp, SwiGLUOp}
     }, tensor::{CanonicalF16Tensor, Dtype, QuantizedTensor, TensorType}
 };
 
@@ -36,7 +36,7 @@ pub struct Qwen25<T: TensorElement> {
     pub config: Qwen25Config,
     pub blocks: Vec<TransformerBlock<T>>,
     pub embed_weight: Tensor<T>,
-    pub output_weight: Tensor<T>,
+    pub output_weight: Option<Tensor<T>>,
     pub output_weight_canon: Option<CanonicalF16Tensor<T>>,
     /// Optional packed Q8_0 weight for the final output projection (logits).
     pub output_weight_q8: Option<crate::tensor::QuantizedQ8_0Tensor>,
@@ -115,15 +115,6 @@ impl<T: TensorElement> Qwen25<T> {
         )
     }
 
-    fn project_canonical(
-        ctx: &mut Context<T>,
-        x_flat: &Tensor<T>,
-        weight_canon: &CanonicalF16Tensor<T>,
-        bias: Option<&Tensor<T>>,
-    ) -> Result<Tensor<T>, MetalError> {
-        ctx.matmul(x_flat, &TensorType::DenseCanonical(weight_canon), false, false, bias, None, None)
-    }
-
     /// Embed tokens into d_model dimensional vectors
     pub fn embed(&self, tokens: &[u32], ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
         let batch = 1; // For now, assume batch size of 1
@@ -182,6 +173,7 @@ impl<T: TensorElement> Qwen25<T> {
         let flat_hidden = hidden.reshape(vec![m, d_model])?;
 
         // Apply output projection: [batch*seq, d_model] x [vocab_size, d_model].T -> [batch*seq, vocab_size]
+        let f16_canonical = crate::context::f16_canonical_gemm_enabled();
         let logits_flat = if let Some(q8) = self.output_weight_q8.as_ref()
             && T::DTYPE == crate::tensor::Dtype::F16
             && let Some(transpose_b) = Self::output_weight_q8_transpose_b(&q8.logical_dims, d_model, self.config.vocab_size)
@@ -195,13 +187,18 @@ impl<T: TensorElement> Qwen25<T> {
                 None,
                 None,
             )?
-        } else if let Some(canon) = &self.output_weight_canon
+        } else if f16_canonical
+            && let Some(canon) = &self.output_weight_canon
             && T::DTYPE == Dtype::F16
-            && m == 1
         {
             ctx.matmul(&flat_hidden, &TensorType::DenseCanonical(canon), false, false, None, None, None)?
         } else {
-            ctx.matmul(&flat_hidden, &TensorType::Dense(&self.output_weight), false, true, None, None, None)?
+            // F32 or fallback legacy path
+            if let Some(w) = &self.output_weight {
+                ctx.matmul(&flat_hidden, &TensorType::Dense(w), false, true, None, None, None)?
+            } else {
+                return Err(MetalError::InvalidOperation("Missing output weight for dense fallback".to_string()));
+            }
         };
 
         // Synchronize to ensure matmul is complete before reading values
@@ -215,11 +212,10 @@ impl<T: TensorElement> Qwen25<T> {
     pub fn new(config: Qwen25Config, ctx: &mut Context<T>) -> Result<Self, MetalError> {
         // allocate embed and output weights
         let embed_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
-        let output_weight = Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?;
-        let output_weight_canon = if T::DTYPE == Dtype::F16 {
-            Some(CanonicalF16Tensor::new(vec![config.d_model, config.vocab_size], ctx)?)
+        let (output_weight, output_weight_canon) = if T::DTYPE == Dtype::F16 {
+            (None, Some(CanonicalF16Tensor::new(vec![config.d_model, config.vocab_size], ctx)?))
         } else {
-            None
+            (Some(Tensor::zeros(vec![config.vocab_size, config.d_model], ctx, false)?), None)
         };
         let final_norm_gamma = Tensor::zeros(vec![config.d_model], ctx, false)?;
 
@@ -289,6 +285,7 @@ impl<T: TensorElement> Qwen25<T> {
         }
 
         let mut x = input.clone();
+        let f16_canonical = crate::context::f16_canonical_gemm_enabled();
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             let resid_attn = x.clone();
@@ -300,15 +297,52 @@ impl<T: TensorElement> Qwen25<T> {
             let m = batch * seq;
             let kv_dim = block.kv_dim;
             let x_flat = x_normed_attn.reshape(vec![m, d_model])?;
-            let (q_mat, k_mat, v_mat) = ctx.qkv(
-                &x_flat,
-                QkvWeights::Dense {
-                    fused_weight: &block.attn_qkv_weight,
-                    fused_bias: &block.attn_qkv_bias,
-                    d_model,
-                    kv_dim,
-                },
-            )?;
+            let (q_mat, k_mat, v_mat) = if f16_canonical {
+                if let (Some(wq), Some(wk), Some(wv)) = (&block.attn_q_weight_canon, &block.attn_k_weight_canon, &block.attn_v_weight_canon)
+                {
+                    let q_bias = block.attn_qkv_bias.slice(0..d_model)?;
+                    let k_bias = block.attn_qkv_bias.slice(d_model..(d_model + kv_dim))?;
+                    let v_bias = block.attn_qkv_bias.slice((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+
+                    ctx.qkv(
+                        &x_flat,
+                        QkvWeights::DenseCanonical {
+                            wq,
+                            wk,
+                            wv,
+                            q_bias: &q_bias,
+                            k_bias: &k_bias,
+                            v_bias: &v_bias,
+                        },
+                    )?
+                } else if let Some(w_qkv) = &block.attn_qkv_weight {
+                    ctx.qkv(
+                        &x_flat,
+                        QkvWeights::Dense {
+                            fused_weight: w_qkv,
+                            fused_bias: &block.attn_qkv_bias,
+                            d_model,
+                            kv_dim,
+                        },
+                    )?
+                } else {
+                    return Err(MetalError::InvalidOperation("Missing attn_qkv_weight for F32 fallback".to_string()));
+                }
+            } else if let Some(w_qkv) = &block.attn_qkv_weight {
+                ctx.qkv(
+                    &x_flat,
+                    QkvWeights::Dense {
+                        fused_weight: w_qkv,
+                        fused_bias: &block.attn_qkv_bias,
+                        d_model,
+                        kv_dim,
+                    },
+                )?
+            } else {
+                return Err(MetalError::InvalidOperation(
+                    "Missing attn_qkv_weight for F32 fallback in qkv".to_string(),
+                ));
+            };
 
             // Defer RoPE until after head rearrangement
             let (q_after, k_after) = (q_mat.clone(), k_mat.clone());
@@ -423,8 +457,18 @@ impl<T: TensorElement> Qwen25<T> {
                 let a = &attn_out_reshaped.reshape(vec![m, d_model])?;
                 if let Some(q8) = &block.attn_out_weight_q8 {
                     ctx.matmul(a, &TensorType::Quant(QuantizedTensor::Q8_0(q8)), false, true, None, None, None)?
+                } else if f16_canonical {
+                    if let Some(canon) = &block.attn_out_weight_canon {
+                        ctx.matmul(a, &TensorType::DenseCanonical(canon), false, false, None, None, None)?
+                    } else if let Some(w) = &block.attn_out_weight {
+                        ctx.matmul(a, &TensorType::Dense(w), false, true, None, None, None)?
+                    } else {
+                        return Err(MetalError::InvalidOperation("Missing attn_out_weight for F32 fallback".to_string()));
+                    }
+                } else if let Some(w) = &block.attn_out_weight {
+                    ctx.matmul(a, &TensorType::Dense(w), false, true, None, None, None)?
                 } else {
-                    ctx.matmul(a, &TensorType::Dense(&block.attn_out_weight), false, true, None, None, None)?
+                    return Err(MetalError::InvalidOperation("Missing attn_out_weight".to_string()));
                 }
             };
             let attn_out = attn_out_flat.reshape(vec![batch, seq, d_model])?;
@@ -495,20 +539,40 @@ impl<T: TensorElement> Qwen25<T> {
                     None,
                     None,
                 )?
-            } else {
+            } else if f16_canonical && block.ffn_gate_canon.is_some() && block.ffn_up_canon.is_some() && block.ffn_down_canon.is_some() {
+                let hidden = ctx.swiglu(
+                    &x_normed_mlp_flat,
+                    &crate::tensor::TensorType::DenseCanonical(block.ffn_gate_canon.as_ref().unwrap()),
+                    &crate::tensor::TensorType::DenseCanonical(block.ffn_up_canon.as_ref().unwrap()),
+                    Some(&block.ffn_gate_bias),
+                    Some(&block.ffn_up_bias),
+                )?;
+                let ffn_temp = ctx.matmul(
+                    &hidden,
+                    &TensorType::DenseCanonical(block.ffn_down_canon.as_ref().unwrap()),
+                    false,
+                    false,
+                    None,
+                    None,
+                    None,
+                )?;
+                ctx.call::<BroadcastElemwiseAddInplaceOp>((ffn_temp, block.ffn_down_bias.clone()), None)?
+            } else if let (Some(g), Some(u), Some(d)) = (&block.ffn_gate, &block.ffn_up, &block.ffn_down) {
                 ctx.call::<SwiGLUOp>(
                     (
                         &x_normed_mlp_flat,
-                        &block.ffn_gate,
+                        g,
                         &block.ffn_gate_bias,
-                        &block.ffn_up,
+                        u,
                         &block.ffn_up_bias,
-                        &block.ffn_down,
+                        d,
                         &block.ffn_down_bias,
-                        Some(&block.ffn_gate_up_weight),
+                        block.ffn_gate_up_weight.as_ref(), // Pass Option ref
                     ),
                     None,
                 )?
+            } else {
+                return Err(MetalError::InvalidOperation("Missing FFN weights for dense fallback".to_string()));
             };
             let ffn_output = ffn_output_flat.reshape(vec![batch, seq, d_model])?;
 
@@ -545,6 +609,7 @@ impl<T: TensorElement> Qwen25<T> {
 
         let mut x = input.clone();
         let mut forward_pass_breakdown = BTreeMap::new();
+        let f16_canonical = crate::context::f16_canonical_gemm_enabled();
 
         for (layer_idx, block) in self.blocks.iter().enumerate() {
             let block_start = Instant::now();
@@ -625,29 +690,41 @@ impl<T: TensorElement> Qwen25<T> {
                         let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
                         let q_mat = match &block.attn_q_weight_q8 {
                             Some(q8) => Self::project_quant(ctx, &x_normed_flat, q8, q_bias.clone())?,
-                            None => Self::project_dense_slice(ctx, &x_normed_flat, &block.attn_qkv_weight, 0..d_model, q_bias.clone())?,
+                            None => {
+                                let w = block
+                                    .attn_qkv_weight
+                                    .as_ref()
+                                    .ok_or(MetalError::InvalidOperation("Missing attn_qkv_weight".to_string()))?;
+                                Self::project_dense_slice(ctx, &x_normed_flat, w, 0..d_model, q_bias.clone())?
+                            }
                         };
 
                         let k_mat = match &block.attn_k_weight_q8 {
                             Some(k8) => Self::project_quant(ctx, &x_normed_flat, k8, k_bias.clone())?,
-                            None => Self::project_dense_slice(
-                                ctx,
-                                &x_normed_flat,
-                                &block.attn_qkv_weight,
-                                d_model..(d_model + kv_dim),
-                                k_bias.clone(),
-                            )?,
+                            None => {
+                                let w = block
+                                    .attn_qkv_weight
+                                    .as_ref()
+                                    .ok_or(MetalError::InvalidOperation("Missing attn_qkv_weight".to_string()))?;
+                                Self::project_dense_slice(ctx, &x_normed_flat, w, d_model..(d_model + kv_dim), k_bias.clone())?
+                            }
                         };
 
                         let v_mat = match &block.attn_v_weight_q8 {
                             Some(v8) => Self::project_quant(ctx, &x_normed_flat, v8, v_bias.clone())?,
-                            None => Self::project_dense_slice(
-                                ctx,
-                                &x_normed_flat,
-                                &block.attn_qkv_weight,
-                                (d_model + kv_dim)..(d_model + 2 * kv_dim),
-                                v_bias.clone(),
-                            )?,
+                            None => {
+                                let w = block
+                                    .attn_qkv_weight
+                                    .as_ref()
+                                    .ok_or(MetalError::InvalidOperation("Missing attn_qkv_weight".to_string()))?;
+                                Self::project_dense_slice(
+                                    ctx,
+                                    &x_normed_flat,
+                                    w,
+                                    (d_model + kv_dim)..(d_model + 2 * kv_dim),
+                                    v_bias.clone(),
+                                )?
+                            }
                         };
 
                         (q_mat, k_mat, v_mat)
@@ -659,16 +736,43 @@ impl<T: TensorElement> Qwen25<T> {
                     breakdown.insert("attn_norm".to_string(), (x_normed_attn.len() * bytes_per_element) as u64);
                     let x_normed_flat = x_normed_attn.reshape(vec![m, d_model])?;
 
-                    let qkv_proj = if let Some(canon) = &block.attn_qkv_weight_canon {
-                        Self::project_canonical(ctx, &x_normed_flat, canon, Some(&block.attn_qkv_bias))?
-                    } else {
+                    let (q_mat, k_mat, v_mat) = if f16_canonical {
+                        if let (Some(wq), Some(wk), Some(wv)) =
+                            (&block.attn_q_weight_canon, &block.attn_k_weight_canon, &block.attn_v_weight_canon)
+                        {
+                            ctx.qkv(
+                                &x_normed_flat,
+                                QkvWeights::DenseCanonical {
+                                    wq,
+                                    wk,
+                                    wv,
+                                    q_bias: &q_bias,
+                                    k_bias: &k_bias,
+                                    v_bias: &v_bias,
+                                },
+                            )?
+                        } else if let Some(w) = &block.attn_qkv_weight {
+                            // Fallback to separate/manual
+                            let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w, Some(&block.attn_qkv_bias))?;
+                            let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
+                            let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
+                            let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+                            (q_mat, k_mat, v_mat)
+                        } else {
+                            return Err(MetalError::InvalidOperation("Missing attn_qkv_weight for F16 fallback".to_string()));
+                        }
+                    } else if let Some(w) = &block.attn_qkv_weight {
                         // QKV weight is already transposed during loading via copy_weight_transposed_into_fused
-                        Self::project_transposed(ctx, &x_normed_flat, &block.attn_qkv_weight, Some(&block.attn_qkv_bias))?
+                        let qkv_proj = Self::project_transposed(ctx, &x_normed_flat, w, Some(&block.attn_qkv_bias))?;
+                        let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
+                        let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
+                        let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
+                        (q_mat, k_mat, v_mat)
+                    } else {
+                        return Err(MetalError::InvalidOperation(
+                            "Missing attn_qkv_weight for F32 fallback in qkv".to_string(),
+                        ));
                     };
-                    // Split into Q, K, V using slice_last_dim (same pattern as qkv_dense)
-                    let q_mat = qkv_proj.slice_last_dim(0..d_model)?;
-                    let k_mat = qkv_proj.slice_last_dim(d_model..(d_model + kv_dim))?;
-                    let v_mat = qkv_proj.slice_last_dim((d_model + kv_dim)..(d_model + 2 * kv_dim))?;
                     (q_mat, k_mat, v_mat)
                 };
                 if used_fused_norm {
@@ -850,7 +954,8 @@ impl<T: TensorElement> Qwen25<T> {
                                 ),
                                 None,
                             )
-                        } else if let Some(canon) = &block.attn_out_weight_canon {
+                        } else if f16_canonical && block.attn_out_weight_canon.is_some() {
+                            let canon = block.attn_out_weight_canon.as_ref().unwrap();
                             let out = resid_attn.reshape(vec![m, d_model])?;
                             ctx.matmul(
                                 a,
@@ -871,7 +976,7 @@ impl<T: TensorElement> Qwen25<T> {
                             let out = resid_attn.reshape(vec![m, d_model])?;
                             ctx.matmul(
                                 a,
-                                &TensorType::Dense(&block.attn_out_weight),
+                                &TensorType::Dense(block.attn_out_weight.as_ref().unwrap()),
                                 false,
                                 true,
                                 None,
@@ -930,24 +1035,22 @@ impl<T: TensorElement> Qwen25<T> {
                         )?
                     } else {
                         // Fallback to separate matmuls when either weight is dense
-                        ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
-                        let gate_lin = {
-                            if let Some(gq8) = &block.ffn_gate_q8 {
-                                ctx.matmul(
-                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Quant(QuantizedTensor::Q8_0(gq8)),
-                                    false,
-                                    false,
-                                    None,
-                                    None,
-                                    None,
-                                )?
-                            } else {
-                                // Dense path: loading already transposes to [Out, In] layout
-                                if let Some(canon) = &block.ffn_gate_canon {
+                        if f16_canonical && block.ffn_gate_canon.is_some() && block.ffn_up_canon.is_some() {
+                            ctx.swiglu(
+                                x_normed_mlp_flat.as_ref().expect("mlp norm"),
+                                &crate::tensor::TensorType::DenseCanonical(block.ffn_gate_canon.as_ref().unwrap()),
+                                &crate::tensor::TensorType::DenseCanonical(block.ffn_up_canon.as_ref().unwrap()),
+                                Some(&block.ffn_gate_bias),
+                                Some(&block.ffn_up_bias),
+                            )?
+                        } else {
+                            // Fallback to separate matmuls when either weight is dense
+                            ctx.set_pending_gpu_scope(format!("mlp_gate_proj_block_{}_op", layer_idx));
+                            let gate_lin = {
+                                if let Some(gq8) = &block.ffn_gate_q8 {
                                     ctx.matmul(
                                         x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                        &TensorType::DenseCanonical(canon),
+                                        &TensorType::Quant(QuantizedTensor::Q8_0(gq8)),
                                         false,
                                         false,
                                         None,
@@ -957,7 +1060,7 @@ impl<T: TensorElement> Qwen25<T> {
                                 } else {
                                     ctx.matmul(
                                         x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                        &TensorType::Dense(&block.ffn_gate),
+                                        &TensorType::Dense(block.ffn_gate.as_ref().unwrap()),
                                         false,
                                         false, // Already [Out, In] layout like Q8
                                         None,
@@ -965,26 +1068,13 @@ impl<T: TensorElement> Qwen25<T> {
                                         None,
                                     )?
                                 }
-                            }
-                        };
-                        ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
-                        let up_lin = {
-                            if let Some(uq8) = &block.ffn_up_q8 {
-                                ctx.matmul(
-                                    x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                    &TensorType::Quant(QuantizedTensor::Q8_0(uq8)),
-                                    false,
-                                    false,
-                                    None,
-                                    None,
-                                    None,
-                                )?
-                            } else {
-                                // Dense path: loading already transposes to [Out, In] layout
-                                if let Some(canon) = &block.ffn_up_canon {
+                            };
+                            ctx.set_pending_gpu_scope(format!("mlp_up_proj_block_{}_op", layer_idx));
+                            let up_lin = {
+                                if let Some(uq8) = &block.ffn_up_q8 {
                                     ctx.matmul(
                                         x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                        &TensorType::DenseCanonical(canon),
+                                        &TensorType::Quant(QuantizedTensor::Q8_0(uq8)),
                                         false,
                                         false,
                                         None,
@@ -994,7 +1084,7 @@ impl<T: TensorElement> Qwen25<T> {
                                 } else {
                                     ctx.matmul(
                                         x_normed_mlp_flat.as_ref().expect("mlp norm"),
-                                        &TensorType::Dense(&block.ffn_up),
+                                        &TensorType::Dense(block.ffn_up.as_ref().unwrap()),
                                         false,
                                         false, // Already [Out, In] layout like Q8
                                         None,
@@ -1002,31 +1092,31 @@ impl<T: TensorElement> Qwen25<T> {
                                         None,
                                     )?
                                 }
-                            }
-                        };
+                            };
 
-                        // fused activation on [m, ff_dim]
-                        let gate_leading = if gate_lin.dims().len() >= 2 {
-                            gate_lin.dims()[gate_lin.dims().len() - 2] as u32
-                        } else {
-                            gate_lin.dims().last().copied().unwrap_or(1) as u32
-                        };
-                        let up_leading = if up_lin.dims().len() >= 2 {
-                            up_lin.dims()[up_lin.dims().len() - 2] as u32
-                        } else {
-                            up_lin.dims().last().copied().unwrap_or(1) as u32
-                        };
-                        ctx.call::<SwiGLUFusedActivationOp>(
-                            (
-                                gate_lin,
-                                block.ffn_gate_bias.clone(),
-                                up_lin,
-                                block.ffn_up_bias.clone(),
-                                gate_leading,
-                                up_leading,
-                            ),
-                            None,
-                        )?
+                            // fused activation on [m, ff_dim]
+                            let gate_leading = if gate_lin.dims().len() >= 2 {
+                                gate_lin.dims()[gate_lin.dims().len() - 2] as u32
+                            } else {
+                                gate_lin.dims().last().copied().unwrap_or(1) as u32
+                            };
+                            let up_leading = if up_lin.dims().len() >= 2 {
+                                up_lin.dims()[up_lin.dims().len() - 2] as u32
+                            } else {
+                                up_lin.dims().last().copied().unwrap_or(1) as u32
+                            };
+                            ctx.call::<SwiGLUFusedActivationOp>(
+                                (
+                                    gate_lin,
+                                    block.ffn_gate_bias.clone(),
+                                    up_lin,
+                                    block.ffn_up_bias.clone(),
+                                    gate_leading,
+                                    up_leading,
+                                ),
+                                None,
+                            )?
+                        }
                     };
 
                     // down projection -> [m, d_model]
@@ -1049,7 +1139,8 @@ impl<T: TensorElement> Qwen25<T> {
                     } else {
                         // Dense path: loading already transposes to [Out, In] layout
                         let out = resid_mlp.reshape(vec![m, d_model])?;
-                        if let Some(canon) = &block.ffn_down_canon {
+                        if f16_canonical && block.ffn_down_canon.is_some() {
+                            let canon = block.ffn_down_canon.as_ref().unwrap();
                             ctx.matmul(
                                 &hidden,
                                 &TensorType::DenseCanonical(canon),
@@ -1058,18 +1149,18 @@ impl<T: TensorElement> Qwen25<T> {
                                 None,
                                 Some(MatmulAlphaBeta {
                                     output: &out,
-                                    alpha: 1.0,
-                                    beta: 1.0,
+                                    alpha: 1.0, // Existing buffer value
+                                    beta: 1.0,  // Add result to buffer
                                 }),
                                 None,
                             )
                         } else {
                             ctx.matmul(
                                 &hidden,
-                                &TensorType::Dense(&block.ffn_down),
+                                &TensorType::Dense(block.ffn_down.as_ref().unwrap()),
                                 false,
                                 false, // Already [Out, In] layout like Q8
-                                None,
+                                Some(&block.ffn_down_bias),
                                 Some(MatmulAlphaBeta {
                                     output: &out,
                                     alpha: 1.0,
