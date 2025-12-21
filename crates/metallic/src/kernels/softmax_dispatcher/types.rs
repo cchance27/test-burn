@@ -2,13 +2,6 @@ use std::{fmt::Display, hash::Hash};
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SoftmaxBackend {
-    Auto,
-    MPS,
-    Custom,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 pub enum SoftmaxVariant {
     Auto,
@@ -30,7 +23,6 @@ impl Display for SoftmaxVariant {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SoftmaxPolicy {
-    pub backend: SoftmaxBackend,
     pub variant: SoftmaxVariant,
     pub threadgroup_size: usize,
 }

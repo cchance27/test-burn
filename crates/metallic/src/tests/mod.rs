@@ -17,7 +17,6 @@ mod gpu_profiling;
 mod matmul;
 mod matmul_alpha_beta_parity_test;
 mod matmul_backend_regression_test;
-mod matmul_dispatch_test;
 mod matmul_q8_m1_mlx_heuristic_test;
 mod q8_0_quantized_tensor;
 mod q8_parity_qwen25;

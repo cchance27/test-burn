@@ -18,7 +18,6 @@ pub mod models;
 pub mod operation;
 pub mod pool;
 pub mod profiling_state;
-pub mod softmax_utils;
 pub mod tensor;
 pub mod tokenizer;
 

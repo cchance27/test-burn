@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use metallic::{
     Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::{
-        matmul_dispatcher::MatmulDispatchOp, matmul_gemm_tiled::MatmulGemmTiledOp, matmul_gemv::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp, softmax_block::SoftmaxBlockOp, softmax_vec::SoftmaxVecOp
+        matmul_gemv::{MatmulGemvSmallN1Op, MatmulGemvSmallN2Op, MatmulGemvSmallN4Op, MatmulGemvSmallN8Op, MatmulGemvSmallN16Op}, matmul_mlx::MatMulMlxOp, softmax_block::SoftmaxBlockOp, softmax_vec::SoftmaxVecOp
     }, tensor::TensorType
 };
 
@@ -112,52 +112,6 @@ fn bench_gemm_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_name: 
                 // Reset pool to free memory after each iteration
                 ctx.reset_pool();
             });
-
-            // MPS GEMM direct
-            group.bench_with_input(BenchmarkId::new("Gemm_Direct_MPS", &label), &label, |bi, _| {
-                let mut ctx = Context::<T>::new().expect("ctx setup");
-                // Reset pool before creating tensors to ensure clean state
-                ctx.reset_pool();
-
-                let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
-                let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
-
-                // Warmup
-                let _warmup_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false), None).expect("warmup");
-                ctx.synchronize();
-
-                bi.iter(|| {
-                    let _iter_out = ctx.call::<MatMulMpsOp>((&a, &b, false, false), None).unwrap();
-                    ctx.synchronize();
-                });
-
-                // Reset pool to free memory after each iteration
-                ctx.reset_pool();
-            });
-
-            // Gemm Tiled direct
-            group.bench_with_input(BenchmarkId::new("Gemm_Direct_Tiled", &label), &label, |bi, _| {
-                let mut ctx = Context::<T>::new().expect("ctx setup");
-                ctx.reset_pool();
-
-                let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("A");
-                let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("B");
-                let out: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("C");
-
-                let _warmup_out = ctx
-                    .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32), None)
-                    .expect("warmup");
-                ctx.synchronize();
-
-                bi.iter(|| {
-                    let _iter_out = ctx
-                        .call::<MatmulGemmTiledOp>((&a, &b, None, Some(&out), false, false, 1.0f32, 0.0f32), None)
-                        .unwrap();
-                    ctx.synchronize();
-                });
-
-                ctx.reset_pool();
-            });
         }
     }
 
@@ -250,90 +204,11 @@ fn bench_softmax_kernels_directly<T: TensorElement>(c: &mut Criterion, dtype_nam
     group.finish();
 }
 
-fn bench_smalln_vs_dispatcher_comparison<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
-    let mut group = c.benchmark_group(format!("smalln_vs_dispatcher_{dtype_name}"));
-
-    // Compare direct kernel calls vs dispatcher overhead for key shapes
-    let test_cases = [
-        (128, 1024, 8),  // Shape where N=8 should be selected
-        (128, 1024, 16), // Shape where N=16 should be selected
-    ];
-
-    for &(m, k, n) in &test_cases {
-        let flops = (m * k * n) as f64 * 2.0;
-        group.throughput(Throughput::Elements(flops as u64));
-        // Include case suffix to match analysis parsing and charts
-        let label = format!("{}x{}x{}_a1_b0", m, k, n);
-
-        // Direct kernel call
-        group.bench_with_input(BenchmarkId::new("Direct_Kernel", &label), &label, |bi, _| {
-            let mut ctx = Context::<T>::new().expect("ctx setup");
-            // Reset pool before creating tensors to ensure clean state
-            ctx.reset_pool();
-
-            let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor A");
-            let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor B");
-
-            // Warmup - use correct interface for Small-N GEMV operations
-            let _warmup_out = match n {
-                8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None).expect("warmup"),
-                16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b), None).expect("warmup"),
-                _ => unreachable!(),
-            };
-            ctx.synchronize();
-
-            bi.iter(|| {
-                let _iter_out = match n {
-                    8 => ctx.call::<MatmulGemvSmallN8Op>((&a, &b), None).unwrap(),
-                    16 => ctx.call::<MatmulGemvSmallN16Op>((&a, &b), None).unwrap(),
-                    _ => unreachable!(),
-                };
-                ctx.synchronize();
-            });
-
-            // Reset pool to free memory after each iteration
-            ctx.reset_pool();
-        });
-
-        // Dispatcher call (for comparison) - use MatmulDispatchOp
-        group.bench_with_input(BenchmarkId::new("Via_Dispatcher", &label), &label, |bi, _| {
-            let mut ctx = Context::<T>::new().expect("ctx setup");
-            // Reset pool before creating tensors to ensure clean state
-            ctx.reset_pool();
-
-            let a: Tensor<T> = Tensor::new(vec![m, k], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor A");
-            let b: Tensor<T> = Tensor::new(vec![k, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor B");
-            let c: Tensor<T> = Tensor::new(vec![m, n], TensorStorage::Pooled(&mut ctx), TensorInit::Uninitialized).expect("tensor C");
-
-            // Warmup - use dispatcher with correct signature
-            let _warmup_out = ctx
-                .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32), None)
-                .expect("warmup");
-            ctx.synchronize();
-
-            bi.iter(|| {
-                let _iter_out = ctx
-                    .call::<MatmulDispatchOp>((&a, &b, None, Some(&c), false, false, 1.0f32, 0.0f32), None)
-                    .unwrap();
-                ctx.synchronize();
-            });
-
-            // Reset pool to free memory after each iteration
-            ctx.reset_pool();
-        });
-    }
-
-    group.finish();
-}
-
 fn criterion_benchmark(c: &mut Criterion) {
     // Direct kernel performance benchmarks
     bench_smalln_gemv_kernels_directly::<F16Element>(c, "f16");
     bench_softmax_kernels_directly::<F16Element>(c, "f16");
     bench_gemm_kernels_directly::<F16Element>(c, "f16");
-
-    // Comparison benchmarks
-    bench_smalln_vs_dispatcher_comparison::<F16Element>(c, "f16");
 }
 
 criterion_group!(benches, criterion_benchmark);

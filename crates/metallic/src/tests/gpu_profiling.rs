@@ -149,7 +149,7 @@ fn context_call_attaches_gpu_profiler() {
 
 // Maintainers: run this test on Apple Silicon hardware before releasing.
 #[test]
-fn matmul_mps_emits_gpu_event() {
+fn matmul_emits_gpu_event() {
     let _guard = ENABLE_PROFILING_VAR.set_guard(true).unwrap();
     reset_app_config_for_tests();
     let _profiling_guard = AppConfig::force_enable_profiling_guard();

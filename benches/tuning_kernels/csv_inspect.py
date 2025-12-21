@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Quick CSV inspection: compares backends on matched Small-N shapes,
-estimates dispatcher overhead, and summarizes direct GEMM (MPS vs MLX).
+estimates dispatcher overhead, and summarizes direct GEMM.
 
 Usage:
   python benches/tuning_kernels/csv_inspect.py benches/benchmark_results.csv
@@ -25,7 +25,7 @@ def parse_mkn(s: str):
 def norm_variant(v: str):
     lv = v.lower() if isinstance(v, str) else ''
     lv = lv.replace(' ', '_')
-    if lv in {'mps', 'mlx', 'gemv', 'gemm_tiled', 'auto', 'noop'}:
+    if lv in {'mlx', 'gemv', 'auto', 'noop'}:
         return lv
     if 'via_dispatcher' in lv:
         return 'via_dispatcher'
@@ -33,12 +33,8 @@ def norm_variant(v: str):
         return 'direct_kernel'
     if 'smalln_direct_n' in lv:
         return lv  # keep specific small-n direct tag
-    if 'gemm_direct_mps' in lv:
-        return 'gemm_direct_mps'
     if 'gemm_direct_mlx' in lv:
         return 'gemm_direct_mlx'
-    if 'gemm_direct_tiled' in lv:
-        return 'gemm_direct_tiled'
     return lv
 
 
@@ -149,14 +145,16 @@ def inspect_softmax(df):
         if not isinstance(v, str):
             return v
         lv = v.lower()
-        if 'softmax_mps' in lv:
-            return 'mps'
         if 'softmax_kernel' in lv:
             return 'kernel'
         if 'softmax_auto' in lv:
             return 'auto'
         if 'softmax_noop' in lv or (lv.startswith('softmax') and 'noop' in lv):
             return 'noop'
+        if 'softmax_vec' in lv:
+            return 'vec'
+        if 'softmax_block' in lv:
+            return 'block'
         if 'softmaxdispatch_vec' in lv:
             return 'vec'
         if 'softmaxdispatch_block' in lv:
@@ -173,7 +171,7 @@ def inspect_softmax(df):
     sdf = sdf.dropna(subset=['rows_total', 'seq_k'])
     sdf[['rows_total', 'seq_k']] = sdf[['rows_total', 'seq_k']].astype(int)
 
-    # Focus on dispatcher seq + mps + kernel comparisons at fixed rows_total
+    # Focus on dispatcher seq + kernel comparisons at fixed rows_total
     # Choose common rows_total = 128 for clarity
     rows_val = 128
     slice_ = sdf[sdf['rows_total'] == rows_val].copy()

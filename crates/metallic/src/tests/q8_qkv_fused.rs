@@ -6,9 +6,7 @@ use half::f16;
 use serial_test::serial;
 
 use crate::{
-    Context, MetalError, kernels::{
-        elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::MatMulMpsOp
-    }, tensor::{
+    Context, MetalError, kernels::{elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp}, tensor::{
         Tensor, TensorStorage, TensorType, quantized::{Q8_0_SCALE_BYTES_PER_BLOCK, QuantizedQ8_0Tensor}
     }
 };
@@ -101,12 +99,12 @@ fn qkv_fused_parity_vs_fp16() -> Result<(), MetalError> {
     let k_bias = make_fp16_tensor(&mut ctx, vec![n], 0x8888_BBBB)?;
     let v_bias = make_fp16_tensor(&mut ctx, vec![n], 0x7777_CCCC)?;
 
-    // FP16 refs via MPS baseline
-    let yq_fp16 = ctx.call::<MatMulMpsOp>((&x, &wq, false, false), None)?;
+    // FP16 refs via MLX GEMM baseline
+    let yq_fp16 = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wq), None, None, false, false, 1.0, 0.0), None)?;
     let yq_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yq_fp16, q_bias.clone()), None)?;
-    let yk_fp16 = ctx.call::<MatMulMpsOp>((&x, &wk, false, false), None)?;
+    let yk_fp16 = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wk), None, None, false, false, 1.0, 0.0), None)?;
     let yk_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yk_fp16, k_bias.clone()), None)?;
-    let yv_fp16 = ctx.call::<MatMulMpsOp>((&x, &wv, false, false), None)?;
+    let yv_fp16 = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wv), None, None, false, false, 1.0, 0.0), None)?;
     let yv_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yv_fp16, v_bias.clone()), None)?;
 
     let fq = yq_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
@@ -215,12 +213,12 @@ fn qkv_fused_parity_vs_fp16_mixed_dims() -> Result<(), MetalError> {
     let k_bias = make_fp16_tensor(&mut ctx, vec![n_kv], 0x2468_1357)?;
     let v_bias = make_fp16_tensor(&mut ctx, vec![n_kv], 0x9999_5555)?;
 
-    // FP16 refs via MPS baseline
-    let yq_fp16 = ctx.call::<MatMulMpsOp>((&x, &wq, false, false), None)?;
+    // FP16 refs via MLX GEMM baseline
+    let yq_fp16 = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wq), None, None, false, false, 1.0, 0.0), None)?;
     let yq_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yq_fp16, q_bias.clone()), None)?;
-    let yk_fp16 = ctx.call::<MatMulMpsOp>((&x, &wk, false, false), None)?;
+    let yk_fp16 = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wk), None, None, false, false, 1.0, 0.0), None)?;
     let yk_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yk_fp16, k_bias.clone()), None)?;
-    let yv_fp16 = ctx.call::<MatMulMpsOp>((&x, &wv, false, false), None)?;
+    let yv_fp16 = ctx.call::<MatMulMlxOp>((&x, TensorType::Dense(&wv), None, None, false, false, 1.0, 0.0), None)?;
     let yv_fp16 = ctx.call::<BroadcastElemwiseAddInplaceOp>((yv_fp16, v_bias.clone()), None)?;
     let fq = yq_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();
     let fk = yk_fp16.as_slice().iter().map(|v| v.to_f32()).collect::<Vec<_>>();

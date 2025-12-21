@@ -1,7 +1,5 @@
 use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
-use crate::kernels::matmul_mps::MatMulBackend;
-
 // Capacity tiering function to reduce the number of buffer allocations during incremental decoding
 pub fn tier_up_capacity(seq: usize) -> usize {
     match seq {
@@ -65,6 +63,12 @@ impl GpuProfilerLabel {
 pub const GPU_PROFILER_BACKEND: &str = "Metal";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatMulBackend {
+    Gemv,
+    Mlx,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MatMulBackendOverride {
     Default,
     Force(MatMulBackend),
@@ -80,7 +84,7 @@ pub fn detect_forced_matmul_backend() -> MatMulBackendOverride {
             } else {
                 match trimmed.to_ascii_lowercase().as_str() {
                     "mlx" => MatMulBackendOverride::Force(MatMulBackend::Mlx),
-                    "mps" => MatMulBackendOverride::Force(MatMulBackend::Mps),
+                    "mps" => MatMulBackendOverride::Force(MatMulBackend::Mlx),
                     "gemv" => MatMulBackendOverride::Force(MatMulBackend::Gemv),
                     "auto" => MatMulBackendOverride::Auto,
                     _ => MatMulBackendOverride::Default,

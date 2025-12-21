@@ -23,7 +23,6 @@ The 5.2 implementation includes several tunable parameters that affect kernel se
 ```bash
 # Run all benchmarks to generate performance data
 cargo build --release --benches
-cargo bench --bench matmul_dispatcher_bench
 cargo bench --bench softmax_dispatcher_bench
 cargo bench --bench direct_kernel_bench
 
@@ -52,19 +51,6 @@ Based on the analysis, update the dispatcher constants:
 ```rust
 // In crates/metallic/src/kernels/softmax_dispatcher/dispatcher.rs
 const SOFTMAX_VEC_BLOCK_THRESHOLD: usize = 1280; // Tuned from analysis
-```
-
-#### Small-N GEMV Thresholds
-```rust
-// In crates/metallic/src/kernels/matmul_dispatcher/constants.rs
-const SMALLN_MAX_N: usize = 8; // Tune this value
-```
-
-#### SIMD GEMM Thresholds
-```rust
-// In crates/metallic/src/kernels/matmul_dispatcher/constants.rs
-const SIMD_GEMM_MIN_M: usize = 64; // Tune this value
-const SIMD_GEMM_MIN_N: usize = 16;  // Tune this value
 ```
 
 ## Hardware-Specific Tuning
@@ -103,14 +89,8 @@ export METALLIC_SOFTMAX_VARIANT=auto  # or vec, block
 # Note: `SOFTMAX_BACKEND_VAR` in code is the typed wrapper for this env var.
 
 # Matmul backend selection
-export METALLIC_MATMUL_BACKEND=auto  # or mlx, mps, custom
+export METALLIC_MATMUL_BACKEND=auto  # or mlx, gemv
 
-# Small-N threshold tuning
-export METALLIC_MATMUL_SMALLN_MAX_N=8
-
-# SIMD thresholds
-export METALLIC_MATMUL_SIMD_M_MIN=64
-export METALLIC_MATMUL_SIMD_N_MIN=16
 ```
 
 ## Validation Process

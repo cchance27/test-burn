@@ -123,3 +123,25 @@ To close the remaining gap (~96 -> 160), we must move beyond single-kernel optim
 ### 5. Advanced Q8 Kernels
 **Theory**: Q8 at 96 tok/s vs 160 tok/s implies we are processing at ~60% potential speed.
 **Target**: Deep dive into M3 ISA optimization.
+
+## Ideas to push toward 200tps (Phase 4 Roadmap)
+
+Based on pipeline analysis of `qwen25` (18 kernel launches per layer):
+*   **Current Overhead**: ~450 dispatch calls per token. At ~5-10µs/call, this creates **2.25ms - 4.5ms of CPU latency**, capping max theoretical TPS regardless of GPU power.
+*   **Memory Bound**: 0.5B params @ Q8 (~0.6GB) on M3 Pro (~150GB/s) should take ~4ms (250 TPS). We are at ~158 TPS (6.3ms). The gap is largely dispatch latency.
+
+### 1. 🧩 Deep Kernel Fusion
+**Target**: Reduce kernel count from 18/layer to ~5/layer.
+**candidates**:
+*   **Fused KV Update**: Fuse `KvRearrange` + `RoPE` + `RepeatKV` into a single kernel (Writes directly to cache with position encoding).
+*   **Fused Residual+Norm**: Fuse `Add` + `RMSNorm` (Input to `QKV` and Input to `MLP`).
+*   **Fused MLP**: Fuse `Gate` + `Up` + `SiLU` + `Down` (challenging register pressure, but `Gate+Up+SiLU` is done).
+
+### 2. Advanced Q8 Kernels (M3)
+**Target**: Utilize M3 `simdgroup_matrix` (AMX) for `Q8` dense layers.
+**Impact**: Higher compute throughput for larger batch sizes (prefill) and potential power savings.
+
+### 3. 🚀 Graph Capture / Indirect Command Buffers (Critical)
+**Target**: Reduce CPU overhead from ~4.5ms to <0.1ms.
+**Action**: Implement `MTLIndirectCommandBuffer` or `MPSGraph` capture for the `forward_step` loop.
+**Impact**: Move from "CPU Bound" to "Memory Bound". Should push TPS from ~160 -> ~200+.

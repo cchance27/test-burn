@@ -55,14 +55,13 @@ def analyze_softmax_crossover(df):
     softmax_df['seq_len'] = pd.to_numeric(seqk_series.fillna(seqlen_legacy), errors='coerce').astype('Int64')
     softmax_df = softmax_df.dropna(subset=['seq_len'])
 
-    # Group by sequence length and variant (mps, kernel, vec, block)
+    # Group by sequence length and variant (kernel, vec, block)
     crossover_data = []
     for seq_len in sorted(softmax_df['seq_len'].unique()):
         seq_data = softmax_df[softmax_df['seq_len'] == seq_len]
         variant_specs = [
-            ('vec', r'^SoftmaxDispatch_vec$'),
-            ('block', r'^SoftmaxDispatch_block$'),
-            ('mps', r'^Softmax_mps$'),
+            ('vec', r'^SoftmaxDispatch_vec$|^Softmax_vec$'),
+            ('block', r'^SoftmaxDispatch_block$|^Softmax_block$'),
             ('kernel', r'^Softmax_kernel$'),
         ]
         for label, pattern in variant_specs:
@@ -233,20 +232,14 @@ def analyze_smalln_gemv_crossover(df):
                 return 'direct_kernel'
             if lv == 'via_dispatcher':
                 return 'via_dispatcher'
-            if lv == 'gemm_tiled':
-                return 'gemm_tiled'
             if lv == 'mlx':
                 return 'mlx'
-            if lv == 'mps':
-                return 'mps'
             if lv == 'noop':
                 return 'noop'
             if lv == 'auto':
                 return 'auto'
             if lv == 'gemv_direct':
                 return 'gemv_direct'
-            if lv.startswith('gemm_direct_tiled'):
-                return 'gemm_direct_tiled'
             return lv
         return v
     perf_rows = []
@@ -414,7 +407,7 @@ def create_visualization(softmax_analysis, smalln_analysis, gemm_analysis=None, 
         plt.figure(figsize=(10, 6))
 
         df = softmax_analysis['data']
-        for variant, label in [('vec', 'vec-softmax'), ('block', 'block-softmax'), ('mps', 'mps'), ('kernel', 'kernel')]:
+        for variant, label in [('vec', 'vec-softmax'), ('block', 'block-softmax'), ('kernel', 'kernel')]:
             variant_data = df[df['variant'] == variant]
             if len(variant_data) > 0:
                 plt.plot(variant_data['seq_len'], variant_data['mean_time'] / 1000.0,
@@ -647,8 +640,6 @@ def create_visualization(softmax_analysis, smalln_analysis, gemm_analysis=None, 
             # Map direct variants to dispatcher counterparts
             variant_pairs = {
                 'gemm_direct_mlx': 'mlx',
-                'gemm_direct_mps': 'mps',
-                'gemm_direct_tiled': 'gemm_tiled',
             }
 
             # Iterate per (m_dim, k_dim) to produce focused comparisons
@@ -715,10 +706,6 @@ def analyze_gemm_direct(df):
         lv = v.lower() if isinstance(v, str) else ''
         if 'gemm_direct_mlx' in lv:
             return 'gemm_direct_mlx'
-        if 'gemm_direct_mps' in lv:
-            return 'gemm_direct_mps'
-        if 'gemm_direct_tiled' in lv:
-            return 'gemm_direct_tiled'
         return lv
 
     gemm_df['variant'] = gemm_df['variant'].apply(norm_variant)
@@ -792,7 +779,7 @@ def analyze_gemm_dispatcher(df):
     # Normalize variant names
     def norm(v):
         lv = v.lower() if isinstance(v, str) else ''
-        if lv in ['mlx', 'mps', 'gemv', 'gemm_tiled', 'auto']:
+        if lv in ['mlx', 'gemv', 'auto']:
             return lv
         return lv
     disp_df['variant'] = disp_df['variant'].apply(norm)

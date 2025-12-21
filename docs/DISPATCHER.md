@@ -98,21 +98,19 @@ The kernel cache now includes additional specialization factors:
 To run A/B tests comparing different implementations:
 
 ```bash
-# Test MLX vs MPS for matmul
-METALLIC_MATMUL_BACKEND=mlx cargo bench matmul_dispatcher
-METALLIC_MATMUL_BACKEND=mps cargo bench matmul_dispatcher
+# Compare GEMV vs MLX matmul routing for compatible shapes
+METALLIC_MATMUL_BACKEND=gemv cargo bench direct_kernel_bench
+METALLIC_MATMUL_BACKEND=mlx cargo bench direct_kernel_bench
 
-# Test different small-N thresholds
-METALLIC_MATMUL_SMALLN_MAX_N=4 cargo bench matmul_dispatcher_smalln
-METALLIC_MATMUL_SMALLN_MAX_N=8 cargo bench matmul_dispatcher_smalln
-METALLIC_MATMUL_SMALLN_MAX_N=16 cargo bench matmul_dispatcher_smalln
+# Test softmax variant selection
+METALLIC_SOFTMAX_VARIANT=vec cargo bench softmax_dispatcher_bench
+METALLIC_SOFTMAX_VARIANT=block cargo bench softmax_dispatcher_bench
 ```
 
 ## Benchmarking
 
 The framework includes several benchmark suites:
 
-- `matmul_dispatcher_bench.rs`: Tests dispatcher behavior and small-N cases
 - `softmax_dispatcher_bench.rs`: Tests softmax parameterization
-- `mlx_vs_mps_matmul_benchmark.rs`: Compares MLX vs MPS implementations
+- `direct_kernel_bench.rs`: Tests direct GEMV/GEMM and softmax kernels
 - `sdpa_benchmark.rs`: Tests scaled dot product attention

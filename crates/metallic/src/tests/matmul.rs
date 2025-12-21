@@ -63,7 +63,7 @@ fn assert_tensors_close(
 }
 
 fn run_matmul_backend_comparison(index: usize, scenario: &MatmulScenario) -> Result<(), MetalError> {
-    let mut ctx_mps = new_context_for_backend("mps")?;
+    let mut ctx_auto = new_context_for_backend("auto")?;
     let mut ctx_mlx = new_context_for_backend("mlx")?;
 
     let a_len = scenario.a_dims.iter().product::<usize>();
@@ -72,21 +72,21 @@ fn run_matmul_backend_comparison(index: usize, scenario: &MatmulScenario) -> Res
     let a_data: Vec<f32> = (0..a_len).map(|i| (i as f32) * 0.01 + 0.05 * (index as f32 + 1.0)).collect();
     let b_data: Vec<f32> = (0..b_len).map(|i| (i as f32) * -0.015 + 0.07 * (index as f32 + 1.5)).collect();
 
-    let a_mps = tensor_from_data(&ctx_mps, &scenario.a_dims, &a_data)?;
-    let b_mps = tensor_from_data(&ctx_mps, &scenario.b_dims, &b_data)?;
+    let a_auto = tensor_from_data(&ctx_auto, &scenario.a_dims, &a_data)?;
+    let b_auto = tensor_from_data(&ctx_auto, &scenario.b_dims, &b_data)?;
     let a_mlx = tensor_from_data(&ctx_mlx, &scenario.a_dims, &a_data)?;
     let b_mlx = tensor_from_data(&ctx_mlx, &scenario.b_dims, &b_data)?;
 
-    let out_mps = ctx_mps.matmul(
-        &a_mps,
-        &TensorType::Dense(&b_mps),
+    let out_auto = ctx_auto.matmul(
+        &a_auto,
+        &TensorType::Dense(&b_auto),
         scenario.transpose_a,
         scenario.transpose_b,
         None,
         None,
         None,
     )?;
-    ctx_mps.synchronize();
+    ctx_auto.synchronize();
     let out_mlx = ctx_mlx.matmul(
         &a_mlx,
         &TensorType::Dense(&b_mlx),
@@ -98,12 +98,12 @@ fn run_matmul_backend_comparison(index: usize, scenario: &MatmulScenario) -> Res
     )?;
     ctx_mlx.synchronize();
 
-    assert_tensors_close(&out_mps, &out_mlx, 1e-3, 1e-6, scenario.description);
+    assert_tensors_close(&out_auto, &out_mlx, 1e-3, 1e-6, scenario.description);
     Ok(())
 }
 
 fn run_alpha_beta_case(index: usize, alpha: f32, beta: f32) -> Result<(), MetalError> {
-    let mut ctx_mps = new_context_for_backend("mps")?;
+    let mut ctx_auto = new_context_for_backend("auto")?;
     let mut ctx_mlx = new_context_for_backend("mlx")?;
 
     let m = 4;
@@ -114,28 +114,28 @@ fn run_alpha_beta_case(index: usize, alpha: f32, beta: f32) -> Result<(), MetalE
     let b_data: Vec<f32> = (0..(k * n)).map(|i| (i as f32) * -0.025 + 0.04 * (index as f32 + 2.0)).collect();
     let c_data: Vec<f32> = (0..(m * n)).map(|i| (i as f32) * 0.017 - 0.05 * (index as f32 + 1.5)).collect();
 
-    let a_mps = tensor_from_data(&ctx_mps, &[m, k], &a_data)?;
-    let b_mps = tensor_from_data(&ctx_mps, &[k, n], &b_data)?;
-    let c_mps = tensor_from_data(&ctx_mps, &[m, n], &c_data)?;
+    let a_auto = tensor_from_data(&ctx_auto, &[m, k], &a_data)?;
+    let b_auto = tensor_from_data(&ctx_auto, &[k, n], &b_data)?;
+    let c_auto = tensor_from_data(&ctx_auto, &[m, n], &c_data)?;
 
     let a_mlx = tensor_from_data(&ctx_mlx, &[m, k], &a_data)?;
     let b_mlx = tensor_from_data(&ctx_mlx, &[k, n], &b_data)?;
     let c_mlx = tensor_from_data(&ctx_mlx, &[m, n], &c_data)?;
 
-    let out_mps = ctx_mps.matmul(
-        &a_mps,
-        &TensorType::Dense(&b_mps),
+    let out_auto = ctx_auto.matmul(
+        &a_auto,
+        &TensorType::Dense(&b_auto),
         false,
         false,
         None,
         Some(MatmulAlphaBeta {
-            output: &c_mps,
+            output: &c_auto,
             alpha,
             beta,
         }),
         None,
     )?;
-    ctx_mps.synchronize();
+    ctx_auto.synchronize();
     let out_mlx = ctx_mlx.matmul(
         &a_mlx,
         &TensorType::Dense(&b_mlx),
@@ -151,7 +151,7 @@ fn run_alpha_beta_case(index: usize, alpha: f32, beta: f32) -> Result<(), MetalE
     )?;
     ctx_mlx.synchronize();
 
-    assert_tensors_close(&out_mps, &out_mlx, 1e-4, 1e-6, &format!("alpha={} beta={}", alpha, beta));
+    assert_tensors_close(&out_auto, &out_mlx, 1e-4, 1e-6, &format!("alpha={} beta={}", alpha, beta));
     Ok(())
 }
 

@@ -1,6 +1,5 @@
 #pragma once
 #include <metal_stdlib>
-#include "common_defs.metal"
 using namespace metal;
 
 constant float GEMV_RMSNORM_EPS = 1e-6f;

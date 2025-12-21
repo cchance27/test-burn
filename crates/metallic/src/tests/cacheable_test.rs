@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_cacheable_trait() {
-    use crate::kernels::softmax_mps::cache::SeqKBucket;
+    use crate::kernels::scaled_dot_product_attention::cache::SeqKBucket;
 
     // Test CacheableSdpa since it doesn't require complex objects
     let key = SdpaKey {

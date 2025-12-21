@@ -97,19 +97,6 @@ name = "swiglu_cache_benchmark"
 harness = false
 
 [[bench]]
-name = "softmax_backend_benchmark"
-harness = false
-
-[[bench]]
-name = "mlx_vs_mps_matmul_benchmark"
-harness = false
-
-[[bench]]
-name = "matmul_dispatcher_bench"
-path = "benches/tuning_kernels/matmul_dispatcher_bench.rs"
-harness = false
-
-[[bench]]
 name = "softmax_dispatcher_bench"
 path = "benches/tuning_kernels/softmax_dispatcher_bench.rs"
 harness = false
@@ -127,10 +114,6 @@ harness = false
 [[bench]]
 name = "pipeline_bench"
 path = "benches/tuning_kernels/pipeline_bench.rs"
-harness = false
-
-[[bench]]
-name = "gemm_tiled_benchmark"
 harness = false
 
 [[bench]]

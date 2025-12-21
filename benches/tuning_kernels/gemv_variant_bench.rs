@@ -20,7 +20,7 @@ fn make_f16(ctx: &mut Context<F16Element>, dims: Vec<usize>, seed: u64) -> Tenso
 
 fn quantize_q8_0_canonical_from_f32(ctx: &Context<F16Element>, k: usize, n: usize, weights_kn: &[f32]) -> QuantizedQ8_0Tensor {
     use metallic::tensor::Q8_0_WEIGHTS_PER_BLOCK;
-    let blocks_per_k = (k + Q8_0_WEIGHTS_PER_BLOCK - 1) / Q8_0_WEIGHTS_PER_BLOCK;
+    let blocks_per_k = k.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
     let total_blocks = blocks_per_k * n;
     let mut data = vec![0u8; total_blocks * Q8_0_WEIGHTS_PER_BLOCK];
     let mut scales = vec![0u8; total_blocks * Q8_0_SCALE_BYTES_PER_BLOCK];

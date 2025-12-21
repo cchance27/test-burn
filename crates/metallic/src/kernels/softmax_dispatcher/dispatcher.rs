@@ -1,4 +1,4 @@
-use super::types::{SoftmaxBackend, SoftmaxPolicy, SoftmaxShape, SoftmaxVariant};
+use super::types::{SoftmaxPolicy, SoftmaxShape, SoftmaxVariant};
 
 // TODO: Move to caps.rs
 #[derive(Debug)]
@@ -18,7 +18,6 @@ impl Default for SoftmaxCaps {
 // TODO: Move to prefs.rs and integrate with metallic_env
 #[derive(Debug, Default)]
 pub struct SoftmaxPrefs {
-    pub forced_backend: Option<SoftmaxBackend>,
     pub forced_variant: Option<SoftmaxVariant>,
     pub forced_tg_size: Option<usize>,
 }
@@ -36,16 +35,16 @@ fn default_tg_size() -> usize {
     256 // Matches legacy softmax kernel
 }
 
-fn classify_backend_variant(seq_k: usize) -> (SoftmaxBackend, SoftmaxVariant) {
+fn classify_variant(seq_k: usize) -> SoftmaxVariant {
     match seq_k {
-        0..=255 => (SoftmaxBackend::Custom, SoftmaxVariant::Auto), // kernel path wins for very short rows
-        256..=767 => (SoftmaxBackend::Custom, SoftmaxVariant::Vec),
-        768..=895 => (SoftmaxBackend::Custom, SoftmaxVariant::Block),
-        896..=1023 => (SoftmaxBackend::Custom, SoftmaxVariant::Vec),
-        1024..=1279 => (SoftmaxBackend::Custom, SoftmaxVariant::Block),
-        1280..=2047 => (SoftmaxBackend::Custom, SoftmaxVariant::Vec),
-        2048..=8191 => (SoftmaxBackend::Custom, SoftmaxVariant::Auto),
-        _ => (SoftmaxBackend::Custom, SoftmaxVariant::Vec), // very long rows fall back to custom vec kernel
+        0..=255 => SoftmaxVariant::Auto, // kernel path wins for very short rows
+        256..=767 => SoftmaxVariant::Vec,
+        768..=895 => SoftmaxVariant::Block,
+        896..=1023 => SoftmaxVariant::Vec,
+        1024..=1279 => SoftmaxVariant::Block,
+        1280..=2047 => SoftmaxVariant::Vec,
+        2048..=8191 => SoftmaxVariant::Auto,
+        _ => SoftmaxVariant::Vec, // very long rows fall back to custom vec kernel
     }
 }
 
@@ -63,32 +62,13 @@ fn select_threadgroup_size(variant: SoftmaxVariant, seq_k: usize, caps: &Softmax
 /// Selects the overall policy for softmax execution.
 pub fn select_policy(shape: SoftmaxShape, caps: &SoftmaxCaps, prefs: &SoftmaxPrefs) -> SoftmaxPolicy {
     // Establish baseline strategy from benchmark-driven heuristics.
-    let (mut backend, mut variant) = classify_backend_variant(shape.seq_k);
+    let mut variant = classify_variant(shape.seq_k);
 
     // Respect user overrides.
-    if let Some(forced_backend) = prefs.forced_backend {
-        backend = forced_backend;
-        if variant == SoftmaxVariant::Auto && backend == SoftmaxBackend::Custom {
-            // Default custom backend to vec kernel when unspecified.
-            variant = SoftmaxVariant::Vec;
-        }
-    }
     if let Some(forced_variant) = prefs.forced_variant {
         variant = forced_variant;
-        if matches!(variant, SoftmaxVariant::Vec | SoftmaxVariant::Block) && backend == SoftmaxBackend::Auto {
-            backend = SoftmaxBackend::Custom;
-        }
-    }
-
-    // Auto backend falls back to custom kernels unless explicitly overridden.
-    if backend == SoftmaxBackend::Auto {
-        backend = SoftmaxBackend::Custom;
     }
 
     let threadgroup_size = select_threadgroup_size(variant, shape.seq_k, caps, prefs);
-    SoftmaxPolicy {
-        backend,
-        variant,
-        threadgroup_size,
-    }
+    SoftmaxPolicy { variant, threadgroup_size }
 }

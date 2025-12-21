@@ -4,7 +4,7 @@ use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
 use super::{DefaultKernelInvocable, KernelFunction};
 use crate::{
-    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::MatmulAlphaBeta, kernels::{scaled_dot_product_attention::cache::SdpaKey, softmax_mps::cache::SeqKBucket}, tensor::TensorType
+    CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, TensorInit, TensorStorage, caching::ResourceCache, context::MatmulAlphaBeta, kernels::scaled_dot_product_attention::cache::{SdpaKey, SeqKBucket}, tensor::TensorType
 };
 
 #[cfg(test)]
@@ -34,12 +34,6 @@ impl SdpaConfig {
         reuse_workspace: true,
     };
 
-    // Note: This configuration is now handled by the new softmax dispatcher
-    const MPS_SOFTMAX: Self = Self {
-        transpose_k: false,
-        reuse_workspace: false,
-    };
-
     const ALL: Self = Self {
         transpose_k: true,
         reuse_workspace: true,
@@ -54,9 +48,6 @@ pub struct ScaledDotProductAttentionNoPermuteOp;
 
 /// Variant that reuses a persistent attention workspace between batches.
 pub struct ScaledDotProductAttentionWorkspaceOp;
-
-/// Variant that applies attention normalization through `MPSMatrixSoftMax` when supported.
-pub struct ScaledDotProductAttentionMpsSoftmaxOp;
 
 /// Variant that combines all optimizations.
 pub struct ScaledDotProductAttentionOptimizedOp;
@@ -325,23 +316,6 @@ impl DefaultKernelInvocable for ScaledDotProductAttentionWorkspaceOp {
         cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         create_sdpa_operation(ctx, args, cache, SdpaConfig::WORKSPACE)
-    }
-}
-
-impl DefaultKernelInvocable for ScaledDotProductAttentionMpsSoftmaxOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, &'a Tensor<T>, bool, u32);
-
-    fn function_id() -> Option<KernelFunction> {
-        None
-    }
-
-    fn new<'a, T: TensorElement>(
-        ctx: &mut Context<T>,
-        args: Self::Args<'a, T>,
-        _pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
-        cache: Option<&mut ResourceCache>,
-    ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
-        create_sdpa_operation(ctx, args, cache, SdpaConfig::MPS_SOFTMAX)
     }
 }
 

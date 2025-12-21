@@ -1,11 +1,8 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLDevice;
-use objc2_metal_performance_shaders::{MPSMatrixDescriptor, MPSMatrixMultiplication, MPSMatrixSoftMax};
 
 use crate::{
-    caching::{CacheMetrics, CacheRegistry, CacheableKernel}, error::MetalError, kernels::{
-        matmul_mps::cache::{MpsGemmKernel, MpsGemmKey, MpsMatrixDescriptorKernel, MpsMatrixDescriptorKey}, scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKernel, SdpaKey}, softmax_mps::cache::{MpsSoftMaxKey, SeqKBucket, SoftmaxMpsKernel}
-    }, tensor::dtypes::Dtype
+    caching::{CacheMetrics, CacheRegistry, CacheableKernel}, error::MetalError, kernels::scaled_dot_product_attention::cache::{CacheableSdpa, SdpaKernel, SdpaKey, SeqKBucket}, tensor::dtypes::Dtype
 };
 
 /// Unified resource cache facade that wraps the generic kernel registry.
@@ -30,69 +27,6 @@ impl ResourceCache {
         explicit_device: Option<&Retained<ProtocolObject<dyn MTLDevice>>>,
     ) -> Result<&mut K::CachedResource, MetalError> {
         self.registry.get_or_create::<K>(params, explicit_device)
-    }
-
-    /// Retrieve or create a cached GEMM executable.
-    #[inline]
-    pub fn get_or_create_gemm(
-        &mut self,
-        key: MpsGemmKey,
-        device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Retained<MPSMatrixMultiplication>, MetalError> {
-        let entry = self.get_or_create_entry::<MpsGemmKernel>(&key, Some(device))?;
-        Ok(MpsGemmKernel::extract_gemm(entry))
-    }
-
-    /// Retrieve or create a cached matrix descriptor.
-    #[inline]
-    pub fn get_or_create_descriptor(
-        &mut self,
-        key: MpsMatrixDescriptorKey,
-        device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Retained<MPSMatrixDescriptor>, MetalError> {
-        let entry = self.get_or_create_entry::<MpsMatrixDescriptorKernel>(&key, Some(device))?;
-        Ok(MpsMatrixDescriptorKernel::extract_descriptor(entry))
-    }
-
-    /// Retrieve or create a cached softmax executable using default causal settings.
-    #[inline]
-    pub fn get_or_create_softmax(
-        &mut self,
-        rows: usize,
-        columns: usize,
-        dtype: Dtype,
-        device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Retained<MPSMatrixSoftMax>, MetalError> {
-        let key = MpsSoftMaxKey {
-            rows,
-            columns,
-            seq_k_bucket: SeqKBucket::from(columns),
-            causal: false,
-            dtype,
-        };
-        let entry = self.get_or_create_entry::<SoftmaxMpsKernel>(&key, Some(device))?;
-        Ok(SoftmaxMpsKernel::extract_softmax(entry))
-    }
-
-    /// Retrieve or create a cached softmax executable with explicit causal control.
-    #[inline]
-    pub fn get_or_create_softmax_full(
-        &mut self,
-        rows: usize,
-        columns: usize,
-        dtype: Dtype,
-        causal: bool,
-        device: &Retained<ProtocolObject<dyn MTLDevice>>,
-    ) -> Result<Retained<MPSMatrixSoftMax>, MetalError> {
-        let key = MpsSoftMaxKey {
-            rows,
-            columns,
-            seq_k_bucket: SeqKBucket::from(columns),
-            causal,
-            dtype,
-        };
-        let entry = self.get_or_create_entry::<SoftmaxMpsKernel>(&key, Some(device))?;
-        Ok(SoftmaxMpsKernel::extract_softmax(entry))
     }
 
     /// Retrieve or create a cached SDPA scaling helper using legacy defaults.
@@ -140,9 +74,9 @@ impl ResourceCache {
     #[inline]
     pub fn get_stats(&self) -> CacheStats {
         CacheStats {
-            gemm: self.metrics::<MpsGemmKernel>(),
-            descriptor: self.metrics::<MpsMatrixDescriptorKernel>(),
-            softmax: self.metrics::<SoftmaxMpsKernel>(),
+            gemm: CacheMetrics::default(),
+            descriptor: CacheMetrics::default(),
+            softmax: CacheMetrics::default(),
             sdpa: self.metrics::<SdpaKernel>(),
         }
     }

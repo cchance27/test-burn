@@ -2,7 +2,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use metallic::{
     Context, F32Element, Tensor, kernels::{
         DefaultKernelInvocable, scaled_dot_product_attention::{
-            ScaledDotProductAttentionMpsSoftmaxOp, ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp, ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp
+            ScaledDotProductAttentionNoPermuteOp, ScaledDotProductAttentionOp, ScaledDotProductAttentionOptimizedOp, ScaledDotProductAttentionWorkspaceOp
         }
     }
 };
@@ -127,24 +127,6 @@ fn benchmark_sdpa_variants(c: &mut Criterion) {
             context.synchronize();
             context.pool.reset();
             run_variant_per_batch::<ScaledDotProductAttentionWorkspaceOp>(&mut context, batch, seq_q, seq_k, dim, causal);
-            context.synchronize();
-        })
-    });
-
-    group.bench_function("mps_softmax_batched", |b| {
-        b.iter(|| {
-            context.synchronize();
-            context.pool.reset();
-            run_variant_batched::<ScaledDotProductAttentionMpsSoftmaxOp>(&mut context, batch, seq_q, seq_k, dim, causal);
-            context.synchronize();
-        })
-    });
-
-    group.bench_function("mps_softmax_per_batch", |b| {
-        b.iter(|| {
-            context.synchronize();
-            context.pool.reset();
-            run_variant_per_batch::<ScaledDotProductAttentionMpsSoftmaxOp>(&mut context, batch, seq_q, seq_k, dim, causal);
             context.synchronize();
         })
     });

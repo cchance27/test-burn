@@ -94,10 +94,7 @@ fn test_sdpa_invalid_batch_dimensions() {
 
 #[test]
 fn test_matmul_invalid_shapes() {
-    use crate::{caching::ResourceCache, kernels::matmul_mps::cache::MpsGemmKey};
-
-    let context = Context::<F32Element>::new().unwrap();
-    let mut cache = ResourceCache::with_device(context.device.clone());
+    let mut context = Context::<F32Element>::new().unwrap();
 
     // Test with incompatible matrix dimensions
     let m = 3;
@@ -109,29 +106,20 @@ fn test_matmul_invalid_shapes() {
     let b_data: Vec<f32> = (0..(k2 * n)).map(|i| (i as f32) * 0.2).collect();
     let result_data: Vec<f32> = vec![0.0; m * n];
 
-    let _a_tensor = Tensor::new(vec![m, k1], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data)).unwrap();
-    let _b_tensor = Tensor::new(vec![k2, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data)).unwrap();
+    let a_tensor = Tensor::new(vec![m, k1], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&a_data)).unwrap();
+    let b_tensor = Tensor::new(vec![k2, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&b_data)).unwrap();
     let _result_tensor = Tensor::new(vec![m, n], TensorStorage::Dedicated(&context), TensorInit::CopyFrom(&result_data)).unwrap();
 
-    let gemm_key = MpsGemmKey {
-        transpose_left: false,
-        transpose_right: false,
-        result_rows: m,
-        result_columns: n,
-        interior_columns: k1, // This won't match k2
-        batch_size: 1,
-        alpha: 1.0,
-        beta: 0.0,
-        beta_nonzero: false,
-        dtype: crate::tensor::dtypes::Dtype::F32,
-    };
-
-    // This might not fail at the Rust level, but would fail at the Metal level
-    // We're testing that our code doesn't panic
-    let result = cache.get_or_create_gemm(gemm_key, &context.device);
-    // The result could be Ok or Err depending on how the Metal API handles this
-    // but it should not panic
-    assert!(result.is_ok() || result.is_err()); // Just ensuring no panic
+    let result = context.matmul(
+        &a_tensor,
+        &crate::tensor::TensorType::Dense(&b_tensor),
+        false,
+        false,
+        None,
+        None,
+        None,
+    );
+    assert!(result.is_err(), "matmul should fail with mismatched K dims");
 }
 
 #[test]

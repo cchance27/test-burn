@@ -1,6 +1,32 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use metallic::{Context, F16Element, Tensor, TensorElement, TensorInit, TensorStorage, kernels::softmax_dispatcher::SoftmaxDispatchOp};
-use metallic_env::SOFTMAX_BACKEND_VAR;
+
+const SOFTMAX_VARIANT_ENV: &str = "METALLIC_SOFTMAX_VARIANT";
+
+struct EnvGuard {
+    key: &'static str,
+    prev: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: Option<&str>) -> Self {
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        Self { key, prev }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        match &self.prev {
+            Some(v) => std::env::set_var(self.key, v),
+            None => std::env::remove_var(self.key),
+        }
+    }
+}
 
 fn bench_softmax_dispatcher_seq_lengths<T: TensorElement>(c: &mut Criterion, dtype_name: &str) {
     let mut group = c.benchmark_group(format!("softmax_dispatcher_seq_{dtype_name}"));
@@ -29,10 +55,14 @@ fn bench_softmax_dispatcher_seq_lengths<T: TensorElement>(c: &mut Criterion, dty
             group.throughput(Throughput::Elements(flops as u64));
             let label = format!("rows{}_seqk{}", rows_total, seq_k);
 
-            // Benchmark softmax with different backends (include 'noop' for dispatcher overhead)
-            for backend in ["auto", "kernel", "mps", "noop"] {
-                group.bench_with_input(BenchmarkId::new(format!("Softmax_{}", backend), &label), &label, |bi, _| {
-                    let _guard = SOFTMAX_BACKEND_VAR.set_guard(backend.to_string()).unwrap();
+            // Benchmark softmax with different variants (include 'noop' for dispatcher overhead)
+            for variant in ["auto", "vec", "block", "noop"] {
+                group.bench_with_input(BenchmarkId::new(format!("Softmax_{}", variant), &label), &label, |bi, _| {
+                    let _guard = if variant == "auto" {
+                        EnvGuard::set(SOFTMAX_VARIANT_ENV, None)
+                    } else {
+                        EnvGuard::set(SOFTMAX_VARIANT_ENV, Some(variant))
+                    };
 
                     let mut ctx = Context::<T>::new().expect("ctx setup");
                     // Reset pool before creating tensors to ensure clean state
@@ -79,7 +109,7 @@ fn bench_softmax_dispatcher_batch_variants<T: TensorElement>(c: &mut Criterion, 
 
         // Test with auto backend selection
         group.bench_with_input(BenchmarkId::new("Softmax_Auto", &label), &label, |bi, _| {
-            let _guard = SOFTMAX_BACKEND_VAR.set_guard("auto".to_string()).unwrap();
+            let _guard = EnvGuard::set(SOFTMAX_VARIANT_ENV, None);
 
             let mut ctx = Context::<T>::new().expect("ctx setup");
             // Reset pool before creating tensors to ensure clean state

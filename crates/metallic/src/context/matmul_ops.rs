@@ -2,12 +2,14 @@ use std::sync::OnceLock;
 
 use metallic_instrumentation::{MetricEvent, record_metric_async};
 
-use super::{main::Context, utils::MatMulBackendOverride as InternalMatMulBackendOverride};
+use super::{
+    main::Context, utils::{MatMulBackend, MatMulBackendOverride as InternalMatMulBackendOverride}
+};
 use crate::{
     MetalError, Tensor, caching::ResourceCache, kernels::{
-        elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv::{
+        matmul_gemv::{
             MATMUL_Q8_NT_MAX_ROWS, MatmulF16CanonicalOp, MatmulF16CanonicalQkvFusedOp, MatmulF16CanonicalRows16Op, MatmulF16CanonicalSwiGluOp, MatmulGemvAddmmOp, MatmulGemvOp, MatmulGemvSmallMOp, MatmulQ8CanonicalOp, MatmulQ8CanonicalRows16Op, MatmulQ8NtOp
-        }, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp, matmul_mps::{MatMulBackend, MatMulMpsAlphaBetaOp, MatMulMpsOp}
+        }, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp
     }, tensor::{CanonicalF16Tensor, QuantizedTensor, TensorElement, TensorType}
 };
 
@@ -339,67 +341,6 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[inline]
-    fn should_use_mlx_bias(&self, dims: &MatmulDims) -> bool {
-        if dims.n <= 32 {
-            return false;
-        }
-
-        if dims.batch == 1 && dims.m <= 4 {
-            // For very skinny decode projections benchmark data shows MLX holds an advantage
-            // unless both the output width is extremely small and the reduction dim dwarfs it.
-            if dims.n <= 1024 && dims.k >= dims.n {
-                return false;
-            }
-        }
-
-        if dims.m >= 1024 || dims.n >= 1024 {
-            return true;
-        }
-
-        if dims.batch > 1 && dims.m >= 256 && dims.n >= 256 {
-            return true;
-        }
-
-        false
-    }
-
-    #[inline]
-    fn has_strided_mps_batch(&self, tensors: &[&Tensor<T>]) -> bool {
-        tensors.iter().any(|tensor| {
-            tensor
-                .as_mps_matrix_batch_view()
-                .map(|view| view.batch > 1 && view.matrix_bytes != view.rows * view.row_bytes)
-                .unwrap_or(false)
-        })
-    }
-
-    #[inline]
-    fn should_use_mlx_dense(&self, dims: &MatmulDims, has_strided_batch: bool) -> bool {
-        if dims.n <= 32 && !has_strided_batch {
-            return false;
-        }
-
-        if dims.batch == 1 && dims.m <= 4 {
-            if !has_strided_batch && dims.n <= 128 && dims.k >= dims.n * 2 {
-                return false;
-            }
-            if !has_strided_batch {
-                let four_k = dims.k.saturating_mul(4);
-                let four_n = dims.n.saturating_mul(4);
-                if dims.n >= four_k || dims.k >= four_n {
-                    return false;
-                }
-            }
-        }
-
-        if dims.m >= 1024 || dims.n >= 1024 {
-            return true;
-        }
-
-        true
-    }
-
-    #[inline]
     fn can_use_gemv(&self, dims: &MatmulDims, transpose_a: bool, _transpose_b: bool) -> bool {
         // SIMD GEMV kernels (MatmulGemvCols8) only support F16, not F32.
         if T::DTYPE != crate::tensor::Dtype::F16 {
@@ -623,17 +564,12 @@ impl<T: TensorElement> Context<T> {
                 emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mlx", "forced_backend_gemv_unsupported");
                 return self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
             }
-            InternalMatMulBackendOverride::Force(MatMulBackend::Mps) => {
-                if can_gemv {
-                    emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "forced_backend");
-                    return self.launch_gemv(a, TensorType::Dense(b), transpose_b, bias, alpha_beta, cache.as_deref_mut());
-                }
-                emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Mps", "forced_backend");
-                return self.matmul_dense_mps(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut());
-            }
             InternalMatMulBackendOverride::Default | InternalMatMulBackendOverride::Auto => {}
         }
 
+        // GEMV is only used for m==1 with contiguous K (and optional bias/alpha-beta).
+        // Every other case (m>1, transposed operands, non-contiguous K, or unsupported dtypes)
+        // falls back to MLX GEMM.
         if can_gemv {
             emit_matmul_backend_selected("dense", dims_ok, transpose_a, transpose_b, "Gemv", "heuristic_m1");
             return self.launch_gemv(a, TensorType::Dense(b), transpose_b, bias, alpha_beta, cache.as_deref_mut());
@@ -647,55 +583,8 @@ impl<T: TensorElement> Context<T> {
             }
         };
 
-        let has_strided_batch = {
-            let mut tensors: Vec<&Tensor<T>> = vec![a, b];
-            if let Some(ep) = alpha_beta {
-                tensors.push(ep.output);
-            }
-            self.has_strided_mps_batch(&tensors)
-        };
-
-        let use_mlx = if alpha_beta.is_some() {
-            self.should_use_mlx_dense(&dims, has_strided_batch)
-        } else if bias.is_some() {
-            self.should_use_mlx_bias(&dims)
-        } else {
-            self.should_use_mlx_dense(&dims, has_strided_batch)
-        };
-
-        if use_mlx {
-            emit_matmul_backend_selected(
-                "dense",
-                Some(dims),
-                transpose_a,
-                transpose_b,
-                "Mlx",
-                if bias.is_some() {
-                    "heuristic_bias"
-                } else if alpha_beta.is_some() {
-                    "heuristic_alpha_beta"
-                } else {
-                    "heuristic"
-                },
-            );
-            self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut())
-        } else {
-            emit_matmul_backend_selected(
-                "dense",
-                Some(dims),
-                transpose_a,
-                transpose_b,
-                "Mps",
-                if bias.is_some() {
-                    "heuristic_bias"
-                } else if alpha_beta.is_some() {
-                    "heuristic_alpha_beta"
-                } else {
-                    "heuristic"
-                },
-            );
-            self.matmul_dense_mps(a, b, transpose_a, transpose_b, bias, alpha_beta, cache)
-        }
+        emit_matmul_backend_selected("dense", Some(dims), transpose_a, transpose_b, "Mlx", "gemv_unsupported");
+        self.matmul_dense_mlx(a, b, transpose_a, transpose_b, bias, alpha_beta, cache.as_deref_mut())
     }
 
     fn matmul_dense_mlx(
@@ -717,34 +606,6 @@ impl<T: TensorElement> Context<T> {
             (a, TensorType::Dense(b), bias, existing_out, transpose_a, transpose_b, alpha, beta),
             None,
         )
-    }
-
-    fn matmul_dense_mps(
-        &mut self,
-        a: &Tensor<T>,
-        b: &Tensor<T>,
-        transpose_a: bool,
-        transpose_b: bool,
-        bias: Option<&Tensor<T>>,
-        alpha_beta: Option<MatmulAlphaBeta<'_, T>>,
-        cache: Option<&mut ResourceCache>,
-    ) -> Result<Tensor<T>, MetalError> {
-        let mut cache = cache;
-        if let Some(ep) = alpha_beta {
-            if bias.is_some() {
-                return Err(MetalError::OperationNotSupported(
-                    "MPS matmul does not support bias + alpha/beta epilogue yet".into(),
-                ));
-            }
-            return self.call::<MatMulMpsAlphaBetaOp>((a, b, ep.output, transpose_a, transpose_b, ep.alpha, ep.beta), cache.as_deref_mut());
-        }
-
-        let mut out = self.call::<MatMulMpsOp>((a, b, transpose_a, transpose_b), cache.as_deref_mut())?;
-        if let Some(bias_tensor) = bias {
-            // Bias add does not benefit from external cache; use internal path to avoid extra CB path
-            out = self.call::<BroadcastElemwiseAddInplaceOp>((out, bias_tensor.clone()), None)?;
-        }
-        Ok(out)
     }
 
     fn launch_gemv(

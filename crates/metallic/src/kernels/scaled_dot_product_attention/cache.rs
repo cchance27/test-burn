@@ -4,7 +4,25 @@ use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLDevice;
 use serde::{Deserialize, Serialize};
 
-use crate::{caching::CacheableKernel, error::MetalError, kernels::softmax_mps::cache::SeqKBucket, tensor::dtypes::Dtype};
+use crate::{caching::CacheableKernel, error::MetalError, tensor::dtypes::Dtype};
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub enum SeqKBucket {
+    Small,
+    Medium,
+    Large,
+    Other,
+}
+
+impl From<usize> for SeqKBucket {
+    fn from(seq_len: usize) -> Self {
+        match seq_len {
+            0..=1024 => SeqKBucket::Small,
+            1025..=4096 => SeqKBucket::Medium,
+            _ => SeqKBucket::Large,
+        }
+    }
+}
 
 /// Key for SDPA operations.
 ///

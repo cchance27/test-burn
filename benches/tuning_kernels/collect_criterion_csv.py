@@ -47,10 +47,10 @@ def collect_rows(criterion_dir: Path):
                 if re.search(r"SoftmaxDispatch_(vec|block)", p):
                     variant = p
                     break
-                if re.search(r"Softmax_(auto|kernel|mps)", p):
+                if re.search(r"Softmax_(auto|kernel|vec|block|noop)", p):
                     variant = p
                     break
-                if p in {"mlx", "mps", "gemv", "gemm_tiled", "auto"}:
+                if p in {"mlx", "gemv", "auto"}:
                     variant = p
                     break
 

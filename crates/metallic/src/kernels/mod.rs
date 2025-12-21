@@ -30,20 +30,15 @@ pub mod gelu;
 pub mod kv_cache_write;
 pub mod kv_rearrange;
 pub mod layernorm;
-pub mod matmul_dispatcher;
-pub mod matmul_gemm_tiled;
 pub mod matmul_gemv;
 pub mod matmul_gemv_qkv_fused;
 pub mod matmul_mlx;
-pub mod matmul_mps;
 
-pub mod softmax_block;
-pub mod softmax_kernel;
-pub mod softmax_mps;
-pub mod softmax_vec;
-pub use matmul_dispatcher::dispatch_op::MatmulDispatchOp;
 pub mod permute;
 pub mod repeat_kv_heads;
+pub mod softmax_block;
+pub mod softmax_kernel;
+pub mod softmax_vec;
 
 pub mod rmsnorm;
 pub mod rope;
@@ -87,7 +82,6 @@ pub enum KernelLibrary {
     Swiglu,
     Tensors,
     MatmulGemv,
-    MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
     SampleTopKTopP,
@@ -127,7 +121,6 @@ impl KernelLibrary {
                 "matmul_gemv/kernel/gemv_fused.metal",
                 "matmul_gemv/kernel/launcher.metal"
             ),
-            KernelLibrary::MatmulGemmTiled => kernel_lib!("matmul_gemm_tiled"),
             KernelLibrary::SoftmaxBlock => kernel_lib!("softmax_block"),
             KernelLibrary::SoftmaxVec => kernel_lib!("softmax_vec"),
             KernelLibrary::SampleTopKTopP => kernel_lib!("sample_topk_topp"),
@@ -193,7 +186,6 @@ pub enum KernelFunction {
     MatmulF16CanonicalQkvFusedRmsnorm,
     MatmulF16CanonicalSwiGlu,
     MatmulF16CanonicalSwiGluRmsnorm,
-    MatmulGemmTiled,
     SoftmaxBlock,
     SoftmaxVec,
     SampleTopKPartials,
@@ -254,7 +246,6 @@ impl KernelFunction {
             KernelFunction::MatmulF16CanonicalSwiGlu => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulF16CanonicalSwiGluRmsnorm => KernelLibrary::MatmulGemv,
             KernelFunction::MatmulGemvSmallM => KernelLibrary::MatmulGemv,
-            KernelFunction::MatmulGemmTiled => KernelLibrary::MatmulGemmTiled,
             KernelFunction::SoftmaxBlock => KernelLibrary::SoftmaxBlock,
             KernelFunction::SoftmaxVec => KernelLibrary::SoftmaxVec,
             KernelFunction::SampleTopKPartials => KernelLibrary::SampleTopKTopP,
@@ -434,13 +425,6 @@ impl KernelFunction {
                 return Err(MetalError::UnsupportedDtype {
                     dtype: Dtype::F32,
                     operation: "MatmulGemvSmallN16",
-                });
-            }
-            (KernelFunction::MatmulGemmTiled, F16) => "gemm_tiled_f16",
-            (KernelFunction::MatmulGemmTiled, F32) => {
-                return Err(MetalError::UnsupportedDtype {
-                    dtype: Dtype::F32,
-                    operation: "MatmulGemmTiled",
                 });
             }
             (KernelFunction::SoftmaxBlock, F16) => "block_softmax_f16",
