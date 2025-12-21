@@ -177,21 +177,44 @@ impl<T: TensorElement> Operation for MatMulGemvRmsnorm<T> {
     }
 }
 
-fn validate_x_shape<T: TensorElement>(x: &Tensor<T>) -> Result<usize, MetalError> {
+fn validate_x_shape<T: TensorElement>(x: &Tensor<T>) -> Result<(usize, usize), MetalError> {
     let x_dims = x.dims();
-    if x_dims.len() != 2 || x_dims[0] != 1 {
+    if x_dims.len() < 2 {
         return Err(GemvError::VectorShape { actual: x_dims.to_vec() }.into());
     }
-    Ok(x_dims[1])
+
+    let k = x_dims[x_dims.len() - 1];
+
+    // 1. [Batch, K] (len=2)
+    if x_dims.len() == 2 {
+        // Interpret as Batch of K-vectors
+        return Ok((x_dims[0], k));
+    }
+
+    // 2. [Batch..., 1, K] (len > 2)
+    // Strictly require penultimate dimension to be 1 to distinguish from GEMM
+    if x_dims[x_dims.len() - 2] != 1 {
+        return Err(GemvError::VectorShape { actual: x_dims.to_vec() }.into());
+    }
+
+    let batch = x_dims[..x_dims.len() - 2].iter().product();
+    Ok((batch, k))
+}
+
+#[inline]
+fn stride_to_u32(val: usize, label: &'static str) -> Result<u32, MetalError> {
+    u32::try_from(val).map_err(|_| MetalError::InvalidShape(format!("{label} stride exceeds u32")))
 }
 
 fn build_operation<'a, T: TensorElement>(
     ctx: &mut Context<T>,
     x: &'a Tensor<T>,
+    batch: usize,
     k: usize,
     rhs: ResolvedGemvRhs<'a, T>,
     bias: Option<&'a Tensor<T>>,
     residual: Option<&'a Tensor<T>>,
+    output: Option<&'a Tensor<T>>,
     alpha: f32,
     beta: f32,
     pipeline: Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
@@ -209,6 +232,10 @@ fn build_operation<'a, T: TensorElement>(
         weights_per_block,
     } = rhs;
 
+    if x.strides.last().copied().unwrap_or(0) != 1 {
+        return Err(MetalError::InvalidShape("GEMV requires contiguous X along K".into()));
+    }
+
     if let Some(bias_tensor) = &bias {
         if bias_tensor.len() != n {
             return Err(GemvError::BiasLengthMismatch {
@@ -221,20 +248,46 @@ fn build_operation<'a, T: TensorElement>(
 
     if let Some(residual_tensor) = &residual {
         let rd = residual_tensor.dims();
-        if rd.len() != 2 || rd[0] != 1 || rd[1] != n {
+        // Allow [1, N] (legacy strict) OR [Batch, 1, N] (batched).
+        // Simplest valid check for GEMV is: last dim is N.
+        if rd.last() != Some(&n) {
             return Err(GemvError::ResidualShapeMismatch {
                 expected: n,
                 actual: rd.to_vec(),
             }
             .into());
         }
+        if residual_tensor.strides.last().copied().unwrap_or(0) != 1 {
+            return Err(MetalError::InvalidShape("GEMV residual must be contiguous along N".into()));
+        }
     }
 
-    let y = Tensor::new(vec![1, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+    let mut y_dims = x.dims().to_vec();
+    *y_dims.last_mut().unwrap() = n;
+    let y = if let Some(out) = output {
+        if out.dims() != y_dims {
+            return Err(MetalError::InvalidShape(format!(
+                "GEMV output shape {:?} does not match expected {:?}",
+                out.dims(),
+                y_dims
+            )));
+        }
+        if out.strides.last().copied().unwrap_or(0) != 1 {
+            return Err(MetalError::InvalidShape("GEMV output must be contiguous along N".into()));
+        }
+        out.clone()
+    } else {
+        Tensor::new(y_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?
+    };
 
     let mut inputs: Vec<&Tensor<T>> = vec![x, &y];
     match &binding {
-        GemvRhsBinding::Dense(rhs_tensor) => inputs.push(rhs_tensor),
+        GemvRhsBinding::Dense(rhs_tensor) => {
+            if rhs_tensor.strides.last().copied().unwrap_or(0) != 1 {
+                return Err(MetalError::InvalidShape("GEMV requires contiguous RHS along K".into()));
+            }
+            inputs.push(rhs_tensor);
+        }
         GemvRhsBinding::DenseCanonical(rhs_tensor) => inputs.push(&rhs_tensor.data),
         GemvRhsBinding::QuantCanonical(_) => {}
     }
@@ -248,11 +301,45 @@ fn build_operation<'a, T: TensorElement>(
 
     let _ = quant_meta;
 
+    // Strides are in ELEMENTS, not bytes.
+    let stride_x = stride_to_u32(*x.strides.first().unwrap_or(&k), "gemv_x")?;
+    let stride_y = stride_to_u32(*y.strides.first().unwrap_or(&n), "gemv_y")?;
+    let stride_a = match &binding {
+        GemvRhsBinding::Dense(t) if t.dims().len() == 3 => {
+            if t.dims()[0] == batch {
+                stride_to_u32(*t.strides.first().unwrap_or(&(k * n)), "gemv_rhs_batch")?
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    let stride_scale = 0;
+
+    // stride_w: row stride in the RHS matrix for computing initial column pointer.
+    let stride_w = match (&binding, loader_mode) {
+        (GemvRhsBinding::Dense(t), GemvLoaderMode::Dense | GemvLoaderMode::DenseBias) => {
+            let row_stride = t.strides.get(t.strides.len().saturating_sub(2)).copied().unwrap_or(k);
+            stride_to_u32(row_stride, "gemv_rhs_row")?
+        }
+        (GemvRhsBinding::Dense(t), GemvLoaderMode::DenseStrided | GemvLoaderMode::DenseStridedBias) => {
+            let row_stride = t.strides.get(t.strides.len().saturating_sub(2)).copied().unwrap_or(n);
+            stride_to_u32(row_stride, "gemv_rhs_row")?
+        }
+        _ => 0,
+    };
+
     let params = GemvParams {
         k: k as u32,
         n: n as u32,
         blocks_per_k,
         weights_per_block,
+        batch: batch as u32,
+        stride_x,
+        stride_y,
+        stride_a,
+        stride_w,
+        stride_scale,
     };
     let dispatch = GemvDispatch::new(loader_mode, needs_bias_buffer, diag_col);
 
@@ -273,8 +360,14 @@ fn build_operation<'a, T: TensorElement>(
     let use_simd_canonical = matches!(binding, GemvRhsBinding::DenseCanonical(_));
 
     let (tg_width, tile_cols) = if is_simd_q8 || use_simd_dense || use_simd_canonical {
-        let cols = if use_simd_dense || use_simd_canonical {
+        let cols = if use_simd_canonical {
             8usize
+        } else if use_simd_dense {
+            match loader_mode {
+                GemvLoaderMode::Dense | GemvLoaderMode::DenseBias => 8usize,
+                GemvLoaderMode::DenseStrided | GemvLoaderMode::DenseStridedBias => 4usize,
+                _ => 4usize,
+            }
         } else {
             match gemv_cols_variant() {
                 GemvColsVariant::Cols2 => 2usize,
@@ -295,7 +388,7 @@ fn build_operation<'a, T: TensorElement>(
     let grid_size = MTLSize {
         width: n.div_ceil(tile_cols) as usize,
         height: 1,
-        depth: 1,
+        depth: batch,
     };
 
     let dq_suffix = match &binding {
@@ -316,7 +409,7 @@ fn build_operation<'a, T: TensorElement>(
         let mut data = FxHashMap::default();
         data.insert("op".to_string(), "matmul".to_string());
         data.insert("backend".to_string(), "gemv".to_string());
-        data.insert("batch".to_string(), "1".to_string());
+        data.insert("batch".to_string(), batch.to_string());
         data.insert("m".to_string(), "1".to_string());
         data.insert("n".to_string(), n.to_string());
         data.insert("k".to_string(), k.to_string());
@@ -377,6 +470,7 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
     ctx: &mut Context<T>,
     x: &'a Tensor<T>,
     gamma: &'a Tensor<T>,
+    batch: usize,
     k: usize,
     rhs: ResolvedGemvRhs<'a, T>,
     bias: Option<&'a Tensor<T>>,
@@ -395,6 +489,10 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
         blocks_per_k,
         weights_per_block,
     } = rhs;
+
+    if x.strides.last().copied().unwrap_or(0) != 1 {
+        return Err(MetalError::InvalidShape("GEMV requires contiguous X along K".into()));
+    }
 
     if gamma.dims() != [k] {
         return Err(MetalError::InvalidShape(format!(
@@ -416,20 +514,31 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
 
     if let Some(residual_tensor) = &residual {
         let rd = residual_tensor.dims();
-        if rd.len() != 2 || rd[0] != 1 || rd[1] != n {
+        // Allow [1, N] (legacy strict) OR [Batch, 1, N] (batched).
+        if rd.last() != Some(&n) {
             return Err(GemvError::ResidualShapeMismatch {
                 expected: n,
                 actual: rd.to_vec(),
             }
             .into());
         }
+        if residual_tensor.strides.last().copied().unwrap_or(0) != 1 {
+            return Err(MetalError::InvalidShape("GEMV residual must be contiguous along N".into()));
+        }
     }
 
-    let y = Tensor::new(vec![1, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
+    let mut y_dims = x.dims().to_vec();
+    *y_dims.last_mut().unwrap() = n;
+    let y = Tensor::new(y_dims, TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 
     let mut inputs: Vec<&Tensor<T>> = vec![x, gamma, &y];
     match &binding {
-        GemvRhsBinding::Dense(rhs_tensor) => inputs.push(rhs_tensor),
+        GemvRhsBinding::Dense(rhs_tensor) => {
+            if rhs_tensor.strides.last().copied().unwrap_or(0) != 1 {
+                return Err(MetalError::InvalidShape("GEMV requires contiguous RHS along K".into()));
+            }
+            inputs.push(rhs_tensor);
+        }
         GemvRhsBinding::DenseCanonical(rhs_tensor) => inputs.push(&rhs_tensor.data),
         GemvRhsBinding::QuantCanonical(_) => {}
     }
@@ -443,39 +552,56 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
 
     let _ = quant_meta;
 
+    // Strides are in ELEMENTS, not bytes.
+    let stride_x = stride_to_u32(*x.strides.first().unwrap_or(&k), "gemv_x")?;
+    let stride_y = stride_to_u32(*y.strides.first().unwrap_or(&n), "gemv_y")?;
+    let stride_a = match &binding {
+        GemvRhsBinding::Dense(t) if t.dims().len() == 3 => {
+            if t.dims()[0] == batch {
+                stride_to_u32(*t.strides.first().unwrap_or(&(k * n)), "gemv_rhs_batch")?
+            } else {
+                0
+            }
+        }
+        _ => 0,
+    };
+    let stride_scale = 0;
+
+    // stride_w: row stride in the RHS matrix for computing initial column pointer.
+    let stride_w = match (&binding, loader_mode) {
+        (GemvRhsBinding::Dense(t), GemvLoaderMode::Dense | GemvLoaderMode::DenseBias) => {
+            let row_stride = t.strides.get(t.strides.len().saturating_sub(2)).copied().unwrap_or(k);
+            stride_to_u32(row_stride, "gemv_rhs_row")?
+        }
+        (GemvRhsBinding::Dense(t), GemvLoaderMode::DenseStrided | GemvLoaderMode::DenseStridedBias) => {
+            let row_stride = t.strides.get(t.strides.len().saturating_sub(2)).copied().unwrap_or(n);
+            stride_to_u32(row_stride, "gemv_rhs_row")?
+        }
+        _ => 0,
+    };
+
     let params = GemvParams {
         k: k as u32,
         n: n as u32,
         blocks_per_k,
         weights_per_block,
+        batch: batch as u32,
+        stride_x,
+        stride_y,
+        stride_a,
+        stride_w,
+        stride_scale,
     };
     let dispatch = GemvDispatch::new(loader_mode, needs_bias_buffer, u32::MAX);
 
     let lid = dispatch.loader_id();
-    let is_simd_q8 = lid == (GemvLoaderMode::Q8Canonical as u32)
+    let _is_simd_q8 = lid == (GemvLoaderMode::Q8Canonical as u32)
         || lid == (GemvLoaderMode::Q8CanonicalBias as u32)
         || lid == (GemvLoaderMode::Q8CanonicalDebug as u32)
         || lid == (GemvLoaderMode::Dense as u32)
         || lid == (GemvLoaderMode::DenseBias as u32)
         || lid == (GemvLoaderMode::DenseCanonical as u32)
         || lid == (GemvLoaderMode::DenseCanonicalBias as u32);
-
-    let (tg_width, tile_cols) = if is_simd_q8 {
-        (128usize, 4usize)
-    } else {
-        (THREADGROUP_WIDTH, TILE_N)
-    };
-
-    let threadgroup_size = MTLSize {
-        width: tg_width as usize,
-        height: 1,
-        depth: 1,
-    };
-    let grid_size = MTLSize {
-        width: n.div_ceil(tile_cols) as usize,
-        height: 1,
-        depth: 1,
-    };
 
     let dq_suffix = match &binding {
         GemvRhsBinding::Dense(_) => " (D)",
@@ -495,7 +621,7 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
         let mut data = FxHashMap::default();
         data.insert("op".to_string(), "matmul".to_string());
         data.insert("backend".to_string(), "gemv_rmsnorm".to_string());
-        data.insert("batch".to_string(), "1".to_string());
+        data.insert("batch".to_string(), batch.to_string());
         data.insert("m".to_string(), "1".to_string());
         data.insert("n".to_string(), n.to_string());
         data.insert("k".to_string(), k.to_string());
@@ -521,6 +647,38 @@ fn build_operation_rmsnorm<'a, T: TensorElement>(
                     .get_pipeline(KernelFunction::MatmulGemvQ8Rmsnorm, T::DTYPE, &ctx.device)?
             }
         }
+    };
+
+    // Grid configuration
+    let use_simd_dense = matches!(binding, GemvRhsBinding::Dense(_));
+    let use_simd_canonical = matches!(binding, GemvRhsBinding::DenseCanonical(_));
+
+    let (tg_width, tile_cols) = if use_simd_dense || use_simd_canonical {
+        let cols = if use_simd_canonical {
+            8usize
+        } else if use_simd_dense {
+            match loader_mode {
+                GemvLoaderMode::Dense | GemvLoaderMode::DenseBias => 8usize,
+                GemvLoaderMode::DenseStrided | GemvLoaderMode::DenseStridedBias => 4usize,
+                _ => 4usize,
+            }
+        } else {
+            4usize
+        };
+        (cols * 32usize, cols)
+    } else {
+        (THREADGROUP_WIDTH, TILE_N)
+    };
+
+    let threadgroup_size = MTLSize {
+        width: tg_width as usize,
+        height: 1,
+        depth: 1,
+    };
+    let grid_size = MTLSize {
+        width: n.div_ceil(tile_cols) as usize,
+        height: 1,
+        depth: batch,
     };
 
     let op = MatMulGemvRmsnorm {
@@ -564,14 +722,15 @@ impl DefaultKernelInvocable for MatmulGemvOp {
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (x, rhs, transpose_right, bias) = args;
-        let k = validate_x_shape(x)?;
+        let (batch, k) = validate_x_shape(x)?;
         let bias_tensor = bias.cloned();
-        let resolved = resolve_rhs(rhs, k, bias_tensor.is_some())?;
+        let resolved = resolve_rhs(rhs, k, bias_tensor.is_some(), transpose_right)?;
 
         if resolved.quant_meta.is_some() && !matches!(resolved.loader_mode, GemvLoaderMode::Q8CanonicalDebug) {
             let k_u = k as u32;
             let n_u = resolved.n as u32;
-            if k_u <= 1024 && n_u <= 1024 {
+            // Q8_Nt kernel doesn't support batching yet
+            if batch == 1 && k_u <= 1024 && n_u <= 1024 {
                 if let Some(meta) = resolved.quant_meta {
                     let (delegated_op, out_tensor) =
                         <MatmulQ8NtOp as DefaultKernelInvocable>::new(ctx, (&x, meta.source, bias), None, None)?;
@@ -583,9 +742,11 @@ impl DefaultKernelInvocable for MatmulGemvOp {
         let (op, y) = build_operation(
             ctx,
             x,
+            batch,
             k,
             resolved,
             bias,
+            None,
             None,
             1.0,
             0.0,
@@ -620,16 +781,18 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
         _cache: Option<&mut ResourceCache>,
     ) -> Result<(Box<dyn Operation>, Tensor<T>), MetalError> {
         let (x, rhs, bias, residual, transpose_right, alpha, beta) = args;
-        let k = validate_x_shape(x)?;
+        let (batch, k) = validate_x_shape(x)?;
         let bias_tensor = bias.cloned();
-        let resolved = resolve_rhs(rhs, k, bias_tensor.is_some())?;
+        let resolved = resolve_rhs(rhs, k, bias_tensor.is_some(), transpose_right)?;
 
         let (op, y) = build_operation(
             ctx,
             x,
+            batch,
             k,
             resolved,
             bias,
+            residual,
             residual,
             alpha,
             beta,
@@ -643,7 +806,7 @@ impl DefaultKernelInvocable for MatmulGemvAddmmOp {
 }
 
 impl DefaultKernelInvocable for MatmulGemvRmsnormOp {
-    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, TensorType<'a, T>, Option<&'a Tensor<T>>);
+    type Args<'a, T: TensorElement> = (&'a Tensor<T>, &'a Tensor<T>, TensorType<'a, T>, bool, Option<&'a Tensor<T>>);
 
     fn function_id() -> Option<KernelFunction> {
         Some(KernelFunction::MatmulGemvRmsnorm)
@@ -662,13 +825,13 @@ impl DefaultKernelInvocable for MatmulGemvRmsnormOp {
             });
         }
 
-        let (x, gamma, rhs, bias) = args;
-        let k = validate_x_shape(x)?;
+        let (x, gamma, rhs, transpose_right, bias) = args;
+        let (batch, k) = validate_x_shape(x)?;
         let bias_tensor = bias.cloned();
-        let resolved = resolve_rhs(rhs, k, bias_tensor.is_some())?;
+        let resolved = resolve_rhs(rhs, k, bias_tensor.is_some(), transpose_right)?;
         let use_pipeline = matches!(&resolved.binding, GemvRhsBinding::Dense(_));
         let pipeline = if use_pipeline { pipeline } else { None };
-        let (op, y) = build_operation_rmsnorm(ctx, x, gamma, k, resolved, bias, None, 1.0, 0.0, pipeline, "gemv_rmsnorm")?;
+        let (op, y) = build_operation_rmsnorm(ctx, x, gamma, batch, k, resolved, bias, None, 1.0, 0.0, pipeline, "gemv_rmsnorm")?;
         Ok((Box::new(op), y))
     }
 }

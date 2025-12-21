@@ -1,5 +1,8 @@
 // Kernel launchers and mixed-mode entrypoints
 
+
+#define PARAMS_ARGS params->K, params->N, params->blocks_per_k, params->weights_per_block, params->batch, params->stride_x, params->stride_y, params->stride_a, params->stride_w, params->stride_scale
+
 ALWAYS_INLINE void gemv_run_loader_mode(
     GemvLoaderMode loader_mode,
     const device uchar *matrix_data,
@@ -44,16 +47,18 @@ ALWAYS_INLINE void gemv_run_loader_mode(
              // Unified SIMD Path (Dense)
              const device half *bias_arr[1] = {bias}; // Unused but passed
              const uint bias_flags[1] = {0u};
-             run_simd_f16_gemv<1, false>(
-                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+             run_simd_f16_gemv_cols8<1, false>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid,
+                 PARAMS_ARGS
              );
              return;
         }
         case GemvLoaderDenseBias: {
              const device half *bias_arr[1] = {bias};
              const uint bias_flags[1] = {1u};
-             run_simd_f16_gemv<1, true>(
-                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+             run_simd_f16_gemv_cols8<1, true>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid,
+                 PARAMS_ARGS
              );
              return;
         }
@@ -62,8 +67,9 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             const device half *bias_arr[1] = {bias};
             const uint bias_flags[1] = {0u};
             SimdGemvPolicyF16Canonical::Params p = { (const device half **)data_arr, params->weights_per_block };
+            GemvParams gp = { PARAMS_ARGS };
             run_simd_gemv_template<SimdGemvPolicyF16Canonical, 1, 4, false>(
-                p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+                p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid, gp
             );
             return;
         }
@@ -72,17 +78,37 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             const device half *bias_arr[1] = {bias};
             const uint bias_flags[1] = {1u};
             SimdGemvPolicyF16Canonical::Params p = { (const device half **)data_arr, params->weights_per_block };
+            GemvParams gp = { PARAMS_ARGS };
             run_simd_gemv_template<SimdGemvPolicyF16Canonical, 1, 4, true>(
-                p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+                p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid, gp
             );
             return;
+        }
+        case GemvLoaderDenseStrided: {
+             const device half *bias_arr[1] = {bias};
+             const uint bias_flags[1] = {0u};
+             run_simd_f16_gemv_strided<1, false>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid,
+                 PARAMS_ARGS
+             );
+             return;
+        }
+        case GemvLoaderDenseStridedBias: {
+             const device half *bias_arr[1] = {bias};
+             const uint bias_flags[1] = {1u};
+             run_simd_f16_gemv_strided<1, true>(
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid,
+                 PARAMS_ARGS
+             );
+             return;
         }
         default: {
              // Fallback to Dense (No Bias)
              const device half *bias_arr[1] = {bias};
              const uint bias_flags[1] = {0u};
              run_simd_f16_gemv<1, false>(
-                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid
+                 (const device half *)matrix_data, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, alpha, beta, residual, gid, lid,
+                 PARAMS_ARGS
              );
              return;
         }
@@ -155,7 +181,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -176,7 +203,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -198,7 +226,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -220,7 +249,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -265,7 +295,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -286,7 +317,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -308,7 +340,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -330,7 +363,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -369,7 +403,7 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             const uint n_arr[1] = { params->N };
             const device half *b_arr[1] = { bias };
             const uint hb_arr[1] = { 0 };
-            run_simd_f16_gemv_rmsnorm<1, false>(
+            run_simd_f16_gemv_rmsnorm_cols8<1, false>(
                 (const device half *)matrix_data,
                 vector_x,
                 gamma,
@@ -383,7 +417,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -392,7 +427,7 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             const uint n_arr[1] = { params->N };
             const device half *b_arr[1] = { bias };
             const uint hb_arr[1] = { 1 };
-            run_simd_f16_gemv_rmsnorm<1, true>(
+            run_simd_f16_gemv_rmsnorm_cols8<1, true>(
                 (const device half *)matrix_data,
                 vector_x,
                 gamma,
@@ -406,7 +441,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -430,7 +466,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -454,7 +491,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -554,7 +592,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             beta,
             residual,
             gid,
-            lid
+            lid,
+            PARAMS_ARGS
         );
         return;
     }
@@ -585,7 +624,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -631,7 +671,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             beta,
             residual,
             gid,
-            lid
+            lid,
+            PARAMS_ARGS
         );
         return;
     }
@@ -662,7 +703,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }
@@ -716,7 +758,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
             beta,
             residual,
             gid,
-            lid
+            lid,
+            PARAMS_ARGS
         );
         return;
     }
@@ -749,7 +792,8 @@ ALWAYS_INLINE void gemv_run_loader_mode(
                 beta,
                 residual,
                 gid,
-                lid
+                lid,
+                PARAMS_ARGS
             );
             return;
         }

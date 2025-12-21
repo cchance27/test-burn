@@ -318,7 +318,12 @@ impl KernelFunction {
             (KernelFunction::Ones, F16) => "ones_kernel_f16",
             (KernelFunction::RandomUniform, F32) => "random_uniform_f32",
             (KernelFunction::RandomUniform, F16) => "random_uniform_f16",
-            (KernelFunction::MatmulGemv, F32) => "gemv_f32",
+            (KernelFunction::MatmulGemv, F32) => {
+                return Err(MetalError::UnsupportedDtype {
+                    dtype: Dtype::F32,
+                    operation: "MatmulGemv",
+                });
+            }
             (KernelFunction::MatmulGemv, F16) => "gemv_f16",
             (KernelFunction::MatmulGemvQ8, F16) => "gemv_q8_entry",
             (KernelFunction::MatmulGemvCols2, F16) => "gemv_f16_cols2",

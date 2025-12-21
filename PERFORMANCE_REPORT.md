@@ -2,6 +2,15 @@
 
 ## Performance History (Latest First)
 
+### Batched GEMV & Strided Architecture (WIP FAST)
+* **Change Summary**:
+    * **Multi-Batch GEMV**: Refactored `MatmulGemvOp`, `Addmm`, and `Rmsnorm` to support `batch > 1` via Metal grid depth and strided parameters.
+    * **Strided Kernel Support**: Introduced `DenseStrided` and `DenseStridedBias` modes with fully configurable strides (`stride_x`, `stride_y`, `stride_a`, `stride_w`) in a new `GemvParams` Metal struct.
+* **Results (M3 Pro, MAX_TOKENS=50, 5-iter avg)**:
+    * **FP16 Decode**: **105.47 tok/s** (Max: 105.83)
+    * **Q8 Decode**: **158.52 tok/s** (Max: 158.68)
+* **Impact**: Total throughput exceeded the 105/158 milestones. The architecture is now robustly batched and strided, clearing the way for complex attention patterns and further fusion.
+
 ### KV Cache & Throughput Measurement Optimizations
 * **Change Summary**:
     * **Deterministic Benchmarking**: Added `--seed` flag for reproducible token generation.

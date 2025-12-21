@@ -98,7 +98,8 @@ struct SwiGluEpilogue {
     };
 
     run_simd_gemv_template<SimdGemvPolicyQ8, 2, 4, true, SwiGluEpilogue>(
-        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid,
+        GemvParams { params->K, params->N0, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0 }
     );
 }
 
@@ -137,7 +138,8 @@ struct SwiGluEpilogue {
     };
 
     run_simd_gemv_template<SimdGemvPolicyQ8Rmsnorm, 2, 4, true, SwiGluEpilogue>(
-        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid,
+        GemvParams { params->K, params->N0, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0 }
     );
 }
 
@@ -173,7 +175,8 @@ struct SwiGluEpilogue {
     };
 
     run_simd_gemv_template<SimdGemvPolicyF16Canonical, 3, 8, true>(
-        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid,
+        GemvParams { params->K, params->Nq, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0 }
     );
 }
 
@@ -214,7 +217,8 @@ struct SwiGluEpilogue {
     };
 
     run_simd_gemv_template<SimdGemvPolicyF16CanonicalRmsnorm, 3, 8, true>(
-        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid,
+        GemvParams { params->K, params->Nq, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0 }
     );
 }
 
@@ -242,7 +246,8 @@ struct SwiGluEpilogue {
     };
 
     run_simd_gemv_template<SimdGemvPolicyF16Canonical, 2, 8, true, SwiGluEpilogue>(
-        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid,
+        GemvParams { params->K, params->N0, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0 }
     );
 }
 
@@ -279,6 +284,7 @@ struct SwiGluEpilogue {
     };
 
     run_simd_gemv_template<SimdGemvPolicyF16CanonicalRmsnorm, 2, 8, true, SwiGluEpilogue>(
-        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid
+        p, vector_x, res_arr, N_arr, params->K, bias_arr, bias_flags, 1.0f, 0.0f, nullptr, gid, lid,
+        GemvParams { params->K, params->N0, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0 }
     );
 }

@@ -13,6 +13,12 @@ struct GemvParams {
     uint N;
     uint blocks_per_k;
     uint weights_per_block;
+    uint batch;
+    uint stride_x;
+    uint stride_y;
+    uint stride_a;
+    uint stride_w;
+    uint stride_scale;
 };
 
 enum GemvLoaderMode : uint {
@@ -23,6 +29,8 @@ enum GemvLoaderMode : uint {
     GemvLoaderQ8CanonicalDebug = 4,
     GemvLoaderDenseCanonical = 5,
     GemvLoaderDenseCanonicalBias = 6,
+    GemvLoaderDenseStrided = 7,
+    GemvLoaderDenseStridedBias = 8,
 };
 
 struct QkvFusedParams {

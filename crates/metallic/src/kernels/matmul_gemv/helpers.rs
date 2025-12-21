@@ -13,6 +13,12 @@ pub struct GemvParams {
     pub n: u32,
     pub blocks_per_k: u32,
     pub weights_per_block: u32,
+    pub batch: u32,
+    pub stride_x: u32,
+    pub stride_y: u32,
+    pub stride_a: u32,
+    pub stride_w: u32,
+    pub stride_scale: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -24,6 +30,8 @@ pub enum GemvLoaderMode {
     Q8CanonicalDebug,
     DenseCanonical,
     DenseCanonicalBias,
+    DenseStrided,
+    DenseStridedBias,
 }
 
 impl GemvLoaderMode {
@@ -36,6 +44,8 @@ impl GemvLoaderMode {
             GemvLoaderMode::Q8CanonicalDebug => 4,
             GemvLoaderMode::DenseCanonical => 5,
             GemvLoaderMode::DenseCanonicalBias => 6,
+            GemvLoaderMode::DenseStrided => 7,
+            GemvLoaderMode::DenseStridedBias => 8,
         }
     }
 }
@@ -91,11 +101,17 @@ impl GemvDispatch {
     }
 }
 
-pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_bias: bool) -> Result<ResolvedGemvRhs<'a, T>, MetalError> {
+pub fn resolve_rhs<'a, T: TensorElement>(
+    rhs: TensorType<'a, T>,
+    k: usize,
+    has_bias: bool,
+    transpose_right: bool,
+) -> Result<ResolvedGemvRhs<'a, T>, MetalError> {
     match rhs {
         TensorType::Dense(a) => {
             let a_dims = a.dims();
-            if a_dims.len() != 2 {
+            // Allow 2D [Rows, Cols] or 3D [Batch, Rows, Cols]
+            if a_dims.len() != 2 && a_dims.len() != 3 {
                 return Err(GemvError::MatrixShape {
                     expected_k: k,
                     actual: a_dims.to_vec(),
@@ -103,11 +119,18 @@ pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_b
                 .into());
             }
 
-            // Check for K in either dimension
-            let (is_k, is_n_rows) = if a_dims[0] == k {
-                (true, false) // [K, N]
-            } else if a_dims[1] == k {
-                (false, true) // [N, K]
+            let last_idx = a_dims.len() - 1;
+            let rows = a_dims[last_idx - 1];
+            let cols = a_dims[last_idx];
+
+            // Check for K in either dimension, prioritizing based on transpose_right
+            let (is_k, is_n_rows) = if rows == k && cols == k {
+                // Ambiguous case (square matrix): use transpose_right to disambiguate.
+                if transpose_right { (false, true) } else { (true, false) }
+            } else if rows == k {
+                (true, false) // [K, N] (Rows=K)
+            } else if cols == k {
+                (false, true) // [N, K] (Cols=K)
             } else {
                 return Err(GemvError::MatrixShape {
                     expected_k: k,
@@ -116,7 +139,18 @@ pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_b
                 .into());
             };
 
-            let n = if is_n_rows { a_dims[0] } else { a_dims[1] };
+            let n = if is_n_rows { rows } else { cols };
+
+            // Check batch dim if present?
+            // We assume caller handles batch broadcasting logic or we just check validity.
+            // If 3D, ensure batch dim > 0.
+            if a_dims.len() == 3 && a_dims[0] == 0 {
+                return Err(GemvError::MatrixShape {
+                    expected_k: k,
+                    actual: a_dims.to_vec(),
+                }
+                .into());
+            }
 
             // To suppress unused warning effectively while keeping logic clear:
             let _ = is_k;
@@ -124,10 +158,11 @@ pub fn resolve_rhs<'a, T: TensorElement>(rhs: TensorType<'a, T>, k: usize, has_b
             Ok(ResolvedGemvRhs {
                 binding: GemvRhsBinding::Dense(a.clone()),
                 n,
-                loader_mode: if has_bias {
-                    GemvLoaderMode::DenseBias
-                } else {
-                    GemvLoaderMode::Dense
+                loader_mode: match (is_n_rows, has_bias) {
+                    (true, false) => GemvLoaderMode::Dense,
+                    (true, true) => GemvLoaderMode::DenseBias,
+                    (false, false) => GemvLoaderMode::DenseStrided,
+                    (false, true) => GemvLoaderMode::DenseStridedBias,
                 },
                 needs_bias_buffer: has_bias,
                 quant_meta: None,

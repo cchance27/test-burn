@@ -44,7 +44,7 @@ fn classify_backend_variant(seq_k: usize) -> (SoftmaxBackend, SoftmaxVariant) {
         896..=1023 => (SoftmaxBackend::Custom, SoftmaxVariant::Vec),
         1024..=1279 => (SoftmaxBackend::Custom, SoftmaxVariant::Block),
         1280..=2047 => (SoftmaxBackend::Custom, SoftmaxVariant::Vec),
-        2048..=8191 => (SoftmaxBackend::MPS, SoftmaxVariant::Auto),
+        2048..=8191 => (SoftmaxBackend::Custom, SoftmaxVariant::Auto),
         _ => (SoftmaxBackend::Custom, SoftmaxVariant::Vec), // very long rows fall back to custom vec kernel
     }
 }

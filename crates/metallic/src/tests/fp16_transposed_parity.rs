@@ -14,7 +14,7 @@ use half::f16;
 use serial_test::serial;
 
 use crate::{
-    Context, MetalError, Tensor, TensorStorage, kernels::matmul_gemv::MatmulGemvOp, tensor::{CanonicalF16Tensor, TensorInit, TensorType}
+    Context, MetalError, Tensor, TensorStorage, context::MatmulAlphaBeta, kernels::matmul_gemv::MatmulGemvOp, tensor::{CanonicalF16Tensor, TensorInit, TensorType}
 };
 
 fn make_fp16_tensor(ctx: &mut Context<crate::tensor::F16>, dims: Vec<usize>, seed: u64) -> Result<Tensor<crate::tensor::F16>, MetalError> {
@@ -141,6 +141,159 @@ fn test_fp16_transposed_gemv_parity() -> Result<(), MetalError> {
 
         // Results should match within tolerance
         assert_close_tensors(&y_legacy, &y_transposed, 0.01, &format!("gemv_{}", name));
+    }
+
+    Ok(())
+}
+
+/// Test batched GEMV (batch>1) correctness against CPU reference.
+#[test]
+#[serial]
+fn test_fp16_gemv_batched_parity() -> Result<(), MetalError> {
+    let mut ctx = Context::<crate::tensor::F16>::new()?;
+
+    let batch = 3usize;
+    let k = 64usize;
+    let n = 48usize;
+
+    // Input as [B, 1, K] to exercise batched GEMV path.
+    let x = make_fp16_tensor(&mut ctx, vec![batch, 1, k], 0xBADA_5555)?;
+    // Weights stored as [N, K] (transposed layout for GEMV).
+    let w_nk = make_fp16_tensor(&mut ctx, vec![n, k], 0xC0FF_EE00)?;
+
+    let y = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&w_nk), true, None), None)?;
+    ctx.synchronize();
+
+    let x_f: Vec<f32> = x.as_slice().iter().map(|v| v.to_f32()).collect();
+    let w_f: Vec<f32> = w_nk.as_slice().iter().map(|v| v.to_f32()).collect();
+    let y_f: Vec<f32> = y.as_slice().iter().map(|v| v.to_f32()).collect();
+
+    let mut y_ref = vec![0.0f32; batch * n];
+    for b in 0..batch {
+        let x_base = b * k;
+        for col in 0..n {
+            let w_base = col * k;
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += x_f[x_base + kk] * w_f[w_base + kk];
+            }
+            y_ref[b * n + col] = acc;
+        }
+    }
+
+    let tol = 0.01f32;
+    for (i, (&got, &exp)) in y_f.iter().zip(y_ref.iter()).enumerate() {
+        let diff = (got - exp).abs();
+        assert!(diff <= tol, "batched_gemv: idx={} diff={} got={} exp={}", i, diff, got, exp);
+    }
+
+    Ok(())
+}
+
+/// Test batched RHS matmul (transpose_b=true) against CPU reference.
+/// This exercises SDPA-like shapes where RHS is [B, N, K] and ensures
+/// the dispatcher avoids GEMV for batched RHS.
+#[test]
+#[serial]
+fn test_fp16_batched_rhs_transpose_parity() -> Result<(), MetalError> {
+    let mut ctx = Context::<crate::tensor::F16>::new()?;
+
+    let batch = 4usize;
+    let k = 8usize;
+    let n = 6usize;
+
+    // A is [B, 1, K], RHS is [B, N, K] with transpose_b=true.
+    let x = make_fp16_tensor(&mut ctx, vec![batch, 1, k], 0x1234_5678)?;
+    let w_bnk = make_fp16_tensor(&mut ctx, vec![batch, n, k], 0xDEAD_BEEF)?;
+
+    let y = ctx.matmul(&x, &TensorType::Dense(&w_bnk), false, true, None, None, None)?;
+    ctx.synchronize();
+
+    assert_eq!(y.dims(), &[batch, 1, n]);
+
+    let x_f: Vec<f32> = x.as_slice().iter().map(|v| v.to_f32()).collect();
+    let w_f: Vec<f32> = w_bnk.as_slice().iter().map(|v| v.to_f32()).collect();
+    let y_f: Vec<f32> = y.as_slice().iter().map(|v| v.to_f32()).collect();
+
+    let mut y_ref = vec![0.0f32; batch * n];
+    for b in 0..batch {
+        let x_base = b * k;
+        let w_base = b * n * k;
+        for col in 0..n {
+            let w_row = w_base + col * k;
+            let mut acc = 0.0f32;
+            for kk in 0..k {
+                acc += x_f[x_base + kk] * w_f[w_row + kk];
+            }
+            y_ref[b * n + col] = acc;
+        }
+    }
+
+    let tol = 0.01f32;
+    for (i, (&got, &exp)) in y_f.iter().zip(y_ref.iter()).enumerate() {
+        let diff = (got - exp).abs();
+        assert!(
+            diff <= tol,
+            "batched_rhs_transpose: idx={} diff={} got={} exp={}",
+            i,
+            diff,
+            got,
+            exp
+        );
+    }
+
+    Ok(())
+}
+
+/// Test GEMV alpha/beta writes into the provided output buffer.
+#[test]
+#[serial]
+fn test_fp16_gemv_alpha_beta_output_parity() -> Result<(), MetalError> {
+    let mut ctx = Context::<crate::tensor::F16>::new()?;
+
+    let k = 16usize;
+    let n = 12usize;
+    let alpha = 0.75f32;
+    let beta = 0.5f32;
+
+    let x = make_fp16_tensor(&mut ctx, vec![1, k], 0xABCDEF01)?;
+    let w_kn = make_fp16_tensor(&mut ctx, vec![k, n], 0x1234_9999)?;
+
+    // Initialize output with non-zero values to validate beta path.
+    let out_init = make_fp16_tensor(&mut ctx, vec![1, n], 0xDEAD_BEEF)?;
+    let out_init_before: Vec<f32> = out_init.as_slice().iter().map(|v| v.to_f32()).collect();
+    let out = ctx.matmul(
+        &x,
+        &TensorType::Dense(&w_kn),
+        false,
+        false,
+        None,
+        Some(MatmulAlphaBeta {
+            output: &out_init,
+            alpha,
+            beta,
+        }),
+        None,
+    )?;
+    ctx.synchronize();
+
+    let x_f: Vec<f32> = x.as_slice().iter().map(|v| v.to_f32()).collect();
+    let w_f: Vec<f32> = w_kn.as_slice().iter().map(|v| v.to_f32()).collect();
+    let out_f: Vec<f32> = out.as_slice().iter().map(|v| v.to_f32()).collect();
+
+    let mut out_ref = vec![0.0f32; n];
+    for col in 0..n {
+        let mut acc = 0.0f32;
+        for kk in 0..k {
+            acc += x_f[kk] * w_f[kk * n + col];
+        }
+        out_ref[col] = alpha * acc + beta * out_init_before[col];
+    }
+
+    let tol = 0.02f32;
+    for (i, (&got, &exp)) in out_f.iter().zip(out_ref.iter()).enumerate() {
+        let diff = (got - exp).abs();
+        assert!(diff <= tol, "gemv_alpha_beta: idx={} diff={} got={} exp={}", i, diff, got, exp);
     }
 
     Ok(())
@@ -348,5 +501,65 @@ fn test_fp16_unified_forward_parity() -> Result<(), MetalError> {
     // Canonical tensors are opaque/blocked, making this manual parity check difficult without decoding.
     // End-to-end correctness is covered by forward_pass_correctness_test.rs.
     // Keeping function signature but making it a no-op for now.
+    Ok(())
+}
+
+/// Test batched GEMV (batch > 1) to match attention head matmuls
+/// This simulates [Batch, 1, K] @ [Batch, N, K]^T => [Batch, 1, N]
+#[test]
+#[serial]
+fn test_batched_gemv_parity() -> Result<(), MetalError> {
+    let mut ctx = Context::<crate::tensor::F16>::new()?;
+
+    // Match EXACT inference pattern from SDPA: batch=14, n=1, k=64
+    // This is [14, 1, 64] @ [14, 1, 64]^T => [14, 1, 1]
+    let batch = 14usize;
+    let k = 64usize;
+    let n = 1usize;
+
+    let x = make_fp16_tensor(&mut ctx, vec![batch, 1, k], 0xFACE_B00C)?;
+    // Weight in transposed layout [Batch, N, K]
+    let w = make_fp16_tensor(&mut ctx, vec![batch, n, k], 0x1234_5678)?;
+
+    // GPU computation via GEMV (should use batch handling)
+    let y_gpu = ctx.call::<MatmulGemvOp>((&x, TensorType::Dense(&w), true, None), None)?;
+    ctx.synchronize();
+
+    // CPU reference: for each batch, compute x[b] @ w[b]^T = sum_k(x[b,k] * w[b,n,k])
+    let x_vals: Vec<f32> = x.as_slice().iter().map(|v| v.to_f32()).collect();
+    let w_vals: Vec<f32> = w.as_slice().iter().map(|v| v.to_f32()).collect();
+    let mut y_cpu = vec![0.0f32; batch * 1 * n];
+    for b in 0..batch {
+        for out_n in 0..n {
+            let mut acc = 0.0f32;
+            for ki in 0..k {
+                let x_idx = b * k + ki; // [Batch, 1, K] with M=1
+                let w_idx = b * n * k + out_n * k + ki; // [Batch, N, K]
+                acc += x_vals[x_idx] * w_vals[w_idx];
+            }
+            y_cpu[b * n + out_n] = acc;
+        }
+    }
+
+    let y_gpu_vals: Vec<f32> = y_gpu.as_slice().iter().map(|v| v.to_f32()).collect();
+
+    // Check parity
+    let mut max_diff = 0.0f32;
+    for i in 0..y_cpu.len() {
+        let diff = (y_cpu[i] - y_gpu_vals[i]).abs();
+        if diff > max_diff {
+            max_diff = diff;
+        }
+        assert!(
+            diff < 0.1,
+            "batched_gemv parity: idx={} cpu={} gpu={} diff={}",
+            i,
+            y_cpu[i],
+            y_gpu_vals[i],
+            diff
+        );
+    }
+    eprintln!("[batched_gemv] max_diff={}", max_diff);
+
     Ok(())
 }

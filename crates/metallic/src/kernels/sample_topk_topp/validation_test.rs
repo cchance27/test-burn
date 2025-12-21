@@ -56,7 +56,7 @@ fn benchmark_cpu_vs_gpu_with_sync_overhead() -> Result<(), MetalError> {
         let start = Instant::now();
 
         // GPU sampling - no sync for main computation, only to read single token
-        let gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
+        let _gpu_token = gpu_sample_top_k_top_p::<F32Element>(&test_logits, vocab_size, k, top_p, temperature, None, &mut ctx)?;
 
         let duration = start.elapsed();
         gpu_times.push(duration);

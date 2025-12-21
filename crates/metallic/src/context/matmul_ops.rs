@@ -11,39 +11,7 @@ use crate::{
     }, tensor::{CanonicalF16Tensor, QuantizedTensor, TensorElement, TensorType}
 };
 
-const METALLIC_Q8_M1_MLX_MIN_N_ENV: &str = "METALLIC_Q8_M1_MLX_MIN_N";
 const METALLIC_F16_CANONICAL_GEMM_ENV: &str = "METALLIC_F16_CANONICAL_GEMM";
-
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-#[cfg(test)]
-static Q8_M1_MLX_MIN_N_OVERRIDE: AtomicUsize = AtomicUsize::new(usize::MAX);
-
-#[inline]
-fn q8_m1_mlx_min_n() -> usize {
-    #[cfg(test)]
-    {
-        let v = Q8_M1_MLX_MIN_N_OVERRIDE.load(Ordering::Relaxed);
-        if v != usize::MAX {
-            return v;
-        }
-    }
-
-    static VALUE: OnceLock<usize> = OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var(METALLIC_Q8_M1_MLX_MIN_N_ENV)
-            .ok()
-            .and_then(|s| s.parse::<usize>().ok())
-            // Default: only prefer MLX for very large `n` (e.g. FFN up/gate at 4864, logits at vocab).
-            .unwrap_or(4096)
-    })
-}
-
-#[cfg(test)]
-pub(crate) fn set_q8_m1_mlx_min_n_override_for_tests(value: Option<usize>) {
-    Q8_M1_MLX_MIN_N_OVERRIDE.store(value.unwrap_or(usize::MAX), Ordering::Relaxed);
-}
 
 #[inline]
 pub(crate) fn f16_canonical_gemm_enabled() -> bool {
@@ -51,11 +19,6 @@ pub(crate) fn f16_canonical_gemm_enabled() -> bool {
         .ok()
         .map(|s| s.trim() != "0")
         .unwrap_or(true)
-}
-
-#[inline]
-pub(crate) fn q8_should_use_mlx_for_m1(dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
-    dims.batch == 1 && dims.m == 1 && !transpose_a && !transpose_b && dims.n >= q8_m1_mlx_min_n()
 }
 
 #[inline]
@@ -437,7 +400,7 @@ impl<T: TensorElement> Context<T> {
     }
 
     #[inline]
-    fn can_use_gemv(&self, dims: &MatmulDims, transpose_a: bool, transpose_b: bool) -> bool {
+    fn can_use_gemv(&self, dims: &MatmulDims, transpose_a: bool, _transpose_b: bool) -> bool {
         // SIMD GEMV kernels (MatmulGemvCols8) only support F16, not F32.
         if T::DTYPE != crate::tensor::Dtype::F16 {
             return false;
@@ -445,15 +408,8 @@ impl<T: TensorElement> Context<T> {
         if transpose_a {
             return false;
         }
-        // Allow transpose_b (standard linear layer) because our kernel supports [N, K] weights
-        // which matches the execution semantic of `x @ W^T` with contiguous K.
-        if !transpose_b {
-            return false;
-        }
-
-        if dims.batch != 1 {
-            return false;
-        }
+        // GEMV supports both [N, K] (transpose_b=true) and [K, N] (transpose_b=false)
+        // as long as K is contiguous.
 
         dims.m == 1
     }
@@ -638,10 +594,21 @@ impl<T: TensorElement> Context<T> {
             Err(_) => None,
         };
         // Enable GEMV even if bias/alpha_beta present (our kernels support them)
-        let can_gemv = dims_ok
+        let base_can_gemv = dims_ok
             .as_ref()
             .map(|dims| self.can_use_gemv(dims, transpose_a, transpose_b))
             .unwrap_or(false);
+        let can_gemv = if base_can_gemv {
+            let a_stride_ok = a.strides.last().copied().unwrap_or(0) == 1;
+            let b_stride_ok = b.strides.last().copied().unwrap_or(0) == 1;
+            let output_stride_ok = alpha_beta
+                .map(|ep| ep.output.strides.last().copied().unwrap_or(0) == 1)
+                .unwrap_or(true);
+            let dims_ok = a.dims().len() <= 3 && b.dims().len() <= 3;
+            a_stride_ok && b_stride_ok && output_stride_ok && dims_ok
+        } else {
+            false
+        };
 
         match self.forced_matmul_backend {
             InternalMatMulBackendOverride::Force(MatMulBackend::Mlx) => {
@@ -865,22 +832,6 @@ impl<T: TensorElement> Context<T> {
                 }
 
                 if dims.batch == 1 && dims.m == 1 && !transpose_a {
-                    if q8_should_use_mlx_for_m1(&dims, transpose_a, transpose_b) {
-                        emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Mlx", "heuristic_m1_large_n");
-                        return self.call::<MatMulMlxOp>(
-                            (
-                                a,
-                                TensorType::Quant(QuantizedTensor::Q8_0(q8)),
-                                bias,
-                                None,
-                                transpose_a,
-                                false,
-                                1.0,
-                                0.0,
-                            ),
-                            None,
-                        );
-                    }
                     emit_matmul_backend_selected("q8_0", Some(dims), transpose_a, transpose_b, "Gemv", "m1");
                     return self.call::<MatmulGemvOp>(
                         (a, TensorType::Quant(QuantizedTensor::Q8_0(q8)), transpose_b, bias),

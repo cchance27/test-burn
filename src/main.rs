@@ -470,7 +470,7 @@ fn run_text_mode(
                     if !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
                         print!("{}", text);
                         // Only flush on newlines to reduce terminal I/O and GPU contention
-                        if text.contains('\n') || generated_tokens % 16 == 0 {
+                        if text.contains('\n') || generated_tokens.is_multiple_of(16) {
                             std::io::stdout().flush().unwrap();
                         }
                     }

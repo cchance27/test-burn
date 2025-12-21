@@ -66,7 +66,8 @@ void run_gemv_q8_canonical(
         beta,
         residual,
         gid,
-        lid
+        lid,
+        params->K, params->N, params->blocks_per_k, params->weights_per_block, params->batch, params->stride_x, params->stride_y, params->stride_a, params->stride_w, params->stride_scale
     );
 }
 
@@ -109,7 +110,8 @@ void run_gemv_q8_canonical(
         bias_flags,
         1.0f, 0.0f,
         (const device half*)nullptr,
-        gid, lid
+        gid, lid,
+        params->K, params->Nq, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0, 0
     );
 }
 
@@ -160,7 +162,8 @@ void run_gemv_q8_canonical(
         0.0f,
         (const device half*)nullptr,
         gid,
-        lid
+        lid,
+        params->K, params->Nq, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0, 0
     );
 }
 
@@ -199,7 +202,8 @@ void run_gemv_q8_canonical(
         bias_flags,
         1.0f, 0.0f,
         (const device half*)nullptr,
-        gid, lid
+        gid, lid,
+        params->K, params->N0, (params->K + params->weights_per_block - 1) / params->weights_per_block, params->weights_per_block, 1, 0, 0, 0, 0, 0
     );
 }
 
