@@ -3515,6 +3515,7 @@ dependencies = [
  "libc",
  "mach2",
  "memmap2",
+ "metallic-macros",
  "metallic_cli_helpers",
  "metallic_env",
  "metallic_instrumentation",
@@ -3526,6 +3527,8 @@ dependencies = [
  "objc2-metal",
  "objc2-metal-performance-shaders",
  "objc2-metal-performance-shaders-graph",
+ "proc-macro2",
+ "quote",
  "rand 0.9.2",
  "ratatui",
  "rayon",
@@ -3534,12 +3537,22 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "syn",
  "sysinfo 0.37.2",
  "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
  "unicode-normalization",
  "walkdir",
+]
+
+[[package]]
+name = "metallic-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

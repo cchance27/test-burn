@@ -1,3 +1,5 @@
+extern crate self as metallic;
+
 pub use context::{Context, SamplerBuffers};
 pub use error::{GemvError, MetalError};
 pub use operation::{CommandBuffer, ComputeKernelEncoder, Operation};
@@ -23,9 +25,18 @@ pub mod tokenizer;
 
 pub mod macros;
 
+pub mod foundry;
+pub mod metals;
+pub mod policies;
+pub mod safety;
+pub mod types;
+
 pub mod kernels;
 
+pub mod compound;
 mod tests;
+
+pub mod fusion;
 
 pub use caching::{CacheMetricsSnapshot, CacheStats, ResourceCache, TensorPreparationCache, TensorPreparationMetrics};
 

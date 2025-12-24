@@ -4,6 +4,10 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+use crate::{
+    fusion::MetalPolicy, policies::{PolicyF16, PolicyQ8}
+};
+
 /// Defines the element type for a tensor
 pub trait TensorElement: Clone + Copy + Default + 'static {
     type Scalar: Clone
@@ -18,6 +22,7 @@ pub trait TensorElement: Clone + Copy + Default + 'static {
         + PartialEq
         + 'static;
     const DTYPE: Dtype;
+    type Policy: MetalPolicy + Default;
 
     fn from_f32(v: f32) -> Self::Scalar;
     fn to_f32(v: Self::Scalar) -> f32;
@@ -76,6 +81,7 @@ pub struct F32;
 impl TensorElement for F32 {
     type Scalar = f32;
     const DTYPE: Dtype = Dtype::F32;
+    type Policy = PolicyF16; // TODO: Implement specific PolicyF32 if needed. Currently falls back to F16.
 
     fn from_f32(v: f32) -> Self::Scalar {
         v
@@ -114,6 +120,7 @@ pub struct U32;
 impl TensorElement for U32 {
     type Scalar = u32;
     const DTYPE: Dtype = Dtype::U32;
+    type Policy = PolicyF16; // TODO: Implement specific PolicyU32. Currently falls back to F16.
 
     fn from_f32(v: f32) -> Self::Scalar {
         v as u32
@@ -154,6 +161,7 @@ pub struct U8;
 impl TensorElement for U8 {
     type Scalar = u8;
     const DTYPE: Dtype = Dtype::U8;
+    type Policy = PolicyQ8;
 
     fn from_f32(v: f32) -> Self::Scalar {
         // Saturate to [0, 255]
@@ -195,6 +203,7 @@ pub struct F16;
 impl TensorElement for F16 {
     type Scalar = half::f16;
     const DTYPE: Dtype = Dtype::F16;
+    type Policy = PolicyF16;
 
     fn from_f32(v: f32) -> Self::Scalar {
         half::f16::from_f32(v)

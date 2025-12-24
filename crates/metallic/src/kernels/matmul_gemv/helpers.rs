@@ -7,7 +7,7 @@ pub const GEMV_COLS_PER_THREAD: usize = 1; // Increasing past 1 hurt perf in pro
 pub const TILE_N: usize = THREADGROUP_WIDTH * GEMV_COLS_PER_THREAD;
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct GemvParams {
     pub k: u32,
     pub n: u32,

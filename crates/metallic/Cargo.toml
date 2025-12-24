@@ -15,6 +15,9 @@ built_kernels = []
 
 [build-dependencies]
 walkdir = "2.5.0"
+syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
+quote = "1.0"
+proc-macro2 = "1.0"
 
 [dependencies]
 burn = { version = "0.18.0", features = ["webgpu", "fusion", "metal"] }
@@ -54,7 +57,12 @@ crossterm = "0.29.0"
 anyhow = "1.0.100"
 sysinfo = "0.37.1"
 chrono = { version = "0.4", features = ["clock", "serde"] }
-half = { version = "2.6.0", features = ["zerocopy", "bytemuck", "num-traits", "use-intrinsics"] }
+half = { version = "2.6.0", features = [
+    "zerocopy",
+    "bytemuck",
+    "num-traits",
+    "use-intrinsics",
+] }
 num-traits = "0.2.19"
 libc = { version = "0.2", optional = false }
 mach2 = "0.5"
@@ -62,6 +70,7 @@ metallic_env = { path = "../metallic_env" }
 metallic_instrumentation = { path = "../metallic_instrumentation" }
 metallic_cli_helpers = { path = "../metallic_cli_helpers" }
 objc2-metal-performance-shaders-graph = "0.3.2"
+metallic-macros = { path = "../metallic-macros" }
 
 [dev-dependencies]
 serial_test = "3.2.0"

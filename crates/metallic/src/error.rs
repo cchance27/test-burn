@@ -42,6 +42,8 @@ pub enum MetalError {
     OutOfMemory,
     #[error("Library compilation failed: {0}")]
     LibraryCompilationFailed(String),
+    #[error("Load library failed: {0}")]
+    LoadLibraryFailed(String),
     #[error("Function creation failed: {0}")]
     FunctionCreationFailed(String),
     #[error("Pipeline creation failed: {0}")]

@@ -12,8 +12,8 @@ impl EnvGuard {
     fn set(key: &'static str, value: Option<&str>) -> Self {
         let prev = std::env::var(key).ok();
         match value {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
         }
         Self { key, prev }
     }
@@ -22,8 +22,8 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         match &self.prev {
-            Some(v) => std::env::set_var(self.key, v),
-            None => std::env::remove_var(self.key),
+            Some(v) => unsafe { std::env::set_var(self.key, v) },
+            None => unsafe { std::env::remove_var(self.key) },
         }
     }
 }
@@ -226,7 +226,7 @@ fn bench_softmax_dispatcher_variant_selection<T: TensorElement>(c: &mut Criterio
         // Test with forced variants to verify dispatcher selection
         for variant in ["auto", "vec", "block"] {
             group.bench_with_input(BenchmarkId::new(format!("SoftmaxDispatch_{}", variant), &label), &label, |bi, _| {
-                let _guard = SOFTMAX_BACKEND_VAR.set_guard(variant.to_string()).unwrap();
+                let _guard = metallic_env::SOFTMAX_BACKEND_VAR.set_guard(variant.to_string()).unwrap();
 
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state
@@ -277,7 +277,7 @@ fn bench_softmax_dispatcher_crossover_analysis<T: TensorElement>(c: &mut Criteri
         // Compare vec vs block performance in crossover region
         for variant in ["vec", "block"] {
             group.bench_with_input(BenchmarkId::new(format!("SoftmaxDispatch_{}", variant), &label), &label, |bi, _| {
-                let _guard = SOFTMAX_BACKEND_VAR.set_guard(variant.to_string()).unwrap();
+                let _guard = metallic_env::SOFTMAX_BACKEND_VAR.set_guard(variant.to_string()).unwrap();
 
                 let mut ctx = Context::<T>::new().expect("ctx setup");
                 // Reset pool before creating tensors to ensure clean state

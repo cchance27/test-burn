@@ -9,6 +9,7 @@ members = [
     "crates/metallic_instrumentation",
     "crates/metallic",
     "crates/metallic_cli_helpers",
+    "crates/metallic-macros",
 ]
 
 [features]

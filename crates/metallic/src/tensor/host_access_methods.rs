@@ -153,7 +153,10 @@ impl<T: TensorElement> Tensor<T> {
         state.host_dirty = false;
     }
 
-    pub(crate) fn flush_host_writes(&self) -> Result<(), MetalError> {
+    /// Flush any pending host writes to the GPU buffer.
+    /// This must be called before dispatching a kernel that reads from this tensor
+    /// if the tensor was initialized via CopyFrom with pooled (private) storage.
+    pub fn flush_host_writes(&self) -> Result<(), MetalError> {
         if self.host_accessible {
             return Ok(());
         }
