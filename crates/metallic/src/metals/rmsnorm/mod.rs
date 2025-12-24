@@ -3,14 +3,12 @@
 //! RMSNorm computes: output = (input / rms(input)) * gamma
 //! where rms(x) = sqrt(mean(x^2) + eps)
 
-use metallic_macros::{KernelArgs, MetalStruct};
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::{
-    compound::Stage, foundry::{Includes, Kernel, KernelSource}, tensor::Dtype, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
-};
+use crate::types::TensorArg;
 
 /// Parameters for RMSNorm kernel.
-#[derive(Clone, Copy, Debug, MetalStruct)]
+#[derive(Clone, Copy, Debug, MetalStruct, Default)]
 #[repr(C)]
 pub struct RmsNormParams {
     /// Feature dimension (last dimension of input).
@@ -19,19 +17,34 @@ pub struct RmsNormParams {
     pub total_elements: u32,
 }
 
-/// RMSNorm kernel.
-///
-/// Performs: output[i] = (input[i] / rms) * gamma[feature_idx]
-/// where rms = sqrt(sum(input[row]^2) / feature_dim + eps)
-#[derive(KernelArgs, Clone)]
+/// SoftmaxVec kernel.
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "rmsnorm/rmsnorm.metal",
+    function = "rmsnorm_kernel_f16",
+    stage_function = "run_rmsnorm_core",
+    args = "RmsNormParams",
+    threadgroup = "float tg_inv_rms",
+    epilogue_emit = r#"
+    // RMSNorm epilogue: scale by gamma
+    half gamma_val = gamma[feature_idx];
+    half {out_var} = {input_var} * gamma_val;"#
+)]
 pub struct RmsNorm {
-    #[arg(buffer = 0)]
+    /// Input tensor (Buffer 0 - Policy Matrix).
+    #[arg(buffer = 0, stage_skip)]
     pub input: TensorArg,
-    #[arg(buffer = 1, output)]
+    /// Scale bytes for Q8 policy (Buffer 1 - Policy Scales).
+    #[arg(buffer = 1, stage_skip)]
+    pub scale_bytes: TensorArg,
+    /// Output tensor (Buffer 2).
+    #[arg(buffer = 2, output)]
     pub output: TensorArg,
-    #[arg(buffer = 2)]
-    pub gamma: TensorArg,
+    /// Scale weights (Buffer 3).
     #[arg(buffer = 3)]
+    pub gamma: TensorArg,
+    /// RMSNorm parameters (Buffer 4).
+    #[arg(buffer = 4)]
     pub params: RmsNormParams,
 }
 
@@ -46,6 +59,7 @@ impl RmsNorm {
     pub fn new(input: &TensorArg, output: &TensorArg, gamma: &TensorArg, params: RmsNormParams) -> Self {
         Self {
             input: input.clone(),
+            scale_bytes: input.clone(), // Default to input for scales (F16 case)
             output: output.clone(),
             gamma: gamma.clone(),
             params,
@@ -53,111 +67,10 @@ impl RmsNorm {
     }
 }
 
-/// Kernel ID for pipeline caching.
-pub struct RmsNormId;
-
-impl Kernel for RmsNorm {
-    type Args = RmsNormParams;
-    type Id = RmsNormId;
-
-    fn source(&self) -> KernelSource {
-        KernelSource::File("rmsnorm/rmsnorm.metal")
-    }
-
-    fn function_name(&self) -> &'static str {
-        "rmsnorm_kernel_f16"
-    }
-
-    fn includes(&self) -> Includes {
-        Includes(vec![])
-    }
-
-    fn dtype(&self) -> Option<Dtype> {
-        Some(Dtype::F16)
-    }
-
-    fn struct_defs(&self) -> String {
-        RmsNormParams::METAL_STRUCT_DEF.to_string()
-    }
-
-    fn bind(&self, encoder: &crate::types::ComputeCommandEncoder) {
-        self.bind_args(encoder);
-    }
-
-    fn dispatch_config(&self) -> DispatchConfig {
-        // One threadgroup per row, 256 threads per threadgroup
-        let num_rows = self.params.total_elements / self.params.feature_dim;
-        let threads_per_group = 256;
-
-        DispatchConfig {
-            grid: GridSize::d1(num_rows as usize),
-            group: ThreadgroupSize::d1(threads_per_group),
-        }
-    }
-
-    fn as_stage(&self) -> Box<dyn Stage> {
-        Box::new(crate::compound::RmsNormCoreStage::new())
-    }
-}
-
-/// RMSNorm stage for compound kernel fusion.
-///
-/// Can be used as an epilogue stage to apply RMSNorm after another operation.
-#[derive(Clone)]
-pub struct RmsNormStage {
-    /// Buffer index for gamma weights.
-    pub gamma_buffer: u32,
-}
-
-impl RmsNormStage {
-    pub fn new() -> Self {
-        Self { gamma_buffer: 2 }
-    }
-
-    pub fn with_gamma_buffer(mut self, idx: u32) -> Self {
-        self.gamma_buffer = idx;
-        self
-    }
-}
-
-impl Default for RmsNormStage {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Stage for RmsNormStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec!["rmsnorm/rmsnorm.metal"]
-    }
-
-    fn buffer_args(&self) -> Vec<crate::compound::BufferArg> {
-        vec![crate::compound::BufferArg {
-            name: "gamma",
-            metal_type: "const device half*",
-            buffer_index: self.gamma_buffer,
-        }]
-    }
-
-    fn struct_defs(&self) -> String {
-        String::new() // No additional struct defs needed for stage
-    }
-
-    fn emit(&self, input_var: &str) -> (String, String) {
-        // Assumes we're operating on a single value with feature_idx available
-        let code = format!(
-            r#"
-    // RMSNorm epilogue: scale by gamma
-    half gamma_val = gamma[feature_idx];
-    half {input_var}_normed = {input_var} * gamma_val;"#
-        );
-        (format!("{}_normed", input_var), code)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::compound::{BufferArg, CompoundKernel, Stage};
 
     #[test]
     fn test_rmsnorm_params_metal_struct() {
@@ -165,5 +78,47 @@ mod tests {
         assert!(def.contains("uint feature_dim;"), "Should have feature_dim: {}", def);
         assert!(def.contains("uint total_elements;"), "Should have total_elements: {}", def);
         assert!(def.contains("struct RmsNormParams"), "Should have struct name: {}", def);
+    }
+
+    #[test]
+    fn test_rmsnorm_stage_fused() {
+        #[derive(Clone, Default)]
+        struct DummyMain;
+        impl Stage for DummyMain {
+            fn includes(&self) -> Vec<&'static str> {
+                vec![]
+            }
+            fn buffer_args(&self) -> Vec<BufferArg> {
+                vec![]
+            }
+            fn struct_defs(&self) -> String {
+                String::new()
+            }
+            fn emit(&self, _input_var: &str) -> (String, String) {
+                ("val".to_string(), "    half val = 1.0h;".to_string())
+            }
+        }
+
+        let stage = RmsNormStage::default();
+        let kernel = CompoundKernel::new("test_fused")
+            .main_dyn(Box::new(DummyMain))
+            .epilogue_dyn(Box::new(stage))
+            .build();
+
+        let source = kernel.source_code();
+
+        // Verify includes
+        assert!(source.contains("#include \"rmsnorm/rmsnorm.metal\""));
+
+        // Verify buffer arguments collected
+        let args = kernel.collect_buffer_args();
+        let gamma_arg = args.iter().find(|a| a.name == "gamma").expect("Should have gamma arg");
+        assert_eq!(gamma_arg.buffer_index, 3);
+        assert_eq!(gamma_arg.metal_type, "const device half*");
+
+        // Verify code emission
+        assert!(source.contains("half val = 1.0h;"));
+        assert!(source.contains("half gamma_val = gamma[feature_idx];"));
+        assert!(source.contains("half val_epilogue = val * gamma_val;"));
     }
 }

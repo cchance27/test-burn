@@ -168,14 +168,15 @@ struct PolicyF16 {
 
 [[kernel]] void rmsnorm_kernel_f16(
     const device uchar *input [[buffer(0)]],
-    device half *output [[buffer(1)]],
-    const device half *gamma [[buffer(2)]],
-    constant RmsNormParams *params [[buffer(3)]],
+    const device uchar *scale_bytes [[buffer(1)]],
+    device half *output [[buffer(2)]],
+    const device half *gamma [[buffer(3)]],
+    constant RmsNormParams *params [[buffer(4)]],
     uint3 gid [[threadgroup_position_in_grid]],
     uint3 lid [[thread_position_in_threadgroup]]
 ) {
     // Threadgroup memory declared in kernel, passed to template
     threadgroup float tg_inv_rms;
-    run_rmsnorm_core<PolicyF16>(input, output, gamma, params, input, gid, lid, &tg_inv_rms);
+    run_rmsnorm_core<PolicyF16>(input, output, gamma, params, scale_bytes, gid, lid, &tg_inv_rms);
 }
 #endif

@@ -1,7 +1,208 @@
-extern crate proc_macro;
 use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Expr, Fields, Lit, Meta, Token, parse_macro_input, punctuated::Punctuated};
+
+// --- Shared Helpers for Macros ---
+
+// Helper to map Rust types to Metal types for MetalStruct
+fn rust_type_to_metal(ty_str: &str) -> &'static str {
+    match ty_str.trim() {
+        "u8" => "uchar",
+        "i8" => "char",
+        "u16" => "ushort",
+        "i16" => "short",
+        "u32" => "uint",
+        "i32" => "int",
+        "u64" => "ulong",
+        "i64" => "long",
+        "f32" => "float",
+        // Note: half::f16 shows up as "f16" in quote! output
+        "f16" | "half :: f16" => "half",
+        _ => unreachable!("Unsupported type: {}", ty_str),
+    }
+}
+
+// Collect signature info for METAL_ARGS generation
+struct ArgInfo {
+    name: String,
+    name_ident: Option<syn::Ident>,
+    buffer_index: u64,
+    metal_type: Option<String>,
+    rust_type: String, // For auto-detection of Metal type
+    rust_type_actual: syn::Type,
+    is_output: bool,
+    is_buffer: bool,
+    stage_skip: bool,
+}
+
+// Helper to infer Metal type from Rust type string
+fn infer_metal_type(type_str: &str, is_buffer: bool, is_output: bool) -> String {
+    let trimmed = type_str.replace(' ', "");
+
+    // TensorArg, &Tensor, Tensor<...> → device pointer
+    if trimmed.contains("TensorArg") || trimmed.contains("Tensor<") || trimmed.starts_with("&Tensor") {
+        return if is_output {
+            "device half*".to_string()
+        } else {
+            "const device half*".to_string()
+        };
+    }
+
+    // Primitive types → constant reference
+    match trimmed.as_str() {
+        "u32" => return "constant uint&".to_string(),
+        "i32" => return "constant int&".to_string(),
+        "f32" => return "constant float&".to_string(),
+        "u64" => return "constant ulong&".to_string(),
+        "i64" => return "constant long&".to_string(),
+        _ => {}
+    }
+
+    // Structs with PascalCase names (likely have METAL_STRUCT_DEF) → const constant Struct*
+    // This detects types like GemvParams, QkvFusedParams, etc.
+    if trimmed.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+        // It's a struct type - assume it has METAL_STRUCT_DEF
+        return format!("const constant {}*", trimmed);
+    }
+
+    // Fallback for buffer types
+    if is_buffer {
+        if is_output {
+            "device half*".to_string()
+        } else {
+            "const device half*".to_string()
+        }
+    } else {
+        "constant uint&".to_string()
+    }
+}
+
+// Helper to collect ArgInfo from fields
+fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenStream>) {
+    let mut arg_infos = Vec::new();
+    let mut bindings = Vec::new();
+
+    let root = quote::quote! { ::metallic };
+
+    if let Fields::Named(fields) = fields {
+        for f in &fields.named {
+            let name = &f.ident;
+            let ty = &f.ty;
+            let mut buffer_index = None;
+            let mut is_output = false;
+            let mut explicit_bytes = false;
+            let mut explicit_skip = false;
+            let mut stage_skip = false;
+            let mut metal_type: Option<String> = None;
+
+            // Check the type to determine if it's a buffer type
+            let type_str = quote::quote!(#ty).to_string();
+            let is_buffer_type = type_str.contains("TensorArg")
+                || type_str.contains("Tensor <")
+                || type_str.starts_with("& Tensor")
+                || type_str.starts_with("&Tensor");
+
+            for attr in &f.attrs {
+                if attr.path().is_ident("arg") {
+                    if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
+                        for meta in nested.iter() {
+                            match meta {
+                                Meta::NameValue(nv) => {
+                                    if nv.path.is_ident("buffer") {
+                                        if let Expr::Lit(expr_lit) = &nv.value {
+                                            if let Lit::Int(lit) = &expr_lit.lit {
+                                                buffer_index = Some(lit.base10_parse::<u64>().unwrap());
+                                            }
+                                        }
+                                        // Still allow explicit kind="bytes" for override
+                                        if let Expr::Lit(expr_lit) = &nv.value {
+                                            if let Lit::Str(lit) = &expr_lit.lit {
+                                                match lit.value().as_str() {
+                                                    "bytes" => explicit_bytes = true,
+                                                    "skip" => explicit_skip = true,
+                                                    _ => {}
+                                                }
+                                            }
+                                        }
+                                    } else if nv.path.is_ident("metal_type") {
+                                        if let Expr::Lit(expr_lit) = &nv.value {
+                                            if let Lit::Str(lit) = &expr_lit.lit {
+                                                metal_type = Some(lit.value());
+                                            }
+                                        }
+                                    }
+                                }
+                                Meta::Path(path) => {
+                                    if path.is_ident("output") {
+                                        is_output = true;
+                                    } else if path.is_ident("stage_skip") {
+                                        stage_skip = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Auto-detect: if it's not a buffer type, treat as bytes
+            let is_bytes = explicit_bytes || !is_buffer_type;
+
+            // Collect arg info for signature generation
+            if let Some(idx) = buffer_index {
+                if !explicit_skip {
+                    arg_infos.push(ArgInfo {
+                        name: name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
+                        name_ident: name.clone(),
+                        buffer_index: buffer_index.unwrap_or(0),
+                        metal_type: metal_type.clone(),
+                        rust_type: type_str.clone(),
+                        rust_type_actual: ty.clone(),
+                        is_output,
+                        is_buffer: is_buffer_type && !explicit_bytes,
+                        stage_skip,
+                    });
+                }
+            }
+
+            if !explicit_skip {
+                if let Some(idx) = buffer_index {
+                    if is_bytes {
+                        bindings.push(quote::quote! {
+                            let ptr = &self.#name as *const _ as *const core::ffi::c_void;
+                            let len = core::mem::size_of_val(&self.#name);
+                            unsafe {
+                                encoder.setBytes_length_atIndex(core::ptr::NonNull::new(ptr as *mut _).unwrap(), len, #idx as usize);
+                            }
+                        });
+                    } else {
+                        // Buffer binding - use KernelArg trait for buf+offset extraction
+                        // Auto-flush inputs (non-outputs) before binding
+                        let flush_code = if is_output {
+                            quote::quote! {}
+                        } else {
+                            quote::quote! {
+                                #root::types::KernelArg::flush(&self.#name);
+                            }
+                        };
+                        bindings.push(quote::quote! {
+                            #flush_code
+                            unsafe {
+                                encoder.setBuffer_offset_atIndex(
+                                    Some(&*#root::types::KernelArg::buffer(&self.#name)),
+                                    #root::types::KernelArg::offset(&self.#name),
+                                    #idx as usize
+                                );
+                            }
+                        });
+                    }
+                }
+            }
+        }
+    }
+    (arg_infos, bindings)
+}
 
 /// Derive macro to generate a Metal struct definition from a Rust struct.
 ///
@@ -46,24 +247,6 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
                     }
                 }
             }
-        }
-    }
-
-    // Helper to map Rust types to Metal types
-    fn rust_type_to_metal(ty_str: &str) -> &'static str {
-        match ty_str.trim() {
-            "u8" => "uchar",
-            "i8" => "char",
-            "u16" => "ushort",
-            "i16" => "short",
-            "u32" => "uint",
-            "i32" => "int",
-            "u64" => "ulong",
-            "i64" => "long",
-            "f32" => "float",
-            // Note: half::f16 shows up as "f16" in quote! output
-            "f16" | "half :: f16" => "half",
-            _ => unreachable!("Unsupported type: {}", ty_str),
         }
     }
 
@@ -248,190 +431,15 @@ pub fn derive_kernel_args(input: TokenStream) -> TokenStream {
     // Always refer to metallic as ::metallic (requires extern crate self as metallic in lib.rs)
     let root = quote::quote! { ::metallic };
 
-    // Collect signature info for METAL_ARGS generation
-    struct ArgInfo {
-        name: String,
-        buffer_index: u64,
-        metal_type: Option<String>,
-        rust_type: String, // For auto-detection of Metal type
-        is_output: bool,
-        is_buffer: bool,
-        stage_skip: bool,
-    }
-    let mut arg_infos: Vec<ArgInfo> = Vec::new();
-
-    let binding_code = match input.data {
-        Data::Struct(data) => match data.fields {
-            Fields::Named(fields) => {
-                let bindings = fields.named.iter().map(|f| {
-                    let name = &f.ident;
-                    let ty = &f.ty;
-                    let mut buffer_index = None;
-                    let mut is_output = false;
-                    let mut explicit_bytes = false;
-                    let mut explicit_skip = false;
-                    let mut stage_skip = false;
-                    let mut metal_type: Option<String> = None;
-
-                    // Check the type to determine if it's a buffer type
-                    let type_str = quote!(#ty).to_string();
-                    let is_buffer_type = type_str.contains("TensorArg")
-                        || type_str.contains("Tensor <")
-                        || type_str.starts_with("& Tensor")
-                        || type_str.starts_with("&Tensor");
-
-                    for attr in &f.attrs {
-                        if attr.path().is_ident("arg") {
-                            if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
-                                for meta in nested.iter() {
-                                    match meta {
-                                        Meta::NameValue(nv) => {
-                                            if nv.path.is_ident("buffer") {
-                                                if let Expr::Lit(expr_lit) = &nv.value {
-                                                    if let Lit::Int(lit) = &expr_lit.lit {
-                                                        buffer_index = Some(lit.base10_parse::<u64>().unwrap());
-                                                    }
-                                                }
-                                                // Still allow explicit kind="bytes" for override
-                                                if let Expr::Lit(expr_lit) = &nv.value {
-                                                    if let Lit::Str(lit) = &expr_lit.lit {
-                                                        match lit.value().as_str() {
-                                                            "bytes" => explicit_bytes = true,
-                                                            "skip" => explicit_skip = true,
-                                                            _ => {}
-                                                        }
-                                                    }
-                                                }
-                                            } else if nv.path.is_ident("metal_type") {
-                                                if let Expr::Lit(expr_lit) = &nv.value {
-                                                    if let Lit::Str(lit) = &expr_lit.lit {
-                                                        metal_type = Some(lit.value());
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Meta::Path(path) => {
-                                            if path.is_ident("output") {
-                                                is_output = true;
-                                            } else if path.is_ident("stage_skip") {
-                                                stage_skip = true;
-                                            }
-                                        }
-                                        _ => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    // Auto-detect: if it's not a buffer type, treat as bytes
-                    let is_bytes = explicit_bytes || !is_buffer_type;
-
-                    // Collect arg info for signature generation
-                    if let Some(idx) = buffer_index {
-                        if !explicit_skip {
-                            arg_infos.push(ArgInfo {
-                                name: name.as_ref().map(|n| n.to_string()).unwrap_or_default(),
-                                buffer_index: idx,
-                                metal_type,
-                                rust_type: type_str.clone(),
-                                is_output,
-                                is_buffer: is_buffer_type,
-                                stage_skip,
-                            });
-                        }
-                    }
-
-                    if explicit_skip {
-                        quote! {}
-                    } else if let Some(idx) = buffer_index {
-                        if is_bytes {
-                            quote! {
-                                let ptr = &self.#name as *const _ as *const core::ffi::c_void;
-                                let len = core::mem::size_of_val(&self.#name);
-                                unsafe {
-                                    encoder.setBytes_length_atIndex(core::ptr::NonNull::new(ptr as *mut _).unwrap(), len, #idx as usize);
-                                }
-                            }
-                        } else {
-                            // Buffer binding - use KernelArg trait for buf+offset extraction
-                            // Auto-flush inputs (non-outputs) before binding
-                            let flush_code = if is_output {
-                                quote! {}
-                            } else {
-                                quote! {
-                                    #root::types::KernelArg::flush(&self.#name);
-                                }
-                            };
-                            quote! {
-                                #flush_code
-                                unsafe {
-                                    encoder.setBuffer_offset_atIndex(
-                                        Some(&*#root::types::KernelArg::buffer(&self.#name)),
-                                        #root::types::KernelArg::offset(&self.#name),
-                                        #idx as usize
-                                    );
-                                }
-                            }
-                        }
-                    } else {
-                        quote! {}
-                    }
-                });
-
-                quote! {
-                    #(#bindings)*
-                }
-            }
-            _ => panic!("KernelArgs only supports named struct fields"),
-        },
+    let (mut arg_infos, bindings) = match input.data {
+        Data::Struct(data) => collect_arg_infos(&data.fields),
         _ => panic!("KernelArgs only supports structs"),
     };
 
     // Sort args by buffer index for signature generation
     arg_infos.sort_by_key(|a| a.buffer_index);
 
-    // Helper to infer Metal type from Rust type string
-    fn infer_metal_type(type_str: &str, is_buffer: bool, is_output: bool) -> String {
-        let trimmed = type_str.replace(' ', "");
-
-        // TensorArg, &Tensor, Tensor<...> → device pointer
-        if trimmed.contains("TensorArg") || trimmed.contains("Tensor<") || trimmed.starts_with("&Tensor") {
-            return if is_output {
-                "device half*".to_string()
-            } else {
-                "const device half*".to_string()
-            };
-        }
-
-        // Primitive types → constant reference
-        match trimmed.as_str() {
-            "u32" => return "constant uint&".to_string(),
-            "i32" => return "constant int&".to_string(),
-            "f32" => return "constant float&".to_string(),
-            "u64" => return "constant ulong&".to_string(),
-            "i64" => return "constant long&".to_string(),
-            _ => {}
-        }
-
-        // Structs with PascalCase names (likely have METAL_STRUCT_DEF) → const constant Struct*
-        // This detects types like GemvParams, QkvFusedParams, etc.
-        if trimmed.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
-            // It's a struct type - assume it has METAL_STRUCT_DEF
-            return format!("const constant {}*", trimmed);
-        }
-
-        // Fallback for buffer types
-        if is_buffer {
-            if is_output {
-                "device half*".to_string()
-            } else {
-                "const device half*".to_string()
-            }
-        } else {
-            "constant uint&".to_string()
-        }
-    }
+    let binding_code = quote! { #(#bindings)* };
 
     // Generate METAL_ARGS elements as TokenStreams (all args)
     let metal_args_elements: Vec<_> = arg_infos
@@ -514,6 +522,8 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let mut includes = Vec::new();
     let mut stage_function = None;
     let mut threadgroup_decl = None;
+    let mut epilogue_emit: Option<String> = None;
+    let mut epilogue_out_var: Option<String> = None;
 
     for attr in &input.attrs {
         if attr.path().is_ident("kernel") {
@@ -562,6 +572,18 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                                         threadgroup_decl = Some(lit.value());
                                     }
                                 }
+                            } else if nv.path.is_ident("epilogue_emit") {
+                                if let Expr::Lit(expr_lit) = nv.value {
+                                    if let Lit::Str(lit) = expr_lit.lit {
+                                        epilogue_emit = Some(lit.value());
+                                    }
+                                }
+                            } else if nv.path.is_ident("epilogue_out_var") {
+                                if let Expr::Lit(expr_lit) = nv.value {
+                                    if let Lit::Str(lit) = expr_lit.lit {
+                                        epilogue_out_var = Some(lit.value());
+                                    }
+                                }
                             }
                         }
                         Meta::List(_) => {}
@@ -581,29 +603,145 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let stage_name = quote::format_ident!("{}Stage", name);
 
     // Generate as_stage() implementation
-    let as_stage_impl = if stage_function.is_some() {
+    let as_stage_impl = if stage_function.is_some() || epilogue_emit.is_some() {
+        let (arg_infos, _) = match &input.data {
+            Data::Struct(data) => collect_arg_infos(&data.fields),
+            _ => (Vec::new(), Vec::new()),
+        };
+        let field_names: Vec<_> = arg_infos
+            .iter()
+            .filter(|info| !info.stage_skip)
+            .filter_map(|info| info.name_ident.as_ref())
+            .collect();
+
         quote! {
             fn as_stage(&self) -> Box<dyn #root::compound::Stage> {
-                Box::new(#stage_name::default())
+                Box::new(#stage_name {
+                    #( #field_names: self.#field_names.clone() ),*
+                })
             }
         }
     } else {
         quote! {
             fn as_stage(&self) -> Box<dyn #root::compound::Stage> {
-                panic!("Kernel {} does not support staging (no stage_function defined)", stringify!(#name))
+                panic!("Kernel {} does not support staging (no stage_function or epilogue_emit defined)", stringify!(#name))
             }
         }
     };
 
-    // Generate Stage struct and impl if stage_function is specified
-    let stage_impl = if let Some(ref stage_fn) = stage_function {
+    // Generate Stage struct and impl if stage_function or epilogue_emit is specified
+    let stage_impl = if stage_function.is_some() || epilogue_emit.is_some() {
         let tg_decl = threadgroup_decl.clone().unwrap_or_default();
         let source_path = source.clone();
+
+        let (arg_infos, _) = match &input.data {
+            Data::Struct(data) => collect_arg_infos(&data.fields),
+            _ => (Vec::new(), Vec::new()),
+        };
+
+        // Filter fields to those that are NOT stage_skip
+        let stage_fields: Vec<_> = arg_infos
+            .iter()
+            .filter(|info| !info.stage_skip)
+            .map(|info| {
+                let fname = info.name_ident.as_ref().unwrap();
+                let ftype = &info.rust_type_actual;
+                quote! { pub #fname: #ftype }
+            })
+            .collect();
+
+        let epilogue_impl = if epilogue_emit.is_some() {
+            quote! {
+                impl #root::fusion::Epilogue for #stage_name {
+                    fn header(&self) -> &'static str { #source_path }
+                    fn struct_name(&self) -> &'static str { stringify!(#name) }
+                }
+            }
+        } else {
+            quote! {}
+        };
+
+        let emit_impl = if let Some(ref emit_tmpl) = epilogue_emit {
+            let out_var_expr = if let Some(ref v) = epilogue_out_var {
+                quote! { #v.to_string() }
+            } else {
+                quote! { format!("{}_epilogue", input_var) }
+            };
+            quote! {
+                fn emit(&self, input_var: &str) -> (String, String) {
+                    let out_var = #out_var_expr;
+                    let mut code = #emit_tmpl.to_string();
+                    code = code.replace("{input_var}", input_var);
+                    code = code.replace("{out_var}", &out_var);
+                    (out_var, code)
+                }
+            }
+        } else if let Some(ref stage_fn) = stage_function {
+            quote! {
+                fn emit(&self, _input_var: &str) -> (String, String) {
+                    let tg = #tg_decl;
+                    let fn_name = #stage_fn;
+                    let args: Vec<&str> = <#name as #root::fusion::HasMetalArgs>::STAGE_METAL_ARGS
+                        .iter()
+                        .map(|(name, _, _)| *name)
+                        .collect();
+                    let args_str = args.join(", ");
+
+                    let tg_vars: Vec<&str> = if tg.is_empty() {
+                        vec![]
+                    } else {
+                        tg.split(';')
+                            .filter_map(|decl| {
+                                let decl = decl.trim();
+                                if decl.is_empty() { return None; }
+                                decl.split_whitespace().last()
+                                    .map(|s| s.split('[').next().unwrap_or(s))
+                            })
+                            .collect()
+                    };
+                    let tg_args_vec: Vec<String> = tg_vars.iter().map(|v| {
+                        // Check if the variable was declared as an array in the original tg string
+                        // We check for name followed by '[' or if the string ends with name+index info
+                        let is_array = tg.contains(&format!("{}[", v)) || tg.ends_with(v); // simplistic check
+                        if is_array && tg.contains(&format!("{}[", v)) {
+                            v.to_string()
+                        } else {
+                            format!("&{}", v)
+                        }
+                    }).collect();
+                    let tg_args = if tg_args_vec.is_empty() {
+                        String::new()
+                    } else {
+                        format!(", {}", tg_args_vec.join(", "))
+                    };
+
+                    let code = if tg.is_empty() {
+                        format!("    {}<Policy>(matrix, {}, scale_bytes, gid, lid);", fn_name, args_str)
+                    } else {
+                        let tg_decls: Vec<String> = tg.split(';')
+                            .filter(|s| !s.trim().is_empty())
+                            .map(|decl| format!("threadgroup {}", decl.trim()))
+                            .collect();
+                        let tg_code = tg_decls.iter().map(|d| format!("    {};", d)).collect::<Vec<_>>().join("\n");
+                        format!("{}\n    {}<Policy>(matrix, {}, scale_bytes, gid, lid{});", tg_code, fn_name, args_str, tg_args)
+                    };
+                    ("void".to_string(), code)
+                }
+            }
+        } else {
+            quote! {
+                fn emit(&self, _input_var: &str) -> (String, String) {
+                    ("void".to_string(), String::new())
+                }
+            }
+        };
 
         quote! {
             /// Auto-generated Stage for compound kernel fusion.
             #[derive(Clone, Default)]
-            pub struct #stage_name;
+            pub struct #stage_name {
+                #( #stage_fields ),*
+            }
 
             impl #root::compound::Stage for #stage_name {
                 fn includes(&self) -> Vec<&'static str> {
@@ -611,7 +749,6 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                 }
 
                 fn buffer_args(&self) -> Vec<#root::compound::BufferArg> {
-                    // Use STAGE_METAL_ARGS (excludes stage_skip buffers)
                     <#name as #root::fusion::HasMetalArgs>::STAGE_METAL_ARGS
                         .iter()
                         .map(|(name, idx, metal_type)| #root::compound::BufferArg {
@@ -626,53 +763,10 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     <#args_type>::METAL_STRUCT_DEF.to_string()
                 }
 
-                fn emit(&self, _input_var: &str) -> (String, String) {
-                    let tg = #tg_decl;
-                    let fn_name = #stage_fn;
-                    // Build argument list from STAGE_METAL_ARGS (excludes stage_skip buffers)
-                    // Buffer args are already pointers in compound kernel signature - pass directly
-                    let args: Vec<&str> = <#name as #root::fusion::HasMetalArgs>::STAGE_METAL_ARGS
-                        .iter()
-                        .map(|(name, _, _)| *name)
-                        .collect();
-                    let args_str = args.join(", ");
-
-                    // Convention: fn<Policy>(matrix, [stage_args], scale_bytes, gid, lid, [threadgroup ptrs])
-                    // Extract threadgroup var names from declarations like "float shared[256]; uint indices[256]"
-                    let tg_vars: Vec<&str> = if tg.is_empty() {
-                        vec![]
-                    } else {
-                        tg.split(';')
-                            .filter_map(|decl| {
-                                let decl = decl.trim();
-                                if decl.is_empty() { return None; }
-                                // Find the variable name (before '[' or at end)
-                                decl.split_whitespace().last()
-                                    .map(|s| s.split('[').next().unwrap_or(s))
-                            })
-                            .collect()
-                    };
-                    let tg_args = if tg_vars.is_empty() {
-                        String::new()
-                    } else {
-                        // Arrays decay to pointers naturally in Metal - no & needed
-                        format!(", {}", tg_vars.join(", "))
-                    };
-
-                    let code = if tg.is_empty() {
-                        format!("    {}<Policy>(matrix, {}, scale_bytes, gid, lid);", fn_name, args_str)
-                    } else {
-                        // Each declaration needs threadgroup prefix
-                        let tg_decls: Vec<String> = tg.split(';')
-                            .filter(|s| !s.trim().is_empty())
-                            .map(|decl| format!("threadgroup {}", decl.trim()))
-                            .collect();
-                        let tg_code = tg_decls.iter().map(|d| format!("    {};", d)).collect::<Vec<_>>().join("\n");
-                        format!("{}\n    {}<Policy>(matrix, {}, scale_bytes, gid, lid{});", tg_code, fn_name, args_str, tg_args)
-                    };
-                    ("void".to_string(), code)
-                }
+                #emit_impl
             }
+
+            #epilogue_impl
         }
     } else {
         quote! {}
@@ -746,6 +840,137 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
 /// Generates:
 /// - `impl Kernel` for the struct with source generation from stages
 /// - Runtime validation that stages chain correctly
+/// Derive macro for Epilogue stages.
+///
+/// Implements `Stage` and `Epilogue` traits.
+/// Supports `#[epilogue(include = "...", emit = "...", struct = "...")]`.
+#[proc_macro_derive(Epilogue, attributes(epilogue, arg))]
+pub fn derive_epilogue(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+
+    // Determine crate root path
+    let crate_name = std::env::var("CARGO_PKG_NAME").unwrap_or_default();
+    let root = if crate_name == "metallic" {
+        quote::quote! { crate }
+    } else {
+        quote::quote! { ::metallic }
+    };
+
+    let mut include = None;
+    let mut emit = None;
+    let mut struct_name_attr = None;
+    let mut out_var_name = None;
+
+    for attr in &input.attrs {
+        if attr.path().is_ident("epilogue") {
+            if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
+                for meta in nested {
+                    match meta {
+                        Meta::NameValue(nv) => {
+                            if nv.path.is_ident("include") {
+                                if let Expr::Lit(expr_lit) = nv.value {
+                                    if let Lit::Str(lit) = expr_lit.lit {
+                                        include = Some(lit.value());
+                                    }
+                                }
+                            } else if nv.path.is_ident("emit") {
+                                if let Expr::Lit(expr_lit) = nv.value {
+                                    if let Lit::Str(lit) = expr_lit.lit {
+                                        emit = Some(lit.value());
+                                    }
+                                }
+                            } else if nv.path.is_ident("struct") {
+                                if let Expr::Lit(expr_lit) = nv.value {
+                                    if let Lit::Str(lit) = expr_lit.lit {
+                                        struct_name_attr = Some(lit.value());
+                                    }
+                                }
+                            } else if nv.path.is_ident("out_var") {
+                                if let Expr::Lit(expr_lit) = nv.value {
+                                    if let Lit::Str(lit) = expr_lit.lit {
+                                        out_var_name = Some(lit.value());
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    let include = include.expect("Epilogue must have `include` attribute");
+    let emit_template = emit.expect("Epilogue must have `emit` attribute");
+    let struct_name_str = struct_name_attr.unwrap_or_else(|| name.to_string());
+
+    let (arg_infos, _) = match input.data {
+        Data::Struct(data) => collect_arg_infos(&data.fields),
+        _ => panic!("Epilogue only supports structs"),
+    };
+
+    let buffer_args = arg_infos.iter().filter(|info| !info.stage_skip).map(|info| {
+        let arg_name = &info.name;
+        let idx = info.buffer_index;
+        let mtype = info
+            .metal_type
+            .clone()
+            .unwrap_or_else(|| infer_metal_type(&info.rust_type, info.is_buffer, info.is_output));
+        quote::quote! {
+            #root::compound::BufferArg {
+                name: #arg_name,
+                metal_type: #mtype,
+                buffer_index: #idx as u32,
+            }
+        }
+    });
+
+    let out_var_expr = if let Some(v) = out_var_name {
+        quote::quote! { #v.to_string() }
+    } else {
+        quote::quote! { format!("{}_epilogue", input_var) }
+    };
+
+    let expanded = quote::quote! {
+        impl #root::fusion::Epilogue for #name {
+            fn header(&self) -> &'static str {
+                #include
+            }
+
+            fn struct_name(&self) -> &'static str {
+                #struct_name_str
+            }
+        }
+
+        impl #root::compound::Stage for #name {
+            fn includes(&self) -> Vec<&'static str> {
+                vec![#include]
+            }
+
+            fn buffer_args(&self) -> Vec<#root::compound::BufferArg> {
+                vec![
+                    #(#buffer_args),*
+                ]
+            }
+
+            fn struct_defs(&self) -> String {
+                String::new()
+            }
+
+            fn emit(&self, input_var: &str) -> (String, String) {
+                let out_var = #out_var_expr;
+                let mut code = #emit_template.to_string();
+                code = code.replace("{input_var}", input_var);
+                code = code.replace("{out_var}", &out_var);
+                (out_var, code)
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 #[proc_macro_derive(CompoundKernel, attributes(compound, prologue, main, epilogue))]
 pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);

@@ -284,25 +284,6 @@ impl CompoundKernel<Unfused> {
 
         code
     }
-
-    /// Collect all buffer arguments from all stages.
-    fn collect_buffer_args(&self) -> Vec<BufferArg> {
-        let mut args = Vec::new();
-
-        for stage in &self.prologues {
-            args.extend(stage.buffer_args());
-        }
-        if let Some(main) = &self.main {
-            args.extend(main.buffer_args());
-        }
-        for stage in &self.epilogues {
-            args.extend(stage.buffer_args());
-        }
-
-        // Sort by buffer index
-        args.sort_by_key(|a| a.buffer_index);
-        args
-    }
 }
 
 impl<S> CompoundKernel<S> {
@@ -357,6 +338,25 @@ impl<S> CompoundKernel<S> {
         let mut seen = std::collections::HashSet::new();
         all_struct_defs.retain(|item| seen.insert(item.clone()));
         all_struct_defs.join("\n\n")
+    }
+
+    /// Collect all buffer arguments from all stages.
+    pub fn collect_buffer_args(&self) -> Vec<BufferArg> {
+        let mut args = Vec::new();
+
+        for stage in &self.prologues {
+            args.extend(stage.buffer_args());
+        }
+        if let Some(main) = &self.main {
+            args.extend(main.buffer_args());
+        }
+        for stage in &self.epilogues {
+            args.extend(stage.buffer_args());
+        }
+
+        // Sort by buffer index
+        args.sort_by_key(|a| a.buffer_index);
+        args
     }
 }
 

@@ -13,6 +13,7 @@ This document provides an overview of the derive macros in `metallic-macros` for
 | `KernelArgs` | Generate buffer binding + Metal signature | `#[arg(...)]` |
 | `Kernel` | Implement `Kernel` trait for standalone kernels | `#[kernel(...)]` |
 | `CompoundKernel` | Compose stages into fused kernel | `#[compound(...)]`, `#[prologue]`, `#[main]`, `#[epilogue]` |
+| `Epilogue` | Implement `Epilogue` and `Stage` for manual fusion | `#[epilogue(...)]` |
 
 ---
 
@@ -235,35 +236,44 @@ impl Kernel for GemvColMajorKernel {
 | `include = [...]` | Additional Metal headers to include |
 | `stage_function = "..."` | Template function name for Stage fusion (enables Stage generation) |
 | `threadgroup = "..."` | Threadgroup memory declaration for Stage emit (e.g., `"float shared[256]"`) |
+| `epilogue_emit = "..."` | Template for Epilogue emission (enables Epilogue generation) |
+| `epilogue_out_var = "..."` | Optional name for Epilogue output variable |
 
 ### Stage Generation
 
-When `stage_function` is specified, the macro automatically generates:
-- `{Kernel}Stage` struct implementing `Stage` trait
-- `as_stage()` returns this generated Stage
-
-```rust
-#[derive(Kernel, KernelArgs, Clone)]
+#[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "rmsnorm/rmsnorm.metal",
     function = "rmsnorm_kernel_f16",
     stage_function = "run_rmsnorm_core",  // Enables Stage generation
     args = "RmsNormParams",
     threadgroup = "float tg_inv_rms",
+    epilogue_emit = r#"
+    // RMSNorm epilogue: scale by gamma
+    half gamma_val = gamma[feature_idx];
+    half {out_var} = {input_var} * gamma_val;"# // Enables Epilogue generation
 )]
 pub struct RmsNorm {
-    #[arg(buffer = 0, stage_skip)]  // Excluded from Stage (PolicyStage provides)
+    #[arg(buffer = 0, stage_skip)]  // Excluded from Stage (Policy provides)
     pub input: TensorArg,
-    #[arg(buffer = 1, stage_skip)]
-    pub scale_bytes: TensorArg,
-    #[arg(buffer = 2, output)]
+    #[arg(buffer = 1, output, stage_skip)]
     pub output: TensorArg,
-    #[arg(buffer = 3)]
+    #[arg(buffer = 2)]
     pub gamma: TensorArg,
-    #[arg(buffer = 4)]
+    #[arg(buffer = 3, stage_skip)]
     pub params: RmsNormParams,
 }
 ```
+
+### Stage/Epilogue Generation
+
+When `stage_function` or `epilogue_emit` is specified, the macro automatically generates:
+- `{Kernel}Stage` struct containing all `#name` fields NOT marked `stage_skip`.
+- `as_stage()` method that clones current fields into the generated Stage struct.
+- `Stage` implementation for `{Kernel}Stage`.
+- `Epilogue` implementation for `{Kernel}Stage` (if `epilogue_emit` is present).
+
+Since `TensorArg` implements `Default`, the generated Stage struct is always `Default`-able, allowing it to be used in `CompoundKernel::new()` planning.
 
 ### Metal Source Requirements
 
@@ -334,7 +344,39 @@ struct PolicyF16 { /* inline load helpers */ };
 
 ---
 
-## 5. `#[derive(CompoundKernel)]`
+## 5. `#[derive(Epilogue)]`
+
+Implements both `Stage` and `Epilogue` traits for stages that are fused after a main operation.
+
+### Usage
+
+```rust
+#[derive(Clone, Epilogue, Default)]
+#[epilogue(
+    include = "rmsnorm/rmsnorm.metal",
+    emit = r#"
+    // RMSNorm epilogue: scale by gamma
+    half gamma_val = gamma[feature_idx];
+    half {out_var} = {input_var} * gamma_val;"#
+)]
+pub struct RmsNormStage {
+    #[arg(buffer = 2, metal_type = "const device half*")]
+    pub gamma: TensorArg,
+}
+```
+
+### Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#[epilogue(include = "...")]` | Metal header file to include |
+| `#[epilogue(emit = "...")]` | Template string with `{input_var}` and `{out_var}` |
+| `#[epilogue(struct = "...")]` | Override Metal struct name (defaults to Rust name) |
+| `#[epilogue(out_var = "...")]` | Explicitly name output variable |
+
+---
+
+## 6. `#[derive(CompoundKernel)]`
 
 Composes multiple `Stage` implementations into a fused kernel with generated Metal source.
 
@@ -382,6 +424,7 @@ impl GemvQ8SiluCompound {
 | `#[epilogue]` | Mark field as epilogue stage |
 
 ---
+
 
 ## Common Patterns
 

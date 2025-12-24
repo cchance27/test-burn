@@ -90,9 +90,19 @@ impl<T: KernelArg + ?Sized> KernelArg for &T {
 /// A kernel argument that captures buffer+offset from any Tensor.
 #[derive(Clone)]
 pub struct TensorArg {
-    buffer: Buffer,
+    buffer: Option<Buffer>,
     offset: usize,
     dtype: Dtype,
+}
+
+impl Default for TensorArg {
+    fn default() -> Self {
+        Self {
+            buffer: None,
+            offset: 0,
+            dtype: Dtype::F16,
+        }
+    }
 }
 
 unsafe impl Send for TensorArg {}
@@ -103,16 +113,16 @@ impl TensorArg {
     pub fn from_tensor<K: KernelArg>(arg: &K) -> Self {
         arg.flush();
         Self {
-            buffer: arg.buffer().clone(),
+            buffer: Some(arg.buffer().clone()),
             offset: arg.offset(),
             dtype: arg.dtype(),
         }
     }
 
-    /// Create a dummy TensorArg (for unused buffer slots).
+    /// Create a dummy TensorArg for testing.
     pub fn dummy(buffer: Buffer) -> Self {
         Self {
-            buffer,
+            buffer: Some(buffer),
             offset: 0,
             dtype: Dtype::F16,
         }
@@ -121,11 +131,13 @@ impl TensorArg {
 
 impl KernelArg for TensorArg {
     fn buffer(&self) -> &Buffer {
-        &self.buffer
+        self.buffer.as_ref().expect("Attempted to access buffer on null TensorArg")
     }
+
     fn offset(&self) -> usize {
         self.offset
     }
+
     fn dtype(&self) -> Dtype {
         self.dtype
     }
