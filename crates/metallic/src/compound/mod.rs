@@ -15,8 +15,6 @@
 //! ```
 
 mod stages;
-#[macro_use]
-mod macros;
 
 pub use stages::*;
 

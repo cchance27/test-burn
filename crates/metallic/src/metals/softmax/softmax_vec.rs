@@ -72,7 +72,7 @@ impl SoftmaxVec {
         }
     }
 
-    /// Dispatch configuration - required by Kernel derive.
+    /// Dispatch configuration - required by `#[derive(Kernel)]`.
     pub fn dispatch_config(&self) -> DispatchConfig {
         // Match legacy: 1 threadgroup per row, threads along X
         let native_width = 32; // Simdgroup width

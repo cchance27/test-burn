@@ -123,6 +123,7 @@ FOLLOW NEW-KERNELS.md and MACROS.md for migration/implementation details.
 - [ ] **Stateful `seq_len_delta` Tracking**: Port full tracking from Legacy (`ctx.sdpa_seq_delta`, `sdpa_workspace_key_for`) for exact parity in edge cases. Currently using `query_offset > 0` as proxy.
 - [ ] **MLX vs Incremental Decode Benchmarking**: Once MLX Matmul is ported, benchmark `METALLIC_SDPA_BACKEND=mlx` vs `auto` to determine optimal strategy.
 - [ ] **Native Matmul Kernel**: Port MLX Matmul for Prefill (M>1) performance parity with Legacy.
+- [ ] **UnrollKernel<Gemv> for Prefill**: Test `UnrollKernel<GemvColMajor>` compound as alternative to in-Rust loop unrolling for prefill dispatch (batch > 1). This wraps the Gemv kernel in a conditional compound that performs GPU-side unrolling, potentially improving performance over host-side iteration.
 
 ### General
 - [ ] Unrolling where possible to hide latency (like legacy kernels)

@@ -2,7 +2,7 @@
 
 use half::f16;
 use metallic::{
-    foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::softmax::{SoftmaxBlock, SoftmaxVariant, SoftmaxVec, select_softmax_variant}, policies::PolicyQ8, tensor::{TensorInit, dtypes::F16 as F16Dtype}, types::TensorArg
+    foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::softmax::{Softmax, SoftmaxBlock, SoftmaxVariant, SoftmaxVec}, policies::PolicyQ8, tensor::{TensorInit, dtypes::F16 as F16Dtype}, types::TensorArg
 };
 use serial_test::serial;
 
@@ -326,13 +326,21 @@ fn test_softmax_vec_causal() {
 
 #[test]
 fn test_softmax_variant_selection() {
-    assert_eq!(select_softmax_variant(128), SoftmaxVariant::Vec);
-    assert_eq!(select_softmax_variant(512), SoftmaxVariant::Vec);
-    assert_eq!(select_softmax_variant(800), SoftmaxVariant::Block);
-    assert_eq!(select_softmax_variant(1000), SoftmaxVariant::Vec);
-    assert_eq!(select_softmax_variant(1100), SoftmaxVariant::Block);
-    assert_eq!(select_softmax_variant(2000), SoftmaxVariant::Vec);
-    assert_eq!(select_softmax_variant(8192), SoftmaxVariant::Block);
+    // Test the new ConditionalKernel-generated select() method
+    // VecShort: 0-767
+    // BlockMid1: 768-895
+    // VecMid: 896-1023
+    // BlockMid2: 1024-1279
+    // VecLong: 1280-4095
+    // BlockVeryLong: 4096+
+
+    assert_eq!(Softmax::select(128), SoftmaxVariant::VecShort);
+    assert_eq!(Softmax::select(512), SoftmaxVariant::VecShort);
+    assert_eq!(Softmax::select(800), SoftmaxVariant::BlockMid1);
+    assert_eq!(Softmax::select(1000), SoftmaxVariant::VecMid);
+    assert_eq!(Softmax::select(1100), SoftmaxVariant::BlockMid2);
+    assert_eq!(Softmax::select(2000), SoftmaxVariant::VecLong);
+    assert_eq!(Softmax::select(8192), SoftmaxVariant::BlockVeryLong);
 }
 
 #[test]

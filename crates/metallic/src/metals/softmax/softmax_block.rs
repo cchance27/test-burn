@@ -80,7 +80,7 @@ impl SoftmaxBlock {
         }
     }
 
-    /// Dispatch configuration - required by Kernel derive.
+    /// Dispatch configuration - required by `#[derive(Kernel)]`.
     pub fn dispatch_config(&self) -> DispatchConfig {
         const THREADS_PER_TG: usize = 256;
         let rows = (self.batch * self.seq_q) as usize;

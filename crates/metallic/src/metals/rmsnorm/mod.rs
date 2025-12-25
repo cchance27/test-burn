@@ -5,7 +5,7 @@
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::types::TensorArg;
+use crate::types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize};
 
 /// Parameters for RMSNorm kernel.
 #[derive(Clone, Copy, Debug, MetalStruct, Default)]
@@ -17,18 +17,21 @@ pub struct RmsNormParams {
     pub total_elements: u32,
 }
 
-/// SoftmaxVec kernel.
+/// RMSNorm kernel.
+///
+/// RMSNorm is typically used as a **prologue** stage before the main computation:
+/// - Pre-attention: `RMSNorm → QKV projection`
+/// - Pre-MLP: `RMSNorm → Linear`
+///
+/// The `stage_function` allows this kernel to be used in fused compound kernels.
+/// Gamma scaling is applied internally in the Metal shader (`rmsnorm_apply`).
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "rmsnorm/rmsnorm.metal",
     function = "rmsnorm_kernel_f16",
     stage_function = "run_rmsnorm_core",
     args = "RmsNormParams",
-    threadgroup = "float tg_inv_rms",
-    epilogue_emit = r#"
-    // RMSNorm epilogue: scale by gamma
-    half gamma_val = gamma[feature_idx];
-    half {out_var} = {input_var} * gamma_val;"#
+    threadgroup = "float tg_inv_rms"
 )]
 pub struct RmsNorm {
     /// Input tensor (Buffer 0 - Policy Matrix).
@@ -63,6 +66,16 @@ impl RmsNorm {
             output: output.clone(),
             gamma: gamma.clone(),
             params,
+        }
+    }
+
+    /// Dispatch configuration - required by `#[derive(Kernel)]`.
+    /// One threadgroup per row, uses simdgroup reductions.
+    pub fn dispatch_config(&self) -> DispatchConfig {
+        let num_rows = self.params.total_elements / self.params.feature_dim;
+        DispatchConfig {
+            grid: GridSize::d1(num_rows as usize),
+            group: ThreadgroupSize::d1(256),
         }
     }
 }

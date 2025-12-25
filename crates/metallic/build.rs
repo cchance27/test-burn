@@ -1,8 +1,6 @@
 // crates/metallic/build.rs
 use std::{env, fs, path::PathBuf, process::Command};
 
-use syn::{Expr, ItemImpl, Lit, Meta, parse_file, visit::Visit};
-
 fn main() {
     // --- Detect build mode and feature flags ---
     let src_kernels = env::var("CARGO_FEATURE_SRC_KERNELS").is_ok();
@@ -92,165 +90,16 @@ fn main() {
             }
         }
 
-        // --- 2. New Foundry Kernels (Rust Scanning Logic) ---
-        if metals_root.exists() {
-            // Walker struct to find #[derive(Kernel)] and extract #[kernel(...)]
-            struct KernelVisitor {
-                kernels: Vec<FoundryKernel>,
-            }
-            struct FoundryKernel {
-                name: String,
-                source: String,
-                includes: Vec<String>,
-            }
-            impl<'ast> Visit<'ast> for KernelVisitor {
-                fn visit_item_impl(&mut self, node: &'ast ItemImpl) {
-                    // We look for internal macro attributes or just parse the tokens.
-                    // But wait, macros consume attributes. If we use `#[derive(Kernel)]`,
-                    // the `#[kernel(...)]` attribute *might* be consumed if the macro doesn't re-emit it?
-                    // Actually, derive macros don't consume attributes visible to other macros?
-                    // Wait, derive macros keep the attributes adjacent usually.
-                    // But here we are parsing the SOURCE code, so the attributes are definitely there.
-
-                    // We want to find: impl ... for StructName ...
-                    // And check if StructName has #[derive(Kernel)].
-                    // OR simpler: we iterate over Structs.
-                    // The user's pseudo-code scanned items.
-                    // Let's scan for `ItemStruct` instead?
-                    // The user pseudo-code used `syn::Item::Fn`? That's for function kernels.
-                    // Our `#[derive(Kernel)]` is on a STRUCT.
-                    // Let's implement `visit_derive_input` or just traverse items.
-
-                    // Actually strict Syn logic:
-                    // iterate items -> check if ItemStruct -> check attrs for derive(Kernel)
-                    // -> check attrs for kernel(...)
-
-                    syn::visit::visit_item_impl(self, node);
-                }
-
-                fn visit_item_struct(&mut self, node: &'ast syn::ItemStruct) {
-                    let has_derive_kernel = node.attrs.iter().any(|attr| {
-                        if attr.path().is_ident("derive") {
-                            // Parsing derive options is complex, assume simplified check for now or parse properly
-                            // This is a comprehensive parser script, let's keep it robust.
-                            let mut is_k = false;
-                            let _ = attr.parse_nested_meta(|meta| {
-                                if meta.path.is_ident("Kernel") {
-                                    is_k = true;
-                                }
-                                Ok(())
-                            });
-                            is_k
-                        } else {
-                            false
-                        }
-                    });
-
-                    if has_derive_kernel {
-                        // Extract #[kernel(source = "...", function = "...")]
-                        let mut source = None;
-                        let mut function = None;
-                        let mut includes = Vec::new();
-                        for attr in &node.attrs {
-                            if attr.path().is_ident("kernel") {
-                                // Parse nested meta
-                                let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
-                                if let Ok(nested) = attr.parse_args_with(parser) {
-                                    for meta in nested {
-                                        if let Meta::NameValue(nv) = meta {
-                                            if nv.path.is_ident("source") {
-                                                if let Expr::Lit(expr_lit) = nv.value {
-                                                    if let Lit::Str(lit) = expr_lit.lit {
-                                                        source = Some(lit.value());
-                                                    }
-                                                }
-                                            } else if nv.path.is_ident("function") {
-                                                if let Expr::Lit(expr_lit) = nv.value {
-                                                    if let Lit::Str(lit) = expr_lit.lit {
-                                                        function = Some(lit.value());
-                                                    }
-                                                }
-                                            } else if nv.path.is_ident("include") {
-                                                if let Expr::Array(arr) = nv.value {
-                                                    for elem in arr.elems {
-                                                        if let Expr::Lit(expr_lit) = elem {
-                                                            if let Lit::Str(lit) = expr_lit.lit {
-                                                                includes.push(lit.value());
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        if let (Some(src), Some(_func)) = (source, function) {
-                            self.kernels.push(FoundryKernel {
-                                name: node.ident.to_string(),
-                                source: src,
-                                includes,
-                            });
-                        }
-                    }
-                }
-            }
-
-            let mut visitor = KernelVisitor { kernels: Vec::new() };
-
-            for entry in walkdir::WalkDir::new(&metals_root)
-                .into_iter()
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().is_file() && e.path().extension().map_or(false, |ext| ext == "rs"))
-            {
-                let content = fs::read_to_string(entry.path()).expect("read rust file");
-                if let Ok(file) = parse_file(&content) {
-                    visitor.visit_file(&file);
-                }
-            }
-
-            // Compile found kernels
-            for kernel in visitor.kernels {
-                let metal_input = if kernel.includes.is_empty() {
-                    metals_root.join(&kernel.source)
-                } else {
-                    let name = kernel.name.as_str();
-                    let generated = out_dir.join(format!("{name}_bundled.metal"));
-                    let mut bundle_source = String::new();
-
-                    // Add includes
-                    for include in kernel.includes {
-                        let include_path = metals_root.join(&include);
-                        let abs_path = fs::canonicalize(&include_path).unwrap_or_else(|err| {
-                            panic!("Failed to canonicalize include '{}': {err}", include_path.display());
-                        });
-                        bundle_source.push_str(&format!(r#"#include "{}""#, abs_path.display()));
-                        bundle_source.push('\n');
-                    }
-
-                    // Add main source
-                    let source_path = metals_root.join(&kernel.source);
-                    let abs_source = fs::canonicalize(&source_path).unwrap_or_else(|err| {
-                        panic!("Failed to canonicalize source '{}': {err}", source_path.display());
-                    });
-                    bundle_source.push_str(&format!(r#"#include "{}""#, abs_source.display()));
-                    bundle_source.push('\n');
-
-                    fs::write(&generated, bundle_source).expect("failed to write bundled metal source");
-                    generated
-                };
-
-                if !metal_input.exists() {
-                    println!("cargo:warning=Kernel source not found: {}", metal_input.display());
-                    continue;
-                }
-
-                let name = kernel.name.as_str();
-                compile_metal(&metal_input, &name, &out_dir, &module_cache);
-            }
-        }
+        // --- 2. New Foundry Kernels ---
+        // NOTE: Foundry kernels in `metals/` are NOT precompiled because they rely on
+        // struct definitions injected at runtime via struct_defs().
+        // This keeps the Metal files clean (no duplicate struct defs) and avoids divergence.
+        // Foundry kernels are compiled at runtime when first dispatched.
+        //
+        // If precompilation becomes needed in the future, the build.rs would need to:
+        // 1. Parse the Rust structs with #[derive(MetalStruct)]
+        // 2. Generate the Metal struct definitions
+        // 3. Prepend them to the Metal source before compilation
     } else {
         println!("Skipping metallib build (using source kernels)");
     }

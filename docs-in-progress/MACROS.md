@@ -14,6 +14,7 @@ This document provides an overview of the derive macros in `metallic-macros` for
 | `Kernel` | Implement `Kernel` trait for standalone kernels | `#[kernel(...)]` |
 | `CompoundKernel` | Compose stages into fused kernel | `#[compound(...)]`, `#[prologue]`, `#[main]`, `#[epilogue]` |
 | `Epilogue` | Implement `Epilogue` and `Stage` for manual fusion | `#[epilogue(...)]` |
+| `ConditionalKernel` | Dispatch to kernel variants based on runtime conditions | `#[conditional(...)]`, `#[when(...)]` |
 
 ---
 
@@ -241,29 +242,45 @@ impl Kernel for GemvColMajorKernel {
 
 ### Stage Generation
 
+When creating a kernel that can be used as a stage in fused compound kernels, use `stage_function`:
+
+```rust
 #[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "rmsnorm/rmsnorm.metal",
     function = "rmsnorm_kernel_f16",
     stage_function = "run_rmsnorm_core",  // Enables Stage generation
     args = "RmsNormParams",
-    threadgroup = "float tg_inv_rms",
-    epilogue_emit = r#"
-    // RMSNorm epilogue: scale by gamma
-    half gamma_val = gamma[feature_idx];
-    half {out_var} = {input_var} * gamma_val;"# // Enables Epilogue generation
+    threadgroup = "float tg_inv_rms"
 )]
 pub struct RmsNorm {
     #[arg(buffer = 0, stage_skip)]  // Excluded from Stage (Policy provides)
     pub input: TensorArg,
-    #[arg(buffer = 1, output, stage_skip)]
+    #[arg(buffer = 1, output)]
     pub output: TensorArg,
     #[arg(buffer = 2)]
     pub gamma: TensorArg,
-    #[arg(buffer = 3, stage_skip)]
+    #[arg(buffer = 3)]
     pub params: RmsNormParams,
 }
+
+impl RmsNorm {
+    // ... new() constructor ...
+
+    /// Required: dispatch_config must be defined for #[derive(Kernel)]
+    pub fn dispatch_config(&self) -> DispatchConfig {
+        DispatchConfig {
+            grid: GridSize::d1(self.params.total_elements as usize / self.params.feature_dim as usize),
+            group: ThreadgroupSize::d1(256),
+        }
+    }
+}
 ```
+
+> [!IMPORTANT]
+> **Every kernel using `#[derive(Kernel)]` MUST implement a `dispatch_config(&self)` method.**
+> The macro generates `Kernel::dispatch_config` that calls `Self::dispatch_config(self)`.
+> Missing this method causes infinite recursion (stack overflow).
 
 ### Stage/Epilogue Generation
 
@@ -487,3 +504,140 @@ Use `#[arg(buffer = N, metal_type = "...")]` to override.
 
 ### Struct not included in Metal source
 Ensure the params type has `#[derive(MetalStruct)]` and is referenced via `args = "TypeName"` in `#[kernel(...)]`.
+
+---
+
+## 7. `#[derive(ConditionalKernel)]`
+
+Generates dispatch logic for enums that select between kernel variants based on runtime conditions. Provides compile-time coverage analysis that errors on gaps or overlaps.
+
+### Usage
+
+```rust
+#[derive(ConditionalKernel, Clone)]
+#[conditional(selector = "batch: u32")]
+pub enum MatmulDispatch {
+    #[when(batch == 1)]
+    Gemv(GemvKernel),
+    
+    #[when(batch > 1)]
+    Gemm(GemmKernel),
+}
+
+// Range-based dispatch (use .in_() method syntax)
+#[derive(ConditionalKernel, Clone)]
+#[conditional(selector = "seq_k: usize")]
+pub enum Softmax {
+    #[when(seq_k.in_(0..=767))]
+    Vec(SoftmaxVec),
+    
+    #[when(seq_k.in_(768..=1023))]
+    Block(SoftmaxBlock),
+    
+    #[when(seq_k >= 1024)]
+    Vec(SoftmaxVec),
+}
+```
+
+### Generated Output
+
+```rust
+// Generated variant enum for pattern matching:
+pub enum MatmulDispatchVariant {
+    Gemv,
+    Gemm,
+}
+
+impl MatmulDispatch {
+    pub fn select(batch: u32) -> MatmulDispatchVariant {
+        if batch == 1 { return MatmulDispatchVariant::Gemv; }
+        if batch > 1 { return MatmulDispatchVariant::Gemm; }
+        unreachable!("All conditions verified at compile-time")
+    }
+}
+
+impl Kernel for MatmulDispatch {
+    // Delegates to selected variant
+}
+```
+
+### Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `#[conditional(selector = "name: Type")]` | Define selector parameters for the `select()` function |
+| `#[when(condition)]` | Condition for selecting this variant |
+
+### Selector Variables
+
+The `selector` attribute defines parameters that become arguments to the generated `select()` function:
+
+```rust
+#[conditional(selector = "seq_k: usize")]  // → fn select(seq_k: usize)
+#[conditional(selector = "batch: u32, dim: usize")]  // → fn select(batch: u32, dim: usize)
+```
+
+**The selector variable name must match the variable used in `#[when(...)]` conditions.**
+
+### Supported Conditions
+
+| Syntax | Example | Notes |
+|--------|---------|-------|
+| Equality | `batch == 1` | Exact match |
+| Comparison | `batch > 1`, `seq_k >= 256` | Standard comparisons |
+| Range (inclusive) | `seq_k.in_(0..=767)` | Use `.in_()` method |
+| Range (exclusive) | `seq_k.in_(256..512)` | Exclusive upper bound |
+| Range (open) | `seq_k >= 1024` | Unbounded upper |
+
+> [!NOTE]
+> Range conditions use the `.in_()` method syntax because Rust's `in` is a reserved keyword.
+
+### Generated Output
+
+The macro generates:
+1. **`{Name}Variant` enum** — A discriminant enum with the same variant names
+2. **`select()` method** — Returns the discriminant based on selector conditions
+3. **`Kernel` impl** — Delegates all trait methods to the selected inner kernel
+
+### Coverage Analysis
+
+> [!IMPORTANT]
+> **Both gaps and overlaps are compile-time errors:**
+
+```rust
+// ERROR: Overlapping conditions
+#[when(batch == 1)]
+A(KernelA),
+#[when(batch >= 1)]  // Overlaps with batch == 1!
+B(KernelB),
+
+// ERROR: Coverage gap
+#[when(batch == 1)]
+A(KernelA),
+#[when(batch > 3)]  // Gap: batch in 2..=3 not covered!
+B(KernelB),
+```
+
+### Error Handling
+
+| Error | Cause |
+|-------|-------|
+| *"Missing #[conditional(selector = ...)]"* | Forgot the selector attribute |
+| *"Missing #[when(...)] condition"* | Variant without a condition |
+| *"Overlapping conditions"* | Two variants match the same input |
+| *"Coverage gap"* | Values exist that match no variant |
+
+### Usage Pattern
+
+```rust
+impl Softmax {
+    pub fn new(input: &TensorArg, output: &TensorArg, ..., seq_k: u32) -> Self {
+        // Use generated select() to get discriminant
+        match Self::select(seq_k as usize) {
+            SoftmaxVariant::VecShort => Softmax::VecShort(SoftmaxVec::new(...)),
+            SoftmaxVariant::BlockMid => Softmax::BlockMid(SoftmaxBlock::new(...)),
+            // ...
+        }
+    }
+}
+```

@@ -2,6 +2,8 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{Data, DeriveInput, Expr, Fields, Lit, Meta, Token, parse_macro_input, punctuated::Punctuated};
 
+mod conditional;
+
 // --- Shared Helpers for Macros ---
 
 // Helper to map Rust types to Metal types for MetalStruct
@@ -150,7 +152,7 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
             let is_bytes = explicit_bytes || !is_buffer_type;
 
             // Collect arg info for signature generation
-            if let Some(idx) = buffer_index {
+            if let Some(_idx) = buffer_index {
                 if !explicit_skip {
                     arg_infos.push(ArgInfo {
                         name: name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
@@ -798,12 +800,17 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             }
 
             fn dispatch_config(&self) -> #root::types::DispatchConfig {
-                Self::dispatch_config(self)
+                // Call the inherent dispatch_config method.
+                // If this fails to compile, add to your kernel's impl block:
+                //   pub fn dispatch_config(&self) -> DispatchConfig { ... }
+                self.dispatch_config()
             }
 
-            #[cfg(feature = "built_kernels")]
+            // Foundry kernels use runtime compilation with struct injection (struct_defs),
+            // so we don't provide precompiled metallib bytes.
             fn metallib_bytes(&self) -> Option<&'static [u8]> {
-                Some(include_bytes!(concat!(env!("OUT_DIR"), "/", stringify!(#name), ".metallib")))
+                // See build.rs for explanation why we don't do precompiled metallib currently.
+                None
             }
 
             fn struct_defs(&self) -> String {
@@ -1126,4 +1133,29 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+/// Derive macro for conditional kernel dispatch with compile-time coverage analysis.
+///
+/// # Example
+/// ```ignore
+/// #[derive(ConditionalKernel, Clone)]
+/// #[conditional(selector = "batch: u32")]
+/// pub enum MatmulDispatch {
+///     #[when(batch == 1)]
+///     Gemv(GemvKernel),
+///
+///     #[when(batch > 1)]
+///     Gemm(GemmKernel),
+/// }
+/// ```
+///
+/// Generates:
+/// - `select(batch: u32) -> Self` method for runtime dispatch
+/// - `impl Kernel` that delegates to the selected variant
+/// - Compile-time errors for coverage gaps or overlapping conditions
+#[proc_macro_derive(ConditionalKernel, attributes(conditional, when))]
+pub fn derive_conditional_kernel(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    conditional::derive_conditional_kernel_impl(input).into()
 }
