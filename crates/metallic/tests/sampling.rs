@@ -2,9 +2,8 @@
 
 use half::f16;
 use metallic::{
-    F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::sampling::SampleTopK, tensor::{F16, TensorInit, dtypes::U32}, types::TensorArg
+    foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::sampling::SampleTopK, tensor::{F16, TensorInit, dtypes::U32}, types::TensorArg
 };
-use rand::{Rng, rng};
 use serial_test::serial;
 
 #[test]
@@ -43,7 +42,6 @@ fn test_sample_topk_foundry_argmax() {
 #[serial]
 fn test_sample_topk_fused_determinism() {
     let mut foundry = Foundry::new().unwrap();
-    let rng = rng();
 
     let vocab_size = 10000;
     let k = 40;

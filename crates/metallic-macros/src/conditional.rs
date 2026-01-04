@@ -16,6 +16,10 @@ pub enum Condition {
     Eq(String, i128),
     /// `x != value`
     Ne(String, i128),
+    /// `x == Path::To::Value`
+    EqPath(String, String),
+    /// `x != Path::To::Value`
+    NePath(String, String),
     /// `x < value`
     Lt(String, i128),
     /// `x <= value`
@@ -38,6 +42,8 @@ impl Condition {
         match self {
             Condition::Eq(v, _)
             | Condition::Ne(v, _)
+            | Condition::EqPath(v, _)
+            | Condition::NePath(v, _)
             | Condition::Lt(v, _)
             | Condition::Le(v, _)
             | Condition::Gt(v, _)
@@ -49,11 +55,13 @@ impl Condition {
     }
 
     /// Convert to an interval representation [start, end] (inclusive)
-    /// Returns None for conditions that don't map to simple intervals (like !=)
+    /// Returns None for conditions that don't map to simple intervals (like != or Paths)
     pub fn to_interval(&self) -> Option<(i128, i128)> {
         match self {
             Condition::Eq(_, v) => Some((*v, *v)),
-            Condition::Ne(_, _) => None, // Can't represent as single interval
+            Condition::Ne(_, _) => None,
+            Condition::EqPath(_, _) => None,
+            Condition::NePath(_, _) => None,
             Condition::Lt(_, v) => Some((i128::MIN, *v - 1)),
             Condition::Le(_, v) => Some((i128::MIN, *v)),
             Condition::Gt(_, v) => Some((*v + 1, i128::MAX)),
@@ -75,6 +83,14 @@ impl Condition {
             Condition::Ne(_, v) => {
                 let lit = syn::LitInt::new(&v.to_string(), proc_macro2::Span::call_site());
                 quote! { #var != #lit }
+            }
+            Condition::EqPath(_, p) => {
+                let path: syn::Path = syn::parse_str(p).unwrap();
+                quote! { #var == #path }
+            }
+            Condition::NePath(_, p) => {
+                let path: syn::Path = syn::parse_str(p).unwrap();
+                quote! { #var != #path }
             }
             Condition::Lt(_, v) => {
                 let lit = syn::LitInt::new(&v.to_string(), proc_macro2::Span::call_site());
@@ -140,6 +156,15 @@ fn parse_binary_condition(bin: &ExprBinary) -> Result<Condition, String> {
         };
     }
 
+    // Try to parse RHS as a path (e.g. Dtype::F16)
+    if let Ok(path) = extract_path(&bin.right) {
+        return match bin.op {
+            syn::BinOp::Eq(_) => Ok(Condition::EqPath(var_name, path)),
+            syn::BinOp::Ne(_) => Ok(Condition::NePath(var_name, path)),
+            _ => Err(format!("Unsupported binary operator for path: {:?}", bin.op)),
+        };
+    }
+
     // Try to parse RHS as a range (for future && combinations)
     Err(format!("Unsupported comparison RHS: {}", bin.right.to_token_stream()))
 }
@@ -197,6 +222,13 @@ fn extract_ident(expr: &Expr) -> Result<String, String> {
             }
         }
         _ => Err(format!("Expected identifier, got: {}", expr.to_token_stream())),
+    }
+}
+
+fn extract_path(expr: &Expr) -> Result<String, String> {
+    match expr {
+        Expr::Path(path) => Ok(path.path.to_token_stream().to_string()),
+        _ => Err(format!("Expected path, got: {}", expr.to_token_stream())),
     }
 }
 

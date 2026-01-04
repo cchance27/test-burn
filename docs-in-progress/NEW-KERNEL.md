@@ -35,12 +35,9 @@ crates/metallic/src/
 ### 2.1 Basic Template
 
 ```metal
+// NOTE: ALWAYS_INLINE is provided by policies/base.metal (included automatically)
 #include <metal_stdlib>
 using namespace metal;
-
-#ifndef ALWAYS_INLINE
-#define ALWAYS_INLINE __attribute__((always_inline))
-#endif
 
 // Struct is injected by Foundry via struct_defs() - DO NOT define here!
 // struct MyParams { ... };
@@ -109,14 +106,12 @@ pub struct MyParams {
 }
 
 /// Kernel struct - generates buffer binding code
-/// Note: Use owned TensorArg (not references) for clonability
+/// Note: All fields are buffer args by default (indices auto-assigned 0, 1, 2...)
 #[derive(KernelArgs, Clone)]
 pub struct MyKernel {
-    #[arg(buffer = 0)]
     pub input: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(output)]
     pub output: TensorArg,
-    #[arg(buffer = 2)]
     pub params: MyParams,
 }
 ```
@@ -334,3 +329,67 @@ When implementing kernels that support `Policy` templates (like `PolicyF16` or `
 3.  **Rust Stage Emit**:
     *   When implementing `Stage::emit`, ensure the C++ code string you generate passes the `threadgroup` pointers (e.g., `tg_mem`) to the template function.
     *   The `PolicyStage` machinery automatically handles `matrix` (Buffer 0) and `scale_bytes` (Buffer 1) binding, so your `buffer_args()` should usually start from index 2 for your stage-specific arguments.
+
+---
+
+## 9. SIMD GEMV Fused Kernels (Decode Path)
+
+For decode-time GEMV (seq_len=1), use the SIMD GEMV template system. This is faster than manually writing kernels and allows fusing RMSNorm + projections.
+
+### 9.1 Using `#[derive(GemvKernel)]` (Preferred)
+
+```rust
+use metallic_macros::{GemvKernel, Epilogue};
+use metallic::metals::matmul_gemv::hooks::F16CanonicalRmsnormHook;
+
+// Define epilogue if needed (or use an existing one)
+#[derive(Epilogue, Clone, Copy, Default)]
+#[epilogue(gemv_struct = "SwiGluEpilogue", gemv_id = "swiglu", include = "swiglu/swiglu.metal")]
+pub struct SwiGluEpilogue;
+
+// Unified kernel definition
+#[derive(GemvKernel)]
+#[gemv_kernel(
+    args = "SwiGluF16CanonicalFusedRmsnormArgs",
+    heads = 2,
+    cols_per_tg = 8,
+    fast_path = true,
+    gemv_n0 = "params->N0",
+    data_ptrs("data_g", "data_u"),
+    result_ptrs("out_res", "nullptr"),
+    n_exprs("params->N0", "params->N1"),
+    bias_ptrs("bias_g", "bias_u"),
+    has_bias_flags("params->has_bias0", "params->has_bias1"),
+    struct_defs_type(Q2FusedParams),
+    hook = F16CanonicalRmsnormHook,
+    epilogue = SwiGluEpilogue,
+)]
+pub struct SwiGluFusedKernel;
+
+// Usage in compound kernel
+let kernel = CompoundKernel::new("swiglu_fused")
+    .main_dyn(Box::new(SwiGluFusedKernel::main_stage()))
+    .build();
+```
+
+### 9.2 Key Attributes
+
+| Attribute | Purpose |
+|-----------|---------|
+| `heads = N` | Number of output heads (QKV=3, Gate/Up=2) |
+| `hook = Type` | `F16CanonicalRmsnormHook`, `Q8CanonicalHook`, etc. |
+| `epilogue = Type` | Post-GEMV processing (SwiGLU, default, etc.) |
+| `struct_defs_type(T)` | MetalStruct to inject (fused params) |
+
+### 9.3 Available Hooks
+
+| Hook | Description |
+|------|-------------|
+| `F16CanonicalHook` | F16 weights, no fused norm |
+| `F16CanonicalRmsnormHook` | F16 weights + fused RMSNorm |
+| `Q8CanonicalHook` | Q8 weights, no fused norm |
+| `Q8CanonicalRmsnormHook` | Q8 weights + fused RMSNorm |
+
+For more details, see:
+- `docs-in-progress/KERNELS.md` — Architecture overview
+- `docs-in-progress/MACROS.md` Section 10 — Full attribute reference

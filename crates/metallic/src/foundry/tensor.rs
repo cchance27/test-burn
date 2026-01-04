@@ -88,6 +88,19 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
     }
 }
 
+impl<T: TensorElement> Tensor<T, View> {
+    /// Create a Tensor view from existing parts.
+    pub fn from_raw_parts(buffer: Buffer, dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Self {
+        Self {
+            buffer,
+            dims,
+            strides,
+            offset,
+            _marker: PhantomData,
+        }
+    }
+}
+
 // Construction logic
 impl<T: TensorElement> Tensor<T, Dedicated> {
     pub fn new(foundry: &mut Foundry, dims: Vec<usize>, init: TensorInit<'_, T>) -> Result<Self, MetalError> {
@@ -211,11 +224,17 @@ impl<T: TensorElement, S: StorageState> KernelArg for Tensor<T, S> {
     fn dtype(&self) -> Dtype {
         T::DTYPE
     }
+    fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+    fn strides(&self) -> &[usize] {
+        &self.strides
+    }
     // No-op flush for now, Foundry handles flushing via command buffer tracking eventually
     fn flush(&self) {}
 }
 
-fn compute_strides(dims: &[usize]) -> Vec<usize> {
+pub fn compute_strides(dims: &[usize]) -> Vec<usize> {
     let mut strides = vec![0; dims.len()];
     let mut s = 1;
     for i in (0..dims.len()).rev() {

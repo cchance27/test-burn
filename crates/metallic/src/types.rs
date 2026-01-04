@@ -48,6 +48,13 @@ impl std::ops::Deref for MetalBuffer {
     }
 }
 
+impl MetalBuffer {
+    /// Create a MetalBuffer from a raw Retained MTLBuffer.
+    pub fn from_retained(buffer: Retained<ProtocolObject<dyn MTLBuffer>>) -> Self {
+        Self(buffer)
+    }
+}
+
 pub type Device = MetalDevice;
 pub type Queue = MetalQueue;
 pub type Buffer = MetalBuffer;
@@ -64,6 +71,16 @@ pub trait KernelArg {
 
     /// Get the data type of the underlying tensor.
     fn dtype(&self) -> Dtype;
+
+    /// Get the tensor dimensions.
+    fn dims(&self) -> &[usize] {
+        &[]
+    }
+
+    /// Get the tensor strides.
+    fn strides(&self) -> &[usize] {
+        &[]
+    }
 
     /// Flush host writes to the GPU.
     fn flush(&self) {}
@@ -82,6 +99,14 @@ impl<T: KernelArg + ?Sized> KernelArg for &T {
         (**self).dtype()
     }
 
+    fn dims(&self) -> &[usize] {
+        (**self).dims()
+    }
+
+    fn strides(&self) -> &[usize] {
+        (**self).strides()
+    }
+
     fn flush(&self) {
         (**self).flush()
     }
@@ -90,9 +115,11 @@ impl<T: KernelArg + ?Sized> KernelArg for &T {
 /// A kernel argument that captures buffer+offset from any Tensor.
 #[derive(Clone)]
 pub struct TensorArg {
-    buffer: Option<Buffer>,
-    offset: usize,
-    dtype: Dtype,
+    pub(crate) buffer: Option<Buffer>,
+    pub(crate) offset: usize,
+    pub(crate) dtype: Dtype,
+    pub(crate) dims: Vec<usize>,
+    pub(crate) strides: Vec<usize>,
 }
 
 impl Default for TensorArg {
@@ -101,6 +128,8 @@ impl Default for TensorArg {
             buffer: None,
             offset: 0,
             dtype: Dtype::F16,
+            dims: vec![],
+            strides: vec![],
         }
     }
 }
@@ -116,6 +145,19 @@ impl TensorArg {
             buffer: Some(arg.buffer().clone()),
             offset: arg.offset(),
             dtype: arg.dtype(),
+            dims: arg.dims().to_vec(),
+            strides: arg.strides().to_vec(),
+        }
+    }
+
+    /// Create a TensorArg from a raw Metal buffer.
+    pub fn from_buffer(buffer: Buffer, dtype: Dtype, dims: Vec<usize>, strides: Vec<usize>) -> Self {
+        Self {
+            buffer: Some(buffer),
+            offset: 0,
+            dtype,
+            dims,
+            strides,
         }
     }
 
@@ -125,6 +167,8 @@ impl TensorArg {
             buffer: Some(buffer),
             offset: 0,
             dtype: Dtype::F16,
+            dims: vec![],
+            strides: vec![],
         }
     }
 }
@@ -140,6 +184,14 @@ impl KernelArg for TensorArg {
 
     fn dtype(&self) -> Dtype {
         self.dtype
+    }
+
+    fn dims(&self) -> &[usize] {
+        &self.dims
+    }
+
+    fn strides(&self) -> &[usize] {
+        &self.strides
     }
 }
 

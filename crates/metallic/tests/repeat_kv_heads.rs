@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic::{
-    Context, F16Element, context::RepeatKvWorkspaceKind, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::repeat_kv_heads::RepeatKvHeadsOp, metals::repeat_kv_heads::{RepeatKvHeads, RepeatKvHeadsParams}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
+    Context, F16Element, context::RepeatKvWorkspaceKind, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::repeat_kv_heads::RepeatKvHeadsOp, metals::repeat_kv_heads::{RepeatKvHeads, RepeatKvHeadsParamsResolved}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -151,7 +151,7 @@ fn run_parity_test(cfg: TestConfig) {
     .unwrap();
     let output_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![output_elements], TensorInit::Uninitialized).unwrap();
 
-    let params = RepeatKvHeadsParams {
+    let params = RepeatKvHeadsParamsResolved {
         group_size: group_size as u32,
         batch: cfg.batch as u32,
         n_kv_heads: cfg.n_kv_heads as u32,
@@ -195,12 +195,22 @@ fn run_parity_test(cfg: TestConfig) {
         cpu_vs_foundry = cpu_vs_foundry.max((cpu_result[i].to_f32() - foundry_result[i].to_f32()).abs());
     }
 
+    // Sanity check: verify results are non-zero (meaningful data)
+    let foundry_max_abs = foundry_result.iter().map(|x| x.to_f32().abs()).fold(0.0f32, f32::max);
+    let legacy_max_abs = legacy_result.iter().map(|x| x.to_f32().abs()).fold(0.0f32, f32::max);
+    assert!(
+        foundry_max_abs > 0.1,
+        "Foundry output appears to be all zeros - test may be invalid"
+    );
+    assert!(legacy_max_abs > 0.1, "Legacy output appears to be all zeros - test may be invalid");
+
     println!(
         "\n[RepeatKvHeads batch={} heads={}/{} seq={} dim={}]",
         cfg.batch, cfg.n_heads, cfg.n_kv_heads, cfg.seq, cfg.head_dim
     );
     println!("  Legacy vs Foundry max diff: {:.6}", legacy_vs_foundry);
     println!("  CPU vs Foundry max diff:    {:.6}", cpu_vs_foundry);
+    println!("  Output max abs: Legacy={:.4}, Foundry={:.4}", legacy_max_abs, foundry_max_abs);
 
     assert!(legacy_vs_foundry <= TOLERANCE, "Legacy vs Foundry mismatch: {}", legacy_vs_foundry);
     assert!(cpu_vs_foundry <= TOLERANCE, "CPU vs Foundry mismatch: {}", cpu_vs_foundry);
@@ -277,5 +287,37 @@ fn test_repeat_kv_heads_batched() {
         seq: 8,
         head_dim: 64,
         cache_stride: 8,
+    });
+}
+
+/// Test Qwen2.5-0.5B dimensions with cache_stride > seq (real autoregressive scenario).
+/// This tests reading from a pre-allocated cache buffer larger than current sequence.
+#[test]
+#[serial]
+fn test_repeat_kv_heads_qwen25_cache_stride() {
+    // Qwen2.5-0.5B: n_heads=14, n_kv_heads=2, head_dim=64
+    // Autoregressive: seq=1, but cache_stride=2048 (max context)
+    run_parity_test(TestConfig {
+        batch: 1,
+        n_kv_heads: 2,
+        n_heads: 14,
+        seq: 1,
+        head_dim: 64,
+        cache_stride: 2048, // Max context length
+    });
+}
+
+/// Test Qwen2.5-0.5B dimensions with longer sequence in cache.
+#[test]
+#[serial]
+fn test_repeat_kv_heads_qwen25_longer_seq() {
+    // Qwen2.5-0.5B with 128 tokens in cache
+    run_parity_test(TestConfig {
+        batch: 1,
+        n_kv_heads: 2,
+        n_heads: 14,
+        seq: 128,
+        head_dim: 64,
+        cache_stride: 2048,
     });
 }

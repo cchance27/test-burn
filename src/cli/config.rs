@@ -32,6 +32,10 @@ pub struct CliConfig {
     /// Override the SDPA backend (defaults to environment-driven auto selection)
     #[arg(long, value_enum, value_name = "BACKEND")]
     pub sdpa_backend: Option<SdpaBackendChoice>,
+
+    /// Inference engine to use (context or foundry)
+    #[arg(long, value_enum, default_value_t = Engine::Context)]
+    pub engine: Engine,
 }
 
 /// Generation configuration options
@@ -93,6 +97,15 @@ pub enum SdpaBackendChoice {
     Graph,
 }
 
+/// Inference engine backend choice.
+#[derive(Debug, Clone, Copy, clap::ValueEnum, PartialEq, Eq)]
+pub enum Engine {
+    /// Use the legacy Context<T> implementation
+    Context,
+    /// Use the new Foundry (DSL) implementation
+    Foundry,
+}
+
 impl CliConfig {
     /// Get the prompt text, using default if not provided
     pub fn get_prompt(&self) -> String {
@@ -128,6 +141,7 @@ mod tests {
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
+            engine: Engine::Context,
         };
 
         assert_eq!(config.get_prompt(), "Create a short javascript hello world app.");
@@ -143,6 +157,7 @@ mod tests {
             verbose: 0,
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
+            engine: Engine::Context,
         };
 
         assert_eq!(config.get_prompt(), "Hello, world!");

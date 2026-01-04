@@ -1,35 +1,39 @@
 //! GEMV Row-Major Kernel.
 //! K dimension is strided, optimized for [N, K] layouts.
 
-use metallic_macros::KernelArgs;
+use metallic_macros::{Kernel, KernelArgs};
 
 pub use super::GemvParams;
-use crate::{
-    compound::{GemvCoreStage, Stage}, foundry::{Includes, Kernel, KernelSource}, tensor::Dtype, types::{DispatchConfig, GridSize, KernelArg, TensorArg, ThreadgroupSize}
-};
+use crate::types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize};
 
 /// GEMV Row-Major kernel for row-major matrix storage.
-#[derive(KernelArgs, Clone)]
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "gemv/row_major.metal",
+    function = "gemv_row_major_f16",
+    args = "GemvParams",
+    dtype = "F16",
+    step = false,
+    stage_emit = r#"
+    if (has_bias != 0) {
+        run_gemv_row_major_core<Policy, true>(matrix, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, scale_bytes);
+    } else {
+        run_gemv_row_major_core<Policy, false>(matrix, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, scale_bytes);
+    }"#
+)]
 pub struct GemvRowMajor {
-    #[arg(buffer = 0)]
+    #[arg(stage_skip)]
     pub matrix: TensorArg,
-    #[arg(buffer = 1)]
+    #[arg(stage_skip)]
     pub scale_bytes: TensorArg,
-    #[arg(buffer = 2)]
     pub vector_x: TensorArg,
-    #[arg(buffer = 3, output)]
+    #[arg(output)]
     pub result_y: TensorArg,
-    #[arg(buffer = 4)]
     pub params: GemvParams,
-    #[arg(buffer = 5)]
     pub bias: TensorArg,
-    #[arg(buffer = 6)]
     pub residual: TensorArg,
-    #[arg(buffer = 7)]
     pub alpha: f32,
-    #[arg(buffer = 8)]
     pub beta: f32,
-    #[arg(buffer = 9)]
     pub has_bias: u32,
 }
 
@@ -84,54 +88,22 @@ impl GemvRowMajor {
         self.alpha = alpha;
         self
     }
-}
 
-/// Kernel ID for pipeline caching.
-pub struct GemvRowMajorId;
-
-impl Kernel for GemvRowMajor {
-    type Args = Self;
-    type Id = GemvRowMajorId;
-
-    fn source(&self) -> KernelSource {
-        KernelSource::File("gemv/row_major.metal")
-    }
-
-    fn function_name(&self) -> &'static str {
-        "gemv_row_major_f16"
-    }
-
-    fn includes(&self) -> Includes {
-        Includes(vec![])
-    }
-
-    fn dtype(&self) -> Option<Dtype> {
-        Some(self.matrix.dtype())
-    }
-
-    fn struct_defs(&self) -> String {
-        GemvParams::METAL_STRUCT_DEF.to_string()
-    }
-
-    fn bind(&self, encoder: &crate::types::ComputeCommandEncoder) {
-        self.bind_args(encoder);
-    }
-
-    fn dispatch_config(&self) -> DispatchConfig {
-        const COLS_PER_TG: usize = 8; // Must match Metal constant
-        const TG_WIDTH: usize = 256; // 8 warps * 32 threads
-
+    pub fn dispatch_config(&self) -> DispatchConfig {
+        const COLS_PER_TG: usize = 8;
+        const TG_WIDTH: usize = 256;
         let n = self.params.n as usize;
         let batch = self.params.batch.max(1) as usize;
         let num_tgs = (n + COLS_PER_TG - 1) / COLS_PER_TG;
-
         DispatchConfig {
             grid: GridSize::new(num_tgs, 1, batch),
             group: ThreadgroupSize::d1(TG_WIDTH),
         }
     }
-
-    fn as_stage(&self) -> Box<dyn Stage> {
-        Box::new(GemvCoreStage::new_row_major())
-    }
 }
+
+/// Kernel ID for pipeline caching.
+pub struct GemvRowMajorId;
+
+#[cfg(test)]
+mod tests {}

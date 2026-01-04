@@ -1,13 +1,9 @@
 // GEMV Row-Major Kernel (strided K)
 // Layout: element (col, k) at matrix[batch_offset + col + k * stride_w].
+// NOTE: ALWAYS_INLINE is provided by policies/base.metal, which must be included.
 
 #include <metal_stdlib>
 using namespace metal;
-
-// ALWAYS_INLINE attribute for performance-critical functions
-#ifndef ALWAYS_INLINE
-#define ALWAYS_INLINE __attribute__((always_inline))
-#endif
 
 // GemvParams struct is injected by Rust's MetalStruct derive
 
@@ -216,12 +212,15 @@ void run_gemv_row_major_core(
     const device half *curr_bias = has_bias ? bias : nullptr;
     const device half *curr_residual = beta != 0.0f ? (residual + (ulong)batch_idx * params->stride_y) : nullptr;
 
+    // Standalone kernel uses PolicyF16
+    using Policy = PolicyF16;
+
     if (has_bias != 0) {
-        run_gemv_row_major_core<PolicyF16, true>(
+        run_gemv_row_major_core<Policy, true>(
             matrix, vector_x, result_y, params, curr_bias, residual, alpha, beta, gid, lid, scale_bytes
         );
     } else {
-        run_gemv_row_major_core<PolicyF16, false>(
+        run_gemv_row_major_core<Policy, false>(
             matrix, vector_x, result_y, params, curr_bias, residual, alpha, beta, gid, lid, scale_bytes
         );
     }

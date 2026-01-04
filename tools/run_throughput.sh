@@ -52,6 +52,7 @@ run_benchmark() {
         # Run and capture stderr (where metrics are printed)
         local output
         output=$(METALLIC_ENABLE_PROFILING=0 \
+          METALLIC_PERF_OUTPUT=1 \
           METALLIC_RECORD_CB_GPU_TIMING=1 \
           METALLIC_METRICS_JSONL_PATH="${jsonl_path}" \
           cargo run -q --message-format=short --release -- "${model}" "${PROMPT}" --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" 2>&1)

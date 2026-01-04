@@ -1,9 +1,6 @@
+// NOTE: ALWAYS_INLINE is provided by policies/base.metal, which must be included.
 #include <metal_stdlib>
 using namespace metal;
-
-#ifndef ALWAYS_INLINE
-#define ALWAYS_INLINE __attribute__((always_inline))
-#endif
 
 constant float EPS = 1e-6f;
 constant uint THREADS_PER_ROW = 256;

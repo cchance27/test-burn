@@ -12,8 +12,8 @@ use crate::{
     TensorElement, Tokenizer, caching::CacheMetrics, kernels::{embedding_lookup::EmbeddingLookupOp, sample_topk_topp::SampleTopKTopPOp}, models::qwen25::Qwen25, operation::CommandBuffer, tensor::dtypes::U32
 };
 
-const IM_START: &str = "[:1]";
-const IM_END: &str = "[:2]";
+const IM_START: &str = "<|im_start|>";
+const IM_END: &str = "<|im_end|>";
 
 const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
 const METALLIC_LOG_CACHE_STATS_DEFAULT_FILE: &str = "metal-cache-stats.log";
@@ -357,7 +357,8 @@ pub(crate) fn gpu_sample_top_k_top_p_async<T: TensorElement>(
         return Ok(GpuSampleFuture::ready(token, iteration_start, sample_start.elapsed()));
     }
 
-    // Use the provided seed or generate a new one.
+    // Use the provided per-step seed (preferred for deterministic generation),
+    // or generate a fresh one when the caller doesn't care about reproducibility.
     let seed = seed.unwrap_or_else(|| rand::rng().next_u32());
 
     let (output_token,) = ctx.call_custom::<SampleTopKTopPOp>(
@@ -882,6 +883,7 @@ where
     let vocab_size = qwen.config.vocab_size;
     let mut decoded_chunk = String::new();
     let mut decode_scratch = Vec::new();
+    let base_seed = cfg.seed.unwrap_or_else(|| rand::rng().next_u32());
 
     let mut pending_output = if let Some(logits_tensor) = logits_tensor {
         let iteration_start = Instant::now();
@@ -891,7 +893,7 @@ where
             cfg.top_k,
             cfg.top_p,
             cfg.temperature,
-            cfg.seed,
+            Some(base_seed),
             ctx,
             iteration_start,
         )?;
@@ -1014,7 +1016,7 @@ where
                 cfg.top_k,
                 cfg.top_p,
                 cfg.temperature,
-                cfg.seed,
+                Some(base_seed.wrapping_add((i as u32).wrapping_add(1))),
                 ctx,
                 iteration_start,
             )?;
@@ -1069,4 +1071,71 @@ where
         Ok::<(), MetalError>(())
     })?;
     Ok::<(), MetalError>(())
+}
+
+/// High-level end-to-end generation pipeline with token streaming support (Foundry backend)
+#[allow(clippy::too_many_arguments)]
+pub fn generate_streaming_foundry(
+    foundry: &mut crate::foundry::Foundry,
+    model: &crate::foundry::model::CompiledModel,
+    prompt: &str,
+    cfg: &GenerationConfig,
+    tx: &mpsc::Sender<AppEvent>,
+) -> Result<(), MetalError> {
+    // Build full prompt string following Qwen2.5 chat template
+    let full_prompt = format!(
+        "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
+    );
+
+    let generation_start = Instant::now();
+    let prompt_start = Instant::now();
+    let tokenizer = model.tokenizer()?;
+    let prompt_tokens = tokenizer.encode(&full_prompt)?;
+    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+
+    let mut prompt_processing_duration: Option<Duration> = None;
+
+    // We need to maintain decode state (scratch buffer) to handle utf8 splitting
+    let mut decode_scratch = Vec::new();
+    let mut decoded_chunk = String::new();
+
+    let callback = |token_id: u32| -> Result<bool, MetalError> {
+        let now = Instant::now();
+        // first token means prompt processing done (roughly)
+        let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
+
+        // Decode
+        // Foundry generates token IDs. Using Tokenizer::decode_token_arc logic
+        if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)? {
+            if tx
+                .send(AppEvent::Token {
+                    text,
+                    prompt_processing: prompt_duration,
+                    iteration: None, // Foundry doesn't report per-token time yet in callback
+                })
+                .is_err()
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+
+    model.generate_with_seed_streaming(
+        foundry,
+        &prompt_tokens,
+        cfg.max_tokens,
+        &[eos],
+        cfg.temperature,
+        cfg.top_k as u32,
+        cfg.top_p,
+        cfg.seed.map(|s| s as u32).unwrap_or_else(|| rand::random()),
+        callback,
+    )?;
+
+    // Send generation completion event with total generation time
+    let total_generation_time = generation_start.elapsed();
+    let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
+
+    Ok(())
 }

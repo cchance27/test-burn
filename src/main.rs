@@ -105,39 +105,100 @@ fn main() -> AppResult<()> {
                 }
                 emit_startup_memory_update(&worker_tx)?;
 
-                worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
-                let loader = GGUFModelLoader::new(gguf);
-                emit_startup_memory_update(&worker_tx)?;
-                let gguf_model = loader.load_model()?;
-                emit_startup_memory_update(&worker_tx)?;
-
-                worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
-                let mut qwen: metallic::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
-
-                // Report model weights breakdown
-                report_model_weight_breakdown(&qwen);
-                emit_startup_memory_update(&worker_tx)?;
-
-                worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-                let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
-                emit_startup_memory_update(&worker_tx)?;
-
-                worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                let tokens = tokenizer.encode(&prompt)?;
-                worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
-                emit_startup_memory_update(&worker_tx)?;
-
-                let cfg = metallic::generation::GenerationConfig {
-                    max_tokens: cli_config.generation.max_tokens,
-                    temperature: cli_config.generation.temperature as f32,
-                    top_p: cli_config.generation.top_p as f32,
-                    top_k: cli_config.generation.top_k,
-                    kv_initial_headroom_tokens: (cli_config.generation.max_tokens / 4).max(32),
-                    seed: cli_config.generation.seed,
-                };
-
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx)?;
+
+                match cli_config.engine {
+                    cli::config::Engine::Context => {
+                        worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
+                        let loader = GGUFModelLoader::new(gguf);
+                        emit_startup_memory_update(&worker_tx)?;
+                        let gguf_model = loader.load_model()?;
+                        emit_startup_memory_update(&worker_tx)?;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
+                        let mut qwen: metallic::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
+
+                        // Report model weights breakdown
+                        report_model_weight_breakdown(&qwen);
+                        emit_startup_memory_update(&worker_tx)?;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
+                        let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
+                        emit_startup_memory_update(&worker_tx)?;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
+                        let tokens = tokenizer.encode(&prompt)?;
+                        worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
+                        emit_startup_memory_update(&worker_tx)?;
+
+                        let cfg = metallic::generation::GenerationConfig {
+                            max_tokens: cli_config.generation.max_tokens,
+                            temperature: cli_config.generation.temperature as f32,
+                            top_p: cli_config.generation.top_p as f32,
+                            top_k: cli_config.generation.top_k,
+                            kv_initial_headroom_tokens: (cli_config.generation.max_tokens / 4).max(32),
+                            seed: cli_config.generation.seed,
+                        };
+
+                        worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+
+                        let start_time = std::time::Instant::now();
+                        generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx)?;
+                        let total_generation_time = start_time.elapsed();
+                        let _ = worker_tx.send(AppEvent::GenerationComplete { total_generation_time });
+                    }
+
+                    cli::config::Engine::Foundry => {
+                        worker_tx.send(AppEvent::StatusUpdate("Detecting architecture...".to_string()))?;
+                        let arch_name = gguf
+                            .metadata()
+                            .entries
+                            .get("general.architecture")
+                            .expect("Architecture not found in GGUF metadata")
+                            .clone();
+
+                        worker_tx.send(AppEvent::StatusUpdate(format!("Detected architecture: {:?}", arch_name)))?;
+
+                        // Determine spec file path
+                        let spec_path = if let metallic::gguf::GGUFValue::String(arch) = arch_name.clone() {
+                            if arch.contains("qwen2") {
+                                "models/qwen25.json"
+                            } else {
+                                // Fallback or error
+                                return Err(anyhow::anyhow!("Unsupported architecture for Foundry: {:?}", arch_name));
+                            }
+                        } else {
+                            // Fallback or error
+                            return Err(anyhow::anyhow!(
+                                "Architecture not listed in GGUF metadata for Foundry: {:?}",
+                                arch_name
+                            ));
+                        };
+
+                        worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
+                        let mut foundry = metallic::foundry::Foundry::new()?;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Building compiled model...".to_string()))?;
+                        let model = metallic::foundry::model::ModelBuilder::new()
+                            .with_spec_file(std::path::PathBuf::from(spec_path))
+                            .unwrap()
+                            .with_gguf(&gguf_path)
+                            .unwrap()
+                            .build(&mut foundry)?;
+
+                        let cfg = metallic::generation::GenerationConfig {
+                            max_tokens: cli_config.generation.max_tokens,
+                            temperature: cli_config.generation.temperature as f32,
+                            top_p: cli_config.generation.top_p as f32,
+                            top_k: cli_config.generation.top_k,
+                            kv_initial_headroom_tokens: 0,
+                            seed: cli_config.generation.seed,
+                        };
+
+                        worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+                        metallic::generation::generate_streaming_foundry(&mut foundry, &model, &prompt, &cfg, &worker_tx)?;
+                    }
+                }
 
                 worker_tx.send(AppEvent::StatusUpdate("Done.".to_string()))?;
                 Ok(())
@@ -508,7 +569,9 @@ fn run_text_mode(
 
     generation_handle.join().unwrap()?;
 
-    if let Some(total) = total_generation_time {
+    if std::env::var("METALLIC_PERF_OUTPUT").is_ok()
+        && let Some(total) = total_generation_time
+    {
         let total_s = total.as_secs_f64().max(1e-9);
         let tps_total = (generated_tokens as f64) / total_s;
         eprintln!("\n\n[metallic] generated_tokens={generated_tokens} total_s={total_s:.3} tps_total={tps_total:.2}");

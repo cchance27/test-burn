@@ -3,6 +3,61 @@ using namespace metal;
 
 // SwigluParams struct is injected by Foundry via struct_defs()
 
+// ============================================================================
+// SIMD GEMV Epilogue (for fused decode path)
+// ============================================================================
+
+/// SIMD GEMV epilogue that applies SwiGLU activation to gate+up accumulator outputs.
+/// Used by CompoundKernel fusions for fused RMSNorm + Gate/Up GEMV + SwiGLU.
+struct SwiGluEpilogue {
+    template<uint HEADS>
+    static void apply(
+        float acc[HEADS],
+        uint lane_id,
+        uint logical_col,
+        const uint N[HEADS],
+        const device half *bias[HEADS],
+        const uint has_bias_flags[HEADS],
+        const float alpha,
+        const float beta,
+        const device half *residual,
+        device half *result_y[HEADS]
+    ) {
+        if (logical_col >= N[0]) return;
+
+        float gate = acc[0];
+        gate += simd_shuffle_xor(gate, 16u);
+        gate += simd_shuffle_xor(gate, 8u);
+        gate += simd_shuffle_xor(gate, 4u);
+        gate += simd_shuffle_xor(gate, 2u);
+        gate += simd_shuffle_xor(gate, 1u);
+
+        float up = acc[1];
+        up += simd_shuffle_xor(up, 16u);
+        up += simd_shuffle_xor(up, 8u);
+        up += simd_shuffle_xor(up, 4u);
+        up += simd_shuffle_xor(up, 2u);
+        up += simd_shuffle_xor(up, 1u);
+
+        if (lane_id == 0) {
+            if (has_bias_flags[0] && bias[0]) gate += (float)bias[0][logical_col];
+            if (has_bias_flags[1] && bias[1]) up += (float)bias[1][logical_col];
+
+            float silu_gate = gate / (1.0f + exp(-gate));
+            float val = silu_gate * up;
+
+            result_y[0][logical_col] = (half)val;
+        }
+    }
+};
+
+// ============================================================================
+// Standalone Activation Kernel (for non-fused path)
+// Only compiled when NOT in a fused compound kernel context.
+// ============================================================================
+
+#ifndef FUSED_KERNEL
+
 /// SwiGLU Fused Activation kernel for half precision.
 ///
 /// Computes: output = SiLU(gate + gate_bias) * (up + up_bias)
@@ -14,7 +69,7 @@ kernel void swiglu_fused_activation_f16(
     device half* up_inout [[buffer(1)]],
     const device half* gate_bias [[buffer(2)]],
     const device half* up_bias [[buffer(3)]],
-    constant SwigluParams* params [[buffer(4)]],
+    constant SwigluParamsResolved* params [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint total_elements = params->total_elements;
@@ -103,3 +158,5 @@ kernel void swiglu_fused_activation_f16(
     float activated = gate_val * sigmoid;
     up_inout[up_index] = (half)(activated * up_val);
 }
+
+#endif // FUSED_KERNEL

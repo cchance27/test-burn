@@ -1,0 +1,68 @@
+//! KV Cache kernels for Foundry DSL.
+//!
+//! - `KvCacheWrite`: Writes current K/V into persistent cache at position
+//! - `KvCacheRead`: Reads cache slice [0..seq_len] for SDPA consumption
+
+mod read;
+
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
+pub use read::{KvCacheRead, KvCacheReadParams, KvCacheReadParamsResolved};
+
+use crate::{
+    foundry::spec::DynamicValue, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+};
+
+/// Parameters for KvCacheWrite kernel.
+#[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[repr(C)]
+pub struct KvCacheWriteParams {
+    /// Number of KV heads.
+    pub n_kv_heads: u32,
+    /// Dimension per head.
+    pub head_dim: u32,
+    /// Input sequence length (number of tokens in this step/prefill).
+    pub input_seq_len: DynamicValue<u32>,
+    /// Position to write to in cache (dynamic).
+    pub position_offset: DynamicValue<u32>,
+    /// Maximum sequence length (stride dimension in cache).
+    pub max_seq_len: DynamicValue<u32>,
+    /// Total elements to copy (n_kv_heads * head_dim).
+    pub total_elements: DynamicValue<u32>,
+    /// Layer index for cache selection.
+    pub layer_idx: DynamicValue<u32>,
+}
+
+/// KvCacheWrite kernel.
+///
+/// Copies the current K/V tensor into the cache at position_offset.
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "kv_cache_write/kv_cache_write.metal",
+    function = "kv_cache_write_kernel",
+    args = "KvCacheWriteParamsResolved",
+    dtype = "F16",
+    step = true
+)]
+pub struct KvCacheWrite {
+    /// Input K or V tensor [1, n_kv_heads, head_dim].
+    pub input: TensorArg,
+    /// Output cache [n_kv_heads, max_seq_len, head_dim].
+    #[arg(output)]
+    pub cache: TensorArg,
+    /// Kernel parameters.
+    pub params: KvCacheWriteParamsResolved,
+}
+
+impl KvCacheWrite {
+    /// Dispatch configuration.
+    pub fn dispatch_config(&self) -> DispatchConfig {
+        let total = self.params.total_elements as usize;
+        let threads_per_group = 256;
+        let num_groups = (total + threads_per_group - 1) / threads_per_group;
+
+        DispatchConfig {
+            grid: GridSize::d1(num_groups),
+            group: ThreadgroupSize::d1(threads_per_group),
+        }
+    }
+}

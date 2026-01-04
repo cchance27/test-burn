@@ -1,13 +1,8 @@
-use std::sync::atomic::{AtomicU32, Ordering};
-
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputeCommandEncoder, MTLComputePipelineState};
 
 use super::*;
 use crate::{CommandBuffer, Context, MetalError, Operation, Tensor, TensorElement, caching::ResourceCache, tensor::dtypes::U32};
-
-// Global counter for seed variation
-static SEED_COUNTER: AtomicU32 = AtomicU32::new(0);
 
 mod sample_topk_fused;
 use sample_topk_fused::SampleTopKFusedOp;
@@ -49,12 +44,8 @@ impl CustomKernelInvocable for SampleTopKTopPOp {
     ) -> Result<(Box<dyn Operation>, <Self::OutputTuple<T> as MultiTensorOutput<T>>::Tensors), MetalError> {
         let (logits, vocab_size, k, top_p, temperature, base_seed, per_thread_m_clamp) = args;
 
-        // CRITICAL: Vary the seed on each call!
-        let counter = SEED_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let varied_seed = base_seed.wrapping_add(counter);
-
         let (output_token,) = ctx.call_custom::<SampleTopKFusedOp>(
-            (logits.clone(), vocab_size, k, top_p, temperature, varied_seed, per_thread_m_clamp),
+            (logits.clone(), vocab_size, k, top_p, temperature, base_seed, per_thread_m_clamp),
             None,
         )?;
         let op = Box::new(SampleTopKWrapper);

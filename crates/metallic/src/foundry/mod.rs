@@ -10,7 +10,9 @@ use crate::{
     error::MetalError, tensor::Dtype, types::{DispatchConfig, MetalDevice, MetalQueue}
 };
 
+pub mod model;
 pub mod pool;
+pub mod spec;
 pub mod storage;
 pub mod tensor;
 
@@ -21,7 +23,7 @@ pub struct Foundry {
     /// Type-safe registry for resources (caches, pools, etc.)
     resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
     /// Cache for compiled pipelines
-    pipelines: FxHashMap<TypeId, Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    pipelines: FxHashMap<(TypeId, u64), Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
 }
 
 /// Metal kernel source (file path or raw string).
@@ -79,15 +81,20 @@ impl Foundry {
 
     /// Loads or retrieves a compute pipeline for the given Kernel type.
     pub fn load_kernel<K: Kernel>(&mut self, kernel: &K) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+        use std::hash::{Hash as _, Hasher as _};
+
         use objc2_foundation::NSString;
 
-        if let Some(pipeline) = self.pipelines.get(&std::any::TypeId::of::<K::Id>()) {
+        let mut hasher = rustc_hash::FxHasher::default();
+        kernel.function_name().hash(&mut hasher);
+        let key = (TypeId::of::<K::Id>(), hasher.finish());
+
+        if let Some(pipeline) = self.pipelines.get(&key) {
             return Ok(pipeline.clone());
         }
 
-        let function_name = kernel.function_name();
-
         // 1. Try Default Library (loading from Bundle/built output)
+        let function_name = kernel.function_name();
         if let Some(lib) = self.device.newDefaultLibrary() {
             let ns_name = NSString::from_str(function_name);
             if let Some(func) = lib.newFunctionWithName(&ns_name) {
@@ -95,7 +102,7 @@ impl Foundry {
                     .device
                     .newComputePipelineStateWithFunction_error(&func)
                     .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
-                self.pipelines.insert(TypeId::of::<K::Id>(), pipeline.clone());
+                self.pipelines.insert(key, pipeline.clone());
                 return Ok(pipeline);
             }
         }
@@ -197,7 +204,9 @@ impl Foundry {
         let _library_options = None::<&objc2_metal::MTLCompileOptions>;
 
         let options = objc2_metal::MTLCompileOptions::new();
-        options.setLanguageVersion(objc2_metal::MTLLanguageVersion::Version2_4); // Or 3.0?
+        // Match legacy kernel compilation settings to avoid source-level feature mismatches
+        // (the matmul_gemv fused kernels rely on newer MSL features).
+        options.setLanguageVersion(objc2_metal::MTLLanguageVersion::Version4_0);
         options.setEnableLogging(true);
         // If we had library options, we'd apply them here
 
@@ -217,7 +226,7 @@ impl Foundry {
             .newComputePipelineStateWithFunction_error(&function)
             .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
 
-        self.pipelines.insert(std::any::TypeId::of::<K::Id>(), pipeline.clone());
+        self.pipelines.insert(key, pipeline.clone());
         Ok(pipeline)
     }
 

@@ -29,37 +29,50 @@ pub struct SampleParams {
 #[derive(KernelArgs, Clone)]
 pub struct SampleTopK {
     /// Input logits [vocab_size].
-    #[arg(buffer = 0)]
     pub logits: TensorArg,
     /// Output token index [1].
-    #[arg(buffer = 1, output)]
+    #[arg(output)]
     pub output: TensorArg,
     /// Kernel parameters.
-    #[arg(buffer = 2)]
     pub params: SampleParams,
+    /// Threads per threadgroup (must match dispatch_config()).
+    #[arg(skip)]
+    pub threads_per_threadgroup: usize,
 }
 
 impl SampleTopK {
     /// Create a new SampleTopK kernel.
     pub fn new(logits: &TensorArg, output: &TensorArg, vocab_size: u32, k: u32, top_p: f32, temperature: f32, seed: u32) -> Self {
-        const THREADS_PER_GROUP: u32 = 1024;
+        const THREADS_PER_GROUP_DEFAULT: u32 = 1024;
+        const PER_THREAD_M_CLAMP_DEFAULT: u32 = 40;
+
+        let threads_per_group = std::env::var("METALLIC_SAMPLE_TPTG")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .filter(|&v| v > 0 && v <= THREADS_PER_GROUP_DEFAULT as usize)
+            .unwrap_or(THREADS_PER_GROUP_DEFAULT as usize);
 
         // Logic from legacy select_default_per_thread_m
-        let default_m = if THREADS_PER_GROUP >= 1024 {
+        let default_m = if threads_per_group >= 1024 {
             6
-        } else if THREADS_PER_GROUP >= 896 {
+        } else if threads_per_group >= 896 {
             4
-        } else if THREADS_PER_GROUP >= 320 {
+        } else if threads_per_group >= 320 {
             6
-        } else if THREADS_PER_GROUP >= 256 {
+        } else if threads_per_group >= 256 {
             5
+        } else if threads_per_group >= 192 {
+            4
         } else {
             3
         };
 
-        // Clamp logic
-        let per_thread_m_clamp = 6; // Typical default max
-        let per_thread_m = default_m.min(k).min(per_thread_m_clamp).max(1);
+        let per_thread_m_clamp = PER_THREAD_M_CLAMP_DEFAULT;
+        let override_m = std::env::var("METALLIC_SAMPLE_PER_THREAD_M")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .filter(|&v| v >= 1);
+        let per_thread_m = override_m.unwrap_or(default_m).min(k).min(per_thread_m_clamp).max(1);
 
         Self {
             logits: logits.clone(),
@@ -73,6 +86,7 @@ impl SampleTopK {
                 per_thread_m,
                 num_threadgroups: 1, // Currently single-block logic
             },
+            threads_per_threadgroup: threads_per_group,
         }
     }
 }
@@ -111,7 +125,7 @@ impl Kernel for SampleTopK {
     fn dispatch_config(&self) -> DispatchConfig {
         DispatchConfig {
             grid: GridSize::d1(1), // Single threadgroup for now
-            group: ThreadgroupSize::d1(1024),
+            group: ThreadgroupSize::d1(self.threads_per_threadgroup),
         }
     }
 

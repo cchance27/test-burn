@@ -26,10 +26,9 @@ pub struct RandomUniformParams {
 #[derive(KernelArgs, Clone)]
 pub struct RandomUniform {
     /// Output tensor.
-    #[arg(buffer = 0, output)]
+    #[arg(output)]
     pub output: TensorArg,
     /// Kernel parameters.
-    #[arg(buffer = 1)]
     pub params: RandomUniformParams,
     /// Number of elements.
     pub length: usize,

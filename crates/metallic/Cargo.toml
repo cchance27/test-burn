@@ -40,6 +40,7 @@ rayon = "1.11"
 rustc-hash = "2.1.1"
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.17"
+typetag = "0.2"
 memmap2 = "0.9"
 byteorder = "1.5"
 bytemuck = { version = "1.15", features = ["derive"] }

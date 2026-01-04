@@ -13,3 +13,4 @@ pub mod softmax_vec;
 pub use softmax::*;
 pub use softmax_block::*;
 pub use softmax_vec::*;
+pub mod step;

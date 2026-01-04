@@ -265,9 +265,7 @@ struct FusedGemv { ... }
 
 **Rust Struct (fusion.rs:24-46):**
 ```rust
-#[arg(buffer = 0)]
 pub matrix: TensorArg,
-#[arg(buffer = 1)]
 pub vector_x: TensorArg,
 ```
 

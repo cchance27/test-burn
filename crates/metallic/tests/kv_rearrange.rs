@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic::{
-    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::kv_rearrange::KvRearrangeOp, metals::kv_rearrange::{KvRearrange, KvRearrangeParams}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
+    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::kv_rearrange::KvRearrangeOp, metals::kv_rearrange::{KvRearrange, KvRearrangeParamsResolved}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -115,7 +115,7 @@ fn run_parity_test(cfg: TestConfig) {
     let input_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![input_elements], TensorInit::CopyFrom(&input_data)).unwrap();
     let output_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![output_elements], TensorInit::Uninitialized).unwrap();
 
-    let params = KvRearrangeParams {
+    let params = KvRearrangeParamsResolved {
         kv_dim: cfg.kv_dim as u32,
         row_stride: row_stride as u32,
         kv_head_dim: cfg.kv_head_dim as u32,
@@ -129,7 +129,11 @@ fn run_parity_test(cfg: TestConfig) {
     let input_arg = TensorArg::from_tensor(&input_foundry);
     let output_arg = TensorArg::from_tensor(&output_foundry);
 
-    let kernel = KvRearrange::new(&input_arg, &output_arg, params);
+    let kernel = KvRearrange {
+        input: input_arg,
+        output: output_arg,
+        params,
+    };
     foundry.run(&kernel).unwrap();
 
     let foundry_result = FoundryTensor::to_vec(&output_foundry, &foundry);

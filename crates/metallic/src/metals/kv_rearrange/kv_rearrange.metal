@@ -10,7 +10,7 @@ using namespace metal;
 kernel void kv_rearrange_kernel_f16(
     const device half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
-    constant KvRearrangeParams* params [[buffer(2)]],
+    constant KvRearrangeParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint kv_dim = params->kv_dim;

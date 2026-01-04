@@ -1,20 +1,30 @@
 use metallic_macros::MetalStruct;
 
 // Parameter struct matching the Metal side
-#[derive(Clone, Copy, Debug, MetalStruct)]
+#[derive(Clone, Copy, Debug, MetalStruct, serde::Serialize, serde::Deserialize, Default)]
 #[repr(C)]
 pub struct GemvParams {
     #[metal(name = "K")]
+    #[serde(default)]
     pub k: u32,
     #[metal(name = "N")]
+    #[serde(default)]
     pub n: u32,
+    #[serde(default)]
     pub blocks_per_k: u32,
+    #[serde(default)]
     pub weights_per_block: u32,
+    #[serde(default)]
     pub batch: u32,
+    #[serde(default)]
     pub stride_x: u32,
+    #[serde(default)]
     pub stride_y: u32,
+    #[serde(default)]
     pub stride_a: u32,
+    #[serde(default)]
     pub stride_w: u32,
+    #[serde(default)]
     pub stride_scale: u32,
 }
 
@@ -29,6 +39,7 @@ pub mod canonical;
 pub use canonical::GemvCanonical;
 // Re-export GemvRowMajor as GemvDense for backwards compatibility
 pub use row_major::GemvRowMajor as GemvDense;
+pub mod step;
 
 #[cfg(test)]
 mod tests {

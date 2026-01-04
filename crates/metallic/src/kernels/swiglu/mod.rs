@@ -36,7 +36,7 @@ impl DefaultKernelInvocable for SwiGLUFusedActivationOp {
     type Args<'a, T: TensorElement> = (Tensor<T>, Tensor<T>, Tensor<T>, Tensor<T>, u32, u32);
 
     fn function_id() -> Option<KernelFunction> {
-        Some(KernelFunction::SwigluFusedActivation)
+        Some(KernelFunction::Swiglu)
     }
 
     fn new<'a, T: TensorElement>(

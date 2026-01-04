@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic::{
-    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::rmsnorm::RMSNormOp, metals::rmsnorm::{RmsNorm, RmsNormParams}, policies::PolicyQ8, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage, U8}, types::TensorArg
+    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::rmsnorm::RMSNormOp, metals::rmsnorm::{RmsNorm, RmsNormParamsResolved}, policies::PolicyQ8, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage, U8}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -99,7 +99,7 @@ fn run_f16_parity_test(cfg: TestConfig) {
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![total_elements], TensorInit::Uninitialized).unwrap();
     let gamma = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.feature_dim], TensorInit::CopyFrom(&gamma_half)).unwrap();
 
-    let params = RmsNormParams {
+    let params = RmsNormParamsResolved {
         feature_dim: cfg.feature_dim as u32,
         total_elements: total_elements as u32,
     };
@@ -157,7 +157,7 @@ fn run_cpu_test(cfg: TestConfig) {
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![total_elements], TensorInit::Uninitialized).unwrap();
     let gamma = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.feature_dim], TensorInit::CopyFrom(&gamma_half)).unwrap();
 
-    let params = RmsNormParams {
+    let params = RmsNormParamsResolved {
         feature_dim: cfg.feature_dim as u32,
         total_elements: total_elements as u32,
     };
@@ -412,7 +412,7 @@ fn run_q8_policy_test(cfg: TestConfig) {
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![total_elements], TensorInit::Uninitialized).unwrap();
     let gamma = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.feature_dim], TensorInit::CopyFrom(&gamma_half)).unwrap();
 
-    let params = RmsNormParams {
+    let params = RmsNormParamsResolved {
         feature_dim: cfg.feature_dim as u32,
         total_elements: total_elements as u32,
     };

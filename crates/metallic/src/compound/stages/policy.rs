@@ -49,6 +49,7 @@ impl<P: MetalPolicy + Default + 'static> Stage for PolicyStage<P> {
     fn emit(&self, _input_var: &str) -> (String, String) {
         let policy = P::default();
         let (output_var, dequant_code) = policy.load_and_dequant("data_ptr", "scale_ptr", "offset");
-        (output_var.to_string(), format!("    {}", dequant_code))
+        let typedef = format!("typedef {} Policy;", policy.struct_name());
+        (output_var.to_string(), format!("    {}\n    {}", typedef, dequant_code))
     }
 }

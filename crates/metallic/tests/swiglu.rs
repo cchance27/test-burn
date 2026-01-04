@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic::{
-    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::swiglu::SwiGLUFusedActivationOp, metals::swiglu::{SwigluFusedActivation, SwigluParams}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
+    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::swiglu::SwiGLUFusedActivationOp, metals::swiglu::{Swiglu, SwigluParamsResolved}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -117,7 +117,7 @@ fn run_parity_test(cfg: TestConfig) {
         FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.hidden_dim], TensorInit::CopyFrom(&up_bias_data)).unwrap();
 
     let vector_width = if cfg.hidden_dim % 4 == 0 { 4 } else { 1 };
-    let params = SwigluParams {
+    let params = SwigluParamsResolved {
         total_elements: total_elements as u32,
         bias_len: cfg.hidden_dim as u32,
         vector_width,
@@ -130,7 +130,7 @@ fn run_parity_test(cfg: TestConfig) {
     let gate_bias_arg = TensorArg::from_tensor(&gate_bias_foundry);
     let up_bias_arg = TensorArg::from_tensor(&up_bias_foundry);
 
-    let kernel = SwigluFusedActivation::new(&gate_arg, &up_arg, &gate_bias_arg, &up_bias_arg, params);
+    let kernel = Swiglu::new(&gate_arg, &up_arg, &gate_bias_arg, &up_bias_arg, params);
     foundry.run(&kernel).unwrap();
 
     let foundry_result = FoundryTensor::to_vec(&up_foundry, &foundry);

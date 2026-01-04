@@ -1,16 +1,14 @@
 // GEMV Canonical Kernel (k-block-major layout)
 // Layout: weights organized in blocks of `weights_per_block` elements.
+// NOTE: ALWAYS_INLINE is provided by policies/base.metal, which must be included.
+
 #include <metal_stdlib>
 using namespace metal;
-
-#ifndef ALWAYS_INLINE
-#define ALWAYS_INLINE __attribute__((always_inline))
-#endif
 
 // GemvParams struct is injected by Rust's MetalStruct derive
 
 // Canonical-specific dispatch constants
-constant uint COLS_PER_TG = 4;
+constant uint COLS_PER_TG = 8; // Match Legacy cols8 variant
 constant uint WARP_SIZE = 32;
 constant uint THREADS_PER_BLOCK_GROUP = 8;
 constant uint ELEMS_PER_THREAD = 4;
@@ -140,10 +138,10 @@ void run_gemv_canonical_core(
         partial += simd_shuffle_xor(partial, 2u);
         partial += simd_shuffle_xor(partial, 1u);
         
-        // Only sub_lane 0 contributes to accumulator (avoids double-counting)
-        if (sub_lane == 0u) {
-            acc += partial;
-        }
+        // Match Legacy: only sub_lane 0 returns non-zero, others return 0.0f
+        // All lanes accumulate, but only sub_lane==0 contributes non-zero values
+        float contribution = (sub_lane == 0u) ? partial : 0.0f;
+        acc += contribution;
         
         k_chunk_base += BLOCKS_PER_CHUNK;
     }
@@ -192,27 +190,21 @@ void run_gemv_canonical_core(
         partial += simd_shuffle_xor(partial, 2u);
         partial += simd_shuffle_xor(partial, 1u);
         
-        if (sub_lane == 0u) {
-            acc += partial;
-        }
+        // Match Legacy: only sub_lane 0 returns non-zero, others return 0.0f
+        float contribution = (sub_lane == 0u) ? partial : 0.0f;
+        acc += contribution;
         
         k_chunk_base += BLOCKS_PER_CHUNK;
     }
     
-    // Final Warp Reduction
-    // Shuffle to gather partial sums from sub_lane 0 threads
-    // The partials are at lanes 0, 8, 16, 24
-    float final_sum = 0.0f;
-    if (sub_lane == 0u) {
-        // Each block_in_group's sub_lane 0 has a partial
-        // Reduce across block_in_groups using shuffle
-        final_sum = acc;
-        final_sum += simd_shuffle_xor(final_sum, 16u);
-        final_sum += simd_shuffle_xor(final_sum, 8u);
-        final_sum += simd_shuffle_xor(final_sum, 4u);
-        final_sum += simd_shuffle_xor(final_sum, 2u);
-        final_sum += simd_shuffle_xor(final_sum, 1u);
-    }
+    // Final Warp Reduction (ALL lanes participate, matching Legacy DefaultEpilogue)
+    // Only lanes 0, 8, 16, 24 have non-zero acc values
+    float final_sum = acc;
+    final_sum += simd_shuffle_xor(final_sum, 16u);
+    final_sum += simd_shuffle_xor(final_sum, 8u);
+    final_sum += simd_shuffle_xor(final_sum, 4u);
+    final_sum += simd_shuffle_xor(final_sum, 2u);
+    final_sum += simd_shuffle_xor(final_sum, 1u);
     
     // Epilogue
     if (lane_id == 0) {
@@ -245,12 +237,15 @@ void run_gemv_canonical_core(
     const uint batch_idx = gid.z;
     if (batch_idx >= params->batch) return;
 
+    // Standalone kernel uses PolicyF16
+    using Policy = PolicyF16;
+
     if (has_bias != 0) {
-        run_gemv_canonical_core<PolicyF16, true>(
+        run_gemv_canonical_core<Policy, true>(
             matrix, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, scale_bytes
         );
     } else {
-        run_gemv_canonical_core<PolicyF16, false>(
+        run_gemv_canonical_core<Policy, false>(
             matrix, vector_x, result_y, params, bias, residual, alpha, beta, gid, lid, scale_bytes
         );
     }

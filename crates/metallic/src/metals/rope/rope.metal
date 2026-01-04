@@ -14,7 +14,7 @@ kernel void rope_kernel_f16(
     device half* output [[buffer(1)]],
     const device half* cos_buf [[buffer(2)]],
     const device half* sin_buf [[buffer(3)]],
-    constant RopeParams* params [[buffer(4)]],
+    constant RopeParamsResolved* params [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint dim = params->dim;

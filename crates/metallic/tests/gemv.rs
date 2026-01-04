@@ -1209,3 +1209,289 @@ fn test_gemv_row_major_batching_regression() {
         assert!((val - 16.0).abs() < 0.1, "Batch 1 index {} mismatch: got {}, expected 16.0", i, val);
     }
 }
+
+// ============================================================================
+// GemvCanonical Parity Tests
+// ============================================================================
+
+/// Test that DSL GemvCanonical produces same results as Legacy MatmulGemvOp with DenseCanonical weights.
+#[test]
+#[serial]
+fn test_gemv_canonical_vs_legacy_parity() {
+    use metallic::tensor::CanonicalF16Tensor;
+
+    let mut ctx: Context<F16> = Context::new().unwrap();
+    let mut foundry = Foundry::new().unwrap();
+
+    let k = 128;
+    let n = 64;
+
+    // Create random KN weight matrix
+    let mut rng = rng();
+    let kn_data: Vec<f16> = (0..k * n).map(|_| f16::from_f32(rng.random::<f32>() - 0.5)).collect();
+
+    // Create input vector
+    let x_data: Vec<f16> = (0..k).map(|i| f16::from_f32((i as f32 / k as f32) * 2.0 - 1.0)).collect();
+
+    // === Legacy Path ===
+    // Create canonical tensor for Legacy
+    let mut legacy_canonical = CanonicalF16Tensor::<F16>::new(vec![k, n], &mut ctx).unwrap();
+    legacy_canonical.write_from_kn_slice(&kn_data, &[k, n], 0).unwrap();
+
+    let x_legacy = Tensor::<F16>::new(vec![1, k], LegacyStorage::Pooled(&mut ctx), TensorInit::CopyFrom(&x_data)).unwrap();
+
+    let legacy_out = ctx
+        .call::<MatmulGemvOp>((&x_legacy, TensorType::DenseCanonical(&legacy_canonical), false, None), None)
+        .unwrap();
+    ctx.synchronize();
+    let legacy_data = legacy_out.as_slice().to_vec();
+
+    // === DSL Path ===
+    // Get canonical data layout for DSL
+    let canonical_slice = legacy_canonical.data.as_slice();
+
+    // Create Foundry tensors for DSL kernel
+    let matrix =
+        FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![canonical_slice.len()], TensorInit::CopyFrom(canonical_slice)).unwrap();
+    let vector = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&x_data)).unwrap();
+    let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized).unwrap();
+
+    let params = GemvParams {
+        k: k as u32,
+        n: n as u32,
+        blocks_per_k: ((k + 31) / 32) as u32,
+        weights_per_block: 32,
+        batch: 1,
+        stride_x: k as u32,
+        stride_y: n as u32,
+        stride_a: 0,
+        stride_w: 0,
+        stride_scale: 0,
+    };
+
+    let kernel = GemvCanonical::new(
+        &TensorArg::from_tensor(&matrix),
+        &TensorArg::from_tensor(&vector),
+        &TensorArg::from_tensor(&output),
+        params,
+    );
+
+    foundry.run(&kernel).unwrap();
+    let dsl_data = FoundryTensor::to_vec(&output, &foundry);
+
+    // Compare results
+    let mut max_diff: f32 = 0.0;
+    let mut avg_diff: f32 = 0.0;
+    for i in 0..n {
+        let diff = (legacy_data[i].to_f32() - dsl_data[i].to_f32()).abs();
+        max_diff = max_diff.max(diff);
+        avg_diff += diff;
+    }
+    avg_diff /= n as f32;
+
+    println!("\n=== GemvCanonical vs Legacy Parity (k={}, n={}) ===", k, n);
+    println!(
+        "Legacy first 10: {:?}",
+        &legacy_data[..10].iter().map(|x| x.to_f32()).collect::<Vec<_>>()
+    );
+    println!(
+        "DSL    first 10: {:?}",
+        &dsl_data[..10].iter().map(|x| x.to_f32()).collect::<Vec<_>>()
+    );
+    println!("Max diff: {:.6}, Avg diff: {:.6}", max_diff, avg_diff);
+
+    // Should be exact match (same algorithm, same data)
+    assert!(max_diff < PARITY_TOLERANCE, "GemvCanonical parity failed: max_diff={:.6}", max_diff);
+}
+
+/// Test GemvCanonical with Qwen-like dimensions.
+#[test]
+#[serial]
+fn test_gemv_canonical_vs_legacy_qwen_dims() {
+    use metallic::tensor::CanonicalF16Tensor;
+
+    let mut ctx: Context<F16> = Context::new().unwrap();
+    let mut foundry = Foundry::new().unwrap();
+
+    // Qwen2.5-0.5B FFN dimensions
+    let k = 896;
+    let n = 4864;
+
+    // Create random KN weight matrix
+    let mut rng = rng();
+    let kn_data: Vec<f16> = (0..k * n).map(|_| f16::from_f32(rng.random::<f32>() - 0.5)).collect();
+
+    // Create input vector
+    let x_data: Vec<f16> = (0..k).map(|i| f16::from_f32((i as f32 / k as f32) * 2.0 - 1.0)).collect();
+
+    // === Legacy Path ===
+    let mut legacy_canonical = CanonicalF16Tensor::<F16>::new(vec![k, n], &mut ctx).unwrap();
+    legacy_canonical.write_from_kn_slice(&kn_data, &[k, n], 0).unwrap();
+
+    let x_legacy = Tensor::<F16>::new(vec![1, k], LegacyStorage::Pooled(&mut ctx), TensorInit::CopyFrom(&x_data)).unwrap();
+
+    let legacy_out = ctx
+        .call::<MatmulGemvOp>((&x_legacy, TensorType::DenseCanonical(&legacy_canonical), false, None), None)
+        .unwrap();
+    ctx.synchronize();
+    let legacy_data = legacy_out.as_slice().to_vec();
+
+    // === DSL Path ===
+    let canonical_slice = legacy_canonical.data.as_slice();
+    let matrix =
+        FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![canonical_slice.len()], TensorInit::CopyFrom(canonical_slice)).unwrap();
+    let vector = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&x_data)).unwrap();
+    let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized).unwrap();
+
+    let params = GemvParams {
+        k: k as u32,
+        n: n as u32,
+        blocks_per_k: ((k + 31) / 32) as u32,
+        weights_per_block: 32,
+        batch: 1,
+        stride_x: k as u32,
+        stride_y: n as u32,
+        stride_a: 0,
+        stride_w: 0,
+        stride_scale: 0,
+    };
+
+    let kernel = GemvCanonical::new(
+        &TensorArg::from_tensor(&matrix),
+        &TensorArg::from_tensor(&vector),
+        &TensorArg::from_tensor(&output),
+        params,
+    );
+
+    foundry.run(&kernel).unwrap();
+    let dsl_data = FoundryTensor::to_vec(&output, &foundry);
+
+    // Compare results
+    let mut max_diff: f32 = 0.0;
+    let mut avg_diff: f32 = 0.0;
+    for i in 0..n {
+        let diff = (legacy_data[i].to_f32() - dsl_data[i].to_f32()).abs();
+        max_diff = max_diff.max(diff);
+        avg_diff += diff;
+    }
+    avg_diff /= n as f32;
+
+    println!("\n=== GemvCanonical vs Legacy Parity (Qwen dims: k={}, n={}) ===", k, n);
+    println!(
+        "Legacy first 10: {:?}",
+        &legacy_data[..10].iter().map(|x| x.to_f32()).collect::<Vec<_>>()
+    );
+    println!(
+        "DSL    first 10: {:?}",
+        &dsl_data[..10].iter().map(|x| x.to_f32()).collect::<Vec<_>>()
+    );
+    println!("Max diff: {:.6}, Avg diff: {:.6}", max_diff, avg_diff);
+
+    // F16 accumulation at scale may introduce small differences
+    // 0.001 max diff across 4864 outputs is excellent for F16
+    assert!(max_diff < 0.01, "GemvCanonical Qwen parity failed: max_diff={:.6}", max_diff);
+}
+
+// ============================================================================
+// Canonical Weight Conversion Parity Test
+// ============================================================================
+
+/// Test that our canonical k-block weight conversion matches Legacy CanonicalF16Tensor layout.
+#[test]
+#[serial]
+fn test_canonical_weight_conversion_parity() {
+    use metallic::tensor::{CanonicalF16Tensor, F16_CANONICAL_WEIGHTS_PER_BLOCK};
+
+    let mut ctx: Context<F16> = Context::new().unwrap();
+
+    // Test with various dimensions
+    let test_cases = vec![
+        (128, 64),   // Small
+        (256, 128),  // Medium
+        (896, 4864), // Qwen FFN gate/up: d_model -> intermediate_size
+        (4864, 896), // Qwen FFN down: intermediate_size -> d_model
+    ];
+
+    for (k, n) in test_cases {
+        println!("\n=== Testing canonical conversion: K={}, N={} ===", k, n);
+
+        // Create random KN weight matrix (row-major: [K, N])
+        let mut rng = rng();
+        let kn_data: Vec<f16> = (0..k * n).map(|_| f16::from_f32(rng.random::<f32>() - 0.5)).collect();
+
+        // === Legacy Conversion via CanonicalF16Tensor ===
+        let mut legacy_canonical = CanonicalF16Tensor::<F16>::new(vec![k, n], &mut ctx).unwrap();
+        legacy_canonical.write_from_kn_slice(&kn_data, &[k, n], 0).unwrap();
+        let legacy_data = legacy_canonical.data.as_slice().to_vec();
+
+        // === DSL-style Conversion (matching bind_gguf_tensor_canonical) ===
+        const WEIGHTS_PER_BLOCK: usize = 32;
+        let blocks_per_k = (k + WEIGHTS_PER_BLOCK - 1) / WEIGHTS_PER_BLOCK;
+        let canonical_len = blocks_per_k * n * WEIGHTS_PER_BLOCK;
+
+        let mut dsl_data = vec![f16::ZERO; canonical_len];
+
+        for out_idx in 0..n {
+            for block in 0..blocks_per_k {
+                let k_base = block * WEIGHTS_PER_BLOCK;
+                let dst_base = (block * n + out_idx) * WEIGHTS_PER_BLOCK;
+                let remaining = k.saturating_sub(k_base);
+
+                if remaining >= WEIGHTS_PER_BLOCK {
+                    for i in 0..WEIGHTS_PER_BLOCK {
+                        let k_idx = k_base + i;
+                        let src_idx = k_idx * n + out_idx;
+                        dsl_data[dst_base + i] = kn_data[src_idx];
+                    }
+                } else if remaining > 0 {
+                    for i in 0..remaining {
+                        let k_idx = k_base + i;
+                        let src_idx = k_idx * n + out_idx;
+                        dsl_data[dst_base + i] = kn_data[src_idx];
+                    }
+                    // Padding: zeros already initialized
+                }
+            }
+        }
+
+        // Compare layouts
+        assert_eq!(
+            legacy_data.len(),
+            dsl_data.len(),
+            "Length mismatch for K={}, N={}: Legacy={}, DSL={}",
+            k,
+            n,
+            legacy_data.len(),
+            dsl_data.len()
+        );
+
+        let mut max_diff: f32 = 0.0;
+        let mut mismatch_count = 0usize;
+        for i in 0..legacy_data.len() {
+            let legacy_val = legacy_data[i].to_f32();
+            let dsl_val = dsl_data[i].to_f32();
+            let diff = (legacy_val - dsl_val).abs();
+            if diff > 0.0 {
+                mismatch_count += 1;
+                if mismatch_count <= 3 {
+                    println!("  Mismatch at {}: legacy={}, dsl={}", i, legacy_val, dsl_val);
+                }
+            }
+            max_diff = max_diff.max(diff);
+        }
+
+        println!("  Canonical data length: {}", legacy_data.len());
+        println!("  Max diff: {:.6}, Mismatches: {}", max_diff, mismatch_count);
+
+        assert!(
+            max_diff == 0.0,
+            "Canonical weight conversion mismatch for K={}, N={}: max_diff={:.6}, mismatches={}",
+            k,
+            n,
+            max_diff,
+            mismatch_count
+        );
+    }
+
+    println!("\n=== All canonical weight conversion tests PASSED ===");
+}

@@ -66,6 +66,11 @@ pub struct Tokenizer {
     special_tokens: SpecialTokens,
     /// Whether to add BOS token
     add_bos_token: bool,
+    /// Optional chat template from GGUF metadata (model-specific).
+    ///
+    /// Note: this is often a Jinja template; Metallic currently uses this as a signal
+    /// to enable a minimal, fast-path formatter for single-turn prompts.
+    chat_template: Option<Arc<str>>,
     /// Cache for BPE tokenization results
     bpe_cache: RwLock<FxHashMap<String, Vec<u32>>>,
     /// ID-based BPE merges for optimized tokenization
@@ -86,6 +91,7 @@ impl Tokenizer {
         token_types: FxHashMap<u32, i32>,
         special_tokens: SpecialTokens,
         add_bos_token: bool,
+        chat_template: Option<String>,
     ) -> Result<Self, MetalError> {
         // Convert vocabulary into shared strings and build reverse map
         let mut vocab_arc = FxHashMap::default();
@@ -129,6 +135,12 @@ impl Tokenizer {
             }
         }
 
+        let chat_template = chat_template
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(Arc::<str>::from);
+
         Ok(Self {
             vocab: vocab_arc,
             vocab_r,
@@ -136,6 +148,7 @@ impl Tokenizer {
             token_types,
             special_tokens,
             add_bos_token,
+            chat_template,
             bpe_cache: RwLock::new(FxHashMap::default()),
             merges_ranks,
             merges_results,
@@ -146,7 +159,7 @@ impl Tokenizer {
 
     /// Create a new tokenizer with the given vocabulary, merges, and default special tokens
     pub fn from_vocab_and_merges(vocab: FxHashMap<u32, String>, merges: Vec<(String, String)>) -> Result<Self, MetalError> {
-        Self::new(vocab, merges, FxHashMap::default(), SpecialTokens::default(), false)
+        Self::new(vocab, merges, FxHashMap::default(), SpecialTokens::default(), false, None)
     }
 
     /// Create a new tokenizer with custom configuration
@@ -156,7 +169,7 @@ impl Tokenizer {
         special_tokens: SpecialTokens,
         add_bos_token: bool,
     ) -> Result<Self, MetalError> {
-        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
+        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token, None)
     }
 
     /// Create a tokenizer from any source that provides vocabulary and merges
@@ -169,7 +182,7 @@ impl Tokenizer {
     ) -> Result<Self, MetalError> {
         let vocab: FxHashMap<u32, String> = vocab_source.into_iter().collect();
         let merges: Vec<(String, String)> = merges_source.into_iter().collect();
-        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token)
+        Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token, None)
     }
 
     /// Create a tokenizer from GGUF metadata
@@ -205,6 +218,11 @@ impl Tokenizer {
                 _ => None,
             })
             .unwrap_or(false);
+
+        let chat_template = metadata.entries.get("tokenizer.chat_template").and_then(|v| match v {
+            crate::gguf::GGUFValue::String(value) => Some(value.clone()),
+            _ => None,
+        });
 
         // Parse tokens array
         let tokens = match tokens_value {
@@ -272,7 +290,7 @@ impl Tokenizer {
             pad_token_id,
         };
 
-        Self::new(vocab, merges, token_types_map, special_tokens, add_bos_token)
+        Self::new(vocab, merges, token_types_map, special_tokens, add_bos_token, chat_template)
     }
 
     /// Encode text into tokens (defaults to encode_simd now that we've benchmarked it as fastest in all lengths)
@@ -629,6 +647,48 @@ impl Tokenizer {
     /// Get special tokens
     pub fn special_tokens(&self) -> &SpecialTokens {
         &self.special_tokens
+    }
+
+    pub fn chat_template(&self) -> Option<&str> {
+        self.chat_template.as_deref()
+    }
+
+    /// Format a single-turn chat prompt for chat-template models (e.g. Qwen2.5 Instruct).
+    ///
+    /// If `prompt` already appears to be templated (contains `<|im_start|>`), it is returned as-is.
+    /// If the tokenizer does not have a chat template, `prompt` is returned as-is.
+    pub fn format_single_turn_chat_prompt(&self, prompt: &str) -> String {
+        const IM_START: &str = "<|im_start|>";
+        const IM_END: &str = "<|im_end|>";
+
+        if prompt.contains(IM_START) {
+            return prompt.to_string();
+        }
+        if self.chat_template.is_none() {
+            return prompt.to_string();
+        }
+
+        // Fast-path for the tools-free branch of the Qwen2.5 chat template.
+        let system = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
+        let mut out = String::with_capacity(prompt.len() + system.len() + 64);
+        out.push_str(IM_START);
+        out.push_str("system\n");
+        out.push_str(system);
+        out.push_str(IM_END);
+        out.push('\n');
+        out.push_str(IM_START);
+        out.push_str("user\n");
+        out.push_str(prompt);
+        out.push_str(IM_END);
+        out.push('\n');
+        out.push_str(IM_START);
+        out.push_str("assistant\n");
+        out
+    }
+
+    pub fn encode_single_turn_chat_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
+        let formatted = self.format_single_turn_chat_prompt(prompt);
+        self.encode(&formatted)
     }
 
     /// Get a token by ID (for testing purposes)

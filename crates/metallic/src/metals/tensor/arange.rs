@@ -14,7 +14,7 @@ use crate::{
 #[derive(KernelArgs, Clone)]
 pub struct Arange {
     /// Output tensor.
-    #[arg(buffer = 0, output)]
+    #[arg(output)]
     pub output: TensorArg,
     /// Length of the output.
     pub length: usize,

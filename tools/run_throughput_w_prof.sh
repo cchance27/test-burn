@@ -17,7 +17,8 @@ run_one() {
 
   echo "== ${name} =="
   rm -f "${jsonl_path}"
-  METALLIC_ENABLE_PROFILING=1 \
+    METALLIC_ENABLE_PROFILING=1 \
+    METALLIC_PERF_OUTPUT=1 \
     METALLIC_RECORD_CB_GPU_TIMING=1 \
     METALLIC_METRICS_JSONL_PATH="${jsonl_path}" \
     cargo run -q --message-format=short --release -- "${model}" "${PROMPT}" --seed 42 --output-format=text --max-tokens="${MAX_TOKENS}"

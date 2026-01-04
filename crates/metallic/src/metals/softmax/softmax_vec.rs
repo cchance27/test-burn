@@ -10,7 +10,7 @@ use crate::{
 };
 
 /// Parameters for SoftmaxVec kernel.
-#[derive(MetalStruct, Clone, Copy, Debug)]
+#[derive(MetalStruct, Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct SoftmaxVecParams {
     pub seq_q: u32,
@@ -23,37 +23,35 @@ pub struct SoftmaxVecParams {
 ///
 /// Input: attention scores [batch * seq_q, seq_k]
 /// Output: attention weights [batch * seq_q, seq_k]
-#[derive(Kernel, KernelArgs, Clone)]
+#[derive(Kernel, KernelArgs, Clone, Default)]
 #[kernel(
     source = "softmax/softmax_vec.metal",
     function = "softmax_vec_f16",
     stage_function = "run_softmax_vec_core",
     args = "SoftmaxVecParams",
-    threadgroup = "float shared_data[256]; threadgroup uint shared_indices[256]"
+    threadgroup = "float shared_data[256]; threadgroup uint shared_indices[256]",
+    step = true
 )]
 pub struct SoftmaxVec {
     /// Input attention scores (Buffer 0 - Policy Matrix).
-    #[arg(buffer = 0, stage_skip)]
+    #[arg(stage_skip)]
     pub input: TensorArg,
     /// Scale bytes for Q8 policy (Buffer 1 - Policy Scales).
-    #[arg(buffer = 1, stage_skip)]
+    #[arg(stage_skip)]
     pub scale_bytes: TensorArg,
     /// Output attention weights (Buffer 2).
-    #[arg(buffer = 2, output)]
+    #[arg(output)]
     pub output: TensorArg,
     /// seq_q parameter.
-    #[arg(buffer = 3)]
     pub seq_q: u32,
     /// seq_k parameter.
-    #[arg(buffer = 4)]
     pub seq_k: u32,
     /// Causal mask flag.
-    #[arg(buffer = 5)]
     pub causal: u32,
     /// Query offset for causal masking.
-    #[arg(buffer = 6)]
     pub query_offset: u32,
     /// Rows total for dispatch.
+    #[arg(skip)]
     rows_total: u32,
 }
 

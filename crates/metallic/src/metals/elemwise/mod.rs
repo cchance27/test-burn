@@ -1,2 +1,2 @@
 mod add;
-pub use add::{ElemwiseAdd, ElemwiseAddParams};
+pub use add::{ElemwiseAdd, ElemwiseAddParams, ElemwiseAddParamsResolved};

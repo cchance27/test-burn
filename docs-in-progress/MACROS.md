@@ -14,6 +14,10 @@ This document provides an overview of the derive macros in `metallic-macros` for
 | `Kernel` | Implement `Kernel` trait for standalone kernels | `#[kernel(...)]` |
 | `CompoundKernel` | Compose stages into fused kernel | `#[compound(...)]`, `#[prologue]`, `#[main]`, `#[epilogue]` |
 | `Epilogue` | Implement `Epilogue` and `Stage` for manual fusion | `#[epilogue(...)]` |
+| `GemvConfig` | Describe SIMD GEMV pointer + shape wiring | `#[gemv_kernel(...)]` |
+| `GemvHook` | Bind SIMD GEMV policy + params | `#[gemv_hook(...)]` |
+| `GemvPrologue` | **Pre-main setup** (e.g., RMSNorm `inv_rms` computation) | `#[gemv_prologue(...)]` |
+| `GemvKernel` | **Unified** GEMV kernel (Prologue + Config + Hook + Epilogue) | `#[gemv_kernel(...)]` |
 | `ConditionalKernel` | Dispatch to kernel variants based on runtime conditions | `#[conditional(...)]`, `#[when(...)]` |
 
 ---
@@ -114,23 +118,25 @@ Generates buffer binding code and Metal signature metadata. **Most commonly used
 
 ### Usage
 
+**All struct fields are treated as buffer arguments by default.** Buffer indices are auto-assigned starting from 0 in field declaration order.
+
 ```rust
 #[derive(KernelArgs, Clone)]
 pub struct GemvColMajor {
-    #[arg(buffer = 0)]
-    pub matrix: TensorArg,           // Buffer type → auto-detect
+    pub matrix: TensorArg,           // Buffer 0 (auto-assigned)
     
-    #[arg(buffer = 1, output)]       // Mark as output (no auto-flush)
+    #[arg(output)]                   // Buffer 1 - mark as output (no auto-flush)
     pub result: TensorArg,
     
-    #[arg(buffer = 2)]
-    pub params: GemvParams,           // Struct → setBytes
+    pub params: GemvParams,           // Buffer 2 - Struct → setBytes
     
-    #[arg(buffer = 3)]
-    pub scale: f32,                   // Primitive → setBytes
+    pub scale: f32,                   // Buffer 3 - Primitive → setBytes
     
-    #[arg(buffer = 4, metal_type = "const device uchar*")]  // Override inference
+    #[arg(metal_type = "const device uchar*")]  // Buffer 4 - Override type inference
     pub quantized: TensorArg,
+    
+    #[arg(skip)]                     // Not a buffer arg - excluded from binding
+    pub local_config: usize,
 }
 ```
 
@@ -162,9 +168,11 @@ impl BindArgs for GemvColMajor { ... }
 
 | Attribute | Description |
 |-----------|-------------|
-| `#[arg(buffer = N)]` | Buffer index in Metal signature |
-| `#[arg(buffer = N, output)]` | Mark as output (skips auto-flush) |
-| `#[arg(buffer = N, metal_type = "...")]` | Override inferred Metal type |
+| `#[arg(output)]` | Mark as output (skips auto-flush) |
+| `#[arg(skip)]` | Exclude from buffer args (not bound to Metal) |
+| `#[arg(stage_skip)]` | Skip in compound stage emit (Policy provides) |
+| `#[arg(metal_type = "...")]` | Override inferred Metal type |
+| `#[arg(buffer = N)]` | **Optional**: Explicit buffer index (auto-assigns from max(N+1) onward) |
 
 ### Type Inference Rules
 
@@ -191,9 +199,10 @@ Implements the `Kernel` trait for standalone (non-compound) kernels.
     include = ["utils/simd.metal", "utils/math.metal"]  // Optional
 )]
 pub struct GemvColMajorKernel {
-    #[arg(buffer = 0)]
-    pub matrix: TensorArg,
-    // ...
+    pub matrix: TensorArg,           // Buffer 0 (auto)
+    #[arg(output)]
+    pub result: TensorArg,           // Buffer 1 (output)
+    pub params: GemvParams,          // Buffer 2
 }
 
 impl GemvColMajorKernel {
@@ -254,13 +263,11 @@ When creating a kernel that can be used as a stage in fused compound kernels, us
     threadgroup = "float tg_inv_rms"
 )]
 pub struct RmsNorm {
-    #[arg(buffer = 0, stage_skip)]  // Excluded from Stage (Policy provides)
+    #[arg(stage_skip)]  // Excluded from Stage (Policy provides)
     pub input: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(output)]
     pub output: TensorArg,
-    #[arg(buffer = 2)]
     pub gamma: TensorArg,
-    #[arg(buffer = 3)]
     pub params: RmsNormParams,
 }
 
@@ -390,6 +397,12 @@ pub struct RmsNormStage {
 | `#[epilogue(emit = "...")]` | Template string with `{input_var}` and `{out_var}` |
 | `#[epilogue(struct = "...")]` | Override Metal struct name (defaults to Rust name) |
 | `#[epilogue(out_var = "...")]` | Explicitly name output variable |
+| `#[epilogue(gemv_struct = "...")]` | (Optional) SIMD-GEMV epilogue struct name for `run_simd_gemv_template` |
+| `#[epilogue(gemv_id = "...")]` | (Optional) SIMD-GEMV epilogue ID used for kernel naming/caching |
+| `#[epilogue(simd_reduce = "...")]` | (Optional) SIMD reduce vars: `"gate: acc[0], up: acc[1]"` |
+| `#[epilogue(simd_reduce_from = "16")]` | (Optional) Start level (default: 16 for 32-lane) |
+| `#[epilogue(simd_reduce_to = "1")]` | (Optional) End level (default: 1) |
+| `#[epilogue(simd_reduce_op = "add")]` | (Optional) Reduction op: `add`, `max`, or `min` |
 
 ---
 
@@ -413,7 +426,6 @@ pub struct GemvQ8SiluCompound {
     pub activation: EpilogueStage<SiLUEpilogue>,
     
     // Also include KernelArgs for buffer bindings
-    #[arg(buffer = 0)]
     pub matrix: TensorArg,
     // ...
 }
@@ -450,11 +462,9 @@ impl GemvQ8SiluCompound {
 ```rust
 #[derive(KernelArgs, Clone)]
 pub struct MyKernel {
-    #[arg(buffer = 0)]
     pub input: TensorArg,
-    #[arg(buffer = 1, output)]
+    #[arg(output)]
     pub output: TensorArg,
-    #[arg(buffer = 2)]
     pub params: MyParams,
 }
 
@@ -483,7 +493,6 @@ pub struct FusedGemvQ8 {
     #[epilogue]
     none: EpilogueStage<EpilogueNone>,
     
-    #[arg(buffer = 0)]
     matrix: TensorArg,
     // ... other args
 }
@@ -560,6 +569,71 @@ impl Kernel for MatmulDispatch {
     // Delegates to selected variant
 }
 ```
+
+---
+
+## 8. SIMD GEMV Macros (`GemvConfig`, `GemvHook`)
+
+These macros exist to keep the **decode-time SIMD GEMV template** fully reusable while avoiding “quant logic spread” across kernels.
+
+### `#[derive(GemvConfig)]`
+
+Defines how a particular fused SIMD GEMV kernel wires its pointers/dims (per-head arrays, N expressions, bias flags, optional scales).
+
+```rust
+use metallic_macros::GemvConfig;
+
+#[derive(GemvConfig)]
+#[gemv_simd(
+    args = "MyArgs",
+    heads = 3,
+    cols_per_tg = 8,
+    fast_path = true,
+    gemv_n0 = "params->Nq",
+    data_ptrs("data_q", "data_k", "data_v"),
+    result_ptrs("out_q", "out_k", "out_v"),
+    n_exprs("params->Nq", "params->Nk", "params->Nv"),
+    bias_ptrs("bias_q", "bias_k", "bias_v"),
+    has_bias_flags("params->has_bias_q", "params->has_bias_k", "params->has_bias_v")
+)]
+struct QkvFusedCfg;
+```
+
+**Generated Behavior:**
+- `struct_defs()` automatically includes `GemvParams::METAL_STRUCT_DEF` for all compound GEMV kernels
+- If `struct_defs_type(MyParams)` is specified, that struct's `METAL_STRUCT_DEF` is also included
+- No hardcoded Metal struct definitions needed in `.metal` files
+
+Notes:
+- `scale_ptrs(...)` is optional; it enables a `scale_arr[HEADS]` local pointer array for quant formats that need per-head scale buffers (e.g. Q8 canonical).
+
+### `#[derive(GemvHook)]`
+
+Selects the policy struct + includes, and injects:
+- optional `preamble` (commonly used to compute `inv_rms` for fused RMSNorm)
+- required `policy_params` initializer snippet, which must define `Params p = { ... }` for the selected policy.
+
+```rust
+use metallic_macros::GemvHook;
+
+#[derive(GemvHook, Clone, Copy, Default)]
+#[gemv_simd_hook(
+    id = "f16_canonical",
+    policy_struct = "SimdGemvPolicyF16Canonical",
+    includes("policies/simd_gemv_f16_canonical.metal"),
+    policy_params = r#"    SimdGemvPolicyF16Canonical::Params p = {
+        (const device half**)data_arr,
+        params->weights_per_block
+    };
+"#
+)]
+pub struct F16CanonicalHook;
+```
+
+**Key convention**
+- SIMD GEMV stages always declare `data_arr` as `const device uchar*[]`. Hooks/policies must cast to the appropriate view.
+
+For more context and the template contract, see `docs-in-progress/KERNELS.md` and `docs-in-progress/QUANT.md`.
 
 ### Attributes
 
@@ -641,3 +715,222 @@ impl Softmax {
     }
 }
 ```
+
+---
+
+## 9. CodeBuilder Utilities
+
+The `CodeBuilder` module provides type-safe utilities for generating Metal code in compound kernels and stages.
+
+### Location
+
+```rust
+use metallic::compound::code_builder::{
+    CodeBuilder, MetalType, MetalVar, SimdReduceConfig, ReduceOp,
+};
+```
+
+### `MetalType` — Type-Safe Metal Types
+
+```rust
+pub enum MetalType {
+    Half, Float, Uint, Int, Bool,      // Scalars
+    Half2, Half4, Float2, Float4,       // Vectors
+    DevicePtr(MetalScalar),             // device T*
+    ConstantPtr(MetalScalar),           // constant T*
+    Custom(&'static str),               // User-defined
+}
+```
+
+### `MetalVar` — Tracked Variables
+
+```rust
+let mut b = CodeBuilder::new("rmsnorm");
+let inv_rms = b.declare_var("inv_rms", MetalType::Float);
+// inv_rms.name() → "rmsnorm_inv_rms1"
+// inv_rms.declaration() → "float rmsnorm_inv_rms1;"
+```
+
+### `SimdReduceConfig` — Flexible SIMD Reductions
+
+```rust
+// Full 32-lane reduction (default)
+let config = SimdReduceConfig::default();  // from=16, to=1, op=Add
+
+// 16-lane reduction
+let config = SimdReduceConfig::lane_16(ReduceOp::Add);  // from=8, to=1
+
+// Max reduction
+let config = SimdReduceConfig::full_32_lane(ReduceOp::Max);
+
+// Single level
+let config = SimdReduceConfig::new(4, 4, ReduceOp::Add);  // just x += simd_shuffle_xor(x, 4)
+```
+
+### `ReduceOp` — Reduction Operations
+
+```rust
+pub enum ReduceOp {
+    Add,  // val += simd_shuffle_xor(val, N)
+    Max,  // val = max(val, simd_shuffle_xor(val, N))
+    Min,  // val = min(val, simd_shuffle_xor(val, N))
+}
+```
+
+### CodeBuilder Usage Example
+
+```rust
+let mut b = CodeBuilder::new("swiglu");
+
+// Declare typed variables
+let gate = b.declare_var("gate", MetalType::Float);
+let up = b.declare_var("up", MetalType::Float);
+
+// Emit declarations with initializers
+b.emit_decl_init(&gate, "gate_data[idx]");
+b.emit_decl_init(&up, "up_data[idx]");
+
+// Emit SIMD reduction with config
+b.emit_simd_reduce_multi(&[gate.name(), up.name()], SimdReduceConfig::default());
+
+// Set output and finish
+b.set_output_var(&up);
+let (output_var, code) = b.finish();
+```
+
+### API Reference
+
+| Method | Description |
+|--------|-------------|
+| `declare_var(name, type)` | Create a typed variable, returns `MetalVar` |
+| `external_var(name, type)` | Register an external variable (e.g., kernel param) |
+| `emit(line)` | Emit a line of code with indentation |
+| `emit_decl(&var)` | Emit `type name;` |
+| `emit_decl_init(&var, value)` | Emit `type name = value;` |
+| `emit_assign(&var, value)` | Emit `name = value;` |
+| `emit_simd_reduce(var)` | Full 32-lane Add reduction |
+| `emit_simd_reduce_with_config(var, config)` | Custom reduction |
+| `emit_simd_reduce_multi(vars, config)` | Reduce multiple vars interleaved |
+| `finish() -> (String, String)` | Returns (output_var, code) |
+
+---
+
+## 10. `#[derive(GemvPrologue)]` — Pre-Main Setup Stage
+
+Prologues run before the hook/main GEMV and set up threadgroup-shared state (e.g., computing `inv_rms` for RMSNorm).
+
+### Usage
+
+```rust
+#[derive(GemvPrologue, Clone, Copy, Default)]
+#[gemv_prologue(
+    emit = r#"
+    threadgroup float inv_rms_s;
+    const float inv_rms = gemv_compute_inv_rms(vector_x, params->K, lid, wid, &inv_rms_s, epsilon);
+    "#,
+    includes("matmul_gemv/simd_common.metal")
+)]
+pub struct RmsnormPrologue;
+```
+
+### Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `emit = "..."` | Metal code emitted before hook preamble |
+| `includes("...")` | Additional includes for prologue |
+
+### Generated Code
+
+```rust
+impl GemvPrologue for RmsnormPrologue {
+    fn includes() -> &'static [&'static str] { &["matmul_gemv/simd_common.metal"] }
+    fn emit() -> String { /* emit code */ }
+}
+```
+
+### Usage with GemvKernel
+
+```rust
+#[derive(GemvKernel)]
+#[gemv_kernel(
+    prologue = RmsnormPrologue,  // Pre-main setup
+    hook = F16CanonicalRmsnormHook,
+    epilogue = SwiGluEpilogue,
+    // ... config ...
+)]
+pub struct MyFusedKernel;
+```
+
+---
+
+## 11. `#[derive(GemvKernel)]` — Unified GEMV Kernel
+
+Combines `GemvPrologue`, `GemvConfig`, `GemvHook`, and `GemvEpilogue` into a single derive macro for cleaner DX.
+
+### Usage
+
+```rust
+#[derive(GemvKernel)]
+#[gemv_kernel(
+    // Config section
+    args = "SwiGluF16CanonicalFusedRmsnormArgs",
+    heads = 2,
+    cols_per_tg = 8,
+    fast_path = true,
+    gemv_n0 = "params->N0",
+    data_ptrs("data_g", "data_u"),
+    result_ptrs("out_res", "nullptr"),
+    n_exprs("params->N0", "params->N1"),
+    bias_ptrs("bias_g", "bias_u"),
+    has_bias_flags("params->has_bias0", "params->has_bias1"),
+    struct_defs_type(Q2FusedParams),
+    
+    // Hook and Epilogue references
+    hook = F16CanonicalRmsnormHook,
+    epilogue = SwiGluEpilogue,
+)]
+pub struct SwiGluFused;
+
+// Usage: Get the composed stage via main_stage()
+let stage = SwiGluFused::main_stage();  // -> GemvStage<...>
+```
+
+### Generated Code
+
+- `impl GemvConfig for SwiGluFused { ... }` — All config constants and methods
+- `SwiGluFused::main_stage()` — Returns `GemvStage<Self, Hook, Epilogue>`
+
+### Attributes
+
+| Attribute | Description |
+|-----------|-------------|
+| `args = "..."`| Args type name (must impl `HasMetalArgs`) |
+| `heads = N` | Number of output heads (Q/K/V = 3, Gate/Up = 2) |
+| `cols_per_tg = N` | Columns per threadgroup (default: 8) |
+| `fast_path = bool` | Enable fast path optimizations |
+| `gemv_n0 = "..."` | Expression for N0 dimension |
+| `data_ptrs("...", ...)` | Per-head weight data pointers |
+| `scale_ptrs("...", ...)` | (Optional) Per-head scale pointers for Q8 |
+| `result_ptrs("...", ...)` | Per-head output pointers |
+| `n_exprs("...", ...)` | Per-head output dimension expressions |
+| `bias_ptrs("...", ...)` | Per-head bias pointers |
+| `has_bias_flags("...", ...)` | Per-head has_bias flag expressions |
+| `struct_defs_type(Type)` | (Optional) MetalStruct type to inject |
+| `hook = Type` | Hook type (e.g., `F16CanonicalRmsnormHook`) |
+| `epilogue = Type` | Epilogue type (e.g., `SwiGluEpilogue`) |
+
+### Validation (at macro time)
+
+- All array lengths (`data_ptrs`, `result_ptrs`, etc.) must equal `heads`
+- `hook` and `epilogue` must be valid type paths
+
+### vs. Separate `GemvConfig` + `GemvHook` + `Epilogue`
+
+| Approach | Lines | Type Safety | Extensibility |
+|----------|-------|-------------|---------------|
+| Separate 3 derives | ~50 | Loose | High |
+| Unified `GemvKernel` | ~20 | Validated | Moderate |
+
+Use `GemvKernel` for most fused GEMV kernels. Use separate derives when you need unusual configurations or shared hooks/epilogues across multiple kernels.
+

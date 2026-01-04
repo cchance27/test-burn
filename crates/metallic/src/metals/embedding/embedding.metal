@@ -1,7 +1,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-// EmbeddingParams struct is injected by Foundry via struct_defs()
+// NOTE: EmbeddingParamsResolved is injected by Foundry via struct_defs()
 
 /// Embedding lookup kernel for half precision.
 ///
@@ -15,7 +15,7 @@ kernel void embedding_lookup_f16(
     const device half* table [[buffer(0)]],
     const device uint* indices [[buffer(1)]],
     device half* out [[buffer(2)]],
-    constant EmbeddingParams* params [[buffer(3)]],
+    constant EmbeddingParamsResolved* params [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint d_model = params->d_model;

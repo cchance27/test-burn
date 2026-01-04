@@ -141,6 +141,10 @@ pub struct GGUFFile {
 }
 
 impl GGUFFile {
+    pub fn metadata(&self) -> &GGUFMetadata {
+        &self.metadata
+    }
+
     pub fn load_mmap_and_get_metadata<P: AsRef<Path>>(path: P) -> Result<Self, GGUFError> {
         let file_path = path.as_ref().to_string_lossy().to_string();
         let file = File::open(&path).map_err(GGUFError::Io)?;

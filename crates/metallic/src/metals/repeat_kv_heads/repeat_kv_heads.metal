@@ -11,7 +11,7 @@ using namespace metal;
 kernel void repeat_kv_heads_kernel_f16(
     const device half* input [[buffer(0)]],
     device half* output [[buffer(1)]],
-    constant RepeatKvHeadsParams* params [[buffer(2)]],
+    constant RepeatKvHeadsParamsResolved* params [[buffer(2)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint group_size = params->group_size;

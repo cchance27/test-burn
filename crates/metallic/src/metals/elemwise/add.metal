@@ -11,7 +11,7 @@ kernel void broadcast_add_kernel_f16(
     const device half* a [[buffer(0)]],
     const device half* b [[buffer(1)]],
     device half* out [[buffer(2)]],
-    constant ElemwiseAddParams* params [[buffer(3)]],
+    constant ElemwiseAddParamsResolved* params [[buffer(3)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint total_elements = params->total_elements;

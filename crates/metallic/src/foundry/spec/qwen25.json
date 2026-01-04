@@ -1,0 +1,349 @@
+{
+    "name": "qwen2.5-0.5b",
+    "architecture": {
+        "d_model": 896,
+        "n_heads": 14,
+        "n_kv_heads": 2,
+        "n_layers": 24,
+        "ff_dim": 4864,
+        "vocab_size": 151936,
+        "max_seq_len": 32768,
+        "rope_base": 1000000.0,
+        "rms_eps": 1e-06,
+        "tensor_names": {
+            "embedding": [
+                "token_embd.weight",
+                "model.embed_tokens.weight"
+            ],
+            "output_weight": [
+                "output.weight",
+                "lm_head.weight",
+                "token_embd.weight"
+            ],
+            "final_norm": [
+                "output_norm.weight",
+                "model.norm.weight"
+            ],
+            "rope_cos": [
+                "rope_cos",
+                "model.rotary.cos"
+            ],
+            "rope_sin": [
+                "rope_sin",
+                "model.rotary.sin"
+            ],
+            "layer": {
+                "attn_norm": [
+                    "blk.{i}.attn_norm.weight",
+                    "model.layers.{i}.input_layernorm.weight"
+                ],
+                "ffn_norm": [
+                    "blk.{i}.ffn_norm.weight",
+                    "model.layers.{i}.post_attention_layernorm.weight"
+                ],
+                "attn_q": [
+                    "blk.{i}.attn_q.weight",
+                    "model.layers.{i}.self_attn.q_proj.weight"
+                ],
+                "attn_k": [
+                    "blk.{i}.attn_k.weight",
+                    "model.layers.{i}.self_attn.k_proj.weight"
+                ],
+                "attn_v": [
+                    "blk.{i}.attn_v.weight",
+                    "model.layers.{i}.self_attn.v_proj.weight"
+                ],
+                "attn_q_bias": [
+                    "blk.{i}.attn_q.bias",
+                    "model.layers.{i}.self_attn.q_proj.bias"
+                ],
+                "attn_k_bias": [
+                    "blk.{i}.attn_k.bias",
+                    "model.layers.{i}.self_attn.k_proj.bias"
+                ],
+                "attn_v_bias": [
+                    "blk.{i}.attn_v.bias",
+                    "model.layers.{i}.self_attn.v_proj.bias"
+                ],
+                "attn_output": [
+                    "blk.{i}.attn_output.weight",
+                    "model.layers.{i}.self_attn.o_proj.weight"
+                ],
+                "ffn_gate": [
+                    "blk.{i}.ffn_gate.weight",
+                    "model.layers.{i}.mlp.gate_proj.weight"
+                ],
+                "ffn_up": [
+                    "blk.{i}.ffn_up.weight",
+                    "model.layers.{i}.mlp.up_proj.weight"
+                ],
+                "ffn_down": [
+                    "blk.{i}.ffn_down.weight",
+                    "model.layers.{i}.mlp.down_proj.weight"
+                ],
+                "ffn_gate_bias": [
+                    "blk.{i}.ffn_gate.bias",
+                    "model.layers.{i}.mlp.gate_proj.bias"
+                ],
+                "ffn_up_bias": [
+                    "blk.{i}.ffn_up.bias",
+                    "model.layers.{i}.mlp.up_proj.bias"
+                ],
+                "ffn_down_bias": [
+                    "blk.{i}.ffn_down.bias",
+                    "model.layers.{i}.mlp.down_proj.bias"
+                ]
+            }
+        },
+        "forward": [
+            {
+                "op": "Embedding",
+                "table": "embedding",
+                "indices": "input_ids",
+                "output": "hidden",
+                "params": {
+                    "d_model": 896,
+                    "total_elements": "{total_elements_hidden}",
+                    "vocab_size": 151936
+                }
+            },
+            {
+                "op": "Repeat",
+                "count": "n_layers",
+                    "var": "i",
+                    "steps": [
+                        {
+                            "op": "QkvF16CanonicalFusedRmsnorm",
+                            "input": "hidden",
+                            "gamma": "layer.attn_norm_{i}",
+                            "wq": "layer.attn_q_{i}",
+                            "wk": "layer.attn_k_{i}",
+                            "wv": "layer.attn_v_{i}",
+                            "bq": "layer.attn_q_bias_{i}",
+                            "bk": "layer.attn_k_bias_{i}",
+                            "bv": "layer.attn_v_bias_{i}",
+                            "out_q": "q",
+                            "out_k": "k",
+                            "out_v": "v",
+                            "epsilon": 0.000001,
+                            "weights_per_block": 32
+                        },
+                        {
+                            "op": "KvRearrange",
+                            "input": "q",
+                        "output": "q_heads",
+                        "params": {
+                            "kv_dim": "{d_model}",
+                            "row_stride": "{d_model}",
+                            "kv_head_dim": "{head_dim}",
+                            "n_heads": "{n_heads}",
+                            "n_kv_heads": "{n_heads}",
+                            "head_dim": "{head_dim}",
+                            "seq": "{seq_len}",
+                            "total_elements": "{total_elements_q}"
+                        }
+                    },
+                    {
+                        "op": "KvRearrange",
+                        "input": "k",
+                        "output": "k_heads",
+                        "params": {
+                            "kv_dim": "{kv_dim}",
+                            "row_stride": "{kv_dim}",
+                            "kv_head_dim": "{head_dim}",
+                            "n_heads": "{n_kv_heads}",
+                            "n_kv_heads": "{n_kv_heads}",
+                            "head_dim": "{head_dim}",
+                            "seq": "{seq_len}",
+                            "total_elements": "{total_elements_k}"
+                        }
+                    },
+                    {
+                        "op": "KvRearrange",
+                        "input": "v",
+                        "output": "v_heads",
+                        "params": {
+                            "kv_dim": "{kv_dim}",
+                            "row_stride": "{kv_dim}",
+                            "kv_head_dim": "{head_dim}",
+                            "n_heads": "{n_kv_heads}",
+                            "n_kv_heads": "{n_kv_heads}",
+                            "head_dim": "{head_dim}",
+                            "seq": "{seq_len}",
+                            "total_elements": "{total_elements_k}"
+                        }
+                    },
+                    {
+                        "op": "Rope",
+                        "input": "q_heads",
+                        "output": "q_rot",
+                        "cos": "rope_cos",
+                        "sin": "rope_sin",
+                        "params": {
+                            "dim": 64,
+                            "seq_len": "{seq_len}",
+                            "position_offset": "{position_offset}",
+                            "total_elements": "{total_elements_q}"
+                        }
+                    },
+                    {
+                        "op": "Rope",
+                        "input": "k_heads",
+                        "output": "k_rot",
+                        "cos": "rope_cos",
+                        "sin": "rope_sin",
+                        "params": {
+                            "dim": 64,
+                            "seq_len": "{seq_len}",
+                            "position_offset": "{position_offset}",
+                            "total_elements": "{total_elements_k}"
+                        }
+                    },
+                    {
+                        "op": "KvCacheWrite",
+                        "input": "k_rot",
+                        "cache": "k_cache_{i}",
+                        "params": {
+                            "n_kv_heads": 2,
+                            "head_dim": 64,
+                            "input_seq_len": "{seq_len}",
+                            "max_seq_len": "{max_seq_len}",
+                            "total_elements": "{total_elements_write}",
+                            "position_offset": "{position_offset}",
+                            "layer_idx": "{i}"
+                        }
+                    },
+                    {
+                        "op": "KvCacheWrite",
+                        "input": "v_heads",
+                        "cache": "v_cache_{i}",
+                        "params": {
+                            "n_kv_heads": 2,
+                            "head_dim": 64,
+                            "input_seq_len": "{seq_len}",
+                            "max_seq_len": "{max_seq_len}",
+                            "total_elements": "{total_elements_write}",
+                            "position_offset": "{position_offset}",
+                            "layer_idx": "{i}"
+                        }
+                    },
+                    {
+                        "op": "RepeatKvHeads",
+                        "input": "k_cache_{i}",
+                        "output": "k_expanded",
+                        "params": {
+                            "group_size": 7,
+                            "batch": 1,
+                            "n_kv_heads": 2,
+                            "n_heads": 14,
+                            "seq": "{kv_seq_len}",
+                            "head_dim": 64,
+                            "cache_stride": "{max_seq_len}",
+                            "total_elements": "{total_elements_repeat}"
+                        }
+                    },
+                    {
+                        "op": "RepeatKvHeads",
+                        "input": "v_cache_{i}",
+                        "output": "v_expanded",
+                        "params": {
+                            "group_size": 7,
+                            "batch": 1,
+                            "n_kv_heads": 2,
+                            "n_heads": 14,
+                            "seq": "{kv_seq_len}",
+                            "head_dim": 64,
+                            "cache_stride": "{max_seq_len}",
+                            "total_elements": "{total_elements_repeat}"
+                        }
+                    },
+                    {
+                        "op": "Sdpa",
+                        "q": "q_rot",
+                        "k": "k_expanded",
+                        "v": "v_expanded",
+                        "output": "attn_out",
+                        "causal": true,
+                        "query_offset": "{position_offset}",
+                        "n_heads": 14,
+                        "head_dim": 64,
+                        "kv_seq_len": "{kv_seq_len}",
+                        "kv_head_major": true
+                    },
+                    {
+                        "op": "GemvCanonical",
+                        "matrix": "layer.attn_output_{i}",
+                        "scale_bytes": "layer.attn_output_{i}",
+                        "vector_x": "attn_out",
+                        "result_y": "residual_1",
+                        "params": {
+                            "batch": 1,
+                            "weights_per_block": 32
+                        },
+                        "bias": "zero",
+                        "residual": "hidden",
+                        "alpha": 1.0,
+                        "beta": 1.0,
+                        "has_bias": 0
+                    },
+                    {
+                        "op": "SwiGluF16CanonicalFusedRmsnorm",
+                        "input": "residual_1",
+                        "gamma": "layer.ffn_norm_{i}",
+                        "wg": "layer.ffn_gate_{i}",
+                        "wu": "layer.ffn_up_{i}",
+                        "bg": "layer.ffn_gate_bias_{i}",
+                        "bu": "layer.ffn_up_bias_{i}",
+                        "out": "up",
+                        "epsilon": 0.000001,
+                        "weights_per_block": 32
+                    },
+                    {
+                        "op": "GemvCanonical",
+                        "matrix": "layer.ffn_down_{i}",
+                        "scale_bytes": "layer.ffn_down_{i}",
+                        "vector_x": "up",
+                        "result_y": "hidden",
+                        "params": {
+                            "batch": 1,
+                            "weights_per_block": 32
+                        },
+                        "bias": "layer.ffn_down_bias_{i}",
+                        "residual": "residual_1",
+                        "alpha": 1.0,
+                        "beta": 1.0,
+                        "has_bias": 1
+                    }
+                ]
+            },
+            {
+                "op": "RmsNorm",
+                "input": "hidden",
+                "output": "final_norm_out",
+                "gamma": "final_norm",
+                "scale_bytes": "hidden",
+                "params": {
+                    "feature_dim": 896,
+                    "total_elements": "{total_elements_hidden}"
+                }
+            },
+            {
+                "op": "GemvColMajor",
+                "matrix": "output_weight",
+                "scale_bytes": "output_weight",
+                "vector_x": "final_norm_out",
+                "result_y": "logits",
+                "params": {
+                    "n": 151936,
+                    "batch": 1,
+                    "fused_bias_offset": 0
+                },
+                "bias": "zero",
+                "residual": "zero",
+                "alpha": 1.0,
+                "beta": 0.0,
+                "has_bias": 0
+            }
+        ]
+    }
+}

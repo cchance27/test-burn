@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic::{
-    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::rope::RoPEOp, metals::rope::{Rope, RopeParams}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
+    Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::rope::RoPEOp, metals::rope::{Rope, RopeParamsResolved}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -139,7 +139,7 @@ fn run_parity_test(cfg: TestConfig) {
     let cos_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![max_seq * half_dim], TensorInit::CopyFrom(&cos_data)).unwrap();
     let sin_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![max_seq * half_dim], TensorInit::CopyFrom(&sin_data)).unwrap();
 
-    let params = RopeParams {
+    let params = RopeParamsResolved {
         dim: cfg.dim as u32,
         seq_len: cfg.seq_len as u32,
         position_offset: cfg.position_offset,

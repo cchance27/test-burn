@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic::{
-    Context, F16Element, TensorElement, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::embedding_lookup::EmbeddingLookupOp, metals::embedding::{Embedding, EmbeddingParams}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage, dtypes::U32 as U32Type}, types::TensorArg
+    Context, F16Element, TensorElement, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::embedding_lookup::EmbeddingLookupOp, metals::embedding::{Embedding, EmbeddingParamsResolved}, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage, dtypes::U32 as U32Type}, types::TensorArg
 };
 use objc2_metal::MTLDevice as _;
 use rand::{Rng, rng};
@@ -98,7 +98,7 @@ fn run_parity_test(cfg: TestConfig) {
         FoundryTensor::<metallic::tensor::U32, Pooled>::new(&mut foundry, vec![total_tokens], TensorInit::CopyFrom(&indices_data)).unwrap();
     let output_foundry = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![total_elements], TensorInit::Uninitialized).unwrap();
 
-    let params = EmbeddingParams {
+    let params = EmbeddingParamsResolved {
         d_model: cfg.d_model as u32,
         total_elements: total_elements as u32,
         vocab_size: cfg.vocab_size as u32,

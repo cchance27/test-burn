@@ -1,9 +1,10 @@
-use std::{any::TypeId, borrow::Cow};
+use std::{any::TypeId, borrow::Cow, sync::OnceLock};
 
 use crate::{
-    Context, Dtype, MetalError, Tensor, TensorElement, gguf::{GGUFDataType, GGUFValue, model_loader::GGUFModel}, models::{LoadableModel, Qwen25, Qwen25Config}
+    Context, Dtype, MetalError, Tensor, TensorElement, gguf::{
+        GGUFDataType, GGUFValue, model_loader::{GGUFLayoutHint, GGUFModel}
+    }, models::{LoadableModel, Qwen25, Qwen25Config}
 };
-
 fn materialize_output_weight_q8_0_packed<T: TensorElement>(
     gguf_model: &GGUFModel,
     name: &str,
@@ -81,6 +82,90 @@ fn tensor_data_as_f32<'a, T: TensorElement>(tensor: &'a Tensor<T>) -> Cow<'a, [f
     }
 }
 
+const METALLIC_F16_CANONICAL_LAYOUT_ENV: &str = "METALLIC_F16_CANONICAL_LAYOUT";
+const METALLIC_CANONICAL_TRACE_ENV: &str = "METALLIC_CANONICAL_TRACE";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CanonicalLayoutOverride {
+    Auto,
+    Nk,
+    Kn,
+}
+
+fn canonical_layout_override() -> CanonicalLayoutOverride {
+    static OVERRIDE: OnceLock<CanonicalLayoutOverride> = OnceLock::new();
+    *OVERRIDE.get_or_init(|| {
+        let value = std::env::var(METALLIC_F16_CANONICAL_LAYOUT_ENV).ok();
+        match value.as_deref().map(|s| s.trim().to_ascii_lowercase()) {
+            Some(ref v) if v == "nk" => CanonicalLayoutOverride::Nk,
+            Some(ref v) if v == "kn" => CanonicalLayoutOverride::Kn,
+            Some(ref v) if v == "auto" => CanonicalLayoutOverride::Auto,
+            Some(ref v) if v.is_empty() => CanonicalLayoutOverride::Auto,
+            None => CanonicalLayoutOverride::Auto,
+            Some(_) => CanonicalLayoutOverride::Auto,
+        }
+    })
+}
+
+fn canonical_trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(METALLIC_CANONICAL_TRACE_ENV)
+            .ok()
+            .map(|v| v.trim() != "0")
+            .unwrap_or(false)
+    })
+}
+
+fn log_canonical_choice(
+    label: &str,
+    dims: &[usize],
+    logical_dims: &[usize],
+    dst_col_offset: usize,
+    layout_hint: GGUFLayoutHint,
+    override_choice: CanonicalLayoutOverride,
+    chosen: GGUFLayoutHint,
+    reason: &str,
+) {
+    if !canonical_trace_enabled() {
+        return;
+    }
+    eprintln!(
+        "[CANONICAL] name={} dims={:?} logical_dims={:?} dst_col_offset={} layout_hint={:?} override={:?} chosen={:?} reason={}",
+        label, dims, logical_dims, dst_col_offset, layout_hint, override_choice, chosen, reason
+    );
+}
+
+fn write_canonical_weight<T: TensorElement>(
+    canon: &mut crate::tensor::CanonicalF16Tensor<T>,
+    label: &str,
+    tensor: &Tensor<T>,
+    dst_col_offset: usize,
+    layout_hint: GGUFLayoutHint,
+) -> Result<(), MetalError> {
+    let override_choice = canonical_layout_override();
+    let (hint, reason) = match override_choice {
+        CanonicalLayoutOverride::Nk => (GGUFLayoutHint::Nk, "override"),
+        CanonicalLayoutOverride::Kn => (GGUFLayoutHint::Kn, "override"),
+        CanonicalLayoutOverride::Auto => (layout_hint, "layout_hint"),
+    };
+    let dims = tensor.dims();
+    log_canonical_choice(
+        label,
+        dims,
+        &canon.logical_dims,
+        dst_col_offset,
+        layout_hint,
+        override_choice,
+        hint,
+        reason,
+    );
+    match hint {
+        GGUFLayoutHint::Nk => canon.write_from_nk_tensor(tensor, dst_col_offset),
+        GGUFLayoutHint::Kn => canon.write_from_kn_tensor(tensor, dst_col_offset),
+    }
+}
+
 fn copy_tensor_data_into_slice<TSrc: TensorElement, TDst: TensorElement>(
     src: &Tensor<TSrc>,
     dst_slice: &mut [TDst::Scalar],
@@ -138,6 +223,82 @@ fn copy_tensor_into<TSrc: TensorElement, TDst: TensorElement>(src: &Tensor<TSrc>
 
     let dst_slice = dst.as_mut_slice();
     copy_tensor_data_into_slice::<TSrc, TDst>(src, dst_slice)
+}
+
+fn copy_tensor_transposed_into<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+) -> Result<(), MetalError> {
+    let src_dims = src.dims().to_vec();
+    let dst_dims = dst.dims().to_vec();
+    if src_dims.len() != 2 || dst_dims.len() != 2 {
+        return Err(MetalError::InvalidShape(format!(
+            "Transpose expects 2D tensors, got src {:?} dst {:?}",
+            src_dims, dst_dims
+        )));
+    }
+    if src_dims[0] != dst_dims[1] || src_dims[1] != dst_dims[0] {
+        return Err(MetalError::InvalidShape(format!(
+            "Transpose shape mismatch: src {:?} dst {:?}",
+            src_dims, dst_dims
+        )));
+    }
+
+    let src_cols = src_dims[1];
+    let dst_cols = dst_dims[1];
+    let src_slice = tensor_data_as_f32(src);
+    let dst_slice = dst.as_mut_slice();
+
+    for row in 0..dst_dims[0] {
+        for col in 0..dst_cols {
+            let src_idx = col * src_cols + row;
+            let dst_idx = row * dst_cols + col;
+            dst_slice[dst_idx] = TDst::from_f32(src_slice[src_idx]);
+        }
+    }
+
+    Ok(())
+}
+
+fn layout_debug_enabled() -> bool {
+    std::env::var("METALLIC_GGUF_LAYOUT_DEBUG")
+        .ok()
+        .map(|v| v.trim() != "0")
+        .unwrap_or(false)
+}
+
+fn copy_tensor_match_or_transpose<TSrc: TensorElement, TDst: TensorElement>(
+    src: &Tensor<TSrc>,
+    dst: &mut Tensor<TDst>,
+    label: &str,
+) -> Result<(), MetalError> {
+    let src_dims = src.dims().to_vec();
+    let dst_dims = dst.dims().to_vec();
+    let src_is_dst = src_dims == dst_dims;
+    let src_is_transposed = src_dims.len() == 2 && dst_dims.len() == 2 && src_dims[0] == dst_dims[1] && src_dims[1] == dst_dims[0];
+
+    let mut did_transpose = false;
+
+    if src_is_dst {
+        copy_tensor_into(src, dst)?;
+    } else if src_is_transposed {
+        copy_tensor_transposed_into(src, dst)?;
+        did_transpose = true;
+    } else {
+        return Err(MetalError::InvalidShape(format!(
+            "{label} dims {:?} cannot map into {:?}",
+            src_dims, dst_dims
+        )));
+    }
+
+    if layout_debug_enabled() {
+        eprintln!(
+            "[GGUF_LAYOUT] {label} src_dims={:?} dst_dims={:?} transpose={}",
+            src_dims, dst_dims, did_transpose
+        );
+    }
+
+    Ok(())
 }
 
 fn pack_weight_transposed_into_fused_slice<TDst: TensorElement>(
@@ -281,25 +442,42 @@ fn parse_layer_index(name: &str) -> Option<usize> {
     None
 }
 
-fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwen: &mut Qwen25<T>) -> Result<(), MetalError> {
+fn load_tensor_into_model<T: TensorElement>(
+    lname: &str,
+    tensor: &Tensor<T>,
+    qwen: &mut Qwen25<T>,
+    layout_hint: GGUFLayoutHint,
+) -> Result<(), MetalError> {
+    let layer_idx = parse_layer_index(lname);
+    let is_layer = layer_idx.is_some();
+
     // Embedding weight (token embeddings)
-    if ((lname.contains("token") && lname.contains("emb")) || lname.contains("tok_emb") || lname.contains("tokembedding"))
+    if !is_layer
+        && ((lname.contains("token") && lname.contains("emb")) || lname.contains("tok_emb") || lname.contains("tokembedding"))
         && tensor.len() == qwen.embed_weight.len()
     {
-        copy_tensor_into(tensor, &mut qwen.embed_weight)?;
+        copy_tensor_match_or_transpose(tensor, &mut qwen.embed_weight, "token_embedding")?;
         return Ok(());
     }
 
     // Output / lm_head weights
     let output_len = qwen.config.vocab_size * qwen.config.d_model;
-    if (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
+    if !is_layer
+        && (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
         && tensor.len() == output_len
     {
         if let Some(w) = qwen.output_weight.as_mut() {
-            copy_tensor_into(tensor, w)?;
+            copy_tensor_match_or_transpose(tensor, w, "output_weight")?;
         }
         if let Some(canon) = qwen.output_weight_canon.as_mut() {
-            canon.write_from_nk_tensor(tensor, 0)?;
+            write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
+            if layout_debug_enabled() {
+                eprintln!(
+                    "[GGUF_LAYOUT] output_weight_canon src_dims={:?} hint={:?}",
+                    tensor.dims(),
+                    layout_hint
+                );
+            }
         }
         return Ok(());
     }
@@ -313,40 +491,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
         return Ok(());
     }
 
-    // Weight tying from token embedding to output weight if still unset
-    if lname.contains("token_embd") && lname.contains("weight") {
-        // Only checking if output seems unset. Since it's option, if it's None (F16), we assume it's handled by canon init or waiting for load.
-        // Actually, for F16, output_weight is None so "is_output_unset" is tricky.
-        // But if T=F16, we rely on output_weight_canon.
-        let output_len = qwen.config.vocab_size * qwen.config.d_model;
-        if tensor.len() == output_len {
-            if let Some(w) = qwen.output_weight.as_mut() {
-                // Only copy if currently zero? F32 path
-                let output_slice = w.as_slice();
-                if output_slice.iter().all(|&x| T::to_f32(x) == 0.0) {
-                    copy_tensor_into(tensor, w)?;
-                }
-            }
-            if let Some(canon) = qwen.output_weight_canon.as_mut() {
-                // For canonical, we just overwrite? Or check if zero?
-                // Canonical init is likely zeroed? CanonicalF16Tensor::new allocs uninit? No, new allocs uninit logic?
-                // Let's assume overwrite if this is token_embd and we haven't loaded lm_head logic yet.
-                // Actually the logic "if is_output_unset" implies we want to respect lm_head if present.
-                // But in GGUF loading order is arbitrary.
-                // Let's just write to canon.
-                canon.write_from_nk_tensor(tensor, 0)?;
-            }
-        } else {
-            return Err(MetalError::InvalidOperation(format!(
-                "MAPPING -> token_embd.weight size mismatch: {} vs {}",
-                tensor.len(),
-                output_len
-            )));
-        }
-        return Ok(());
-    }
-
-    if let Some(layer_idx) = parse_layer_index(lname) {
+    if let Some(layer_idx) = layer_idx {
         if layer_idx >= qwen.blocks.len() {
             return Ok(());
         }
@@ -372,7 +517,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_weight_transposed_into_fused(tensor, w, q_offset)?;
             }
             if let Some(canon) = block.attn_q_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -390,7 +535,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_weight_transposed_into_fused(tensor, w, k_offset)?;
             }
             if let Some(canon) = block.attn_k_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -408,7 +553,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_weight_transposed_into_fused(tensor, w, v_offset)?;
             }
             if let Some(canon) = block.attn_v_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -426,7 +571,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_tensor_into(tensor, w)?;
             }
             if let Some(canon) = block.attn_out_weight_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -479,7 +624,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_weight_transposed_into_fused(tensor, w, 0)?;
             }
             if let Some(canon) = block.ffn_gate_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -496,7 +641,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_weight_transposed_into_fused(tensor, w, 0)?;
             }
             if let Some(canon) = block.ffn_up_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -515,7 +660,7 @@ fn load_tensor_into_model<T: TensorElement>(lname: &str, tensor: &Tensor<T>, qwe
                 copy_weight_transposed_into_fused(tensor, w, 0)?;
             }
             if let Some(canon) = block.ffn_down_canon.as_mut() {
-                canon.write_from_nk_tensor(tensor, 0)?;
+                write_canonical_weight(canon, lname, tensor, 0, layout_hint)?;
             }
             return Ok(());
         }
@@ -594,9 +739,28 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
 
         // Instantiate Qwen25 with default-initialized weights
         let mut qwen = Qwen25::new(cfg, ctx)?;
+        let mut saw_output_weight = false;
+        let mut saw_token_embedding = false;
+        let output_len = qwen.config.vocab_size * qwen.config.d_model;
 
         for (name, descriptor) in &gguf_model.tensors {
             let lname = name.to_lowercase();
+            let is_top_level = parse_layer_index(&lname).is_none();
+            if is_top_level
+                && ((lname.contains("token") && lname.contains("emb"))
+                    || lname.contains("tok_emb")
+                    || lname.contains("tokembedding")
+                    || lname.contains("token_embd"))
+                && descriptor.len() == qwen.embed_weight.len()
+            {
+                saw_token_embedding = true;
+            }
+            if is_top_level
+                && (lname.contains("lm_head") || lname.contains("lmhead") || (lname.contains("output") && lname.contains("weight")))
+                && descriptor.len() == output_len
+            {
+                saw_output_weight = true;
+            }
             // Capture Q8_0 for final output/logits projection when it appears at top-level (not per-layer).
             // Some GGUFs tie `lm_head` to `token_embd.weight` and omit an explicit `lm_head.weight`.
             // We materialize into a consistent logical layout of [K=d_model, N=vocab] so downstream
@@ -713,8 +877,24 @@ impl<T: TensorElement> LoadableModel<T> for Qwen25<T> {
                 ))
             })?;
 
-            load_tensor_into_model(&lname, &materialized, &mut qwen)
+            load_tensor_into_model(&lname, &materialized, &mut qwen, gguf_model.layout_hint())
                 .map_err(|err| MetalError::InvalidOperation(format!("Failed to load tensor '{}' into model: {err}", name)))?;
+        }
+
+        if !saw_output_weight && saw_token_embedding {
+            if let Some(canon) = qwen.output_weight_canon.as_mut() {
+                write_canonical_weight(canon, "tied_output_from_embedding", &qwen.embed_weight, 0, gguf_model.layout_hint())?;
+                if layout_debug_enabled() {
+                    eprintln!(
+                        "[GGUF_LAYOUT] output_weight_tied_from_embedding dims={:?} hint={:?}",
+                        qwen.embed_weight.dims(),
+                        gguf_model.layout_hint()
+                    );
+                }
+            }
+            if let Some(w) = qwen.output_weight.as_mut() {
+                copy_tensor_into(&qwen.embed_weight, w)?;
+            }
         }
 
         // NOTE: Dense weights (QKV, FFN gate/up/down) are transposed during loading

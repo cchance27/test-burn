@@ -32,7 +32,7 @@ fn sdpa_backend_override() -> SdpaBackend {
 /// only the newest query row is processed, enabling efficient Gemv kernels.
 pub fn scaled_dot_product_attention(
     foundry: &mut Foundry,
-    q: &Tensor<F16Dtype, Pooled>,
+    q: &Tensor<F16Dtype, impl crate::foundry::storage::StorageState>,
     k: &Tensor<F16Dtype, impl crate::foundry::storage::StorageState>,
     v: &Tensor<F16Dtype, impl crate::foundry::storage::StorageState>,
     causal: bool,

@@ -1,9 +1,6 @@
+// NOTE: ALWAYS_INLINE is provided by policies/base.metal, which must be included.
 #include <metal_stdlib>
 using namespace metal;
-
-#ifndef ALWAYS_INLINE
-#define ALWAYS_INLINE __attribute__((always_inline))
-#endif
 
 // Core computation template (policy-aware)
 // STAGE CONVENTION: fn<Policy>(matrix, [stage_args in buffer order], scale_bytes, gid, lid, [threadgroup])

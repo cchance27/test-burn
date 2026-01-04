@@ -3,51 +3,53 @@
 //! Applies rotary position embeddings to input tensors using precomputed cos/sin caches.
 //! Each pair of features (i, i+half_dim) is rotated: out_i = x_i*cos - x_j*sin, out_j = x_j*cos + x_i*sin
 
-use metallic_macros::{KernelArgs, MetalStruct};
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::{
-    compound::Stage, foundry::{Includes, Kernel, KernelSource}, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
-};
+use crate::{foundry::spec::DynamicValue, types::TensorArg};
 
 /// Parameters for RoPE kernel.
-#[derive(MetalStruct, Clone, Copy, Debug)]
+#[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct RopeParams {
     /// Feature dimension (must be even).
     pub dim: u32,
     /// Sequence length.
-    pub seq_len: u32,
-    /// Position offset for incremental decoding.
-    pub position_offset: u32,
+    pub seq_len: DynamicValue<u32>,
+    /// Position offset for incremental decoding (can be dynamic).
+    pub position_offset: DynamicValue<u32>,
     /// Total elements in input tensor.
-    pub total_elements: u32,
+    pub total_elements: DynamicValue<u32>,
 }
 
 /// RoPE (Rotary Position Embedding) kernel.
 ///
 /// Applies rotation to paired features using cos/sin caches.
-#[derive(KernelArgs, Clone)]
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "rope/rope.metal",
+    function = "rope_kernel_f16",
+    args = RopeParamsResolved,
+    dispatch = per_element,
+    dtype = F16,
+    step = true
+)]
 pub struct Rope {
     /// Input tensor.
-    #[arg(buffer = 0)]
     pub input: TensorArg,
     /// Output tensor (same shape as input).
-    #[arg(buffer = 1, output)]
+    #[arg(output)]
     pub output: TensorArg,
     /// Precomputed cosine cache [max_seq, dim/2].
-    #[arg(buffer = 2)]
     pub cos: TensorArg,
     /// Precomputed sine cache [max_seq, dim/2].
-    #[arg(buffer = 3)]
     pub sin: TensorArg,
-    /// Kernel parameters.
-    #[arg(buffer = 4)]
-    pub params: RopeParams,
+    /// Kernel parameters (resolved from dynamic values).
+    pub params: RopeParamsResolved,
 }
 
 impl Rope {
     /// Create a new RoPE kernel.
-    pub fn new(input: &TensorArg, output: &TensorArg, cos: &TensorArg, sin: &TensorArg, params: RopeParams) -> Self {
+    pub fn new(input: &TensorArg, output: &TensorArg, cos: &TensorArg, sin: &TensorArg, params: RopeParamsResolved) -> Self {
         Self {
             input: input.clone(),
             output: output.clone(),
@@ -55,54 +57,6 @@ impl Rope {
             sin: sin.clone(),
             params,
         }
-    }
-}
-
-/// Kernel ID for pipeline caching.
-pub struct RopeId;
-
-impl Kernel for Rope {
-    type Args = RopeParams;
-    type Id = RopeId;
-
-    fn source(&self) -> KernelSource {
-        KernelSource::File("rope/rope.metal")
-    }
-
-    fn function_name(&self) -> &'static str {
-        "rope_kernel_f16"
-    }
-
-    fn includes(&self) -> Includes {
-        Includes(vec![])
-    }
-
-    fn dtype(&self) -> Option<Dtype> {
-        Some(Dtype::F16)
-    }
-
-    fn struct_defs(&self) -> String {
-        RopeParams::METAL_STRUCT_DEF.to_string()
-    }
-
-    fn bind(&self, encoder: &ComputeCommandEncoder) {
-        self.bind_args(encoder);
-    }
-
-    fn dispatch_config(&self) -> DispatchConfig {
-        // Thread-based: one thread per element
-        let total = self.params.total_elements as usize;
-        let threads_per_group = 256;
-        let num_groups = (total + threads_per_group - 1) / threads_per_group;
-
-        DispatchConfig {
-            grid: GridSize::d1(num_groups),
-            group: ThreadgroupSize::d1(threads_per_group),
-        }
-    }
-
-    fn as_stage(&self) -> Box<dyn Stage> {
-        todo!("RoPE kernel does not yet support compound kernel staging - needs Metal template refactoring")
     }
 }
 

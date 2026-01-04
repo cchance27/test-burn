@@ -5,16 +5,16 @@
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize};
+use crate::{foundry::spec::DynamicValue, types::TensorArg};
 
 /// Parameters for RMSNorm kernel.
-#[derive(Clone, Copy, Debug, MetalStruct, Default)]
+#[derive(Clone, Debug, MetalStruct, Default, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct RmsNormParams {
     /// Feature dimension (last dimension of input).
-    pub feature_dim: u32,
+    pub feature_dim: DynamicValue<u32>,
     /// Total number of elements in input tensor.
-    pub total_elements: u32,
+    pub total_elements: DynamicValue<u32>,
 }
 
 /// RMSNorm kernel.
@@ -30,25 +30,25 @@ pub struct RmsNormParams {
     source = "rmsnorm/rmsnorm.metal",
     function = "rmsnorm_kernel_f16",
     stage_function = "run_rmsnorm_core",
-    args = "RmsNormParams",
+    args = RmsNormParams,
+    dispatch = per_row,
     threadgroup = "float tg_inv_rms"
 )]
 pub struct RmsNorm {
     /// Input tensor (Buffer 0 - Policy Matrix).
-    #[arg(buffer = 0, stage_skip)]
+    #[arg(stage_skip)]
     pub input: TensorArg,
     /// Scale bytes for Q8 policy (Buffer 1 - Policy Scales).
-    #[arg(buffer = 1, stage_skip)]
+    #[arg(stage_skip)]
     pub scale_bytes: TensorArg,
     /// Output tensor (Buffer 2).
-    #[arg(buffer = 2, output)]
+    #[arg(output)]
     pub output: TensorArg,
     /// Scale weights (Buffer 3).
-    #[arg(buffer = 3)]
     pub gamma: TensorArg,
     /// RMSNorm parameters (Buffer 4).
-    #[arg(buffer = 4)]
-    pub params: RmsNormParams,
+    #[arg(metal_type = "const constant RmsNormParams*")]
+    pub params: RmsNormParamsResolved,
 }
 
 impl RmsNorm {
@@ -59,7 +59,7 @@ impl RmsNorm {
     /// * `output` - Output tensor (same shape as input)
     /// * `gamma` - Scale weights of shape [feature_dim]
     /// * `params` - RMSNorm parameters (feature_dim, total_elements)
-    pub fn new(input: &TensorArg, output: &TensorArg, gamma: &TensorArg, params: RmsNormParams) -> Self {
+    pub fn new(input: &TensorArg, output: &TensorArg, gamma: &TensorArg, params: RmsNormParamsResolved) -> Self {
         Self {
             input: input.clone(),
             scale_bytes: input.clone(), // Default to input for scales (F16 case)
@@ -68,22 +68,12 @@ impl RmsNorm {
             params,
         }
     }
-
-    /// Dispatch configuration - required by `#[derive(Kernel)]`.
-    /// One threadgroup per row, uses simdgroup reductions.
-    pub fn dispatch_config(&self) -> DispatchConfig {
-        let num_rows = self.params.total_elements / self.params.feature_dim;
-        DispatchConfig {
-            grid: GridSize::d1(num_rows as usize),
-            group: ThreadgroupSize::d1(256),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compound::{BufferArg, CompoundKernel, Stage};
+    use crate::compound::CompoundKernel;
 
     #[test]
     fn test_rmsnorm_params_metal_struct() {
@@ -95,27 +85,10 @@ mod tests {
 
     #[test]
     fn test_rmsnorm_stage_fused() {
-        #[derive(Clone, Default)]
-        struct DummyMain;
-        impl Stage for DummyMain {
-            fn includes(&self) -> Vec<&'static str> {
-                vec![]
-            }
-            fn buffer_args(&self) -> Vec<BufferArg> {
-                vec![]
-            }
-            fn struct_defs(&self) -> String {
-                String::new()
-            }
-            fn emit(&self, _input_var: &str) -> (String, String) {
-                ("val".to_string(), "    half val = 1.0h;".to_string())
-            }
-        }
-
         let stage = RmsNormStage::default();
         let kernel = CompoundKernel::new("test_fused")
-            .main_dyn(Box::new(DummyMain))
-            .epilogue_dyn(Box::new(stage))
+            .main_dyn(Box::new(stage))
+            .with_manual_output(true)
             .build();
 
         let source = kernel.source_code();
@@ -130,8 +103,7 @@ mod tests {
         assert_eq!(gamma_arg.metal_type, "const device half*");
 
         // Verify code emission
-        assert!(source.contains("half val = 1.0h;"));
-        assert!(source.contains("half gamma_val = gamma[feature_idx];"));
-        assert!(source.contains("half val_epilogue = val * gamma_val;"));
+        assert!(source.contains("threadgroup float tg_inv_rms"));
+        assert!(source.contains("run_rmsnorm_core<Policy>("));
     }
 }

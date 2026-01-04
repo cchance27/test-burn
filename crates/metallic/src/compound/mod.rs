@@ -14,8 +14,10 @@
 //! foundry.run(&kernel)?;
 //! ```
 
+mod code_builder;
 mod stages;
 
+pub use code_builder::CodeBuilder;
 pub use stages::*;
 
 use crate::{
@@ -60,6 +62,18 @@ pub trait Stage: Send + Sync {
     /// # Returns
     /// Tuple of (output_variable_name, metal_code_string)
     fn emit(&self, input_var: &str) -> (String, String);
+
+    /// Generate Metal code for SIMD GEMV prologue (threadgroup setup).
+    /// Used when this Stage is fused into a GEMV kernel.
+    fn emit_simd_prologue(&self) -> Option<String> {
+        None
+    }
+
+    /// Generate Metal code for SIMD GEMV reduction loop (shuffle/xor).
+    /// Used when this Stage is fused into a GEMV kernel.
+    fn emit_simd_reduce(&self) -> Option<String> {
+        None
+    }
 
     /// Generate C-struct definitions required by this stage.
     /// Default implementation returns empty string.
@@ -132,6 +146,24 @@ pub struct CompoundKernel<State = Unfused> {
     /// Disable automatic output assignment (output[idx] = var).
     /// Used when a stage handles writing to output manually (e.g. Gemv).
     pub manual_output: bool,
+}
+
+/// A compiled compound kernel template that no longer retains stage objects.
+///
+/// This is the recommended representation for hot-path usage (e.g. per-token decode),
+/// since it avoids rebuilding source strings and avoids owning non-cloneable stage graphs.
+pub struct CompiledCompoundKernel {
+    fn_name: &'static str,
+    includes: Vec<&'static str>,
+    struct_defs: String,
+    source: String,
+}
+
+/// A bound (dispatchable) compiled compound kernel.
+pub struct BoundCompiledCompoundKernel<A: BindArgs> {
+    template: &'static CompiledCompoundKernel,
+    args: A,
+    dispatch: DispatchConfig,
 }
 
 impl CompoundKernel<Unfused> {
@@ -208,6 +240,20 @@ impl CompoundKernel<Unfused> {
             source: Some(source),
             state: Fused,
             manual_output: self.manual_output,
+        }
+    }
+
+    /// Compile into a reusable template that can be bound many times without rebuilding.
+    pub fn compile(self) -> CompiledCompoundKernel {
+        let source = self.generate_source();
+        let includes = self.collect_includes();
+        let struct_defs = format!("#define FUSED_KERNEL 1\n\n{}", self.collect_struct_defs());
+        let fn_name = Box::leak(self.name.into_boxed_str());
+        CompiledCompoundKernel {
+            fn_name,
+            includes,
+            struct_defs,
+            source,
         }
     }
 
@@ -355,6 +401,69 @@ impl<S> CompoundKernel<S> {
         // Sort by buffer index
         args.sort_by_key(|a| a.buffer_index);
         args
+    }
+}
+
+impl CompiledCompoundKernel {
+    /// Bind this kernel with runtime arguments for dispatch.
+    pub fn bind<A: BindArgs>(self: &'static Self, args: A, dispatch: DispatchConfig) -> BoundCompiledCompoundKernel<A> {
+        BoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+        }
+    }
+}
+
+impl Kernel for CompiledCompoundKernel {
+    type Id = String;
+    type Args = ();
+
+    fn function_name(&self) -> &'static str {
+        self.fn_name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.source.clone())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.includes.clone())
+    }
+
+    fn struct_defs(&self) -> String {
+        self.struct_defs.clone()
+    }
+
+    fn bind(&self, _encoder: &ComputeCommandEncoder) {}
+}
+
+impl<A: BindArgs> Kernel for BoundCompiledCompoundKernel<A> {
+    type Id = String;
+    type Args = A;
+
+    fn function_name(&self) -> &'static str {
+        self.template.fn_name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.template.source.clone())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.template.includes.clone())
+    }
+
+    fn struct_defs(&self) -> String {
+        self.template.struct_defs.clone()
+    }
+
+    fn bind(&self, encoder: &ComputeCommandEncoder) {
+        self.args.bind_args(encoder);
+    }
+
+    fn dispatch_config(&self) -> DispatchConfig {
+        self.dispatch.clone()
     }
 }
 

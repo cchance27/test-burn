@@ -5,7 +5,7 @@ use metallic::{
     Context, F16Element, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, kernels::{
         elemwise_add::BroadcastElemwiseAddInplaceOp, tensors::{ArangeOp, OnesOp, RandomUniformOp}
     }, metals::{
-        elemwise::{ElemwiseAdd, ElemwiseAddParams}, tensor::{Arange, Ones, RandomUniform}
+        elemwise::ElemwiseAdd, tensor::{Arange, Ones, RandomUniform}
     }, tensor::{F16, Tensor, TensorInit, TensorStorage as LegacyStorage}, types::TensorArg
 };
 use rand::{Rng, rng};
@@ -53,11 +53,8 @@ fn test_elemwise_add_broadcast() {
 
     let a_arg = TensorArg::from_tensor(&a_foundry);
     let b_arg = TensorArg::from_tensor(&b_foundry);
-    let params = ElemwiseAddParams {
-        total_elements: total as u32,
-        b_len: cols as u32,
-    };
-    let kernel = ElemwiseAdd::new_inplace(&a_arg, &b_arg, params.total_elements, params.b_len);
+
+    let kernel = ElemwiseAdd::new_inplace(&a_arg, &b_arg, total as u32, cols as u32);
     foundry.run(&kernel).unwrap();
     let foundry_result = FoundryTensor::to_vec(&a_foundry, &foundry);
 
