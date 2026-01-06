@@ -115,7 +115,7 @@ impl<T: KernelArg + ?Sized> KernelArg for &T {
 use smallvec::SmallVec;
 
 /// A kernel argument that captures buffer+offset from any Tensor.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TensorArg {
     pub(crate) buffer: Option<Buffer>,
     pub(crate) offset: usize,

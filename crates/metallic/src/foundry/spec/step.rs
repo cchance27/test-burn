@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::{error::MetalError, foundry::Foundry, types::TensorArg};
 
 /// Reference to a named tensor in the execution graph.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
 pub struct Ref(pub String);
 
 impl From<&str> for Ref {

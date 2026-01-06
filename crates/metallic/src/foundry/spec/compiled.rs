@@ -77,4 +77,8 @@ impl SymbolTable {
     pub fn len(&self) -> usize {
         self.map.len()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &usize)> {
+        self.map.iter()
+    }
 }

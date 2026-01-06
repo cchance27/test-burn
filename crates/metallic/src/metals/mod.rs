@@ -12,6 +12,7 @@ pub mod sdpa;
 pub mod softmax;
 pub mod swiglu;
 pub mod tensor;
+pub mod v2;
 
 // Re-exports for backwards compatibility (items moved to matmul_gemv/fused/)
 pub use matmul_gemv::fused::{

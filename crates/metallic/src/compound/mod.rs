@@ -15,7 +15,7 @@
 //! ```
 
 mod code_builder;
-mod stages;
+pub mod stages;
 
 pub use code_builder::CodeBuilder;
 pub use stages::*;
@@ -152,6 +152,7 @@ pub struct CompoundKernel<State = Unfused> {
 ///
 /// This is the recommended representation for hot-path usage (e.g. per-token decode),
 /// since it avoids rebuilding source strings and avoids owning non-cloneable stage graphs.
+#[derive(Clone, Debug, Default)]
 pub struct CompiledCompoundKernel {
     fn_name: &'static str,
     includes: Vec<&'static str>,
@@ -400,6 +401,7 @@ impl<S> CompoundKernel<S> {
 
         // Sort by buffer index
         args.sort_by_key(|a| a.buffer_index);
+        args.dedup_by_key(|a| a.buffer_index);
         args
     }
 }

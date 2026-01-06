@@ -2600,3 +2600,164 @@ pub fn derive_compiled_step(input: TokenStream) -> TokenStream {
 
     TokenStream::from(expanded)
 }
+
+/// Derive macro for Stage trait.
+///
+/// Generates `Stage` implementation from struct annotations.
+/// This is a simpler version of `#[derive(Epilogue)]` without GEMV-specific hooks.
+///
+/// # Example
+/// ```ignore
+/// #[derive(Stage, Clone)]
+/// #[stage(
+///     include = "v2/softmax/softmax.metal",
+///     emit = r#"float local_max = find_row_max(matrix, ...);"#,
+///     out_var = "local_max",
+///     struct_defs = "SoftmaxParams"  // Optional: MetalStruct type to include
+/// )]
+/// pub struct SoftmaxMaxStage {
+///     #[arg(buffer = 0)]
+///     pub matrix: TensorArg,
+///     #[arg(buffer = 3)]
+///     pub params: SoftmaxParams,
+/// }
+/// ```
+#[proc_macro_derive(Stage, attributes(stage, arg))]
+pub fn derive_stage(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+
+    let root = metallic_root();
+
+    let mut include: Option<String> = None;
+    let mut emit: Option<String> = None;
+    let mut out_var: Option<String> = None;
+    let mut struct_defs_type: Option<String> = None;
+    let mut struct_defs_fn: Option<String> = None;
+
+    for attr in &input.attrs {
+        if attr.path().is_ident("stage") {
+            if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
+                for meta in nested {
+                    if let Meta::NameValue(nv) = meta {
+                        if nv.path.is_ident("include") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Str(lit) = expr_lit.lit {
+                                    include = Some(lit.value());
+                                }
+                            }
+                        } else if nv.path.is_ident("emit") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Str(lit) = expr_lit.lit {
+                                    emit = Some(lit.value());
+                                    if let Err(e) = validate_metal_template(&lit.value(), lit.span()) {
+                                        return TokenStream::from(e.to_compile_error());
+                                    }
+                                }
+                            }
+                        } else if nv.path.is_ident("out_var") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Str(lit) = expr_lit.lit {
+                                    out_var = Some(lit.value());
+                                }
+                            }
+                        } else if nv.path.is_ident("struct_defs") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Str(lit) = expr_lit.lit {
+                                    struct_defs_type = Some(lit.value());
+                                }
+                            }
+                        } else if nv.path.is_ident("struct_defs_fn") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Str(lit) = expr_lit.lit {
+                                    struct_defs_fn = Some(lit.value());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let emit_template = emit.unwrap_or_default();
+    let out_var_expr = if let Some(v) = out_var {
+        quote::quote! { #v.to_string() }
+    } else {
+        quote::quote! { "void".to_string() }
+    };
+
+    // Collect buffer args from fields
+    let (arg_infos, _) = match input.data {
+        Data::Struct(data) => collect_arg_infos(&data.fields),
+        _ => panic!("Stage only supports structs"),
+    };
+
+    let buffer_args = arg_infos.iter().filter(|info| !info.stage_skip).map(|info| {
+        let arg_name = &info.name;
+        let idx = info.buffer_index;
+        let mtype = info
+            .metal_type
+            .clone()
+            .unwrap_or_else(|| infer_metal_type(&info.rust_type, info.is_buffer, info.is_output));
+        quote::quote! {
+            #root::compound::BufferArg {
+                name: #arg_name,
+                metal_type: #mtype,
+                buffer_index: #idx as u32,
+            }
+        }
+    });
+
+    // Generate includes vec
+    let includes_impl = if let Some(inc) = include {
+        quote::quote! { vec![#inc] }
+    } else {
+        quote::quote! { vec![] }
+    };
+
+    // Generate struct_defs impl - supports struct_defs_fn (function) or struct_defs (MetalStruct type)
+    let struct_defs_impl = if let Some(fn_name) = struct_defs_fn {
+        let fn_ident = Ident::new(&fn_name, Span::call_site());
+        quote::quote! {
+            Self::#fn_ident()
+        }
+    } else if let Some(type_name) = struct_defs_type {
+        let type_ident = Ident::new(&type_name, Span::call_site());
+        quote::quote! {
+            <#type_ident as #root::HasMetalStructDef>::METAL_STRUCT_DEF.to_string()
+        }
+    } else {
+        quote::quote! { String::new() }
+    };
+
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let expanded = quote::quote! {
+        impl #impl_generics #root::compound::Stage for #name #ty_generics #where_clause {
+            fn includes(&self) -> Vec<&'static str> {
+                #includes_impl
+            }
+
+            fn buffer_args(&self) -> Vec<#root::compound::BufferArg> {
+                vec![
+                    #(#buffer_args),*
+                ]
+            }
+
+            fn struct_defs(&self) -> String {
+                #struct_defs_impl
+            }
+
+            fn emit(&self, input_var: &str) -> (String, String) {
+                let out_var = #out_var_expr;
+                let mut code = #emit_template.to_string();
+                code = code.replace("{input_var}", input_var);
+                code = code.replace("{out_var}", &out_var);
+                (out_var, code)
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}

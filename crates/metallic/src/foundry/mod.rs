@@ -183,14 +183,6 @@ impl Foundry {
             }
         }
 
-        // Prepend struct definitions
-        let struct_defs = kernel.struct_defs();
-        if !struct_defs.is_empty() {
-            full_source.push_str("// Auto-generated struct definitions\n");
-            full_source.push_str(&struct_defs);
-            full_source.push_str("\n\n");
-        }
-
         // Define source_path only for File variant context
         let mut source_path_ctx: Option<PathBuf> = None;
 
@@ -208,7 +200,7 @@ impl Foundry {
             KernelSource::String(s) => s,
         };
 
-        // Load includes
+        // Load includes FIRST so macros/headers are available to struct_defs
         for include in includes {
             let p = find_include(include, source_path_ctx.as_ref())
                 .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
@@ -226,6 +218,14 @@ impl Foundry {
                 }
             }
             full_source.push('\n');
+        }
+
+        // Prepend struct definitions AFTER includes
+        let struct_defs = kernel.struct_defs();
+        if !struct_defs.is_empty() {
+            full_source.push_str("// Auto-generated struct definitions\n");
+            full_source.push_str(&struct_defs);
+            full_source.push_str("\n\n");
         }
 
         // Also strip includes from main content (if it's from a file, it might have them).

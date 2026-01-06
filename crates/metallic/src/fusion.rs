@@ -169,6 +169,7 @@ impl SourceBuilder {
 pub const THREAD_ARGS: &[&str] = &[
     "uint3 gid [[threadgroup_position_in_grid]]",
     "uint3 lid [[thread_position_in_threadgroup]]",
+    "uint3 tptg [[threads_per_threadgroup]]",
 ];
 
 /// Generate a Metal kernel signature from METAL_ARGS and policy buffer_types().

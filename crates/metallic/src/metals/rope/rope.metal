@@ -1,4 +1,20 @@
 #include <metal_stdlib>
+#ifndef ALWAYS_INLINE
+#define ALWAYS_INLINE __attribute__((always_inline))
+#endif
+
+ALWAYS_INLINE void rope_rotate_half(
+    thread float& out_i,
+    thread float& out_j,
+    float x_i,
+    float x_j,
+    float cos_v,
+    float sin_v
+) {
+    out_i = x_i * cos_v - x_j * sin_v;
+    out_j = x_j * cos_v + x_i * sin_v;
+}
+
 using namespace metal;
 
 // RopeParams struct is injected by Foundry via struct_defs()
@@ -29,23 +45,31 @@ kernel void rope_kernel_f16(
     uint row_idx = gid / dim;
     uint pos = (row_idx % seq_len) + position_offset;
     uint half_dim = dim / 2u;
-    uint pair = (feature_idx < half_dim) ? feature_idx : (feature_idx - half_dim);
     
     // Load cos/sin values for this position and feature pair
+    // Pair index is always feature_idx if < half_dim, or feature_idx - half_dim
+    uint pair = (feature_idx < half_dim) ? feature_idx : (feature_idx - half_dim);
+    
     float cosv = (float)cos_buf[pos * half_dim + pair];
     float sinv = (float)sin_buf[pos * half_dim + pair];
     
     if (feature_idx < half_dim) {
-        // First half: out_i = x_i * cos - x_j * sin
+        // First half: out_i
         float x_i = (float)input[gid];
         float x_j = (float)input[row_idx * dim + feature_idx + half_dim];
-        float out_i = x_i * cosv - x_j * sinv;
+        
+        float out_i, out_j;
+        rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
+        
         output[gid] = (half)out_i;
     } else {
-        // Second half: out_j = x_j * cos + x_i * sin
+        // Second half: out_j
         float x_j = (float)input[gid];
         float x_i = (float)input[row_idx * dim + (feature_idx - half_dim)];
-        float out_j = x_j * cosv + x_i * sinv;
+        
+        float out_i, out_j;
+        rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
+        
         output[gid] = (half)out_j;
     }
 }
