@@ -233,37 +233,19 @@ impl Stage for WarpReduceStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        // Generate shuffle distances dynamically based on simd_width
-        // For simd_width=32: distances are 16, 8, 4, 2, 1
-        // For simd_width=64: distances are 32, 16, 8, 4, 2, 1
-        let mut code = format!(
-            "    // Warp-level SIMD {:?} reduction (simd_width={})\n    {} {} = {};\n",
-            self.op, self.simd_width, self.dtype, self.output_var, self.input_var
-        );
-
-        let op_fn = match self.op {
-            WarpReduceOp::Sum => "+=",
-            WarpReduceOp::Max => "= max({out}, ",
+        let func = match self.op {
+            WarpReduceOp::Sum => "simd_sum",
+            WarpReduceOp::Max => "simd_max",
         };
 
-        let mut distance = self.simd_width / 2;
-        while distance >= 1 {
-            match self.op {
-                WarpReduceOp::Sum => {
-                    code.push_str(&format!(
-                        "    {} {} simd_shuffle_xor({}, {}u);\n",
-                        self.output_var, op_fn, self.output_var, distance
-                    ));
-                }
-                WarpReduceOp::Max => {
-                    code.push_str(&format!(
-                        "    {} = max({}, simd_shuffle_xor({}, {}u));\n",
-                        self.output_var, self.output_var, self.output_var, distance
-                    ));
-                }
-            }
-            distance /= 2;
-        }
+        let code = format!(
+            "    // Warp-level SIMD {op:?} reduction\n    {dtype} {out} = {func}({in_var});",
+            op = self.op,
+            dtype = self.dtype,
+            out = self.output_var,
+            func = func,
+            in_var = self.input_var
+        );
 
         (self.output_var.clone(), code)
     }

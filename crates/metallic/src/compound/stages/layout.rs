@@ -17,6 +17,9 @@ pub enum Layout {
     /// Column-major (KN): weights[k * N + row]  
     /// Each column is contiguous in memory.
     ColMajor,
+    /// Canonical Blocked-Column-Major: weights[(k % wpb) + wpb * (col + (k / wpb) * N)]
+    /// Used by legacy GemvCanonical kernels.
+    Canonical,
 }
 
 /// A stage that defines layout indexing variables and helpers.
@@ -50,6 +53,11 @@ impl LayoutStage {
     /// Column-major (KN) layout: weights[k * N + row]
     pub fn col_major() -> Self {
         Self::new(Layout::ColMajor, "gid", "lid")
+    }
+
+    /// Canonical blocked-column-major layout.
+    pub fn canonical() -> Self {
+        Self::new(Layout::Canonical, "gid", "lid")
     }
 
     /// Get the layout type
@@ -88,6 +96,13 @@ impl Stage for LayoutStage {
 #define WEIGHT_INDEX(row, k, K, N) ((k) * (N) + (row))
 "#
             .to_string(),
+            Layout::Canonical => r#"
+// Layout: Canonical Blocked (Legacy)
+// weights[(k % weights_per_block) + weights_per_block * (row + (k / weights_per_block) * N)]
+#define IS_K_CONTIGUOUS 1
+#define WEIGHT_INDEX(row, k, K, N) ((k % weights_per_block) + weights_per_block * ((row) + ((k) / weights_per_block) * (N)))
+"#
+            .to_string(),
         }
     }
 
@@ -105,6 +120,7 @@ impl Stage for LayoutStage {
             layout_name = match self.layout {
                 Layout::RowMajor => "RowMajor (NK)",
                 Layout::ColMajor => "ColMajor (KN)",
+                Layout::Canonical => "Canonical (Blocked)",
             }
         );
 
@@ -154,6 +170,11 @@ impl WarpLayoutStage {
     /// Column-major (KN) layout with warp-per-row dispatch.
     pub fn col_major() -> Self {
         Self::new(Layout::ColMajor)
+    }
+
+    /// Canonical blocked-column-major layout with warp-per-row dispatch.
+    pub fn canonical() -> Self {
+        Self::new(Layout::Canonical)
     }
 
     /// Configure number of warps per threadgroup.
@@ -211,6 +232,14 @@ impl Stage for WarpLayoutStage {
 #define WEIGHT_INDEX(row, k, K, N) ((k) * (N) + (row))
 "#
             }
+            Layout::Canonical => {
+                r#"
+// Layout: Canonical Blocked (Legacy)
+// weights[(k % weights_per_block) + weights_per_block * (row + (k / weights_per_block) * N)]
+#define IS_K_CONTIGUOUS 1
+#define WEIGHT_INDEX(row, k, K, N) ((k % weights_per_block) + weights_per_block * ((row) + ((k) / weights_per_block) * (N)))
+"#
+            }
         };
 
         format!(
@@ -235,6 +264,7 @@ impl Stage for WarpLayoutStage {
             layout_name = match self.layout {
                 Layout::RowMajor => "RowMajor (NK) with warp-per-row",
                 Layout::ColMajor => "ColMajor (KN) with warp-per-row",
+                Layout::Canonical => "Canonical (Blocked) with warp-per-row",
             }
         );
 

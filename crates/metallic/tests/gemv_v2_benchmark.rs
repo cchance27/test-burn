@@ -8,12 +8,13 @@ use metallic::{
     }, tensor::{TensorInit, dtypes::F16}, types::TensorArg
 };
 
-fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout, iterations: usize) {
+fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout, alpha: f32, iterations: usize) {
     let layout_str = match layout {
         Layout::RowMajor => "NK (RowMajor)",
         Layout::ColMajor => "KN (ColMajor)",
+        Layout::Canonical => "Blocked (Canonical)",
     };
-    println!("Benchmarking {}: K={}, N={}", layout_str, k, n);
+    println!("Benchmarking {}: K={}, N={}, alpha={:.2}", layout_str, k, n, alpha);
 
     // Allocation
     let dims_weights = vec![k * n];
@@ -53,6 +54,18 @@ fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout,
             weights_per_block: 0,
             stride_scale: 0,
         },
+        Layout::Canonical => GemvParams {
+            k: k as u32,
+            n: n as u32,
+            batch: 1,
+            stride_x: 1,
+            stride_y: 1,
+            stride_a: 0,
+            stride_w: (n * 32) as u32,
+            blocks_per_k: (k / 32) as u32,
+            weights_per_block: 32,
+            stride_scale: 0,
+        },
     };
 
     let weights_arg = TensorArg::from_tensor(&weights);
@@ -61,11 +74,16 @@ fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout,
 
     let run_legacy: Box<dyn Fn(&mut Foundry)> = match layout {
         Layout::RowMajor => {
-            let kernel = GemvColMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params);
+            let kernel = GemvColMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(alpha);
             Box::new(move |f| f.run(&kernel).unwrap())
         }
         Layout::ColMajor => {
-            let kernel = GemvRowMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params);
+            let kernel = GemvRowMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(alpha);
+            Box::new(move |f| f.run(&kernel).unwrap())
+        }
+        Layout::Canonical => {
+            use metallic::metals::gemv::GemvCanonical;
+            let kernel = GemvCanonical::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(alpha);
             Box::new(move |f| f.run(&kernel).unwrap())
         }
     };
@@ -88,6 +106,8 @@ fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout,
         n_dim: DynamicValue::Literal(n as u32),
         weights_per_block: 32,
         layout: layout,
+        strategy: None,
+        alpha,
     };
 
     let mut symbols = metallic::foundry::spec::SymbolTable::new();
@@ -146,11 +166,20 @@ fn benchmark_gemv_v2_perf() {
 
     println!("\n=== NK Layout (RowMajor) - GemvV2 ===");
     for (k, n) in &cases {
-        run_benchmark_case(&mut foundry, *k, *n, Layout::RowMajor, iterations);
+        run_benchmark_case(&mut foundry, *k, *n, Layout::RowMajor, 1.0, iterations);
     }
+    run_benchmark_case(&mut foundry, 4096, 4096, Layout::RowMajor, 0.5, iterations);
 
     println!("\n=== KN Layout (ColMajor) - GemvV2 ===");
     for (k, n) in &cases {
-        run_benchmark_case(&mut foundry, *k, *n, Layout::ColMajor, iterations);
+        run_benchmark_case(&mut foundry, *k, *n, Layout::ColMajor, 1.0, iterations);
     }
+    run_benchmark_case(&mut foundry, 4096, 4096, Layout::ColMajor, 0.5, iterations);
+
+    println!("\n=== Blocked (Canonical) Layout - GemvV2 ===");
+    let canonical_cases = vec![(128, 128), (4096, 128), (4096, 4096)];
+    for (k, n) in &canonical_cases {
+        run_benchmark_case(&mut foundry, *k, *n, Layout::Canonical, 1.0, iterations);
+    }
+    run_benchmark_case(&mut foundry, 4096, 4096, Layout::Canonical, 2.0, iterations);
 }

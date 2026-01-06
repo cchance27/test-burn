@@ -226,6 +226,111 @@ impl Stage for VectorizedDotStage {
     }
 }
 
+// ... VectorizedDotStage ...
+
+/// Canonical dot product stage (Legacy V1 compatibility).
+///
+/// Uses `gemv_dot_canonical` which implements a 4-way unrolled loop.
+/// This acts as a robust fallback or alternative to the vectorized stage.
+#[derive(Debug, Clone)]
+pub struct CanonicalDotStage {
+    quantization: Quantization,
+}
+
+impl CanonicalDotStage {
+    pub fn new(quantization: Quantization) -> Self {
+        Self { quantization }
+    }
+}
+
+impl Stage for CanonicalDotStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec![self.quantization.include_path()]
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        // Same arguments as VectorizedDotStage
+        vec![
+            BufferArg {
+                name: "weights",
+                metal_type: "const device uchar*",
+                buffer_index: 0,
+            },
+            BufferArg {
+                name: "scale_bytes",
+                metal_type: "const device uchar*",
+                buffer_index: 1,
+            },
+            BufferArg {
+                name: "input",
+                metal_type: "const device half*",
+                buffer_index: 2,
+            },
+            BufferArg {
+                name: "k_dim",
+                metal_type: "constant uint&",
+                buffer_index: 4,
+            },
+            BufferArg {
+                name: "n_dim",
+                metal_type: "constant uint&",
+                buffer_index: 5,
+            },
+            BufferArg {
+                name: "weights_per_block",
+                metal_type: "constant uint&",
+                buffer_index: 6,
+            },
+        ]
+    }
+
+    fn struct_defs(&self) -> String {
+        GEMV_METAL.to_string()
+    }
+
+    fn emit(&self, _prev: &str) -> (String, String) {
+        let policy = self.quantization.policy_name();
+
+        let code = format!(
+            r#"
+    // Canonical Dot Product ({policy})
+    // Uses 4-way unrolling with warp-interleaved access
+    // Each thread processes 4 elements, stride = 32 * 4 = 128
+    const uint blocks_per_k = (k_dim + weights_per_block - 1) / weights_per_block;
+    
+    float acc = 0.0f;
+    uint k_step = 32u * 4u; // 128
+    
+    uint k = lane_id * 4u;
+    
+    // Main interleaved loop
+    while (k < k_dim) {{
+         // Process 4 elements (or remainder)
+         // gemv_dot_canonical handles bounds check against k_dim
+         acc += gemv_dot_canonical<{policy}>(
+             weights,
+             scale_bytes,
+             input,
+             row_idx,
+             k,
+             k + 4u,
+             k_dim,
+             n_dim,
+             weights_per_block
+         );
+         
+         k += k_step;
+    }}
+    
+    // Reduce happens in next stage
+    float partial_dot = acc;
+"#
+        );
+
+        ("partial_dot".to_string(), code)
+    }
+}
+
 /// Stage that writes the reduced result to output with optional bias.
 /// Designed for warp-per-row dispatch where only lane 0 writes.
 #[derive(Debug, Clone)]
@@ -265,6 +370,11 @@ impl Stage for WarpWriteOutputStage {
                 metal_type: "constant uint&",
                 buffer_index: 8,
             },
+            BufferArg {
+                name: "alpha",
+                metal_type: "constant float&",
+                buffer_index: 9,
+            },
         ]
     }
 
@@ -276,7 +386,9 @@ impl Stage for WarpWriteOutputStage {
         let code = r#"
     // Write output (only lane 0 of each warp)
     if (lane_id == 0) {
-        gemv_write_output(output, bias, row_idx, row_sum, has_bias != 0);
+        // Apply alpha scaling to the reduced sum
+        float scaled_sum = row_sum * alpha;
+        gemv_write_output(output, bias, row_idx, scaled_sum, has_bias != 0);
     }
 "#
         .to_string();

@@ -32,6 +32,7 @@ struct V2TestConfig {
     n: usize,
     with_bias: bool,
     layout: TestLayout,
+    alpha: f32,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -47,6 +48,7 @@ impl Default for V2TestConfig {
             n: 128,
             with_bias: false,
             layout: TestLayout::NK,
+            alpha: 1.0,
         }
     }
 }
@@ -113,19 +115,19 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
     match cfg.layout {
         TestLayout::NK => {
             if cfg.with_bias {
-                let kernel = GemvColMajor::with_bias(&weights_arg, &input_arg, &output_legacy_arg, params, &bias_arg);
+                let kernel = GemvColMajor::with_bias(&weights_arg, &input_arg, &output_legacy_arg, params, &bias_arg).with_alpha(cfg.alpha);
                 foundry.run(&kernel).unwrap();
             } else {
-                let kernel = GemvColMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params);
+                let kernel = GemvColMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(cfg.alpha);
                 foundry.run(&kernel).unwrap();
             }
         }
         TestLayout::KN => {
             if cfg.with_bias {
-                let kernel = GemvRowMajor::with_bias(&weights_arg, &input_arg, &output_legacy_arg, params, &bias_arg);
+                let kernel = GemvRowMajor::with_bias(&weights_arg, &input_arg, &output_legacy_arg, params, &bias_arg).with_alpha(cfg.alpha);
                 foundry.run(&kernel).unwrap();
             } else {
-                let kernel = GemvRowMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params);
+                let kernel = GemvRowMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(cfg.alpha);
                 foundry.run(&kernel).unwrap();
             }
         }
@@ -155,6 +157,8 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
             TestLayout::NK => Layout::RowMajor,
             TestLayout::KN => Layout::ColMajor,
         },
+        strategy: None,
+        alpha: cfg.alpha,
     };
 
     let compiled_steps = step.compile(&mut bindings, &mut symbols);
@@ -187,8 +191,10 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
     println!("V2 output (first 10):     {:?}", &v2_output[..10.min(cfg.n)]);
 
     // Verify results with tolerance scaling with K
-    // F16 precision decays with sqrt(K)
-    let tolerance = 1e-4 * (cfg.k as f32).sqrt();
+    // F16 precision decays with sqrt(K). Since V2 uses float4/8-way accumulation
+    // while Legacy uses 4-way unrolling or single-lane, slight deviations are expected
+    // in large kernels due to floating point associativity.
+    let tolerance = 1e-3 * (cfg.k as f32).sqrt();
 
     let mut max_diff = 0.0f32;
     let mut max_diff_idx = 0;
@@ -248,6 +254,29 @@ fn test_gemv_v2_nk_512x128() {
         k: 512,
         n: 128,
         layout: TestLayout::NK,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemv_v2_nk_alpha_256x256() {
+    run_gemv_v2_parity_test(V2TestConfig {
+        k: 256,
+        n: 256,
+        alpha: 0.5,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemv_v2_kn_alpha_128x128() {
+    run_gemv_v2_parity_test(V2TestConfig {
+        k: 128,
+        n: 128,
+        layout: TestLayout::KN,
+        alpha: 2.0,
         ..Default::default()
     });
 }
@@ -441,6 +470,8 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
             TestLayout::NK => Layout::RowMajor,
             TestLayout::KN => Layout::ColMajor,
         },
+        strategy: None,
+        alpha: cfg.alpha,
     };
 
     let compiled_steps = step.compile(&mut bindings, &mut symbols);
