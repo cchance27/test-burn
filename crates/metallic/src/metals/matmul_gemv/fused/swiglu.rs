@@ -195,4 +195,114 @@ impl Step for SwiGluF16CanonicalFusedRmsnormStep {
     fn name(&self) -> &'static str {
         "SwiGluF16CanonicalFusedRmsnorm"
     }
+
+    fn compile(
+        &self,
+        resolver: &mut TensorBindings,
+        symbols: &mut crate::foundry::spec::SymbolTable,
+    ) -> Vec<Box<dyn crate::foundry::spec::CompiledStep>> {
+        let input_idx = symbols.get_or_create(resolver.interpolate(self.input.0.clone()));
+        let gamma_idx = symbols.get_or_create(resolver.interpolate(self.gamma.0.clone()));
+        let wg_idx = symbols.get_or_create(resolver.interpolate(self.wg.0.clone()));
+        let wu_idx = symbols.get_or_create(resolver.interpolate(self.wu.0.clone()));
+        let bg_idx = symbols.get_or_create(resolver.interpolate(self.bg.0.clone()));
+        let bu_idx = symbols.get_or_create(resolver.interpolate(self.bu.0.clone()));
+        let out_idx = symbols.get_or_create(resolver.interpolate(self.out.0.clone()));
+
+        vec![Box::new(CompiledSwiGluF16CanonicalFusedRmsnormStep {
+            input_idx,
+            gamma_idx,
+            wg_idx,
+            wu_idx,
+            bg_idx,
+            bu_idx,
+            out_idx,
+            epsilon: self.epsilon.clone(),
+            weights_per_block: self.weights_per_block,
+        })]
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledSwiGluF16CanonicalFusedRmsnormStep {
+    pub input_idx: usize,
+    pub gamma_idx: usize,
+    pub wg_idx: usize,
+    pub wu_idx: usize,
+    pub bg_idx: usize,
+    pub bu_idx: usize,
+    pub out_idx: usize,
+    pub epsilon: DynamicValue<f32>,
+    pub weights_per_block: u32,
+}
+
+impl crate::foundry::spec::CompiledStep for CompiledSwiGluF16CanonicalFusedRmsnormStep {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &crate::foundry::spec::FastBindings,
+        bindings: &TensorBindings,
+    ) -> Result<(), MetalError> {
+        let input = fast_bindings
+            .get(self.input_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Input tensor not found at idx {}", self.input_idx)))?;
+        let gamma = fast_bindings
+            .get(self.gamma_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Gamma tensor not found at idx {}", self.gamma_idx)))?;
+        let wg = fast_bindings
+            .get(self.wg_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Wg tensor not found at idx {}", self.wg_idx)))?;
+        let wu = fast_bindings
+            .get(self.wu_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Wu tensor not found at idx {}", self.wu_idx)))?;
+        let bg = fast_bindings
+            .get(self.bg_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bg tensor not found at idx {}", self.bg_idx)))?;
+        let bu = fast_bindings
+            .get(self.bu_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bu tensor not found at idx {}", self.bu_idx)))?;
+        let out = fast_bindings
+            .get(self.out_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Out tensor not found at idx {}", self.out_idx)))?;
+
+        let eps = self.epsilon.resolve(bindings);
+        let wpb = if self.weights_per_block == 0 { 32 } else { self.weights_per_block };
+
+        let k = input.dims().last().copied().unwrap_or(0);
+        if k == 0 {
+            return Err(MetalError::InvalidShape(
+                "SwiGluF16CanonicalFusedRmsnorm requires non-zero K".into(),
+            ));
+        }
+        let n0 = out.dims().last().copied().unwrap_or(0);
+        if n0 == 0 {
+            return Err(MetalError::InvalidShape(
+                "SwiGluF16CanonicalFusedRmsnorm requires non-zero output dim".into(),
+            ));
+        }
+
+        let blocks_per_k = ((k + wpb as usize - 1) / wpb as usize) as u32;
+        let params = Q2FusedParams {
+            k: k as u32,
+            n0: n0 as u32,
+            n1: n0 as u32,
+            blocks_per_k,
+            weights_per_block: wpb,
+            has_bias0: 1,
+            has_bias1: 1,
+        };
+
+        let args = SwiGluF16CanonicalFusedRmsnormArgs {
+            data_g: wg.clone(),
+            data_u: wu.clone(),
+            vector_x: input.clone(),
+            out_res: out.clone(),
+            params,
+            bias_g: bg.clone(),
+            bias_u: bu.clone(),
+            gamma: gamma.clone(),
+            epsilon: eps,
+        };
+        dispatch_swiglu(foundry, args, &params)
+    }
 }

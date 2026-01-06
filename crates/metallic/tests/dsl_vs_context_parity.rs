@@ -553,6 +553,7 @@ struct LegacyLayer0Outputs {
     q_rot: Vec<f16>,      // Q after RoPE (before SDPA)
     k_expanded: Vec<f16>, // K after repeat (before SDPA)
     v_expanded: Vec<f16>, // V after repeat (before SDPA)
+    q_proj: Vec<f16>,     // Q projection output
     k_proj: Vec<f16>,     // K projection output
     v_proj: Vec<f16>,     // V projection output
     ffn_norm_out: Vec<f16>,
@@ -661,7 +662,7 @@ fn legacy_layer0_outputs<T: TensorElement>(
 
     let q_heads = ctx.call::<KvRearrangeOp>(
         (
-            q_mat,
+            q_mat.clone(),
             d_model as u32,
             head_dim as u32,
             n_heads as u32,
@@ -898,6 +899,7 @@ fn legacy_layer0_outputs<T: TensorElement>(
         q_rot: tensor_to_f16_vec(&q_heads_after_rope),
         k_expanded: tensor_to_f16_vec(&k_repeated),
         v_expanded: tensor_to_f16_vec(&v_repeated),
+        q_proj: tensor_to_f16_vec(&q_mat),
         k_proj: tensor_to_f16_vec(&k_mat),
         v_proj: tensor_to_f16_vec(&v_mat),
         ffn_norm_out: tensor_to_f16_vec(&x_normed_mlp),
@@ -937,7 +939,7 @@ fn test_dsl_vs_context_embedding_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     // =========================================================================
     // STEP 3: Create tokenizer and encode a test prompt
@@ -1048,7 +1050,7 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     let tokenizer = dsl_model.tokenizer()?;
     let prompt = "Hello";
@@ -1379,7 +1381,7 @@ fn test_dsl_vs_context_pre_norm_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     let tokenizer = dsl_model.tokenizer()?;
     let prompt = "Hello";
@@ -1476,7 +1478,7 @@ fn test_dsl_vs_context_sdpa_layer0_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     let tokenizer = dsl_model.tokenizer()?;
     let prompt = "Hello";
@@ -1585,7 +1587,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     let tokenizer = dsl_model.tokenizer()?;
     let tokens = tokenizer.encode("Hello")?;
@@ -2231,7 +2233,7 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     eprintln!("✅ Both models loaded");
 
@@ -2453,7 +2455,7 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, mut fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     // =========================================================================
     // STEP 2: Create shared input (single token for consistent shapes)
@@ -2530,6 +2532,11 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
         metallic::types::MetalBuffer::from_retained(buf)
     };
     let input_tensor = metallic::types::TensorArg::from_buffer(input_buffer, metallic::tensor::Dtype::U32, vec![tokens.len()], vec![1]);
+
+    // Bind input_ids to both binding types
+    if let Some(id) = dsl_model.symbol_id("input_ids") {
+        fast_bindings.set(id, input_tensor.clone());
+    }
     bindings.insert("input_ids".to_string(), input_tensor);
 
     // Embedding parity (run embedding step directly)
@@ -2559,7 +2566,8 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
     }
 
     // Run full DSL forward pass (embedding + layer 0)
-    dsl_model.forward(&mut foundry, &mut bindings)?;
+    // Use forward_uncompiled so the n_layers=1 override works (compiled steps are pre-unrolled)
+    dsl_model.forward_uncompiled(&mut foundry, &mut bindings)?;
     ctx.synchronize();
 
     // =========================================================================
@@ -2621,6 +2629,7 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
     };
 
     // Q/K/V projection outputs (before rearrange)
+    compare("Q projection", "q", &legacy_out.q_proj, false);
     compare("K projection", "k", &legacy_out.k_proj, false);
     compare("V projection", "v", &legacy_out.v_proj, false);
 

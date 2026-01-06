@@ -112,14 +112,16 @@ impl<T: KernelArg + ?Sized> KernelArg for &T {
     }
 }
 
+use smallvec::SmallVec;
+
 /// A kernel argument that captures buffer+offset from any Tensor.
 #[derive(Clone)]
 pub struct TensorArg {
     pub(crate) buffer: Option<Buffer>,
     pub(crate) offset: usize,
     pub(crate) dtype: Dtype,
-    pub(crate) dims: Vec<usize>,
-    pub(crate) strides: Vec<usize>,
+    pub(crate) dims: SmallVec<[usize; 4]>,
+    pub(crate) strides: SmallVec<[usize; 4]>,
 }
 
 impl Default for TensorArg {
@@ -128,8 +130,8 @@ impl Default for TensorArg {
             buffer: None,
             offset: 0,
             dtype: Dtype::F16,
-            dims: vec![],
-            strides: vec![],
+            dims: SmallVec::new(),
+            strides: SmallVec::new(),
         }
     }
 }
@@ -145,8 +147,8 @@ impl TensorArg {
             buffer: Some(arg.buffer().clone()),
             offset: arg.offset(),
             dtype: arg.dtype(),
-            dims: arg.dims().to_vec(),
-            strides: arg.strides().to_vec(),
+            dims: SmallVec::from_slice(arg.dims()),
+            strides: SmallVec::from_slice(arg.strides()),
         }
     }
 
@@ -156,8 +158,8 @@ impl TensorArg {
             buffer: Some(buffer),
             offset: 0,
             dtype,
-            dims,
-            strides,
+            dims: SmallVec::from_vec(dims),
+            strides: SmallVec::from_vec(strides),
         }
     }
 
@@ -167,8 +169,8 @@ impl TensorArg {
             buffer: Some(buffer),
             offset: 0,
             dtype: Dtype::F16,
-            dims: vec![],
-            strides: vec![],
+            dims: SmallVec::new(),
+            strides: SmallVec::new(),
         }
     }
 }

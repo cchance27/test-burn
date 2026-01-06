@@ -142,7 +142,7 @@ fn test_e2e_forward_pass() {
     eprintln!("Loaded model: {}", model.name());
 
     // Prepare bindings
-    let mut bindings = model.prepare_bindings(&mut foundry).expect("Failed to prepare bindings");
+    let (mut bindings, mut fast_bindings) = model.prepare_bindings(&mut foundry).expect("Failed to prepare bindings");
     eprintln!("Prepared {} bindings", bindings.len());
 
     // Prepare input_ids from a coherent prompt
@@ -170,7 +170,10 @@ fn test_e2e_forward_pass() {
     };
     let input_tensor =
         metallic::types::TensorArg::from_buffer(input_buffer, metallic::tensor::Dtype::U32, vec![prompt_tokens.len()], vec![1]);
-    bindings.insert("input_ids".to_string(), input_tensor);
+    bindings.insert("input_ids".to_string(), input_tensor.clone());
+    if let Some(id) = model.symbol_id("input_ids") {
+        fast_bindings.set(id, input_tensor);
+    }
     eprintln!("Bound input_ids with {} token(s)", prompt_tokens.len());
 
     // Get architecture config for globals
@@ -206,7 +209,7 @@ fn test_e2e_forward_pass() {
     if !arch.forward.is_empty() {
         eprintln!("Running forward pass ({} steps)...", arch.forward.len());
 
-        match model.forward(&mut foundry, &mut bindings) {
+        match model.forward(&mut foundry, &mut bindings, &fast_bindings) {
             Ok(()) => eprintln!("Forward pass completed successfully!"),
             Err(e) => panic!("Forward pass failed: {:?}", e),
         }

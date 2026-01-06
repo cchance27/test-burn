@@ -1,14 +1,8 @@
-//! Dynamic value types for DSL param interpolation.
-//!
-//! These types allow kernel params to use variable references like `"{position_offset}"`
-//! that get resolved from TensorBindings globals at execution time.
-
-use std::str::FromStr;
+use std::{any::TypeId, str::FromStr};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::step::TensorBindings;
-
 /// A value that can be either a literal or a variable reference.
 ///
 /// In JSON, this can be:
@@ -30,18 +24,41 @@ impl<T: Default> Default for DynamicValue<T> {
     }
 }
 
-impl<T: FromStr + Copy + Default> DynamicValue<T> {
+impl<T: FromStr + Copy + Default + 'static> DynamicValue<T> {
     /// Resolve this value, looking up variables from bindings if needed.
     ///
     /// Returns the default value if variable lookup or parsing fails.
     pub fn resolve(&self, bindings: &TensorBindings) -> T {
         match self {
             DynamicValue::Literal(v) => *v,
-            DynamicValue::Variable(name) => bindings.get_var(name).and_then(|s| s.parse().ok()).unwrap_or_default(),
+            DynamicValue::Variable(name) => {
+                // Optimization: If T is u32, checking int_globals first avoids String parsing.
+                // This is a compile-time check that optimizes away for other types.
+                if TypeId::of::<T>() == TypeId::of::<u32>() {
+                    if let Some(v) = bindings.get_int_global(name) {
+                        // SAFETY: We verified T is u32 via TypeId.
+                        // We cast usize -> u32 (safe for our params) and then transmute layout.
+                        let val_u32 = v as u32;
+                        return unsafe { std::mem::transmute_copy(&val_u32) };
+                    }
+                }
+
+                // Optimization: If T is usize, checking int_globals first.
+                if TypeId::of::<T>() == TypeId::of::<usize>() {
+                    if let Some(v) = bindings.get_int_global(name) {
+                        // SAFETY: T is usize.
+                        return unsafe { std::mem::transmute_copy(&v) };
+                    }
+                }
+
+                // Fallback to string globals
+                bindings.get_var(name).and_then(|s| s.parse().ok()).unwrap_or_default()
+            }
         }
     }
 
     /// Returns true if this is a literal value.
+
     pub fn is_literal(&self) -> bool {
         matches!(self, DynamicValue::Literal(_))
     }

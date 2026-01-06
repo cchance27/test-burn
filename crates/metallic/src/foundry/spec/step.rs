@@ -38,6 +38,8 @@ pub struct TensorBindings {
     scopes: Vec<FxHashMap<String, String>>,
     /// Global variables (e.g. config values like "n_layers")
     globals: FxHashMap<String, String>,
+    /// Integer globals for fast lookup without String allocation/parsing
+    int_globals: FxHashMap<&'static str, usize>,
 }
 
 impl std::fmt::Debug for TensorBindings {
@@ -94,6 +96,16 @@ impl TensorBindings {
             }
         }
         self.globals.get(key)
+    }
+
+    /// Set an integer global for fast lookup (no String allocation).
+    pub fn set_int_global(&mut self, key: &'static str, value: usize) {
+        self.int_globals.insert(key, value);
+    }
+
+    /// Get an integer global directly (no String parsing).
+    pub fn get_int_global(&self, key: &str) -> Option<usize> {
+        self.int_globals.get(key).copied()
     }
 
     /// Interpolate a string using current variables (e.g. "blk.{i}.weight" -> "blk.0.weight").
@@ -196,6 +208,11 @@ impl TensorBindings {
 pub trait Step: Send + Sync + std::fmt::Debug {
     /// Execute this step, resolving refs from bindings.
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError>;
+
+    /// Compile this step into an optimized executable form.
+    fn compile(&self, _resolver: &mut TensorBindings, _symbols: &mut super::SymbolTable) -> Vec<Box<dyn super::CompiledStep>> {
+        unimplemented!("compile not implemented for {}", self.name())
+    }
 
     /// Returns a human-readable name for this step.
     fn name(&self) -> &'static str;

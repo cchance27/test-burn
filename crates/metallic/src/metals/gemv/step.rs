@@ -144,6 +144,91 @@ impl Step for GemvRowMajorStep {
     fn name(&self) -> &'static str {
         "GemvRowMajor"
     }
+
+    fn compile(
+        &self,
+        resolver: &mut TensorBindings,
+        symbols: &mut crate::foundry::spec::SymbolTable,
+    ) -> Vec<Box<dyn crate::foundry::spec::CompiledStep>> {
+        let matrix_idx = symbols.get_or_create(resolver.interpolate(self.matrix.0.clone()));
+        let scale_bytes_idx = symbols.get_or_create(resolver.interpolate(self.scale_bytes.0.clone()));
+        let vector_x_idx = symbols.get_or_create(resolver.interpolate(self.vector_x.0.clone()));
+        let result_y_idx = symbols.get_or_create(resolver.interpolate(self.result_y.0.clone()));
+        let bias_idx = symbols.get_or_create(resolver.interpolate(self.bias.0.clone()));
+        let residual_idx = symbols.get_or_create(resolver.interpolate(self.residual.0.clone()));
+
+        vec![Box::new(CompiledGemvRowMajorStep {
+            matrix_idx,
+            scale_bytes_idx,
+            vector_x_idx,
+            result_y_idx,
+            bias_idx,
+            residual_idx,
+            params: self.params,
+            alpha: self.alpha,
+            beta: self.beta,
+            has_bias: self.has_bias,
+        })]
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledGemvRowMajorStep {
+    pub matrix_idx: usize,
+    pub scale_bytes_idx: usize,
+    pub vector_x_idx: usize,
+    pub result_y_idx: usize,
+    pub bias_idx: usize,
+    pub residual_idx: usize,
+    pub params: GemvParams,
+    pub alpha: f32,
+    pub beta: f32,
+    pub has_bias: u32,
+}
+
+impl crate::foundry::spec::CompiledStep for CompiledGemvRowMajorStep {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &crate::foundry::spec::FastBindings,
+        _bindings: &TensorBindings,
+    ) -> Result<(), MetalError> {
+        let matrix = fast_bindings
+            .get(self.matrix_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Matrix tensor not found at idx {}", self.matrix_idx)))?;
+        let scale_bytes = fast_bindings
+            .get(self.scale_bytes_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("ScaleBytes tensor not found at idx {}", self.scale_bytes_idx)))?;
+        let vector_x = fast_bindings
+            .get(self.vector_x_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("VectorX tensor not found at idx {}", self.vector_x_idx)))?;
+        let result_y = fast_bindings
+            .get(self.result_y_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("ResultY tensor not found at idx {}", self.result_y_idx)))?;
+        let bias = fast_bindings
+            .get(self.bias_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bias tensor not found at idx {}", self.bias_idx)))?;
+        let residual = fast_bindings
+            .get(self.residual_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Residual tensor not found at idx {}", self.residual_idx)))?;
+
+        let params = resolve_gemv_params(self.params, GemvLayout::RowMajor, matrix, vector_x, result_y)?;
+
+        let kernel = GemvRowMajor {
+            matrix: matrix.clone(),
+            scale_bytes: scale_bytes.clone(),
+            vector_x: vector_x.clone(),
+            result_y: result_y.clone(),
+            params,
+            bias: bias.clone(),
+            residual: residual.clone(),
+            alpha: self.alpha,
+            beta: self.beta,
+            has_bias: self.has_bias,
+        };
+
+        foundry.run(&kernel)
+    }
 }
 
 /// DSL Step for Column-Major GEMV.
@@ -191,6 +276,91 @@ impl Step for GemvColMajorStep {
 
     fn name(&self) -> &'static str {
         "GemvColMajor"
+    }
+
+    fn compile(
+        &self,
+        resolver: &mut TensorBindings,
+        symbols: &mut crate::foundry::spec::SymbolTable,
+    ) -> Vec<Box<dyn crate::foundry::spec::CompiledStep>> {
+        let matrix_idx = symbols.get_or_create(resolver.interpolate(self.matrix.0.clone()));
+        let scale_bytes_idx = symbols.get_or_create(resolver.interpolate(self.scale_bytes.0.clone()));
+        let vector_x_idx = symbols.get_or_create(resolver.interpolate(self.vector_x.0.clone()));
+        let result_y_idx = symbols.get_or_create(resolver.interpolate(self.result_y.0.clone()));
+        let bias_idx = symbols.get_or_create(resolver.interpolate(self.bias.0.clone()));
+        let residual_idx = symbols.get_or_create(resolver.interpolate(self.residual.0.clone()));
+
+        vec![Box::new(CompiledGemvColMajorStep {
+            matrix_idx,
+            scale_bytes_idx,
+            vector_x_idx,
+            result_y_idx,
+            bias_idx,
+            residual_idx,
+            params: self.params,
+            alpha: self.alpha,
+            beta: self.beta,
+            has_bias: self.has_bias,
+        })]
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledGemvColMajorStep {
+    pub matrix_idx: usize,
+    pub scale_bytes_idx: usize,
+    pub vector_x_idx: usize,
+    pub result_y_idx: usize,
+    pub bias_idx: usize,
+    pub residual_idx: usize,
+    pub params: GemvParams,
+    pub alpha: f32,
+    pub beta: f32,
+    pub has_bias: u32,
+}
+
+impl crate::foundry::spec::CompiledStep for CompiledGemvColMajorStep {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &crate::foundry::spec::FastBindings,
+        _bindings: &TensorBindings,
+    ) -> Result<(), MetalError> {
+        let matrix = fast_bindings
+            .get(self.matrix_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Matrix tensor not found at idx {}", self.matrix_idx)))?;
+        let scale_bytes = fast_bindings
+            .get(self.scale_bytes_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("ScaleBytes tensor not found at idx {}", self.scale_bytes_idx)))?;
+        let vector_x = fast_bindings
+            .get(self.vector_x_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("VectorX tensor not found at idx {}", self.vector_x_idx)))?;
+        let result_y = fast_bindings
+            .get(self.result_y_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("ResultY tensor not found at idx {}", self.result_y_idx)))?;
+        let bias = fast_bindings
+            .get(self.bias_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bias tensor not found at idx {}", self.bias_idx)))?;
+        let residual = fast_bindings
+            .get(self.residual_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Residual tensor not found at idx {}", self.residual_idx)))?;
+
+        let params = resolve_gemv_params(self.params, GemvLayout::ColMajor, matrix, vector_x, result_y)?;
+
+        let kernel = GemvColMajor {
+            matrix: matrix.clone(),
+            scale_bytes: scale_bytes.clone(),
+            vector_x: vector_x.clone(),
+            result_y: result_y.clone(),
+            params,
+            bias: bias.clone(),
+            residual: residual.clone(),
+            alpha: self.alpha,
+            beta: self.beta,
+            has_bias: self.has_bias,
+        };
+
+        foundry.run(&kernel)
     }
 }
 
@@ -377,5 +547,94 @@ impl Step for GemvCanonicalStep {
 
     fn name(&self) -> &'static str {
         "GemvCanonical"
+    }
+
+    fn compile(
+        &self,
+        resolver: &mut TensorBindings,
+        symbols: &mut crate::foundry::spec::SymbolTable,
+    ) -> Vec<Box<dyn crate::foundry::spec::CompiledStep>> {
+        let matrix_idx = symbols.get_or_create(resolver.interpolate(self.matrix.0.clone()));
+        let scale_bytes_idx = symbols.get_or_create(resolver.interpolate(self.scale_bytes.0.clone()));
+        let vector_x_idx = symbols.get_or_create(resolver.interpolate(self.vector_x.0.clone()));
+        let result_y_idx = symbols.get_or_create(resolver.interpolate(self.result_y.0.clone()));
+        let bias_idx = symbols.get_or_create(resolver.interpolate(self.bias.0.clone()));
+        let residual_idx = symbols.get_or_create(resolver.interpolate(self.residual.0.clone()));
+
+        vec![Box::new(CompiledGemvCanonicalStep {
+            matrix_idx,
+            scale_bytes_idx,
+            vector_x_idx,
+            result_y_idx,
+            bias_idx,
+            residual_idx,
+            params: self.params,
+            alpha: self.alpha,
+            beta: self.beta,
+            has_bias: self.has_bias,
+        })]
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledGemvCanonicalStep {
+    pub matrix_idx: usize,
+    pub scale_bytes_idx: usize,
+    pub vector_x_idx: usize,
+    pub result_y_idx: usize,
+    pub bias_idx: usize,
+    pub residual_idx: usize,
+    pub params: GemvParams,
+    pub alpha: f32,
+    pub beta: f32,
+    pub has_bias: u32,
+}
+
+impl crate::foundry::spec::CompiledStep for CompiledGemvCanonicalStep {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &crate::foundry::spec::FastBindings,
+        _bindings: &TensorBindings,
+    ) -> Result<(), MetalError> {
+        let matrix = fast_bindings
+            .get(self.matrix_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Matrix tensor not found at idx {}", self.matrix_idx)))?;
+        let scale_bytes = fast_bindings
+            .get(self.scale_bytes_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("ScaleBytes tensor not found at idx {}", self.scale_bytes_idx)))?;
+        let vector_x = fast_bindings
+            .get(self.vector_x_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("VectorX tensor not found at idx {}", self.vector_x_idx)))?;
+        let result_y = fast_bindings
+            .get(self.result_y_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("ResultY tensor not found at idx {}", self.result_y_idx)))?;
+        let bias = fast_bindings
+            .get(self.bias_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bias tensor not found at idx {}", self.bias_idx)))?;
+        let residual = fast_bindings
+            .get(self.residual_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Residual tensor not found at idx {}", self.residual_idx)))?;
+
+        // Note: we're cloning inputs here, should we pass references?
+        // GemvCanonical struct takes TensorArg (owned? no, it has PhantomData usually, but TensorArg struct itself is small metadata).
+        // Let's check TensorArg definition later if needed. For now assuming cloning is cheap (shared buffer ref).
+
+        let params = resolve_gemv_canonical_params(self.params, matrix, vector_x, result_y)?;
+
+        let kernel = GemvCanonical {
+            matrix: matrix.clone(),
+            scale_bytes: scale_bytes.clone(),
+            vector_x: vector_x.clone(),
+            result_y: result_y.clone(),
+            params,
+            bias: bias.clone(),
+            residual: residual.clone(),
+            alpha: self.alpha,
+            beta: self.beta,
+            has_bias: self.has_bias,
+        };
+
+        foundry.run(&kernel)
     }
 }

@@ -8,7 +8,9 @@ use rustc_hash::FxHashMap;
 use super::builder::WeightBundle;
 use crate::{
     error::MetalError, foundry::{
-        Foundry, spec::{ModelSpec, TensorBindings}
+        Foundry, spec::{
+            ModelSpec, TensorBindings, compiled::{CompiledStep, FastBindings, SymbolTable}
+        }
     }, gguf::{GGUFDataType, tensor_info::GGUFRawTensor}, types::TensorArg
 };
 
@@ -20,6 +22,10 @@ use crate::{
 pub struct CompiledModel {
     spec: ModelSpec,
     weights: WeightBundle,
+    /// Optimized execution steps (compiled from DSL)
+    compiled_steps: Vec<Box<dyn CompiledStep>>,
+    /// Symbol table mapping tensor names to integer indices for fast lookup
+    symbol_table: SymbolTable,
 }
 
 impl CompiledModel {
@@ -29,9 +35,41 @@ impl CompiledModel {
             tracing::debug!("Loading model: spec='{}' gguf_arch='{}'", spec.name, gguf_arch);
         }
 
-        tracing::info!("CompiledModel created with {} forward steps", spec.architecture.forward.len());
+        tracing::info!("Compiling model with {} forward DSL steps...", spec.architecture.forward.len());
 
-        Ok(Self { spec, weights })
+        // Compiler setup
+        let mut symbols = SymbolTable::new();
+        let mut resolver = TensorBindings::new();
+        let arch = &spec.architecture;
+
+        // Set config globals for DSL variable interpolation (needed for Repeat unrolling, etc.)
+        resolver.set_global("n_layers", arch.n_layers.to_string());
+        resolver.set_global("d_model", arch.d_model.to_string());
+        resolver.set_global("n_heads", arch.n_heads.to_string());
+        resolver.set_global("n_kv_heads", arch.n_kv_heads.to_string());
+        resolver.set_global("ff_dim", arch.ff_dim.to_string());
+        resolver.set_global("vocab_size", arch.vocab_size.to_string());
+        let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
+        resolver.set_global("kv_dim", kv_dim.to_string());
+
+        // Compile steps
+        let mut compiled_steps = Vec::new();
+        for step in &spec.architecture.forward {
+            compiled_steps.extend(step.compile(&mut resolver, &mut symbols));
+        }
+
+        tracing::info!(
+            "CompiledModel ready: {} compiled steps, {} symbols",
+            compiled_steps.len(),
+            symbols.len()
+        );
+
+        Ok(Self {
+            spec,
+            weights,
+            compiled_steps,
+            symbol_table: symbols,
+        })
     }
 
     /// Get the model name from the spec.
@@ -63,8 +101,10 @@ impl CompiledModel {
     /// 1. Setting config globals (n_layers, d_model, etc.)
     /// 2. Materializing weight tensors from GGUF using logical name resolution
     /// 3. Allocating intermediate buffers for activations
-    pub fn prepare_bindings(&self, foundry: &mut Foundry) -> Result<TensorBindings, MetalError> {
+    pub fn prepare_bindings(&self, foundry: &mut Foundry) -> Result<(TensorBindings, FastBindings), MetalError> {
         let mut bindings = TensorBindings::new();
+        let mut fast_bindings = FastBindings::new(self.symbol_table.len());
+
         let _gguf = self.weights.gguf_model();
         let arch = &self.spec.architecture;
         let tensor_names = &arch.tensor_names;
@@ -86,7 +126,7 @@ impl CompiledModel {
         let global_keys = ["embedding", "output_weight", "final_norm", "rope_cos", "rope_sin"];
         for key in global_keys {
             if let Some(gguf_name) = tensor_names.resolve(key, None, &available) {
-                self.bind_gguf_tensor(&mut bindings, foundry, &gguf_name, key)?;
+                self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, key)?;
             }
         }
 
@@ -107,7 +147,7 @@ impl CompiledModel {
             for key in regular_layer_keys {
                 if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
                     let logical_name = format!("{key}_{i}");
-                    self.bind_gguf_tensor(&mut bindings, foundry, &gguf_name, &logical_name)?;
+                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
                 }
             }
             for key in canonical_layer_keys {
@@ -128,7 +168,15 @@ impl CompiledModel {
                             )));
                         }
                     };
-                    self.bind_gguf_tensor_canonical(&mut bindings, foundry, &gguf_name, &logical_name, expected_k, expected_n)?;
+                    self.bind_gguf_tensor_canonical(
+                        &mut bindings,
+                        &mut fast_bindings,
+                        foundry,
+                        &gguf_name,
+                        &logical_name,
+                        expected_k,
+                        expected_n,
+                    )?;
                 }
             }
         }
@@ -149,7 +197,7 @@ impl CompiledModel {
             for (key, size) in bias_specs {
                 let logical_name = format!("{key}_{i}");
                 if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                    self.bind_gguf_tensor(&mut bindings, foundry, &gguf_name, &logical_name)?;
+                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
                 } else {
                     let zero = if let Some(tensor) = zero_cache.get(&size) {
                         tensor.clone()
@@ -158,7 +206,7 @@ impl CompiledModel {
                         zero_cache.insert(size, tensor.clone());
                         tensor
                     };
-                    bindings.insert(logical_name, zero);
+                    self.insert_binding(&mut bindings, &mut fast_bindings, logical_name, zero);
                 }
             }
         }
@@ -170,47 +218,71 @@ impl CompiledModel {
         let seq_len = 1; // Will be updated per-forward based on input
 
         // 1D buffers for general intermediates
-        self.allocate_intermediate(&mut bindings, foundry, "hidden", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "norm_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "proj_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "residual_1", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "ffn_norm_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "gate", arch.ff_dim)?;
-        self.allocate_intermediate(&mut bindings, foundry, "up", arch.ff_dim)?;
-        self.allocate_intermediate(&mut bindings, foundry, "ffn_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "final_norm_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, foundry, "logits", arch.vocab_size)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "hidden", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "norm_out", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "proj_out", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "residual_1", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "ffn_norm_out", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "gate", arch.ff_dim)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "up", arch.ff_dim)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "ffn_out", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "final_norm_out", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "logits", arch.vocab_size)?;
 
         // 3D buffers for SDPA (batch, seq_len, dim)
         let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "q", batch, seq_len, arch.d_model)?;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "k", batch, seq_len, kv_dim)?;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "v", batch, seq_len, kv_dim)?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "q", batch, seq_len, arch.d_model)?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "k", batch, seq_len, kv_dim)?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "v", batch, seq_len, kv_dim)?;
         let head_dim = arch.d_model / arch.n_heads;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "q_heads", batch * arch.n_heads, seq_len, head_dim)?;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "k_heads", batch * arch.n_kv_heads, seq_len, head_dim)?;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "v_heads", batch * arch.n_kv_heads, seq_len, head_dim)?;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "q_rot", batch, seq_len, arch.d_model)?;
-        self.allocate_intermediate_3d(&mut bindings, foundry, "k_rot", batch, seq_len, kv_dim)?;
+        self.allocate_intermediate_3d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "q_heads",
+            batch * arch.n_heads,
+            seq_len,
+            head_dim,
+        )?;
+        self.allocate_intermediate_3d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "k_heads",
+            batch * arch.n_kv_heads,
+            seq_len,
+            head_dim,
+        )?;
+        self.allocate_intermediate_3d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "v_heads",
+            batch * arch.n_kv_heads,
+            seq_len,
+            head_dim,
+        )?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "q_rot", batch, seq_len, arch.d_model)?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "k_rot", batch, seq_len, kv_dim)?;
         // Expanded K/V buffers for GQA (after RepeatKvHeads, same dim as Q)
         // Must be sized for MAX sequence length because they hold repeated history
         let max_seq_len_for_slice = 2048;
         let expanded_dim = batch * max_seq_len_for_slice * arch.d_model;
-        self.allocate_intermediate(&mut bindings, foundry, "k_expanded", expanded_dim)?;
-        self.allocate_intermediate(&mut bindings, foundry, "v_expanded", expanded_dim)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_expanded", expanded_dim)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_expanded", expanded_dim)?;
         // SDPA output is per-step (seq_len=1) in incremental decode; keep this compact.
-        self.allocate_intermediate(&mut bindings, foundry, "attn_out", arch.d_model)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "attn_out", arch.d_model)?;
 
         // KV slice buffers for cache reads (sized for max sequence to avoid reallocation)
         // These hold the sliced cache [n_kv_heads, current_seq_len, head_dim]
         // We allocate to max size and track actual usage via globals
         let max_seq_len_for_slice = 2048;
         let kv_slice_dim = arch.n_kv_heads * max_seq_len_for_slice * head_dim;
-        self.allocate_intermediate(&mut bindings, foundry, "k_slice", kv_slice_dim)?;
-        self.allocate_intermediate(&mut bindings, foundry, "v_slice", kv_slice_dim)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_slice", kv_slice_dim)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_slice", kv_slice_dim)?;
 
         // 5. Create a "zero" buffer for unused bias/residual slots
-        self.allocate_intermediate(&mut bindings, foundry, "zero", 1)?;
+        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "zero", 1)?;
 
         // 6. Allocate KV cache for autoregressive generation
         // Shape: [n_kv_heads, max_seq_len, head_dim] per layer
@@ -221,8 +293,24 @@ impl CompiledModel {
             let k_cache_name = format!("k_cache_{}", layer_idx);
             let v_cache_name = format!("v_cache_{}", layer_idx);
             // KV cache: [n_kv_heads, max_seq_len, head_dim]
-            self.allocate_kv_cache(&mut bindings, foundry, &k_cache_name, arch.n_kv_heads, max_seq_len, head_dim)?;
-            self.allocate_kv_cache(&mut bindings, foundry, &v_cache_name, arch.n_kv_heads, max_seq_len, head_dim)?;
+            self.allocate_kv_cache(
+                &mut bindings,
+                &mut fast_bindings,
+                foundry,
+                &k_cache_name,
+                arch.n_kv_heads,
+                max_seq_len,
+                head_dim,
+            )?;
+            self.allocate_kv_cache(
+                &mut bindings,
+                &mut fast_bindings,
+                foundry,
+                &v_cache_name,
+                arch.n_kv_heads,
+                max_seq_len,
+                head_dim,
+            )?;
         }
         // Store max_seq_len as a global for kernels to use
         bindings.set_global("max_seq_len", max_seq_len.to_string());
@@ -232,18 +320,22 @@ impl CompiledModel {
 
         // 7. Compute and bind RoPE cos/sin caches
         // These are precomputed based on model config since they're not in GGUF
-        self.compute_and_bind_rope_caches(&mut bindings, foundry, arch)?;
+        self.compute_and_bind_rope_caches(&mut bindings, &mut fast_bindings, foundry, arch)?;
 
         tracing::info!("Prepared {} bindings (weights + intermediates + RoPE + KV cache)", bindings.len());
-        Ok(bindings)
+        Ok((bindings, fast_bindings))
     }
 
+    /// Compute and bind RoPE cos/sin cache tables.
+    ///
+    /// RoPE caches are not stored in GGUF, so we compute them based on arch config.
     /// Compute and bind RoPE cos/sin cache tables.
     ///
     /// RoPE caches are not stored in GGUF, so we compute them based on arch config.
     fn compute_and_bind_rope_caches(
         &self,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         arch: &crate::foundry::spec::Architecture,
     ) -> Result<(), MetalError> {
@@ -291,7 +383,7 @@ impl CompiledModel {
             vec![max_seq_len, dim_half],
             vec![dim_half, 1],
         );
-        bindings.insert("rope_cos".to_string(), cos_tensor);
+        self.insert_binding(bindings, fast_bindings, "rope_cos".to_string(), cos_tensor);
 
         // Allocate and fill sin buffer
         let sin_buffer = foundry
@@ -312,7 +404,7 @@ impl CompiledModel {
             vec![max_seq_len, dim_half],
             vec![dim_half, 1],
         );
-        bindings.insert("rope_sin".to_string(), sin_tensor);
+        self.insert_binding(bindings, fast_bindings, "rope_sin".to_string(), sin_tensor);
 
         tracing::debug!("Computed RoPE caches: [{}, {}] (rope_base={})", max_seq_len, dim_half, rope_base);
         Ok(())
@@ -322,6 +414,7 @@ impl CompiledModel {
     fn bind_gguf_tensor(
         &self,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         gguf_name: &str,
         logical_name: &str,
@@ -382,8 +475,8 @@ impl CompiledModel {
             let tensor_arg = TensorArg::from_buffer(buffer, dtype, dims, strides);
 
             // Bind under both gguf_name (for direct access) and logical_name (for DSL refs)
-            bindings.insert(gguf_name.to_string(), tensor_arg.clone());
-            bindings.insert(logical_name.to_string(), tensor_arg);
+            self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg.clone());
+            self.insert_binding(bindings, fast_bindings, logical_name.to_string(), tensor_arg);
 
             tracing::trace!("Bound '{}' -> '{}'", logical_name, gguf_name);
         }
@@ -396,6 +489,7 @@ impl CompiledModel {
     fn bind_gguf_tensor_canonical(
         &self,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         gguf_name: &str,
         logical_name: &str,
@@ -411,7 +505,7 @@ impl CompiledModel {
 
             if dims.len() != 2 {
                 // Non-2D tensors fall back to regular binding
-                return self.bind_gguf_tensor(bindings, foundry, gguf_name, logical_name);
+                return self.bind_gguf_tensor(bindings, fast_bindings, foundry, gguf_name, logical_name);
             }
 
             if expected_k == 0 || expected_n == 0 {
@@ -523,8 +617,8 @@ impl CompiledModel {
                 vec![1],
             );
 
-            bindings.insert(gguf_name.to_string(), tensor_arg.clone());
-            bindings.insert(logical_name.to_string(), tensor_arg);
+            self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg.clone());
+            self.insert_binding(bindings, fast_bindings, logical_name.to_string(), tensor_arg);
 
             tracing::trace!(
                 "Bound canonical '{}' -> '{}' (K={}, N={}, blocks={}, layout_hint={:?})",
@@ -571,6 +665,7 @@ impl CompiledModel {
     fn allocate_intermediate(
         &self,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         name: &str,
         size: usize,
@@ -592,7 +687,7 @@ impl CompiledModel {
 
         let tensor_arg = TensorArg::from_buffer(crate::types::MetalBuffer(buffer), crate::tensor::Dtype::F16, vec![size], vec![1]);
 
-        bindings.insert(name.to_string(), tensor_arg);
+        self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
         tracing::trace!("Allocated intermediate '{}' ({} elements)", name, size);
 
         Ok(())
@@ -602,6 +697,7 @@ impl CompiledModel {
     fn allocate_intermediate_3d(
         &self,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         name: &str,
         batch: usize,
@@ -630,10 +726,18 @@ impl CompiledModel {
             crate::foundry::tensor::compute_strides(&[batch, seq_len, dim]),
         );
 
-        bindings.insert(name.to_string(), tensor_arg);
+        self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
         tracing::trace!("Allocated 3D intermediate '{}' [{}, {}, {}]", name, batch, seq_len, dim);
 
         Ok(())
+    }
+
+    /// Helper to insert a tensor into both string and fast bindings
+    fn insert_binding(&self, bindings: &mut TensorBindings, fast_bindings: &mut FastBindings, name: String, tensor: TensorArg) {
+        if let Some(id) = self.symbol_table.get(&name) {
+            fast_bindings.set(id, tensor.clone());
+        }
+        bindings.insert(name, tensor);
     }
 
     /// Allocate a KV cache buffer for attention caching.
@@ -641,6 +745,7 @@ impl CompiledModel {
     fn allocate_kv_cache(
         &self,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         name: &str,
         n_heads: usize,
@@ -669,7 +774,7 @@ impl CompiledModel {
             crate::foundry::tensor::compute_strides(&[n_heads, max_seq_len, head_dim]),
         );
 
-        bindings.insert(name.to_string(), tensor_arg);
+        self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
         tracing::trace!("Allocated KV cache '{}' [{}, {}, {}]", name, n_heads, max_seq_len, head_dim);
 
         Ok(())
@@ -678,10 +783,52 @@ impl CompiledModel {
     /// Run a single forward step by executing all DSL steps.
     ///
     /// Each step in `spec.architecture.forward` is executed via `Step::execute()`.
-    pub fn forward(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
+    /// Run a single forward step by executing all compiled steps.
+    pub fn forward(&self, foundry: &mut Foundry, bindings: &mut TensorBindings, fast_bindings: &FastBindings) -> Result<(), MetalError> {
+        // If we are already capturing (e.g. batched prompt processing), don't start a new capture.
+        let nested_capture = foundry.is_capturing();
+
+        if !nested_capture {
+            // Start a new command buffer for this forward pass (token)
+            foundry.start_capture()?;
+        }
+
+        for step in &self.compiled_steps {
+            step.execute(foundry, fast_bindings, bindings)?;
+        }
+
+        if !nested_capture {
+            // Commit and wait for the token to complete
+            // This is the "Stable Batcher" approach: one wait per token.
+            use objc2_metal::MTLCommandBuffer as _;
+            let buffer = foundry.end_capture()?;
+            buffer.waitUntilCompleted();
+        }
+
+        Ok(())
+    }
+
+    /// Run a single forward step by executing DSL steps (uncompiled/interpreted).
+    ///
+    /// Unlike `forward()` which uses pre-compiled steps, this method executes the
+    /// original `Step::execute()` method on each step in `spec.architecture.forward`.
+    /// This allows runtime modification of variables like `n_layers` via `bindings.set_global()`.
+    pub fn forward_uncompiled(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
+        // Start a new command buffer for this forward pass (token)
+        foundry.start_capture()?;
+
         for step in &self.spec.architecture.forward {
+            if step.name() == "Sample" {
+                continue;
+            }
             step.execute(foundry, bindings)?;
         }
+
+        // Commit and wait for the token to complete
+        use objc2_metal::MTLCommandBuffer as _;
+        let buffer = foundry.end_capture()?;
+        buffer.waitUntilCompleted();
+
         Ok(())
     }
 
@@ -744,7 +891,7 @@ impl CompiledModel {
         let arch = &self.spec.architecture;
 
         // Prepare bindings (weights + intermediates + globals)
-        let mut bindings = self.prepare_bindings(foundry)?;
+        let (mut bindings, mut fast_bindings) = self.prepare_bindings(foundry)?;
 
         let d_model = arch.d_model;
         let n_heads = arch.n_heads;
@@ -752,29 +899,47 @@ impl CompiledModel {
         let head_dim = d_model / n_heads;
         let ff_dim = arch.ff_dim;
 
-        // Allocate a single-token input_ids buffer and overwrite each step (matches DSL tests).
-        let input_buffer = self.allocate_u32_buffer(foundry, "input_ids", 1)?;
-        let input_tensor = TensorArg::from_buffer(input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
-        bindings.insert("input_ids".to_string(), input_tensor);
+        // Allocate a single large input buffer for the entire prompt to avoid reallocation
+        // and allow batched processing (different offsets).
+        let prompt_len = prompt_tokens.len();
+        let full_input_buffer = self.allocate_u32_buffer(foundry, "input_ids_full", prompt_len)?;
+
+        // Write all prompt tokens to the shared buffer
+        unsafe {
+            use objc2_metal::MTLBuffer;
+            let ptr = full_input_buffer.0.contents().as_ptr() as *mut u32;
+            std::ptr::copy_nonoverlapping(prompt_tokens.as_ptr(), ptr, prompt_len);
+        }
 
         // Keep max_seq_len consistent with KV cache allocation.
         bindings.set_global("max_seq_len", "2048".to_string());
 
-        let set_globals_for_pos = |bindings: &mut TensorBindings, pos: usize| {
-            let seq_len = 1usize;
-            let kv_seq_len = pos + seq_len;
+        // Pre-compute static globals ONCE (avoid String allocations per token)
+        // These don't change between tokens:
+        let static_total_elements_q = (n_heads * head_dim).to_string();
+        let static_total_elements_k = (n_kv_heads * head_dim).to_string();
+        let static_total_elements_hidden = d_model.to_string();
+        let static_total_elements_ffn = ff_dim.to_string();
+        let static_total_elements_write = (n_kv_heads * head_dim).to_string();
 
-            bindings.set_global("seq_len", "1".to_string());
-            bindings.set_global("position_offset", pos.to_string());
-            bindings.set_global("kv_seq_len", kv_seq_len.to_string());
+        bindings.set_global("seq_len", "1".to_string());
+        bindings.set_global("total_elements_q", static_total_elements_q);
+        bindings.set_global("total_elements_k", static_total_elements_k);
+        bindings.set_global("total_elements_hidden", static_total_elements_hidden);
+        bindings.set_global("total_elements_ffn", static_total_elements_ffn);
+        bindings.set_global("total_elements_write", static_total_elements_write);
 
-            bindings.set_global("total_elements_q", (n_heads * head_dim).to_string());
-            bindings.set_global("total_elements_k", (n_kv_heads * head_dim).to_string());
-            bindings.set_global("total_elements_hidden", d_model.to_string());
-            bindings.set_global("total_elements_ffn", ff_dim.to_string());
-            bindings.set_global("total_elements_slice", (n_kv_heads * kv_seq_len * head_dim).to_string());
-            bindings.set_global("total_elements_repeat", (n_heads * kv_seq_len * head_dim).to_string());
-            bindings.set_global("total_elements_write", (n_kv_heads * head_dim).to_string());
+        // Only position-dependent globals need updating per token
+        // Use int_globals to avoid String allocation on every token
+        let update_pos_globals = |bindings: &mut TensorBindings, pos: usize| {
+            let kv_seq_len = pos + 1; // seq_len is always 1
+
+            // Set integer globals for all steps (manual Sdpa and auto-generated Rope/KvCacheWrite)
+            // DynamicValue::resolve now checks int_globals for u32/usize types efficiently
+            bindings.set_int_global("position_offset", pos);
+            bindings.set_int_global("kv_seq_len", kv_seq_len);
+            bindings.set_int_global("total_elements_slice", n_kv_heads * kv_seq_len * head_dim);
+            bindings.set_int_global("total_elements_repeat", n_heads * kv_seq_len * head_dim);
         };
 
         // Allocate output buffer for sampled token
@@ -852,18 +1017,42 @@ impl CompiledModel {
             Ok(best_idx)
         }
 
-        // Prefill KV cache: run each prompt token at its absolute position (seq_len=1).
-        for (pos, &token) in prompt_tokens.iter().enumerate() {
-            unsafe {
-                use objc2_metal::MTLBuffer;
-                let ptr = input_buffer.0.contents().as_ptr() as *mut u32;
-                *ptr = token;
+        // Prefill KV cache, batched in chunks to reduce overhead.
+        // We update the 'input_ids' binding to point to the correct offset in full_input_buffer.
+        const CHUNK_SIZE: usize = 64;
+
+        // Cache the input_ids key to avoid String allocation per token
+        let input_ids_key = "input_ids".to_string();
+
+        for chunk in prompt_tokens.chunks(CHUNK_SIZE).enumerate() {
+            let (chunk_idx, chunk_tokens) = chunk;
+            let base_pos = chunk_idx * CHUNK_SIZE;
+
+            // Start capture for this chunk
+            foundry.start_capture()?;
+
+            for (i, _) in chunk_tokens.iter().enumerate() {
+                let pos = base_pos + i;
+
+                // Update bindings to point to the specific token in the large buffer
+                let mut tensor_input = TensorArg::from_buffer(full_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                tensor_input.offset = pos * 4; // 4 bytes per u32
+                self.insert_binding(&mut bindings, &mut fast_bindings, input_ids_key.clone(), tensor_input);
+
+                update_pos_globals(&mut bindings, pos);
+                self.forward(foundry, &mut bindings, &fast_bindings)?;
             }
-            set_globals_for_pos(&mut bindings, pos);
-            self.forward(foundry, &mut bindings)?;
+
+            // Commit and wait for the chunk
+            use objc2_metal::MTLCommandBuffer as _;
+            let buffer = foundry.end_capture()?;
+            buffer.waitUntilCompleted();
         }
 
         // Now autoregressive decode: sample from last prompt-token logits, then step forward per token.
+        // We reuse the first slot of full_input_buffer as a scratch space for generated tokens.
+        let single_input_buffer = full_input_buffer; // reuse ownership
+
         for step in 0..max_new_tokens {
             // Get logits buffer from bindings
             let logits = bindings.get("logits")?;
@@ -903,15 +1092,20 @@ impl CompiledModel {
             // Advance one token at absolute position (prompt_len + step).
             let pos = prompt_tokens.len() + step;
 
-            // Update input_ids buffer for this step (just the new token)
+            // Update input_ids buffer: write new token to index 0
+            // and bind index 0. (We can just use offset 0).
             unsafe {
                 use objc2_metal::MTLBuffer;
-                let ptr = input_buffer.0.contents().as_ptr() as *mut u32;
+                let ptr = single_input_buffer.0.contents().as_ptr() as *mut u32;
                 *ptr = next_token;
             }
 
-            set_globals_for_pos(&mut bindings, pos);
-            self.forward(foundry, &mut bindings)?;
+            let mut tensor_input = TensorArg::from_buffer(single_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+            tensor_input.offset = 0;
+            self.insert_binding(&mut bindings, &mut fast_bindings, input_ids_key.clone(), tensor_input);
+
+            update_pos_globals(&mut bindings, pos);
+            self.forward(foundry, &mut bindings, &fast_bindings)?;
         }
 
         Ok(generated)
@@ -993,8 +1187,14 @@ impl CompiledModel {
     }
 
     // Keep old method for backward compatibility, delegating to new one
+    /// Get the compiled symbol ID for a tensor name.
+    pub fn symbol_id(&self, name: &str) -> Option<usize> {
+        self.symbol_table.get(name)
+    }
+
+    // Keep old method for backward compatibility, delegating to new one
     #[deprecated(note = "Use prepare_bindings instead")]
     pub fn prepare_weight_bindings(&self, foundry: &mut Foundry) -> Result<TensorBindings, MetalError> {
-        self.prepare_bindings(foundry)
+        self.prepare_bindings(foundry).map(|(b, _)| b)
     }
 }

@@ -1400,7 +1400,7 @@ fn test_gemv_canonical_vs_legacy_qwen_dims() {
 #[test]
 #[serial]
 fn test_canonical_weight_conversion_parity() {
-    use metallic::tensor::{CanonicalF16Tensor, F16_CANONICAL_WEIGHTS_PER_BLOCK};
+    use metallic::tensor::CanonicalF16Tensor;
 
     let mut ctx: Context<F16> = Context::new().unwrap();
 

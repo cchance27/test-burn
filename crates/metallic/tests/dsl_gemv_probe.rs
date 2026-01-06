@@ -285,7 +285,7 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let mut bindings = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     // Only run one layer to keep intermediate buffers stable.
     bindings.set_global("n_layers", "1".to_string());

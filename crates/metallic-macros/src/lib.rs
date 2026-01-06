@@ -287,17 +287,7 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                         }
                     });
                 } else {
-                    // Buffer binding - use KernelArg trait for buf+offset extraction
-                    // Auto-flush inputs (non-outputs) before binding
-                    let flush_code = if is_output {
-                        quote::quote! {}
-                    } else {
-                        quote::quote! {
-                            #root::types::KernelArg::flush(&self.#name);
-                        }
-                    };
                     bindings.push(quote::quote! {
-                        #flush_code
                         unsafe {
                             encoder.setBuffer_offset_atIndex(
                                 Some(&*#root::types::KernelArg::buffer(&self.#name)),
@@ -1193,6 +1183,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let step_impl = if enable_step {
         let name_str = name.to_string();
         let step_name = quote::format_ident!("{}Step", name);
+        let compiled_step_name = quote::format_ident!("Compiled{}Step", name);
 
         // Collect field info from the kernel struct
         let (arg_infos, _) = match &input.data {
@@ -1200,7 +1191,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             _ => (Vec::new(), Vec::new()),
         };
 
-        // Generate Step struct fields: TensorArg -> Ref, ParamsResolved -> Params, others as-is
+        // 1. Generate Step struct definition (JSON serializable)
         let step_fields: Vec<_> = arg_infos
             .iter()
             .map(|info| {
@@ -1221,7 +1212,26 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             })
             .collect();
 
-        // Generate resolve calls for kernel construction
+        // 2. Generate CompiledStep struct definition (Optimized)
+        let compiled_fields: Vec<_> = arg_infos
+            .iter()
+            .map(|info| {
+                let fname = info.name_ident.as_ref().unwrap();
+                if info.rust_type.contains("TensorArg") {
+                    quote! { pub #fname: usize }
+                } else if info.rust_type.contains("Resolved") {
+                    let resolved_type_str = &info.rust_type;
+                    let dynamic_type_str = resolved_type_str.replace("Resolved", "");
+                    let dynamic_type: syn::Type = syn::parse_str(&dynamic_type_str).expect("Failed to parse dynamic params type");
+                    quote! { pub #fname: #dynamic_type }
+                } else {
+                    let ftype = &info.rust_type_actual;
+                    quote! { pub #fname: #ftype }
+                }
+            })
+            .collect();
+
+        // 3. Generate Resolve Fields for Step::execute (Original)
         let resolve_fields: Vec<_> = arg_infos
             .iter()
             .map(|info| {
@@ -1237,12 +1247,51 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             })
             .collect();
 
+        // 4. Generate Compile Fields for Step::compile (New)
+        let compile_fields: Vec<_> = arg_infos
+            .iter()
+            .map(|info| {
+                let fname = info.name_ident.as_ref().unwrap();
+                if info.rust_type.contains("TensorArg") {
+                    quote! { 
+                        #fname: symbols.get_or_create(resolver.interpolate(self.#fname.0.clone()))
+                    }
+                } else {
+                    quote! { #fname: self.#fname.clone() }
+                }
+            })
+            .collect();
+
+        // 5. Generate Execute Fields for CompiledStep::execute (New)
+        let execute_fields: Vec<_> = arg_infos
+            .iter()
+            .map(|info| {
+                let fname = info.name_ident.as_ref().unwrap();
+                if info.rust_type.contains("TensorArg") {
+                    quote! { 
+                        #fname: bindings.get(self.#fname).cloned().ok_or_else(|| #root::error::MetalError::InputNotFound("Compiled tensor missing".into()))?
+                    }
+                } else if info.rust_type.contains("Params") {
+                     // Note: using 'globals' (the TensorBindings ref) for resolving vars
+                     quote! { #fname: crate::foundry::spec::Resolvable::resolve(&self.#fname, globals) }
+                } else {
+                    quote! { #fname: self.#fname.clone() }
+                }
+            })
+            .collect();
+
         quote! {
             /// Auto-generated DSL Step for JSON deserialization.
             /// Resolves string refs to TensorArgs at execute time.
             #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
             pub struct #step_name {
                 #(#step_fields),*
+            }
+
+            /// Auto-generated Compiled Step for fast execution.
+            #[derive(Debug, Clone, Default)]
+            pub struct #compiled_step_name {
+                #(#compiled_fields),*
             }
 
             #[typetag::serde(name = #name_str)]
@@ -1256,8 +1305,27 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     foundry.run(&kernel)
                 }
 
+                fn compile(&self, resolver: &mut #root::foundry::spec::TensorBindings, symbols: &mut #root::foundry::spec::SymbolTable) -> Vec<Box<dyn #root::foundry::spec::CompiledStep>> {
+                    let compiled = #compiled_step_name {
+                        #(#compile_fields,)*
+                        // Using Default is safe because compiled fields cover all struct fields if derived correctly
+                        ..Default::default()
+                    };
+                    vec![Box::new(compiled)]
+                }
+
                 fn name(&self) -> &'static str {
                     #name_str
+                }
+            }
+
+            impl #root::foundry::spec::CompiledStep for #compiled_step_name {
+                fn execute(&self, foundry: &mut #root::foundry::Foundry, bindings: & #root::foundry::spec::FastBindings, globals: & #root::foundry::spec::TensorBindings) -> Result<(), #root::error::MetalError> {
+                    let kernel = #name {
+                        #(#execute_fields,)*
+                        ..Default::default()
+                    };
+                    foundry.run(&kernel)
                 }
             }
         }
@@ -2355,6 +2423,177 @@ pub fn derive_gemv_simd_prologue(input: TokenStream) -> TokenStream {
 
             fn emit() -> String {
                 #emit_code.to_string()
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Derive macro for auto-generating CompiledStep boilerplate.
+///
+/// Use this on Step structs that manually implement `Step` trait.
+/// It generates:
+/// 1. A `Compiled{Step}` struct with Ref fields converted to `usize` indices
+/// 2. `Step::compile()` implementation that maps Ref names to symbol indices
+/// 3. `CompiledStep::execute()` implementation that fetches tensors from FastBindings
+///
+/// # Required Attributes
+/// - `#[compiled_step(kernel = "KernelType")]` - The kernel type to construct and run
+/// - `#[compiled_step(name = "StepName")]` - The step name for typetag
+///
+/// # Field Attributes  
+/// - `#[ref_field]` - Mark Ref fields that need index compilation
+///
+/// # Example
+/// ```ignore
+/// #[derive(CompiledStep)]
+/// #[compiled_step(kernel = "Softmax", name = "Softmax")]
+/// pub struct SoftmaxStep {
+///     #[ref_field]
+///     pub input: Ref,
+///     #[ref_field]
+///     pub output: Ref,
+///     pub rows_total: u32,
+/// }
+/// ```
+#[proc_macro_derive(CompiledStep, attributes(compiled_step, ref_field))]
+pub fn derive_compiled_step(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = input.ident.clone();
+    let compiled_name = quote::format_ident!("Compiled{}", name);
+
+    let root = metallic_root();
+
+    // Parse attributes
+    let mut kernel_type: Option<syn::Type> = None;
+    let mut step_name: Option<String> = None;
+
+    for attr in &input.attrs {
+        if attr.path().is_ident("compiled_step") {
+            if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
+                for meta in nested {
+                    if let Meta::NameValue(nv) = meta {
+                        if nv.path.is_ident("kernel") {
+                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = nv.value {
+                                kernel_type = Some(syn::parse_str(&s.value()).expect("Invalid kernel type"));
+                            }
+                        } else if nv.path.is_ident("name") {
+                            if let Expr::Lit(ExprLit { lit: Lit::Str(s), .. }) = nv.value {
+                                step_name = Some(s.value());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    // FIXME: step_name is unused
+    let _ = step_name;
+
+    // Collect field info
+    let fields = match &input.data {
+        Data::Struct(data) => match &data.fields {
+            Fields::Named(fields) => &fields.named,
+            _ => panic!("CompiledStep only supports named fields"),
+        },
+        _ => panic!("CompiledStep only supports structs"),
+    };
+
+    let mut ref_fields = Vec::new();
+    let mut other_fields = Vec::new();
+
+    for field in fields {
+        let fname = field.ident.as_ref().unwrap();
+        let ftype = &field.ty;
+        let is_ref = field.attrs.iter().any(|a| a.path().is_ident("ref_field"));
+
+        if is_ref {
+            ref_fields.push((fname.clone(), ftype.clone()));
+        } else {
+            other_fields.push((fname.clone(), ftype.clone()));
+        }
+    }
+
+    // Generate compiled struct fields
+    let compiled_fields: Vec<_> = ref_fields
+        .iter()
+        .map(|(fname, _)| {
+            let idx_name = quote::format_ident!("{}_idx", fname);
+            quote! { pub #idx_name: usize }
+        })
+        .chain(other_fields.iter().map(|(fname, ftype)| {
+            quote! { pub #fname: #ftype }
+        }))
+        .collect();
+
+    // Generate compile() field mappings
+    let compile_mappings: Vec<_> = ref_fields
+        .iter()
+        .map(|(fname, _)| {
+            let idx_name = quote::format_ident!("{}_idx", fname);
+            quote! {
+                #idx_name: symbols.get_or_create(resolver.interpolate(self.#fname.0.clone()))
+            }
+        })
+        .chain(other_fields.iter().map(|(fname, _)| {
+            quote! { #fname: self.#fname.clone() }
+        }))
+        .collect();
+
+    // Generate execute() tensor fetches
+    let tensor_fetches: Vec<_> = ref_fields
+        .iter()
+        .map(|(fname, _)| {
+            let idx_name = quote::format_ident!("{}_idx", fname);
+            let err_msg = format!("{} tensor not found at idx {{}}", fname);
+            quote! {
+                let #fname = fast_bindings
+                    .get(self.#idx_name)
+                    .ok_or_else(|| #root::error::MetalError::InvalidShape(format!(#err_msg, self.#idx_name)))?;
+            }
+        })
+        .collect();
+
+    // Generate kernel construction for execute
+    let kernel_field_args: Vec<_> = ref_fields
+        .iter()
+        .map(|(fname, _)| quote! { #fname.clone() })
+        .chain(other_fields.iter().map(|(fname, _)| quote! { self.#fname.clone() }))
+        .collect();
+
+    let kernel_ty = kernel_type.expect("Missing #[compiled_step(kernel = \"...\")]");
+    // FIXME: step_name_str is unused
+    //let step_name_str = step_name.unwrap_or_else(|| name.to_string().replace("Step", ""));
+
+    let expanded = quote! {
+        /// Auto-generated compiled step struct.
+        #[derive(Debug)]
+        pub struct #compiled_name {
+            #(#compiled_fields),*
+        }
+
+        impl #name {
+            /// Compile this step into an optimized form.
+            pub fn do_compile(&self, resolver: &mut #root::foundry::spec::TensorBindings, symbols: &mut #root::foundry::spec::SymbolTable) -> #compiled_name {
+                #compiled_name {
+                    #(#compile_mappings),*
+                }
+            }
+        }
+
+        impl #root::foundry::spec::CompiledStep for #compiled_name {
+            fn execute(
+                &self,
+                foundry: &mut #root::foundry::Foundry,
+                fast_bindings: &#root::foundry::spec::FastBindings,
+                _bindings: &#root::foundry::spec::TensorBindings,
+            ) -> Result<(), #root::error::MetalError> {
+                #(#tensor_fetches)*
+
+                // Note: Kernel construction may need custom logic for some kernels.
+                // This is a simplified version that works for simple cases.
+                foundry.run(&<#kernel_ty>::new(#(#kernel_field_args),*))
             }
         }
     };

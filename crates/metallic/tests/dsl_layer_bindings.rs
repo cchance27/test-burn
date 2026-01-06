@@ -20,7 +20,7 @@ fn test_layer_weight_bindings_have_indices() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let bindings = model.prepare_bindings(&mut foundry)?;
+    let (bindings, _fast_bindings) = model.prepare_bindings(&mut foundry).expect("Bindings failed");
 
     // First layer bindings should exist.
     assert!(bindings.contains("layer.attn_norm_0"));

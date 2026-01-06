@@ -66,8 +66,10 @@ pub enum MetalError {
     DtypeMismatch { expected: Dtype, actual: Dtype },
     #[error("Operation failed: {0}")]
     OperationFailed(String),
-    #[error("GEMV error: {0}")]
+    #[error("Gemv error: {0}")]
     Gemv(#[from] GemvError),
+    #[error("Input not found: {0}")]
+    InputNotFound(String),
 }
 
 impl From<crate::tokenizer::TokenizerError> for MetalError {

@@ -11,3 +11,6 @@ pub use dynamic::{DynamicValue, Resolvable};
 pub use model_spec::{Architecture, LayerTensorNames, ModelSpec, TensorNames};
 pub use repeat::Repeat;
 pub use step::{Ref, Step, TensorBindings};
+
+pub mod compiled;
+pub use compiled::{CompiledStep, FastBindings, SymbolTable};

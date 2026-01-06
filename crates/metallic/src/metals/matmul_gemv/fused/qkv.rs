@@ -231,4 +231,145 @@ impl Step for QkvF16CanonicalFusedRmsnormStep {
     fn name(&self) -> &'static str {
         "QkvF16CanonicalFusedRmsnorm"
     }
+
+    fn compile(
+        &self,
+        resolver: &mut TensorBindings,
+        symbols: &mut crate::foundry::spec::SymbolTable,
+    ) -> Vec<Box<dyn crate::foundry::spec::CompiledStep>> {
+        let input_idx = symbols.get_or_create(resolver.interpolate(self.input.0.clone()));
+        let gamma_idx = symbols.get_or_create(resolver.interpolate(self.gamma.0.clone()));
+        let wq_idx = symbols.get_or_create(resolver.interpolate(self.wq.0.clone()));
+        let wk_idx = symbols.get_or_create(resolver.interpolate(self.wk.0.clone()));
+        let wv_idx = symbols.get_or_create(resolver.interpolate(self.wv.0.clone()));
+        let bq_idx = symbols.get_or_create(resolver.interpolate(self.bq.0.clone()));
+        let bk_idx = symbols.get_or_create(resolver.interpolate(self.bk.0.clone()));
+        let bv_idx = symbols.get_or_create(resolver.interpolate(self.bv.0.clone()));
+        let out_q_idx = symbols.get_or_create(resolver.interpolate(self.out_q.0.clone()));
+        let out_k_idx = symbols.get_or_create(resolver.interpolate(self.out_k.0.clone()));
+        let out_v_idx = symbols.get_or_create(resolver.interpolate(self.out_v.0.clone()));
+
+        vec![Box::new(CompiledQkvF16CanonicalFusedRmsnormStep {
+            input_idx,
+            gamma_idx,
+            wq_idx,
+            wk_idx,
+            wv_idx,
+            bq_idx,
+            bk_idx,
+            bv_idx,
+            out_q_idx,
+            out_k_idx,
+            out_v_idx,
+            epsilon: self.epsilon.clone(),
+            weights_per_block: self.weights_per_block,
+        })]
+    }
+}
+
+#[derive(Debug)]
+pub struct CompiledQkvF16CanonicalFusedRmsnormStep {
+    pub input_idx: usize,
+    pub gamma_idx: usize,
+    pub wq_idx: usize,
+    pub wk_idx: usize,
+    pub wv_idx: usize,
+    pub bq_idx: usize,
+    pub bk_idx: usize,
+    pub bv_idx: usize,
+    pub out_q_idx: usize,
+    pub out_k_idx: usize,
+    pub out_v_idx: usize,
+    pub epsilon: DynamicValue<f32>,
+    pub weights_per_block: u32,
+}
+
+impl crate::foundry::spec::CompiledStep for CompiledQkvF16CanonicalFusedRmsnormStep {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &crate::foundry::spec::FastBindings,
+        bindings: &TensorBindings,
+    ) -> Result<(), MetalError> {
+        let input = fast_bindings
+            .get(self.input_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Input tensor not found at idx {}", self.input_idx)))?;
+        let gamma = fast_bindings
+            .get(self.gamma_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Gamma tensor not found at idx {}", self.gamma_idx)))?;
+        let wq = fast_bindings
+            .get(self.wq_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Wq tensor not found at idx {}", self.wq_idx)))?;
+        let wk = fast_bindings
+            .get(self.wk_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Wk tensor not found at idx {}", self.wk_idx)))?;
+        let wv = fast_bindings
+            .get(self.wv_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Wv tensor not found at idx {}", self.wv_idx)))?;
+        let bq = fast_bindings
+            .get(self.bq_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bq tensor not found at idx {}", self.bq_idx)))?;
+        let bk = fast_bindings
+            .get(self.bk_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bk tensor not found at idx {}", self.bk_idx)))?;
+        let bv = fast_bindings
+            .get(self.bv_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Bv tensor not found at idx {}", self.bv_idx)))?;
+        let out_q = fast_bindings
+            .get(self.out_q_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("OutQ tensor not found at idx {}", self.out_q_idx)))?;
+        let out_k = fast_bindings
+            .get(self.out_k_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("OutK tensor not found at idx {}", self.out_k_idx)))?;
+        let out_v = fast_bindings
+            .get(self.out_v_idx)
+            .ok_or_else(|| MetalError::InvalidShape(format!("OutV tensor not found at idx {}", self.out_v_idx)))?;
+
+        let eps = self.epsilon.resolve(bindings);
+        let wpb = if self.weights_per_block == 0 { 32 } else { self.weights_per_block };
+
+        let k = input.dims().last().copied().unwrap_or(0);
+        if k == 0 {
+            return Err(MetalError::InvalidShape("QkvF16CanonicalFusedRmsnorm requires non-zero K".into()));
+        }
+        let nq = out_q.dims().last().copied().unwrap_or(0);
+        let nk = out_k.dims().last().copied().unwrap_or(0);
+        let nv = out_v.dims().last().copied().unwrap_or(0);
+        if nq == 0 || nk == 0 || nv == 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "QkvF16CanonicalFusedRmsnorm requires non-zero output dims, got nq={nq} nk={nk} nv={nv}"
+            )));
+        }
+
+        let blocks_per_k = ((k + wpb as usize - 1) / wpb as usize) as u32;
+
+        let params = QkvFusedParams {
+            k: k as u32,
+            nq: nq as u32,
+            nk: nk as u32,
+            nv: nv as u32,
+            blocks_per_k,
+            weights_per_block: wpb,
+            has_bias_q: 1,
+            has_bias_k: 1,
+            has_bias_v: 1,
+        };
+
+        let args = QkvF16CanonicalFusedRmsnormArgs {
+            data_q: wq.clone(),
+            data_k: wk.clone(),
+            data_v: wv.clone(),
+            vector_x: input.clone(),
+            out_q: out_q.clone(),
+            out_k: out_k.clone(),
+            out_v: out_v.clone(),
+            params,
+            bias_q: bq.clone(),
+            bias_k: bk.clone(),
+            bias_v: bv.clone(),
+            gamma: gamma.clone(),
+            epsilon: eps,
+        };
+        dispatch_qkv(foundry, args, &params)
+    }
 }

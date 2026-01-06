@@ -103,6 +103,39 @@ impl Step for Repeat {
         Ok(())
     }
 
+    fn compile(
+        &self,
+        resolver: &mut TensorBindings,
+        symbols: &mut crate::foundry::spec::SymbolTable,
+    ) -> Vec<Box<dyn crate::foundry::spec::CompiledStep>> {
+        let count_val = if let Ok(val) = self.count.parse::<usize>() {
+            val
+        } else {
+            // Lookup variable
+            resolver
+                .get_var(&self.count)
+                .expect(&format!("Repeat count variable '{}' not found during compilation", self.count))
+                .parse::<usize>()
+                .expect(&format!("Repeat count variable '{}' is not a valid integer", self.count))
+        };
+
+        let mut compiled = Vec::new();
+
+        // Scope management for compilation (simulated scope)
+        resolver.push_scope();
+
+        for i in 0..count_val {
+            resolver.set_var(&self.var, i.to_string());
+            for step in &self.steps {
+                let substeps = step.compile(resolver, symbols);
+                compiled.extend(substeps);
+            }
+        }
+
+        resolver.pop_scope();
+        compiled
+    }
+
     fn name(&self) -> &'static str {
         "Repeat"
     }

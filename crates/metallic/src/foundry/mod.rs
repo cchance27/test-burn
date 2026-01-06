@@ -24,6 +24,10 @@ pub struct Foundry {
     resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
     /// Cache for compiled pipelines
     pipelines: FxHashMap<(TypeId, u64), Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
+    /// Active command buffer for batched dispatch
+    active_command_buffer: Option<Retained<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>>,
+    /// Helper: Active compute encoder to reuse across dispatches
+    active_compute_encoder: Option<Retained<ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>>,
 }
 
 /// Metal kernel source (file path or raw string).
@@ -52,13 +56,15 @@ impl Foundry {
             queue,
             resources,
             pipelines: FxHashMap::default(),
+            active_command_buffer: None,
+            active_compute_encoder: None,
         })
     }
 
     /// Create a new Foundry with an existing device and queue.
     pub fn new_with(device: MetalDevice, queue: MetalQueue) -> Self {
         let mut resources = FxHashMap::default();
-        let pool = pool::MemoryPool::new(device.clone(), queue.clone()).expect("Failed to create MemoryPool");
+        let pool = pool::MemoryPool::new(device.clone(), queue.clone()).expect("Failed to create memory pool");
         resources.insert(TypeId::of::<pool::MemoryPool>(), Box::new(pool) as Box<dyn Any + Send + Sync>);
 
         Self {
@@ -66,6 +72,8 @@ impl Foundry {
             queue,
             resources,
             pipelines: FxHashMap::default(),
+            active_command_buffer: None,
+            active_compute_encoder: None,
         }
     }
 
@@ -77,6 +85,35 @@ impl Foundry {
     /// Register a new resource.
     pub fn register_resource<R: 'static + Send + Sync>(&mut self, resource: R) {
         self.resources.insert(TypeId::of::<R>(), Box::new(resource));
+    }
+
+    /// Start capturing commands into a single command buffer (batched dispatch).
+    pub fn start_capture(&mut self) -> Result<(), MetalError> {
+        use objc2_metal::MTLCommandQueue as _;
+        if self.active_command_buffer.is_some() {
+            return Err(MetalError::OperationFailed("Capture already active".to_string()));
+        }
+        let buffer = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+        self.active_command_buffer = Some(buffer);
+        self.active_compute_encoder = None;
+        Ok(())
+    }
+
+    /// End capture and return the command buffer (committed but not waited).
+    pub fn end_capture(&mut self) -> Result<Retained<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>, MetalError> {
+        use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _};
+        // End the persistent encoder before committing
+        if let Some(encoder) = self.active_compute_encoder.take() {
+            encoder.endEncoding();
+        }
+
+        let buffer = self
+            .active_command_buffer
+            .take()
+            .ok_or(MetalError::OperationFailed("No active capture".to_string()))?;
+
+        buffer.commit();
+        Ok(buffer)
     }
 
     /// Loads or retrieves a compute pipeline for the given Kernel type.
@@ -243,23 +280,38 @@ impl Foundry {
 
         let pipeline = self.load_kernel(kernel)?;
 
-        let command_buffer = self.queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+        if self.active_command_buffer.is_some() {
+            // Batched dispatch path
+            let encoder = if let Some(enc) = self.active_compute_encoder.clone() {
+                enc
+            } else {
+                let active = self.active_command_buffer.as_ref().unwrap();
+                let enc = active.computeCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+                self.active_compute_encoder = Some(enc.clone());
+                enc
+            };
 
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::CommandQueueCreationFailed)?;
+            encoder.setComputePipelineState(&pipeline);
+            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
+            kernel.bind(&encoder_wrapper);
+            let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
+        } else {
+            // Non-batched path
+            let command_buffer = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+            let encoder = command_buffer
+                .computeCommandEncoder()
+                .ok_or(MetalError::CommandQueueCreationFailed)?;
 
-        encoder.setComputePipelineState(&pipeline);
-
-        let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
-        kernel.bind(&encoder_wrapper);
-
-        let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
-        encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
-        encoder.endEncoding();
-
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
+            encoder.setComputePipelineState(&pipeline);
+            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
+            kernel.bind(&encoder_wrapper);
+            let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
+            encoder.endEncoding();
+            command_buffer.commit();
+            command_buffer.waitUntilCompleted();
+        }
 
         Ok(())
     }
@@ -313,6 +365,72 @@ impl Foundry {
         command_buffer.waitUntilCompleted();
 
         Ok(())
+    }
+
+    /// Check if command buffer capture is currently active.
+    pub fn is_capturing(&self) -> bool {
+        self.active_command_buffer.is_some()
+    }
+
+    /// Copy data between buffers using a blit encoder.
+    ///
+    /// When batched dispatch is active, this encodes the blit into the active command buffer
+    /// (ending the compute encoder temporarily). When not batched, creates a standalone
+    /// command buffer that commits and waits.
+    pub fn blit_copy(
+        &mut self,
+        src_buffer: &crate::types::MetalBuffer,
+        src_offset: usize,
+        dst_buffer: &crate::types::MetalBuffer,
+        dst_offset: usize,
+        size_bytes: usize,
+    ) -> Result<(), MetalError> {
+        use objc2_metal::{MTLBlitCommandEncoder as _, MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _};
+
+        if let Some(ref active_buffer) = self.active_command_buffer {
+            // Batched path: encode blit into the active command buffer
+
+            // End the compute encoder if one is active (Metal requires only one encoder at a time)
+            if let Some(encoder) = self.active_compute_encoder.take() {
+                encoder.endEncoding();
+            }
+
+            // Create a blit encoder on the same command buffer
+            let blit = active_buffer.blitCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+
+            unsafe {
+                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    src_buffer, src_offset, dst_buffer, dst_offset, size_bytes,
+                );
+            }
+            blit.endEncoding();
+
+            // The next dispatch() call will recreate the compute encoder as needed
+        } else {
+            // Non-batched path: create a standalone command buffer
+            let cmd = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+            let blit = cmd.blitCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+
+            unsafe {
+                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
+                    src_buffer, src_offset, dst_buffer, dst_offset, size_bytes,
+                );
+            }
+            blit.endEncoding();
+            cmd.commit();
+            cmd.waitUntilCompleted();
+        }
+
+        Ok(())
+    }
+}
+
+impl Drop for Foundry {
+    fn drop(&mut self) {
+        use objc2_metal::MTLCommandEncoder as _;
+        if let Some(encoder) = self.active_compute_encoder.take() {
+            encoder.endEncoding();
+        }
     }
 }
 

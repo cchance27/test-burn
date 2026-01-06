@@ -3563,6 +3563,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "smallvec",
  "syn",
  "sysinfo 0.37.2",
  "thiserror 2.0.17",
