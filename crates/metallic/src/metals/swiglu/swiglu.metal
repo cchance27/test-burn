@@ -69,7 +69,7 @@ kernel void swiglu_fused_activation_f16(
     device half* up_inout [[buffer(1)]],
     const device half* gate_bias [[buffer(2)]],
     const device half* up_bias [[buffer(3)]],
-    constant SwigluParamsResolved* params [[buffer(4)]],
+    constant SwigluParams* params [[buffer(4)]],
     uint gid [[thread_position_in_grid]]
 ) {
     uint total_elements = params->total_elements;
@@ -118,7 +118,7 @@ kernel void swiglu_fused_activation_f16(
             
             // SiLU: x * sigmoid(x)
             AccumVec one(1.0f);
-            AccumVec sigmoid = one / (one + metal::fast::exp(-gate_vals));
+            AccumVec sigmoid = one / (one + exp(-gate_vals));
             AccumVec activated = gate_vals * sigmoid;
             
             // Output

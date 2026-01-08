@@ -3,7 +3,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{
-    Data, DeriveInput, Expr, ExprLit, ExprPath, Fields, Lit, LitStr, Meta, Token, parse_macro_input, punctuated::Punctuated, spanned::Spanned
+    Data, DeriveInput, Expr, ExprLit, ExprPath, Fields, Lit, Meta, Token, parse_macro_input, punctuated::Punctuated, spanned::Spanned
 };
 
 mod conditional;
@@ -1380,9 +1380,9 @@ pub fn derive_epilogue(input: TokenStream) -> TokenStream {
     let mut gemv_id = None;
     let mut simd_reduce: Vec<(String, String)> = Vec::new();
     // Flexible SIMD reduce config: from/to level, operation
-    let mut simd_reduce_from: u8 = 16; // default: 32-lane (16 down to 1)
-    let mut simd_reduce_to: u8 = 1;
-    let mut simd_reduce_op: String = "add".to_string();
+    let mut _simd_reduce_from: u8 = 16; // default: 32-lane (16 down to 1)
+    let mut _simd_reduce_to: u8 = 1;
+    let mut _simd_reduce_op: String = "add".to_string();
 
     for attr in &input.attrs {
         if attr.path().is_ident("epilogue") {
@@ -1445,25 +1445,25 @@ pub fn derive_epilogue(input: TokenStream) -> TokenStream {
                                 // Parse from level (u8): simd_reduce_from = "16"
                                 if let Expr::Lit(expr_lit) = nv.value {
                                     if let Lit::Str(lit) = expr_lit.lit {
-                                        simd_reduce_from = lit.value().parse().unwrap_or(16);
+                                        _simd_reduce_from = lit.value().parse().unwrap_or(16);
                                     } else if let Lit::Int(lit) = expr_lit.lit {
-                                        simd_reduce_from = lit.base10_parse().unwrap_or(16);
+                                        _simd_reduce_from = lit.base10_parse().unwrap_or(16);
                                     }
                                 }
                             } else if nv.path.is_ident("simd_reduce_to") {
                                 // Parse to level (u8): simd_reduce_to = "1"
                                 if let Expr::Lit(expr_lit) = nv.value {
                                     if let Lit::Str(lit) = expr_lit.lit {
-                                        simd_reduce_to = lit.value().parse().unwrap_or(1);
+                                        _simd_reduce_to = lit.value().parse().unwrap_or(1);
                                     } else if let Lit::Int(lit) = expr_lit.lit {
-                                        simd_reduce_to = lit.base10_parse().unwrap_or(1);
+                                        _simd_reduce_to = lit.base10_parse().unwrap_or(1);
                                     }
                                 }
                             } else if nv.path.is_ident("simd_reduce_op") {
                                 // Parse op: simd_reduce_op = "add" | "max" | "min"
                                 if let Expr::Lit(expr_lit) = nv.value {
                                     if let Lit::Str(lit) = expr_lit.lit {
-                                        simd_reduce_op = lit.value().to_lowercase();
+                                        _simd_reduce_op = lit.value().to_lowercase();
                                     }
                                 }
                             }
@@ -1485,8 +1485,8 @@ pub fn derive_epilogue(input: TokenStream) -> TokenStream {
     }
 
     let emit_template = emit.unwrap_or_default();
-    let gemv_struct_str = gemv_struct.unwrap_or_default();
-    let gemv_id_str = gemv_id.unwrap_or_else(|| name.to_string());
+    let _gemv_struct_str = gemv_struct.unwrap_or_default();
+    let _gemv_id_str = gemv_id.unwrap_or_else(|| name.to_string());
 
     let (arg_infos, _) = match input.data {
         Data::Struct(data) => collect_arg_infos(&data.fields),
@@ -1555,368 +1555,11 @@ pub fn derive_epilogue(input: TokenStream) -> TokenStream {
         quote::quote! {}
     };
 
-    let gemv_impl = if has_gemv {
-        // Generate simd_reduce_code if simd_reduce vars are specified
-        let simd_reduce_code_impl = if !simd_reduce.is_empty() {
-            let mut metal_code = String::new();
-
-            // Generate reduction combine expression based on op
-            let op_template = match simd_reduce_op.as_str() {
-                "max" => "{0} = max({0}, simd_shuffle_xor({0}, {1}u))",
-                "min" => "{0} = min({0}, simd_shuffle_xor({0}, {1}u))",
-                _ => "{0} += simd_shuffle_xor({0}, {1}u)", // default: add
-            };
-
-            // Generate reduction levels (powers of 2 from `from` down to `to`)
-            let mut levels = Vec::new();
-            let mut level = simd_reduce_from;
-            while level >= simd_reduce_to && level > 0 {
-                levels.push(level);
-                level /= 2;
-            }
-
-            for (var_name, source_expr) in &simd_reduce {
-                metal_code.push_str(&format!("        float {} = {};\n", var_name, source_expr));
-                for lvl in &levels {
-                    let line = op_template.replace("{0}", var_name).replace("{1}", &lvl.to_string());
-                    metal_code.push_str(&format!("        {};\n", line));
-                }
-                metal_code.push('\n');
-            }
-            quote::quote! {
-                fn simd_reduce_code() -> &'static str {
-                    #metal_code
-                }
-            }
-        } else {
-            quote::quote! {}
-        };
-
-        quote::quote! {
-            impl #root::metals::matmul_gemv::simd::GemvEpilogue for #name {
-                fn id() -> &'static str {
-                    #gemv_id_str
-                }
-
-                fn includes() -> &'static [&'static str] {
-                    &[#include]
-                }
-
-                fn template_arg() -> Option<&'static str> {
-                    Some(#gemv_struct_str)
-                }
-
-                #simd_reduce_code_impl
-            }
-        }
-    } else {
-        quote::quote! {}
-    };
+    let gemv_impl = quote::quote! {};
 
     let expanded = quote::quote! {
         #stage_impl
         #gemv_impl
-    };
-
-    TokenStream::from(expanded)
-}
-
-#[proc_macro_derive(GemvSimdConfig, attributes(gemv_simd))]
-pub fn derive_gemv_simd_config(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = input.ident.clone();
-
-    let root = metallic_root();
-
-    let mut args_ty: Option<syn::Type> = None;
-    let mut heads: Option<usize> = None;
-    let mut cols_per_tg: Option<usize> = None;
-    let mut fast_path: Option<bool> = None;
-    let mut gemv_n0: Option<String> = None;
-    let mut data_ptrs: Vec<String> = Vec::new();
-    let mut result_ptrs: Vec<String> = Vec::new();
-    let mut n_exprs: Vec<String> = Vec::new();
-    let mut bias_ptrs: Vec<String> = Vec::new();
-    let mut has_bias_flags: Vec<String> = Vec::new();
-    let mut scale_ptrs: Vec<String> = Vec::new();
-    let mut struct_defs_type: Option<syn::Type> = None;
-
-    for attr in &input.attrs {
-        if !attr.path().is_ident("gemv_simd") {
-            continue;
-        }
-
-        let nested = attr
-            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .expect("Invalid gemv_simd attribute");
-
-        for meta in nested {
-            match meta {
-                Meta::NameValue(nv) => {
-                    if nv.path.is_ident("args") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Str(lit) = expr_lit.lit {
-                                args_ty = Some(syn::parse_str::<syn::Type>(&lit.value()).expect("args must be a valid Rust type"));
-                            }
-                        }
-                    } else if nv.path.is_ident("heads") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Int(lit) = expr_lit.lit {
-                                heads = Some(lit.base10_parse::<usize>().expect("heads must be int"));
-                            }
-                        }
-                    } else if nv.path.is_ident("cols_per_tg") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Int(lit) = expr_lit.lit {
-                                cols_per_tg = Some(lit.base10_parse::<usize>().expect("cols_per_tg must be int"));
-                            }
-                        }
-                    } else if nv.path.is_ident("fast_path") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Bool(lit) = expr_lit.lit {
-                                fast_path = Some(lit.value);
-                            }
-                        }
-                    } else if nv.path.is_ident("gemv_n0") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Str(lit) = expr_lit.lit {
-                                gemv_n0 = Some(lit.value());
-                            }
-                        }
-                    }
-                }
-                Meta::List(list) => {
-                    let parse_list = |list: &syn::MetaList| -> Vec<String> {
-                        list.parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)
-                            .expect("list must be comma-separated string literals")
-                            .iter()
-                            .map(|s| s.value())
-                            .collect()
-                    };
-
-                    if list.path.is_ident("data_ptrs") {
-                        data_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("result_ptrs") {
-                        result_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("n_exprs") {
-                        n_exprs = parse_list(&list);
-                    } else if list.path.is_ident("bias_ptrs") {
-                        bias_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("has_bias_flags") {
-                        has_bias_flags = parse_list(&list);
-                    } else if list.path.is_ident("scale_ptrs") {
-                        scale_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("struct_defs_type") {
-                        // struct_defs_type(MyParams) - type with METAL_STRUCT_DEF
-                        if let Ok(ty) = list.parse_args::<syn::Type>() {
-                            struct_defs_type = Some(ty);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let args_ty = args_ty.expect("GemvSimdConfig requires gemv_simd(args = \"...\")");
-    let heads = heads.expect("GemvSimdConfig requires gemv_simd(heads = N)");
-    let cols_per_tg = cols_per_tg.expect("GemvSimdConfig requires gemv_simd(cols_per_tg = N)");
-    let fast_path = fast_path.unwrap_or(true);
-    let gemv_n0 = gemv_n0.expect("GemvSimdConfig requires gemv_simd(gemv_n0 = \"...\")");
-
-    let mk_slice = |items: Vec<String>| -> Vec<proc_macro2::TokenStream> { items.into_iter().map(|s| quote::quote! { #s }).collect() };
-
-    let data_ptrs_ts = mk_slice(data_ptrs.clone());
-    let result_ptrs_ts = mk_slice(result_ptrs.clone());
-    let n_exprs_ts = mk_slice(n_exprs.clone());
-    let bias_ptrs_ts = mk_slice(bias_ptrs.clone());
-    let has_bias_flags_ts = mk_slice(has_bias_flags.clone());
-
-    let data_len = data_ptrs.len();
-    let result_len = result_ptrs.len();
-    let n_len = n_exprs.len();
-    let bias_len = bias_ptrs.len();
-    let has_bias_len = has_bias_flags.len();
-    let scale_len = scale_ptrs.len();
-    let scale_len_assert = if scale_ptrs.is_empty() { heads } else { scale_len };
-
-    let scale_ptrs_ts = mk_slice(scale_ptrs.clone());
-
-    let assert_data = quote::format_ident!("__GEMV_SIMD_ASSERT_{}_DATA", name);
-    let assert_result = quote::format_ident!("__GEMV_SIMD_ASSERT_{}_RESULT", name);
-    let assert_n = quote::format_ident!("__GEMV_SIMD_ASSERT_{}_N", name);
-    let assert_bias = quote::format_ident!("__GEMV_SIMD_ASSERT_{}_BIAS", name);
-    let assert_has_bias = quote::format_ident!("__GEMV_SIMD_ASSERT_{}_HAS_BIAS", name);
-    let assert_scale = quote::format_ident!("__GEMV_SIMD_ASSERT_{}_SCALE", name);
-
-    let scale_ptrs_impl = if !scale_ptrs.is_empty() {
-        quote::quote! {
-            fn scale_ptrs() -> &'static [&'static str] {
-                &[#(#scale_ptrs_ts),*]
-            }
-        }
-    } else {
-        quote::quote! {}
-    };
-
-    // Generate struct_defs() implementation
-    // Always include GemvParams (shared infrastructure for SIMD GEMV) plus any struct_defs_type
-    let struct_defs_impl = if let Some(ty) = struct_defs_type {
-        quote::quote! {
-            // Include both GemvParams and the config-specific params
-            format!("{}\n{}",
-                #root::metals::gemv::GemvParams::METAL_STRUCT_DEF,
-                <#ty>::METAL_STRUCT_DEF)
-        }
-    } else {
-        quote::quote! {
-            // Just GemvParams
-            #root::metals::gemv::GemvParams::METAL_STRUCT_DEF.to_string()
-        }
-    };
-
-    let expanded = quote::quote! {
-        #[allow(non_upper_case_globals, dead_code)]
-        const #assert_data: [(); #heads] = [(); #data_len];
-        #[allow(non_upper_case_globals, dead_code)]
-        const #assert_result: [(); #heads] = [(); #result_len];
-        #[allow(non_upper_case_globals, dead_code)]
-        const #assert_n: [(); #heads] = [(); #n_len];
-        #[allow(non_upper_case_globals, dead_code)]
-        const #assert_bias: [(); #heads] = [(); #bias_len];
-        #[allow(non_upper_case_globals, dead_code)]
-        const #assert_has_bias: [(); #heads] = [(); #has_bias_len];
-        #[allow(non_upper_case_globals, dead_code)]
-        const #assert_scale: [(); #heads] = [(); #scale_len_assert];
-
-        impl #root::metals::matmul_gemv::simd::GemvSimdConfig for #name {
-            type Args = #args_ty;
-
-            const HEADS: usize = #heads;
-            const COLS_PER_TG: usize = #cols_per_tg;
-            const FAST_PATH: bool = #fast_path;
-
-            fn data_ptrs() -> &'static [&'static str] {
-                &[#(#data_ptrs_ts),*]
-            }
-
-            #scale_ptrs_impl
-
-            fn result_ptrs() -> &'static [&'static str] {
-                &[#(#result_ptrs_ts),*]
-            }
-
-            fn n_exprs() -> &'static [&'static str] {
-                &[#(#n_exprs_ts),*]
-            }
-
-            fn bias_ptrs() -> &'static [&'static str] {
-                &[#(#bias_ptrs_ts),*]
-            }
-
-            fn has_bias_flags() -> &'static [&'static str] {
-                &[#(#has_bias_flags_ts),*]
-            }
-
-            fn gemv_params_n0_expr() -> &'static str {
-                #gemv_n0
-            }
-
-            fn struct_defs() -> String {
-                #struct_defs_impl
-            }
-        }
-    };
-
-    TokenStream::from(expanded)
-}
-
-#[proc_macro_derive(GemvHook, attributes(gemv_hook))]
-pub fn derive_gemv_hook(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = input.ident.clone();
-
-    let root = metallic_root();
-
-    let mut id: Option<String> = None;
-    let mut policy_struct: Option<String> = None;
-    let mut preamble: Option<String> = None;
-    let mut policy_params: Option<String> = None;
-    let mut includes: Vec<String> = Vec::new();
-
-    for attr in &input.attrs {
-        if !attr.path().is_ident("gemv_hook") {
-            continue;
-        }
-
-        let nested = attr
-            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .expect("Invalid gemv_hook attribute");
-
-        for meta in nested {
-            match meta {
-                Meta::NameValue(nv) => {
-                    if let Expr::Lit(expr_lit) = nv.value {
-                        match expr_lit.lit {
-                            Lit::Str(lit) => {
-                                if nv.path.is_ident("id") {
-                                    id = Some(lit.value());
-                                } else if nv.path.is_ident("policy_struct") {
-                                    policy_struct = Some(lit.value());
-                                } else if nv.path.is_ident("preamble") {
-                                    preamble = Some(lit.value());
-                                } else if nv.path.is_ident("policy_params") {
-                                    policy_params = Some(lit.value());
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-                Meta::List(list) => {
-                    if list.path.is_ident("includes") {
-                        includes = list
-                            .parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)
-                            .expect("includes must be comma-separated string literals")
-                            .iter()
-                            .map(|s| s.value())
-                            .collect();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let id = id.expect("GemvHook requires gemv_hook(id = \"...\")");
-    let policy_struct = policy_struct.expect("GemvHook requires gemv_hook(policy_struct = \"...\")");
-    let policy_params = policy_params.expect("GemvHook requires gemv_hook(policy_params = \"...\")");
-    let preamble = preamble.unwrap_or_default();
-
-    let includes_ts: Vec<_> = includes.into_iter().map(|s| quote::quote! { #s }).collect();
-
-    let expanded = quote::quote! {
-        impl #root::metals::matmul_gemv::simd::GemvHook for #name {
-            fn id() -> &'static str {
-                #id
-            }
-
-            fn includes() -> &'static [&'static str] {
-                &[#(#includes_ts),*]
-            }
-
-            fn policy_struct() -> &'static str {
-                #policy_struct
-            }
-
-            fn preamble_code() -> &'static str {
-                #preamble
-            }
-
-            fn policy_params_code() -> &'static str {
-                #policy_params
-            }
-        }
     };
 
     TokenStream::from(expanded)
@@ -2130,230 +1773,7 @@ pub fn derive_conditional_kernel(input: TokenStream) -> TokenStream {
 /// Generates:
 /// - `impl GemvSimdConfig for MyFusedKernel { ... }`
 /// - `type MainStage = GemvSimdMainStage<MyFusedKernel, Hook, Epilogue>`
-#[proc_macro_derive(GemvKernel, attributes(gemv_kernel))]
-pub fn derive_gemv_kernel(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = input.ident.clone();
-    let root = metallic_root();
 
-    // Parse attributes
-    let mut args_type: Option<syn::Ident> = None;
-    let mut heads: usize = 1;
-    let mut cols_per_tg: usize = 8;
-    let mut fast_path = true;
-    let mut gemv_n0: Option<String> = None;
-    let mut data_ptrs: Vec<String> = Vec::new();
-    let mut scale_ptrs: Vec<String> = Vec::new();
-    let mut result_ptrs: Vec<String> = Vec::new();
-    let mut n_exprs: Vec<String> = Vec::new();
-    let mut bias_ptrs: Vec<String> = Vec::new();
-    let mut has_bias_flags: Vec<String> = Vec::new();
-    let mut struct_defs_type: Option<syn::Type> = None;
-    let mut prologue_type: Option<syn::Type> = None;
-    let mut hook_type: Option<syn::Type> = None;
-    let mut epilogue_type: Option<syn::Type> = None;
-
-    for attr in &input.attrs {
-        if !attr.path().is_ident("gemv_kernel") {
-            continue;
-        }
-
-        let nested = attr
-            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .expect("Invalid gemv_kernel attribute");
-
-        // Helper to parse list of string literals
-        let parse_list = |list: &syn::MetaList| -> Vec<String> {
-            list.parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)
-                .expect("list must be comma-separated string literals")
-                .iter()
-                .map(|s| s.value())
-                .collect()
-        };
-
-        for meta in nested {
-            match meta {
-                Meta::NameValue(nv) => {
-                    if nv.path.is_ident("args") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Str(lit) = expr_lit.lit {
-                                args_type = Some(syn::Ident::new(&lit.value(), lit.span()));
-                            }
-                        }
-                    } else if nv.path.is_ident("heads") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Int(lit) = expr_lit.lit {
-                                heads = lit.base10_parse().expect("heads must be an integer");
-                            }
-                        }
-                    } else if nv.path.is_ident("cols_per_tg") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Int(lit) = expr_lit.lit {
-                                cols_per_tg = lit.base10_parse().expect("cols_per_tg must be an integer");
-                            }
-                        }
-                    } else if nv.path.is_ident("fast_path") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Bool(lit) = expr_lit.lit {
-                                fast_path = lit.value();
-                            }
-                        }
-                    } else if nv.path.is_ident("gemv_n0") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Str(lit) = expr_lit.lit {
-                                gemv_n0 = Some(lit.value());
-                            }
-                        }
-                    } else if nv.path.is_ident("prologue") {
-                        if let Expr::Path(path) = nv.value.clone() {
-                            prologue_type = Some(syn::Type::Path(syn::TypePath {
-                                qself: None,
-                                path: path.path,
-                            }));
-                        }
-                    } else if nv.path.is_ident("hook") {
-                        if let Expr::Path(path) = nv.value.clone() {
-                            hook_type = Some(syn::Type::Path(syn::TypePath {
-                                qself: None,
-                                path: path.path,
-                            }));
-                        }
-                    } else if nv.path.is_ident("epilogue") {
-                        if let Expr::Path(path) = nv.value {
-                            epilogue_type = Some(syn::Type::Path(syn::TypePath {
-                                qself: None,
-                                path: path.path,
-                            }));
-                        }
-                    }
-                }
-                Meta::List(list) => {
-                    if list.path.is_ident("data_ptrs") {
-                        data_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("scale_ptrs") {
-                        scale_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("result_ptrs") {
-                        result_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("n_exprs") {
-                        n_exprs = parse_list(&list);
-                    } else if list.path.is_ident("bias_ptrs") {
-                        bias_ptrs = parse_list(&list);
-                    } else if list.path.is_ident("has_bias_flags") {
-                        has_bias_flags = parse_list(&list);
-                    } else if list.path.is_ident("struct_defs_type") {
-                        let ty: syn::Type = list.parse_args().expect("struct_defs_type must be a valid type");
-                        struct_defs_type = Some(ty);
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Validation
-    let args_type = args_type.expect("GemvKernel requires `args = \"ArgsType\"`");
-    let gemv_n0 = gemv_n0.expect("GemvKernel requires `gemv_n0 = \"...\"`");
-    let hook_type = hook_type.expect("GemvKernel requires `hook = HookType`");
-    let epilogue_type = epilogue_type.expect("GemvKernel requires `epilogue = EpilogueType`");
-
-    // Default prologue to NoPrologue if not specified
-    let prologue_type_resolved = prologue_type.unwrap_or_else(|| syn::parse_quote!(#root::metals::matmul_gemv::simd::NoPrologue));
-
-    // Validate array lengths match heads
-    if data_ptrs.len() != heads {
-        panic!("data_ptrs length ({}) must match heads ({})", data_ptrs.len(), heads);
-    }
-    if result_ptrs.len() != heads {
-        panic!("result_ptrs length ({}) must match heads ({})", result_ptrs.len(), heads);
-    }
-    if n_exprs.len() != heads {
-        panic!("n_exprs length ({}) must match heads ({})", n_exprs.len(), heads);
-    }
-    if bias_ptrs.len() != heads {
-        panic!("bias_ptrs length ({}) must match heads ({})", bias_ptrs.len(), heads);
-    }
-    if has_bias_flags.len() != heads {
-        panic!("has_bias_flags length ({}) must match heads ({})", has_bias_flags.len(), heads);
-    }
-
-    // Generate struct_defs impl
-    let struct_defs_impl = if let Some(ty) = struct_defs_type {
-        quote::quote! {
-            fn struct_defs() -> String {
-                format!("{}\n{}",
-                    #root::metals::gemv::GemvParams::METAL_STRUCT_DEF,
-                    <#ty>::METAL_STRUCT_DEF)
-            }
-        }
-    } else {
-        quote::quote! {
-            fn struct_defs() -> String {
-                #root::metals::gemv::GemvParams::METAL_STRUCT_DEF.to_string()
-            }
-        }
-    };
-
-    // Generate scale_ptrs impl
-    let scale_ptrs_impl = if scale_ptrs.is_empty() {
-        quote::quote! {}
-    } else {
-        quote::quote! {
-            fn scale_ptrs() -> &'static [&'static str] {
-                &[#(#scale_ptrs),*]
-            }
-        }
-    };
-
-    let expanded = quote::quote! {
-        impl #root::metals::matmul_gemv::simd::GemvConfig for #name {
-            type Args = #args_type;
-
-            const HEADS: usize = #heads;
-            const COLS_PER_TG: usize = #cols_per_tg;
-            const FAST_PATH: bool = #fast_path;
-
-            fn data_ptrs() -> &'static [&'static str] {
-                &[#(#data_ptrs),*]
-            }
-
-            fn result_ptrs() -> &'static [&'static str] {
-                &[#(#result_ptrs),*]
-            }
-
-            fn n_exprs() -> &'static [&'static str] {
-                &[#(#n_exprs),*]
-            }
-
-            fn bias_ptrs() -> &'static [&'static str] {
-                &[#(#bias_ptrs),*]
-            }
-
-            fn has_bias_flags() -> &'static [&'static str] {
-                &[#(#has_bias_flags),*]
-            }
-
-            fn gemv_params_n0_expr() -> &'static str {
-                #gemv_n0
-            }
-
-            #scale_ptrs_impl
-
-            #struct_defs_impl
-        }
-
-        impl #name {
-            /// Create the main stage for compound kernel usage.
-            /// Returns `GemvStage<Prologue, Self, Hook, Epilogue>`.
-            pub fn main_stage() -> #root::metals::matmul_gemv::simd::GemvStage<
-                #prologue_type_resolved, #name, #hook_type, #epilogue_type
-            > {
-                Default::default()
-            }
-        }
-    };
-
-    TokenStream::from(expanded)
-}
 
 /// Derive macro for SIMD GEMV Prologue stages.
 ///
@@ -2369,66 +1789,7 @@ pub fn derive_gemv_kernel(input: TokenStream) -> TokenStream {
 /// )]
 /// pub struct RmsnormPrologue;
 /// ```
-#[proc_macro_derive(GemvPrologue, attributes(gemv_prologue))]
-pub fn derive_gemv_simd_prologue(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-    let root = metallic_root();
 
-    let mut emit_code: Option<String> = None;
-    let mut includes: Vec<String> = Vec::new();
-
-    for attr in &input.attrs {
-        if !attr.path().is_ident("gemv_prologue") {
-            continue;
-        }
-
-        let nested = attr
-            .parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
-            .expect("Invalid gemv_prologue attribute");
-
-        for meta in nested {
-            match meta {
-                Meta::NameValue(nv) => {
-                    if nv.path.is_ident("emit") {
-                        if let Expr::Lit(expr_lit) = nv.value {
-                            if let Lit::Str(lit) = expr_lit.lit {
-                                emit_code = Some(lit.value());
-                            }
-                        }
-                    }
-                }
-                Meta::List(list) => {
-                    if list.path.is_ident("includes") {
-                        includes = list
-                            .parse_args_with(Punctuated::<LitStr, Token![,]>::parse_terminated)
-                            .expect("includes must be comma-separated string literals")
-                            .iter()
-                            .map(|s| s.value())
-                            .collect();
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let emit_code = emit_code.unwrap_or_default();
-
-    let expanded = quote::quote! {
-        impl #root::metals::matmul_gemv::simd::GemvPrologue for #name {
-            fn includes() -> &'static [&'static str] {
-                &[#(#includes),*]
-            }
-
-            fn emit() -> String {
-                #emit_code.to_string()
-            }
-        }
-    };
-
-    TokenStream::from(expanded)
-}
 
 /// Derive macro for auto-generating CompiledStep boilerplate.
 ///

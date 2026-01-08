@@ -81,7 +81,7 @@ This is what allows new quants to plug in without changing the SIMD GEMV templat
 ### Step 4 — Update the model wiring (spec/steps)
 
 Your new quant must be reachable from the model execution plan:
-- Foundry specs select concrete ops/steps (e.g. `QkvF16CanonicalFusedRmsnorm` in `crates/metallic/src/foundry/spec/qwen25.json`).
+- Foundry specs select concrete ops/steps (e.g. `QkvF16CanonicalFusedRmsnorm` in `../../models/qwen25.json`).
 - If you add a new quant-specific fused path, add a corresponding step and hook/policy selection.
 
 ## Common pitfalls

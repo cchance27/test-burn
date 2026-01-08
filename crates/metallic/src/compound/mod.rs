@@ -160,6 +160,13 @@ pub struct CompiledCompoundKernel {
     source: String,
 }
 
+impl CompiledCompoundKernel {
+    /// Get the generated Metal source code for debugging.
+    pub fn source_code(&self) -> &str {
+        &self.source
+    }
+}
+
 /// A bound (dispatchable) compiled compound kernel.
 pub struct BoundCompiledCompoundKernel<A: BindArgs> {
     template: &'static CompiledCompoundKernel,
@@ -550,6 +557,11 @@ impl<A: BindArgs + 'static> Kernel for CompoundKernel<Bound<A>> {
 }
 
 impl CompoundKernel<Fused> {
+    /// Get the generated source code.
+    pub fn source(&self) -> &str {
+        self.source.as_ref().unwrap()
+    }
+
     /// Bind this kernel with runtime arguments for dispatch.
     pub fn bind<A: BindArgs>(self, args: A, dispatch: DispatchConfig) -> CompoundKernel<Bound<A>> {
         CompoundKernel {

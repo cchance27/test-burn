@@ -1,3 +1,6 @@
+#ifndef RMSNORM_METAL_H
+#define RMSNORM_METAL_H
+
 // NOTE: ALWAYS_INLINE is provided by policies/base.metal, which must be included.
 #include <metal_stdlib>
 using namespace metal;
@@ -22,6 +25,8 @@ ALWAYS_INLINE float rmsnorm_compute_inv_rms(
     const uint warp_id,
     threadgroup float *tg_inv_rms
 ) {
+    // if (feature_dim == 0u) { // Restore original logic below
+
     if (feature_dim == 0u) {
         if (warp_id == 0u && lane_id == 0u) {
             tg_inv_rms[0] = 0.0f;
@@ -140,7 +145,7 @@ void run_rmsnorm_core(
 // Entry Points (for standalone non-fused usage)
 // ============================================================================
 
-#ifndef FUSED_KERNEL
+// #ifndef FUSED_KERNEL (Moved down)
 #ifndef POLICY_F16_DEFINED
 #define POLICY_F16_DEFINED
 struct PolicyF16 {
@@ -163,6 +168,7 @@ struct PolicyF16 {
 };
 #endif // POLICY_F16_DEFINED
 
+#ifndef FUSED_KERNEL
 [[kernel]] void rmsnorm_kernel_f16(
     const device uchar *input [[buffer(0)]],
     const device uchar *scale_bytes [[buffer(1)]],
@@ -177,3 +183,5 @@ struct PolicyF16 {
     run_rmsnorm_core<PolicyF16>(input, output, gamma, params, scale_bytes, gid, lid, &tg_inv_rms);
 }
 #endif
+
+#endif // RMSNORM_METAL_H

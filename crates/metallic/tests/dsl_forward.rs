@@ -105,8 +105,8 @@ fn test_e2e_forward_pass() {
     use std::path::Path;
 
     // Model path - adjust if your model is elsewhere
-    let model_path = "/Volumes/2TB/LMStudio/Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-fp16.gguf";
-    let spec_path = concat!(env!("CARGO_MANIFEST_DIR"), "/src/foundry/spec/qwen25.json");
+    let model_path = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
+    let spec_path = "../../models/qwen25.json";
 
     // Check if model exists
     if !Path::new(model_path).exists() {

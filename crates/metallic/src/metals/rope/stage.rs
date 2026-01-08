@@ -81,22 +81,24 @@ impl Stage for RopeStage {
             half4 cos_v = cos_buf_vec[pos * half_vec + tid];
             half4 sin_v = sin_buf_vec[pos * half_vec + tid];
             
-            // Rotate (Vector math: component-wise)
-            // x_new[i] = x[i]*cos[i] - x[i+h]*sin[i]
-            // x_new[i+h] = x[i]*sin[i] + x[i+h]*cos[i]
+            // Rotate (Vector math: component-wise) with Float precision
+            float4 x_l = (float4)x_low;
+            float4 x_h = (float4)x_high;
+            float4 c_v = (float4)cos_v;
+            float4 s_v = (float4)sin_v;
+
+            float4 out_l = x_l * c_v - x_h * s_v;
+            float4 out_h = x_l * s_v + x_h * c_v;
             
-            half4 out_low = x_low * cos_v - x_high * sin_v;
-            half4 out_high = x_low * sin_v + x_high * cos_v;
-            
-            q_shared[tid] = out_low;
-            q_shared[tid + half_vec] = out_high;
+            q_shared[tid] = (half4)out_l;
+            q_shared[tid + half_vec] = (half4)out_h;
         }
     }
     
     threadgroup_barrier(mem_flags::mem_threadgroup);
     
     // 3. Expose pointers for next stage
-    const threadgroup half4* q_shared_ptr = q_shared; // SdpaCoreStage uses q_shared directly though
+    const threadgroup half4* q_shared_ptr = q_shared; // SdpaOnlineStage uses q_shared directly though
            "#
             .to_string(),
         )

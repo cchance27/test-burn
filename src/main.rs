@@ -572,18 +572,21 @@ fn run_text_mode(
     if std::env::var("METALLIC_PERF_OUTPUT").is_ok()
         && let Some(total) = total_generation_time
     {
-        let total_s = total.as_secs_f64().max(1e-9);
-        let tps_total = (generated_tokens as f64) / total_s;
-        eprintln!("\n\n[metallic] generated_tokens={generated_tokens} total_s={total_s:.3} tps_total={tps_total:.2}");
-
+        eprintln!("\n[metallic] Performance Breakdown:");
+        
         if let Some(prompt) = prompt_processing {
+            let prompt_s = prompt.as_secs_f64().max(1e-9);
+            eprintln!("[metallic]   Prompt Processing: {:.3}s", prompt_s);
+            
             let decode_s = total.saturating_sub(prompt).as_secs_f64().max(1e-9);
             let tps_decode = (generated_tokens as f64) / decode_s;
-            eprintln!(
-                "[metallic] prompt_s={:.3} decode_s={decode_s:.3} tps_decode={tps_decode:.2}",
-                prompt.as_secs_f64()
-            );
+            eprintln!("[metallic]   Decode:            {:.3}s ({:.2} tokens/s)", decode_s, tps_decode);
         }
+
+        let total_s = total.as_secs_f64().max(1e-9);
+        let tps_total = (generated_tokens as f64) / total_s;
+        eprintln!("[metallic]   Total:             {:.3}s ({:.2} tokens/s)", total_s, tps_total);
+        eprintln!("[metallic]   Tokens Generated:  {}", generated_tokens);
     }
 
     Ok(())

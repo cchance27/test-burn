@@ -8,6 +8,11 @@ pub trait CompiledStep: Send + Sync + std::fmt::Debug {
     /// Execute this step using fast bindings (Vec lookup) for tensors,
     /// and slow bindings (HashMap) for global variables if needed.
     fn execute(&self, foundry: &mut Foundry, bindings: &FastBindings, globals: &TensorBindings) -> Result<(), MetalError>;
+
+    /// Human-readable name for this step (for debugging).
+    fn name(&self) -> &'static str {
+        "UnnamedStep"
+    }
 }
 
 /// Runtime bindings storage optimized for vector access.
@@ -35,6 +40,10 @@ impl FastBindings {
     #[inline(always)]
     pub fn get(&self, index: usize) -> Option<&TensorArg> {
         self.storage.get(index).and_then(|opt| opt.as_ref())
+    }
+
+    pub fn len(&self) -> usize {
+        self.storage.len()
     }
 }
 

@@ -57,25 +57,24 @@ impl Step for Repeat {
 
         for i in 0..count_val {
             bindings.set_var(&self.var, i.to_string());
-
             for (step_idx, step) in self.steps.iter().enumerate() {
                 // Debug logging for first layer only
                 if i == 0 && foundry_trace_enabled() {
                     eprintln!("    [Layer 0, SubStep {}] {}", step_idx, step.name());
                 }
+
                 step.execute(foundry, bindings)?;
 
                 // Dump key tensors after specific sub-steps in layer 0
                 if i == 0 && foundry_trace_enabled() {
                     let tensor_name = match step_idx {
-                        0 => Some("norm_out"),
-                        1 => Some("q"),
-                        4 => Some("q_heads"),
-                        6 => Some("v_heads"),
-                        7 => Some("q_rot"),
-                        12 => Some("v_expanded"),
-                        13 => Some("attn_out"),
-                        14 => Some("hidden"),
+                        0 => Some("q"),
+                        1 => Some("q_heads"),
+                        3 => Some("v_heads"),
+                        4 => Some("q_rot"),
+                        10 => Some("attn_out"),
+                        11 => Some("residual_1"),
+                        16 => Some("hidden"),
                         _ => None,
                     };
 
@@ -83,6 +82,16 @@ impl Step for Repeat {
                         if let Ok(arg) = bindings.get(name) {
                             let len = arg.dims().iter().product::<usize>().min(5);
                             if len > 0 {
+                                // Sync if capturing
+                                if foundry.is_capturing() {
+                                    let cmd = foundry.end_capture()?;
+                                    {
+                                        use objc2_metal::MTLCommandBuffer;
+                                        cmd.waitUntilCompleted();
+                                    }
+                                    foundry.start_capture()?;
+                                }
+
                                 let data: Vec<half::f16> = unsafe {
                                     use objc2_metal::MTLBuffer;
                                     let ptr = arg.buffer().contents().as_ptr() as *const half::f16;
@@ -90,10 +99,38 @@ impl Step for Repeat {
                                 };
                                 eprintln!("      → {} first {}: {:?}", name, len, data);
                             }
-                        } else {
-                            eprintln!("      → {} not found in bindings", name);
                         }
                     }
+                }
+            }
+
+            if foundry_trace_enabled() {
+                eprintln!("[FOUNDRY] layer {} sync and norm check", i);
+                // Force sync between layers to allow reading intermediate state
+                if foundry.is_capturing() {
+                    let cmd = foundry.end_capture()?;
+                    {
+                        use objc2_metal::MTLCommandBuffer;
+                        cmd.waitUntilCompleted();
+                    }
+                    foundry.start_capture()?;
+                }
+
+                if let Ok(arg) = bindings.get("hidden") {
+                    let full_len = arg.dims().iter().product::<usize>();
+                    let data: Vec<half::f16> = unsafe {
+                        use objc2_metal::MTLBuffer;
+                        let ptr = arg.buffer().contents().as_ptr() as *const half::f16;
+                        std::slice::from_raw_parts(ptr, full_len).to_vec()
+                    };
+                    let mut sum_sq = 0.0f32;
+                    for v in data {
+                        let vf = v.to_f32();
+                        sum_sq += vf * vf;
+                    }
+                    eprintln!("[FOUNDRY] layer {} hidden norm: {:.4}", i, sum_sq.sqrt());
+                } else {
+                    eprintln!("[FOUNDRY] layer {} - 'hidden' not found in bindings", i);
                 }
             }
         }

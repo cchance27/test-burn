@@ -11,8 +11,8 @@ use metallic::{
 };
 use serial_test::serial;
 
-const MODEL_SPEC_PATH: &str = "src/foundry/spec/qwen25.json";
-const GGUF_PATH: &str = "/Volumes/2TB/LMStudio/Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-fp16.gguf";
+const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
+const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
 
 /// Compare two f16 slices and return (max_diff, avg_diff, first_mismatch_idx)
 fn compare_f16_slices(a: &[f16], b: &[f16], tolerance: f32) -> (f32, f32, Option<usize>) {
@@ -42,11 +42,13 @@ fn compare_f16_slices(a: &[f16], b: &[f16], tolerance: f32) -> (f32, f32, Option
 
 /// Read f16 data from a TensorArg buffer
 fn read_f16_buffer(arg: &metallic::types::TensorArg) -> Vec<f16> {
+    use metallic::types::KernelArg;
     let buffer = arg.buffer();
+    let offset = arg.offset(); // offset is in bytes
     let len = arg.dims().iter().product::<usize>();
     unsafe {
         use objc2_metal::MTLBuffer;
-        let ptr = buffer.contents().as_ptr() as *const f16;
+        let ptr = (buffer.contents().as_ptr() as *const u8).add(offset) as *const f16;
         std::slice::from_raw_parts(ptr, len).to_vec()
     }
 }
@@ -1050,7 +1052,7 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
-    let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
+    let (mut bindings, mut fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
     let tokenizer = dsl_model.tokenizer()?;
     let prompt = "Hello";
@@ -1085,15 +1087,20 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         metallic::types::MetalBuffer::from_retained(buf)
     };
     let input_tensor = metallic::types::TensorArg::from_buffer(input_buffer.clone(), metallic::tensor::Dtype::U32, vec![1], vec![1]);
-    bindings.insert("input_ids".to_string(), input_tensor);
+    // Sync input_ids to both bindings and fast_bindings for compiled step execution
+    bindings.insert("input_ids".to_string(), input_tensor.clone());
+    if let Some(id) = dsl_model.symbol_id("input_ids") {
+        fast_bindings.set(id, input_tensor);
+    }
 
     fn run_dsl_step(
         foundry: &mut Foundry,
         bindings: &mut TensorBindings,
+        fast_bindings: &mut metallic::foundry::spec::compiled::FastBindings,
+        dsl_model: &metallic::foundry::model::CompiledModel,
         input_buffer: &metallic::types::MetalBuffer,
         token: u32,
         pos: usize,
-        arch: &metallic::foundry::spec::Architecture,
         n_heads: usize,
         n_kv_heads: usize,
         head_dim: usize,
@@ -1119,9 +1126,15 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         bindings.set_global("total_elements_repeat", (n_heads * kv_seq_len * head_dim).to_string());
         bindings.set_global("total_elements_write", (n_kv_heads * seq_len * head_dim).to_string());
 
-        for step in arch.forward.iter() {
-            step.execute(foundry, bindings)?;
-        }
+        // Also set int_globals for fast lookup
+        bindings.set_int_global("position_offset", pos);
+        bindings.set_int_global("kv_seq_len", kv_seq_len);
+        bindings.set_int_global("total_elements_slice", n_kv_heads * kv_seq_len * head_dim);
+        bindings.set_int_global("total_elements_repeat", n_heads * kv_seq_len * head_dim);
+
+        // Use compiled forward path instead of interpreted step.execute()
+        dsl_model.forward(foundry, bindings, fast_bindings)?;
+
         let logits = bindings.get("logits")?;
         let hidden = bindings.get("final_norm_out").or_else(|_| bindings.get("hidden"))?;
         Ok((read_f16_buffer(&logits), read_f16_buffer(&hidden)))
@@ -1188,10 +1201,11 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         let (dsl_logits, dsl_hidden) = run_dsl_step(
             &mut foundry,
             &mut bindings,
+            &mut fast_bindings,
+            &dsl_model,
             &input_buffer,
             token,
             pos,
-            arch,
             n_heads,
             n_kv_heads,
             head_dim,
@@ -1315,10 +1329,11 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         let (dsl_logits, dsl_hidden) = run_dsl_step(
             &mut foundry,
             &mut bindings,
+            &mut fast_bindings,
+            &dsl_model,
             &input_buffer,
             current_token,
             pos,
-            arch,
             n_heads,
             n_kv_heads,
             head_dim,
@@ -2115,8 +2130,11 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
         metallic::tensor::TensorInit::Uninitialized,
     )?;
 
-    // Run GemvRowMajor with same weights as DSL uses (FFN uses RowMajor due to [K, N] GGUF layout)
-    use metallic::metals::gemv::{GemvParams, GemvRowMajor};
+    // Run GemvV2 (RowMajor) with same weights as DSL uses
+    use metallic::{
+        compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel_f16, warp_dispatch_config}
+    };
+
     let gate_weight = bindings.get("layer.ffn_gate_0")?;
     let gate_dims = gate_weight.dims();
     eprintln!("  Gate weight dims: {:?}", gate_dims);
@@ -2164,27 +2182,26 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     }
 
     // RowMajor: dims[0] = K, dims[1] = N (GGUF stores [K, N])
-    let cross_gate_params = GemvParams {
-        k: gate_dims[0] as u32,
-        n: gate_dims[1] as u32,
-        batch: 1,
-        ..Default::default()
-    };
+    let k_dim = gate_dims[0] as u32;
+    let n_dim = gate_dims[1] as u32;
 
     let zero_buf = bindings.get("zero")?;
-    let cross_gate_kernel = GemvRowMajor {
-        matrix: gate_weight.clone(),
-        scale_bytes: gate_weight.clone(),
-        vector_x: metallic::types::TensorArg::from_tensor(&legacy_ffn_norm_tensor),
-        result_y: metallic::types::TensorArg::from_tensor(&cross_gate_output),
-        params: cross_gate_params,
-        bias: zero_buf.clone(),
-        residual: zero_buf.clone(),
-        alpha: 1.0,
-        beta: 0.0,
+
+    let args_gate = GemvV2Args {
+        weights: gate_weight.clone(),
+        scale_bytes: gate_weight.clone(), // Dummy (F16)
+        input: metallic::types::TensorArg::from_tensor(&legacy_ffn_norm_tensor),
+        output: metallic::types::TensorArg::from_tensor(&cross_gate_output),
+        k_dim,
+        n_dim,
+        weights_per_block: 32,  // Unused for F16
+        bias: zero_buf.clone(), // Zero bias
         has_bias: 0,
+        alpha: 1.0,
     };
-    foundry.run(&cross_gate_kernel)?;
+
+    let kernel = get_gemv_v2_kernel_f16(Layout::RowMajor, GemvStrategy::Vectorized);
+    foundry.run(&kernel.bind(args_gate, warp_dispatch_config(n_dim)))?;
 
     let cross_gate_result = FoundryTensor::to_vec(&cross_gate_output, &foundry);
     let cross_gate_f16: Vec<f16> = cross_gate_result.into_iter().collect();
@@ -2560,6 +2577,8 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
             "Embedding parity: max_diff={:.6} avg_diff={:.8} mismatch={:?}",
             max_diff, avg_diff, first_mismatch
         );
+        eprintln!("   Legacy Hidden[0..5]: {:?}", &legacy_embed_data[..5]);
+        eprintln!("   DSL Hidden[0..5]:    {:?}", &dsl_hidden_data[..5]);
         if max_diff != 0.0 {
             return Err(MetalError::InvalidShape("Embedding parity FAILED".into()));
         }
@@ -2589,8 +2608,8 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
         eprintln!("⚠️ DSL attn_q_0 binding not found!\n");
     }
 
-    let tolerance = 0.1f32;
-    let strict_tolerance = 0.01f32;
+    let tolerance = 0.01f32;
+    let strict_tolerance = 0.001f32;
     let mut all_passed = true;
 
     let mut compare = |name: &str, dsl_name: &str, legacy: &[f16], strict: bool| {
@@ -2630,6 +2649,9 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
 
     // Q/K/V projection outputs (before rearrange)
     compare("Q projection", "q", &legacy_out.q_proj, false);
+    if legacy_out.q_proj.len() > 666 {
+        eprintln!("DEBUG Legacy OutQ index 666: {:?}", legacy_out.q_proj[666]);
+    }
     compare("K projection", "k", &legacy_out.k_proj, false);
     compare("V projection", "v", &legacy_out.v_proj, false);
 

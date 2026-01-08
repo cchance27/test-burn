@@ -116,6 +116,24 @@ impl Foundry {
         Ok(buffer)
     }
 
+    /// Ensure all pending commands have completed.
+    /// If capture is active, completes the current batch and starts a new one.
+    pub fn synchronize(&mut self) -> Result<(), MetalError> {
+        use objc2_metal::MTLCommandBuffer as _;
+        if self.is_capturing() {
+            let buf = self.end_capture()?;
+            buf.waitUntilCompleted();
+            self.start_capture()?;
+        } else {
+            // Not capturing - commands are already committed and waited in dispatch() but
+            // we might have a committed buffer that hasn't finished yet if they were manually committed.
+            // For safety, we'll just ensure the queue is empty.
+            // Actually, currently dispatch() is synchronous for non-capturing, so this is a no-op except
+            // for ensuring any previously committed buffers are done.
+        }
+        Ok(())
+    }
+
     /// Loads or retrieves a compute pipeline for the given Kernel type.
     pub fn load_kernel<K: Kernel>(&mut self, kernel: &K) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
         use std::hash::{Hash as _, Hasher as _};
@@ -200,15 +218,18 @@ impl Foundry {
             KernelSource::String(s) => s,
         };
 
-        // Load includes FIRST so macros/headers are available to struct_defs
-        for include in includes {
+        // Helper to check if an include is a policy/system header
+        let is_policy = |inc: &str| inc.starts_with("policies/");
+
+        // 1. Load policy includes (base, f16, q8, etc.)
+        // These provide types (uint, half) needed by struct_defs
+        for include in includes.iter().filter(|&&i| is_policy(i)) {
             let p = find_include(include, source_path_ctx.as_ref())
                 .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
             let content = std::fs::read_to_string(&p)
                 .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
 
-            // Strip local includes (#include "...") to prevent recursive resolution errors
-            // since we are manually concatenating the dependent files.
+            // Strip local includes
             for line in content.lines() {
                 if line.trim().starts_with("#include \"") {
                     full_source.push_str(&format!("// Skipped: {}\n", line));
@@ -220,12 +241,32 @@ impl Foundry {
             full_source.push('\n');
         }
 
-        // Prepend struct definitions AFTER includes
+        // 2. Inject struct definitions
+        // These rely on types from policies, and are relied upon by user helper/stage includes
         let struct_defs = kernel.struct_defs();
         if !struct_defs.is_empty() {
             full_source.push_str("// Auto-generated struct definitions\n");
             full_source.push_str(&struct_defs);
             full_source.push_str("\n\n");
+        }
+
+        // 3. Load remaining user includes (stages, helpers)
+        for include in includes.iter().filter(|&&i| !is_policy(i)) {
+            let p = find_include(include, source_path_ctx.as_ref())
+                .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
+            let content = std::fs::read_to_string(&p)
+                .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
+
+            // Strip local includes
+            for line in content.lines() {
+                if line.trim().starts_with("#include \"") {
+                    full_source.push_str(&format!("// Skipped: {}\n", line));
+                } else {
+                    full_source.push_str(line);
+                    full_source.push('\n');
+                }
+            }
+            full_source.push('\n');
         }
 
         // Also strip includes from main content (if it's from a file, it might have them).
@@ -267,18 +308,17 @@ impl Foundry {
         Ok(pipeline)
     }
 
-    /// Dispatches a kernel.
+    /// Dispatches a kernel using a pre-loaded pipeline.
     ///
-    /// This handles:
-    /// 1. Getting the pipeline (compiling if needed).
-    /// 2. Creating an encoder.
-    /// 3. Binding arguments via `K::bind`.
-    /// 4. Calculating grid size.
-    /// 5. Committing the command.
-    pub fn dispatch<K: Kernel>(&mut self, kernel: &K, config: DispatchConfig) -> Result<(), MetalError> {
+    /// This bypasses the pipeline lookup/compilation step, which is useful for
+    /// repeatedly dispatching the same kernel (e.g. in autoregressive loops).
+    pub fn dispatch_pipeline<K: Kernel>(
+        &mut self,
+        pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+        kernel: &K,
+        config: DispatchConfig,
+    ) -> Result<(), MetalError> {
         use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _, MTLComputeCommandEncoder as _, MTLSize};
-
-        let pipeline = self.load_kernel(kernel)?;
 
         if self.active_command_buffer.is_some() {
             // Batched dispatch path
@@ -291,7 +331,7 @@ impl Foundry {
                 enc
             };
 
-            encoder.setComputePipelineState(&pipeline);
+            encoder.setComputePipelineState(pipeline);
             let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
             kernel.bind(&encoder_wrapper);
             let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
@@ -303,7 +343,7 @@ impl Foundry {
                 .computeCommandEncoder()
                 .ok_or(MetalError::CommandQueueCreationFailed)?;
 
-            encoder.setComputePipelineState(&pipeline);
+            encoder.setComputePipelineState(pipeline);
             let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
             kernel.bind(&encoder_wrapper);
             let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
@@ -314,6 +354,19 @@ impl Foundry {
         }
 
         Ok(())
+    }
+
+    /// Dispatches a kernel.
+    ///
+    /// This handles:
+    /// 1. Getting the pipeline (compiling if needed).
+    /// 2. Creating an encoder.
+    /// 3. Binding arguments via `K::bind`.
+    /// 4. Calculating grid size.
+    /// 5. Committing the command.
+    pub fn dispatch<K: Kernel>(&mut self, kernel: &K, config: DispatchConfig) -> Result<(), MetalError> {
+        let pipeline = self.load_kernel(kernel)?;
+        self.dispatch_pipeline(&pipeline, kernel, config)
     }
 
     /// Simplified dispatch using the kernel's built-in dispatch configuration.

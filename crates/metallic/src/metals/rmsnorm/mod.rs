@@ -5,6 +5,9 @@
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
+pub mod stages;
+pub mod step;
+
 use crate::{foundry::spec::DynamicValue, types::TensorArg};
 
 /// Parameters for RMSNorm kernel.

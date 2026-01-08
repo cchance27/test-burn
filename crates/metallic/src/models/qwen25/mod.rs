@@ -293,6 +293,11 @@ impl<T: TensorElement> Qwen25<T> {
             // RMSNorm before Attention
             let x_normed_attn = ctx.call::<RMSNormOp>((x, block.attn_norm_gamma.clone(), d_model as u32), None)?;
 
+            if layer_idx == 0 && std::env::var("METALLIC_FOUNDRY_TRACE").is_ok() {
+                ctx.synchronize();
+                eprintln!("[LEGACY] layer 0 x_normed_attn first 5: {:?}", &x_normed_attn.to_vec()[..5]);
+            }
+
             // QKV GEMMs
             let m = batch * seq;
             let kv_dim = block.kv_dim;
@@ -389,6 +394,11 @@ impl<T: TensorElement> Qwen25<T> {
                 None,
             )?;
 
+            if layer_idx == 0 && std::env::var("METALLIC_FOUNDRY_TRACE").is_ok() {
+                ctx.synchronize();
+                eprintln!("[LEGACY] layer 0 v_heads first 5: {:?}", &v_heads.to_vec()[..5]);
+            }
+
             // Apply RoPE per head on Q and K using head_dim (and kv_head_dim)
             let q_heads_after_rope = ctx.call::<RoPEOp>(
                 (
@@ -475,6 +485,15 @@ impl<T: TensorElement> Qwen25<T> {
 
             // Residual Add
             x = resid_attn.add_elem(&attn_out, ctx)?;
+
+            if layer_idx == 0 && std::env::var("METALLIC_FOUNDRY_TRACE").is_ok() {
+                ctx.synchronize();
+                eprintln!(
+                    "[LEGACY] layer 0 q_heads_after_rope first 5: {:?}",
+                    &q_heads_after_rope.to_vec()[..5]
+                );
+                eprintln!("[LEGACY] layer 0 attn_out first 5: {:?}", &attn_out.to_vec()[..5]);
+            }
 
             // --- MLP Block ---
             let resid_mlp = x.clone();
@@ -578,6 +597,22 @@ impl<T: TensorElement> Qwen25<T> {
 
             // Residual Add
             x = resid_mlp.add_elem(&ffn_output, ctx)?;
+
+            if std::env::var("METALLIC_FOUNDRY_TRACE").is_ok() {
+                ctx.synchronize();
+                let x_vec = x.to_vec();
+                let mut sum_sq = 0.0f32;
+                for &v in &x_vec {
+                    let vf = T::to_f32(v);
+                    sum_sq += vf * vf;
+                }
+                eprintln!(
+                    "[LEGACY] layer {} hidden norm: {:.4}, first 5: {:?}",
+                    layer_idx,
+                    sum_sq.sqrt(),
+                    &x_vec[..5.min(x_vec.len())]
+                );
+            }
         }
 
         // Final RMSNorm after all blocks
@@ -1249,6 +1284,18 @@ impl<T: TensorElement> Qwen25<T> {
                 }
                 Ok(x)
             })?;
+
+            if std::env::var("METALLIC_FOUNDRY_TRACE").is_ok() {
+                ctx.synchronize();
+                let x_vec = x.to_vec();
+                let mut sum_sq = 0.0f32;
+                for &v in &x_vec {
+                    let vf = T::to_f32(v);
+                    sum_sq += vf * vf;
+                }
+                eprintln!("[LEGACY] layer {} hidden norm: {:.4}", layer_idx, sum_sq.sqrt());
+            }
+
             let block_duration = block_start.elapsed();
             if !block_duration.is_zero() {
                 record_metric_async!(MetricEvent::InternalKernelCompleted {

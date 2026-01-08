@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use metallic::{
     foundry::{Foundry, storage::Pooled, tensor::Tensor}, metals::{
-        rope::{Rope, RopeParamsResolved}, sdpa::sdpa::scaled_dot_product_attention, v2::attention::{stages::SdpaParamsResolved, step::FusedMhaStep}
+        rope::{Rope, RopeParamsResolved}, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
     }, tensor::{TensorInit, dtypes::F16}, types::TensorArg
 };
 
@@ -28,7 +28,6 @@ fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len:
     let output_v2 = Tensor::<F16, Pooled>::new(foundry, q_dims_3d.clone(), TensorInit::Uninitialized).unwrap();
 
     // Aux tensors
-    let q_roped = Tensor::<F16, Pooled>::new(foundry, q_dims_3d.clone(), TensorInit::Uninitialized).unwrap();
     let k_roped = Tensor::<F16, Pooled>::new(foundry, k_dims_3d.clone(), TensorInit::Uninitialized).unwrap();
 
     // ----------------------------------------------------------------
@@ -89,45 +88,6 @@ fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len:
     )
     .unwrap();
 
-    // ----------------------------------------------------------------
-    // Setup Legacy (Dispatch 3 kernels)
-    // ----------------------------------------------------------------
-    let rope_q_params = RopeParamsResolved {
-        dim: head_dim as u32,
-        seq_len: 1,
-        position_offset: (kv_len - 1) as u32,
-        total_elements: 0,
-    };
-    let rope_q_kernel = Rope::new(
-        &TensorArg::from_tensor(&q),
-        &TensorArg::from_tensor(&q_roped),
-        &TensorArg::from_tensor(&cos),
-        &TensorArg::from_tensor(&sin),
-        rope_q_params,
-    );
-
-    // Legacy Loop Closure
-    let run_legacy = |f: &mut Foundry| {
-        // 1. Rope Q
-        f.run(&rope_q_kernel).unwrap();
-        // 2. Rope K (Assume K is dynamic in legacy? Usually cached.
-        // Logic: Legacy usually Ropes Q, reads Cache K (roped?).
-        // Parity test ran Rope K every time. Let's maximize fairness.
-        // If Legacy assumes K is cached, we skip Rope K here.
-        // But SDPA Legacy takes `k_roped`. So we assume k_roped is ready.
-
-        // 3. SDPA
-        scaled_dot_product_attention(
-            f,
-            &q_roped,
-            &k_roped,
-            &v,
-            true,                // causal
-            (kv_len - 1) as u32, // query_offset
-        )
-        .unwrap();
-    };
-
     // V2 Loop Closure
     use metallic::foundry::spec::{CompiledStep, FastBindings, TensorBindings};
     let run_v2 = |f: &mut Foundry| {
@@ -136,34 +96,18 @@ fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len:
 
     // Warmup
     for _ in 0..5 {
-        run_legacy(foundry);
         run_v2(foundry);
     }
-
-    // Measure Legacy
-    let start = Instant::now();
-    for _ in 0..iterations {
-        run_legacy(foundry);
-    }
-
-    let legacy_duration = start.elapsed();
 
     // Measure V2
     let start = Instant::now();
     for _ in 0..iterations {
         run_v2(foundry);
     }
-
     let v2_duration = start.elapsed();
-
-    let legacy_avg = legacy_duration.as_micros() as f64 / iterations as f64;
     let v2_avg = v2_duration.as_micros() as f64 / iterations as f64;
-    let speedup = legacy_avg / v2_avg;
 
-    println!(
-        "  -> Legacy: {:.2} us | V2: {:.2} us | Speedup: {:.2}x",
-        legacy_avg, v2_avg, speedup
-    );
+    println!("  -> V2: {:.2} us", v2_avg);
 }
 
 #[test]

@@ -13,6 +13,9 @@ use crate::{
     foundry::spec::DynamicValue, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
+pub mod stages;
+pub mod step;
+
 // ================================================================================================
 // SIMD GEMV Epilogue (for fused decode path)
 // ================================================================================================

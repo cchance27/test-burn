@@ -11,11 +11,7 @@
 
 use half::f16;
 use metallic::{
-    compound::stages::Layout, foundry::{
-        Foundry, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::Tensor as FoundryTensor
-    }, metals::{
-        gemv::{GemvColMajor, GemvParams, GemvRowMajor}, v2::gemv::step::GemvV2Step
-    }, tensor::{F16, TensorInit}, types::TensorArg
+    compound::stages::Layout, foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel_f16, get_gemv_v2_kernel_q8, warp_dispatch_config}, tensor::{F16, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -54,7 +50,79 @@ impl Default for V2TestConfig {
 }
 
 // ============================================================================
-// Test Runner - V2 vs Legacy Foundry Kernel
+// CPU Reference Implementations
+// ============================================================================
+
+fn run_cpu_gemv_f16(k: usize, n: usize, layout: Layout, weights: &[f16], input: &[f16], bias: Option<&[f16]>, alpha: f32) -> Vec<f16> {
+    let mut output = vec![f16::from_f32(0.0); n];
+    for row in 0..n {
+        let mut acc = 0.0f32;
+        for ki in 0..k {
+            let w_idx = match layout {
+                Layout::RowMajor => row * k + ki,
+                Layout::ColMajor => ki * n + row,
+                Layout::Canonical => (ki % 32) + 32 * (row + (ki / 32) * n),
+            };
+            let w = weights[w_idx].to_f32();
+            let x = input[ki].to_f32();
+            acc += w * x;
+        }
+        let mut res = acc * alpha;
+        if let Some(b) = bias {
+            res += b[row].to_f32();
+        }
+        output[row] = f16::from_f32(res);
+    }
+    output
+}
+
+fn run_cpu_gemv_q8(
+    k: usize,
+    n: usize,
+    layout: Layout,
+    weights_i8: &[i8],
+    scales: &[f16],
+    weights_per_block: usize,
+    input: &[f16],
+    bias: Option<&[f16]>,
+    alpha: f32,
+) -> Vec<f16> {
+    let mut output = vec![f16::from_f32(0.0); n];
+    let blocks_per_k = (k + weights_per_block - 1) / weights_per_block;
+    for row in 0..n {
+        let mut acc = 0.0f32;
+        let mut ki = 0;
+        while ki < k {
+            let chunk_size = if ki + 8 <= k { 8 } else { k - ki };
+            let mut chunk_acc = 0.0f32;
+            let block_idx = ki / weights_per_block;
+            let scale = scales[row * blocks_per_k + block_idx].to_f32();
+
+            for i in 0..chunk_size {
+                let curr_k = ki + i;
+                let w_idx = match layout {
+                    Layout::RowMajor => row * k + curr_k,
+                    Layout::ColMajor => curr_k * n + row,
+                    Layout::Canonical => (curr_k % weights_per_block) + weights_per_block * (row + (curr_k / weights_per_block) * n),
+                };
+                let w = weights_i8[w_idx] as f32;
+                let x = input[curr_k].to_f32();
+                chunk_acc += w * x;
+            }
+            acc += chunk_acc * scale;
+            ki += chunk_size;
+        }
+        let mut res = acc * alpha;
+        if let Some(b) = bias {
+            res += b[row].to_f32();
+        }
+        output[row] = f16::from_f32(res);
+    }
+    output
+}
+
+// ============================================================================
+// Test Runner - V2 vs CPU Reference
 // ============================================================================
 
 fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
@@ -78,117 +146,60 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
     let output_v2 = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.n], TensorInit::Uninitialized).unwrap();
     let bias = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.n], TensorInit::CopyFrom(&bias_half)).unwrap();
 
-    // ========== Run Legacy GEMV ==========
-    let weights_arg = TensorArg::from_tensor(&weights);
-    let input_arg = TensorArg::from_tensor(&input);
-    let output_legacy_arg = TensorArg::from_tensor(&output_legacy);
-    let bias_arg = TensorArg::from_tensor(&bias);
-
-    let params = match cfg.layout {
-        TestLayout::NK => GemvParams {
-            k: cfg.k as u32,
-            n: cfg.n as u32,
-            batch: 1,
-            stride_x: 1,
-            stride_y: 1,
-            stride_a: 0,
-            stride_w: cfg.k as u32,
-            blocks_per_k: (cfg.k / 32) as u32,
-            weights_per_block: 32,
-            stride_scale: 0,
-        },
-        TestLayout::KN => GemvParams {
-            k: cfg.k as u32,
-            n: cfg.n as u32,
-            batch: 1,
-            stride_x: 1,
-            stride_y: 1,
-            stride_a: 0,
-            stride_w: cfg.n as u32,
-            blocks_per_k: 0,
-            weights_per_block: 0,
-            stride_scale: 0,
-        },
+    // ========== Run CPU Reference ==========
+    let cpu_layout = match cfg.layout {
+        TestLayout::NK => Layout::RowMajor,
+        TestLayout::KN => Layout::ColMajor,
     };
-
-    // Run legacy kernel based on layout type
-    match cfg.layout {
-        TestLayout::NK => {
-            if cfg.with_bias {
-                let kernel = GemvColMajor::with_bias(&weights_arg, &input_arg, &output_legacy_arg, params, &bias_arg).with_alpha(cfg.alpha);
-                foundry.run(&kernel).unwrap();
-            } else {
-                let kernel = GemvColMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(cfg.alpha);
-                foundry.run(&kernel).unwrap();
-            }
-        }
-        TestLayout::KN => {
-            if cfg.with_bias {
-                let kernel = GemvRowMajor::with_bias(&weights_arg, &input_arg, &output_legacy_arg, params, &bias_arg).with_alpha(cfg.alpha);
-                foundry.run(&kernel).unwrap();
-            } else {
-                let kernel = GemvRowMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(cfg.alpha);
-                foundry.run(&kernel).unwrap();
-            }
-        }
-    }
+    let cpu_output_f16 = run_cpu_gemv_f16(
+        cfg.k,
+        cfg.n,
+        cpu_layout,
+        &weights_half,
+        &input_half,
+        if cfg.with_bias { Some(&bias_half) } else { None },
+        cfg.alpha,
+    );
 
     // ========== Run V2 GEMV ==========
-    let mut bindings = TensorBindings::new();
-    let mut symbols = SymbolTable::new();
-
-    bindings.insert("weights".to_string(), TensorArg::from_tensor(&weights));
-    bindings.insert("input".to_string(), TensorArg::from_tensor(&input));
-    bindings.insert("output".to_string(), TensorArg::from_tensor(&output_v2));
-    if cfg.with_bias {
-        bindings.insert("bias".to_string(), TensorArg::from_tensor(&bias));
-    }
-
-    let step = GemvV2Step {
-        weights: Ref("weights".to_string()),
-        scale_bytes: None, // F16 mode
-        input: Ref("input".to_string()),
-        output: Ref("output".to_string()),
-        bias: if cfg.with_bias { Some(Ref("bias".to_string())) } else { None },
-        k_dim: DynamicValue::Literal(cfg.k as u32),
-        n_dim: DynamicValue::Literal(cfg.n as u32),
-        weights_per_block: 32,
-        layout: match cfg.layout {
-            TestLayout::NK => Layout::RowMajor,
-            TestLayout::KN => Layout::ColMajor,
+    let args = GemvV2Args {
+        weights: TensorArg::from_tensor(&weights),
+        scale_bytes: TensorArg::from_tensor(&weights), // Dummy
+        input: TensorArg::from_tensor(&input),
+        output: TensorArg::from_tensor(&output_v2),
+        bias: if cfg.with_bias {
+            TensorArg::from_tensor(&bias)
+        } else {
+            TensorArg::from_tensor(&output_v2)
         },
-        strategy: None,
+        has_bias: if cfg.with_bias { 1 } else { 0 },
+        k_dim: cfg.k as u32,
+        n_dim: cfg.n as u32,
+        weights_per_block: 32,
         alpha: cfg.alpha,
     };
 
-    let compiled_steps = step.compile(&mut bindings, &mut symbols);
+    let layout = match cfg.layout {
+        TestLayout::NK => Layout::RowMajor,
+        TestLayout::KN => Layout::ColMajor,
+    };
+    let kernel = get_gemv_v2_kernel_f16(layout, GemvStrategy::Vectorized);
+    let dispatch = warp_dispatch_config(cfg.n as u32);
 
-    // Create FastBindings
-    let mut fast_bindings = FastBindings::new(symbols.len());
-    for (name, id) in symbols.iter() {
-        if let Ok(arg) = bindings.get(name) {
-            fast_bindings.set(*id, arg);
-        }
-    }
-
-    // Execute V2
-    for c_step in compiled_steps {
-        c_step.execute(&mut foundry, &fast_bindings, &bindings).unwrap();
-    }
+    foundry.run(&kernel.bind(args, dispatch)).unwrap();
 
     // ========== Compare Results ==========
-    let legacy_f16 = FoundryTensor::to_vec(&output_legacy, &foundry);
     let v2_f16 = FoundryTensor::to_vec(&output_v2, &foundry);
 
-    let legacy_output: Vec<f32> = legacy_f16.iter().map(|x| x.to_f32()).collect();
+    let cpu_output: Vec<f32> = cpu_output_f16.iter().map(|x| x.to_f32()).collect();
     let v2_output: Vec<f32> = v2_f16.iter().map(|x| x.to_f32()).collect();
 
     println!("\n=== Test Config ===");
     println!("Layout: {:?}", cfg.layout);
     println!("K: {}, N: {}", cfg.k, cfg.n);
     println!("With bias: {}", cfg.with_bias);
-    println!("Legacy output (first 10): {:?}", &legacy_output[..10.min(cfg.n)]);
-    println!("V2 output (first 10):     {:?}", &v2_output[..10.min(cfg.n)]);
+    println!("CPU output (first 10): {:?}", &cpu_output[..10.min(cfg.n)]);
+    println!("V2 output (first 10):  {:?}", &v2_output[..10.min(cfg.n)]);
 
     // Verify results with tolerance scaling with K
     // F16 precision decays with sqrt(K). Since V2 uses float4/8-way accumulation
@@ -199,7 +210,7 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
     let mut max_diff = 0.0f32;
     let mut max_diff_idx = 0;
 
-    for (i, (l, v)) in legacy_output.iter().zip(v2_output.iter()).enumerate() {
+    for (i, (l, v)) in cpu_output.iter().zip(v2_output.iter()).enumerate() {
         let diff = (l - v).abs();
         if diff > max_diff {
             max_diff = diff;
@@ -212,7 +223,7 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
 
     if max_diff > tolerance {
         panic!(
-            "GemvV2 vs Legacy parity failed: max_diff = {} at index {}, expected < {}",
+            "GemvV2 vs CPU parity failed: max_diff = {} at index {}, expected < {}",
             max_diff, max_diff_idx, tolerance
         );
     }
@@ -441,49 +452,59 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
     let output_v2 = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.n], TensorInit::Uninitialized).unwrap();
     let bias = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.n], TensorInit::CopyFrom(&bias_data)).unwrap();
 
-    // ========== Run Legacy GEMV (Q8) ==========
-    let _weights_arg = TensorArg::from_tensor(&weights);
-    let _scales_arg = TensorArg::from_tensor(&scales); // Used as 'scale_bytes' or via stride?
-
-    // ========== Run V2 GEMV (Q8) ==========
-    let mut bindings = TensorBindings::new();
-    let mut symbols = SymbolTable::new();
-
-    bindings.insert("weights".to_string(), TensorArg::from_tensor(&weights));
-    bindings.insert("scales".to_string(), TensorArg::from_tensor(&scales));
-    bindings.insert("input".to_string(), TensorArg::from_tensor(&input));
-    bindings.insert("output".to_string(), TensorArg::from_tensor(&output_v2));
-    if cfg.with_bias {
-        bindings.insert("bias".to_string(), TensorArg::from_tensor(&bias));
-    }
-
-    let step = GemvV2Step {
-        weights: Ref("weights".to_string()),
-        scale_bytes: Some(Ref("scales".to_string())),
-        input: Ref("input".to_string()),
-        output: Ref("output".to_string()),
-        bias: if cfg.with_bias { Some(Ref("bias".to_string())) } else { None },
-        k_dim: DynamicValue::Literal(cfg.k as u32),
-        n_dim: DynamicValue::Literal(cfg.n as u32),
-        weights_per_block: 32,
-        layout: match cfg.layout {
-            TestLayout::NK => Layout::RowMajor,
-            TestLayout::KN => Layout::ColMajor,
+    let args = GemvV2Args {
+        weights: TensorArg::from_tensor(&weights),
+        scale_bytes: TensorArg::from_tensor(&scales),
+        input: TensorArg::from_tensor(&input),
+        output: TensorArg::from_tensor(&output_v2),
+        bias: if cfg.with_bias {
+            TensorArg::from_tensor(&bias)
+        } else {
+            TensorArg::from_tensor(&output_v2)
         },
-        strategy: None,
+        has_bias: if cfg.with_bias { 1 } else { 0 },
+        k_dim: cfg.k as u32,
+        n_dim: cfg.n as u32,
+        weights_per_block: 32,
         alpha: cfg.alpha,
     };
 
-    let compiled_steps = step.compile(&mut bindings, &mut symbols);
-    let mut fast_bindings = FastBindings::new(symbols.len());
-    for (name, id) in symbols.iter() {
-        if let Ok(arg) = bindings.get(name) {
-            fast_bindings.set(*id, arg);
-        }
+    let layout = match cfg.layout {
+        TestLayout::NK => Layout::RowMajor,
+        TestLayout::KN => Layout::ColMajor,
+    };
+    let kernel = get_gemv_v2_kernel_q8(layout, GemvStrategy::Vectorized);
+    let dispatch = warp_dispatch_config(cfg.n as u32);
+
+    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+
+    // ========== Run CPU Reference (Q8) ==========
+    let weights_i8: Vec<i8> = weights_data.iter().map(|&x| x as i8).collect();
+    let cpu_output_f16 = run_cpu_gemv_q8(
+        cfg.k,
+        cfg.n,
+        layout,
+        &weights_i8,
+        &scales_data,
+        32,
+        &input_data,
+        if cfg.with_bias { Some(&bias_data) } else { None },
+        cfg.alpha,
+    );
+    let v2_f16 = FoundryTensor::to_vec(&output_v2, &foundry);
+
+    let cpu_output: Vec<f32> = cpu_output_f16.iter().map(|x| x.to_f32()).collect();
+    let v2_output: Vec<f32> = v2_f16.iter().map(|x| x.to_f32()).collect();
+
+    let tolerance = 1e-2 * (cfg.k as f32).sqrt(); // Q8 has higher variance
+    let mut max_diff = 0.0f32;
+    for (l, v) in cpu_output.iter().zip(v2_output.iter()) {
+        max_diff = max_diff.max((l - v).abs());
     }
 
-    for c_step in compiled_steps {
-        c_step.execute(&mut foundry, &fast_bindings, &bindings).unwrap();
+    println!("Max diff (Q8): {}", max_diff);
+    if max_diff > tolerance {
+        panic!("Q8 Parity failed: max_diff {} > {}", max_diff, tolerance);
     }
 
     println!("V2 Q8 run successful.");

@@ -4,8 +4,8 @@ use metallic::{
 };
 use serial_test::serial;
 
-const GGUF_PATH_DEFAULT: &str = "/Volumes/2TB/test-burn/models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
-const MODEL_SPEC_PATH: &str = "src/foundry/spec/qwen25.json";
+const GGUF_PATH_DEFAULT: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
+const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
 
 fn get_gguf_path() -> String {
     std::env::var("GGUF_PATH").unwrap_or_else(|_| GGUF_PATH_DEFAULT.to_string())

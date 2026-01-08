@@ -29,6 +29,16 @@ pub struct CompiledModel {
 }
 
 impl CompiledModel {
+    /// Optimized execution steps (compiled from DSL)
+    pub fn compiled_steps(&self) -> &[Box<dyn CompiledStep>] {
+        &self.compiled_steps
+    }
+
+    /// Symbol table mapping tensor names to integer indices for fast lookup
+    pub fn symbol_table(&self) -> &SymbolTable {
+        &self.symbol_table
+    }
+
     /// Create a new CompiledModel from spec and weights.
     pub(crate) fn new(spec: ModelSpec, weights: WeightBundle) -> Result<Self, MetalError> {
         if let Some(gguf_arch) = weights.architecture() {
@@ -49,7 +59,9 @@ impl CompiledModel {
         resolver.set_global("n_kv_heads", arch.n_kv_heads.to_string());
         resolver.set_global("ff_dim", arch.ff_dim.to_string());
         resolver.set_global("vocab_size", arch.vocab_size.to_string());
-        let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
+        let head_dim = arch.d_model / arch.n_heads;
+        resolver.set_global("head_dim", head_dim.to_string());
+        let kv_dim = head_dim * arch.n_kv_heads;
         resolver.set_global("kv_dim", kv_dim.to_string());
 
         // Compile steps
@@ -116,18 +128,33 @@ impl CompiledModel {
         bindings.set_global("n_kv_heads", arch.n_kv_heads.to_string());
         bindings.set_global("ff_dim", arch.ff_dim.to_string());
         bindings.set_global("vocab_size", arch.vocab_size.to_string());
-        let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
+        let head_dim = arch.d_model / arch.n_heads;
+        bindings.set_global("head_dim", head_dim.to_string());
+        let kv_dim = head_dim * arch.n_kv_heads;
         bindings.set_global("kv_dim", kv_dim.to_string());
 
         // Build a set of available GGUF tensor names for resolution
         let available: FxHashMap<String, ()> = self.weights.tensor_names().map(|name| (name.clone(), ())).collect();
 
         // 2. Resolve and bind global weight tensors
-        let global_keys = ["embedding", "output_weight", "final_norm", "rope_cos", "rope_sin"];
+        let global_keys = ["embedding", "final_norm", "rope_cos", "rope_sin"];
         for key in global_keys {
             if let Some(gguf_name) = tensor_names.resolve(key, None, &available) {
                 self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, key)?;
             }
+        }
+
+        // 2b. Bind output_weight (LM Head) using canonical layout for GemvCanonical
+        if let Some(gguf_name) = tensor_names.resolve("output_weight", None, &available) {
+            self.bind_gguf_tensor_canonical(
+                &mut bindings,
+                &mut fast_bindings,
+                foundry,
+                &gguf_name,
+                "output_weight",
+                arch.d_model,
+                arch.vocab_size,
+            )?;
         }
 
         // 3. Resolve and bind per-layer weight tensors
@@ -790,6 +817,8 @@ impl CompiledModel {
 
         if !nested_capture {
             // Start a new command buffer for this forward pass (token)
+            // Reuse the existing command buffer if one is active but not capturing?
+            // No, start_capture() handles creation.
             foundry.start_capture()?;
         }
 
@@ -798,11 +827,10 @@ impl CompiledModel {
         }
 
         if !nested_capture {
-            // Commit and wait for the token to complete
-            // This is the "Stable Batcher" approach: one wait per token.
-            use objc2_metal::MTLCommandBuffer as _;
-            let buffer = foundry.end_capture()?;
-            buffer.waitUntilCompleted();
+            // Commit but do NOT wait - standard async dispatch
+            // Note: If we are in autoregressive loop, caller might need to wait if reading back to CPU.
+            // But forward() itself should be async.
+            foundry.end_capture()?;
         }
 
         Ok(())
@@ -825,9 +853,11 @@ impl CompiledModel {
         }
 
         // Commit and wait for the token to complete
-        use objc2_metal::MTLCommandBuffer as _;
-        let buffer = foundry.end_capture()?;
-        buffer.waitUntilCompleted();
+        let cmd_buffer = foundry.end_capture()?;
+        {
+            use objc2_metal::MTLCommandBuffer as _;
+            cmd_buffer.waitUntilCompleted();
+        }
 
         Ok(())
     }
@@ -942,94 +972,31 @@ impl CompiledModel {
             bindings.set_int_global("total_elements_repeat", n_heads * kv_seq_len * head_dim);
         };
 
-        // Allocate output buffer for sampled token
-        let sample_output_buffer = self.allocate_u32_buffer(foundry, "_sample_output", 1)?;
-        let sample_output = TensorArg::from_buffer(sample_output_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
-
         let greedy = temperature <= 0.0 || !temperature.is_finite() || top_k == 0;
         let vocab_size = arch.vocab_size as u32;
 
-        fn argmax_logits(logits: &TensorArg) -> Result<u32, MetalError> {
-            use half::f16;
-
-            use crate::types::KernelArg;
-
-            let dims = logits.dims();
-            if dims.is_empty() {
-                return Err(MetalError::InvalidShape("logits must have at least one dimension".into()));
-            }
-            let last_dim = *dims.last().unwrap();
-            if last_dim == 0 {
-                return Ok(0);
-            }
-
-            let total = dims.iter().product::<usize>();
-            if total < last_dim {
-                return Err(MetalError::InvalidShape("logits buffer shorter than last dimension".into()));
-            }
-            let start = total - last_dim;
-
-            let buffer = logits.buffer();
-            let mut best_idx = 0u32;
-            let mut best_val = f32::NEG_INFINITY;
-            let mut found = false;
-
-            unsafe {
-                use objc2_metal::MTLBuffer;
-                match logits.dtype() {
-                    crate::tensor::Dtype::F16 => {
-                        let ptr = buffer.contents().as_ptr() as *const f16;
-                        let slice = std::slice::from_raw_parts(ptr, total);
-                        for (offset, &raw) in slice[start..].iter().enumerate() {
-                            let value = raw.to_f32();
-                            if !value.is_finite() {
-                                continue;
-                            }
-                            let token_idx = offset as u32;
-                            if !found || value > best_val || (value == best_val && token_idx > best_idx) {
-                                found = true;
-                                best_val = value;
-                                best_idx = token_idx;
-                            }
-                        }
-                    }
-                    crate::tensor::Dtype::F32 => {
-                        let ptr = buffer.contents().as_ptr() as *const f32;
-                        let slice = std::slice::from_raw_parts(ptr, total);
-                        for (offset, &value) in slice[start..].iter().enumerate() {
-                            if !value.is_finite() {
-                                continue;
-                            }
-                            let token_idx = offset as u32;
-                            if !found || value > best_val || (value == best_val && token_idx > best_idx) {
-                                found = true;
-                                best_val = value;
-                                best_idx = token_idx;
-                            }
-                        }
-                    }
-                    other => {
-                        return Err(MetalError::InvalidShape(format!("Unsupported logits dtype for argmax: {other:?}")));
-                    }
-                }
-            }
-
-            Ok(best_idx)
-        }
-
         // Prefill KV cache, batched in chunks to reduce overhead.
         // We update the 'input_ids' binding to point to the correct offset in full_input_buffer.
-        const CHUNK_SIZE: usize = 64;
+        // Larger chunk size for prefill since we don't need intermediate CPU syncs.
+       
+        //QUESTION: Would Having GEMM available for Foundry allow us to prefill faster and improve further than basic batching like this in dispatch?
+        const PREFILL_CHUNK_SIZE: usize = 512;
 
         // Cache the input_ids key to avoid String allocation per token
         let input_ids_key = "input_ids".to_string();
 
-        for chunk in prompt_tokens.chunks(CHUNK_SIZE).enumerate() {
-            let (chunk_idx, chunk_tokens) = chunk;
-            let base_pos = chunk_idx * CHUNK_SIZE;
+        // Check for debug sync flag to disable batched capture for isolation
+        let debug_sync = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
 
-            // Start capture for this chunk
-            foundry.start_capture()?;
+        for chunk in prompt_tokens.chunks(PREFILL_CHUNK_SIZE).enumerate() {
+            let (chunk_idx, chunk_tokens) = chunk;
+
+            let base_pos = chunk_idx * PREFILL_CHUNK_SIZE;
+
+            // Start capture for this chunk (unless debugging)
+            if !debug_sync {
+                foundry.start_capture()?;
+            }
 
             for (i, _) in chunk_tokens.iter().enumerate() {
                 let pos = base_pos + i;
@@ -1044,69 +1011,116 @@ impl CompiledModel {
             }
 
             // Commit and wait for the chunk
-            use objc2_metal::MTLCommandBuffer as _;
-            let buffer = foundry.end_capture()?;
-            buffer.waitUntilCompleted();
+
+            if !debug_sync {
+                foundry.end_capture()?;
+            }
         }
 
         // Now autoregressive decode: sample from last prompt-token logits, then step forward per token.
         // We reuse the first slot of full_input_buffer as a scratch space for generated tokens.
         let single_input_buffer = full_input_buffer; // reuse ownership
 
-        for step in 0..max_new_tokens {
-            // Get logits buffer from bindings
-            let logits = bindings.get("logits")?;
-
-            let next_token = if greedy {
-                argmax_logits(&logits)?
-            } else {
-                // Create and run SampleTopK kernel
-                let sample_kernel = crate::metals::sampling::SampleTopK::new(
-                    &logits,
-                    &sample_output,
-                    vocab_size,
-                    top_k,
-                    top_p,
-                    temperature,
-                    seed.wrapping_add(step as u32),
-                );
-                foundry.run(&sample_kernel)?;
-
-                // Read sampled token from output buffer
-                unsafe {
-                    use objc2_metal::MTLBuffer;
-                    let ptr = sample_output_buffer.0.contents().as_ptr() as *const u32;
-                    *ptr
-                }
-            };
-
-            if stop_tokens.contains(&next_token) {
-                break;
-            }
-
-            generated.push(next_token);
-            if !callback(next_token)? {
-                break;
-            }
-
-            // Advance one token at absolute position (prompt_len + step).
-            let pos = prompt_tokens.len() + step;
-
-            // Update input_ids buffer: write new token to index 0
-            // and bind index 0. (We can just use offset 0).
-            unsafe {
-                use objc2_metal::MTLBuffer;
-                let ptr = single_input_buffer.0.contents().as_ptr() as *mut u32;
-                *ptr = next_token;
-            }
-
+        // Ensure input_ids is bound to the single input buffer (offset 0) for the generated tokens
+        let input_ids_key = "input_ids".to_string();
+        {
             let mut tensor_input = TensorArg::from_buffer(single_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
             tensor_input.offset = 0;
             self.insert_binding(&mut bindings, &mut fast_bindings, input_ids_key.clone(), tensor_input);
-
-            update_pos_globals(&mut bindings, pos);
-            self.forward(foundry, &mut bindings, &fast_bindings)?;
         }
+        
+        // BATCHING: We batch multiple tokens into a single command buffer to amortize submission overhead.
+        // We keep tokens on GPU (copying Sample -> Input) and only sync when the batch is full.
+        const BATCH_SIZE: usize = 16;
+        let mut step_output_buffers = Vec::with_capacity(BATCH_SIZE);
+        for i in 0..BATCH_SIZE {
+            step_output_buffers.push(self.allocate_u32_buffer(foundry, &format!("sample_out_{}", i), 1)?);
+        }
+
+        let mut pending_count = 0;
+
+        for step in 0..max_new_tokens {
+            let batch_idx = pending_count;
+
+            // Start capture at the beginning of a batch
+            if batch_idx == 0 {
+                foundry.start_capture()?;
+            }
+
+            // 1. Get logits from previous forward pass (or prefill)
+            let logits = bindings.get("logits")?;
+
+            // 2. Sample (Greedy or Random) using GPU kernel
+            // We use SampleTopK for both to keep execution on GPU. Greedy is just top_k=1.
+            let effective_top_k = if greedy { 1 } else { top_k };
+            let sample_out = &step_output_buffers[batch_idx];
+            
+            // Create sample kernel with destination buffer
+            let sample_kernel = crate::metals::sampling::SampleTopK::new(
+                &logits,
+                &TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
+                vocab_size,
+                effective_top_k,
+                top_p,
+                temperature,
+                seed.wrapping_add(step as u32),
+            );
+            foundry.run(&sample_kernel)?;
+
+            // 3. Copy sampled token to input_ids buffer for next step
+            // We copy from the specific sample output to the single shared input buffer (offset 0)
+            // Use compute kernel instead of blit to keep encoder active (batching optimization)
+            let copy_kernel = crate::metals::tensor::CopyU32::new(
+                TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
+                TensorArg::from_buffer(single_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
+                1,
+            );
+            foundry.run(&copy_kernel)?;
+
+            // 4. Update globals for the NEXT forward pass
+            // We are about to run forward for position `prompt_len + step` (the token we just sampled)
+            update_pos_globals(&mut bindings, prompt_len + step);
+
+            // 5. Run Forward (predicts next token's logits)
+            self.forward(foundry, &mut bindings, &fast_bindings)?;
+
+            pending_count += 1;
+
+            // 6. If batch is full or we are done, sync and process
+            if pending_count >= BATCH_SIZE || step == max_new_tokens - 1 {
+                let cmd = foundry.end_capture()?;
+                // Sync CPU to read back the tokens
+                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+
+                // Process the batch results
+                let mut batch_done = false;
+                for i in 0..pending_count {
+                    let token_buf = &step_output_buffers[i];
+                    let token = unsafe {
+                        use objc2_metal::MTLBuffer;
+                        let ptr = token_buf.0.contents().as_ptr() as *const u32;
+                        *ptr
+                    };
+
+                    generated.push(token);
+                    
+                    if stop_tokens.contains(&token) {
+                        batch_done = true;
+                        break;
+                    }
+                    if !callback(token)? {
+                        batch_done = true;
+                        break;
+                    }
+                }
+                pending_count = 0;
+                
+                if batch_done {
+                    break;
+                }
+            }
+        }
+
 
         Ok(generated)
     }

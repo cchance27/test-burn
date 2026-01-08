@@ -3,9 +3,7 @@ use std::time::Instant;
 use metallic::{
     compound::stages::Layout, foundry::{
         Foundry, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::Tensor
-    }, metals::{
-        gemv::{GemvColMajor, GemvParams, GemvRowMajor}, v2::gemv::step::GemvV2Step
-    }, tensor::{TensorInit, dtypes::F16}, types::TensorArg
+    }, metals::gemv::step::GemvV2Step, tensor::{TensorInit, dtypes::F16}, types::TensorArg
 };
 
 fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout, alpha: f32, iterations: usize) {
@@ -23,70 +21,7 @@ fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout,
 
     let weights = Tensor::<F16, Pooled>::new(foundry, dims_weights, TensorInit::Uninitialized).unwrap();
     let input = Tensor::<F16, Pooled>::new(foundry, dims_input, TensorInit::Uninitialized).unwrap();
-    let output_legacy = Tensor::<F16, Pooled>::new(foundry, dims_output.clone(), TensorInit::Uninitialized).unwrap();
     let output_v2 = Tensor::<F16, Pooled>::new(foundry, dims_output.clone(), TensorInit::Uninitialized).unwrap();
-
-    // ----------------------------------------------------------------
-    // Setup Legacy
-    // ----------------------------------------------------------------
-    let params = match layout {
-        Layout::RowMajor => GemvParams {
-            k: k as u32,
-            n: n as u32,
-            batch: 1,
-            stride_x: 1,
-            stride_y: 1,
-            stride_a: 0,
-            stride_w: k as u32,
-            blocks_per_k: (k / 32) as u32,
-            weights_per_block: 32,
-            stride_scale: 0,
-        },
-        Layout::ColMajor => GemvParams {
-            k: k as u32,
-            n: n as u32,
-            batch: 1,
-            stride_x: 1,
-            stride_y: 1,
-            stride_a: 0,
-            stride_w: n as u32,
-            blocks_per_k: 0,
-            weights_per_block: 0,
-            stride_scale: 0,
-        },
-        Layout::Canonical => GemvParams {
-            k: k as u32,
-            n: n as u32,
-            batch: 1,
-            stride_x: 1,
-            stride_y: 1,
-            stride_a: 0,
-            stride_w: (n * 32) as u32,
-            blocks_per_k: (k / 32) as u32,
-            weights_per_block: 32,
-            stride_scale: 0,
-        },
-    };
-
-    let weights_arg = TensorArg::from_tensor(&weights);
-    let input_arg = TensorArg::from_tensor(&input);
-    let output_legacy_arg = TensorArg::from_tensor(&output_legacy);
-
-    let run_legacy: Box<dyn Fn(&mut Foundry)> = match layout {
-        Layout::RowMajor => {
-            let kernel = GemvColMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(alpha);
-            Box::new(move |f| f.run(&kernel).unwrap())
-        }
-        Layout::ColMajor => {
-            let kernel = GemvRowMajor::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(alpha);
-            Box::new(move |f| f.run(&kernel).unwrap())
-        }
-        Layout::Canonical => {
-            use metallic::metals::gemv::GemvCanonical;
-            let kernel = GemvCanonical::new(&weights_arg, &input_arg, &output_legacy_arg, params).with_alpha(alpha);
-            Box::new(move |f| f.run(&kernel).unwrap())
-        }
-    };
 
     // ----------------------------------------------------------------
     // Setup V2
@@ -129,16 +64,8 @@ fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout,
 
     // Warmup
     for _ in 0..5 {
-        run_legacy(foundry);
         run_v2(foundry);
     }
-
-    // Measure Legacy
-    let start = Instant::now();
-    for _ in 0..iterations {
-        run_legacy(foundry);
-    }
-    let legacy_duration = start.elapsed();
 
     // Measure V2
     let start = Instant::now();
@@ -147,14 +74,9 @@ fn run_benchmark_case(foundry: &mut Foundry, k: usize, n: usize, layout: Layout,
     }
     let v2_duration = start.elapsed();
 
-    let legacy_avg = legacy_duration.as_micros() as f64 / iterations as f64;
     let v2_avg = v2_duration.as_micros() as f64 / iterations as f64;
-    let speedup = legacy_avg / v2_avg;
 
-    println!(
-        "  -> Legacy: {:.2} us | V2: {:.2} us | Speedup: {:.2}x",
-        legacy_avg, v2_avg, speedup
-    );
+    println!("  -> V2: {:.2} us", v2_avg);
 }
 
 #[test]

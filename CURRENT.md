@@ -188,7 +188,7 @@ The spec used `"op": "GemvCanonical"` for attention Q/K/V projections, but there
 - [`src/foundry/model/executor.rs`](file:///Volumes/2TB/test-burn/crates/metallic/src/foundry/model/executor.rs) - Fixed N/K swap in canonical weight swizzling
 - [`tests/dsl_vs_context_parity.rs`](file:///Volumes/2TB/test-burn/crates/metallic/tests/dsl_vs_context_parity.rs) - Added `test_full_block_step_parity`
  - [`src/metals/sdpa/step.rs`](file:///Volumes/2TB/test-burn/crates/metallic/src/metals/sdpa/step.rs) - Fix Q head-major view for SDPA
- - [`src/foundry/spec/qwen25.json`](file:///Volumes/2TB/test-burn/crates/metallic/src/foundry/spec/qwen25.json) - SDPA no longer uses `max_seq_len` for K/V stride
+ - [`../../models/qwen25.json`](../../models/qwen25.json) - SDPA no longer uses `max_seq_len` for K/V stride
  - [`src/foundry/spec/repeat.rs`](file:///Volumes/2TB/test-burn/crates/metallic/src/foundry/spec/repeat.rs) - Gate debug prints behind `METALLIC_FOUNDRY_TRACE`
  - [`src/metals/matmul_gemv_fused.rs`](file:///Volumes/2TB/test-burn/crates/metallic/src/metals/matmul_gemv_fused.rs) - Foundry wrappers + DSL steps for legacy fused matmul_gemv kernels
  - [`src/foundry/mod.rs`](file:///Volumes/2TB/test-burn/crates/metallic/src/foundry/mod.rs) - Match legacy Metal language version (`Version4_0`)

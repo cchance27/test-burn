@@ -3,6 +3,7 @@
 #ifndef POLICY_F16_DEFINED
 #define POLICY_F16_DEFINED
 struct PolicyF16 {
+    // Standardized uchar* interface - ignores scales for F16
     static ALWAYS_INLINE half load_scale(const device uchar *scales, ulong block_idx) {
         return 1.0h;
     }
@@ -13,6 +14,7 @@ struct PolicyF16 {
         ulong offset, 
         thread float results[N]
     ) {
+        // Cast uchar* to half* internally
         const device half *w_ptr = (const device half *)ptr;
         
         if constexpr (N == 8) {

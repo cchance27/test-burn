@@ -1,24 +1,40 @@
 //! Layout Stage - Handles memory layout and indexing for GEMV and other kernels.
 //!
-//! Supports:
-//! - RowMajor (NK): weights[row * K + k] - rows contiguous
-//! - ColMajor (KN): weights[k * N + row] - columns contiguous
+//! Memory layout determines how weight tensors are indexed:
+//! - `RowMajor`: Weights stored as [N, K] - output dimension first
+//! - `ColMajor`: Weights stored as [K, N] - input dimension first
+//! - `Canonical`: Blocked [N, K] for cache efficiency
 
 use serde::{Deserialize, Serialize};
 
 use crate::compound::{BufferArg, Stage};
 
-/// Memory layout for 2D tensors.
+/// Memory layout for 2D weight tensors in GEMV.
+///
+/// In GEMV, we compute: output[n] = sum_k(input[k] * weights[n, k])
+/// The `row` variable in indexing refers to the OUTPUT dimension (N).
+///
+/// **IMPORTANT**: The naming indicates how weights are stored in memory:
+/// - `RowMajor`: Weights are [N, K] shape - each output row is contiguous in K
+/// - `ColMajor`: Weights are [K, N] shape - each input column is contiguous in N  
+/// - `Canonical`: Blocked [N, K] with K blocked into chunks
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Layout {
-    /// Row-major (NK): weights[row * K + k]
-    /// Each row is contiguous in memory.
+    /// Weights stored as [N, K] (output-major).
+    /// Index: weights[n * K + k]
+    /// Each output neuron's weights are contiguous in memory.
+    /// Use when weights tensor has shape [N, K].
     RowMajor,
-    /// Column-major (KN): weights[k * N + row]  
-    /// Each column is contiguous in memory.
+
+    /// Weights stored as [K, N] (input-major).
+    /// Index: weights[k * N + n]
+    /// Each input feature's connections are contiguous in memory.
+    /// Use when weights tensor has shape [K, N].
     ColMajor,
-    /// Canonical Blocked-Column-Major: weights[(k % wpb) + wpb * (col + (k / wpb) * N)]
-    /// Used by legacy GemvCanonical kernels.
+
+    /// Canonical Blocked format: [N, K] with K dimension blocked.
+    /// Index: weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
+    /// Used by legacy GemvCanonical kernels for cache efficiency.
     Canonical,
 }
 
@@ -45,17 +61,19 @@ impl LayoutStage {
         }
     }
 
-    /// Row-major (NK) layout: weights[row * K + k]
+    /// Weights stored as [N, K] - each output row is contiguous in K.
+    /// Use for Context transpose_b=true (Context expects [N, K]).
     pub fn row_major() -> Self {
         Self::new(Layout::RowMajor, "gid", "lid")
     }
 
-    /// Column-major (KN) layout: weights[k * N + row]
+    /// Weights stored as [K, N] - each input column is contiguous in N.
+    /// Use for Context transpose_b=false (Context expects [K, N]).
     pub fn col_major() -> Self {
         Self::new(Layout::ColMajor, "gid", "lid")
     }
 
-    /// Canonical blocked-column-major layout.
+    /// Canonical blocked [N, K] format for cache efficiency.
     pub fn canonical() -> Self {
         Self::new(Layout::Canonical, "gid", "lid")
     }
@@ -79,8 +97,9 @@ impl Stage for LayoutStage {
         // Emit layout-specific indexing macros
         match self.layout {
             Layout::RowMajor => r#"
-// Layout: Row-Major (NK)
-// weights[row * K + k] - rows are contiguous
+// Layout: RowMajor - Weights shape [N, K]
+// weights[n * K + k] - output dimension is the slow axis
+// Context equivalent: transpose_b=true with [N, K] tensor
 #define WEIGHT_STRIDE_K 1
 #define WEIGHT_STRIDE_ROW K
 #define IS_K_CONTIGUOUS 1
@@ -88,8 +107,9 @@ impl Stage for LayoutStage {
 "#
             .to_string(),
             Layout::ColMajor => r#"
-// Layout: Column-Major (KN)  
-// weights[k * N + row] - columns are contiguous
+// Layout: ColMajor - Weights shape [K, N]
+// weights[k * N + n] - input dimension is the slow axis
+// Context equivalent: transpose_b=false with [K, N] tensor
 #define WEIGHT_STRIDE_K N
 #define WEIGHT_STRIDE_ROW 1
 #define IS_K_CONTIGUOUS 0
@@ -97,8 +117,9 @@ impl Stage for LayoutStage {
 "#
             .to_string(),
             Layout::Canonical => r#"
-// Layout: Canonical Blocked (Legacy)
-// weights[(k % weights_per_block) + weights_per_block * (row + (k / weights_per_block) * N)]
+// Layout: Canonical Blocked - Weights shape [N, K] with K blocked
+// weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
+// Used for cache-efficient GEMV with large K
 #define IS_K_CONTIGUOUS 1
 #define WEIGHT_INDEX(row, k, K, N) ((k % weights_per_block) + weights_per_block * ((row) + ((k) / weights_per_block) * (N)))
 "#
@@ -109,18 +130,18 @@ impl Stage for LayoutStage {
     fn emit(&self, _prev: &str) -> (String, String) {
         let code = format!(
             r#"    // Layout indices
-    uint row_idx = {gid}.x;
+    uint row_idx = {gid}.x;  // Output dimension index (N)
     uint tid = {lid}.x;
     uint col_idx = tid;
     
-    // Layout type: {layout_name}
+    // Layout: {layout_name}
 "#,
             gid = self.gid_var,
             lid = self.lid_var,
             layout_name = match self.layout {
-                Layout::RowMajor => "RowMajor (NK)",
-                Layout::ColMajor => "ColMajor (KN)",
-                Layout::Canonical => "Canonical (Blocked)",
+                Layout::RowMajor => "[N, K] (output-major)",
+                Layout::ColMajor => "[K, N] (input-major)",
+                Layout::Canonical => "[N, K] Blocked",
             }
         );
 
@@ -157,22 +178,22 @@ impl WarpLayoutStage {
     pub fn new(layout: Layout) -> Self {
         Self {
             layout,
-            warps_per_tg: 8,
+            warps_per_tg: 1,
             simd_width: 32,
         }
     }
 
-    /// Row-major (NK) layout with warp-per-row dispatch.
+    /// Weights stored as [N, K] - warp-per-row dispatch.
     pub fn row_major() -> Self {
         Self::new(Layout::RowMajor)
     }
 
-    /// Column-major (KN) layout with warp-per-row dispatch.
+    /// Weights stored as [K, N] - warp-per-row dispatch.
     pub fn col_major() -> Self {
         Self::new(Layout::ColMajor)
     }
 
-    /// Canonical blocked-column-major layout with warp-per-row dispatch.
+    /// Canonical blocked [N, K] format - warp-per-row dispatch.
     pub fn canonical() -> Self {
         Self::new(Layout::Canonical)
     }
@@ -214,8 +235,8 @@ impl Stage for WarpLayoutStage {
         let layout_defs = match self.layout {
             Layout::RowMajor => {
                 r#"
-// Layout: Row-Major (NK)
-// weights[row * K + k] - rows are contiguous
+// Layout: RowMajor - Weights shape [N, K]
+// weights[n * K + k] - output dimension is the slow axis
 #define WEIGHT_STRIDE_K 1
 #define WEIGHT_STRIDE_ROW K
 #define IS_K_CONTIGUOUS 1
@@ -224,8 +245,8 @@ impl Stage for WarpLayoutStage {
             }
             Layout::ColMajor => {
                 r#"
-// Layout: Column-Major (KN)  
-// weights[k * N + row] - columns are contiguous
+// Layout: ColMajor - Weights shape [K, N]
+// weights[k * N + n] - input dimension is the slow axis
 #define WEIGHT_STRIDE_K N
 #define WEIGHT_STRIDE_ROW 1
 #define IS_K_CONTIGUOUS 0
@@ -234,8 +255,8 @@ impl Stage for WarpLayoutStage {
             }
             Layout::Canonical => {
                 r#"
-// Layout: Canonical Blocked (Legacy)
-// weights[(k % weights_per_block) + weights_per_block * (row + (k / weights_per_block) * N)]
+// Layout: Canonical Blocked - Weights shape [N, K] with K blocked
+// weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
 #define IS_K_CONTIGUOUS 1
 #define WEIGHT_INDEX(row, k, K, N) ((k % weights_per_block) + weights_per_block * ((row) + ((k) / weights_per_block) * (N)))
 "#
@@ -253,18 +274,18 @@ impl Stage for WarpLayoutStage {
             r#"    // Warp-per-row layout indices
     const uint warp_id = lid.x / SIMD_WIDTH;
     const uint lane_id = lid.x & (SIMD_WIDTH - 1u);
-    const uint row_idx = gid.x * WARPS_PER_TG + warp_id;
+    const uint row_idx = gid.x * WARPS_PER_TG + warp_id;  // Output index (N)
     const uint tid = lane_id;
     
     // Early exit if row is out of bounds
     if (row_idx >= n_dim) return;
     
-    // Layout type: {layout_name}
+    // Layout: {layout_name}
 "#,
             layout_name = match self.layout {
-                Layout::RowMajor => "RowMajor (NK) with warp-per-row",
-                Layout::ColMajor => "ColMajor (KN) with warp-per-row",
-                Layout::Canonical => "Canonical (Blocked) with warp-per-row",
+                Layout::RowMajor => "[N, K] (output-major)",
+                Layout::ColMajor => "[K, N] (input-major)",
+                Layout::Canonical => "[N, K] Blocked",
             }
         );
 

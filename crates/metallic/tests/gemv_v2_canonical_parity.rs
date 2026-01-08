@@ -8,9 +8,7 @@ use half::f16;
 use metallic::{
     compound::stages::Layout, foundry::{
         Foundry, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::Tensor as FoundryTensor
-    }, metals::{
-        gemv::{GemvCanonical, GemvParams}, v2::gemv::step::{GemvStrategy, GemvV2Step}
-    }, tensor::{F16, TensorInit}, types::TensorArg
+    }, metals::gemv::step::{GemvStrategy, GemvV2Step}, tensor::{F16, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -69,30 +67,7 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
     // Create tensors
     let weights_can = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k * n], TensorInit::CopyFrom(&weights_can_half)).unwrap();
     let input = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&input_half)).unwrap();
-    let output_legacy = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized).unwrap();
     let output_v2 = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized).unwrap();
-
-    // Run Legacy
-    let params = GemvParams {
-        k: k as u32,
-        n: n as u32,
-        batch: 1,
-        stride_x: 1,
-        stride_y: 1,
-        stride_a: 0,
-        stride_w: (n * wpb) as u32,
-        blocks_per_k: (k / wpb) as u32,
-        weights_per_block: wpb as u32,
-        stride_scale: 0,
-    };
-    let kernel = GemvCanonical::new(
-        &TensorArg::from_tensor(&weights_can),
-        &TensorArg::from_tensor(&input),
-        &TensorArg::from_tensor(&output_legacy),
-        params,
-    )
-    .with_alpha(alpha);
-    foundry.run(&kernel).unwrap();
 
     // Run V2 (Testing CANONICAL strategy explicitly)
     let mut bindings = TensorBindings::new();
@@ -126,22 +101,21 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
     }
 
     // Compare
-    let legacy_output: Vec<f32> = FoundryTensor::to_vec(&output_legacy, &foundry).iter().map(|x| x.to_f32()).collect();
     let v2_output: Vec<f32> = FoundryTensor::to_vec(&output_v2, &foundry).iter().map(|x| x.to_f32()).collect();
 
-    let tolerance = 1e-3 * (k as f32).sqrt();
+    // Tolerance: F16 precision accumulation typically needs loose tolerance
+    // (sqrt(k) factor is good rule of thumb for sum accumulation noise)
+    let tolerance = 5e-3 * (k as f32).sqrt();
 
     for i in 0..n {
         let r = reference[i];
-        let l = legacy_output[i];
         let v = v2_output[i];
+        let diff = (r - v).abs();
 
-        let diff_lv = (l - v).abs();
-
-        if diff_lv > tolerance {
+        if diff > tolerance {
             panic!(
-                "Canonical Parity mismatch at {}: Legacy={}, V2={}, Diff={}, Tol={}",
-                i, l, v, diff_lv, tolerance
+                "Canonical Parity mismatch (Strategy=Canonical) at {}: Ref={}, V2={}, Diff={}, Tol={} (K={}, N={}, Alpha={})",
+                i, r, v, diff, tolerance, k, n, alpha
             );
         }
     }

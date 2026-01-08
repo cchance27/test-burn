@@ -110,27 +110,30 @@
             {
                 "op": "Repeat",
                 "count": "n_layers",
-                    "var": "i",
-                    "steps": [
-                        {
-                            "op": "QkvF16CanonicalFusedRmsnorm",
-                            "input": "hidden",
-                            "gamma": "layer.attn_norm_{i}",
-                            "wq": "layer.attn_q_{i}",
-                            "wk": "layer.attn_k_{i}",
-                            "wv": "layer.attn_v_{i}",
-                            "bq": "layer.attn_q_bias_{i}",
-                            "bk": "layer.attn_k_bias_{i}",
-                            "bv": "layer.attn_v_bias_{i}",
-                            "out_q": "q",
-                            "out_k": "k",
-                            "out_v": "v",
-                            "epsilon": 0.000001,
-                            "weights_per_block": 32
-                        },
-                        {
-                            "op": "KvRearrange",
-                            "input": "q",
+                "var": "i",
+                "steps": [
+                    {
+                        "op": "FusedQkv",
+                        "input": "hidden",
+                        "gamma": "layer.attn_norm_{i}",
+                        "w_q": "layer.attn_q_{i}",
+                        "w_k": "layer.attn_k_{i}",
+                        "w_v": "layer.attn_v_{i}",
+                        "bias_q": "layer.attn_q_bias_{i}",
+                        "bias_k": "layer.attn_k_bias_{i}",
+                        "bias_v": "layer.attn_v_bias_{i}",
+                        "out_q": "q",
+                        "out_k": "k",
+                        "out_v": "v",
+                        "k_dim": "{d_model}",
+                        "n_dim": "{d_model}",
+                        "n_kv": "{kv_dim}",
+                        "weights_per_block": 32,
+                        "strategy": "Vectorized"
+                    },
+                    {
+                        "op": "KvRearrange",
+                        "input": "q",
                         "output": "q_heads",
                         "params": {
                             "kv_dim": "{d_model}",
@@ -258,7 +261,7 @@
                         }
                     },
                     {
-                        "op": "Sdpa",
+                        "op": "SdpaMaterialized",
                         "q": "q_rot",
                         "k": "k_expanded",
                         "v": "v_expanded",
@@ -287,16 +290,54 @@
                         "has_bias": 0
                     },
                     {
-                        "op": "SwiGluF16CanonicalFusedRmsnorm",
+                        "op": "RmsNormV2",
                         "input": "residual_1",
+                        "output": "ffn_norm_out",
                         "gamma": "layer.ffn_norm_{i}",
-                        "wg": "layer.ffn_gate_{i}",
-                        "wu": "layer.ffn_up_{i}",
-                        "bg": "layer.ffn_gate_bias_{i}",
-                        "bu": "layer.ffn_up_bias_{i}",
-                        "out": "up",
-                        "epsilon": 0.000001,
-                        "weights_per_block": 32
+                        "feature_dim": 896,
+                        "total_elements": "{total_elements_hidden}"
+                    },
+                    {
+                        "op": "GemvCanonical",
+                        "matrix": "layer.ffn_gate_{i}",
+                        "scale_bytes": "layer.ffn_gate_{i}",
+                        "vector_x": "ffn_norm_out",
+                        "result_y": "gate",
+                        "params": {
+                            "batch": 1,
+                            "weights_per_block": 32
+                        },
+                        "bias": "zero",
+                        "residual": "zero",
+                        "alpha": 1.0,
+                        "beta": 0.0,
+                        "has_bias": 0
+                    },
+                    {
+                        "op": "GemvCanonical",
+                        "matrix": "layer.ffn_up_{i}",
+                        "scale_bytes": "layer.ffn_up_{i}",
+                        "vector_x": "ffn_norm_out",
+                        "result_y": "up",
+                        "params": {
+                            "batch": 1,
+                            "weights_per_block": 32
+                        },
+                        "bias": "zero",
+                        "residual": "zero",
+                        "alpha": 1.0,
+                        "beta": 0.0,
+                        "has_bias": 0
+                    },
+                    {
+                        "op": "SwigluV2",
+                        "gate": "gate",
+                        "up_inout": "up",
+                        "gate_bias": "layer.ffn_gate_bias_{i}",
+                        "up_bias": "layer.ffn_up_bias_{i}",
+                        "bias_len": "{ff_dim}",
+                        "gate_leading_stride": "{ff_dim}",
+                        "up_leading_stride": "{ff_dim}"
                     },
                     {
                         "op": "GemvCanonical",
@@ -317,26 +358,22 @@
                 ]
             },
             {
-                "op": "RmsNorm",
+                "op": "RmsNormV2",
                 "input": "hidden",
                 "output": "final_norm_out",
                 "gamma": "final_norm",
-                "scale_bytes": "hidden",
-                "params": {
-                    "feature_dim": 896,
-                    "total_elements": "{total_elements_hidden}"
-                }
+                "feature_dim": 896,
+                "total_elements": "{total_elements_hidden}"
             },
             {
-                "op": "GemvColMajor",
+                "op": "GemvCanonical",
                 "matrix": "output_weight",
                 "scale_bytes": "output_weight",
                 "vector_x": "final_norm_out",
                 "result_y": "logits",
                 "params": {
-                    "n": 151936,
                     "batch": 1,
-                    "fused_bias_offset": 0
+                    "weights_per_block": 32
                 },
                 "bias": "zero",
                 "residual": "zero",

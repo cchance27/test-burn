@@ -9,8 +9,8 @@ use metallic::{
 use rustc_hash::FxHashMap;
 use serial_test::serial;
 
-const MODEL_SPEC_PATH: &str = "src/foundry/spec/qwen25.json";
-const GGUF_PATH: &str = "/Volumes/2TB/LMStudio/Qwen/Qwen2.5-0.5B-Instruct-GGUF/qwen2.5-0.5b-instruct-fp16.gguf";
+const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
+const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
 
 fn gguf_available(model: &metallic::gguf::model_loader::GGUFModel) -> FxHashMap<String, ()> {
     model.tensors.keys().map(|name| (name.clone(), ())).collect()
