@@ -94,7 +94,7 @@ mod tests {
             .with_manual_output(true)
             .build();
 
-        let source = kernel.source_code();
+        let source = kernel.source();
 
         // Verify includes
         assert!(source.contains("#include \"rmsnorm/rmsnorm.metal\""));

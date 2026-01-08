@@ -160,7 +160,7 @@ fn test_qkv_parity_f16() {
 
     // DUMP KERNEL SOURCE FOR DEBUGGING
     println!("=== Generated Metal Source ===");
-    println!("{}", kernel.source_code());
+    println!("{}", kernel.source());
     println!("=== End Metal Source ===");
 
     let args = FusedQkvArgs {

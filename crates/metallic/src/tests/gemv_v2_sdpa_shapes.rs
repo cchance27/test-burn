@@ -20,8 +20,8 @@ fn test_gemv_v2_sdpa_foundry_qk() -> Result<(), MetalError> {
     let n = seq_len;
     let k = head_dim;
 
-    let q_data: Vec<f16> = (0..k).map(|_| f16::from_f32(rng.gen_range(-0.5..0.5))).collect();
-    let k_data: Vec<f16> = (0..n * k).map(|_| f16::from_f32(rng.gen_range(-0.5..0.5))).collect();
+    let q_data: Vec<f16> = (0..k).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
+    let k_data: Vec<f16> = (0..n * k).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
 
     // Flat 1D for weights like gemv_v2_context_parity
     let q_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&q_data))?;
@@ -82,8 +82,8 @@ fn test_gemv_v2_sdpa_foundry_av() -> Result<(), MetalError> {
     let k = seq_len;
     let n = head_dim;
 
-    let probs_data: Vec<f16> = (0..k).map(|_| f16::from_f32(rng.gen_range(0.0..1.0))).collect();
-    let v_data: Vec<f16> = (0..k * n).map(|_| f16::from_f32(rng.gen_range(-0.5..0.5))).collect();
+    let probs_data: Vec<f16> = (0..k).map(|_| f16::from_f32(rng.random_range(0.0..1.0))).collect();
+    let v_data: Vec<f16> = (0..k * n).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
 
     let probs_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k], TensorInit::CopyFrom(&probs_data))?;
     let v_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k * n], TensorInit::CopyFrom(&v_data))?;

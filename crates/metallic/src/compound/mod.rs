@@ -162,7 +162,7 @@ pub struct CompiledCompoundKernel {
 
 impl CompiledCompoundKernel {
     /// Get the generated Metal source code for debugging.
-    pub fn source_code(&self) -> &str {
+    pub fn source(&self) -> &str {
         &self.source
     }
 }
@@ -473,13 +473,6 @@ impl<A: BindArgs> Kernel for BoundCompiledCompoundKernel<A> {
 
     fn dispatch_config(&self) -> DispatchConfig {
         self.dispatch.clone()
-    }
-}
-
-impl CompoundKernel<Fused> {
-    /// Get the generated Metal source.
-    pub fn source_code(&self) -> &str {
-        self.source.as_ref().expect("Fused kernel should have source")
     }
 }
 

@@ -27,12 +27,14 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
     // Q: [n_heads * head_dim] - flattened
     // K: [n_heads * seq_len * head_dim] - flattened
     // V: [n_heads * seq_len * head_dim] - flattened
-    let q_data: Vec<f16> = (0..n_heads * head_dim).map(|_| f16::from_f32(rng.gen_range(-0.5..0.5))).collect();
+    let q_data: Vec<f16> = (0..n_heads * head_dim)
+        .map(|_| f16::from_f32(rng.random_range(-0.5..0.5)))
+        .collect();
     let k_data: Vec<f16> = (0..n_heads * seq_len * head_dim)
-        .map(|_| f16::from_f32(rng.gen_range(-0.5..0.5)))
+        .map(|_| f16::from_f32(rng.random_range(-0.5..0.5)))
         .collect();
     let v_data: Vec<f16> = (0..n_heads * seq_len * head_dim)
-        .map(|_| f16::from_f32(rng.gen_range(-0.5..0.5)))
+        .map(|_| f16::from_f32(rng.random_range(-0.5..0.5)))
         .collect();
 
     // Upload to Foundry (1D flat tensors)

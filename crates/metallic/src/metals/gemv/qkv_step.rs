@@ -264,7 +264,7 @@ impl CompiledStep for CompiledFusedQkvStep {
         let dispatch = warp_dispatch_config(n_dim.max(n_kv));
 
         if bindings.get_var("i").map(|v| v == "0").unwrap_or(false) {
-            eprintln!("DEBUG FusedQkv Source:\n{}", kernel.source_code());
+            eprintln!("DEBUG FusedQkv Source:\n{}", kernel.source());
             eprintln!(
                 "DEBUG FusedQkv Layer 0: k_dim={} n_dim={} n_kv={} weights_per_block={} | q_off={} k_off={} v_off={} input_off={}",
                 k_dim, n_dim, n_kv, weights_per_block, out_q.offset, out_k.offset, out_v.offset, input.offset
