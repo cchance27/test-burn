@@ -69,6 +69,7 @@ fn main() -> AppResult<()> {
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
+                let load_start = std::time::Instant::now();
                 let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
 
                 // Report GGUF file MMAP usage
@@ -122,13 +123,21 @@ fn main() -> AppResult<()> {
                         report_model_weight_breakdown(&qwen);
                         emit_startup_memory_update(&worker_tx)?;
 
+                        let load_duration = load_start.elapsed();
+                        worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
+
                         worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
+                        let tokenization_start = std::time::Instant::now();
                         let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
                         emit_startup_memory_update(&worker_tx)?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
                         let tokens = tokenizer.encode(&prompt)?;
                         worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
+
+                        let tokenization_duration = tokenization_start.elapsed();
+                        worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
+
                         emit_startup_memory_update(&worker_tx)?;
 
                         let cfg = metallic::generation::GenerationConfig {
@@ -185,6 +194,20 @@ fn main() -> AppResult<()> {
                             .with_gguf(&gguf_path)
                             .unwrap()
                             .build(&mut foundry)?;
+
+                        let load_duration = load_start.elapsed();
+                        worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
+                        let tokenization_start = std::time::Instant::now();
+                        let tokenizer = model.tokenizer()?;
+
+                        worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
+                        let tokens = tokenizer.encode(&prompt)?;
+                        worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
+
+                        let tokenization_duration = tokenization_start.elapsed();
+                        worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
 
                         let cfg = metallic::generation::GenerationConfig {
                             max_tokens: cli_config.generation.max_tokens,
@@ -509,62 +532,53 @@ fn run_text_mode(
     rx: &std::sync::mpsc::Receiver<AppEvent>,
     generation_handle: thread::JoinHandle<Result<()>>,
 ) -> AppResult<()> {
-    use tracing::{debug, error, info, warn};
-
     let mut generated_tokens: u64 = 0;
     let mut prompt_processing: Option<Duration> = None;
     let mut total_generation_time: Option<Duration> = None;
+    let mut tokenization_time: Option<Duration> = None;
+    let mut model_load_time: Option<Duration> = None;
+    let mut prompt_token_count: usize = 0;
 
     // Process all events until generation is done
-    while !generation_handle.is_finished() || rx.recv_timeout(Duration::from_millis(100)).is_ok() {
+    while !generation_handle.is_finished() {
         // Drain metrics channel to prevent memory leak and unnecessary buffering overhead
         while let Ok(_metric) = metrics_receiver.try_recv() {}
 
         // Process any pending app events
-        while let Ok(event) = rx.try_recv() {
-            match event {
-                AppEvent::Token {
-                    text,
-                    prompt_processing: prompt,
-                    ..
-                } => {
-                    if !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
-                        print!("{}", text);
-                        // Only flush on newlines to reduce terminal I/O and GPU contention
-                        if text.contains('\n') || generated_tokens.is_multiple_of(16) {
-                            std::io::stdout().flush().unwrap();
-                        }
-                    }
-                    generated_tokens = generated_tokens.saturating_add(1);
-                    prompt_processing.get_or_insert(prompt);
-                }
-                AppEvent::GenerationComplete {
-                    total_generation_time: total,
-                } => {
-                    total_generation_time = Some(total);
-                }
-                AppEvent::StatusUpdate(status) => {
-                    // Only log status updates if we're in verbose mode
-                    // For now, using debug level which won't show by default
-                    debug!("Status update: {}", status);
-                }
-                AppEvent::Alert(alert) => match alert.level {
-                    metallic_cli_helpers::app_event::AlertLevel::Info => {
-                        info!("{}", alert.message);
-                    }
-                    metallic_cli_helpers::app_event::AlertLevel::Warning => {
-                        warn!("{}", alert.message);
-                    }
-                    metallic_cli_helpers::app_event::AlertLevel::Error => {
-                        error!("{}", alert.message);
-                    }
-                },
-                AppEvent::TokenCount(count) => {
-                    debug!("Prompt token count: {}", count);
-                }
-                _ => {} // Ignore other events in text mode
+        // We use recv_timeout to avoid busy waiting but still check for generation_handle finishing frequently
+        match rx.recv_timeout(Duration::from_millis(50)) {
+            Ok(event) => process_text_mode_event(
+                event,
+                cli_config,
+                &mut generated_tokens,
+                &mut prompt_processing,
+                &mut total_generation_time,
+                &mut model_load_time,
+                &mut tokenization_time,
+                &mut prompt_token_count,
+            ),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Just continue to check loop condition
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                // Channel closed, so generation must be done (or crashed)
+                break;
             }
         }
+    }
+
+    // Process any remaining events
+    while let Ok(event) = rx.try_recv() {
+        process_text_mode_event(
+            event,
+            cli_config,
+            &mut generated_tokens,
+            &mut prompt_processing,
+            &mut total_generation_time,
+            &mut model_load_time,
+            &mut tokenization_time,
+            &mut prompt_token_count,
+        );
     }
 
     generation_handle.join().unwrap()?;
@@ -572,12 +586,38 @@ fn run_text_mode(
     if std::env::var("METALLIC_PERF_OUTPUT").is_ok()
         && let Some(total) = total_generation_time
     {
+        // Flush stdout so we don't interleave with the perf report if it goes to stderr?
+        // Actually perf report goes to stderr usually to separate from output.
+        // Let's ensure a newline first just in case.
+        if generated_tokens > 0 {
+            println!();
+        }
+
         eprintln!("\n[metallic] Performance Breakdown:");
-        
+
+        if let Some(load_time) = model_load_time {
+            eprintln!("[metallic]   Model Load:        {:.3}s", load_time.as_secs_f64());
+        }
+
+        if let Some(tok_time) = tokenization_time {
+            let tok_s = tok_time.as_secs_f64().max(1e-9);
+            let tok_speed = if prompt_token_count > 0 {
+                prompt_token_count as f64 / tok_s
+            } else {
+                0.0
+            };
+            eprintln!("[metallic]   Tokenization:      {:.3}s ({:.2} tokens/s)", tok_s, tok_speed);
+        }
+
         if let Some(prompt) = prompt_processing {
             let prompt_s = prompt.as_secs_f64().max(1e-9);
-            eprintln!("[metallic]   Prompt Processing: {:.3}s", prompt_s);
-            
+            let pp_tok_s = if prompt_token_count > 0 {
+                prompt_token_count as f64 / prompt_s
+            } else {
+                0.0
+            };
+            eprintln!("[metallic]   Prompt Processing: {:.3}s ({:.2} tok/s)", prompt_s, pp_tok_s);
+
             let decode_s = total.saturating_sub(prompt).as_secs_f64().max(1e-9);
             let tps_decode = (generated_tokens as f64) / decode_s;
             eprintln!("[metallic]   Decode:            {:.3}s ({:.2} tokens/s)", decode_s, tps_decode);
@@ -590,6 +630,69 @@ fn run_text_mode(
     }
 
     Ok(())
+}
+
+fn process_text_mode_event(
+    event: AppEvent,
+    cli_config: &cli::CliConfig,
+    generated_tokens: &mut u64,
+    prompt_processing: &mut Option<Duration>,
+    total_generation_time: &mut Option<Duration>,
+    model_load_time: &mut Option<Duration>,
+    tokenization_time: &mut Option<Duration>,
+    prompt_token_count: &mut usize,
+) {
+    match event {
+        AppEvent::Token {
+            text,
+            prompt_processing: prompt,
+            ..
+        } => {
+            if !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
+                print!("{}", text);
+                // Only flush on newlines to reduce terminal I/O and GPU contention
+                if text.contains('\n') || *generated_tokens % 16 == 0 {
+                    std::io::stdout().flush().unwrap();
+                }
+            }
+            *generated_tokens = generated_tokens.saturating_add(1);
+            prompt_processing.get_or_insert(prompt);
+        }
+        AppEvent::GenerationComplete {
+            total_generation_time: total,
+        } => {
+            *total_generation_time = Some(total);
+        }
+        AppEvent::ModelLoadComplete(duration) => {
+            *model_load_time = Some(duration);
+            tracing::debug!("Model load time: {:?}", duration);
+        }
+        AppEvent::TokenizationComplete(duration) => {
+            *tokenization_time = Some(duration);
+            tracing::debug!("Tokenization time: {:?}", duration);
+        }
+        AppEvent::StatusUpdate(status) => {
+            // Only log status updates if we're in verbose mode
+            // For now, using debug level which won't show by default
+            tracing::debug!("Status update: {}", status);
+        }
+        AppEvent::Alert(alert) => match alert.level {
+            metallic_cli_helpers::app_event::AlertLevel::Info => {
+                tracing::info!("{}", alert.message);
+            }
+            metallic_cli_helpers::app_event::AlertLevel::Warning => {
+                tracing::warn!("{}", alert.message);
+            }
+            metallic_cli_helpers::app_event::AlertLevel::Error => {
+                tracing::error!("{}", alert.message);
+            }
+        },
+        AppEvent::TokenCount(count) => {
+            *prompt_token_count = count;
+            tracing::debug!("Prompt token count: {}", count);
+        }
+        _ => {} // Ignore other events in text mode
+    }
 }
 
 fn run_json_mode(
@@ -676,6 +779,22 @@ fn run_json_mode(
                     });
                     logs.push(log_entry);
                 }
+                AppEvent::ModelLoadComplete(duration) => {
+                    let log_entry = serde_json::json!({
+                        "type": "model_load_complete",
+                        "duration_ms": duration.as_millis(),
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    logs.push(log_entry);
+                }
+                AppEvent::TokenizationComplete(duration) => {
+                    let log_entry = serde_json::json!({
+                        "type": "tokenization_complete",
+                        "duration_ms": duration.as_millis(),
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    logs.push(log_entry);
+                }
                 AppEvent::LogMessage(message) => {
                     let log_entry = serde_json::json!({
                         "type": "log_message",
@@ -720,6 +839,9 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
             app.reset_generation_metrics();
             app.reset_prompt_processing_metrics();
             app.prompt_token_count = count;
+        }
+        AppEvent::TokenizationComplete(_) => {
+            // No specific TUI update for tokenization complete yet, but we need to handle the event
         }
         AppEvent::StatusUpdate(status) => {
             app.status = status;
@@ -774,6 +896,7 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
         AppEvent::GenerationComplete { total_generation_time } => {
             app.generation_time = total_generation_time;
         }
+        AppEvent::ModelLoadComplete(_) => {}
     }
 }
 

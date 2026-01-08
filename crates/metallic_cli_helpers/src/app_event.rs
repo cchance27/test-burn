@@ -92,6 +92,8 @@ pub enum AppEvent {
     GenerationComplete {
         total_generation_time: Duration,
     },
+    ModelLoadComplete(Duration),
+    TokenizationComplete(Duration),
     TokenCount(usize),
     StatusUpdate(String),
     MemoryUpdate(Vec<MemoryRow>),

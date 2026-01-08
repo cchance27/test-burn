@@ -737,10 +737,10 @@ pub fn generate_streaming<T: TensorElement>(
     );
 
     let generation_start = Instant::now();
-    let prompt_start = Instant::now();
 
     // Encode the full prompt
     let input_ids = tokenizer.encode(&full_prompt)?;
+    let prompt_start = Instant::now();
 
     let mut prompt_processing_duration: Option<Duration> = None;
     let mut token_callback = |_token_id, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
@@ -1088,9 +1088,9 @@ pub fn generate_streaming_foundry(
     );
 
     let generation_start = Instant::now();
-    let prompt_start = Instant::now();
     let tokenizer = model.tokenizer()?;
     let prompt_tokens = tokenizer.encode(&full_prompt)?;
+    let prompt_start = Instant::now();
     let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
 
     let mut prompt_processing_duration: Option<Duration> = None;

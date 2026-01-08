@@ -1,15 +1,64 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL_FP16="${1:-./models/qwen2.5-coder-0.5b-instruct-fp16.gguf}"
-MODEL_Q8="${2:-./models/qwen2.5-coder-0.5b-instruct-q8_0.gguf}"
-PROMPT="${3:-create a short js fibonacci function}"
-MAX_TOKENS="${MAX_TOKENS:-50}"
-ITERATIONS="${ITERATIONS:-5}"
+# Default values
+MODEL_FP16="./models/qwen2.5-coder-0.5b-instruct-fp16.gguf"
+MODEL_Q8="./models/qwen2.5-coder-0.5b-instruct-q8_0.gguf"
+PROMPT="create a short js fibonacci function"
+MAX_TOKENS=50
+ITERATIONS=5
+ENABLE_PROFILING=0
+ENGINE="context"
+
+RUN_FP16=0
+RUN_Q8=0
+
+show_help() {
+    echo "Usage: $0 [options]"
+    echo ""
+    echo "Options:"
+    echo "  --fp16             Run FP16 benchmark"
+    echo "  --q8               Run Q8 benchmark"
+    echo "  --fp16_path <path> Path to FP16 model (default: $MODEL_FP16)"
+    echo "  --q8_path <path>   Path to Q8 model (default: $MODEL_Q8)"
+    echo "  --prompt <string>  Prompt to use (default: '$PROMPT')"
+    echo "  --max-tokens <n>   Max tokens to generate (default: $MAX_TOKENS)"
+    echo "  --iterations <n>   Number of iterations per model (default: $ITERATIONS)"
+    echo "  --profiles         Enable profiling (METALLIC_ENABLE_PROFILING=1)"
+    echo "  --engine <name>    Engine to use (context, foundry) (default: $ENGINE)"
+    echo "  --help             Show this help"
+    echo ""
+    echo "Note: If neither --fp16 nor --q8 is specified, both will run."
+}
+
+# Parse arguments
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --fp16) RUN_FP16=1; shift ;;
+        --q8) RUN_Q8=1; shift ;;
+        --fp16_path) MODEL_FP16="$2"; shift 2 ;;
+        --q8_path) MODEL_Q8="$2"; shift 2 ;;
+        --prompt) PROMPT="$2"; shift 2 ;;
+        --max-tokens) MAX_TOKENS="$2"; shift 2 ;;
+        --iterations) ITERATIONS="$2"; shift 2 ;;
+        --profiles) ENABLE_PROFILING=1; shift ;;
+        --engine) ENGINE="$2"; shift 2 ;;
+        --help) show_help; exit 0 ;;
+        *) echo "Unknown option: $1"; show_help; exit 1 ;;
+    esac
+done
+
+# Default to both if none specified
+if [[ $RUN_FP16 -eq 0 && $RUN_Q8 -eq 0 ]]; then
+    RUN_FP16=1
+    RUN_Q8=1
+fi
 
 echo "[metallic] MAX_TOKENS=${MAX_TOKENS}"
 echo "[metallic] prompt=${PROMPT}"
 echo "[metallic] iterations=${ITERATIONS}"
+echo "[metallic] engine=${ENGINE}"
+echo "[metallic] profiling=${ENABLE_PROFILING}"
 echo
 
 calculate_stats() {
@@ -32,7 +81,7 @@ calculate_stats() {
     done
     
     local avg=$(echo "$sum / ${#values[@]}" | bc -l)
-    printf "[stats] %-12s | min: %6.2f | avg: %6.2f | max: %6.2f\n" "$label" "$min" "$avg" "$max"
+    printf "  [stats] %-20s | min: %8.2f | avg: %8.2f | max: %8.2f\n" "$label" "$min" "$avg" "$max"
 }
 
 run_benchmark() {
@@ -42,8 +91,15 @@ run_benchmark() {
     
     echo "== ${name} =="
     
-    local tps_totals=()
-    local tps_decodes=()
+    local load_times=()
+    local tok_times=()
+    local tok_tps=()
+    local pp_times=()
+    local pp_tps=()
+    local decode_times=()
+    local decode_tps=()
+    local total_times=()
+    local total_tps=()
     
     for ((i=1; i<=ITERATIONS; i++)); do
         echo "  Run $i/$ITERATIONS..."
@@ -51,30 +107,66 @@ run_benchmark() {
         
         # Run and capture stderr (where metrics are printed)
         local output
-        output=$(METALLIC_ENABLE_PROFILING=0 \
+        output=$(METALLIC_ENABLE_PROFILING=${ENABLE_PROFILING} \
           METALLIC_PERF_OUTPUT=1 \
           METALLIC_RECORD_CB_GPU_TIMING=1 \
           METALLIC_METRICS_JSONL_PATH="${jsonl_path}" \
-          cargo run -q --message-format=short --release -- "${model}" "${PROMPT}" --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" 2>&1)
+          cargo run -q --message-format=short --release -- "${model}" "${PROMPT}" \
+          --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" --engine="${ENGINE}" 2>&1)
         
-        local tps_total=$(echo "$output" | grep "tps_total=" | sed -E 's/.*tps_total=([0-9.]+).*/\1/')
-        local tps_decode=$(echo "$output" | grep "tps_decode=" | sed -E 's/.*tps_decode=([0-9.]+).*/\1/')
-        
-        if [ -n "$tps_total" ]; then
-            tps_totals+=("$tps_total")
-            echo "    TPS Total: $tps_total"
-        fi
-        if [ -n "$tps_decode" ]; then
-            tps_decodes+=("$tps_decode")
-            echo "    TPS Decode: $tps_decode"
-        fi
+        # Extraction logic
+        local l_time=$(echo "$output" | grep "Model Load:" | sed -E 's/.*Model Load:[[:space:]]+([0-9.]+)s.*/\1/')
+        local t_time=$(echo "$output" | grep "Tokenization:" | sed -E 's/.*Tokenization:[[:space:]]+([0-9.]+)s.*/\1/')
+        local t_tps=$(echo "$output" | grep "Tokenization:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+        local p_time=$(echo "$output" | grep "Prompt Processing:" | sed -E 's/.*Prompt Processing:[[:space:]]+([0-9.]+)s.*/\1/')
+        local p_tps=$(echo "$output" | grep "Prompt Processing:" | sed -E 's/.*\(([0-9.]+) tok\/s\).*/\1/')
+        local d_time=$(echo "$output" | grep "Decode:" | sed -E 's/.*Decode:[[:space:]]+([0-9.]+)s.*/\1/')
+        local d_tps=$(echo "$output" | grep "Decode:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+        local tot_time=$(echo "$output" | grep "Total:" | sed -E 's/.*Total:[[:space:]]+([0-9.]+)s.*/\1/')
+        local tot_tps=$(echo "$output" | grep "Total:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+
+        [[ -n "$l_time" ]] && load_times+=("$l_time")
+        [[ -n "$t_time" ]] && tok_times+=("$t_time")
+        [[ -n "$t_tps" ]] && tok_tps+=("$t_tps")
+        [[ -n "$p_time" ]] && pp_times+=("$p_time")
+        [[ -n "$p_tps" ]] && pp_tps+=("$p_tps")
+        [[ -n "$d_time" ]] && decode_times+=("$d_time")
+        [[ -n "$d_tps" ]] && decode_tps+=("$d_tps")
+        [[ -n "$tot_time" ]] && total_times+=("$tot_time")
+        [[ -n "$tot_tps" ]] && total_tps+=("$tot_tps")
+
+        echo "    Model Load: ${l_time:-N/A}s | Prefill: ${p_tps:-N/A} tok/s | Decode: ${d_tps:-N/A} tok/s"
     done
     
-    echo "  Results for ${name}:"
-    calculate_stats "TPS Total" "${tps_totals[@]}"
-    calculate_stats "TPS Decode" "${tps_decodes[@]}"
+    echo ""
+    echo "== Results for ${name} (${ENGINE}) =="
+    # Use ${array[@]+"${array[@]}"} to avoid unbound variable errors on empty arrays in older bash versions
+    calculate_stats "Model Load (s)" ${load_times[@]+"${load_times[@]}"}
+    calculate_stats "Tokenization (s)" ${tok_times[@]+"${tok_times[@]}"}
+    calculate_stats "Tokenization (tps)" ${tok_tps[@]+"${tok_tps[@]}"}
+    calculate_stats "Prefill (s)" ${pp_times[@]+"${pp_times[@]}"}
+    calculate_stats "Prefill (tps)" ${pp_tps[@]+"${pp_tps[@]}"}
+    calculate_stats "Decode (s)" ${decode_times[@]+"${decode_times[@]}"}
+    calculate_stats "Decode (tps)" ${decode_tps[@]+"${decode_tps[@]}"}
+    calculate_stats "Total (s)" ${total_times[@]+"${total_times[@]}"}
+    calculate_stats "Total (tps)" ${total_tps[@]+"${total_tps[@]}"}
     echo
 }
 
-run_benchmark "fp16" "${MODEL_FP16}"
-run_benchmark "q8" "${MODEL_Q8}"
+# Run FP16 if selected
+if [[ $RUN_FP16 -eq 1 ]]; then
+    if [ ! -f "$MODEL_FP16" ]; then 
+        echo "Error: FP16 model not found at $MODEL_FP16"
+        exit 1
+    fi
+    run_benchmark "fp16" "${MODEL_FP16}"
+fi
+
+# Run Q8 if selected
+if [[ $RUN_Q8 -eq 1 ]]; then
+    if [ ! -f "$MODEL_Q8" ]; then 
+        echo "Error: Q8 model not found at $MODEL_Q8"
+        exit 1
+    fi
+    run_benchmark "q8" "${MODEL_Q8}"
+fi

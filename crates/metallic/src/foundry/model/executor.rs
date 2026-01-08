@@ -978,9 +978,9 @@ impl CompiledModel {
         // Prefill KV cache, batched in chunks to reduce overhead.
         // We update the 'input_ids' binding to point to the correct offset in full_input_buffer.
         // Larger chunk size for prefill since we don't need intermediate CPU syncs.
-       
+
         //QUESTION: Would Having GEMM available for Foundry allow us to prefill faster and improve further than basic batching like this in dispatch?
-        const PREFILL_CHUNK_SIZE: usize = 512;
+        const PREFILL_CHUNK_SIZE: usize = 256;
 
         // Cache the input_ids key to avoid String allocation per token
         let input_ids_key = "input_ids".to_string();
@@ -1028,10 +1028,10 @@ impl CompiledModel {
             tensor_input.offset = 0;
             self.insert_binding(&mut bindings, &mut fast_bindings, input_ids_key.clone(), tensor_input);
         }
-        
+
         // BATCHING: We batch multiple tokens into a single command buffer to amortize submission overhead.
         // We keep tokens on GPU (copying Sample -> Input) and only sync when the batch is full.
-        const BATCH_SIZE: usize = 16;
+        const BATCH_SIZE: usize = 32;
         let mut step_output_buffers = Vec::with_capacity(BATCH_SIZE);
         for i in 0..BATCH_SIZE {
             step_output_buffers.push(self.allocate_u32_buffer(foundry, &format!("sample_out_{}", i), 1)?);
@@ -1054,7 +1054,7 @@ impl CompiledModel {
             // We use SampleTopK for both to keep execution on GPU. Greedy is just top_k=1.
             let effective_top_k = if greedy { 1 } else { top_k };
             let sample_out = &step_output_buffers[batch_idx];
-            
+
             // Create sample kernel with destination buffer
             let sample_kernel = crate::metals::sampling::SampleTopK::new(
                 &logits,
@@ -1103,7 +1103,7 @@ impl CompiledModel {
                     };
 
                     generated.push(token);
-                    
+
                     if stop_tokens.contains(&token) {
                         batch_done = true;
                         break;
@@ -1114,13 +1114,12 @@ impl CompiledModel {
                     }
                 }
                 pending_count = 0;
-                
+
                 if batch_done {
                     break;
                 }
             }
         }
-
 
         Ok(generated)
     }
