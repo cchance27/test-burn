@@ -287,6 +287,7 @@ pub fn thread_dispatch_config(output_rows: u32) -> DispatchConfig {
 
 #[derive(Debug, Clone)]
 pub struct CompiledGemvV2Step {
+    pub weights_name: String,
     pub weights_idx: usize,
     pub scale_bytes_idx: Option<usize>,
     pub derived_scale_bytes_idx: usize,
@@ -383,6 +384,7 @@ impl Step for GemvV2Step {
         get_gemv_v2_kernel_q8(self.layout, strategy);
 
         vec![Box::new(CompiledGemvV2Step {
+            weights_name,
             weights_idx,
             scale_bytes_idx,
             derived_scale_bytes_idx,
@@ -402,7 +404,13 @@ impl Step for GemvV2Step {
 }
 
 impl CompiledStep for CompiledGemvV2Step {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         let weights = fast_bindings
             .get(self.weights_idx)
             .ok_or_else(|| MetalError::InputNotFound(format!("Weights {}", self.weights_idx)))?;
@@ -417,24 +425,17 @@ impl CompiledStep for CompiledGemvV2Step {
         let k_dim = self.k_dim.resolve(bindings);
         let n_dim = self.n_dim.resolve(bindings);
 
-        let is_q8 = weights.dtype == crate::tensor::Dtype::U8;
+        // Centralized Quantization Binding
+        let policy = crate::foundry::policy::resolve_policy(weights.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
+        let loader_args = loader
+            .bind(fast_bindings, &self.weights_name, symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.weights_name, e)))?;
 
-        // Scale bytes: Q8 requires real scales; F16 uses a dummy (PolicyF16 ignores scales).
-        let scale_bytes = if is_q8 {
-            let idx = self.scale_bytes_idx.unwrap_or(self.derived_scale_bytes_idx);
-            let s = fast_bindings
-                .get(idx)
-                .ok_or_else(|| MetalError::InputNotFound(format!("ScaleBytes {}", idx)))?;
-            if s.dtype != crate::tensor::Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "scale_bytes must be U8 for Q8 weights (got {:?})",
-                    s.dtype
-                )));
-            }
-            TensorArg::from_tensor(s)
-        } else {
-            TensorArg::from_tensor(weights)
-        };
+        let weights_arg = loader_args[0].clone();
+        let scale_bytes = loader_args[1].clone();
+        let is_q8 = quantization == Quantization::Q8;
 
         // Handle optional bias
         let (bias, has_bias) = if let Some(idx) = self.bias_idx {
@@ -457,7 +458,7 @@ impl CompiledStep for CompiledGemvV2Step {
             (TensorArg::from_tensor(output), 0u32)
         };
 
-        let weights_arg = TensorArg::from_tensor(weights);
+        // let weights_arg = TensorArg::from_tensor(weights); // Handled by loader_args[0] above
 
         let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
 
@@ -565,13 +566,12 @@ fn default_wpb_legacy() -> u32 {
 #[derive(Debug, Clone)]
 pub struct CompiledGemvCanonicalStep {
     pub step: GemvCanonicalStep,
+    pub matrix_name: String,
     pub matrix_idx: usize,
-    pub scale_bytes_idx: usize,
     pub vector_x_idx: usize,
     pub result_y_idx: usize,
     pub bias_idx: Option<usize>,
     pub residual_idx: Option<usize>,
-    pub is_q8: bool,
 }
 
 #[typetag::serde(name = "GemvCanonical")]
@@ -593,16 +593,16 @@ impl Step for GemvCanonicalStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
     }
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let matrix_idx = symbols.get_or_create(bindings.interpolate(self.matrix.0.clone()));
-        let scale_ref = self.scale_bytes.as_ref().unwrap_or(&self.matrix);
-        let scale_bytes_idx = symbols.get_or_create(bindings.interpolate(scale_ref.0.clone()));
+        let matrix_name = bindings.interpolate(self.matrix.0.clone());
+        let matrix_idx = symbols.get_or_create(matrix_name.clone());
+        let _matrix_scales_idx = symbols.get_or_create(format!("{matrix_name}_scales"));
         let vector_x_idx = symbols.get_or_create(bindings.interpolate(self.vector_x.0.clone()));
         let result_y_idx = symbols.get_or_create(bindings.interpolate(self.result_y.0.clone()));
         let bias_idx = self
@@ -616,36 +616,47 @@ impl Step for GemvCanonicalStep {
             .filter(|r| r.0 != "zero")
             .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
 
-        let is_q8 = self.matrix.0 != scale_ref.0;
-
         vec![Box::new(CompiledGemvCanonicalStep {
             step: self.clone(),
+            matrix_name,
             matrix_idx,
-            scale_bytes_idx,
             vector_x_idx,
             result_y_idx,
             bias_idx,
             residual_idx,
-            is_q8,
         })]
     }
 }
 
 impl CompiledStep for CompiledGemvCanonicalStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         let matrix = fast_bindings
             .get(self.matrix_idx)
             .ok_or(MetalError::InputNotFound("matrix".into()))?;
-
-        let scale_bytes = fast_bindings
-            .get(self.scale_bytes_idx)
-            .ok_or(MetalError::InputNotFound("scale_bytes".into()))?;
         let vector_x = fast_bindings
             .get(self.vector_x_idx)
             .ok_or(MetalError::InputNotFound("vector_x".into()))?;
         let result_y = fast_bindings
             .get(self.result_y_idx)
             .ok_or(MetalError::InputNotFound("result_y".into()))?;
+
+        // Centralized Quantization Binding
+        let policy = crate::foundry::policy::resolve_policy(matrix.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
+
+        let matrix_args = loader
+            .bind(fast_bindings, &self.matrix_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for matrix: {}", e)))?;
+
+        let weights = matrix_args[0].clone();
+        let scale_arg = matrix_args[1].clone();
 
         // Handle Bias
         let (bias, has_bias) = if let Some(idx) = self.bias_idx {
@@ -691,12 +702,14 @@ impl CompiledStep for CompiledGemvCanonicalStep {
             (n, x_k)
         };
 
-        let weights = TensorArg::from_tensor(matrix);
+        // let weights = TensorArg::from_tensor(matrix); // Handled by matrix_args[0]
+        /*
         let scale_arg = if self.is_q8 {
             TensorArg::from_tensor(scale_bytes)
         } else {
             TensorArg::from_tensor(matrix) // Dummy bind to valid buffer
         };
+        */
 
         let args = GemvV2Args {
             weights,
@@ -717,10 +730,9 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         let batch = bindings.get_int_global("m").unwrap_or(self.step.params.batch as usize).max(1) as u32;
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
-        let kernel = if self.is_q8 {
-            get_gemv_v2_kernel_q8(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical)
-        } else {
-            get_gemv_v2_kernel_f16(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical)
+        let kernel = match quantization {
+            Quantization::Q8 => get_gemv_v2_kernel_q8(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical),
+            _ => get_gemv_v2_kernel_f16(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical),
         };
 
         foundry.run(&kernel.bind(args, dispatch))?;
@@ -765,13 +777,12 @@ pub struct GemvColMajorParams {
 #[derive(Debug, Clone)]
 pub struct CompiledGemvColMajorStep {
     pub step: GemvColMajorStep,
+    pub matrix_name: String,
     pub matrix_idx: usize,
-    pub scale_bytes_idx: usize,
     pub vector_x_idx: usize,
     pub result_y_idx: usize,
     pub bias_idx: Option<usize>,
-    pub residual_idx: Option<usize>, // Added field
-    pub is_q8: bool,
+    pub residual_idx: Option<usize>,
 }
 
 #[typetag::serde(name = "GemvColMajor")]
@@ -793,16 +804,16 @@ impl Step for GemvColMajorStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
     }
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let matrix_idx = symbols.get_or_create(bindings.interpolate(self.matrix.0.clone()));
-        let scale_ref = self.scale_bytes.as_ref().unwrap_or(&self.matrix);
-        let scale_bytes_idx = symbols.get_or_create(bindings.interpolate(scale_ref.0.clone()));
+        let matrix_name = bindings.interpolate(self.matrix.0.clone());
+        let matrix_idx = symbols.get_or_create(matrix_name.clone());
+        let _matrix_scales_idx = symbols.get_or_create(format!("{matrix_name}_scales"));
         let vector_x_idx = symbols.get_or_create(bindings.interpolate(self.vector_x.0.clone()));
         let result_y_idx = symbols.get_or_create(bindings.interpolate(self.result_y.0.clone()));
         let bias_idx = self
@@ -816,23 +827,26 @@ impl Step for GemvColMajorStep {
             .filter(|r| r.0 != "zero")
             .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
 
-        let is_q8 = self.matrix.0 != scale_ref.0;
-
         vec![Box::new(CompiledGemvColMajorStep {
             step: self.clone(),
+            matrix_name,
             matrix_idx,
-            scale_bytes_idx,
             vector_x_idx,
             result_y_idx,
             bias_idx,
             residual_idx,
-            is_q8,
         })]
     }
 }
 
 impl CompiledStep for CompiledGemvColMajorStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, _bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        _bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         // Debug flag for granular tracing
         let debug = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
 
@@ -844,15 +858,25 @@ impl CompiledStep for CompiledGemvColMajorStep {
         let matrix = fast_bindings
             .get(self.matrix_idx)
             .ok_or(MetalError::InputNotFound("matrix".into()))?;
-        let scale_bytes = fast_bindings
-            .get(self.scale_bytes_idx)
-            .ok_or(MetalError::InputNotFound("scale_bytes".into()))?;
         let vector_x = fast_bindings
             .get(self.vector_x_idx)
             .ok_or(MetalError::InputNotFound("vector_x".into()))?;
         let result_y = fast_bindings
             .get(self.result_y_idx)
             .ok_or(MetalError::InputNotFound("result_y".into()))?;
+
+        // Centralized Quantization Binding
+        let policy = crate::foundry::policy::resolve_policy(matrix.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
+
+        let matrix_args = loader
+            .bind(fast_bindings, &self.matrix_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for matrix: {}", e)))?;
+
+        let weights = matrix_args[0].clone();
+        let scale_arg = matrix_args[1].clone();
+        let is_q8 = quantization == Quantization::Q8;
 
         if debug {
             eprintln!(
@@ -889,19 +913,18 @@ impl CompiledStep for CompiledGemvColMajorStep {
         };
 
         if debug {
-            eprintln!(
-                "  [GemvColMajor] Dimensions: k_dim={}, n_dim={}, is_q8={}",
-                k_dim, n_dim, self.is_q8
-            );
+            eprintln!("  [GemvColMajor] Dimensions: k_dim={}, n_dim={}, is_q8={}", k_dim, n_dim, is_q8);
             std::io::Write::flush(&mut std::io::stderr()).ok();
         }
 
-        let weights = TensorArg::from_tensor(matrix);
+        // let weights = TensorArg::from_tensor(matrix); // Handled by matrix_args[0]
+        /*
         let scale_arg = if self.is_q8 {
             TensorArg::from_tensor(scale_bytes)
         } else {
             TensorArg::from_tensor(matrix)
         };
+        */
 
         let args = GemvV2Args {
             weights,
@@ -934,17 +957,20 @@ impl CompiledStep for CompiledGemvColMajorStep {
 
         // Use Vectorized strategy for ColMajor as it naturally vectorizes
         // Logic Update: Use Scalar if N > 4096
-        let kernel = if self.is_q8 {
-            if n_dim > 4096 {
-                get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
-            } else {
-                get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+        let kernel = match quantization {
+            Quantization::Q8 => {
+                if n_dim > 4096 {
+                    get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
+                } else {
+                    get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+                }
             }
-        } else {
-            if n_dim > 4096 {
-                get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
-            } else {
-                get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+            _ => {
+                if n_dim > 4096 {
+                    get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
+                } else {
+                    get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+                }
             }
         };
 

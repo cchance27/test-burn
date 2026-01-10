@@ -151,8 +151,13 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
         out_strides,
     )?;
 
-    use metallic::foundry::spec::{CompiledStep, FastBindings, TensorBindings};
-    v2_step.execute(&mut foundry, &FastBindings::default(), &TensorBindings::default())?;
+    use metallic::foundry::spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings};
+    v2_step.execute(
+        &mut foundry,
+        &FastBindings::default(),
+        &TensorBindings::default(),
+        &SymbolTable::new(),
+    )?;
 
     let res_v2 = out_v2.to_vec(&foundry);
 
@@ -290,8 +295,13 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
         (out_v2.strides()[0] as u32, out_v2.strides()[1] as u32),
     )?;
 
-    use metallic::foundry::spec::{CompiledStep, FastBindings, TensorBindings};
-    v2_step.execute(&mut foundry, &FastBindings::default(), &TensorBindings::default())?;
+    use metallic::foundry::spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings};
+    v2_step.execute(
+        &mut foundry,
+        &FastBindings::default(),
+        &TensorBindings::default(),
+        &SymbolTable::new(),
+    )?;
     let res_v2 = out_v2.to_vec(&foundry);
 
     // Context: RoPE + SDPA

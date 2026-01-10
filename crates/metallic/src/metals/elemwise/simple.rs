@@ -4,7 +4,7 @@ use metallic_macros::KernelArgs;
 
 use crate::{
     MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage}, foundry::{
-        Foundry, spec::{CompiledStep, FastBindings, TensorBindings}
+        Foundry, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}
     }, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
@@ -21,7 +21,13 @@ pub struct CompiledSimpleAddStep {
 }
 
 impl CompiledStep for CompiledSimpleAddStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, _bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        _bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         let a = fast_bindings.get(self.a_idx).ok_or(MetalError::InputNotFound("Add: a".into()))?;
         let b = fast_bindings.get(self.b_idx).ok_or(MetalError::InputNotFound("Add: b".into()))?;
         let out = fast_bindings

@@ -350,6 +350,7 @@ impl Step for GemmV2Step {
 
         vec![Box::new(CompiledGemmV2Step {
             a_idx,
+            b_name: b_name.clone(),
             b_idx,
             output_idx,
             b_scales_idx,
@@ -379,6 +380,7 @@ impl Step for GemmV2Step {
 #[derive(Debug, Clone)]
 pub struct CompiledGemmV2Step {
     pub a_idx: usize,
+    pub b_name: String,
     pub b_idx: usize,
     pub output_idx: usize,
     pub b_scales_idx: Option<usize>,
@@ -399,7 +401,13 @@ pub struct CompiledGemmV2Step {
 }
 
 impl CompiledStep for CompiledGemmV2Step {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         // Get tensor args from bindings
         let a = fast_bindings
             .get(self.a_idx)
@@ -427,13 +435,22 @@ impl CompiledStep for CompiledGemmV2Step {
         let has_alpha_beta = self.alpha != 1.0 || self.beta != 0.0 || self.c_idx.is_some();
         let has_bias = self.bias_idx.is_some();
 
-        let is_q8 = b.dtype == crate::tensor::Dtype::U8;
-        let b_quant = if is_q8 { Quantization::Q8 } else { Quantization::F16 };
+        // Resolve Policy and LoaderStage
+        let policy = crate::foundry::policy::resolve_policy(b.dtype.into());
+        let loader = policy.loader_stage();
+
+        // Bind Weights and Scales using LoaderStage
+        let loader_args = loader
+            .bind(fast_bindings, &self.b_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.b_name, e)))?;
+
+        let b_arg = loader_args[0].clone();
+        let b_scales_arg = loader_args[1].clone();
 
         // Get kernel (cached) - uses unified getter for all quant types
         let kernel = get_gemm_kernel(
             Quantization::F16, // A is always F16 (activations)
-            b_quant,
+            loader.quantization_type(),
             self.transpose_a,
             self.transpose_b,
             config,
@@ -442,20 +459,6 @@ impl CompiledStep for CompiledGemmV2Step {
         );
 
         // Build scale arg - Q8 requires real scales (default derived name: "{b}_scales").
-        let b_scales = if is_q8 {
-            let idx = self.b_scales_idx.unwrap_or(self.derived_b_scales_idx);
-            let scales = fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("B scales".into()))?;
-            if scales.dtype != crate::tensor::Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "b_scales must be U8 for Q8 weights (got {:?})",
-                    scales.dtype
-                )));
-            }
-            TensorArg::from_tensor(scales)
-        } else {
-            TensorArg::from_tensor(b) // Dummy for F16 (PolicyF16 ignores scales)
-        };
-
         // Build bias arg - use output as dummy if no bias
         let bias = if let Some(idx) = self.bias_idx {
             let bias_tensor = fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("bias".into()))?;
@@ -474,11 +477,11 @@ impl CompiledStep for CompiledGemmV2Step {
 
         let args = GemmV2Args {
             a: TensorArg::from_tensor(a),
-            b: TensorArg::from_tensor(b),
+            b: b_arg,
             d: TensorArg::from_tensor(output),
             c,
             bias,
-            b_scales,
+            b_scales: b_scales_arg,
             weights_per_block: self.weights_per_block,
             alpha: self.alpha,
             beta: self.beta,

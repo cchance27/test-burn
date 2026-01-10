@@ -7,7 +7,13 @@ use crate::{error::MetalError, foundry::Foundry, types::TensorArg};
 pub trait CompiledStep: Send + Sync + std::fmt::Debug {
     /// Execute this step using fast bindings (Vec lookup) for tensors,
     /// and slow bindings (HashMap) for global variables if needed.
-    fn execute(&self, foundry: &mut Foundry, bindings: &FastBindings, globals: &TensorBindings) -> Result<(), MetalError>;
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &FastBindings,
+        globals: &TensorBindings,
+        symbols: &SymbolTable,
+    ) -> Result<(), MetalError>;
 
     /// Human-readable name for this step (for debugging).
     fn name(&self) -> &'static str {

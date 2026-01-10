@@ -78,7 +78,7 @@ fn run_benchmark_case(
 
     let run_v2 = |f: &mut Foundry| {
         for c_step in &compiled_steps {
-            c_step.execute(f, &fast_bindings, &bindings).unwrap();
+            c_step.execute(f, &fast_bindings, &bindings, &symbols).unwrap();
         }
     };
 

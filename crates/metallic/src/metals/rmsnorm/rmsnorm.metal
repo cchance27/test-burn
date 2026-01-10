@@ -141,47 +141,4 @@ void run_rmsnorm_core(
     );
 }
 
-// ============================================================================
-// Entry Points (for standalone non-fused usage)
-// ============================================================================
-
-// #ifndef FUSED_KERNEL (Moved down)
-#ifndef POLICY_F16_DEFINED
-#define POLICY_F16_DEFINED
-struct PolicyF16 {
-    static ALWAYS_INLINE half load_scale(const device uchar *scales, ulong block_idx) {
-        return 1.0h;
-    }
-
-    template<int N>
-    static ALWAYS_INLINE void load_weights(
-        const device uchar *ptr, 
-        ulong offset, 
-        thread float results[N]
-    ) {
-        const device half *w_ptr = (const device half *)ptr;
-        #pragma unroll
-        for (int i = 0; i < N; ++i) {
-            results[i] = (float)w_ptr[offset + i];
-        }
-    }
-};
-#endif // POLICY_F16_DEFINED
-
-#ifndef FUSED_KERNEL
-[[kernel]] void rmsnorm_kernel_f16(
-    const device uchar *input [[buffer(0)]],
-    const device uchar *scale_bytes [[buffer(1)]],
-    device half *output [[buffer(2)]],
-    const device half *gamma [[buffer(3)]],
-    constant RmsNormParams *params [[buffer(4)]],
-    uint3 gid [[threadgroup_position_in_grid]],
-    uint3 lid [[thread_position_in_threadgroup]]
-) {
-    // Threadgroup memory declared in kernel, passed to template
-    threadgroup float tg_inv_rms;
-    run_rmsnorm_core<PolicyF16>(input, output, gamma, params, scale_bytes, gid, lid, &tg_inv_rms);
-}
-#endif
-
 #endif // RMSNORM_METAL_H

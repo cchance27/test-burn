@@ -1,4 +1,10 @@
+use std::{
+    collections::HashMap, sync::{Arc, Mutex, OnceLock}
+};
+
 use metallic_macros::KernelArgs;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputePipelineState;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -30,12 +36,13 @@ pub struct FusedGemvStep {
 #[derive(Debug, Clone)]
 pub struct CompiledFusedGemvStep {
     pub step: FusedGemvStep,
+    pub weights_name: String,
     pub input_idx: usize,
     pub weights_idx: usize,
-    pub scales_idx: usize,
     pub output_idx: usize,
     pub gamma_idx: usize,
     pub bias_idx: Option<usize>,
+    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 #[derive(Debug, KernelArgs)]
@@ -76,20 +83,22 @@ impl Step for FusedGemvStep {
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
-        let weights_idx = symbols.get_or_create(bindings.interpolate(self.weights.0.clone()));
-        let scales_idx = symbols.get_or_create(bindings.interpolate(self.scales.0.clone()));
+        let weights_name = bindings.interpolate(self.weights.0.clone());
+        let weights_idx = symbols.get_or_create(weights_name.clone());
+        let _weights_scales_idx = symbols.get_or_create(format!("{weights_name}_scales"));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
         let bias_idx = self.bias.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
 
         vec![Box::new(CompiledFusedGemvStep {
             step: self.clone(),
+            weights_name,
             input_idx,
             weights_idx,
-            scales_idx,
             output_idx,
             gamma_idx,
             bias_idx,
+            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
@@ -100,14 +109,24 @@ impl CompiledStep for CompiledFusedGemvStep {
         foundry: &mut Foundry,
         fast_bindings: &crate::foundry::spec::FastBindings,
         bindings: &TensorBindings,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let input = fast_bindings.get(self.input_idx).ok_or(MetalError::InputNotFound("input".into()))?;
-        let weights = fast_bindings
+        let weights_tensor = fast_bindings
             .get(self.weights_idx)
             .ok_or(MetalError::InputNotFound("weights".into()))?;
-        let scales = fast_bindings
-            .get(self.scales_idx)
-            .ok_or(MetalError::InputNotFound("scales".into()))?;
+
+        // Centralized Quantization Binding
+        let policy = crate::foundry::policy::resolve_policy(weights_tensor.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
+
+        let weights_args = loader
+            .bind(fast_bindings, &self.weights_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for weights: {}", e)))?;
+
+        let weights = weights_args[0].clone();
+        let scales = weights_args[1].clone();
         let output = fast_bindings
             .get(self.output_idx)
             .ok_or(MetalError::InputNotFound("output".into()))?;
@@ -125,8 +144,8 @@ impl CompiledStep for CompiledFusedGemvStep {
         let weights_per_block = self.step.weights_per_block.resolve(bindings);
 
         let args = FusedGemvArgs {
-            weights: TensorArg::from_tensor(weights),
-            scales: TensorArg::from_tensor(scales),
+            weights,
+            scales,
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),
             k_dim,
@@ -138,7 +157,7 @@ impl CompiledStep for CompiledFusedGemvStep {
             gamma: TensorArg::from_tensor(gamma),
         };
 
-        let kernel = get_fused_gemv_kernel(self.step.strategy);
+        let kernel = get_fused_gemv_kernel(self.step.strategy, quantization);
         let dispatch = warp_dispatch_config(n_dim);
 
         foundry.run(&kernel.bind(args, dispatch))
@@ -149,15 +168,29 @@ impl CompiledStep for CompiledFusedGemvStep {
     }
 }
 
-fn get_fused_gemv_kernel(_strategy: GemvStrategy) -> &'static CompiledCompoundKernel {
-    Box::leak(Box::new(
-        CompoundKernel::new("fused_gemv_rmsnorm_v2")
+fn get_fused_gemv_kernel(_strategy: GemvStrategy, quant: Quantization) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<Mutex<HashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+    let cache = KERNELS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().unwrap();
+
+    if let Some(kernel) = cache.get(&quant) {
+        return *kernel;
+    }
+
+    let policy_name = quant.policy_name();
+    let kernel_name = format!("fused_gemv_rmsnorm_{}", policy_name.to_lowercase().replace("policy", ""));
+
+    let compiled = Box::leak(Box::new(
+        CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor)) // Defines row_idx, lane_id
             .prologue(RmsNormComputeStage::new(2, 4))
-            .main(VectorizedDotStage::new(Quantization::Q8).with_norm(10, "inv_rms"))
+            .main(VectorizedDotStage::new(quant).with_norm(10, "inv_rms"))
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
             .epilogue(WarpWriteOutputStage::new())
             .compile(),
-    ))
+    ));
+
+    cache.insert(quant, compiled);
+    compiled
 }

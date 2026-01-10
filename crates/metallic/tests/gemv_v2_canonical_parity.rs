@@ -99,7 +99,7 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
         }
     }
     for c_step in compiled_steps {
-        c_step.execute(&mut foundry, &fast_bindings, &bindings).unwrap();
+        c_step.execute(&mut foundry, &fast_bindings, &bindings, &symbols).unwrap();
     }
 
     // Compare

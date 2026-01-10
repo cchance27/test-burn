@@ -71,7 +71,7 @@ fn run_softmax_v2_test(rows: usize, seq_k: usize) {
     }
 
     for c_step in compiled_steps {
-        c_step.execute(&mut foundry, &fast_bindings, &bindings).unwrap();
+        c_step.execute(&mut foundry, &fast_bindings, &bindings, &symbols).unwrap();
     }
 
     // 4. Compare Results with CPU Ref

@@ -43,15 +43,12 @@ pub struct FusedQkvStep {
 pub struct CompiledFusedQkvStep {
     pub step: FusedQkvStep,
     pub input_idx: usize,
+    pub w_q_name: String,
     pub w_q_idx: usize,
-    pub s_q_idx: Option<usize>,
-    pub derived_s_q_idx: usize,
+    pub w_k_name: String,
     pub w_k_idx: usize,
-    pub s_k_idx: Option<usize>,
-    pub derived_s_k_idx: usize,
+    pub w_v_name: String,
     pub w_v_idx: usize,
-    pub s_v_idx: Option<usize>,
-    pub derived_s_v_idx: usize,
     pub out_q_idx: usize,
     pub out_k_idx: usize,
     pub out_v_idx: usize,
@@ -122,7 +119,7 @@ impl Step for FusedQkvStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
@@ -132,18 +129,16 @@ impl Step for FusedQkvStep {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
         let w_q_name = bindings.interpolate(self.w_q.0.clone());
         let w_q_idx = symbols.get_or_create(w_q_name.clone());
-        let s_q_idx = self.s_q.as_ref().map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
-        let derived_s_q_idx = symbols.get_or_create(format!("{w_q_name}_scales"));
+        let _w_q_scales_idx = symbols.get_or_create(format!("{w_q_name}_scales"));
 
         let w_k_name = bindings.interpolate(self.w_k.0.clone());
         let w_k_idx = symbols.get_or_create(w_k_name.clone());
-        let s_k_idx = self.s_k.as_ref().map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
-        let derived_s_k_idx = symbols.get_or_create(format!("{w_k_name}_scales"));
+        let _w_k_scales_idx = symbols.get_or_create(format!("{w_k_name}_scales"));
 
         let w_v_name = bindings.interpolate(self.w_v.0.clone());
         let w_v_idx = symbols.get_or_create(w_v_name.clone());
-        let s_v_idx = self.s_v.as_ref().map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
-        let derived_s_v_idx = symbols.get_or_create(format!("{w_v_name}_scales"));
+        let _w_v_scales_idx = symbols.get_or_create(format!("{w_v_name}_scales"));
+
         let out_q_idx = symbols.get_or_create(bindings.interpolate(self.out_q.0.clone()));
         let out_k_idx = symbols.get_or_create(bindings.interpolate(self.out_k.0.clone()));
         let out_v_idx = symbols.get_or_create(bindings.interpolate(self.out_v.0.clone()));
@@ -171,15 +166,12 @@ impl Step for FusedQkvStep {
         vec![Box::new(CompiledFusedQkvStep {
             step: self.clone(),
             input_idx,
+            w_q_name,
             w_q_idx,
-            s_q_idx,
-            derived_s_q_idx,
+            w_k_name,
             w_k_idx,
-            s_k_idx,
+            w_v_name,
             w_v_idx,
-            s_v_idx,
-            derived_s_k_idx,
-            derived_s_v_idx,
             out_q_idx,
             out_k_idx,
             out_v_idx,
@@ -197,52 +189,33 @@ impl CompiledStep for CompiledFusedQkvStep {
         foundry: &mut Foundry,
         fast_bindings: &crate::foundry::spec::FastBindings,
         bindings: &TensorBindings,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let get = |idx| fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
         let input = get(self.input_idx)?;
-        let w_q = get(self.w_q_idx)?;
-        let is_q8 = w_q.dtype == crate::tensor::Dtype::U8;
-        let s_q = if is_q8 {
-            let idx = self.s_q_idx.unwrap_or(self.derived_s_q_idx);
-            let s = get(idx)?;
-            if s.dtype != crate::tensor::Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "s_q must be U8 for Q8 weights (got {:?})",
-                    s.dtype
-                )));
-            }
-            s
-        } else {
-            w_q
-        };
-        let w_k = get(self.w_k_idx)?;
-        let s_k = if is_q8 {
-            let idx = self.s_k_idx.unwrap_or(self.derived_s_k_idx);
-            let s = get(idx)?;
-            if s.dtype != crate::tensor::Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "s_k must be U8 for Q8 weights (got {:?})",
-                    s.dtype
-                )));
-            }
-            s
-        } else {
-            w_k
-        };
-        let w_v = get(self.w_v_idx)?;
-        let s_v = if is_q8 {
-            let idx = self.s_v_idx.unwrap_or(self.derived_s_v_idx);
-            let s = get(idx)?;
-            if s.dtype != crate::tensor::Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "s_v must be U8 for Q8 weights (got {:?})",
-                    s.dtype
-                )));
-            }
-            s
-        } else {
-            w_v
-        };
+        let w_q_tensor = get(self.w_q_idx)?;
+
+        // Centralized Quantization Binding
+        let policy = crate::foundry::policy::resolve_policy(w_q_tensor.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
+
+        let q_args = loader
+            .bind(fast_bindings, &self.w_q_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for w_q: {}", e)))?;
+        let k_args = loader
+            .bind(fast_bindings, &self.w_k_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for w_k: {}", e)))?;
+        let v_args = loader
+            .bind(fast_bindings, &self.w_v_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for w_v: {}", e)))?;
+
+        let w_q = q_args[0].clone();
+        let s_q = q_args[1].clone();
+        let w_k = k_args[0].clone();
+        let s_k = k_args[1].clone();
+        let w_v = v_args[0].clone();
+        let s_v = v_args[1].clone();
         let out_q = get(self.out_q_idx)?;
         let out_k = get(self.out_k_idx)?;
         let out_v = get(self.out_v_idx)?;
@@ -278,12 +251,12 @@ impl CompiledStep for CompiledFusedQkvStep {
         let m = self.step.m.resolve(bindings).max(1);
 
         let args = FusedQkvArgs {
-            w_q: TensorArg::from_tensor(w_q),
-            s_q: TensorArg::from_tensor(s_q),
-            w_k: TensorArg::from_tensor(w_k),
-            s_k: TensorArg::from_tensor(s_k),
-            w_v: TensorArg::from_tensor(w_v),
-            s_v: TensorArg::from_tensor(s_v),
+            w_q,
+            s_q,
+            w_k,
+            s_k,
+            w_v,
+            s_v,
             input: TensorArg::from_tensor(input),
             k_dim,
             n_dim,
@@ -299,11 +272,7 @@ impl CompiledStep for CompiledFusedQkvStep {
             gamma,
         };
 
-        let kernel = get_fused_qkv_kernel(
-            self.step.strategy,
-            if is_q8 { Quantization::Q8 } else { Quantization::F16 },
-            self.gamma_idx.is_some(),
-        );
+        let kernel = get_fused_qkv_kernel(self.step.strategy, quantization, self.gamma_idx.is_some());
 
         // Manual dispatch to support M dimension (batch)
         const WARPS_PER_TG: usize = 8;

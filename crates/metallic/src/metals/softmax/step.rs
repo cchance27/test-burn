@@ -106,6 +106,7 @@ impl CompiledStep for CompiledSoftmaxV2Step {
         foundry: &mut Foundry,
         fast_bindings: &crate::foundry::spec::FastBindings,
         bindings: &TensorBindings,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let input = fast_bindings
             .get(self.input_idx)

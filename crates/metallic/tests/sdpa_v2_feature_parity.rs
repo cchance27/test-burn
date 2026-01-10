@@ -116,8 +116,13 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
     )?;
 
     // Execute Foundry
-    use metallic::foundry::spec::{CompiledStep, FastBindings, TensorBindings};
-    v2_step.execute(&mut foundry, &FastBindings::default(), &TensorBindings::default())?;
+    use metallic::foundry::spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings};
+    v2_step.execute(
+        &mut foundry,
+        &FastBindings::default(),
+        &TensorBindings::default(),
+        &SymbolTable::new(),
+    )?;
 
     let res_f = out_f.to_vec(&foundry);
 

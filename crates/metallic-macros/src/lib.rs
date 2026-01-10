@@ -1320,7 +1320,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             }
 
             impl #root::foundry::spec::CompiledStep for #compiled_step_name {
-                fn execute(&self, foundry: &mut #root::foundry::Foundry, bindings: & #root::foundry::spec::FastBindings, globals: & #root::foundry::spec::TensorBindings) -> Result<(), #root::error::MetalError> {
+                                fn execute(&self, foundry: &mut #root::foundry::Foundry, bindings: & #root::foundry::spec::FastBindings, globals: & #root::foundry::spec::TensorBindings, _symbols: &#root::foundry::spec::SymbolTable) -> Result<(), #root::error::MetalError> {
                     let kernel = #name {
                         #(#execute_fields,)*
                         ..Default::default()
@@ -1947,6 +1947,7 @@ pub fn derive_compiled_step(input: TokenStream) -> TokenStream {
                 foundry: &mut #root::foundry::Foundry,
                 fast_bindings: &#root::foundry::spec::FastBindings,
                 _bindings: &#root::foundry::spec::TensorBindings,
+                _symbols: &#root::foundry::spec::SymbolTable,
             ) -> Result<(), #root::error::MetalError> {
                 #(#tensor_fetches)*
 

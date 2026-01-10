@@ -18,12 +18,13 @@ fn measure_step(
     compiled: &[Box<dyn CompiledStep>],
     fast_bindings: &FastBindings,
     bindings: &TensorBindings,
+    symbols: &SymbolTable,
     iterations: usize,
 ) -> f64 {
     // Warmup
     for _ in 0..10 {
         for s in compiled {
-            s.execute(foundry, fast_bindings, bindings).unwrap();
+            s.execute(foundry, fast_bindings, bindings, symbols).unwrap();
         }
     }
 
@@ -38,7 +39,7 @@ fn measure_step(
     foundry.start_capture().unwrap();
     for _ in 0..iterations {
         for s in compiled {
-            s.execute(foundry, fast_bindings, bindings).unwrap();
+            s.execute(foundry, fast_bindings, bindings, symbols).unwrap();
         }
     }
     let buf = foundry.end_capture().unwrap();
@@ -93,7 +94,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         }
     }
 
-    let lat_gemm = measure_step(foundry, &compiled_gemm, &fb_gemm, &bindings, iterations);
+    let lat_gemm = measure_step(foundry, &compiled_gemm, &fb_gemm, &bindings, &sym_gemm, iterations);
     println!("GEMM V2:    {:>8.2} us", lat_gemm);
 
     // 2. GEMV V2 (Only valid if M=1)
@@ -122,7 +123,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
             }
         }
 
-        let val = measure_step(foundry, &compiled_gemv, &fb_gemv, &bindings, iterations);
+        let val = measure_step(foundry, &compiled_gemv, &fb_gemv, &bindings, &sym_gemv, iterations);
         println!("GEMV V2:    {:>8.2} us", val);
         Some(val)
     } else {
@@ -158,7 +159,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         }
     }
 
-    let lat_uni = measure_step(foundry, &compiled_uni, &fb_uni, &bindings, iterations);
+    let lat_uni = measure_step(foundry, &compiled_uni, &fb_uni, &bindings, &sym_uni, iterations);
     println!("Unified:    {:>8.2} us", lat_uni);
 
     // Verification

@@ -210,7 +210,13 @@ impl CompiledFusedMhaStep {
 }
 
 impl CompiledStep for CompiledFusedMhaStep {
-    fn execute(&self, foundry: &mut Foundry, _fast_bindings: &FastBindings, _globals: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        _fast_bindings: &FastBindings,
+        _globals: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         // Construct Args
         let args = FusedMhaArgs {
             q: self.q.clone(),
@@ -356,7 +362,13 @@ struct SdpaStandaloneArgs {
 }
 
 impl CompiledStep for CompiledSdpaStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         let q = fast_bindings.get(self.q_idx).ok_or(MetalError::InputNotFound("q".into()))?;
         let k = fast_bindings.get(self.k_idx).ok_or(MetalError::InputNotFound("k".into()))?;
         let v = fast_bindings.get(self.v_idx).ok_or(MetalError::InputNotFound("v".into()))?;
@@ -492,7 +504,7 @@ impl Step for SdpaMaterializedStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
@@ -515,7 +527,13 @@ impl Step for SdpaMaterializedStep {
 }
 
 impl CompiledStep for CompiledSdpaMaterializedStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         // 1. Resolve Inputs
         let q = fast_bindings.get(self.q_idx).ok_or(MetalError::InputNotFound("q".into()))?;
         let k = fast_bindings.get(self.k_idx).ok_or(MetalError::InputNotFound("k".into()))?;

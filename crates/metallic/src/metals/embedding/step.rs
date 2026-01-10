@@ -1,9 +1,15 @@
+use std::sync::{Arc, OnceLock};
+
+use metallic_macros::KernelArgs;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputePipelineState;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MetalError, foundry::{
+    MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::Quantization}, foundry::{
         Foundry, spec::{CompiledStep, FastBindings, Ref, Step, SymbolTable, TensorBindings}
-    }, metals::embedding::{Embedding, EmbeddingParams, EmbeddingParamsResolved, EmbeddingQ8}, tensor::Dtype, types::TensorArg
+    }, metals::embedding::{EmbeddingParams, EmbeddingParamsResolved}, types::{DispatchConfig, GridSize, TensorArg}
 };
 
 /// Manual Embedding Step with runtime dtype dispatch (F16 vs Q8_0).
@@ -20,11 +26,12 @@ pub struct EmbeddingStep {
 
 #[derive(Debug, Clone)]
 pub struct CompiledEmbeddingStep {
+    pub step: EmbeddingStep,
+    pub table_name: String,
     pub table_idx: usize,
-    pub derived_scale_idx: usize,
     pub indices_idx: usize,
     pub output_idx: usize,
-    pub params: EmbeddingParams,
+    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 #[typetag::serde(name = "Embedding")]
@@ -45,7 +52,7 @@ impl Step for EmbeddingStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
         Ok(())
     }
@@ -53,22 +60,29 @@ impl Step for EmbeddingStep {
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let table_name = bindings.interpolate(self.table.0.clone());
         let table_idx = symbols.get_or_create(table_name.clone());
-        let derived_scale_idx = symbols.get_or_create(format!("{table_name}_scales"));
+        let _derived_scale_idx = symbols.get_or_create(format!("{table_name}_scales"));
         let indices_idx = symbols.get_or_create(bindings.interpolate(self.indices.0.clone()));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
 
         vec![Box::new(CompiledEmbeddingStep {
+            step: self.clone(),
+            table_name,
             table_idx,
-            derived_scale_idx,
             indices_idx,
             output_idx,
-            params: self.params.clone(),
+            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
 
 impl CompiledStep for CompiledEmbeddingStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         let table = fast_bindings
             .get(self.table_idx)
             .ok_or_else(|| MetalError::InputNotFound("embedding table".into()))?;
@@ -80,42 +94,140 @@ impl CompiledStep for CompiledEmbeddingStep {
             .ok_or_else(|| MetalError::InputNotFound("embedding output".into()))?;
 
         let params = EmbeddingParamsResolved {
-            d_model: self.params.d_model.resolve(bindings),
-            total_elements: self.params.total_elements.resolve(bindings),
-            vocab_size: self.params.vocab_size.resolve(bindings),
+            d_model: self.step.params.d_model.resolve(bindings),
+            total_elements: self.step.params.total_elements.resolve(bindings),
+            vocab_size: self.step.params.vocab_size.resolve(bindings),
         };
 
-        if table.dtype == Dtype::U8 {
-            let scale_bytes = fast_bindings
-                .get(self.derived_scale_idx)
-                .ok_or_else(|| MetalError::InputNotFound("embedding scale_bytes".into()))?;
-            if scale_bytes.dtype != Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "embedding scale_bytes must be U8 for Q8 table (got {:?})",
-                    scale_bytes.dtype
-                )));
-            }
+        let policy = crate::foundry::policy::resolve_policy(table.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
 
-            let kernel = EmbeddingQ8 {
-                table: TensorArg::from_tensor(table),
-                scale_bytes: TensorArg::from_tensor(scale_bytes),
-                indices: TensorArg::from_tensor(indices),
-                output: TensorArg::from_tensor(output),
-                params,
-            };
-            foundry.run(&kernel)
-        } else {
-            let kernel = Embedding {
-                table: TensorArg::from_tensor(table),
-                indices: TensorArg::from_tensor(indices),
-                output: TensorArg::from_tensor(output),
-                params,
-            };
-            foundry.run(&kernel)
-        }
+        let table_args = loader
+            .bind(fast_bindings, &self.table_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for table: {}", e)))?;
+
+        let args = EmbeddingGenericArgs {
+            table: table_args[0].clone(),
+            scale_bytes: table_args[1].clone(),
+            indices: TensorArg::from_tensor(indices),
+            output: TensorArg::from_tensor(output),
+            params,
+        };
+
+        let kernel = get_embedding_kernel(quantization);
+        let dispatch = DispatchConfig {
+            grid: GridSize::d1(params.total_elements as usize),
+            group: crate::types::ThreadgroupSize::d1(256),
+        };
+
+        foundry.run(&kernel.bind(args, dispatch))?;
+        Ok(())
     }
 
     fn name(&self) -> &'static str {
         "Embedding"
     }
+}
+
+#[derive(Debug, Clone, KernelArgs)]
+pub struct EmbeddingGenericArgs {
+    pub table: TensorArg,
+    pub scale_bytes: TensorArg,
+    pub indices: TensorArg,
+    pub output: TensorArg,
+    pub params: EmbeddingParamsResolved,
+}
+
+#[derive(Debug, Clone, KernelArgs)]
+pub struct EmbeddingStage {
+    pub params: EmbeddingParamsResolved,
+    pub quant: Quantization,
+}
+
+impl Stage for EmbeddingStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec!["embedding/embedding.metal", self.quant.include_path()]
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        vec![
+            BufferArg {
+                name: "table",
+                metal_type: "const device uchar*",
+                buffer_index: 0,
+            },
+            BufferArg {
+                name: "scale_bytes",
+                metal_type: "const device uchar*",
+                buffer_index: 1,
+            },
+            BufferArg {
+                name: "indices",
+                metal_type: "const device uint*",
+                buffer_index: 2,
+            },
+            BufferArg {
+                name: "output",
+                metal_type: "device half*",
+                buffer_index: 3,
+            },
+            BufferArg {
+                name: "params",
+                metal_type: "constant EmbeddingParamsResolved*",
+                buffer_index: 4,
+            },
+        ]
+    }
+
+    fn emit(&self, _input_var: &str) -> (String, String) {
+        let policy_name = self.quant.policy_name();
+        (
+            "output".to_string(),
+            format!(
+                r#"
+    run_embedding_core<{policy_name}>(table, scale_bytes, indices, output, params, gid);
+"#
+            ),
+        )
+    }
+
+    fn struct_defs(&self) -> String {
+        r#"
+struct EmbeddingParamsResolved {
+    uint d_model;
+    uint total_elements;
+    uint vocab_size;
+};
+"#
+        .to_string()
+    }
+}
+
+fn get_embedding_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+    let mut cache = cache.lock().unwrap();
+
+    if let Some(kernel) = cache.get(&quant) {
+        return *kernel;
+    }
+
+    let dummy_params = EmbeddingParamsResolved {
+        d_model: 0,
+        total_elements: 0,
+        vocab_size: 0,
+    };
+    let stage = EmbeddingStage {
+        params: dummy_params,
+        quant,
+    };
+
+    let kernel_name = format!("embedding_standalone_{}", quant.short_name());
+    let compiled = Box::leak(Box::new(
+        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile(),
+    ));
+
+    cache.insert(quant, compiled);
+    compiled
 }

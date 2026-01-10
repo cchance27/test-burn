@@ -89,9 +89,11 @@ fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len:
     .unwrap();
 
     // V2 Loop Closure
-    use metallic::foundry::spec::{CompiledStep, FastBindings, TensorBindings};
+    use metallic::foundry::spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings};
     let run_v2 = |f: &mut Foundry| {
-        v2_step.execute(f, &FastBindings::default(), &TensorBindings::default()).unwrap();
+        v2_step
+            .execute(f, &FastBindings::default(), &TensorBindings::default(), &SymbolTable::new())
+            .unwrap();
     };
 
     // Warmup

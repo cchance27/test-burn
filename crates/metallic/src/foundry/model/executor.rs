@@ -8,10 +8,10 @@ use rustc_hash::FxHashMap;
 use super::builder::WeightBundle;
 use crate::{
     error::MetalError, foundry::{
-        Foundry, spec::{
+        Foundry, policy::{WeightLayout, resolve_policy}, spec::{
             ModelSpec, TensorBindings, compiled::{CompiledStep, FastBindings, SymbolTable}
         }
-    }, gguf::{GGUFDataType, tensor_info::GGUFRawTensor}, types::TensorArg
+    }, types::TensorArg
 };
 
 /// A compiled, ready-to-run model.
@@ -170,15 +170,7 @@ impl CompiledModel {
 
         // 2b. Bind output_weight (LM Head) as NK row-major ([Vocab, DModel]) to enable GEMM prefill.
         if let Some(gguf_name) = tensor_names.resolve("output_weight", None, &available) {
-            self.bind_gguf_tensor_nk_f16(
-                &mut bindings,
-                &mut fast_bindings,
-                foundry,
-                &gguf_name,
-                "output_weight",
-                arch.d_model,
-                arch.vocab_size,
-            )?;
+            self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, "output_weight")?;
         }
 
         // 3. Resolve and bind per-layer weight tensors
@@ -224,27 +216,8 @@ impl CompiledModel {
             for key in nk_layer_keys {
                 if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
                     let logical_name = format!("{key}_{i}");
-                    let (expected_k, expected_n) = match key {
-                        "layer.attn_output" => (arch.d_model, arch.d_model),
-                        "layer.ffn_gate" => (arch.d_model, arch.ff_dim),
-                        "layer.ffn_up" => (arch.d_model, arch.ff_dim),
-                        "layer.ffn_down" => (arch.ff_dim, arch.d_model),
-                        _ => {
-                            return Err(MetalError::InvalidShape(format!(
-                                "Unhandled NK weight key '{}'; update executor NK binding map",
-                                key
-                            )));
-                        }
-                    };
-                    self.bind_gguf_tensor_nk_f16(
-                        &mut bindings,
-                        &mut fast_bindings,
-                        foundry,
-                        &gguf_name,
-                        &logical_name,
-                        expected_k,
-                        expected_n,
-                    )?;
+
+                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
                 }
             }
         }
@@ -580,75 +553,7 @@ impl CompiledModel {
         gguf_name: &str,
         logical_name: &str,
     ) -> Result<(), MetalError> {
-        let gguf = self.weights.gguf_model();
-
-        if let Some(tensor) = gguf.get_tensor(gguf_name) {
-            // Q8 weights: split packed GGUF blocks into (data, scales) buffers and bind both.
-            // This enables Q8-aware kernels to discover `"{name}_scales"` automatically.
-            if tensor.data_type() == GGUFDataType::Q8_0 {
-                return self.bind_gguf_tensor_q8_row_major(bindings, fast_bindings, foundry, gguf_name, logical_name, None, None);
-            }
-
-            let dtype = crate::gguf::model_loader::GGUFModel::map_dtype(tensor.data_type());
-            let dims: Vec<usize> = tensor.dims().to_vec();
-            let strides = crate::foundry::tensor::compute_strides(&dims);
-
-            let (buffer, dtype) = if dtype == crate::tensor::Dtype::F32 {
-                // F32 weights need downcast to F16
-                let view = tensor
-                    .raw_view(&gguf.gguf_file)
-                    .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error: {:?}", e)))?;
-
-                let f32_slice: &[f32] = match view {
-                    GGUFRawTensor::F32(values) => values,
-                    GGUFRawTensor::Bytes(raw, GGUFDataType::F32) => bytemuck::try_cast_slice(raw)
-                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F32 bytes for '{}'", gguf_name)))?,
-                    _ => {
-                        return Err(MetalError::InvalidShape(format!(
-                            "Unsupported GGUF dtype {:?} for F32 downcast: {}",
-                            tensor.data_type(),
-                            gguf_name
-                        )));
-                    }
-                };
-
-                let mut f16_data: Vec<f16> = Vec::with_capacity(f32_slice.len());
-                for &v in f32_slice {
-                    f16_data.push(f16::from_f32(v));
-                }
-
-                use objc2_metal::MTLDevice;
-                let byte_size = f16_data.len() * std::mem::size_of::<f16>();
-                let buffer = foundry
-                    .device
-                    .0
-                    .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
-                    .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, gguf_name)))?;
-
-                unsafe {
-                    use objc2_metal::MTLBuffer;
-                    let ptr = buffer.contents().as_ptr() as *mut f16;
-                    std::ptr::copy_nonoverlapping(f16_data.as_ptr(), ptr, f16_data.len());
-                }
-
-                (crate::types::MetalBuffer(buffer), crate::tensor::Dtype::F16)
-            } else {
-                let buffer = tensor
-                    .materialize_to_device(&gguf.gguf_file, &foundry.device)
-                    .map_err(|e| MetalError::InvalidShape(format!("GGUF materialization error: {:?}", e)))?;
-                (buffer, dtype)
-            };
-
-            let tensor_arg = TensorArg::from_buffer(buffer, dtype, dims, strides);
-
-            // Bind under both gguf_name (for direct access) and logical_name (for DSL refs)
-            self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg.clone());
-            self.insert_binding(bindings, fast_bindings, logical_name.to_string(), tensor_arg);
-
-            tracing::trace!("Bound '{}' -> '{}'", logical_name, gguf_name);
-        }
-
-        Ok(())
+        self.bind_gguf_tensor_with_layout(bindings, fast_bindings, foundry, gguf_name, logical_name, WeightLayout::RowMajor)
     }
 
     /// Bind a GGUF tensor to bindings in canonical k-block-major layout.
@@ -663,637 +568,49 @@ impl CompiledModel {
         expected_k: usize,
         expected_n: usize,
     ) -> Result<(), MetalError> {
-        const WEIGHTS_PER_BLOCK: usize = 32;
-
-        let gguf = self.weights.gguf_model();
-
-        if let Some(tensor) = gguf.get_tensor(gguf_name) {
-            if tensor.data_type() == GGUFDataType::Q8_0 {
-                return self.bind_gguf_tensor_q8_canonical_data_row_scales(
-                    bindings,
-                    fast_bindings,
-                    foundry,
-                    gguf_name,
-                    logical_name,
-                    expected_k,
-                    expected_n,
-                );
-            }
-
-            let dims: Vec<usize> = tensor.dims().to_vec();
-
-            if dims.len() != 2 {
-                // Non-2D tensors fall back to regular binding
-                return self.bind_gguf_tensor(bindings, fast_bindings, foundry, gguf_name, logical_name);
-            }
-
-            if expected_k == 0 || expected_n == 0 {
-                return Err(MetalError::InvalidShape(format!(
-                    "Canonical weight '{}' expects non-zero (K,N), got K={} N={}",
-                    gguf_name, expected_k, expected_n
-                )));
-            }
-
-            // GGUF weights can be stored as either NK or KN depending on metadata, and GGUF dims
-            // can appear in either order. We avoid guessing by using expected (K,N) from the model arch.
-            let layout_hint = gguf.layout_hint();
-
-            // Validate GGUF dims match expected (up to ordering).
-            if !((dims[0] == expected_k && dims[1] == expected_n) || (dims[0] == expected_n && dims[1] == expected_k)) {
-                return Err(MetalError::InvalidShape(format!(
-                    "Canonical weight '{}' dims {:?} do not match expected (K,N)=({}, {})",
-                    gguf_name, dims, expected_k, expected_n
-                )));
-            }
-
-            let blocks_per_k = (expected_k + WEIGHTS_PER_BLOCK - 1) / WEIGHTS_PER_BLOCK;
-            let canonical_len = blocks_per_k * expected_n * WEIGHTS_PER_BLOCK;
-
-            // Load source data as F16
-            let view = tensor
-                .raw_view(&gguf.gguf_file)
-                .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error: {:?}", e)))?;
-
-            let src_f16: Vec<f16> = match view {
-                GGUFRawTensor::F32(values) => values.iter().map(|&v| f16::from_f32(v)).collect(),
-                GGUFRawTensor::F16(values) => values.to_vec(),
-                GGUFRawTensor::Bytes(raw, GGUFDataType::F32) => {
-                    let f32_slice: &[f32] = bytemuck::try_cast_slice(raw)
-                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F32 bytes for '{}'", gguf_name)))?;
-                    f32_slice.iter().map(|&v| f16::from_f32(v)).collect()
-                }
-                GGUFRawTensor::Bytes(raw, GGUFDataType::F16) => {
-                    let f16_slice: &[f16] = bytemuck::try_cast_slice(raw)
-                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F16 bytes for '{}'", gguf_name)))?;
-                    f16_slice.to_vec()
-                }
-                _ => {
-                    return Err(MetalError::InvalidShape(format!(
-                        "Unsupported GGUF dtype {:?} for canonical conversion: {}",
-                        tensor.data_type(),
-                        gguf_name
-                    )));
-                }
-            };
-
-            // Convert NK row-major to canonical k-block-major layout
-            // Layout: for each k-block, store N columns of WEIGHTS_PER_BLOCK elements each
-            let mut canonical_data = vec![f16::ZERO; canonical_len];
-
-            for out_idx in 0..expected_n {
-                for block in 0..blocks_per_k {
-                    let k_base = block * WEIGHTS_PER_BLOCK;
-                    let dst_base = (block * expected_n + out_idx) * WEIGHTS_PER_BLOCK;
-                    let remaining = expected_k.saturating_sub(k_base);
-
-                    if remaining >= WEIGHTS_PER_BLOCK {
-                        for i in 0..WEIGHTS_PER_BLOCK {
-                            let k_idx = k_base + i;
-                            let src_idx = match layout_hint {
-                                // NK row-major: rows=N, cols=K
-                                crate::gguf::model_loader::GGUFLayoutHint::Nk => out_idx * expected_k + k_idx,
-                                // KN row-major: rows=K, cols=N
-                                crate::gguf::model_loader::GGUFLayoutHint::Kn => k_idx * expected_n + out_idx,
-                            };
-                            canonical_data[dst_base + i] = src_f16[src_idx];
-                        }
-                    } else if remaining > 0 {
-                        for i in 0..remaining {
-                            let k_idx = k_base + i;
-                            let src_idx = match layout_hint {
-                                crate::gguf::model_loader::GGUFLayoutHint::Nk => out_idx * expected_k + k_idx,
-                                crate::gguf::model_loader::GGUFLayoutHint::Kn => k_idx * expected_n + out_idx,
-                            };
-                            canonical_data[dst_base + i] = src_f16[src_idx];
-                        }
-                        // Padding already zero-initialized
-                    }
-                }
-            }
-
-            // Allocate GPU buffer
-            use objc2_metal::MTLDevice;
-            let byte_size = canonical_data.len() * std::mem::size_of::<f16>();
-            let buffer = foundry
-                .device
-                .0
-                .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
-                .ok_or_else(|| {
-                    MetalError::OperationFailed(format!("Failed to allocate {} bytes for canonical '{}'", byte_size, gguf_name))
-                })?;
-
-            unsafe {
-                use objc2_metal::MTLBuffer;
-                let ptr = buffer.contents().as_ptr() as *mut f16;
-                std::ptr::copy_nonoverlapping(canonical_data.as_ptr(), ptr, canonical_data.len());
-            }
-
-            // Use canonical layout dims: [canonical_len] (flat buffer)
-            let tensor_arg = TensorArg::from_buffer(
-                crate::types::MetalBuffer(buffer),
-                crate::tensor::Dtype::F16,
-                vec![canonical_len],
-                vec![1],
-            );
-
-            self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg.clone());
-            self.insert_binding(bindings, fast_bindings, logical_name.to_string(), tensor_arg);
-
-            tracing::trace!(
-                "Bound canonical '{}' -> '{}' (K={}, N={}, blocks={}, layout_hint={:?})",
-                logical_name,
-                gguf_name,
-                expected_k,
-                expected_n,
-                blocks_per_k,
-                layout_hint
-            );
-        }
-
-        Ok(())
+        return self.bind_gguf_tensor_with_layout(
+            bindings,
+            fast_bindings,
+            foundry,
+            gguf_name,
+            logical_name,
+            WeightLayout::Canonical { expected_k, expected_n },
+        );
     }
 
-    /// Bind a GGUF 2D weight tensor as contiguous NK row-major F16 ([N, K]).
-    ///
-    /// This is the most GEMM-friendly layout for transformer weights that are stored as
-    /// [out_features, in_features]. It also enables GEMV V2 RowMajor for decode.
-    ///
-    /// If the GGUF tensor is not 2D, this falls back to `bind_gguf_tensor`.
-    fn bind_gguf_tensor_nk_f16(
+    /// Helper to bind a GGUF tensor using the new QuantizationPolicy system.
+    fn bind_gguf_tensor_with_layout(
         &self,
         bindings: &mut TensorBindings,
         fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         gguf_name: &str,
         logical_name: &str,
-        expected_k: usize,
-        expected_n: usize,
+        layout: WeightLayout,
     ) -> Result<(), MetalError> {
-        use half::f16;
-        use objc2_metal::MTLDevice;
-
         let gguf = self.weights.gguf_model();
-
-        if let Some(tensor) = gguf.get_tensor(gguf_name) {
-            if tensor.data_type() == GGUFDataType::Q8_0 {
-                return self.bind_gguf_tensor_q8_row_major(
-                    bindings,
-                    fast_bindings,
-                    foundry,
-                    gguf_name,
-                    logical_name,
-                    Some(expected_k),
-                    Some(expected_n),
-                );
-            }
-
-            let dims: Vec<usize> = tensor.dims().to_vec();
-
-            if dims.len() != 2 {
-                return self.bind_gguf_tensor(bindings, fast_bindings, foundry, gguf_name, logical_name);
-            }
-
-            if expected_k == 0 || expected_n == 0 {
-                return Err(MetalError::InvalidShape(format!(
-                    "NK weight '{}' expects non-zero (K,N), got K={} N={}",
-                    gguf_name, expected_k, expected_n
-                )));
-            }
-
-            // Validate GGUF dims match expected (up to ordering).
-            if !((dims[0] == expected_k && dims[1] == expected_n) || (dims[0] == expected_n && dims[1] == expected_k)) {
-                return Err(MetalError::InvalidShape(format!(
-                    "NK weight '{}' dims {:?} do not match expected (K,N)=({}, {})",
-                    gguf_name, dims, expected_k, expected_n
-                )));
-            }
-
-            let layout_hint = gguf.layout_hint();
-
-            // Load source data as F16
-            let view = tensor
-                .raw_view(&gguf.gguf_file)
-                .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error: {:?}", e)))?;
-
-            let src_f16: Vec<f16> = match view {
-                GGUFRawTensor::F32(values) => values.iter().map(|&v| f16::from_f32(v)).collect(),
-                GGUFRawTensor::F16(values) => values.to_vec(),
-                GGUFRawTensor::Bytes(raw, GGUFDataType::F32) => {
-                    let f32_slice: &[f32] = bytemuck::try_cast_slice(raw)
-                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F32 bytes for '{}'", gguf_name)))?;
-                    f32_slice.iter().map(|&v| f16::from_f32(v)).collect()
-                }
-                GGUFRawTensor::Bytes(raw, GGUFDataType::F16) => {
-                    let f16_slice: &[f16] = bytemuck::try_cast_slice(raw)
-                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F16 bytes for '{}'", gguf_name)))?;
-                    f16_slice.to_vec()
-                }
-                _ => {
-                    return Err(MetalError::InvalidShape(format!(
-                        "Unsupported GGUF dtype {:?} for NK conversion: {}",
-                        tensor.data_type(),
-                        gguf_name
-                    )));
-                }
-            };
-
-            let expected_len = expected_n
-                .checked_mul(expected_k)
-                .ok_or_else(|| MetalError::InvalidShape(format!("NK weight '{}' dims overflow", gguf_name)))?;
-
-            if src_f16.len() != expected_len {
-                return Err(MetalError::InvalidShape(format!(
-                    "NK weight '{}' len {} does not match expected N*K={}",
-                    gguf_name,
-                    src_f16.len(),
-                    expected_len
-                )));
-            }
-
-            // Ensure NK row-major ([N, K]) contiguous, regardless of GGUF layout hint.
-            let nk_data: Vec<f16> = match layout_hint {
-                crate::gguf::model_loader::GGUFLayoutHint::Nk => src_f16,
-                crate::gguf::model_loader::GGUFLayoutHint::Kn => {
-                    let mut nk = vec![f16::ZERO; expected_len];
-                    for n in 0..expected_n {
-                        for k in 0..expected_k {
-                            nk[n * expected_k + k] = src_f16[k * expected_n + n];
-                        }
-                    }
-                    nk
-                }
-            };
-
-            let byte_size = nk_data.len() * std::mem::size_of::<f16>();
-            let buffer = foundry
-                .device
-                .0
-                .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
-                .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for NK '{}'", byte_size, gguf_name)))?;
-
-            unsafe {
-                use objc2_metal::MTLBuffer;
-                let ptr = buffer.contents().as_ptr() as *mut f16;
-                std::ptr::copy_nonoverlapping(nk_data.as_ptr(), ptr, nk_data.len());
-            }
-
-            let tensor_arg = TensorArg::from_buffer(
-                crate::types::MetalBuffer(buffer),
-                crate::tensor::Dtype::F16,
-                vec![expected_n, expected_k],
-                vec![expected_k, 1],
-            );
-
-            // Bind both GGUF and logical names to this NK buffer for convenience.
-            self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg.clone());
-            self.insert_binding(bindings, fast_bindings, logical_name.to_string(), tensor_arg);
-
-            tracing::trace!(
-                "Bound NK '{}' -> '{}' (K={}, N={}, layout_hint={:?})",
-                logical_name,
-                gguf_name,
-                expected_k,
-                expected_n,
-                layout_hint
-            );
-        }
-
-        Ok(())
-    }
-
-    #[inline]
-    fn scales_binding_name(name: &str) -> String {
-        format!("{name}_scales")
-    }
-
-    /// Bind a GGUF Q8_0 2D weight tensor as split (data, scales) buffers in dense [N, K] order.
-    ///
-    /// - `data` is a byte-per-weight int8 array (stored as `u8` bytes on GPU).
-    /// - `scales` is a contiguous byte array where each block scale is 2 bytes (half), stored row-major:
-    ///   `scale_idx = row * blocks_per_k + block`.
-    ///
-    /// This matches Foundry V2 GEMV/GEMM Q8 kernels (PolicyQ8) and Fused FFN stages.
-    fn bind_gguf_tensor_q8_row_major(
-        &self,
-        bindings: &mut TensorBindings,
-        fast_bindings: &mut FastBindings,
-        foundry: &mut Foundry,
-        gguf_name: &str,
-        logical_name: &str,
-        expected_k: Option<usize>,
-        expected_n: Option<usize>,
-    ) -> Result<(), MetalError> {
-        use objc2_metal::{MTLBuffer as _, MTLDevice};
-
-        let gguf = self.weights.gguf_model();
-        let tensor = gguf
+        let tensor_info = gguf
             .get_tensor(gguf_name)
-            .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", gguf_name)))?;
+            .ok_or_else(|| MetalError::InputNotFound(format!("Tensor '{}' not found in GGUF", gguf_name)))?;
 
-        let dims: Vec<usize> = tensor.dims().to_vec();
-        if dims.len() != 2 {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 tensor '{}' must be 2D (got dims {:?})",
-                gguf_name, dims
-            )));
-        }
+        let policy = resolve_policy(tensor_info.data_type());
 
-        if gguf.layout_hint() != crate::gguf::model_loader::GGUFLayoutHint::Nk {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 tensor '{}' requires GGUF layout Nk (got {:?})",
-                gguf_name,
-                gguf.layout_hint()
-            )));
-        }
+        // Load weights using the policy (handles Q8 splitting, F32 downcast, canonical, etc.)
+        let loaded_tensors = policy
+            .load_weights(foundry, gguf, gguf_name, logical_name, layout)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy load failed for '{}': {}", gguf_name, e)))?;
 
-        const WPB: usize = crate::tensor::Q8_0_WEIGHTS_PER_BLOCK;
-        const BLOCK_BYTES: usize = crate::tensor::Q8_0_BLOCK_SIZE_BYTES;
-        const SCALE_BYTES: usize = crate::tensor::quantized::Q8_0_SCALE_BYTES_PER_BLOCK;
+        for (name, tensor_arg) in loaded_tensors {
+            self.insert_binding(bindings, fast_bindings, name.clone(), tensor_arg.clone());
 
-        let view = tensor
-            .raw_view(&gguf.gguf_file)
-            .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error: {:?}", e)))?;
-        let raw = match view {
-            GGUFRawTensor::Bytes(bytes, GGUFDataType::Q8_0) => bytes,
-            _ => {
-                return Err(MetalError::InvalidShape(format!(
-                    "Tensor '{}' is not Q8_0 bytes (got {:?})",
-                    gguf_name,
-                    tensor.data_type()
-                )));
-            }
-        };
-
-        let (n_dim, k_dim) = match (expected_n, expected_k) {
-            (Some(n), Some(k)) => {
-                if k == 0 || n == 0 {
-                    return Err(MetalError::InvalidShape(format!(
-                        "Q8_0 tensor '{}' expects non-zero dims (N,K), got N={} K={}",
-                        gguf_name, n, k
-                    )));
-                }
-                if !((dims[0] == n && dims[1] == k) || (dims[0] == k && dims[1] == n)) {
-                    return Err(MetalError::InvalidShape(format!(
-                        "Q8_0 tensor '{}' dims {:?} do not match expected (N,K)=({}, {})",
-                        gguf_name, dims, n, k
-                    )));
-                }
-                (n, k)
-            }
-            _ => {
-                // Infer (N,K) ordering by matching raw byte length against both hypotheses.
-                let cand0 = if dims[1] != 0 && dims[1] % WPB == 0 {
-                    let blocks_per_k = dims[1] / WPB;
-                    dims[0].checked_mul(blocks_per_k).and_then(|v| v.checked_mul(BLOCK_BYTES))
-                } else {
-                    None
-                };
-                let cand1 = if dims[0] != 0 && dims[0] % WPB == 0 {
-                    let blocks_per_k = dims[0] / WPB;
-                    dims[1].checked_mul(blocks_per_k).and_then(|v| v.checked_mul(BLOCK_BYTES))
-                } else {
-                    None
-                };
-
-                match (cand0 == Some(raw.len()), cand1 == Some(raw.len())) {
-                    (true, false) => (dims[0], dims[1]),
-                    (false, true) => (dims[1], dims[0]),
-                    (true, true) => (dims[0], dims[1]),
-                    (false, false) => {
-                        return Err(MetalError::InvalidShape(format!(
-                            "Q8_0 tensor '{}' dims {:?} do not match raw byte length {} (no valid (N,K) interpretation)",
-                            gguf_name,
-                            dims,
-                            raw.len()
-                        )));
-                    }
-                }
-            }
-        };
-
-        if k_dim % WPB != 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 tensor '{}' requires K divisible by {} for dense [N,K] Q8 binding (K={})",
-                gguf_name, WPB, k_dim
-            )));
-        }
-
-        let blocks_per_k = k_dim / WPB;
-        let blocks = n_dim
-            .checked_mul(blocks_per_k)
-            .ok_or_else(|| MetalError::InvalidShape(format!("Q8_0 tensor '{}' blocks overflow", gguf_name)))?;
-        let expected_raw_bytes = blocks
-            .checked_mul(BLOCK_BYTES)
-            .ok_or_else(|| MetalError::InvalidShape(format!("Q8_0 tensor '{}' raw bytes overflow", gguf_name)))?;
-
-        if raw.len() != expected_raw_bytes {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 tensor '{}' has {} bytes; expected {} for (N,K)=({}, {})",
-                gguf_name,
-                raw.len(),
-                expected_raw_bytes,
-                n_dim,
-                k_dim
-            )));
-        }
-
-        let data_len = blocks * WPB;
-        let scales_len = blocks * SCALE_BYTES;
-
-        let data_buffer = foundry
-            .device
-            .0
-            .newBufferWithLength_options(data_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-            .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for Q8 data '{}'", data_len, gguf_name)))?;
-        let scales_buffer = foundry
-            .device
-            .0
-            .newBufferWithLength_options(scales_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-            .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for Q8 scales '{}'", scales_len, gguf_name)))?;
-
-        unsafe {
-            let data_ptr = data_buffer.contents().as_ptr() as *mut u8;
-            let scales_ptr = scales_buffer.contents().as_ptr() as *mut u8;
-
-            // Raw is in row-major block order for Nk layout: (row, block).
-            for (block_idx, chunk) in raw.chunks_exact(BLOCK_BYTES).enumerate() {
-                std::ptr::copy_nonoverlapping(chunk.as_ptr(), scales_ptr.add(block_idx * SCALE_BYTES), SCALE_BYTES);
-                std::ptr::copy_nonoverlapping(chunk.as_ptr().add(SCALE_BYTES), data_ptr.add(block_idx * WPB), WPB);
+            if name == logical_name {
+                // Also alias the GGUF name to the same tensor arg
+                self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg);
+                tracing::trace!("Bound '{}' -> '{}' using policy {}", logical_name, gguf_name, policy.name());
+            } else {
+                tracing::trace!("Bound derived '{}' using policy {}", name, policy.name());
             }
         }
-
-        let weights_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(data_buffer),
-            crate::tensor::Dtype::U8,
-            vec![n_dim, k_dim],
-            vec![k_dim, 1],
-        );
-        let scales_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(scales_buffer),
-            crate::tensor::Dtype::U8,
-            vec![scales_len],
-            vec![1],
-        );
-
-        // Bind both GGUF and logical names.
-        self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), weights_arg.clone());
-        self.insert_binding(bindings, fast_bindings, logical_name.to_string(), weights_arg);
-
-        let gguf_scales = Self::scales_binding_name(gguf_name);
-        let logical_scales = Self::scales_binding_name(logical_name);
-        self.insert_binding(bindings, fast_bindings, gguf_scales, scales_arg.clone());
-        self.insert_binding(bindings, fast_bindings, logical_scales, scales_arg);
-
-        Ok(())
-    }
-
-    /// Bind a GGUF Q8_0 2D weight tensor in canonical blocked layout for weights data (for FusedQkv),
-    /// while keeping scales in row-major order.
-    ///
-    /// - `data` is written in canonical order: blocks are grouped by K-block, then row.
-    /// - `scales` is kept row-major: row then block.
-    fn bind_gguf_tensor_q8_canonical_data_row_scales(
-        &self,
-        bindings: &mut TensorBindings,
-        fast_bindings: &mut FastBindings,
-        foundry: &mut Foundry,
-        gguf_name: &str,
-        logical_name: &str,
-        expected_k: usize,
-        expected_n: usize,
-    ) -> Result<(), MetalError> {
-        use objc2_metal::{MTLBuffer as _, MTLDevice};
-
-        let gguf = self.weights.gguf_model();
-        let tensor = gguf
-            .get_tensor(gguf_name)
-            .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", gguf_name)))?;
-
-        let dims: Vec<usize> = tensor.dims().to_vec();
-        if dims.len() != 2 {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 canonical tensor '{}' must be 2D (got dims {:?})",
-                gguf_name, dims
-            )));
-        }
-
-        if gguf.layout_hint() != crate::gguf::model_loader::GGUFLayoutHint::Nk {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 canonical tensor '{}' requires GGUF layout Nk (got {:?})",
-                gguf_name,
-                gguf.layout_hint()
-            )));
-        }
-
-        if !((dims[0] == expected_n && dims[1] == expected_k) || (dims[0] == expected_k && dims[1] == expected_n)) {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 canonical tensor '{}' dims {:?} do not match expected (N,K)=({}, {})",
-                gguf_name, dims, expected_n, expected_k
-            )));
-        }
-
-        const WPB: usize = crate::tensor::Q8_0_WEIGHTS_PER_BLOCK;
-        const BLOCK_BYTES: usize = crate::tensor::Q8_0_BLOCK_SIZE_BYTES;
-        const SCALE_BYTES: usize = crate::tensor::quantized::Q8_0_SCALE_BYTES_PER_BLOCK;
-
-        if expected_k == 0 || expected_n == 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 canonical tensor '{}' expects non-zero (K,N), got K={} N={}",
-                gguf_name, expected_k, expected_n
-            )));
-        }
-
-        if expected_k % WPB != 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 canonical tensor '{}' requires K divisible by {} (K={})",
-                gguf_name, WPB, expected_k
-            )));
-        }
-
-        let blocks_per_k = expected_k / WPB;
-        let blocks = expected_n
-            .checked_mul(blocks_per_k)
-            .ok_or_else(|| MetalError::InvalidShape(format!("Q8_0 canonical tensor '{}' blocks overflow", gguf_name)))?;
-        let expected_raw_bytes = blocks
-            .checked_mul(BLOCK_BYTES)
-            .ok_or_else(|| MetalError::InvalidShape(format!("Q8_0 canonical tensor '{}' raw bytes overflow", gguf_name)))?;
-
-        let view = tensor
-            .raw_view(&gguf.gguf_file)
-            .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error: {:?}", e)))?;
-        let raw = match view {
-            GGUFRawTensor::Bytes(bytes, GGUFDataType::Q8_0) => bytes,
-            _ => {
-                return Err(MetalError::InvalidShape(format!(
-                    "Tensor '{}' is not Q8_0 bytes (got {:?})",
-                    gguf_name,
-                    tensor.data_type()
-                )));
-            }
-        };
-
-        if raw.len() != expected_raw_bytes {
-            return Err(MetalError::InvalidShape(format!(
-                "Q8_0 canonical tensor '{}' has {} bytes; expected {} for (K,N)=({}, {})",
-                gguf_name,
-                raw.len(),
-                expected_raw_bytes,
-                expected_k,
-                expected_n
-            )));
-        }
-
-        let data_len = blocks * WPB;
-        let scales_len = blocks * SCALE_BYTES;
-
-        let data_buffer = foundry
-            .device
-            .0
-            .newBufferWithLength_options(data_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-            .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for Q8 data '{}'", data_len, gguf_name)))?;
-        let scales_buffer = foundry
-            .device
-            .0
-            .newBufferWithLength_options(scales_len, objc2_metal::MTLResourceOptions::StorageModeShared)
-            .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for Q8 scales '{}'", scales_len, gguf_name)))?;
-
-        unsafe {
-            let data_ptr = data_buffer.contents().as_ptr() as *mut u8;
-            let scales_ptr = scales_buffer.contents().as_ptr() as *mut u8;
-
-            // Raw is in row-major block order (row, block). Reorder weights blocks to (block, row).
-            for (src_block, chunk) in raw.chunks_exact(BLOCK_BYTES).enumerate() {
-                let row = src_block / blocks_per_k;
-                let block = src_block - row * blocks_per_k;
-
-                // Scales remain row-major (same order as raw blocks).
-                std::ptr::copy_nonoverlapping(chunk.as_ptr(), scales_ptr.add(src_block * SCALE_BYTES), SCALE_BYTES);
-
-                let dst_block = block * expected_n + row;
-                std::ptr::copy_nonoverlapping(chunk.as_ptr().add(SCALE_BYTES), data_ptr.add(dst_block * WPB), WPB);
-            }
-        }
-
-        let weights_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(data_buffer),
-            crate::tensor::Dtype::U8,
-            vec![data_len],
-            vec![1],
-        );
-        let scales_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(scales_buffer),
-            crate::tensor::Dtype::U8,
-            vec![scales_len],
-            vec![1],
-        );
-
-        self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), weights_arg.clone());
-        self.insert_binding(bindings, fast_bindings, logical_name.to_string(), weights_arg);
-
-        let gguf_scales = Self::scales_binding_name(gguf_name);
-        let logical_scales = Self::scales_binding_name(logical_name);
-        self.insert_binding(bindings, fast_bindings, gguf_scales, scales_arg.clone());
-        self.insert_binding(bindings, fast_bindings, logical_scales, scales_arg);
 
         Ok(())
     }
@@ -1521,7 +838,7 @@ impl CompiledModel {
         }
 
         for step in &self.compiled_steps {
-            step.execute(foundry, fast_bindings, bindings)?;
+            step.execute(foundry, fast_bindings, bindings, &self.symbol_table)?;
         }
 
         if !nested_capture {

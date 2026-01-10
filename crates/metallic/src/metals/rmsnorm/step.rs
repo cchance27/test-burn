@@ -3,11 +3,12 @@ use std::sync::{Arc, OnceLock};
 use metallic_macros::KernelArgs;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::MTLComputePipelineState;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{RmsNorm, RmsNormParamsResolved};
 use crate::{
-    MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel}, foundry::{
+    MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, stages::Quantization}, foundry::{
         Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
     }, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
@@ -51,14 +52,16 @@ impl Step for RmsNormStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
     }
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
+        let input_name = bindings.interpolate(self.input.0.clone());
+        let input_idx = symbols.get_or_create(input_name.clone());
+        let _input_scales_idx = symbols.get_or_create(format!("{input_name}_scales"));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
 
@@ -73,7 +76,13 @@ impl Step for RmsNormStep {
 }
 
 impl CompiledStep for CompiledRmsNormStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, _bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        _symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         let input = fast_bindings.get(self.input_idx).ok_or(MetalError::InputNotFound("input".into()))?;
 
         let output = fast_bindings
@@ -91,14 +100,22 @@ impl CompiledStep for CompiledRmsNormStep {
             _ => input.dims.iter().product::<usize>() as u32,
         };
 
+        let policy = crate::foundry::policy::resolve_policy(input.dtype.into());
+        let loader = policy.loader_stage();
+        let quantization = loader.quantization_type();
+
+        let input_args = loader
+            .bind(fast_bindings, &bindings.interpolate(self.step.input.0.clone()), _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for input: {}", e)))?;
+
         let params = RmsNormParamsResolved {
             feature_dim,
             total_elements,
         };
 
         let args = RmsNorm {
-            input: TensorArg::from_tensor(input),
-            scale_bytes: TensorArg::from_tensor(input), // F16 uses input as dummy/cast for scale
+            input: input_args[0].clone(),
+            scale_bytes: input_args[1].clone(),
             output: TensorArg::from_tensor(output),
             gamma: TensorArg::from_tensor(gamma),
             params,
@@ -111,7 +128,7 @@ impl CompiledStep for CompiledRmsNormStep {
             group: ThreadgroupSize::d1(256), // matches THREADS_PER_ROW constant in kernel
         };
 
-        let kernel = get_rmsnorm_kernel();
+        let kernel = get_rmsnorm_kernel(quantization);
 
         let pipeline = if let Some(p) = self.pipeline.get() {
             p
@@ -136,11 +153,12 @@ impl CompiledStep for CompiledRmsNormStep {
 #[derive(Debug, Clone, KernelArgs)]
 pub struct RmsNormStandaloneStage {
     pub params: RmsNormParamsResolved,
+    pub quant: Quantization,
 }
 
 impl crate::compound::Stage for RmsNormStandaloneStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec!["rmsnorm/rmsnorm.metal"]
+        vec!["rmsnorm/rmsnorm.metal", self.quant.include_path()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -174,15 +192,15 @@ impl crate::compound::Stage for RmsNormStandaloneStage {
     }
 
     fn emit(&self, _input_var: &str) -> (String, String) {
+        let policy_name = self.quant.policy_name();
         (
             "output_ptr".to_string(),
-            r#"
+            format!(
+                r#"
     // RmsNormStandaloneStage
-    // Using PolicyF16 for now
-    
     threadgroup float tg_inv_rms;
     
-    run_rmsnorm_core<PolicyF16>(
+    run_rmsnorm_core<{policy_name}>(
         input,
         output,
         gamma,
@@ -193,7 +211,7 @@ impl crate::compound::Stage for RmsNormStandaloneStage {
         &tg_inv_rms
     );
             "#
-            .to_string(),
+            ),
         )
     }
 
@@ -208,18 +226,29 @@ struct RmsNormParams {
     }
 }
 
-fn get_rmsnorm_kernel() -> &'static CompiledCompoundKernel {
-    static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-    KERNEL.get_or_init(|| {
-        let dummy_params = RmsNormParamsResolved {
-            feature_dim: 0,
-            total_elements: 0,
-        };
-        let stage = RmsNormStandaloneStage { params: dummy_params };
+fn get_rmsnorm_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+    let mut cache = cache.lock().unwrap();
 
-        CompoundKernel::new("rmsnorm_standalone")
-            .main(stage)
-            .with_manual_output(true)
-            .compile()
-    })
+    if let Some(kernel) = cache.get(&quant) {
+        return *kernel;
+    }
+
+    let dummy_params = RmsNormParamsResolved {
+        feature_dim: 0,
+        total_elements: 0,
+    };
+    let stage = RmsNormStandaloneStage {
+        params: dummy_params,
+        quant,
+    };
+
+    let kernel_name = format!("rmsnorm_standalone_{}", quant.short_name());
+    let compiled = Box::leak(Box::new(
+        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile(),
+    ));
+
+    cache.insert(quant, compiled);
+    compiled
 }

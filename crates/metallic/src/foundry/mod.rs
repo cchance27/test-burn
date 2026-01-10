@@ -12,6 +12,7 @@ use crate::{
 
 pub mod constants;
 pub mod model;
+pub mod policy;
 pub mod pool;
 pub mod spec;
 pub mod storage;

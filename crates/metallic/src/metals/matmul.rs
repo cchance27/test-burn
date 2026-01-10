@@ -97,7 +97,13 @@ pub struct CompiledMatMulStep {
 }
 
 impl CompiledStep for CompiledMatMulStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &FastBindings,
+        bindings: &TensorBindings,
+        symbols: &SymbolTable,
+    ) -> Result<(), MetalError> {
         // Resolve M dimension at runtime
         // Note: bindings contains the interpolated/runtime argument values if they were dynamic
         // but DynamicValue::resolve uses bindings.globals or scopes?
@@ -107,12 +113,12 @@ impl CompiledStep for CompiledMatMulStep {
         if m == 1 || !self.gemm_enabled {
             // Dispatch GEMV
             for step in &self.gemv {
-                step.execute(foundry, fast_bindings, bindings)?;
+                step.execute(foundry, fast_bindings, bindings, symbols)?;
             }
         } else {
             // Dispatch GEMM
             for step in &self.gemm {
-                step.execute(foundry, fast_bindings, bindings)?;
+                step.execute(foundry, fast_bindings, bindings, symbols)?;
             }
         }
 
@@ -142,7 +148,7 @@ impl Step for MatMulStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())

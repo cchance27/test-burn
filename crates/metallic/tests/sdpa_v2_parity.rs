@@ -222,9 +222,14 @@ fn run_parity_test_case(batch: usize, heads: usize, kv_len: usize, head_dim: usi
     )
     .unwrap();
 
-    use metallic::foundry::spec::{CompiledStep, FastBindings, TensorBindings};
+    use metallic::foundry::spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings};
     v2_step
-        .execute(&mut foundry, &FastBindings::default(), &TensorBindings::default())
+        .execute(
+            &mut foundry,
+            &FastBindings::default(),
+            &TensorBindings::default(),
+            &SymbolTable::new(),
+        )
         .unwrap();
 
     // ----------------------------------------------------------------

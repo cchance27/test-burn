@@ -103,7 +103,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<F16>, cfg: B
 
     let execute_v2 = |f: &mut Foundry| {
         for c_step in &compiled_steps {
-            c_step.execute(f, &fast_bindings, &bindings).unwrap();
+            c_step.execute(f, &fast_bindings, &bindings, &symbols).unwrap();
         }
     };
 

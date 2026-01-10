@@ -77,7 +77,7 @@ fn run_softmax_parity_test(rows: usize, cols: usize, causal: bool) -> Result<(),
     }
 
     for c_step in compiled_steps {
-        c_step.execute(&mut foundry, &fast_bindings, &bindings)?;
+        c_step.execute(&mut foundry, &fast_bindings, &bindings, &symbols)?;
     }
 
     let res_v2 = output_v2.to_vec(&foundry);

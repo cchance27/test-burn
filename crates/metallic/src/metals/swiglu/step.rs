@@ -70,7 +70,7 @@ impl Step for SwigluStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
@@ -100,6 +100,7 @@ impl CompiledStep for CompiledSwigluStep {
         foundry: &mut Foundry,
         fast_bindings: &crate::foundry::spec::FastBindings,
         bindings: &TensorBindings,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let gate = fast_bindings.get(self.gate).ok_or(MetalError::InputNotFound("gate".into()))?;
         let up = fast_bindings.get(self.up_inout).ok_or(MetalError::InputNotFound("up".into()))?;
@@ -211,7 +212,9 @@ pub struct CompiledFusedSwigluStep {
     pub step: FusedSwigluStep,
     pub input_idx: usize,
     pub gamma_idx: usize,
+    pub wg_name: String,
     pub wg_idx: usize,
+    pub wu_name: String,
     pub wu_idx: usize,
     pub bg_idx: Option<usize>,
     pub bu_idx: Option<usize>,
@@ -236,7 +239,7 @@ impl Step for FusedSwigluStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
@@ -245,27 +248,23 @@ impl Step for FusedSwigluStep {
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
-        let wg_idx = symbols.get_or_create(bindings.interpolate(self.wg.0.clone()));
-        let wu_idx = symbols.get_or_create(bindings.interpolate(self.wu.0.clone()));
+        let wg_name = bindings.interpolate(self.wg.0.clone());
+        let wu_name = bindings.interpolate(self.wu.0.clone());
+        let wg_idx = symbols.get_or_create(wg_name.clone());
+        let _wg_scales_idx = symbols.get_or_create(format!("{wg_name}_scales"));
+        let wu_idx = symbols.get_or_create(wu_name.clone());
+        let _wu_scales_idx = symbols.get_or_create(format!("{wu_name}_scales"));
         let bg_idx = self.bg.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
         let bu_idx = self.bu.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
         let out_idx = symbols.get_or_create(bindings.interpolate(self.out.0.clone()));
 
         vec![Box::new(CompiledFusedSwigluStep {
-            step: FusedSwigluStep {
-                input: self.input.clone(),
-                gamma: self.gamma.clone(),
-                wg: self.wg.clone(),
-                wu: self.wu.clone(),
-                bg: self.bg.clone(),
-                bu: self.bu.clone(),
-                out: self.out.clone(),
-                epsilon: self.epsilon,
-                weights_per_block: self.weights_per_block,
-            },
+            step: self.clone(),
             input_idx,
             gamma_idx,
+            wg_name: wg_name.clone(),
             wg_idx,
+            wu_name: wu_name.clone(),
             wu_idx,
             bg_idx,
             bu_idx,
@@ -280,6 +279,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
         foundry: &mut Foundry,
         _fast_bindings: &crate::foundry::spec::FastBindings,
         bindings: &TensorBindings,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let get = |idx| _fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
 
@@ -332,11 +332,27 @@ impl CompiledStep for CompiledFusedSwigluStep {
         let weights_per_block = self.step.weights_per_block;
         let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
 
+        let policy_gate = crate::foundry::policy::resolve_policy(w_gate.dtype.into());
+        let loader_gate = policy_gate.loader_stage();
+        let args_gate = loader_gate
+            .bind(_fast_bindings, &self.wg_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.wg_name, e)))?;
+
+        let policy_up = crate::foundry::policy::resolve_policy(w_up.dtype.into());
+        let loader_up = policy_up.loader_stage();
+        let args_up = loader_up
+            .bind(_fast_bindings, &self.wu_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.wu_name, e)))?;
+
+        let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
+        let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
+        let quantization = loader_gate.quantization_type();
+
         let args = FusedFfnArgs {
-            w_gate: TensorArg::from_tensor(w_gate),
-            s_gate: TensorArg::from_tensor(w_gate), // F16 path ignores scales
-            w_up: TensorArg::from_tensor(w_up),
-            s_up: TensorArg::from_tensor(w_up), // F16 path ignores scales
+            w_gate: w_gate_arg,
+            s_gate,
+            w_up: w_up_arg,
+            s_up,
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),
             k_dim,
@@ -349,7 +365,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
             has_b_up,
         };
 
-        let kernel = get_fused_ffn_kernel(Quantization::F16);
+        let kernel = get_fused_ffn_kernel(quantization);
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
         foundry.run(&kernel.bind(args, dispatch))
@@ -382,10 +398,10 @@ pub struct FusedFfnSwiGluRmsNormStep {
 pub struct CompiledFusedFfnSwiGluRmsNormStep {
     pub input_idx: usize,
     pub gamma_idx: usize,
+    pub w_gate_name: String,
     pub w_gate_idx: usize,
-    pub derived_s_gate_idx: usize,
+    pub w_up_name: String,
     pub w_up_idx: usize,
-    pub derived_s_up_idx: usize,
     pub b_gate_idx: Option<usize>,
     pub b_up_idx: Option<usize>,
     pub output_idx: usize,
@@ -442,7 +458,7 @@ impl Step for FusedFfnSwiGluRmsNormStep {
         }
 
         for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings)?;
+            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
         }
 
         Ok(())
@@ -454,9 +470,9 @@ impl Step for FusedFfnSwiGluRmsNormStep {
         let w_gate_name = bindings.interpolate(self.w_gate.0.clone());
         let w_up_name = bindings.interpolate(self.w_up.0.clone());
         let w_gate_idx = symbols.get_or_create(w_gate_name.clone());
+        let _w_gate_scales_idx = symbols.get_or_create(format!("{w_gate_name}_scales"));
         let w_up_idx = symbols.get_or_create(w_up_name.clone());
-        let derived_s_gate_idx = symbols.get_or_create(format!("{w_gate_name}_scales"));
-        let derived_s_up_idx = symbols.get_or_create(format!("{w_up_name}_scales"));
+        let _w_up_scales_idx = symbols.get_or_create(format!("{w_up_name}_scales"));
         let b_gate_idx = self
             .b_gate
             .as_ref()
@@ -467,10 +483,10 @@ impl Step for FusedFfnSwiGluRmsNormStep {
         vec![Box::new(CompiledFusedFfnSwiGluRmsNormStep {
             input_idx,
             gamma_idx,
+            w_gate_name: w_gate_name.clone(),
             w_gate_idx,
-            derived_s_gate_idx,
+            w_up_name: w_up_name.clone(),
             w_up_idx,
-            derived_s_up_idx,
             b_gate_idx,
             b_up_idx,
             output_idx,
@@ -485,6 +501,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         foundry: &mut Foundry,
         fast_bindings: &crate::foundry::spec::FastBindings,
         bindings: &TensorBindings,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let get = |idx| fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
 
@@ -494,28 +511,21 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let w_up = get(self.w_up_idx)?;
         let output = get(self.output_idx)?;
 
-        let is_q8 = w_gate.dtype == crate::tensor::Dtype::U8;
-        if is_q8 && w_up.dtype != crate::tensor::Dtype::U8 {
-            return Err(MetalError::InvalidShape(format!(
-                "FusedFfnSwiGluRmsNorm requires both weights to be Q8 when w_gate is Q8 (w_up={:?})",
-                w_up.dtype
-            )));
-        }
+        let policy_gate = crate::foundry::policy::resolve_policy(w_gate.dtype.into());
+        let loader_gate = policy_gate.loader_stage();
+        let args_gate = loader_gate
+            .bind(fast_bindings, &self.w_gate_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.w_gate_name, e)))?;
 
-        let (s_gate, s_up) = if is_q8 {
-            let s_gate = get(self.derived_s_gate_idx)?;
-            let s_up = get(self.derived_s_up_idx)?;
-            if s_gate.dtype != crate::tensor::Dtype::U8 || s_up.dtype != crate::tensor::Dtype::U8 {
-                return Err(MetalError::InvalidShape(format!(
-                    "FFN scales must be U8 for Q8 weights (s_gate={:?}, s_up={:?})",
-                    s_gate.dtype, s_up.dtype
-                )));
-            }
-            (TensorArg::from_tensor(s_gate), TensorArg::from_tensor(s_up))
-        } else {
-            // F16 path ignores scales.
-            (TensorArg::from_tensor(w_gate), TensorArg::from_tensor(w_up))
-        };
+        let policy_up = crate::foundry::policy::resolve_policy(w_up.dtype.into());
+        let loader_up = policy_up.loader_stage();
+        let args_up = loader_up
+            .bind(fast_bindings, &self.w_up_name, _symbols)
+            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.w_up_name, e)))?;
+
+        let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
+        let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
+        let is_q8 = loader_gate.quantization_type() == Quantization::Q8;
 
         let (b_gate, has_b_gate) = if let Some(idx) = self.b_gate_idx {
             (TensorArg::from_tensor(get(idx)?), 1u32)
@@ -562,9 +572,9 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
 
         let args = FusedFfnArgs {
-            w_gate: TensorArg::from_tensor(w_gate),
+            w_gate: w_gate_arg,
             s_gate,
-            w_up: TensorArg::from_tensor(w_up),
+            w_up: w_up_arg,
             s_up,
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),

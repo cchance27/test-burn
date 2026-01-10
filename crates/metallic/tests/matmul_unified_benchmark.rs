@@ -62,7 +62,7 @@ fn run_matmul_benchmark(foundry: &mut Foundry, cfg: BenchmarkConfig) {
 
     let execute = |f: &mut Foundry| {
         for s in &compiled_steps {
-            s.execute(f, &fast_bindings, &bindings).unwrap();
+            s.execute(f, &fast_bindings, &bindings, &symbols).unwrap();
         }
     };
 
