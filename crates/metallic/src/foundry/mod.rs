@@ -10,12 +10,12 @@ use crate::{
     error::MetalError, tensor::Dtype, types::{DispatchConfig, MetalDevice, MetalQueue}
 };
 
+pub mod constants;
 pub mod model;
 pub mod pool;
 pub mod spec;
 pub mod storage;
 pub mod tensor;
-pub mod constants;
 
 /// The central hub for Metal operations, managing the device, queue, and resources.
 pub struct Foundry {

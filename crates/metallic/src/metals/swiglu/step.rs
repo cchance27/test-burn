@@ -1,18 +1,19 @@
 use std::sync::OnceLock;
 
 use metallic_macros::KernelArgs;
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
-use rustc_hash::FxHashMap;
-
-use super::{SwigluParamsResolved, stages::SwigluStage, ffn_stages::{FfnDualProjectStage, FfnSwigluWriteStage, FfnWarpReduceStage}};
-use crate::{
-    MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, foundry::{
-        Foundry, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}
-    }, metals::rmsnorm::stages::RmsNormComputeStage, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+use super::{
+    SwigluParamsResolved, ffn_stages::{FfnDualProjectStage, FfnSwigluWriteStage, FfnWarpReduceStage}, stages::SwigluStage
 };
-use crate::compound::stages::{Quantization, WarpLayoutStage};
-use crate::metals::gemv::step::warp_dispatch_config_2d;
+use crate::{
+    MetalError, compound::{
+        CompiledCompoundKernel, CompoundKernel, stages::{Quantization, WarpLayoutStage}
+    }, foundry::{
+        Foundry, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}
+    }, metals::{gemv::step::warp_dispatch_config_2d, rmsnorm::stages::RmsNormComputeStage}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SwigluStep {
@@ -335,7 +336,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
             w_gate: TensorArg::from_tensor(w_gate),
             s_gate: TensorArg::from_tensor(w_gate), // F16 path ignores scales
             w_up: TensorArg::from_tensor(w_up),
-            s_up: TensorArg::from_tensor(w_up),     // F16 path ignores scales
+            s_up: TensorArg::from_tensor(w_up), // F16 path ignores scales
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),
             k_dim,
@@ -450,7 +451,10 @@ impl Step for FusedFfnSwiGluRmsNormStep {
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
         let w_gate_idx = symbols.get_or_create(bindings.interpolate(self.w_gate.0.clone()));
         let w_up_idx = symbols.get_or_create(bindings.interpolate(self.w_up.0.clone()));
-        let b_gate_idx = self.b_gate.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
+        let b_gate_idx = self
+            .b_gate
+            .as_ref()
+            .map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
         let b_up_idx = self.b_up.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
 
@@ -497,7 +501,9 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let input_shape = input.dims.as_slice();
         let output_shape = output.dims.as_slice();
         if input_shape.is_empty() || output_shape.is_empty() {
-            return Err(MetalError::InvalidShape("FusedFfnSwiGluRmsNorm expects non-empty input/output shapes".into()));
+            return Err(MetalError::InvalidShape(
+                "FusedFfnSwiGluRmsNorm expects non-empty input/output shapes".into(),
+            ));
         }
 
         let k_dim = *input_shape.last().unwrap() as u32;
@@ -528,7 +534,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             w_gate: TensorArg::from_tensor(w_gate),
             s_gate: TensorArg::from_tensor(w_gate), // F16 path ignores scales
             w_up: TensorArg::from_tensor(w_up),
-            s_up: TensorArg::from_tensor(w_up),     // F16 path ignores scales
+            s_up: TensorArg::from_tensor(w_up), // F16 path ignores scales
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),
             k_dim,

@@ -2,10 +2,7 @@ use half::f16;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
 use crate::{
-    foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor},
-    metals::kv_cache_write::{KvCacheWriteRepeatKvHeads, KvCacheWriteRepeatKvHeadsParamsResolved},
-    tensor::{F16, TensorInit},
-    types::TensorArg,
+    foundry::{Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::kv_cache_write::{KvCacheWriteRepeatKvHeads, KvCacheWriteRepeatKvHeadsParamsResolved}, tensor::{F16, TensorInit}, types::TensorArg
 };
 
 #[test]
@@ -24,9 +21,7 @@ fn test_kv_cache_write_repeat_kv_heads_m2() -> Result<(), Box<dyn std::error::Er
     let total_in = n_kv_heads * input_seq_len * head_dim;
 
     // Input: [n_kv_heads, input_seq_len, head_dim]
-    let input_data: Vec<f16> = (0..total_in)
-        .map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32)))
-        .collect();
+    let input_data: Vec<f16> = (0..total_in).map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32))).collect();
 
     let input = FoundryTensor::<F16, Pooled>::new(
         &mut foundry,
@@ -35,11 +30,7 @@ fn test_kv_cache_write_repeat_kv_heads_m2() -> Result<(), Box<dyn std::error::Er
     )?;
 
     // Cache: [n_heads, max_seq_len, head_dim]
-    let cache = FoundryTensor::<F16, Pooled>::new(
-        &mut foundry,
-        vec![n_heads, max_seq_len, head_dim],
-        TensorInit::Uninitialized,
-    )?;
+    let cache = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads, max_seq_len, head_dim], TensorInit::Uninitialized)?;
 
     let params = KvCacheWriteRepeatKvHeadsParamsResolved {
         n_kv_heads: n_kv_heads as u32,

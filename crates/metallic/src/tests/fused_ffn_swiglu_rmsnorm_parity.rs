@@ -5,9 +5,7 @@ use rand::{Rng, SeedableRng, rngs::StdRng};
 use crate::{
     foundry::{
         Foundry, spec::{Step, TensorBindings}, storage::Pooled, tensor::Tensor as FoundryTensor
-    },
-    metals::swiglu::step::FusedFfnSwiGluRmsNormStep,
-    tensor::{F16, TensorInit},
+    }, metals::swiglu::step::FusedFfnSwiGluRmsNormStep, tensor::{F16, TensorInit}
 };
 
 fn cpu_rmsnorm_rows(x: &Array2<f32>, gamma: &[f32], eps: f32) -> Array2<f32> {

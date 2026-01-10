@@ -2,13 +2,10 @@ use half::f16;
 use objc2_metal::{MTLBuffer as _, MTLDevice as _, MTLResourceOptions};
 use rustc_hash::FxHashMap;
 
-use crate::{
-    error::MetalError,
-    tensor::Dtype,
-    types::{MetalBuffer, MetalDevice, TensorArg},
-};
-
 use super::Foundry;
+use crate::{
+    error::MetalError, tensor::Dtype, types::{MetalBuffer, MetalDevice, TensorArg}
+};
 
 /// Cached scalar buffers for Foundry.
 ///

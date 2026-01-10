@@ -438,14 +438,9 @@ impl CompiledStep for CompiledSdpaStep {
 use half::f16;
 
 use crate::{
-    compound::stages::Layout,
-    foundry::constants,
-    metals::{
-        gemm::step::{get_gemm_kernel, gemm_dispatch_config, GemmParams, GemmV2Args},
-        gemv::{get_gemv_v2_kernel_f16, warp_dispatch_config, GemvStrategy, GemvV2Args},
-        mma::stages::TileConfig,
-        softmax::{get_softmax_v2_kernel, get_softmax_v2_sdpa_batched_kernel, SoftmaxV2Args, SoftmaxV2SdpaBatchedArgs},
-    },
+    compound::stages::Layout, foundry::constants, metals::{
+        gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel_f16, warp_dispatch_config}, mma::stages::TileConfig, softmax::{SoftmaxV2Args, SoftmaxV2SdpaBatchedArgs, get_softmax_v2_kernel, get_softmax_v2_sdpa_batched_kernel}
+    }
 };
 
 /// Materialized SDPA (Gemv/Gemm + Softmax + Gemv/Gemm).

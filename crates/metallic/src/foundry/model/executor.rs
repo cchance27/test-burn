@@ -1309,13 +1309,21 @@ impl CompiledModel {
         let greedy = temperature <= 0.0 || !temperature.is_finite() || top_k == 0;
         let vocab_size = arch.vocab_size as u32;
 
-        // Prefill KV cache, batched in chunks to reduce overhead.
-        // We update the 'input_ids' binding to point to the correct offset in full_input_buffer.
-        // Larger chunk size for prefill since we don't need intermediate CPU syncs.
+        // Prefill KV cache.
+        //
+        // Fast path is batched prefill (M>1) in large chunks. However, we've observed correctness
+        // issues when the *final* chunk is very small (e.g. 32 + 2 tokens). To keep performance
+        // while avoiding that tail pathology, we rebalance the chunk size so the prompt splits
+        // into similarly-sized chunks (e.g. 34 @ 32 => 17 + 17) instead of a tiny tail.
+        //
+        // Set `METALLIC_DISABLE_BATCHED_PREFILL=1` to force fully sequential prefill for isolation.
+        let disable_batched_prefill = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
 
+        // We use "prefill_chunk_size" as the vector width (m) for batched prefill and as a capture
+        // batching knob in sequential mode.
         let max_prefill_chunk = bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
         let (_, mut prefill_chunk_size) = Self::prefill_config();
-        prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk);
+        prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk).max(1);
 
         let input_ids_key = "input_ids";
 
@@ -1323,58 +1331,108 @@ impl CompiledModel {
         let debug_sync = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
 
         let prefill_start = std::time::Instant::now();
-        let mut last_prefill_m = 0;
+        let mut last_prefill_m = 1usize;
 
-        if !debug_sync {
-            // Capture the entire prefill into a single command buffer to amortize submission overhead.
-            foundry.start_capture()?;
-        }
-
-        for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
-            let m = chunk_tokens.len();
-            last_prefill_m = m;
-            let base_pos = chunk_idx * prefill_chunk_size;
-
-            // In debug-sync mode, keep each chunk isolated and synchronous.
-            if debug_sync {
+        if !disable_batched_prefill {
+            // === BATCHED PREFILL (m>1) ===
+            // In debug-sync mode, isolate each chunk into its own synchronous command buffer.
+            if !debug_sync {
                 foundry.start_capture()?;
             }
 
-            // === BATCHED PREFILL ===
-            // Set all batch-aware globals for M tokens
-            bindings.set_int_global("m", m);
-            bindings.set_int_global("seq_len", m);
-            bindings.set_int_global("position_offset", base_pos);
-            bindings.set_int_global("kv_seq_len", base_pos + m);
+            let rebalance_chunk_size = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
+                let requested = requested.max(1).min(max_allowed.max(1));
+                if prompt_len <= 1 {
+                    return 1;
+                }
 
-            // Update total_elements for all batch-aware operations
-            bindings.set_int_global("total_elements_hidden", m * d_model);
-            bindings.set_int_global("total_elements_q", m * n_heads * head_dim);
-            bindings.set_int_global("total_elements_k", m * n_kv_heads * head_dim);
-            bindings.set_int_global("total_elements_write", m * n_kv_heads * head_dim);
-            bindings.set_int_global("total_elements_ffn", m * ff_dim);
-            bindings.set_int_global("total_elements_slice", n_kv_heads * (base_pos + m) * head_dim);
-            bindings.set_int_global("total_elements_repeat", n_heads * (base_pos + m) * head_dim);
+                let chunks = (prompt_len + requested - 1) / requested;
+                let balanced = (prompt_len + chunks - 1) / chunks;
+                balanced.max(1).min(max_allowed)
+            };
 
-            // Input tensor: [M] token IDs pointing to chunk in buffer
-            let mut tensor_input = TensorArg::from_buffer(full_input_buffer.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
-            tensor_input.offset = base_pos * 4; // 4 bytes per u32
-            self.set_binding(&mut bindings, &mut fast_bindings, input_ids_key, tensor_input);
+            let chunk_size = rebalance_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk);
 
-            // Run forward pass with batched input
-            self.forward(foundry, &mut bindings, &fast_bindings)?;
+            for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(chunk_size).enumerate() {
+                let m = chunk_tokens.len();
+                last_prefill_m = m;
+                let base_pos = chunk_idx * chunk_size;
 
-            // Commit and wait for the chunk (debug-sync only)
-            if debug_sync {
+                if debug_sync {
+                    foundry.start_capture()?;
+                }
+
+                bindings.set_int_global("m", m);
+                bindings.set_int_global("seq_len", m);
+                bindings.set_int_global("position_offset", base_pos);
+                bindings.set_int_global("kv_seq_len", base_pos + m);
+
+                bindings.set_int_global("total_elements_hidden", m * d_model);
+                bindings.set_int_global("total_elements_q", m * n_heads * head_dim);
+                bindings.set_int_global("total_elements_k", m * n_kv_heads * head_dim);
+                bindings.set_int_global("total_elements_write", m * n_kv_heads * head_dim);
+                bindings.set_int_global("total_elements_ffn", m * ff_dim);
+                bindings.set_int_global("total_elements_slice", n_kv_heads * (base_pos + m) * head_dim);
+                bindings.set_int_global("total_elements_repeat", n_heads * (base_pos + m) * head_dim);
+
+                let mut tensor_input = TensorArg::from_buffer(full_input_buffer.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
+                tensor_input.offset = base_pos * 4;
+                self.set_binding(&mut bindings, &mut fast_bindings, input_ids_key, tensor_input);
+
+                self.forward(foundry, &mut bindings, &fast_bindings)?;
+
+                if debug_sync {
+                    let cmd = foundry.end_capture()?;
+                    objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                }
+            }
+
+            if !debug_sync {
                 let cmd = foundry.end_capture()?;
                 objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
             }
-        }
+        } else {
+            // === SEQUENTIAL PREFILL (seq_len=1) ===
+            // Capture the whole prefill to amortize submission overhead, but execute each token
+            // with the same semantics as the decode loop.
+            bindings.set_int_global("m", 1);
+            bindings.set_int_global("seq_len", 1);
+            bindings.set_int_global("total_elements_hidden", d_model);
+            bindings.set_int_global("total_elements_q", n_heads * head_dim);
+            bindings.set_int_global("total_elements_k", n_kv_heads * head_dim);
+            bindings.set_int_global("total_elements_write", n_kv_heads * head_dim);
+            bindings.set_int_global("total_elements_ffn", ff_dim);
 
-        // Ensure prefill is complete before sampling from logits.
-        if !debug_sync {
-            let cmd = foundry.end_capture()?;
-            objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+            for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
+                let base_pos = chunk_idx * prefill_chunk_size;
+
+                if debug_sync {
+                    foundry.start_capture()?;
+                } else if chunk_idx == 0 {
+                    foundry.start_capture()?;
+                }
+
+                for (i, _token_id) in chunk_tokens.iter().enumerate() {
+                    let pos = base_pos + i;
+                    update_pos_globals(&mut bindings, pos);
+
+                    let mut tensor_input = TensorArg::from_buffer(full_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                    tensor_input.offset = pos * 4;
+                    self.set_binding(&mut bindings, &mut fast_bindings, input_ids_key, tensor_input);
+
+                    self.forward(foundry, &mut bindings, &fast_bindings)?;
+                }
+
+                if debug_sync {
+                    let cmd = foundry.end_capture()?;
+                    objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                }
+            }
+
+            if !debug_sync {
+                let cmd = foundry.end_capture()?;
+                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+            }
         }
 
         let prefill_duration = prefill_start.elapsed();
@@ -1404,7 +1462,7 @@ impl CompiledModel {
 
         // BATCHING: We batch multiple tokens into a single command buffer to amortize submission overhead.
         // We keep tokens on GPU (copying Sample -> Input) and only sync when the batch is full.
-        const BATCH_SIZE: usize = 32;
+        const BATCH_SIZE: usize = 64;
         let mut step_output_buffers = Vec::with_capacity(BATCH_SIZE);
         for i in 0..BATCH_SIZE {
             step_output_buffers.push(self.allocate_u32_buffer(foundry, &format!("sample_out_{}", i), 1)?);
@@ -1588,5 +1646,31 @@ impl CompiledModel {
     #[deprecated(note = "Use prepare_bindings instead")]
     pub fn prepare_weight_bindings(&self, foundry: &mut Foundry) -> Result<TensorBindings, MetalError> {
         self.prepare_bindings(foundry).map(|(b, _)| b)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_rebalanced_prefill_chunk_size_avoids_tiny_tail() {
+        let rebalance = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
+            let requested = requested.max(1).min(max_allowed.max(1));
+            if prompt_len <= 1 {
+                return 1;
+            }
+            let chunks = (prompt_len + requested - 1) / requested;
+            let balanced = (prompt_len + chunks - 1) / chunks;
+            balanced.max(1).min(max_allowed)
+        };
+
+        // Repro shape: 34 with requested 32 becomes 17+17 (no 2-token tail).
+        assert_eq!(rebalance(34, 32, 32), 17);
+        // Already balanced.
+        assert_eq!(rebalance(1000, 32, 32), 32);
+        // Single chunk.
+        assert_eq!(rebalance(31, 32, 32), 31);
+        // Degenerate.
+        assert_eq!(rebalance(0, 32, 32), 1);
+        assert_eq!(rebalance(1, 32, 32), 1);
     }
 }

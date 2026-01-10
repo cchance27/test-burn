@@ -1,7 +1,8 @@
 //! Fused FFN stages: RMSNorm + Gate/Up projections + SwiGLU writeback.
 
-use crate::compound::{BufferArg, Stage, stages::Quantization};
-use crate::metals::gemv::stages::VectorWidth;
+use crate::{
+    compound::{BufferArg, Stage, stages::Quantization}, metals::gemv::stages::VectorWidth
+};
 
 /// Metal definitions for GEMV helper functions.
 const GEMV_METAL: &str = include_str!("../gemv/gemv.metal");

@@ -13,8 +13,8 @@ use crate::{
     foundry::spec::DynamicValue, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
-pub mod stages;
 pub mod ffn_stages;
+pub mod stages;
 pub mod step;
 
 // ================================================================================================
