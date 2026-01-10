@@ -332,14 +332,19 @@ impl Step for GemmV2Step {
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         // Resolve symbol IDs
-        let a_idx = symbols.get_or_create(bindings.interpolate(self.a.0.clone()));
-        let b_idx = symbols.get_or_create(bindings.interpolate(self.b.0.clone()));
-        let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
+        let a_name = bindings.interpolate(self.a.0.clone());
+        let b_name = bindings.interpolate(self.b.0.clone());
+        let output_name = bindings.interpolate(self.output.0.clone());
+
+        let a_idx = symbols.get_or_create(a_name);
+        let b_idx = symbols.get_or_create(b_name.clone());
+        let output_idx = symbols.get_or_create(output_name);
 
         let b_scales_idx = self
             .b_scales
             .as_ref()
             .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
+        let derived_b_scales_idx = symbols.get_or_create(format!("{b_name}_scales"));
         let bias_idx = self.bias.as_ref().map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
         let c_idx = self.c.as_ref().map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
 
@@ -348,6 +353,7 @@ impl Step for GemmV2Step {
             b_idx,
             output_idx,
             b_scales_idx,
+            derived_b_scales_idx,
             bias_idx,
             c_idx,
             m_dim: self.m_dim.clone(),
@@ -376,6 +382,7 @@ pub struct CompiledGemmV2Step {
     pub b_idx: usize,
     pub output_idx: usize,
     pub b_scales_idx: Option<usize>,
+    pub derived_b_scales_idx: usize,
     pub bias_idx: Option<usize>,
     pub c_idx: Option<usize>,
     pub m_dim: DynamicValue<u32>,
@@ -420,10 +427,13 @@ impl CompiledStep for CompiledGemmV2Step {
         let has_alpha_beta = self.alpha != 1.0 || self.beta != 0.0 || self.c_idx.is_some();
         let has_bias = self.bias_idx.is_some();
 
+        let is_q8 = b.dtype == crate::tensor::Dtype::U8;
+        let b_quant = if is_q8 { Quantization::Q8 } else { Quantization::F16 };
+
         // Get kernel (cached) - uses unified getter for all quant types
         let kernel = get_gemm_kernel(
             Quantization::F16, // A is always F16 (activations)
-            self.b_quant,
+            b_quant,
             self.transpose_a,
             self.transpose_b,
             config,
@@ -431,9 +441,16 @@ impl CompiledStep for CompiledGemmV2Step {
             has_bias,
         );
 
-        // Build scale arg - use B buffer as dummy for F16
-        let b_scales = if let Some(idx) = self.b_scales_idx {
+        // Build scale arg - Q8 requires real scales (default derived name: "{b}_scales").
+        let b_scales = if is_q8 {
+            let idx = self.b_scales_idx.unwrap_or(self.derived_b_scales_idx);
             let scales = fast_bindings.get(idx).ok_or_else(|| MetalError::InputNotFound("B scales".into()))?;
+            if scales.dtype != crate::tensor::Dtype::U8 {
+                return Err(MetalError::InvalidShape(format!(
+                    "b_scales must be U8 for Q8 weights (got {:?})",
+                    scales.dtype
+                )));
+            }
             TensorArg::from_tensor(scales)
         } else {
             TensorArg::from_tensor(b) // Dummy for F16 (PolicyF16 ignores scales)

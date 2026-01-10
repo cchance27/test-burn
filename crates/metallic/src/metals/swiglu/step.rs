@@ -383,7 +383,9 @@ pub struct CompiledFusedFfnSwiGluRmsNormStep {
     pub input_idx: usize,
     pub gamma_idx: usize,
     pub w_gate_idx: usize,
+    pub derived_s_gate_idx: usize,
     pub w_up_idx: usize,
+    pub derived_s_up_idx: usize,
     pub b_gate_idx: Option<usize>,
     pub b_up_idx: Option<usize>,
     pub output_idx: usize,
@@ -449,8 +451,12 @@ impl Step for FusedFfnSwiGluRmsNormStep {
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
         let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
-        let w_gate_idx = symbols.get_or_create(bindings.interpolate(self.w_gate.0.clone()));
-        let w_up_idx = symbols.get_or_create(bindings.interpolate(self.w_up.0.clone()));
+        let w_gate_name = bindings.interpolate(self.w_gate.0.clone());
+        let w_up_name = bindings.interpolate(self.w_up.0.clone());
+        let w_gate_idx = symbols.get_or_create(w_gate_name.clone());
+        let w_up_idx = symbols.get_or_create(w_up_name.clone());
+        let derived_s_gate_idx = symbols.get_or_create(format!("{w_gate_name}_scales"));
+        let derived_s_up_idx = symbols.get_or_create(format!("{w_up_name}_scales"));
         let b_gate_idx = self
             .b_gate
             .as_ref()
@@ -462,7 +468,9 @@ impl Step for FusedFfnSwiGluRmsNormStep {
             input_idx,
             gamma_idx,
             w_gate_idx,
+            derived_s_gate_idx,
             w_up_idx,
+            derived_s_up_idx,
             b_gate_idx,
             b_up_idx,
             output_idx,
@@ -485,6 +493,29 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let w_gate = get(self.w_gate_idx)?;
         let w_up = get(self.w_up_idx)?;
         let output = get(self.output_idx)?;
+
+        let is_q8 = w_gate.dtype == crate::tensor::Dtype::U8;
+        if is_q8 && w_up.dtype != crate::tensor::Dtype::U8 {
+            return Err(MetalError::InvalidShape(format!(
+                "FusedFfnSwiGluRmsNorm requires both weights to be Q8 when w_gate is Q8 (w_up={:?})",
+                w_up.dtype
+            )));
+        }
+
+        let (s_gate, s_up) = if is_q8 {
+            let s_gate = get(self.derived_s_gate_idx)?;
+            let s_up = get(self.derived_s_up_idx)?;
+            if s_gate.dtype != crate::tensor::Dtype::U8 || s_up.dtype != crate::tensor::Dtype::U8 {
+                return Err(MetalError::InvalidShape(format!(
+                    "FFN scales must be U8 for Q8 weights (s_gate={:?}, s_up={:?})",
+                    s_gate.dtype, s_up.dtype
+                )));
+            }
+            (TensorArg::from_tensor(s_gate), TensorArg::from_tensor(s_up))
+        } else {
+            // F16 path ignores scales.
+            (TensorArg::from_tensor(w_gate), TensorArg::from_tensor(w_up))
+        };
 
         let (b_gate, has_b_gate) = if let Some(idx) = self.b_gate_idx {
             (TensorArg::from_tensor(get(idx)?), 1u32)
@@ -532,9 +563,9 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
 
         let args = FusedFfnArgs {
             w_gate: TensorArg::from_tensor(w_gate),
-            s_gate: TensorArg::from_tensor(w_gate), // F16 path ignores scales
+            s_gate,
             w_up: TensorArg::from_tensor(w_up),
-            s_up: TensorArg::from_tensor(w_up), // F16 path ignores scales
+            s_up,
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),
             k_dim,
@@ -547,7 +578,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             has_b_up,
         };
 
-        let kernel = get_fused_ffn_kernel(Quantization::F16);
+        let kernel = get_fused_ffn_kernel(if is_q8 { Quantization::Q8 } else { Quantization::F16 });
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
         foundry.run(&kernel.bind(args, dispatch))
@@ -574,7 +605,8 @@ fn get_fused_ffn_kernel(quant: Quantization) -> &'static CompiledCompoundKernel 
         CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::row_major().with_warps(8))
-            .prologue(RmsNormComputeStage::new(4, 6).with_quantization(quant))
+            // Activation input is always F16; quantization only applies to weight loading stages.
+            .prologue(RmsNormComputeStage::new(4, 6))
             .main(FfnDualProjectStage::new(quant).with_norm(9, "inv_rms"))
             .epilogue(FfnWarpReduceStage)
             .epilogue(FfnSwigluWriteStage)

@@ -15,6 +15,8 @@ mod clamping_extreme_test;
 #[cfg(test)]
 mod determinism_test;
 #[cfg(test)]
+mod embedding_q8_smoke;
+#[cfg(test)]
 mod error_path_test;
 #[cfg(test)]
 mod forward_pass_correctness_test;

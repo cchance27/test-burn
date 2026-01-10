@@ -289,6 +289,7 @@ pub fn thread_dispatch_config(output_rows: u32) -> DispatchConfig {
 pub struct CompiledGemvV2Step {
     pub weights_idx: usize,
     pub scale_bytes_idx: Option<usize>,
+    pub derived_scale_bytes_idx: usize,
     pub input_idx: usize,
     pub output_idx: usize,
     pub bias_idx: Option<usize>,
@@ -297,7 +298,6 @@ pub struct CompiledGemvV2Step {
     pub n_dim: DynamicValue<u32>,
     pub weights_per_block: u32,
     pub layout: Layout,
-    pub is_q8: bool,
     pub strategy: GemvStrategy,
     pub alpha: f32,
     pub beta: f32,
@@ -345,22 +345,24 @@ impl Step for GemvV2Step {
     }
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let weights_idx = symbols.get_or_create(bindings.interpolate(self.weights.0.clone()));
-        let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
-        let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
+        let weights_name = bindings.interpolate(self.weights.0.clone());
+        let input_name = bindings.interpolate(self.input.0.clone());
+        let output_name = bindings.interpolate(self.output.0.clone());
+
+        let weights_idx = symbols.get_or_create(weights_name.clone());
+        let input_idx = symbols.get_or_create(input_name);
+        let output_idx = symbols.get_or_create(output_name);
 
         let scale_bytes_idx = self
             .scale_bytes
             .as_ref()
             .map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
+        let derived_scale_bytes_idx = symbols.get_or_create(format!("{weights_name}_scales"));
         let bias_idx = self.bias.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
         let residual_idx = self
             .residual
             .as_ref()
             .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
-
-        // Determine quantization mode based on scale_bytes presence
-        let is_q8 = self.scale_bytes.is_some();
 
         // Strategy priority:
         // 1. Explicitly set in struct
@@ -376,16 +378,14 @@ impl Step for GemvV2Step {
             }
         });
 
-        // Ensure kernel is compiled (pre-warm cache)
-        if is_q8 {
-            get_gemv_v2_kernel_q8(self.layout, strategy);
-        } else {
-            get_gemv_v2_kernel_f16(self.layout, strategy);
-        }
+        // Pre-warm both variants; quantization is selected at runtime from the bound weight dtype.
+        get_gemv_v2_kernel_f16(self.layout, strategy);
+        get_gemv_v2_kernel_q8(self.layout, strategy);
 
         vec![Box::new(CompiledGemvV2Step {
             weights_idx,
             scale_bytes_idx,
+            derived_scale_bytes_idx,
             input_idx,
             output_idx,
             bias_idx,
@@ -394,7 +394,6 @@ impl Step for GemvV2Step {
             n_dim: self.n_dim.clone(),
             weights_per_block: self.weights_per_block,
             layout: self.layout,
-            is_q8,
             strategy,
             alpha: self.alpha,
             beta: self.beta,
@@ -418,14 +417,22 @@ impl CompiledStep for CompiledGemvV2Step {
         let k_dim = self.k_dim.resolve(bindings);
         let n_dim = self.n_dim.resolve(bindings);
 
-        // Scale bytes: use provided or duplicate weights (F16 case - Policy ignores)
-        let scale_bytes = if let Some(idx) = self.scale_bytes_idx {
+        let is_q8 = weights.dtype == crate::tensor::Dtype::U8;
+
+        // Scale bytes: Q8 requires real scales; F16 uses a dummy (PolicyF16 ignores scales).
+        let scale_bytes = if is_q8 {
+            let idx = self.scale_bytes_idx.unwrap_or(self.derived_scale_bytes_idx);
             let s = fast_bindings
                 .get(idx)
                 .ok_or_else(|| MetalError::InputNotFound(format!("ScaleBytes {}", idx)))?;
+            if s.dtype != crate::tensor::Dtype::U8 {
+                return Err(MetalError::InvalidShape(format!(
+                    "scale_bytes must be U8 for Q8 weights (got {:?})",
+                    s.dtype
+                )));
+            }
             TensorArg::from_tensor(s)
         } else {
-            // F16 mode: PolicyF16::load_scale returns 1.0, so this is unused
             TensorArg::from_tensor(weights)
         };
 
@@ -474,7 +481,7 @@ impl CompiledStep for CompiledGemvV2Step {
         }
 
         // Select Kernel based on effective strategy
-        let kernel = if self.is_q8 {
+        let kernel = if is_q8 {
             get_gemv_v2_kernel_q8(self.layout, effective_strategy)
         } else {
             get_gemv_v2_kernel_f16(self.layout, effective_strategy)

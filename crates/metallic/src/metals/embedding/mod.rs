@@ -7,6 +7,8 @@ use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::{foundry::spec::DynamicValue, types::TensorArg};
 
+pub mod step;
+
 /// Parameters for embedding lookup kernel.
 #[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
@@ -32,7 +34,7 @@ pub struct EmbeddingParams {
     args = EmbeddingParamsResolved,
     dispatch = per_element,
     dtype = F16,
-    step = true
+    step = false
 )]
 pub struct Embedding {
     /// Embedding table buffer.
@@ -56,6 +58,28 @@ impl Embedding {
             params,
         }
     }
+}
+
+/// Embedding lookup kernel for Q8_0 tables (split data + scales).
+///
+/// - `table` is int8 weights as bytes (one byte per weight)
+/// - `scale_bytes` stores fp16 scales (2 bytes) per 32-weight block, row-major by token row.
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "embedding/embedding.metal",
+    function = "embedding_lookup_q8",
+    args = EmbeddingParamsResolved,
+    dispatch = per_element,
+    dtype = F16,
+    step = false
+)]
+pub struct EmbeddingQ8 {
+    pub table: TensorArg,
+    pub scale_bytes: TensorArg,
+    pub indices: TensorArg,
+    #[arg(output)]
+    pub output: TensorArg,
+    pub params: EmbeddingParamsResolved,
 }
 
 #[cfg(test)]

@@ -45,11 +45,13 @@ pub struct CompiledFusedQkvStep {
     pub input_idx: usize,
     pub w_q_idx: usize,
     pub s_q_idx: Option<usize>,
+    pub derived_s_q_idx: usize,
     pub w_k_idx: usize,
     pub s_k_idx: Option<usize>,
+    pub derived_s_k_idx: usize,
     pub w_v_idx: usize,
     pub s_v_idx: Option<usize>,
-    pub is_q8: bool,
+    pub derived_s_v_idx: usize,
     pub out_q_idx: usize,
     pub out_k_idx: usize,
     pub out_v_idx: usize,
@@ -128,12 +130,20 @@ impl Step for FusedQkvStep {
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
-        let w_q_idx = symbols.get_or_create(bindings.interpolate(self.w_q.0.clone()));
+        let w_q_name = bindings.interpolate(self.w_q.0.clone());
+        let w_q_idx = symbols.get_or_create(w_q_name.clone());
         let s_q_idx = self.s_q.as_ref().map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
-        let w_k_idx = symbols.get_or_create(bindings.interpolate(self.w_k.0.clone()));
+        let derived_s_q_idx = symbols.get_or_create(format!("{w_q_name}_scales"));
+
+        let w_k_name = bindings.interpolate(self.w_k.0.clone());
+        let w_k_idx = symbols.get_or_create(w_k_name.clone());
         let s_k_idx = self.s_k.as_ref().map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
-        let w_v_idx = symbols.get_or_create(bindings.interpolate(self.w_v.0.clone()));
+        let derived_s_k_idx = symbols.get_or_create(format!("{w_k_name}_scales"));
+
+        let w_v_name = bindings.interpolate(self.w_v.0.clone());
+        let w_v_idx = symbols.get_or_create(w_v_name.clone());
         let s_v_idx = self.s_v.as_ref().map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
+        let derived_s_v_idx = symbols.get_or_create(format!("{w_v_name}_scales"));
         let out_q_idx = symbols.get_or_create(bindings.interpolate(self.out_q.0.clone()));
         let out_k_idx = symbols.get_or_create(bindings.interpolate(self.out_k.0.clone()));
         let out_v_idx = symbols.get_or_create(bindings.interpolate(self.out_v.0.clone()));
@@ -154,21 +164,22 @@ impl Step for FusedQkvStep {
             .as_ref()
             .map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
 
-        let is_q8 = s_q_idx.is_some();
-        let quant = if is_q8 { Quantization::Q8 } else { Quantization::F16 };
-
-        // Ensure kernel is compiled
-        get_fused_qkv_kernel(self.strategy, quant, gamma_idx.is_some());
+        // Ensure kernels are compiled (quantization selected at runtime based on bound weight dtype)
+        get_fused_qkv_kernel(self.strategy, Quantization::F16, gamma_idx.is_some());
+        get_fused_qkv_kernel(self.strategy, Quantization::Q8, gamma_idx.is_some());
 
         vec![Box::new(CompiledFusedQkvStep {
             step: self.clone(),
             input_idx,
             w_q_idx,
             s_q_idx,
+            derived_s_q_idx,
             w_k_idx,
             s_k_idx,
             w_v_idx,
             s_v_idx,
+            derived_s_k_idx,
+            derived_s_v_idx,
             out_q_idx,
             out_k_idx,
             out_v_idx,
@@ -176,7 +187,6 @@ impl Step for FusedQkvStep {
             bias_q_idx,
             bias_k_idx,
             bias_v_idx,
-            is_q8,
         })]
     }
 }
@@ -191,11 +201,48 @@ impl CompiledStep for CompiledFusedQkvStep {
         let get = |idx| fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
         let input = get(self.input_idx)?;
         let w_q = get(self.w_q_idx)?;
-        let s_q = if let Some(idx) = self.s_q_idx { get(idx)? } else { w_q };
+        let is_q8 = w_q.dtype == crate::tensor::Dtype::U8;
+        let s_q = if is_q8 {
+            let idx = self.s_q_idx.unwrap_or(self.derived_s_q_idx);
+            let s = get(idx)?;
+            if s.dtype != crate::tensor::Dtype::U8 {
+                return Err(MetalError::InvalidShape(format!(
+                    "s_q must be U8 for Q8 weights (got {:?})",
+                    s.dtype
+                )));
+            }
+            s
+        } else {
+            w_q
+        };
         let w_k = get(self.w_k_idx)?;
-        let s_k = if let Some(idx) = self.s_k_idx { get(idx)? } else { w_k };
+        let s_k = if is_q8 {
+            let idx = self.s_k_idx.unwrap_or(self.derived_s_k_idx);
+            let s = get(idx)?;
+            if s.dtype != crate::tensor::Dtype::U8 {
+                return Err(MetalError::InvalidShape(format!(
+                    "s_k must be U8 for Q8 weights (got {:?})",
+                    s.dtype
+                )));
+            }
+            s
+        } else {
+            w_k
+        };
         let w_v = get(self.w_v_idx)?;
-        let s_v = if let Some(idx) = self.s_v_idx { get(idx)? } else { w_v };
+        let s_v = if is_q8 {
+            let idx = self.s_v_idx.unwrap_or(self.derived_s_v_idx);
+            let s = get(idx)?;
+            if s.dtype != crate::tensor::Dtype::U8 {
+                return Err(MetalError::InvalidShape(format!(
+                    "s_v must be U8 for Q8 weights (got {:?})",
+                    s.dtype
+                )));
+            }
+            s
+        } else {
+            w_v
+        };
         let out_q = get(self.out_q_idx)?;
         let out_k = get(self.out_k_idx)?;
         let out_v = get(self.out_v_idx)?;
@@ -254,7 +301,7 @@ impl CompiledStep for CompiledFusedQkvStep {
 
         let kernel = get_fused_qkv_kernel(
             self.step.strategy,
-            if self.is_q8 { Quantization::Q8 } else { Quantization::F16 },
+            if is_q8 { Quantization::Q8 } else { Quantization::F16 },
             self.gamma_idx.is_some(),
         );
 
