@@ -8,7 +8,7 @@ use crate::{
     MetalError, compound::{
         CompiledCompoundKernel, CompoundKernel, stages::{Quantization, WarpLayoutStage}
     }, foundry::{
-        Foundry, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}
+        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}
     }, metals::{
         gemv::qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, rmsnorm::stages::RmsNormComputeStage
     }, types::TensorArg
@@ -44,11 +44,11 @@ pub struct CompiledFusedQkvStep {
     pub step: FusedQkvStep,
     pub input_idx: usize,
     pub w_q_name: String,
-    pub w_q_idx: usize,
+    pub w_q_resolved: ResolvedSymbols,
     pub w_k_name: String,
-    pub w_k_idx: usize,
+    pub w_k_resolved: ResolvedSymbols,
     pub w_v_name: String,
-    pub w_v_idx: usize,
+    pub w_v_resolved: ResolvedSymbols,
     pub out_q_idx: usize,
     pub out_k_idx: usize,
     pub out_v_idx: usize,
@@ -109,7 +109,7 @@ impl Step for FusedQkvStep {
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
         let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         // Bind all symbols found in the table
         for (name, symbol_id) in symbols.iter() {
@@ -167,11 +167,23 @@ impl Step for FusedQkvStep {
             step: self.clone(),
             input_idx,
             w_q_name,
-            w_q_idx,
+            w_q_resolved: ResolvedSymbols {
+                weights: w_q_idx,
+                scales: _w_q_scales_idx.into(),
+                bias: None,
+            },
             w_k_name,
-            w_k_idx,
+            w_k_resolved: ResolvedSymbols {
+                weights: w_k_idx,
+                scales: _w_k_scales_idx.into(),
+                bias: None,
+            },
             w_v_name,
-            w_v_idx,
+            w_v_resolved: ResolvedSymbols {
+                weights: w_v_idx,
+                scales: _w_v_scales_idx.into(),
+                bias: None,
+            },
             out_q_idx,
             out_k_idx,
             out_v_idx,
@@ -187,28 +199,22 @@ impl CompiledStep for CompiledFusedQkvStep {
     fn execute(
         &self,
         foundry: &mut Foundry,
-        fast_bindings: &crate::foundry::spec::FastBindings,
+        fast_bindings: &FastBindings,
         bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let get = |idx| fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
         let input = get(self.input_idx)?;
-        let w_q_tensor = get(self.w_q_idx)?;
+        let w_q_tensor = get(self.w_q_resolved.weights)?;
 
         // Centralized Quantization Binding
         let policy = crate::foundry::policy::resolve_policy(w_q_tensor.dtype.into());
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
 
-        let q_args = loader
-            .bind(fast_bindings, &self.w_q_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for w_q: {}", e)))?;
-        let k_args = loader
-            .bind(fast_bindings, &self.w_k_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for w_k: {}", e)))?;
-        let v_args = loader
-            .bind(fast_bindings, &self.w_v_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for w_v: {}", e)))?;
+        let q_args = loader.bind(fast_bindings, &self.w_q_resolved);
+        let k_args = loader.bind(fast_bindings, &self.w_k_resolved);
+        let v_args = loader.bind(fast_bindings, &self.w_v_resolved);
 
         let w_q = q_args[0].clone();
         let s_q = q_args[1].clone();

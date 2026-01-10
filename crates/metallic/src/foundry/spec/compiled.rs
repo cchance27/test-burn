@@ -21,6 +21,15 @@ pub trait CompiledStep: Send + Sync + std::fmt::Debug {
     }
 }
 
+/// Pre-resolved indices for tensor arguments (weights, scales, etc.).
+/// This allows LoaderStage to bind arguments without hash lookups.
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedSymbols {
+    pub weights: usize,
+    pub scales: Option<usize>,
+    pub bias: Option<usize>,
+}
+
 /// Runtime bindings storage optimized for vector access.
 #[derive(Default)]
 pub struct FastBindings {

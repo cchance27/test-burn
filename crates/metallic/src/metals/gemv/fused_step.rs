@@ -36,9 +36,8 @@ pub struct FusedGemvStep {
 #[derive(Debug, Clone)]
 pub struct CompiledFusedGemvStep {
     pub step: FusedGemvStep,
-    pub weights_name: String,
+    pub weights_resolved: crate::foundry::spec::ResolvedSymbols,
     pub input_idx: usize,
-    pub weights_idx: usize,
     pub output_idx: usize,
     pub gamma_idx: usize,
     pub bias_idx: Option<usize>,
@@ -92,9 +91,12 @@ impl Step for FusedGemvStep {
 
         vec![Box::new(CompiledFusedGemvStep {
             step: self.clone(),
-            weights_name,
+            weights_resolved: crate::foundry::spec::ResolvedSymbols {
+                weights: weights_idx,
+                scales: _weights_scales_idx.into(),
+                bias: None,
+            },
             input_idx,
-            weights_idx,
             output_idx,
             gamma_idx,
             bias_idx,
@@ -113,7 +115,7 @@ impl CompiledStep for CompiledFusedGemvStep {
     ) -> Result<(), MetalError> {
         let input = fast_bindings.get(self.input_idx).ok_or(MetalError::InputNotFound("input".into()))?;
         let weights_tensor = fast_bindings
-            .get(self.weights_idx)
+            .get(self.weights_resolved.weights)
             .ok_or(MetalError::InputNotFound("weights".into()))?;
 
         // Centralized Quantization Binding
@@ -121,9 +123,7 @@ impl CompiledStep for CompiledFusedGemvStep {
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
 
-        let weights_args = loader
-            .bind(fast_bindings, &self.weights_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for weights: {}", e)))?;
+        let weights_args = loader.bind(fast_bindings, &self.weights_resolved);
 
         let weights = weights_args[0].clone();
         let scales = weights_args[1].clone();

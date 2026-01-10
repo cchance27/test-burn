@@ -27,7 +27,7 @@ pub struct RmsNormStep {
 #[derive(Debug, Clone)]
 pub struct CompiledRmsNormStep {
     pub step: RmsNormStep,
-    pub input_idx: usize,
+    pub input_resolved: crate::foundry::spec::ResolvedSymbols,
     pub output_idx: usize,
     pub gamma_idx: usize,
     pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
@@ -67,7 +67,11 @@ impl Step for RmsNormStep {
 
         vec![Box::new(CompiledRmsNormStep {
             step: self.clone(),
-            input_idx,
+            input_resolved: crate::foundry::spec::ResolvedSymbols {
+                weights: input_idx,
+                scales: _input_scales_idx.into(),
+                bias: None,
+            },
             output_idx,
             gamma_idx,
             pipeline: Arc::new(OnceLock::new()),
@@ -80,10 +84,12 @@ impl CompiledStep for CompiledRmsNormStep {
         &self,
         foundry: &mut Foundry,
         fast_bindings: &FastBindings,
-        bindings: &TensorBindings,
+        _bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
-        let input = fast_bindings.get(self.input_idx).ok_or(MetalError::InputNotFound("input".into()))?;
+        let input = fast_bindings
+            .get(self.input_resolved.weights)
+            .ok_or(MetalError::InputNotFound("input".into()))?;
 
         let output = fast_bindings
             .get(self.output_idx)
@@ -104,9 +110,7 @@ impl CompiledStep for CompiledRmsNormStep {
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
 
-        let input_args = loader
-            .bind(fast_bindings, &bindings.interpolate(self.step.input.0.clone()), _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for input: {}", e)))?;
+        let input_args = loader.bind(fast_bindings, &self.input_resolved);
 
         let params = RmsNormParamsResolved {
             feature_dim,

@@ -13,4 +13,4 @@ pub use repeat::Repeat;
 pub use step::{Ref, Step, TensorBindings};
 
 pub mod compiled;
-pub use compiled::{CompiledStep, FastBindings, SymbolTable};
+pub use compiled::{CompiledStep, FastBindings, ResolvedSymbols, SymbolTable};

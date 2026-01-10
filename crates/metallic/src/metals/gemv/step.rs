@@ -17,7 +17,7 @@ use crate::{
     MetalError, compound::{
         BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::{Layout, Quantization, ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
     }, foundry::{
-        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
+        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}
     }, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
@@ -288,9 +288,8 @@ pub fn thread_dispatch_config(output_rows: u32) -> DispatchConfig {
 #[derive(Debug, Clone)]
 pub struct CompiledGemvV2Step {
     pub weights_name: String,
-    pub weights_idx: usize,
+    pub weights_resolved: ResolvedSymbols,
     pub scale_bytes_idx: Option<usize>,
-    pub derived_scale_bytes_idx: usize,
     pub input_idx: usize,
     pub output_idx: usize,
     pub bias_idx: Option<usize>,
@@ -385,9 +384,12 @@ impl Step for GemvV2Step {
 
         vec![Box::new(CompiledGemvV2Step {
             weights_name,
-            weights_idx,
+            weights_resolved: ResolvedSymbols {
+                weights: weights_idx,
+                scales: derived_scale_bytes_idx.into(), // Using pre-resolved scales index
+                bias: None,
+            },
             scale_bytes_idx,
-            derived_scale_bytes_idx,
             input_idx,
             output_idx,
             bias_idx,
@@ -409,11 +411,11 @@ impl CompiledStep for CompiledGemvV2Step {
         foundry: &mut Foundry,
         fast_bindings: &FastBindings,
         bindings: &TensorBindings,
-        symbols: &SymbolTable,
+        _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let weights = fast_bindings
-            .get(self.weights_idx)
-            .ok_or_else(|| MetalError::InputNotFound(format!("Weights {}", self.weights_idx)))?;
+            .get(self.weights_resolved.weights)
+            .ok_or_else(|| MetalError::InputNotFound(format!("Weights {}", self.weights_resolved.weights)))?;
         let input = fast_bindings
             .get(self.input_idx)
             .ok_or_else(|| MetalError::InputNotFound(format!("Input {}", self.input_idx)))?;
@@ -429,9 +431,7 @@ impl CompiledStep for CompiledGemvV2Step {
         let policy = crate::foundry::policy::resolve_policy(weights.dtype.into());
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
-        let loader_args = loader
-            .bind(fast_bindings, &self.weights_name, symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.weights_name, e)))?;
+        let loader_args = loader.bind(fast_bindings, &self.weights_resolved);
 
         let weights_arg = loader_args[0].clone();
         let scale_bytes = loader_args[1].clone();
@@ -567,7 +567,7 @@ fn default_wpb_legacy() -> u32 {
 pub struct CompiledGemvCanonicalStep {
     pub step: GemvCanonicalStep,
     pub matrix_name: String,
-    pub matrix_idx: usize,
+    pub matrix_resolved: ResolvedSymbols,
     pub vector_x_idx: usize,
     pub result_y_idx: usize,
     pub bias_idx: Option<usize>,
@@ -581,9 +581,9 @@ impl Step for GemvCanonicalStep {
     }
 
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = crate::foundry::spec::SymbolTable::new();
+        let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         // Bind all symbols found in the table
         for (name, symbol_id) in symbols.iter() {
@@ -619,7 +619,11 @@ impl Step for GemvCanonicalStep {
         vec![Box::new(CompiledGemvCanonicalStep {
             step: self.clone(),
             matrix_name,
-            matrix_idx,
+            matrix_resolved: ResolvedSymbols {
+                weights: matrix_idx,
+                scales: _matrix_scales_idx.into(),
+                bias: None,
+            },
             vector_x_idx,
             result_y_idx,
             bias_idx,
@@ -637,7 +641,7 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let matrix = fast_bindings
-            .get(self.matrix_idx)
+            .get(self.matrix_resolved.weights)
             .ok_or(MetalError::InputNotFound("matrix".into()))?;
         let vector_x = fast_bindings
             .get(self.vector_x_idx)
@@ -651,9 +655,7 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
 
-        let matrix_args = loader
-            .bind(fast_bindings, &self.matrix_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for matrix: {}", e)))?;
+        let matrix_args = loader.bind(fast_bindings, &self.matrix_resolved);
 
         let weights = matrix_args[0].clone();
         let scale_arg = matrix_args[1].clone();
@@ -778,7 +780,7 @@ pub struct GemvColMajorParams {
 pub struct CompiledGemvColMajorStep {
     pub step: GemvColMajorStep,
     pub matrix_name: String,
-    pub matrix_idx: usize,
+    pub matrix_resolved: ResolvedSymbols,
     pub vector_x_idx: usize,
     pub result_y_idx: usize,
     pub bias_idx: Option<usize>,
@@ -792,9 +794,9 @@ impl Step for GemvColMajorStep {
     }
 
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = crate::foundry::spec::SymbolTable::new();
+        let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         // Bind all symbols found in the table
         for (name, symbol_id) in symbols.iter() {
@@ -830,7 +832,11 @@ impl Step for GemvColMajorStep {
         vec![Box::new(CompiledGemvColMajorStep {
             step: self.clone(),
             matrix_name,
-            matrix_idx,
+            matrix_resolved: ResolvedSymbols {
+                weights: matrix_idx,
+                scales: _matrix_scales_idx.into(),
+                bias: None,
+            },
             vector_x_idx,
             result_y_idx,
             bias_idx,
@@ -844,11 +850,11 @@ impl CompiledStep for CompiledGemvColMajorStep {
         &self,
         foundry: &mut Foundry,
         fast_bindings: &FastBindings,
-        _bindings: &TensorBindings,
+        bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         // Debug flag for granular tracing
-        let debug = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
+        let debug = bindings.get_var("DEBUG").is_some();
 
         if debug {
             eprintln!("  [GemvColMajor] Resolving tensors...");
@@ -856,7 +862,7 @@ impl CompiledStep for CompiledGemvColMajorStep {
         }
 
         let matrix = fast_bindings
-            .get(self.matrix_idx)
+            .get(self.matrix_resolved.weights)
             .ok_or(MetalError::InputNotFound("matrix".into()))?;
         let vector_x = fast_bindings
             .get(self.vector_x_idx)
@@ -870,9 +876,7 @@ impl CompiledStep for CompiledGemvColMajorStep {
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
 
-        let matrix_args = loader
-            .bind(fast_bindings, &self.matrix_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for matrix: {}", e)))?;
+        let matrix_args = loader.bind(fast_bindings, &self.matrix_resolved);
 
         let weights = matrix_args[0].clone();
         let scale_arg = matrix_args[1].clone();

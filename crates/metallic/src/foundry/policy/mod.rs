@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::Arc};
 use anyhow::Result;
 
 use crate::{
-    foundry::spec::FastBindings, gguf::{file::GGUFDataType, model_loader::GGUFModel}, types::TensorArg
+    foundry::spec::{FastBindings, ResolvedSymbols}, gguf::{file::GGUFDataType, model_loader::GGUFModel}, types::TensorArg
 };
 
 /// Optimization hints for kernel dispatch.
@@ -41,9 +41,7 @@ pub enum WeightLayout {
     Canonical { expected_k: usize, expected_n: usize },
 }
 
-use crate::{
-    compound::{Stage, stages::Quantization}, foundry::spec::SymbolTable
-};
+use crate::compound::{Stage, stages::Quantization};
 
 /// A stage responsible for defining and binding loader arguments.
 ///
@@ -53,12 +51,10 @@ pub trait LoaderStage: Stage {
     /// Return the Metal struct for loader params (e.g. scales, block size).
     fn params_struct(&self) -> String;
 
-    /// Bind arguments for the loader stage.
+    /// Bind arguments using pre-resolved indices (Hot Path).
     ///
-    /// This retrieves the necessary tensors (weight, scales, etc.) from `fast_bindings`
-    /// using `base_name` (and derived names like `base_name + "_scales"`), and returns
-    /// a list of `TensorArg`s that the kernel expects.
-    fn bind(&self, fast_bindings: &FastBindings, base_name: &str, symbol_table: &SymbolTable) -> Result<Vec<TensorArg>>;
+    /// This uses integer indices stored in `ResolvedSymbols` to retrieve tensors directly from `FastBindings`.
+    fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]>;
 
     /// Return the quantization type this loader handles.
     fn quantization_type(&self) -> Quantization;

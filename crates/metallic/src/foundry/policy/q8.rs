@@ -5,7 +5,7 @@ use objc2_metal::{MTLBuffer as _, MTLDevice};
 use super::{LoaderStage, OptimizationMetadata, QuantizationPolicy, WeightLayout};
 use crate::{
     compound::{BufferArg, stages::Quantization}, foundry::{
-        Foundry, spec::{FastBindings, SymbolTable}
+        Foundry, spec::{FastBindings, ResolvedSymbols}
     }, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, tensor::Dtype, types::{MetalBuffer, TensorArg}
 };
 
@@ -31,24 +31,18 @@ impl LoaderStage for Q8LoaderStage {
         "".to_string()
     }
 
-    fn bind(&self, fast_bindings: &FastBindings, base_name: &str, symbol_table: &SymbolTable) -> anyhow::Result<Vec<TensorArg>> {
-        let weight_sym = symbol_table
-            .get(base_name)
-            .ok_or_else(|| anyhow::anyhow!("Symbol '{}' not found", base_name))?;
-        let weight = fast_bindings
-            .get(weight_sym)
-            .ok_or_else(|| anyhow::anyhow!("Q8 binding '{}' not found", base_name))?;
+    fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]> {
+        use smallvec::smallvec;
+        // Q8 expects [weight, scales]
+        // We panic here if bindings are missing because bind assumes indices are valid
+        // and presence was validated during compile/load (or we accept the panic as "unbound tensor").
+        // For performance, we can unwrap or use expect.
+        let weight = fast_bindings.get(resolved.weights).expect("Q8 weight bound");
 
-        let scales_name = format!("{}_scales", base_name);
-        let scales_sym = symbol_table
-            .get(&scales_name)
-            .ok_or_else(|| anyhow::anyhow!("Symbol '{}' not found", scales_name))?;
+        let scales_idx = resolved.scales.expect("Q8 requires scales index");
+        let scales = fast_bindings.get(scales_idx).expect("Q8 scales bound");
 
-        let scales = fast_bindings
-            .get(scales_sym)
-            .ok_or_else(|| anyhow::anyhow!("Q8 binding '{}' not found", scales_name))?;
-
-        Ok(vec![weight.clone(), scales.clone()])
+        smallvec![weight.clone(), scales.clone()]
     }
 
     fn quantization_type(&self) -> Quantization {

@@ -350,11 +350,13 @@ impl Step for GemmV2Step {
 
         vec![Box::new(CompiledGemmV2Step {
             a_idx,
-            b_name: b_name.clone(),
-            b_idx,
+            b_resolved: crate::foundry::spec::ResolvedSymbols {
+                weights: b_idx,
+                scales: derived_b_scales_idx.into(),
+                bias: None,
+            },
             output_idx,
             b_scales_idx,
-            derived_b_scales_idx,
             bias_idx,
             c_idx,
             m_dim: self.m_dim.clone(),
@@ -380,11 +382,10 @@ impl Step for GemmV2Step {
 #[derive(Debug, Clone)]
 pub struct CompiledGemmV2Step {
     pub a_idx: usize,
-    pub b_name: String,
-    pub b_idx: usize,
+    pub b_resolved: crate::foundry::spec::ResolvedSymbols,
     pub output_idx: usize,
     pub b_scales_idx: Option<usize>,
-    pub derived_b_scales_idx: usize,
+    // derived_b_scales_idx is inside b_resolved
     pub bias_idx: Option<usize>,
     pub c_idx: Option<usize>,
     pub m_dim: DynamicValue<u32>,
@@ -413,7 +414,7 @@ impl CompiledStep for CompiledGemmV2Step {
             .get(self.a_idx)
             .ok_or_else(|| MetalError::InputNotFound("A tensor".into()))?;
         let b = fast_bindings
-            .get(self.b_idx)
+            .get(self.b_resolved.weights)
             .ok_or_else(|| MetalError::InputNotFound("B tensor".into()))?;
         let output = fast_bindings
             .get(self.output_idx)
@@ -440,9 +441,7 @@ impl CompiledStep for CompiledGemmV2Step {
         let loader = policy.loader_stage();
 
         // Bind Weights and Scales using LoaderStage
-        let loader_args = loader
-            .bind(fast_bindings, &self.b_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.b_name, e)))?;
+        let loader_args = loader.bind(fast_bindings, &self.b_resolved);
 
         let b_arg = loader_args[0].clone();
         let b_scales_arg = loader_args[1].clone();

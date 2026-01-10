@@ -11,7 +11,7 @@ use crate::{
     MetalError, compound::{
         CompiledCompoundKernel, CompoundKernel, stages::{Quantization, WarpLayoutStage}
     }, foundry::{
-        Foundry, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}
+        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}
     }, metals::{gemv::step::warp_dispatch_config_2d, rmsnorm::stages::RmsNormComputeStage}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
@@ -58,9 +58,9 @@ impl Step for SwigluStep {
     }
 
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = crate::foundry::spec::SymbolTable::new();
+        let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         // Bind all symbols found in the table
         for (name, symbol_id) in symbols.iter() {
@@ -98,7 +98,7 @@ impl CompiledStep for CompiledSwigluStep {
     fn execute(
         &self,
         foundry: &mut Foundry,
-        fast_bindings: &crate::foundry::spec::FastBindings,
+        fast_bindings: &FastBindings,
         bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
@@ -213,9 +213,9 @@ pub struct CompiledFusedSwigluStep {
     pub input_idx: usize,
     pub gamma_idx: usize,
     pub wg_name: String,
-    pub wg_idx: usize,
+    pub wg_resolved: ResolvedSymbols,
     pub wu_name: String,
-    pub wu_idx: usize,
+    pub wu_resolved: ResolvedSymbols,
     pub bg_idx: Option<usize>,
     pub bu_idx: Option<usize>,
     pub out_idx: usize,
@@ -230,7 +230,7 @@ impl Step for FusedSwigluStep {
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
         let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         for (name, symbol_id) in symbols.iter() {
             if let Ok(tensor) = bindings.get(name) {
@@ -263,9 +263,17 @@ impl Step for FusedSwigluStep {
             input_idx,
             gamma_idx,
             wg_name: wg_name.clone(),
-            wg_idx,
+            wg_resolved: ResolvedSymbols {
+                weights: wg_idx,
+                scales: _wg_scales_idx.into(),
+                bias: None,
+            },
             wu_name: wu_name.clone(),
-            wu_idx,
+            wu_resolved: ResolvedSymbols {
+                weights: wu_idx,
+                scales: _wu_scales_idx.into(),
+                bias: None,
+            },
             bg_idx,
             bu_idx,
             out_idx,
@@ -277,7 +285,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
     fn execute(
         &self,
         foundry: &mut Foundry,
-        _fast_bindings: &crate::foundry::spec::FastBindings,
+        _fast_bindings: &FastBindings,
         bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
@@ -285,8 +293,8 @@ impl CompiledStep for CompiledFusedSwigluStep {
 
         let input = get(self.input_idx)?;
         let gamma = get(self.gamma_idx)?;
-        let w_gate = get(self.wg_idx)?;
-        let w_up = get(self.wu_idx)?;
+        let w_gate = get(self.wg_resolved.weights)?;
+        let w_up = get(self.wu_resolved.weights)?;
         let output = get(self.out_idx)?;
 
         let (b_gate, has_b_gate) = if let Some(idx) = self.bg_idx {
@@ -334,15 +342,11 @@ impl CompiledStep for CompiledFusedSwigluStep {
 
         let policy_gate = crate::foundry::policy::resolve_policy(w_gate.dtype.into());
         let loader_gate = policy_gate.loader_stage();
-        let args_gate = loader_gate
-            .bind(_fast_bindings, &self.wg_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.wg_name, e)))?;
+        let args_gate = loader_gate.bind(_fast_bindings, &self.wg_resolved);
 
         let policy_up = crate::foundry::policy::resolve_policy(w_up.dtype.into());
         let loader_up = policy_up.loader_stage();
-        let args_up = loader_up
-            .bind(_fast_bindings, &self.wu_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.wu_name, e)))?;
+        let args_up = loader_up.bind(_fast_bindings, &self.wu_resolved);
 
         let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
         let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
@@ -399,9 +403,9 @@ pub struct CompiledFusedFfnSwiGluRmsNormStep {
     pub input_idx: usize,
     pub gamma_idx: usize,
     pub w_gate_name: String,
-    pub w_gate_idx: usize,
+    pub w_gate_resolved: ResolvedSymbols,
     pub w_up_name: String,
-    pub w_up_idx: usize,
+    pub w_up_resolved: ResolvedSymbols,
     pub b_gate_idx: Option<usize>,
     pub b_up_idx: Option<usize>,
     pub output_idx: usize,
@@ -449,7 +453,7 @@ impl Step for FusedFfnSwiGluRmsNormStep {
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
         let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         for (name, symbol_id) in symbols.iter() {
             if let Ok(tensor) = bindings.get(name) {
@@ -484,9 +488,17 @@ impl Step for FusedFfnSwiGluRmsNormStep {
             input_idx,
             gamma_idx,
             w_gate_name: w_gate_name.clone(),
-            w_gate_idx,
+            w_gate_resolved: ResolvedSymbols {
+                weights: w_gate_idx,
+                scales: _w_gate_scales_idx.into(),
+                bias: None,
+            },
             w_up_name: w_up_name.clone(),
-            w_up_idx,
+            w_up_resolved: ResolvedSymbols {
+                weights: w_up_idx,
+                scales: _w_up_scales_idx.into(),
+                bias: None,
+            },
             b_gate_idx,
             b_up_idx,
             output_idx,
@@ -499,7 +511,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
     fn execute(
         &self,
         foundry: &mut Foundry,
-        fast_bindings: &crate::foundry::spec::FastBindings,
+        fast_bindings: &FastBindings,
         bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
@@ -507,21 +519,17 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
 
         let input = get(self.input_idx)?;
         let gamma = get(self.gamma_idx)?;
-        let w_gate = get(self.w_gate_idx)?;
-        let w_up = get(self.w_up_idx)?;
+        let w_gate = get(self.w_gate_resolved.weights)?;
+        let w_up = get(self.w_up_resolved.weights)?;
         let output = get(self.output_idx)?;
 
         let policy_gate = crate::foundry::policy::resolve_policy(w_gate.dtype.into());
         let loader_gate = policy_gate.loader_stage();
-        let args_gate = loader_gate
-            .bind(fast_bindings, &self.w_gate_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.w_gate_name, e)))?;
+        let args_gate = loader_gate.bind(fast_bindings, &self.w_gate_resolved);
 
         let policy_up = crate::foundry::policy::resolve_policy(w_up.dtype.into());
         let loader_up = policy_up.loader_stage();
-        let args_up = loader_up
-            .bind(fast_bindings, &self.w_up_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for '{}': {}", self.w_up_name, e)))?;
+        let args_up = loader_up.bind(fast_bindings, &self.w_up_resolved);
 
         let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
         let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());

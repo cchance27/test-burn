@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::Quantization}, foundry::{
-        Foundry, spec::{CompiledStep, FastBindings, Ref, Step, SymbolTable, TensorBindings}
+        Foundry, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}
     }, metals::embedding::{EmbeddingParams, EmbeddingParamsResolved}, types::{DispatchConfig, GridSize, TensorArg}
 };
 
@@ -28,7 +28,7 @@ pub struct EmbeddingStep {
 pub struct CompiledEmbeddingStep {
     pub step: EmbeddingStep,
     pub table_name: String,
-    pub table_idx: usize,
+    pub table_resolved: ResolvedSymbols,
     pub indices_idx: usize,
     pub output_idx: usize,
     pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
@@ -60,14 +60,20 @@ impl Step for EmbeddingStep {
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
         let table_name = bindings.interpolate(self.table.0.clone());
         let table_idx = symbols.get_or_create(table_name.clone());
-        let _derived_scale_idx = symbols.get_or_create(format!("{table_name}_scales"));
+        // Pre-resolve scales eagerly during compilation
+        let scales_idx = symbols.get_or_create(format!("{table_name}_scales"));
+
         let indices_idx = symbols.get_or_create(bindings.interpolate(self.indices.0.clone()));
         let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
 
         vec![Box::new(CompiledEmbeddingStep {
             step: self.clone(),
             table_name,
-            table_idx,
+            table_resolved: ResolvedSymbols {
+                weights: table_idx,
+                scales: Some(scales_idx),
+                bias: None,
+            },
             indices_idx,
             output_idx,
             pipeline: Arc::new(OnceLock::new()),
@@ -84,7 +90,7 @@ impl CompiledStep for CompiledEmbeddingStep {
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
         let table = fast_bindings
-            .get(self.table_idx)
+            .get(self.table_resolved.weights)
             .ok_or_else(|| MetalError::InputNotFound("embedding table".into()))?;
         let indices = fast_bindings
             .get(self.indices_idx)
@@ -103,9 +109,7 @@ impl CompiledStep for CompiledEmbeddingStep {
         let loader = policy.loader_stage();
         let quantization = loader.quantization_type();
 
-        let table_args = loader
-            .bind(fast_bindings, &self.table_name, _symbols)
-            .map_err(|e| MetalError::OperationFailed(format!("Policy bind failed for table: {}", e)))?;
+        let table_args = loader.bind(fast_bindings, &self.table_resolved);
 
         let args = EmbeddingGenericArgs {
             table: table_args[0].clone(),

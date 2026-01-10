@@ -1,7 +1,7 @@
 use super::{LoaderStage, OptimizationMetadata, QuantizationPolicy, WeightLayout};
 use crate::{
     compound::{BufferArg, stages::Quantization}, foundry::{
-        Foundry, spec::{FastBindings, SymbolTable}, tensor::Tensor
+        Foundry, spec::{FastBindings, ResolvedSymbols}, tensor::Tensor
     }, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, tensor::TensorInit, types::TensorArg
 };
 
@@ -29,24 +29,14 @@ impl LoaderStage for F16LoaderStage {
         "".to_string()
     }
 
-    fn bind(&self, fast_bindings: &FastBindings, base_name: &str, symbol_table: &SymbolTable) -> anyhow::Result<Vec<TensorArg>> {
-        // For F16, we just bind the weight tensor twice (second is dummy scale)
-        // This maintains the existing behavior where the kernel expects 2 buffers
-        // even if the second is unused by PolicyF16.
-        // TODO: In Phase 3.3, we updates kernels to not expect dummy args for F16.
+    fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]> {
+        use smallvec::smallvec;
+        let tensor = fast_bindings.get(resolved.weights).expect("F16 weight bound");
 
-        let symbol_id = symbol_table
-            .get(base_name)
-            .ok_or_else(|| anyhow::anyhow!("Symbol '{}' not found", base_name))?;
-
-        let tensor = fast_bindings
-            .get(symbol_id)
-            .ok_or_else(|| anyhow::anyhow!("Tensor binding '{}' not found", base_name))?;
-
-        Ok(vec![
-            tensor.clone(),
-            tensor.clone(), // Dummy Scale
-        ])
+        // Match existing behavior: [weight, dummy_scale]
+        // where dummy_scale is just the weight again (unused by kernel)
+        // DEBT: We should avoid this? Or at least assess is as it seems like a hack and might affect memory?
+        smallvec![tensor.clone(), tensor.clone()]
     }
     fn quantization_type(&self) -> Quantization {
         Quantization::F16

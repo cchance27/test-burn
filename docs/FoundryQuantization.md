@@ -33,12 +33,12 @@ The `LoaderStage` trait handles the "plumbing" of tensors. It bridges the gap be
 
 ```rust
 pub trait LoaderStage: Send + Sync + Debug {
+    /// Bind arguments using pre-resolved indices (Zero Allocation).
     fn bind(
         &self,
         fast_bindings: &FastBindings,
-        base_name: &str, // e.g. "w1"
-        symbol_table: &SymbolTable
-    ) -> anyhow::Result<Vec<TensorArg>>;
+        resolved: &ResolvedSymbols
+    ) -> SmallVec<[TensorArg; 4]>;
     
     fn quantization_type(&self) -> QuantizationType;
 }
@@ -62,8 +62,8 @@ When a `Step` (like `GemvCanonicalStep`) is compiled, the following happens:
 
 1.  **Policy Resolution**: The system checks the `quantization` field of the step (or defaults to F16).
 2.  **Kernel Selection**: `resolve_policy(quantization_type)` is called to retrieve the correct `QuantizationPolicy` implementation (e.g., `PolicyQ8`).
-3.  **Symbol Registration**: The `compile` method registers all necessary symbols in the `SymbolTable`. complex quants like Q8 register derived symbols (e.g., `{name}_scales`).
-4.  **Binding**: At runtime, `loader.bind(...)` is called. For Q8, this automatically binds both the weight tensor and the scale tensor.
+3.  **Symbol Resolution**: The `compile` method resolves all necessary symbol IDs into a `ResolvedSymbols` struct (e.g., weights index, scales index).
+4.  **Binding**: At runtime, `loader.bind(fast_bindings, &resolved)` is called. This uses direct integer indexing (no strings) for zero-allocation binding.
 
 ## Kernel Integration (Metal)
 
@@ -111,7 +111,7 @@ Follow this checklist to implement a new quantization format (e.g., Q4_0).
 2.  **Create Policy**: Create `crates/metallic/src/foundry/policy/q4.rs`.
     - Implement `QuantizationPolicy` for `PolicyQ4`.
     - Implement `LoaderStage` for `Q4LoaderStage`.
-    - In `bind()`, expect and resolve necessary tensors (e.g., weights packed, scales, maybe zeros).
+    - In `bind()`, use `resolved.weights` (and scales) to get tensors from `FastBindings`.
 3.  **Register Policy**: Update `resolve_policy` in `crates/metallic/src/foundry/policy.rs` to return `PolicyQ4` for `QuantizationType::Q4_0`.
 
 ### 2. Metal Implementation
