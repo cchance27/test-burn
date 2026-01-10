@@ -2198,6 +2198,9 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
         bias: zero_buf.clone(), // Zero bias
         has_bias: 0,
         alpha: 1.0,
+        residual: metallic::types::TensorArg::from_tensor(&cross_gate_output),
+        has_residual: 0,
+        beta: 0.0,
     };
 
     let kernel = get_gemv_v2_kernel_f16(Layout::RowMajor, GemvStrategy::Vectorized);

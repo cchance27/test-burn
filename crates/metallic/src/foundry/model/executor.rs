@@ -29,6 +29,30 @@ pub struct CompiledModel {
 }
 
 impl CompiledModel {
+    fn read_prefill_usize(var: &str) -> Option<usize> {
+        std::env::var(var).ok().and_then(|v| v.trim().parse::<usize>().ok())
+    }
+
+    fn prefill_config() -> (usize, usize) {
+        // Defaults chosen to be "big enough to matter" but not explode memory (logits = max*V).
+        const DEFAULT_MAX_PREFILL_CHUNK: usize = 32;
+        const DEFAULT_PREFILL_CHUNK_SIZE: usize = 32;
+        const MAX_ALLOWED: usize = 512;
+
+        let mut max_prefill_chunk = Self::read_prefill_usize("METALLIC_MAX_PREFILL_CHUNK").unwrap_or(DEFAULT_MAX_PREFILL_CHUNK);
+        let mut prefill_chunk_size = Self::read_prefill_usize("METALLIC_PREFILL_CHUNK_SIZE").unwrap_or(DEFAULT_PREFILL_CHUNK_SIZE);
+
+        max_prefill_chunk = max_prefill_chunk.clamp(1, MAX_ALLOWED);
+        prefill_chunk_size = prefill_chunk_size.clamp(1, MAX_ALLOWED);
+
+        // Allocation must cover the largest runtime M.
+        if prefill_chunk_size > max_prefill_chunk {
+            max_prefill_chunk = prefill_chunk_size;
+        }
+
+        (max_prefill_chunk, prefill_chunk_size)
+    }
+
     /// Optimized execution steps (compiled from DSL)
     pub fn compiled_steps(&self) -> &[Box<dyn CompiledStep>] {
         &self.compiled_steps
@@ -144,9 +168,9 @@ impl CompiledModel {
             }
         }
 
-        // 2b. Bind output_weight (LM Head) using canonical layout for GemvCanonical
+        // 2b. Bind output_weight (LM Head) as NK row-major ([Vocab, DModel]) to enable GEMM prefill.
         if let Some(gguf_name) = tensor_names.resolve("output_weight", None, &available) {
-            self.bind_gguf_tensor_canonical(
+            self.bind_gguf_tensor_nk_f16(
                 &mut bindings,
                 &mut fast_bindings,
                 foundry,
@@ -160,16 +184,10 @@ impl CompiledModel {
         // 3. Resolve and bind per-layer weight tensors
         // Non-FFN weights use regular binding
         let regular_layer_keys = ["layer.attn_norm", "layer.ffn_norm"];
-        // FFN and Attn weights use canonical k-block-major conversion for GemvCanonical
-        let canonical_layer_keys = [
-            "layer.ffn_gate",
-            "layer.ffn_up",
-            "layer.ffn_down",
-            "layer.attn_q",
-            "layer.attn_k",
-            "layer.attn_v",
-            "layer.attn_output",
-        ];
+        // Canonical weights (blocked) are needed for FusedQkv.
+        let canonical_layer_keys = ["layer.attn_q", "layer.attn_k", "layer.attn_v"];
+        // NK row-major weights are GEMM-friendly for MatMul (transpose_b=true).
+        let nk_layer_keys = ["layer.attn_output", "layer.ffn_gate", "layer.ffn_up", "layer.ffn_down"];
         for i in 0..arch.n_layers {
             for key in regular_layer_keys {
                 if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
@@ -184,10 +202,6 @@ impl CompiledModel {
                         "layer.attn_q" => (arch.d_model, arch.d_model),
                         "layer.attn_k" => (arch.d_model, kv_dim),
                         "layer.attn_v" => (arch.d_model, kv_dim),
-                        "layer.attn_output" => (arch.d_model, arch.d_model),
-                        "layer.ffn_gate" => (arch.d_model, arch.ff_dim),
-                        "layer.ffn_up" => (arch.d_model, arch.ff_dim),
-                        "layer.ffn_down" => (arch.ff_dim, arch.d_model),
                         _ => {
                             return Err(MetalError::InvalidShape(format!(
                                 "Unhandled canonical weight key '{}'; update executor canonical binding map",
@@ -196,6 +210,33 @@ impl CompiledModel {
                         }
                     };
                     self.bind_gguf_tensor_canonical(
+                        &mut bindings,
+                        &mut fast_bindings,
+                        foundry,
+                        &gguf_name,
+                        &logical_name,
+                        expected_k,
+                        expected_n,
+                    )?;
+                }
+            }
+
+            for key in nk_layer_keys {
+                if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
+                    let logical_name = format!("{key}_{i}");
+                    let (expected_k, expected_n) = match key {
+                        "layer.attn_output" => (arch.d_model, arch.d_model),
+                        "layer.ffn_gate" => (arch.d_model, arch.ff_dim),
+                        "layer.ffn_up" => (arch.d_model, arch.ff_dim),
+                        "layer.ffn_down" => (arch.ff_dim, arch.d_model),
+                        _ => {
+                            return Err(MetalError::InvalidShape(format!(
+                                "Unhandled NK weight key '{}'; update executor NK binding map",
+                                key
+                            )));
+                        }
+                    };
+                    self.bind_gguf_tensor_nk_f16(
                         &mut bindings,
                         &mut fast_bindings,
                         foundry,
@@ -240,27 +281,105 @@ impl CompiledModel {
 
         // 4. Allocate intermediate buffers
         // These are named buffers used by the forward pass for activations
-        // For now, we use seq_len=1 (single token inference), batch=1
+        // Pre-allocate for max batch size to support batched prefill (M>1)
+        // Tune via:
+        // - METALLIC_MAX_PREFILL_CHUNK (allocation)
+        // - METALLIC_PREFILL_CHUNK_SIZE (runtime chunking; may raise allocation if larger)
+        let (max_prefill_chunk, _prefill_chunk_size) = Self::prefill_config();
+        bindings.set_int_global("max_prefill_chunk", max_prefill_chunk);
         let batch = 1;
-        let seq_len = 1; // Will be updated per-forward based on input
 
-        // 1D buffers for general intermediates
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "hidden", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "norm_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "proj_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "residual_1", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "ffn_norm_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "gate", arch.ff_dim)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "up", arch.ff_dim)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "ffn_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "final_norm_out", arch.d_model)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "logits", arch.vocab_size)?;
+        // 2D buffers for general intermediates (max batch rows).
+        // IMPORTANT: keep the last dim as the feature dim so steps that infer K/N from dims stay correct.
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "hidden",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "norm_out",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "proj_out",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "residual_1",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "ffn_norm_out",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(&mut bindings, &mut fast_bindings, foundry, "gate", max_prefill_chunk, arch.ff_dim)?;
+        self.allocate_intermediate_2d(&mut bindings, &mut fast_bindings, foundry, "up", max_prefill_chunk, arch.ff_dim)?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "ffn_out",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "final_norm_out",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "logits",
+            max_prefill_chunk,
+            arch.vocab_size,
+        )?;
+        self.allocate_intermediate_2d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "attn_out",
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
 
         // 3D buffers for SDPA (batch, seq_len, dim)
+        // For prefill, seq_len dimension can be up to max_prefill_chunk
         let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "q", batch, seq_len, arch.d_model)?;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "k", batch, seq_len, kv_dim)?;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "v", batch, seq_len, kv_dim)?;
+        self.allocate_intermediate_3d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "q",
+            batch,
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "k", batch, max_prefill_chunk, kv_dim)?;
+        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "v", batch, max_prefill_chunk, kv_dim)?;
         let head_dim = arch.d_model / arch.n_heads;
         self.allocate_intermediate_3d(
             &mut bindings,
@@ -268,7 +387,7 @@ impl CompiledModel {
             foundry,
             "q_heads",
             batch * arch.n_heads,
-            seq_len,
+            max_prefill_chunk,
             head_dim,
         )?;
         self.allocate_intermediate_3d(
@@ -277,7 +396,7 @@ impl CompiledModel {
             foundry,
             "k_heads",
             batch * arch.n_kv_heads,
-            seq_len,
+            max_prefill_chunk,
             head_dim,
         )?;
         self.allocate_intermediate_3d(
@@ -286,19 +405,33 @@ impl CompiledModel {
             foundry,
             "v_heads",
             batch * arch.n_kv_heads,
-            seq_len,
+            max_prefill_chunk,
             head_dim,
         )?;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "q_rot", batch, seq_len, arch.d_model)?;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "k_rot", batch, seq_len, kv_dim)?;
+        self.allocate_intermediate_3d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "q_rot",
+            batch,
+            max_prefill_chunk,
+            arch.d_model,
+        )?;
+        self.allocate_intermediate_3d(
+            &mut bindings,
+            &mut fast_bindings,
+            foundry,
+            "k_rot",
+            batch,
+            max_prefill_chunk,
+            kv_dim,
+        )?;
         // Expanded K/V buffers for GQA (after RepeatKvHeads, same dim as Q)
         // Must be sized for MAX sequence length because they hold repeated history
         let max_seq_len_for_slice = 2048;
         let expanded_dim = batch * max_seq_len_for_slice * arch.d_model;
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_expanded", expanded_dim)?;
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_expanded", expanded_dim)?;
-        // SDPA output is per-step (seq_len=1) in incremental decode; keep this compact.
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "attn_out", arch.d_model)?;
 
         // KV slice buffers for cache reads (sized for max sequence to avoid reallocation)
         // These hold the sliced cache [n_kv_heads, current_seq_len, head_dim]
@@ -312,20 +445,21 @@ impl CompiledModel {
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "zero", 1)?;
 
         // 6. Allocate KV cache for autoregressive generation
-        // Shape: [n_kv_heads, max_seq_len, head_dim] per layer
+        // Context stores KV already repeated to n_heads (so decode avoids a RepeatKvHeads dispatch).
+        // Shape: [n_heads, max_seq_len, head_dim] per layer
         // We'll create one k_cache and v_cache per layer, named k_cache_0, k_cache_1, etc.
         let max_seq_len = 2048; // Maximum context length
         let head_dim = arch.d_model / arch.n_heads;
         for layer_idx in 0..arch.n_layers {
             let k_cache_name = format!("k_cache_{}", layer_idx);
             let v_cache_name = format!("v_cache_{}", layer_idx);
-            // KV cache: [n_kv_heads, max_seq_len, head_dim]
+            // KV cache: [n_heads, max_seq_len, head_dim]
             self.allocate_kv_cache(
                 &mut bindings,
                 &mut fast_bindings,
                 foundry,
                 &k_cache_name,
-                arch.n_kv_heads,
+                arch.n_heads,
                 max_seq_len,
                 head_dim,
             )?;
@@ -334,7 +468,7 @@ impl CompiledModel {
                 &mut fast_bindings,
                 foundry,
                 &v_cache_name,
-                arch.n_kv_heads,
+                arch.n_heads,
                 max_seq_len,
                 head_dim,
             )?;
@@ -661,6 +795,142 @@ impl CompiledModel {
         Ok(())
     }
 
+    /// Bind a GGUF 2D weight tensor as contiguous NK row-major F16 ([N, K]).
+    ///
+    /// This is the most GEMM-friendly layout for transformer weights that are stored as
+    /// [out_features, in_features]. It also enables GEMV V2 RowMajor for decode.
+    ///
+    /// If the GGUF tensor is not 2D, this falls back to `bind_gguf_tensor`.
+    fn bind_gguf_tensor_nk_f16(
+        &self,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        foundry: &mut Foundry,
+        gguf_name: &str,
+        logical_name: &str,
+        expected_k: usize,
+        expected_n: usize,
+    ) -> Result<(), MetalError> {
+        use half::f16;
+        use objc2_metal::MTLDevice;
+
+        let gguf = self.weights.gguf_model();
+
+        if let Some(tensor) = gguf.get_tensor(gguf_name) {
+            let dims: Vec<usize> = tensor.dims().to_vec();
+
+            if dims.len() != 2 {
+                return self.bind_gguf_tensor(bindings, fast_bindings, foundry, gguf_name, logical_name);
+            }
+
+            if expected_k == 0 || expected_n == 0 {
+                return Err(MetalError::InvalidShape(format!(
+                    "NK weight '{}' expects non-zero (K,N), got K={} N={}",
+                    gguf_name, expected_k, expected_n
+                )));
+            }
+
+            // Validate GGUF dims match expected (up to ordering).
+            if !((dims[0] == expected_k && dims[1] == expected_n) || (dims[0] == expected_n && dims[1] == expected_k)) {
+                return Err(MetalError::InvalidShape(format!(
+                    "NK weight '{}' dims {:?} do not match expected (K,N)=({}, {})",
+                    gguf_name, dims, expected_k, expected_n
+                )));
+            }
+
+            let layout_hint = gguf.layout_hint();
+
+            // Load source data as F16
+            let view = tensor
+                .raw_view(&gguf.gguf_file)
+                .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error: {:?}", e)))?;
+
+            let src_f16: Vec<f16> = match view {
+                GGUFRawTensor::F32(values) => values.iter().map(|&v| f16::from_f32(v)).collect(),
+                GGUFRawTensor::F16(values) => values.to_vec(),
+                GGUFRawTensor::Bytes(raw, GGUFDataType::F32) => {
+                    let f32_slice: &[f32] = bytemuck::try_cast_slice(raw)
+                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F32 bytes for '{}'", gguf_name)))?;
+                    f32_slice.iter().map(|&v| f16::from_f32(v)).collect()
+                }
+                GGUFRawTensor::Bytes(raw, GGUFDataType::F16) => {
+                    let f16_slice: &[f16] = bytemuck::try_cast_slice(raw)
+                        .map_err(|_| MetalError::InvalidShape(format!("Invalid F16 bytes for '{}'", gguf_name)))?;
+                    f16_slice.to_vec()
+                }
+                _ => {
+                    return Err(MetalError::InvalidShape(format!(
+                        "Unsupported GGUF dtype {:?} for NK conversion: {}",
+                        tensor.data_type(),
+                        gguf_name
+                    )));
+                }
+            };
+
+            let expected_len = expected_n
+                .checked_mul(expected_k)
+                .ok_or_else(|| MetalError::InvalidShape(format!("NK weight '{}' dims overflow", gguf_name)))?;
+
+            if src_f16.len() != expected_len {
+                return Err(MetalError::InvalidShape(format!(
+                    "NK weight '{}' len {} does not match expected N*K={}",
+                    gguf_name,
+                    src_f16.len(),
+                    expected_len
+                )));
+            }
+
+            // Ensure NK row-major ([N, K]) contiguous, regardless of GGUF layout hint.
+            let nk_data: Vec<f16> = match layout_hint {
+                crate::gguf::model_loader::GGUFLayoutHint::Nk => src_f16,
+                crate::gguf::model_loader::GGUFLayoutHint::Kn => {
+                    let mut nk = vec![f16::ZERO; expected_len];
+                    for n in 0..expected_n {
+                        for k in 0..expected_k {
+                            nk[n * expected_k + k] = src_f16[k * expected_n + n];
+                        }
+                    }
+                    nk
+                }
+            };
+
+            let byte_size = nk_data.len() * std::mem::size_of::<f16>();
+            let buffer = foundry
+                .device
+                .0
+                .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+                .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for NK '{}'", byte_size, gguf_name)))?;
+
+            unsafe {
+                use objc2_metal::MTLBuffer;
+                let ptr = buffer.contents().as_ptr() as *mut f16;
+                std::ptr::copy_nonoverlapping(nk_data.as_ptr(), ptr, nk_data.len());
+            }
+
+            let tensor_arg = TensorArg::from_buffer(
+                crate::types::MetalBuffer(buffer),
+                crate::tensor::Dtype::F16,
+                vec![expected_n, expected_k],
+                vec![expected_k, 1],
+            );
+
+            // Bind both GGUF and logical names to this NK buffer for convenience.
+            self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg.clone());
+            self.insert_binding(bindings, fast_bindings, logical_name.to_string(), tensor_arg);
+
+            tracing::trace!(
+                "Bound NK '{}' -> '{}' (K={}, N={}, layout_hint={:?})",
+                logical_name,
+                gguf_name,
+                expected_k,
+                expected_n,
+                layout_hint
+            );
+        }
+
+        Ok(())
+    }
+
     fn zero_tensor_arg(&self, foundry: &mut Foundry, size: usize) -> Result<TensorArg, MetalError> {
         if size == 0 {
             return Err(MetalError::InvalidShape("zero_tensor_arg size must be > 0".into()));
@@ -720,6 +990,50 @@ impl CompiledModel {
         Ok(())
     }
 
+    /// Allocate a 2D intermediate buffer for activations (row-major).
+    fn allocate_intermediate_2d(
+        &self,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        foundry: &mut Foundry,
+        name: &str,
+        rows: usize,
+        cols: usize,
+    ) -> Result<(), MetalError> {
+        use objc2_metal::MTLDevice;
+
+        if rows == 0 || cols == 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "allocate_intermediate_2d '{name}' requires rows>0 and cols>0"
+            )));
+        }
+
+        // Skip if already bound
+        if bindings.contains(name) {
+            return Ok(());
+        }
+
+        let total_elements = rows * cols;
+        let byte_size = total_elements * 2; // F16
+        let buffer = foundry
+            .device
+            .0
+            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
+
+        let tensor_arg = TensorArg::from_buffer(
+            crate::types::MetalBuffer(buffer),
+            crate::tensor::Dtype::F16,
+            vec![rows, cols],
+            crate::foundry::tensor::compute_strides(&[rows, cols]),
+        );
+
+        self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
+        tracing::trace!("Allocated 2D intermediate '{}' [{}, {}]", name, rows, cols);
+
+        Ok(())
+    }
+
     /// Allocate a 3D intermediate buffer for SDPA-style tensors.
     fn allocate_intermediate_3d(
         &self,
@@ -767,6 +1081,15 @@ impl CompiledModel {
         bindings.insert(name, tensor);
     }
 
+    /// Helper to update an existing binding without allocating a new String key.
+    /// Falls back to insert if the binding isn't present (should be rare on hot paths).
+    fn set_binding(&self, bindings: &mut TensorBindings, fast_bindings: &mut FastBindings, name: &str, tensor: TensorArg) {
+        if let Some(id) = self.symbol_table.get(name) {
+            fast_bindings.set(id, tensor.clone());
+        }
+        bindings.set_binding(name, tensor);
+    }
+
     /// Allocate a KV cache buffer for attention caching.
     /// Shape: [n_heads, max_seq_len, head_dim]
     fn allocate_kv_cache(
@@ -788,10 +1111,18 @@ impl CompiledModel {
 
         let total_elements = n_heads * max_seq_len * head_dim;
         let byte_size = total_elements * 2; // F16 = 2 bytes
+
+        // KV caches are hot-read on GPU every decode step; prefer private storage.
+        // Shared is only useful for debugging (CPU visibility) and is slower on GPU.
+        let storage_mode = if std::env::var("METALLIC_KV_CACHE_SHARED").is_ok() {
+            objc2_metal::MTLResourceOptions::StorageModeShared
+        } else {
+            objc2_metal::MTLResourceOptions::StorageModePrivate
+        };
         let buffer = foundry
             .device
             .0
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .newBufferWithLength_options(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(
@@ -911,7 +1242,7 @@ impl CompiledModel {
         mut callback: F,
     ) -> Result<Vec<u32>, MetalError>
     where
-        F: FnMut(u32) -> Result<bool, MetalError>,
+        F: FnMut(u32, std::time::Duration) -> Result<bool, MetalError>,
     {
         if prompt_tokens.is_empty() {
             return Err(MetalError::InvalidShape("generate requires non-empty prompt_tokens".into()));
@@ -959,6 +1290,9 @@ impl CompiledModel {
         bindings.set_global("total_elements_ffn", static_total_elements_ffn);
         bindings.set_global("total_elements_write", static_total_elements_write);
 
+        // Set m=1 for single-token inference (MatMul dispatch)
+        bindings.set_int_global("m", 1);
+
         // Only position-dependent globals need updating per token
         // Use int_globals to avoid String allocation on every token
         let update_pos_globals = |bindings: &mut TensorBindings, pos: usize| {
@@ -979,54 +1313,93 @@ impl CompiledModel {
         // We update the 'input_ids' binding to point to the correct offset in full_input_buffer.
         // Larger chunk size for prefill since we don't need intermediate CPU syncs.
 
-        //QUESTION: Would Having GEMM available for Foundry allow us to prefill faster and improve further than basic batching like this in dispatch?
-        const PREFILL_CHUNK_SIZE: usize = 256;
+        let max_prefill_chunk = bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
+        let (_, mut prefill_chunk_size) = Self::prefill_config();
+        prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk);
 
-        // Cache the input_ids key to avoid String allocation per token
-        let input_ids_key = "input_ids".to_string();
+        let input_ids_key = "input_ids";
 
         // Check for debug sync flag to disable batched capture for isolation
         let debug_sync = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
 
-        for chunk in prompt_tokens.chunks(PREFILL_CHUNK_SIZE).enumerate() {
-            let (chunk_idx, chunk_tokens) = chunk;
+        let prefill_start = std::time::Instant::now();
+        let mut last_prefill_m = 0;
 
-            let base_pos = chunk_idx * PREFILL_CHUNK_SIZE;
+        if !debug_sync {
+            // Capture the entire prefill into a single command buffer to amortize submission overhead.
+            foundry.start_capture()?;
+        }
 
-            // Start capture for this chunk (unless debugging)
-            if !debug_sync {
+        for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
+            let m = chunk_tokens.len();
+            last_prefill_m = m;
+            let base_pos = chunk_idx * prefill_chunk_size;
+
+            // In debug-sync mode, keep each chunk isolated and synchronous.
+            if debug_sync {
                 foundry.start_capture()?;
             }
 
-            for (i, _) in chunk_tokens.iter().enumerate() {
-                let pos = base_pos + i;
+            // === BATCHED PREFILL ===
+            // Set all batch-aware globals for M tokens
+            bindings.set_int_global("m", m);
+            bindings.set_int_global("seq_len", m);
+            bindings.set_int_global("position_offset", base_pos);
+            bindings.set_int_global("kv_seq_len", base_pos + m);
 
-                // Update bindings to point to the specific token in the large buffer
-                let mut tensor_input = TensorArg::from_buffer(full_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
-                tensor_input.offset = pos * 4; // 4 bytes per u32
-                self.insert_binding(&mut bindings, &mut fast_bindings, input_ids_key.clone(), tensor_input);
+            // Update total_elements for all batch-aware operations
+            bindings.set_int_global("total_elements_hidden", m * d_model);
+            bindings.set_int_global("total_elements_q", m * n_heads * head_dim);
+            bindings.set_int_global("total_elements_k", m * n_kv_heads * head_dim);
+            bindings.set_int_global("total_elements_write", m * n_kv_heads * head_dim);
+            bindings.set_int_global("total_elements_ffn", m * ff_dim);
+            bindings.set_int_global("total_elements_slice", n_kv_heads * (base_pos + m) * head_dim);
+            bindings.set_int_global("total_elements_repeat", n_heads * (base_pos + m) * head_dim);
 
-                update_pos_globals(&mut bindings, pos);
-                self.forward(foundry, &mut bindings, &fast_bindings)?;
-            }
+            // Input tensor: [M] token IDs pointing to chunk in buffer
+            let mut tensor_input = TensorArg::from_buffer(full_input_buffer.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
+            tensor_input.offset = base_pos * 4; // 4 bytes per u32
+            self.set_binding(&mut bindings, &mut fast_bindings, input_ids_key, tensor_input);
 
-            // Commit and wait for the chunk
+            // Run forward pass with batched input
+            self.forward(foundry, &mut bindings, &fast_bindings)?;
 
-            if !debug_sync {
-                foundry.end_capture()?;
+            // Commit and wait for the chunk (debug-sync only)
+            if debug_sync {
+                let cmd = foundry.end_capture()?;
+                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
             }
         }
+
+        // Ensure prefill is complete before sampling from logits.
+        if !debug_sync {
+            let cmd = foundry.end_capture()?;
+            objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+        }
+
+        let prefill_duration = prefill_start.elapsed();
+
+        // Reset to M=1 for autoregressive decode
+        bindings.set_int_global("m", 1);
+        bindings.set_int_global("seq_len", 1);
+        bindings.set_int_global("total_elements_hidden", d_model);
+        bindings.set_int_global("total_elements_q", n_heads * head_dim);
+        bindings.set_int_global("total_elements_k", n_kv_heads * head_dim);
+        bindings.set_int_global("total_elements_write", n_kv_heads * head_dim);
+        bindings.set_int_global("total_elements_ffn", ff_dim);
 
         // Now autoregressive decode: sample from last prompt-token logits, then step forward per token.
         // We reuse the first slot of full_input_buffer as a scratch space for generated tokens.
         let single_input_buffer = full_input_buffer; // reuse ownership
 
         // Ensure input_ids is bound to the single input buffer (offset 0) for the generated tokens
-        let input_ids_key = "input_ids".to_string();
+        let input_ids_key = "input_ids";
+        // Seed `input_ids` with any valid U32 buffer; we overwrite it per-step below to point at the
+        // sampled-token buffer (avoids a dedicated CopyU32 kernel each step).
         {
             let mut tensor_input = TensorArg::from_buffer(single_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
             tensor_input.offset = 0;
-            self.insert_binding(&mut bindings, &mut fast_bindings, input_ids_key.clone(), tensor_input);
+            self.set_binding(&mut bindings, &mut fast_bindings, input_ids_key, tensor_input);
         }
 
         // BATCHING: We batch multiple tokens into a single command buffer to amortize submission overhead.
@@ -1050,6 +1423,13 @@ impl CompiledModel {
             // 1. Get logits from previous forward pass (or prefill)
             let logits = bindings.get("logits")?;
 
+            let mut logits_arg = logits.clone();
+
+            // If sampling from prefill result (step 0), offset to the last token if batch > 1
+            if step == 0 && last_prefill_m > 1 {
+                logits_arg.offset += (last_prefill_m - 1) * (vocab_size as usize) * 2; // F16 bytes
+            }
+
             // 2. Sample (Greedy or Random) using GPU kernel
             // We use SampleTopK for both to keep execution on GPU. Greedy is just top_k=1.
             let effective_top_k = if greedy { 1 } else { top_k };
@@ -1057,7 +1437,7 @@ impl CompiledModel {
 
             // Create sample kernel with destination buffer
             let sample_kernel = crate::metals::sampling::SampleTopK::new(
-                &logits,
+                &logits_arg,
                 &TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
                 vocab_size,
                 effective_top_k,
@@ -1067,15 +1447,14 @@ impl CompiledModel {
             );
             foundry.run(&sample_kernel)?;
 
-            // 3. Copy sampled token to input_ids buffer for next step
-            // We copy from the specific sample output to the single shared input buffer (offset 0)
-            // Use compute kernel instead of blit to keep encoder active (batching optimization)
-            let copy_kernel = crate::metals::tensor::CopyU32::new(
+            // 3. Feed the sampled token directly into the next forward pass by rebinding `input_ids`
+            // to the sampled-token buffer. This avoids an extra CopyU32 dispatch per step.
+            self.set_binding(
+                &mut bindings,
+                &mut fast_bindings,
+                input_ids_key,
                 TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
-                TensorArg::from_buffer(single_input_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
-                1,
             );
-            foundry.run(&copy_kernel)?;
 
             // 4. Update globals for the NEXT forward pass
             // We are about to run forward for position `prompt_len + step` (the token we just sampled)
@@ -1108,7 +1487,7 @@ impl CompiledModel {
                         batch_done = true;
                         break;
                     }
-                    if !callback(token)? {
+                    if !callback(token, prefill_duration)? {
                         batch_done = true;
                         break;
                     }
@@ -1148,7 +1527,7 @@ impl CompiledModel {
             top_k,
             top_p,
             seed,
-            |_| Ok(true),
+            |_, _| Ok(true),
         )
     }
 

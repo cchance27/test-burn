@@ -1,9 +1,8 @@
 use std::sync::{Arc, OnceLock};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::MTLComputePipelineState;
 
 use metallic_macros::KernelArgs;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputePipelineState;
 use serde::{Deserialize, Serialize};
 
 use super::{RmsNorm, RmsNormParamsResolved};
@@ -115,11 +114,11 @@ impl CompiledStep for CompiledRmsNormStep {
         let kernel = get_rmsnorm_kernel();
 
         let pipeline = if let Some(p) = self.pipeline.get() {
-             p
+            p
         } else {
-             let p = foundry.load_kernel(kernel)?;
-             let _ = self.pipeline.set(p);
-             self.pipeline.get().unwrap()
+            let p = foundry.load_kernel(kernel)?;
+            let _ = self.pipeline.set(p);
+            self.pipeline.get().unwrap()
         };
 
         foundry.dispatch_pipeline(pipeline, &kernel.bind(args, dispatch), dispatch)

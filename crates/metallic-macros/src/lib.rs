@@ -1253,7 +1253,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             .map(|info| {
                 let fname = info.name_ident.as_ref().unwrap();
                 if info.rust_type.contains("TensorArg") {
-                    quote! { 
+                    quote! {
                         #fname: symbols.get_or_create(resolver.interpolate(self.#fname.0.clone()))
                     }
                 } else {
@@ -1268,7 +1268,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             .map(|info| {
                 let fname = info.name_ident.as_ref().unwrap();
                 if info.rust_type.contains("TensorArg") {
-                    quote! { 
+                    quote! {
                         #fname: bindings.get(self.#fname).cloned().ok_or_else(|| #root::error::MetalError::InputNotFound("Compiled tensor missing".into()))?
                     }
                 } else if info.rust_type.contains("Params") {
@@ -1774,7 +1774,6 @@ pub fn derive_conditional_kernel(input: TokenStream) -> TokenStream {
 /// - `impl GemvSimdConfig for MyFusedKernel { ... }`
 /// - `type MainStage = GemvSimdMainStage<MyFusedKernel, Hook, Epilogue>`
 
-
 /// Derive macro for SIMD GEMV Prologue stages.
 ///
 /// # Example
@@ -1789,7 +1788,6 @@ pub fn derive_conditional_kernel(input: TokenStream) -> TokenStream {
 /// )]
 /// pub struct RmsnormPrologue;
 /// ```
-
 
 /// Derive macro for auto-generating CompiledStep boilerplate.
 ///

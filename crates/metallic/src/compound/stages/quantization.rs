@@ -43,6 +43,22 @@ impl Quantization {
             Quantization::Q8 => "q8",
         }
     }
+
+    /// Size of a single element in bytes.
+    pub fn element_size(&self) -> usize {
+        match self {
+            Quantization::F16 => 2,
+            Quantization::Q8 => 1,
+        }
+    }
+
+    /// Convert a number of elements to a byte count string for Metal.
+    pub fn bytes(&self, elements: &str) -> String {
+        match self {
+            Quantization::F16 => format!("(ulong)({}) * 2", elements),
+            Quantization::Q8 => format!("(ulong)({})", elements),
+        }
+    }
 }
 
 impl Default for Quantization {

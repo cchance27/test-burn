@@ -7,16 +7,16 @@
 //! - Dynamic block size selection based on K dimension
 //! - Composable stage architecture
 
-use std::sync::{Arc, OnceLock};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::MTLComputePipelineState;
+use std::sync::OnceLock;
 
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
+use super::stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpWriteOutputStage};
 use crate::{
-    MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::Layout}, foundry::{
+    MetalError, compound::{
+        BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::{Layout, Quantization, ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
+    }, foundry::{
         Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
     }, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
@@ -29,6 +29,7 @@ pub struct GemvV2Step {
     pub input: Ref,
     pub output: Ref,
     pub bias: Option<Ref>,
+    pub residual: Option<Ref>,
     pub k_dim: DynamicValue<u32>,
     pub n_dim: DynamicValue<u32>,
     pub weights_per_block: u32, // Typically 32 for Q8
@@ -36,6 +37,8 @@ pub struct GemvV2Step {
     pub strategy: Option<GemvStrategy>,
     #[serde(default = "default_alpha")]
     pub alpha: f32,
+    #[serde(default)]
+    pub beta: f32,
 }
 
 fn default_alpha() -> f32 {
@@ -46,15 +49,16 @@ fn default_alpha() -> f32 {
 // Fast Warp-Per-Row Kernels (Standard V2)
 // =============================================================================
 
-use super::stages::{CanonicalDotStage, VectorizedDotStage, WarpWriteOutputStage};
-use crate::compound::stages::{Quantization, WarpLayoutStage, WarpReduceStage};
-
 /// Sub-strategy for GEMV V2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, Hash)]
 pub enum GemvStrategy {
-    /// Optimized vectorized strategy (fastest).
+    /// Automatically select best strategy based on dimensions.
     #[default]
+    Auto,
+    /// Optimized vectorized strategy (fastest for small N / K-contiguous).
     Vectorized,
+    /// Scalar strategy (optimized for large N / strided K).
+    Scalar,
     /// Canonical 4-way unrolled strategy (legacy compatibility/safety).
     Canonical,
 }
@@ -62,7 +66,7 @@ pub enum GemvStrategy {
 /// Get fast warp-per-row kernel for F16.
 pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'static CompiledCompoundKernel {
     match (layout, strategy) {
-        (Layout::RowMajor, GemvStrategy::Vectorized) => {
+        (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
             static NK_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
             NK_KERNEL_F16_VEC.get_or_init(|| {
                 CompoundKernel::new("gemv_v2_nk_f16_vec")
@@ -86,7 +90,8 @@ pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'stati
                     .compile()
             })
         }
-        (Layout::ColMajor, GemvStrategy::Vectorized) => {
+        (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => {
+            // Auto defaults to Vectorized for ColMajor unless specifically hitting Large N path at runtime check
             static KN_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
             KN_KERNEL_F16_VEC.get_or_init(|| {
                 CompoundKernel::new("gemv_v2_kn_f16_vec")
@@ -94,6 +99,18 @@ pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'stati
                     .prologue(VectorizedDotStage::new(Quantization::F16))
                     .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
                     .main(WarpWriteOutputStage::new())
+                    .with_manual_output(true)
+                    .compile()
+            })
+        }
+        (Layout::ColMajor, GemvStrategy::Scalar) => {
+            static KN_KERNEL_F16_SCALAR: OnceLock<CompiledCompoundKernel> = OnceLock::new();
+            KN_KERNEL_F16_SCALAR.get_or_init(|| {
+                CompoundKernel::new("gemv_v2_kn_f16_scalar")
+                    .prologue(ThreadLayoutStage::col_major())
+                    .prologue(ScalarDotStage::new(Quantization::F16))
+                    // No WarpReduce needed, ScalarDot computes full sum
+                    .main(WarpWriteOutputStage::new()) // Works because lane_id=0 defined by ThreadLayout
                     .with_manual_output(true)
                     .compile()
             })
@@ -122,7 +139,7 @@ pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'stati
                     .compile()
             })
         }
-        (Layout::Canonical, GemvStrategy::Canonical) => {
+        (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => {
             static CAN_KERNEL_F16_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
             CAN_KERNEL_F16_CAN.get_or_init(|| {
                 CompoundKernel::new("gemv_v2_can_f16_can")
@@ -134,13 +151,14 @@ pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'stati
                     .compile()
             })
         }
+        _ => unreachable!("Unsupported layout/strategy pair for F16"),
     }
 }
 
 /// Get fast warp-per-row kernel for Q8.
 pub fn get_gemv_v2_kernel_q8(layout: Layout, strategy: GemvStrategy) -> &'static CompiledCompoundKernel {
     match (layout, strategy) {
-        (Layout::RowMajor, GemvStrategy::Vectorized) => {
+        (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
             static NK_KERNEL_Q8_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
             NK_KERNEL_Q8_VEC.get_or_init(|| {
                 CompoundKernel::new("gemv_v2_nk_q8_vec")
@@ -164,13 +182,24 @@ pub fn get_gemv_v2_kernel_q8(layout: Layout, strategy: GemvStrategy) -> &'static
                     .compile()
             })
         }
-        (Layout::ColMajor, GemvStrategy::Vectorized) => {
+        (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => {
             static KN_KERNEL_Q8_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
             KN_KERNEL_Q8_VEC.get_or_init(|| {
                 CompoundKernel::new("gemv_v2_kn_q8_vec")
                     .prologue(WarpLayoutStage::col_major())
                     .prologue(VectorizedDotStage::new(Quantization::Q8))
                     .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                    .main(WarpWriteOutputStage::new())
+                    .with_manual_output(true)
+                    .compile()
+            })
+        }
+        (Layout::ColMajor, GemvStrategy::Scalar) => {
+            static KN_KERNEL_Q8_SCALAR: OnceLock<CompiledCompoundKernel> = OnceLock::new();
+            KN_KERNEL_Q8_SCALAR.get_or_init(|| {
+                CompoundKernel::new("gemv_v2_kn_q8_scalar")
+                    .prologue(ThreadLayoutStage::col_major())
+                    .prologue(ScalarDotStage::new(Quantization::Q8))
                     .main(WarpWriteOutputStage::new())
                     .with_manual_output(true)
                     .compile()
@@ -200,7 +229,7 @@ pub fn get_gemv_v2_kernel_q8(layout: Layout, strategy: GemvStrategy) -> &'static
                     .compile()
             })
         }
-        (Layout::Canonical, GemvStrategy::Canonical) => {
+        (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => {
             static CAN_KERNEL_Q8_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
             CAN_KERNEL_Q8_CAN.get_or_init(|| {
                 CompoundKernel::new("gemv_v2_can_q8_can")
@@ -212,6 +241,7 @@ pub fn get_gemv_v2_kernel_q8(layout: Layout, strategy: GemvStrategy) -> &'static
                     .compile()
             })
         }
+        _ => unreachable!("Unsupported layout/strategy pair for Q8"),
     }
 }
 
@@ -229,6 +259,32 @@ pub fn warp_dispatch_config(n_dim: u32) -> DispatchConfig {
     }
 }
 
+/// Dispatch configuration for warp-per-row kernels with a batch (M) dimension.
+///
+/// Uses `gid.y` as the batch index.
+pub fn warp_dispatch_config_2d(n_dim: u32, batch: u32) -> DispatchConfig {
+    const WARPS_PER_TG: usize = 8;
+    const SIMD_WIDTH: usize = 32;
+    const TG_WIDTH: usize = WARPS_PER_TG * SIMD_WIDTH; // 256
+
+    let num_tgs = (n_dim as usize + WARPS_PER_TG - 1) / WARPS_PER_TG;
+    DispatchConfig {
+        grid: GridSize::new(num_tgs, (batch.max(1)) as usize, 1),
+        group: ThreadgroupSize::new(TG_WIDTH, 1, 1),
+    }
+}
+
+/// Dispatch configuration for thread-per-row (scalar) kernels.
+pub fn thread_dispatch_config(output_rows: u32) -> DispatchConfig {
+    let threads_per_tg = 256;
+    let threadgroups = (output_rows + threads_per_tg - 1) / threads_per_tg;
+
+    DispatchConfig {
+        grid: GridSize::d1(threadgroups as usize),
+        group: ThreadgroupSize::d1(threads_per_tg as usize),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CompiledGemvV2Step {
     pub weights_idx: usize,
@@ -236,6 +292,7 @@ pub struct CompiledGemvV2Step {
     pub input_idx: usize,
     pub output_idx: usize,
     pub bias_idx: Option<usize>,
+    pub residual_idx: Option<usize>,
     pub k_dim: DynamicValue<u32>,
     pub n_dim: DynamicValue<u32>,
     pub weights_per_block: u32,
@@ -243,7 +300,7 @@ pub struct CompiledGemvV2Step {
     pub is_q8: bool,
     pub strategy: GemvStrategy,
     pub alpha: f32,
-    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
+    pub beta: f32,
 }
 
 /// Arguments for GemvV2 kernel dispatch.
@@ -269,6 +326,12 @@ pub struct GemvV2Args {
     pub has_bias: u32,
     #[arg(buffer = 9)]
     pub alpha: f32,
+    #[arg(buffer = 10)]
+    pub residual: TensorArg,
+    #[arg(buffer = 11)]
+    pub has_residual: u32,
+    #[arg(buffer = 12)]
+    pub beta: f32,
 }
 
 #[typetag::serde(name = "GemvV2")]
@@ -291,6 +354,10 @@ impl Step for GemvV2Step {
             .as_ref()
             .map(|s| symbols.get_or_create(bindings.interpolate(s.0.clone())));
         let bias_idx = self.bias.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
+        let residual_idx = self
+            .residual
+            .as_ref()
+            .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
 
         // Determine quantization mode based on scale_bytes presence
         let is_q8 = self.scale_bytes.is_some();
@@ -302,8 +369,10 @@ impl Step for GemvV2Step {
         let strategy = self.strategy.unwrap_or_else(|| {
             if std::env::var("METALLIC_GEMV_STRATEGY").ok().as_deref() == Some("canonical") {
                 GemvStrategy::Canonical
+            } else if std::env::var("METALLIC_GEMV_STRATEGY").ok().as_deref() == Some("scalar") {
+                GemvStrategy::Scalar
             } else {
-                GemvStrategy::Vectorized
+                GemvStrategy::Auto
             }
         });
 
@@ -320,6 +389,7 @@ impl Step for GemvV2Step {
             input_idx,
             output_idx,
             bias_idx,
+            residual_idx,
             k_dim: self.k_dim.clone(),
             n_dim: self.n_dim.clone(),
             weights_per_block: self.weights_per_block,
@@ -327,7 +397,7 @@ impl Step for GemvV2Step {
             is_q8,
             strategy,
             alpha: self.alpha,
-            pipeline: Arc::new(OnceLock::new()),
+            beta: self.beta,
         })]
     }
 }
@@ -370,8 +440,48 @@ impl CompiledStep for CompiledGemvV2Step {
             (TensorArg::from_tensor(output), 0u32)
         };
 
+        // Handle optional residual
+        let (residual, has_residual) = if let Some(idx) = self.residual_idx {
+            let r = fast_bindings
+                .get(idx)
+                .ok_or_else(|| MetalError::InputNotFound(format!("Residual {}", idx)))?;
+            (TensorArg::from_tensor(r), 1u32)
+        } else {
+            (TensorArg::from_tensor(output), 0u32)
+        };
+
+        let weights_arg = TensorArg::from_tensor(weights);
+
+        let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
+
+        // Determine Effective Strategy
+        let mut effective_strategy = match self.strategy {
+            GemvStrategy::Auto => {
+                // If Auto, choose Scalar for Large N in ColMajor layout
+                // Using cutoff N > 4096 based on typical Warp vs Thread efficiency
+                if self.layout == Layout::ColMajor && n_dim > 4096 {
+                    GemvStrategy::Scalar
+                } else {
+                    GemvStrategy::Vectorized
+                }
+            }
+            s => s,
+        };
+
+        // Batched dispatch requires WarpLayoutStage semantics (uses gid.y = batch_idx).
+        if batch > 1 && effective_strategy == GemvStrategy::Scalar {
+            effective_strategy = GemvStrategy::Vectorized;
+        }
+
+        // Select Kernel based on effective strategy
+        let kernel = if self.is_q8 {
+            get_gemv_v2_kernel_q8(self.layout, effective_strategy)
+        } else {
+            get_gemv_v2_kernel_f16(self.layout, effective_strategy)
+        };
+
         let args = GemvV2Args {
-            weights: TensorArg::from_tensor(weights),
+            weights: weights_arg,
             scale_bytes,
             input: TensorArg::from_tensor(input),
             output: TensorArg::from_tensor(output),
@@ -381,32 +491,21 @@ impl CompiledStep for CompiledGemvV2Step {
             bias,
             has_bias,
             alpha: self.alpha,
+            residual,
+            has_residual,
+            beta: self.beta,
         };
 
-        // There used to be a local `strategy` var in some versions, but we have `self.strategy`.
-        // The layout is in `self.layout`.
-
-        // Choose dispatch config (always warp-per-row now)
-        let dispatch = warp_dispatch_config(n_dim);
-
-        // Select kernel
-        let kernel = if self.is_q8 {
-            get_gemv_v2_kernel_q8(self.layout, self.strategy)
+        // Dispatch Logic based on Strategy
+        let dispatch = if effective_strategy == GemvStrategy::Scalar {
+            thread_dispatch_config(n_dim)
         } else {
-            get_gemv_v2_kernel_f16(self.layout, self.strategy)
+            warp_dispatch_config_2d(n_dim, batch)
         };
 
-        // Get pipeline from cache or load it
-        let pipeline = if let Some(p) = self.pipeline.get() {
-            p
-        } else {
-            let p = foundry.load_kernel(kernel)?;
-            let _ = self.pipeline.set(p);
-            self.pipeline.get().unwrap()
-        };
+        foundry.run(&kernel.bind(args, dispatch))?;
 
-        let bound_kernel = kernel.bind(args, dispatch);
-        foundry.dispatch_pipeline(pipeline, &bound_kernel, dispatch)
+        Ok(())
     }
 
     fn name(&self) -> &'static str {
@@ -526,7 +625,7 @@ impl Step for GemvCanonicalStep {
 }
 
 impl CompiledStep for CompiledGemvCanonicalStep {
-    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, _bindings: &TensorBindings) -> Result<(), MetalError> {
+    fn execute(&self, foundry: &mut Foundry, fast_bindings: &FastBindings, bindings: &TensorBindings) -> Result<(), MetalError> {
         let matrix = fast_bindings
             .get(self.matrix_idx)
             .ok_or(MetalError::InputNotFound("matrix".into()))?;
@@ -545,6 +644,14 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         let (bias, has_bias) = if let Some(idx) = self.bias_idx {
             let b = fast_bindings.get(idx).ok_or(MetalError::InputNotFound("bias".into()))?;
             (TensorArg::from_tensor(b), 1)
+        } else {
+            (TensorArg::from_tensor(result_y), 0)
+        };
+
+        // Handle optional residual (fused in write stage)
+        let (residual, has_residual) = if let Some(res_idx) = self.residual_idx {
+            let r = fast_bindings.get(res_idx).ok_or(MetalError::InputNotFound("residual".into()))?;
+            (TensorArg::from_tensor(r), 1)
         } else {
             (TensorArg::from_tensor(result_y), 0)
         };
@@ -595,9 +702,13 @@ impl CompiledStep for CompiledGemvCanonicalStep {
             bias,
             has_bias,
             alpha: self.step.alpha,
+            residual,
+            has_residual,
+            beta: self.step.beta,
         };
 
-        let dispatch = warp_dispatch_config(n_dim);
+        let batch = bindings.get_int_global("m").unwrap_or(self.step.params.batch as usize).max(1) as u32;
+        let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
         let kernel = if self.is_q8 {
             get_gemv_v2_kernel_q8(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical)
@@ -606,28 +717,6 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         };
 
         foundry.run(&kernel.bind(args, dispatch))?;
-
-        if let Some(res_idx) = self.residual_idx {
-            let residual = fast_bindings.get(res_idx).ok_or(MetalError::InputNotFound("residual".into()))?;
-
-            // Chain Add Kernel: result_y += residual
-            let total = result_y.dims.iter().product::<usize>() as u32;
-            let add_args = AddArgs {
-                a: TensorArg::from_tensor(result_y),
-                b: TensorArg::from_tensor(residual),
-                out: TensorArg::from_tensor(result_y),
-                total,
-            };
-
-            let add_kernel = get_add_kernel();
-            let grid_size = ((total + 255) / 256) as usize;
-            let dispatch = DispatchConfig {
-                grid: GridSize::d1(grid_size),
-                group: ThreadgroupSize::d1(256),
-            };
-
-            foundry.run(&add_kernel.bind(add_args, dispatch))?;
-        }
 
         Ok(())
     }
@@ -818,14 +907,17 @@ impl CompiledStep for CompiledGemvColMajorStep {
             bias,
             has_bias,
             alpha: self.step.alpha,
+            residual: TensorArg::from_tensor(result_y),
+            has_residual: 0,
+            beta: 0.0,
         };
 
         let dispatch = if n_dim > 4096 {
             // Use scalar dispatch (thread-per-row) for large N (ColMajor)
             thread_dispatch_config(n_dim)
         } else {
-            // Use typical warp dispatch for small N? Actually for ColMajor scalar is always better due to coalescing.
-            thread_dispatch_config(n_dim)
+            // Use typical warp dispatch for small N
+            warp_dispatch_config(n_dim)
         };
 
         if debug {
@@ -834,10 +926,19 @@ impl CompiledStep for CompiledGemvColMajorStep {
         }
 
         // Use Vectorized strategy for ColMajor as it naturally vectorizes
+        // Logic Update: Use Scalar if N > 4096
         let kernel = if self.is_q8 {
-            get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+            if n_dim > 4096 {
+                get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
+            } else {
+                get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+            }
         } else {
-            get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+            if n_dim > 4096 {
+                get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
+            } else {
+                get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
+            }
         };
 
         if debug {
@@ -883,16 +984,6 @@ impl CompiledStep for CompiledGemvColMajorStep {
 
     fn name(&self) -> &'static str {
         "GemvColMajor"
-    }
-}
-
-fn thread_dispatch_config(output_rows: u32) -> DispatchConfig {
-    let threads_per_tg = 256;
-    let threadgroups = (output_rows + threads_per_tg - 1) / threads_per_tg;
-
-    DispatchConfig {
-        grid: GridSize::d1(threadgroups as usize),
-        group: ThreadgroupSize::d1(threads_per_tg as usize),
     }
 }
 

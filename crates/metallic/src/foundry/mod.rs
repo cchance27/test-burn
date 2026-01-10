@@ -15,6 +15,7 @@ pub mod pool;
 pub mod spec;
 pub mod storage;
 pub mod tensor;
+pub mod constants;
 
 /// The central hub for Metal operations, managing the device, queue, and resources.
 pub struct Foundry {
@@ -397,25 +398,48 @@ impl Foundry {
 
         // Dispatch with manual binding
         use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _, MTLComputeCommandEncoder as _};
-        let command_buffer = self.queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
-        let encoder = command_buffer
-            .computeCommandEncoder()
-            .ok_or(MetalError::CommandQueueCreationFailed)?;
 
-        encoder.setComputePipelineState(&pipeline);
+        if let Some(ref buffer) = self.active_command_buffer {
+            // Batched path: reuse or create encoder on active buffer
+            let encoder = if let Some(ref active_enc) = self.active_compute_encoder {
+                active_enc.clone()
+            } else {
+                let enc = buffer.computeCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+                self.active_compute_encoder = Some(enc.clone());
+                enc
+            };
 
-        // Bind arguments using the ORIGINAL kernel
-        let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
-        kernel.bind(&encoder_wrapper);
+            encoder.setComputePipelineState(&pipeline);
+            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
+            kernel.bind(&encoder_wrapper);
 
-        let config = kernel.dispatch_config();
-        let (grid_size, group_size): (objc2_metal::MTLSize, objc2_metal::MTLSize) = config.into();
+            let config = kernel.dispatch_config();
+            let (grid_size, group_size): (objc2_metal::MTLSize, objc2_metal::MTLSize) = config.into();
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
 
-        encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
-        encoder.endEncoding();
+            // Do NOT end encoding or commit - wait for sync() or end_capture()
+        } else {
+            // Standalone path: create new buffer, encode, and block wait
+            let command_buffer = self.queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+            let encoder = command_buffer
+                .computeCommandEncoder()
+                .ok_or(MetalError::CommandQueueCreationFailed)?;
 
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
+            encoder.setComputePipelineState(&pipeline);
+
+            // Bind arguments using the ORIGINAL kernel
+            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
+            kernel.bind(&encoder_wrapper);
+
+            let config = kernel.dispatch_config();
+            let (grid_size, group_size): (objc2_metal::MTLSize, objc2_metal::MTLSize) = config.into();
+
+            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
+            encoder.endEncoding();
+
+            command_buffer.commit();
+            command_buffer.waitUntilCompleted();
+        }
 
         Ok(())
     }

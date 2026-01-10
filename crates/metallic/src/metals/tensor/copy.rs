@@ -1,4 +1,5 @@
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
+
 use crate::types::TensorArg;
 
 #[derive(MetalStruct, Clone, Copy, Debug, Default, serde::Serialize, serde::Deserialize)]

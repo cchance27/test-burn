@@ -276,6 +276,7 @@ impl Stage for WarpLayoutStage {
     const uint lane_id = lid.x & (SIMD_WIDTH - 1u);
     const uint row_idx = gid.x * WARPS_PER_TG + warp_id;  // Output index (N)
     const uint tid = lane_id;
+    const uint batch_idx = gid.y; // Support batched dispatch
     
     // Early exit if row is out of bounds
     if (row_idx >= n_dim) return;
@@ -288,6 +289,83 @@ impl Stage for WarpLayoutStage {
                 Layout::Canonical => "[N, K] Blocked",
             }
         );
+
+        ("void".to_string(), code)
+    }
+}
+
+// =============================================================================
+// ThreadLayoutStage - Thread-per-row dispatch strategy (Scalar)
+// =============================================================================
+
+/// A stage that defines thread-per-row layout for scalar GEMV dispatch.
+///
+/// Assigns one output row per thread.
+/// Efficient for Layout::ColMajor (KxN weights) where contiguous load is along N.
+///
+/// Dispatch: N threads (Grid = (N+255)/256)
+///
+/// Emits:
+/// - `row_idx`: Row index = gid.x
+/// - `lane_id`: 0 (dummy)
+#[derive(Debug, Clone)]
+pub struct ThreadLayoutStage {
+    layout: Layout,
+}
+
+impl ThreadLayoutStage {
+    pub fn new(layout: Layout) -> Self {
+        Self { layout }
+    }
+
+    pub fn col_major() -> Self {
+        Self::new(Layout::ColMajor)
+    }
+}
+
+impl Stage for ThreadLayoutStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        vec![]
+    }
+
+    fn struct_defs(&self) -> String {
+        // Reuse layout definitions
+        let layout_defs = match self.layout {
+            Layout::ColMajor => {
+                r#"
+// Layout: ColMajor - Weights shape [K, N]
+// Thread-per-row: Contiguous load along N possible if we group?
+// Actually if we assume Thread-per-Row, we load W[k, n] where n varies by thread.
+// Lane i loads W[k, n+i]. This IS contiguous in memory (stride 1 along N).
+#define WEIGHT_STRIDE_K N
+#define WEIGHT_STRIDE_ROW 1
+#define IS_K_CONTIGUOUS 0
+#define WEIGHT_INDEX(row, k, K, N) ((k) * (N) + (row))
+"#
+            }
+            _ => panic!("ThreadLayoutStage currently only supports ColMajor (Scalar) optimization"),
+        };
+
+        format!("{}\n#define SIMD_WIDTH 32\n", layout_defs)
+    }
+
+    fn emit(&self, _prev: &str) -> (String, String) {
+        let code = r#"    // Thread-per-row layout indices
+	    const uint row_idx = gid.x;
+	    const uint lane_id = 0; // Scalar mode implies single lane acting as 'warp'
+	    const uint tid = lid.x;
+	    const uint batch_idx = gid.y; // Support batched dispatch (gid.y==0 for d1 grids)
+
+	    if (row_idx >= n_dim) return;
+	    
+	    // Define scalar constants
+	    #define SCALAR_DISPATCH 1
+"#
+        .to_string();
 
         ("void".to_string(), code)
     }

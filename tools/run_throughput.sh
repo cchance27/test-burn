@@ -70,17 +70,31 @@ calculate_stats() {
         return
     fi
 
-    local min=${values[0]}
-    local max=${values[0]}
+    local min=""
+    local max=""
     local sum=0
+    local count=0
     
     for val in "${values[@]}"; do
+        # Defensive: only accept plain numeric values.
+        if [[ ! "$val" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            continue
+        fi
+        if [ -z "$min" ]; then
+            min="$val"
+            max="$val"
+        fi
         if (( $(echo "$val < $min" | bc -l) )); then min=$val; fi
         if (( $(echo "$val > $max" | bc -l) )); then max=$val; fi
         sum=$(echo "$sum + $val" | bc -l)
+        count=$((count + 1))
     done
     
-    local avg=$(echo "$sum / ${#values[@]}" | bc -l)
+    if [ "$count" -eq 0 ]; then
+        return
+    fi
+
+    local avg=$(echo "$sum / $count" | bc -l)
     printf "  [stats] %-20s | min: %8.2f | avg: %8.2f | max: %8.2f\n" "$label" "$min" "$avg" "$max"
 }
 
@@ -88,8 +102,12 @@ run_benchmark() {
     local name="$1"
     local model="$2"
     local jsonl_path="metrics-throughput-${name}.jsonl"
+    local bin_path="target/release/metallic_cli"
     
     echo "== ${name} =="
+
+    # Build once up-front so we don't depend on a stale binary after code changes.
+    cargo build -q --message-format=short --release
     
     local load_times=()
     local tok_times=()
@@ -98,6 +116,8 @@ run_benchmark() {
     local pp_tps=()
     local decode_times=()
     local decode_tps=()
+    local e2e_times=()
+    local e2e_tps=()
     local total_times=()
     local total_tps=()
     
@@ -111,19 +131,21 @@ run_benchmark() {
           METALLIC_PERF_OUTPUT=1 \
           METALLIC_RECORD_CB_GPU_TIMING=1 \
           METALLIC_METRICS_JSONL_PATH="${jsonl_path}" \
-          cargo run -q --message-format=short --release -- "${model}" "${PROMPT}" \
+          "${bin_path}" "${model}" "${PROMPT}" \
           --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" --engine="${ENGINE}" 2>&1)
         
         # Extraction logic
-        local l_time=$(echo "$output" | grep "Model Load:" | sed -E 's/.*Model Load:[[:space:]]+([0-9.]+)s.*/\1/')
-        local t_time=$(echo "$output" | grep "Tokenization:" | sed -E 's/.*Tokenization:[[:space:]]+([0-9.]+)s.*/\1/')
-        local t_tps=$(echo "$output" | grep "Tokenization:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
-        local p_time=$(echo "$output" | grep "Prompt Processing:" | sed -E 's/.*Prompt Processing:[[:space:]]+([0-9.]+)s.*/\1/')
-        local p_tps=$(echo "$output" | grep "Prompt Processing:" | sed -E 's/.*\(([0-9.]+) tok\/s\).*/\1/')
-        local d_time=$(echo "$output" | grep "Decode:" | sed -E 's/.*Decode:[[:space:]]+([0-9.]+)s.*/\1/')
-        local d_tps=$(echo "$output" | grep "Decode:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
-        local tot_time=$(echo "$output" | grep "Total:" | sed -E 's/.*Total:[[:space:]]+([0-9.]+)s.*/\1/')
-        local tot_tps=$(echo "$output" | grep "Total:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+        local l_time=$(echo "$output" | grep -m1 "Model Load:" | sed -E 's/.*Model Load:[[:space:]]+([0-9.]+)s.*/\1/')
+        local t_time=$(echo "$output" | grep -m1 "Tokenization:" | sed -E 's/.*Tokenization:[[:space:]]+([0-9.]+)s.*/\1/')
+        local t_tps=$(echo "$output" | grep -m1 "Tokenization:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+        local p_time=$(echo "$output" | grep -m1 "Prompt Processing:" | sed -E 's/.*Prompt Processing:[[:space:]]+([0-9.]+)s.*/\1/')
+        local p_tps=$(echo "$output" | grep -m1 "Prompt Processing:" | sed -E 's/.*\(([0-9.]+) tok\/s\).*/\1/')
+        local d_time=$(echo "$output" | grep -m1 "Decode:" | sed -E 's/.*Decode:[[:space:]]+([0-9.]+)s.*/\1/')
+        local d_tps=$(echo "$output" | grep -m1 "Decode:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+        local e2e_time=$(echo "$output" | grep -m1 "End-to-End:" | sed -E 's/.*End-to-End:[[:space:]]+([0-9.]+)s.*/\1/')
+        local e2e_tps=$(echo "$output" | grep -m1 "End-to-End:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
+        local tot_time=$(echo "$output" | grep -m1 "Total:" | sed -E 's/.*Total:[[:space:]]+([0-9.]+)s.*/\1/')
+        local tot_tps=$(echo "$output" | grep -m1 "Total:" | sed -E 's/.*\(([0-9.]+) tokens\/s\).*/\1/')
 
         [[ -n "$l_time" ]] && load_times+=("$l_time")
         [[ -n "$t_time" ]] && tok_times+=("$t_time")
@@ -132,10 +154,12 @@ run_benchmark() {
         [[ -n "$p_tps" ]] && pp_tps+=("$p_tps")
         [[ -n "$d_time" ]] && decode_times+=("$d_time")
         [[ -n "$d_tps" ]] && decode_tps+=("$d_tps")
+        [[ -n "$e2e_time" ]] && e2e_times+=("$e2e_time")
+        [[ -n "$e2e_tps" ]] && e2e_tps+=("$e2e_tps")
         [[ -n "$tot_time" ]] && total_times+=("$tot_time")
         [[ -n "$tot_tps" ]] && total_tps+=("$tot_tps")
 
-        echo "    Model Load: ${l_time:-N/A}s | Prefill: ${p_tps:-N/A} tok/s | Decode: ${d_tps:-N/A} tok/s"
+        echo "    Model Load: ${l_time:-N/A}s | Prefill: ${p_tps:-N/A} tok/s | Decode: ${d_tps:-N/A} tok/s | E2E: ${e2e_tps:-N/A} tok/s"
     done
     
     echo ""
@@ -148,6 +172,8 @@ run_benchmark() {
     calculate_stats "Prefill (tps)" ${pp_tps[@]+"${pp_tps[@]}"}
     calculate_stats "Decode (s)" ${decode_times[@]+"${decode_times[@]}"}
     calculate_stats "Decode (tps)" ${decode_tps[@]+"${decode_tps[@]}"}
+    calculate_stats "End-to-End (s)" ${e2e_times[@]+"${e2e_times[@]}"}
+    calculate_stats "End-to-End (tps)" ${e2e_tps[@]+"${e2e_tps[@]}"}
     calculate_stats "Total (s)" ${total_times[@]+"${total_times[@]}"}
     calculate_stats "Total (tps)" ${total_tps[@]+"${total_tps[@]}"}
     echo

@@ -162,6 +162,44 @@ impl Stage for ParallelProjectStage {
             ""
         };
 
+        let scales_logic = match self.quantization {
+            Quantization::F16 => r#"
+        float s_q_val = 1.0f;
+        float s_k_val = (row_idx < n_kv) ? 1.0f : 0.0f;
+        float s_v_val = (row_idx < n_kv) ? 1.0f : 0.0f;
+                "#
+            .to_string(),
+            Quantization::Q8 => {
+                format!(
+                    r#"
+        float s_q_val = (float){policy}::load_scale(row_s_q, block_off);
+        float s_k_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
+        float s_v_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
+                    "#,
+                    policy = policy
+                )
+            }
+        };
+
+        let tail_scales_logic = match self.quantization {
+            Quantization::F16 => r#"
+        float s_q_val = (k < k_dim) ? 1.0f : 0.0f;
+        float s_k_val = (row_idx < n_kv && k < k_dim) ? 1.0f : 0.0f;
+        float s_v_val = (row_idx < n_kv && k < k_dim) ? 1.0f : 0.0f;
+                "#
+            .to_string(),
+            Quantization::Q8 => {
+                format!(
+                    r#"
+        float s_q_val = (k < k_dim) ? (float){policy}::load_scale(row_s_q, block_off) : 0.0f;
+        float s_k_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
+        float s_v_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
+                    "#,
+                    policy = policy
+                )
+            }
+        };
+
         let code = format!(
             r#"
     // Parallel QKV Projection ({policy})
@@ -177,7 +215,7 @@ impl Stage for ParallelProjectStage {
 
     while (k_base + K_CHUNK_SIZE <= k_dim) {{
         uint k = k_base + lane_id * {vec_width}u;
-        float4 xv_raw = *(const device float4*)(input + k);
+        float4 xv_raw = *(const device float4*)(input + batch_idx * k_dim + k);
         half4 xv_lo = as_type<half4>(xv_raw.xy);
         half4 xv_hi = as_type<half4>(xv_raw.zw);
 
@@ -189,9 +227,7 @@ impl Stage for ParallelProjectStage {
         uint block_off = k / weights_per_block;
         // Optimization: Use half scales directly and only load once per block
         // (Compiler will likely optimize these further)
-        float s_q_val = (float){policy}::load_scale(row_s_q, block_off);
-        float s_k_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
-        float s_v_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
+        {scales_logic}
 
         // Q Dot
         {{
@@ -227,11 +263,11 @@ impl Stage for ParallelProjectStage {
         uint valid_count = 0;
         
         if (k + {vec_width}u <= k_dim) {{
-            xv_raw = *(const device float4*)(input + k);
+            xv_raw = *(const device float4*)(input + batch_idx * k_dim + k);
             valid_count = {vec_width}u;
         }} else if (k < k_dim) {{
             for (uint i = 0; i < {vec_width}u && k + i < k_dim; ++i) {{
-                ((thread half*)&xv_raw)[i] = input[k + i];
+                ((thread half*)&xv_raw)[i] = input[batch_idx * k_dim + k + i];
                 valid_count++;
             }}
         }}
@@ -245,9 +281,7 @@ impl Stage for ParallelProjectStage {
         float4 xv_f32_hi = float4(xv_hi);
         
         uint block_off = k / weights_per_block;
-        float s_q_val = (k < k_dim) ? (float){policy}::load_scale(row_s_q, block_off) : 0.0f;
-        float s_k_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
-        float s_v_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
+        {tail_scales_logic}
 
         // Q Dot
         if (k < k_dim) {{
@@ -283,7 +317,9 @@ impl Stage for ParallelProjectStage {
             vec_width = vec_width,
             norm_logic = norm_logic,
             byte_scale = byte_scale,
-            scale_stride = scale_stride
+            scale_stride = scale_stride,
+            scales_logic = scales_logic,
+            tail_scales_logic = tail_scales_logic
         );
 
         ("qkv_partial".to_string(), code)
@@ -371,10 +407,10 @@ impl Stage for MultiWriteOutputStage {
         let code = format!(
             r#"
     if (lane_id == 0) {{
-        out_q[row_idx] = half({input_var}.x + (has_b ? (float)b_q[row_idx] : 0.0f));
+        out_q[batch_idx * n_dim + row_idx] = half({input_var}.x + (has_b ? (float)b_q[row_idx] : 0.0f));
         if (row_idx < n_kv) {{
-            out_k[row_idx] = half({input_var}.y + (has_b ? (float)b_k[row_idx] : 0.0f));
-            out_v[row_idx] = half({input_var}.z + (has_b ? (float)b_v[row_idx] : 0.0f));
+            out_k[batch_idx * n_kv + row_idx] = half({input_var}.y + (has_b ? (float)b_k[row_idx] : 0.0f));
+            out_v[batch_idx * n_kv + row_idx] = half({input_var}.z + (has_b ? (float)b_v[row_idx] : 0.0f));
         }}
     }}
 "#,

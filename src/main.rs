@@ -4,7 +4,7 @@ use std::{
 
 use anyhow::Result;
 use metallic::{
-    Context, F16Element, TensorElement, Tokenizer, generation::generate_streaming, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
+    Context, F16Element, TensorElement, Tokenizer, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
 use metallic_cli_helpers::prelude::*;
 use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
@@ -132,7 +132,7 @@ fn main() -> AppResult<()> {
                         emit_startup_memory_update(&worker_tx)?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                        let tokens = tokenizer.encode(&prompt)?;
+                        let tokens = tokenizer.encode_single_turn_chat_prompt(&prompt)?;
                         worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
 
                         let tokenization_duration = tokenization_start.elapsed();
@@ -150,11 +150,7 @@ fn main() -> AppResult<()> {
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-
-                        let start_time = std::time::Instant::now();
-                        generate_streaming(&mut qwen, &tokenizer, &mut ctx, &prompt, &cfg, &worker_tx)?;
-                        let total_generation_time = start_time.elapsed();
-                        let _ = worker_tx.send(AppEvent::GenerationComplete { total_generation_time });
+                        metallic::generation::generate_streaming_from_tokens(&mut qwen, &tokenizer, &mut ctx, &tokens, &cfg, &worker_tx)?;
                     }
 
                     cli::config::Engine::Foundry => {
@@ -203,7 +199,7 @@ fn main() -> AppResult<()> {
                         let tokenizer = model.tokenizer()?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                        let tokens = tokenizer.encode(&prompt)?;
+                        let tokens = tokenizer.encode_single_turn_chat_prompt(&prompt)?;
                         worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
 
                         let tokenization_duration = tokenization_start.elapsed();
@@ -219,7 +215,14 @@ fn main() -> AppResult<()> {
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                        metallic::generation::generate_streaming_foundry(&mut foundry, &model, &prompt, &cfg, &worker_tx)?;
+                        metallic::generation::generate_streaming_foundry_from_tokens(
+                            &mut foundry,
+                            &model,
+                            &tokenizer,
+                            &tokens,
+                            &cfg,
+                            &worker_tx,
+                        )?;
                     }
                 }
 
@@ -626,6 +629,15 @@ fn run_text_mode(
         let total_s = total.as_secs_f64().max(1e-9);
         let tps_total = (generated_tokens as f64) / total_s;
         eprintln!("[metallic]   Total:             {:.3}s ({:.2} tokens/s)", total_s, tps_total);
+
+        // End-to-end excludes Cargo build/launch but includes in-process model load + tokenization + generation.
+        if let Some(load) = model_load_time {
+            let tok = tokenization_time.unwrap_or(Duration::ZERO);
+            let e2e = load.saturating_add(tok).saturating_add(total);
+            let e2e_s = e2e.as_secs_f64().max(1e-9);
+            let e2e_tps = (generated_tokens as f64) / e2e_s;
+            eprintln!("[metallic]   End-to-End:        {:.3}s ({:.2} tokens/s)", e2e_s, e2e_tps);
+        }
         eprintln!("[metallic]   Tokens Generated:  {}", generated_tokens);
     }
 
@@ -651,7 +663,7 @@ fn process_text_mode_event(
             if !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
                 print!("{}", text);
                 // Only flush on newlines to reduce terminal I/O and GPU contention
-                if text.contains('\n') || *generated_tokens % 16 == 0 {
+                if text.contains('\n') || (*generated_tokens).is_multiple_of(16) {
                     std::io::stdout().flush().unwrap();
                 }
             }

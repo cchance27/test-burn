@@ -62,6 +62,27 @@ impl TensorBindings {
         self.bindings.insert(name.into(), tensor);
     }
 
+    /// Set (insert or replace) a tensor binding by name.
+    ///
+    /// Fast-path avoids allocations when `name` does not require interpolation.
+    pub fn set_binding(&mut self, name: &str, tensor: TensorArg) {
+        if name.contains('{') {
+            let resolved_name = self.interpolate(name.to_string());
+            if let Some(existing) = self.bindings.get_mut(&resolved_name) {
+                *existing = tensor;
+            } else {
+                self.bindings.insert(resolved_name, tensor);
+            }
+            return;
+        }
+
+        if let Some(existing) = self.bindings.get_mut(name) {
+            *existing = tensor;
+        } else {
+            self.bindings.insert(name.to_string(), tensor);
+        }
+    }
+
     /// Set a global variable.
     pub fn set_global(&mut self, key: impl Into<String>, value: impl Into<String>) {
         self.globals.insert(key.into(), value.into());

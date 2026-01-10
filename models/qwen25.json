@@ -129,6 +129,7 @@
                         "n_dim": "{d_model}",
                         "n_kv": "{kv_dim}",
                         "weights_per_block": 32,
+                        "m": "{m}",
                         "strategy": "Vectorized"
                     },
                     {
@@ -203,11 +204,13 @@
                         }
                     },
                     {
-                        "op": "KvCacheWrite",
+                        "op": "KvCacheWriteRepeatKvHeads",
                         "input": "k_rot",
                         "cache": "k_cache_{i}",
                         "params": {
                             "n_kv_heads": 2,
+                            "n_heads": 14,
+                            "group_size": 7,
                             "head_dim": 64,
                             "input_seq_len": "{seq_len}",
                             "max_seq_len": "{max_seq_len}",
@@ -217,140 +220,82 @@
                         }
                     },
                     {
-                        "op": "KvCacheWrite",
+                        "op": "KvCacheWriteRepeatKvHeads",
                         "input": "v_heads",
                         "cache": "v_cache_{i}",
                         "params": {
                             "n_kv_heads": 2,
+                            "n_heads": 14,
+                            "group_size": 7,
                             "head_dim": 64,
                             "input_seq_len": "{seq_len}",
                             "max_seq_len": "{max_seq_len}",
                             "total_elements": "{total_elements_write}",
                             "position_offset": "{position_offset}",
                             "layer_idx": "{i}"
-                        }
-                    },
-                    {
-                        "op": "RepeatKvHeads",
-                        "input": "k_cache_{i}",
-                        "output": "k_expanded",
-                        "params": {
-                            "group_size": 7,
-                            "batch": 1,
-                            "n_kv_heads": 2,
-                            "n_heads": 14,
-                            "seq": "{kv_seq_len}",
-                            "head_dim": 64,
-                            "cache_stride": "{max_seq_len}",
-                            "total_elements": "{total_elements_repeat}"
-                        }
-                    },
-                    {
-                        "op": "RepeatKvHeads",
-                        "input": "v_cache_{i}",
-                        "output": "v_expanded",
-                        "params": {
-                            "group_size": 7,
-                            "batch": 1,
-                            "n_kv_heads": 2,
-                            "n_heads": 14,
-                            "seq": "{kv_seq_len}",
-                            "head_dim": 64,
-                            "cache_stride": "{max_seq_len}",
-                            "total_elements": "{total_elements_repeat}"
                         }
                     },
                     {
                         "op": "SdpaMaterialized",
                         "q": "q_rot",
-                        "k": "k_expanded",
-                        "v": "v_expanded",
+                        "k": "k_cache_{i}",
+                        "v": "v_cache_{i}",
                         "output": "attn_out",
                         "causal": true,
                         "query_offset": "{position_offset}",
                         "n_heads": 14,
                         "head_dim": 64,
                         "kv_seq_len": "{kv_seq_len}",
+                        "m": "{m}",
                         "kv_head_major": true
                     },
                     {
-                        "op": "GemvCanonical",
-                        "matrix": "layer.attn_output_{i}",
-                        "scale_bytes": "layer.attn_output_{i}",
-                        "vector_x": "attn_out",
-                        "result_y": "residual_1",
+                        "op": "MatMul",
+                        "m": "{m}",
+                        "n": "{d_model}",
+                        "k": "{d_model}",
+                        "transpose_b": true,
+                        "b": "layer.attn_output_{i}",
+                        "b_scales": "layer.attn_output_{i}",
+                        "a": "attn_out",
+                        "output": "residual_1",
                         "params": {
                             "batch": 1,
                             "weights_per_block": 32
                         },
                         "bias": "zero",
-                        "residual": "hidden",
+                        "c": "hidden",
                         "alpha": 1.0,
                         "beta": 1.0,
                         "has_bias": 0
                     },
                     {
-                        "op": "RmsNormV2",
+                        "op": "FusedFfnSwiGluRmsNorm",
                         "input": "residual_1",
-                        "output": "ffn_norm_out",
                         "gamma": "layer.ffn_norm_{i}",
-                        "feature_dim": 896,
-                        "total_elements": "{total_elements_hidden}"
+                        "w_gate": "layer.ffn_gate_{i}",
+                        "w_up": "layer.ffn_up_{i}",
+                        "b_gate": "layer.ffn_gate_bias_{i}",
+                        "b_up": "layer.ffn_up_bias_{i}",
+                        "output": "up",
+                        "weights_per_block": 32
                     },
                     {
-                        "op": "GemvCanonical",
-                        "matrix": "layer.ffn_gate_{i}",
-                        "scale_bytes": "layer.ffn_gate_{i}",
-                        "vector_x": "ffn_norm_out",
-                        "result_y": "gate",
-                        "params": {
-                            "batch": 1,
-                            "weights_per_block": 32
-                        },
-                        "bias": "zero",
-                        "residual": "zero",
-                        "alpha": 1.0,
-                        "beta": 0.0,
-                        "has_bias": 0
-                    },
-                    {
-                        "op": "GemvCanonical",
-                        "matrix": "layer.ffn_up_{i}",
-                        "scale_bytes": "layer.ffn_up_{i}",
-                        "vector_x": "ffn_norm_out",
-                        "result_y": "up",
-                        "params": {
-                            "batch": 1,
-                            "weights_per_block": 32
-                        },
-                        "bias": "zero",
-                        "residual": "zero",
-                        "alpha": 1.0,
-                        "beta": 0.0,
-                        "has_bias": 0
-                    },
-                    {
-                        "op": "SwigluV2",
-                        "gate": "gate",
-                        "up_inout": "up",
-                        "gate_bias": "layer.ffn_gate_bias_{i}",
-                        "up_bias": "layer.ffn_up_bias_{i}",
-                        "bias_len": "{ff_dim}",
-                        "gate_leading_stride": "{ff_dim}",
-                        "up_leading_stride": "{ff_dim}"
-                    },
-                    {
-                        "op": "GemvCanonical",
-                        "matrix": "layer.ffn_down_{i}",
-                        "scale_bytes": "layer.ffn_down_{i}",
-                        "vector_x": "up",
-                        "result_y": "hidden",
+                        "op": "MatMul",
+                        "m": "{m}",
+                        "n": "{d_model}",
+                        "k": "{ff_dim}",
+                        "transpose_b": true,
+                        "b": "layer.ffn_down_{i}",
+                        "b_scales": "layer.ffn_down_{i}",
+                        "a": "up",
+                        "output": "hidden",
                         "params": {
                             "batch": 1,
                             "weights_per_block": 32
                         },
                         "bias": "layer.ffn_down_bias_{i}",
-                        "residual": "residual_1",
+                        "c": "residual_1",
                         "alpha": 1.0,
                         "beta": 1.0,
                         "has_bias": 1
@@ -366,17 +311,21 @@
                 "total_elements": "{total_elements_hidden}"
             },
             {
-                "op": "GemvCanonical",
-                "matrix": "output_weight",
-                "scale_bytes": "output_weight",
-                "vector_x": "final_norm_out",
-                "result_y": "logits",
+                "op": "MatMul",
+                "m": "{m}",
+                "n": "{vocab_size}",
+                "k": "{d_model}",
+                "transpose_b": true,
+                "b": "output_weight",
+                "b_scales": "output_weight",
+                "a": "final_norm_out",
+                "output": "logits",
                 "params": {
                     "batch": 1,
                     "weights_per_block": 32
                 },
                 "bias": "zero",
-                "residual": "zero",
+                "c": "zero",
                 "alpha": 1.0,
                 "beta": 0.0,
                 "has_bias": 0

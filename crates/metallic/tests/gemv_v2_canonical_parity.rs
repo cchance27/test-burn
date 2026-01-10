@@ -82,12 +82,14 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
         input: Ref("input".to_string()),
         output: Ref("output".to_string()),
         bias: None,
+        residual: None,
         k_dim: DynamicValue::Literal(k as u32),
         n_dim: DynamicValue::Literal(n as u32),
         weights_per_block: wpb as u32,
         layout: Layout::Canonical,
         strategy: Some(GemvStrategy::Canonical),
         alpha,
+        beta: 0.0,
     };
     let compiled_steps = step.compile(&mut bindings, &mut symbols);
     let mut fast_bindings = FastBindings::new(symbols.len());

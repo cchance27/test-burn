@@ -177,6 +177,9 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
         n_dim: cfg.n as u32,
         weights_per_block: 32,
         alpha: cfg.alpha,
+        residual: TensorArg::from_tensor(&output_v2),
+        has_residual: 0,
+        beta: 0.0,
     };
 
     let layout = match cfg.layout {
@@ -467,6 +470,9 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
         n_dim: cfg.n as u32,
         weights_per_block: 32,
         alpha: cfg.alpha,
+        residual: TensorArg::from_tensor(&output_v2),
+        has_residual: 0,
+        beta: 0.0,
     };
 
     let layout = match cfg.layout {

@@ -29,12 +29,12 @@ pub mod foundry;
 pub mod metals;
 pub mod policies;
 pub mod safety;
+pub mod tests;
 pub mod types;
 
 pub mod kernels;
 
 pub mod compound;
-mod tests;
 
 pub mod fusion;
 

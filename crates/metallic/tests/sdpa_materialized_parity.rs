@@ -229,6 +229,9 @@ fn test_v2_materialized_sdpa_decode() -> Result<(), MetalError> {
         n_dim: kv_len as u32,
         weights_per_block: 32,
         alpha: scale,
+        residual: TensorArg::from_tensor(&attn_scores),
+        has_residual: 0,
+        beta: 0.0,
     };
     let qk_kernel = get_gemv_v2_kernel_f16(Layout::RowMajor, GemvStrategy::Vectorized);
     let qk_dispatch = warp_dispatch_config(kv_len as u32);
@@ -261,6 +264,9 @@ fn test_v2_materialized_sdpa_decode() -> Result<(), MetalError> {
         n_dim: head_dim as u32,
         weights_per_block: 32,
         alpha: 1.0,
+        residual: TensorArg::from_tensor(&out_v2),
+        has_residual: 0,
+        beta: 0.0,
     };
     let av_kernel = get_gemv_v2_kernel_f16(Layout::ColMajor, GemvStrategy::Vectorized);
     let av_dispatch = warp_dispatch_config(head_dim as u32);

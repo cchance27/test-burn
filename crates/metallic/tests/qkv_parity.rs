@@ -271,8 +271,8 @@ fn test_qkv_parity() {
     let kernel = Box::leak(Box::new(
         CompoundKernel::new("fused_qkv_rmsnorm_test")
             .with_manual_output(true)
-            .prologue(WarpLayoutStage::new(Layout::RowMajor))
-            .prologue(RmsNormComputeStage::new(6, 7).with_quantization(Quantization::Q8))
+            .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
+            .prologue(RmsNormComputeStage::new(6, 7))
             .main(ParallelProjectStage::new(Quantization::Q8).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage::default())
             .epilogue(MultiWriteOutputStage)

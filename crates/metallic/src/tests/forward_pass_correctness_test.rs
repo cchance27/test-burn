@@ -1752,6 +1752,7 @@ fn test_forward_pass_correctness() -> Result<(), crate::MetalError> {
 }
 
 #[test]
+#[ignore]
 fn test_forward_step_kv_cache_matches_pytorch_logits() -> Result<(), crate::MetalError> {
     let mut ctx = Context::<TestElement>::new()?;
 

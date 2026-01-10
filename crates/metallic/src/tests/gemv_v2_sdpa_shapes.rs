@@ -42,6 +42,9 @@ fn test_gemv_v2_sdpa_foundry_qk() -> Result<(), MetalError> {
         n_dim: n as u32,
         weights_per_block: 32,
         alpha: 1.0,
+        residual: TensorArg::from_tensor(&output_tensor),
+        has_residual: 0,
+        beta: 0.0,
     };
 
     foundry.run(&kernel.bind(args, dispatch))?;
@@ -103,6 +106,9 @@ fn test_gemv_v2_sdpa_foundry_av() -> Result<(), MetalError> {
         n_dim: n as u32,
         weights_per_block: 32,
         alpha: 1.0,
+        residual: TensorArg::from_tensor(&output_tensor),
+        has_residual: 0,
+        beta: 0.0,
     };
 
     foundry.run(&kernel.bind(args, dispatch))?;

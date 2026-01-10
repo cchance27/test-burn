@@ -12,9 +12,6 @@ use crate::{
     TensorElement, Tokenizer, caching::CacheMetrics, kernels::{embedding_lookup::EmbeddingLookupOp, sample_topk_topp::SampleTopKTopPOp}, models::qwen25::Qwen25, operation::CommandBuffer, tensor::dtypes::U32
 };
 
-const IM_START: &str = "<|im_start|>";
-const IM_END: &str = "<|im_end|>";
-
 const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
 const METALLIC_LOG_CACHE_STATS_DEFAULT_FILE: &str = "metal-cache-stats.log";
 
@@ -687,10 +684,7 @@ pub fn generate<T: TensorElement>(
     prompt: &str,
     cfg: &GenerationConfig,
 ) -> Result<String, MetalError> {
-    let full_prompt = format!(
-        "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
-    );
-    let input_ids = tokenizer.encode(&full_prompt)?;
+    let input_ids = tokenizer.encode_single_turn_chat_prompt(prompt)?;
     let output_tokens = generate_autoregressive_with_kv_cache(qwen, tokenizer, ctx, &input_ids, cfg)?;
     let output_text = tokenizer.decode(&output_tokens)?;
     Ok(output_text)
@@ -731,21 +725,29 @@ pub fn generate_streaming<T: TensorElement>(
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError> {
-    // Build full prompt string following Qwen2.5 chat template
-    let full_prompt = format!(
-        "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
-    );
+    let input_ids = tokenizer.encode_single_turn_chat_prompt(prompt)?;
+    generate_streaming_from_tokens(qwen, tokenizer, ctx, &input_ids, cfg, tx)
+}
 
+/// High-level end-to-end generation pipeline with token streaming support.
+///
+/// This variant accepts pre-tokenized `input_ids` so callers can measure tokenization separately
+/// and avoid redundant prompt formatting/encoding.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_streaming_from_tokens<T: TensorElement>(
+    qwen: &mut Qwen25<T>,
+    tokenizer: &Tokenizer,
+    ctx: &mut Context<T>,
+    input_ids: &[u32],
+    cfg: &GenerationConfig,
+    tx: &mpsc::Sender<AppEvent>,
+) -> Result<(), MetalError> {
     let generation_start = Instant::now();
-
-    // Encode the full prompt
-    let input_ids = tokenizer.encode(&full_prompt)?;
     let prompt_start = Instant::now();
 
     let mut prompt_processing_duration: Option<Duration> = None;
     let mut token_callback = |_token_id, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
         let now = Instant::now();
-
         let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
 
         if tx
@@ -761,13 +763,10 @@ pub fn generate_streaming<T: TensorElement>(
         Ok(true)
     };
 
-    // Generate tokens using the new KV cache approach with streaming
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, &input_ids, cfg, &mut token_callback, tx)?;
+    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut token_callback, tx)?;
 
-    // Send generation completion event with total generation time
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
-
     Ok(())
 }
 
@@ -1082,35 +1081,35 @@ pub fn generate_streaming_foundry(
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError> {
-    // Build full prompt string following Qwen2.5 chat template
-    let full_prompt = format!(
-        "{IM_START}\nsystem\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.{IM_END}\n{IM_START}user\n{prompt}{IM_END}\n{IM_START}assistant\n"
-    );
-
-    let generation_start = Instant::now();
     let tokenizer = model.tokenizer()?;
-    let prompt_tokens = tokenizer.encode(&full_prompt)?;
-    let prompt_start = Instant::now();
+    let prompt_tokens = tokenizer.encode_single_turn_chat_prompt(prompt)?;
+    generate_streaming_foundry_from_tokens(foundry, model, &tokenizer, &prompt_tokens, cfg, tx)
+}
+
+/// Streaming generation for the Foundry backend using pre-tokenized prompt ids.
+///
+/// Using pre-tokenized ids avoids re-tokenizing/formatting in the hot path and keeps perf metrics consistent.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_streaming_foundry_from_tokens(
+    foundry: &mut crate::foundry::Foundry,
+    model: &crate::foundry::model::CompiledModel,
+    tokenizer: &Tokenizer,
+    prompt_tokens: &[u32],
+    cfg: &GenerationConfig,
+    tx: &mpsc::Sender<AppEvent>,
+) -> Result<(), MetalError> {
+    let generation_start = Instant::now();
     let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
 
-    let mut prompt_processing_duration: Option<Duration> = None;
-
-    // We need to maintain decode state (scratch buffer) to handle utf8 splitting
     let mut decode_scratch = Vec::new();
     let mut decoded_chunk = String::new();
 
-    let callback = |token_id: u32| -> Result<bool, MetalError> {
-        let now = Instant::now();
-        // first token means prompt processing done (roughly)
-        let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
-
-        // Decode
-        // Foundry generates token IDs. Using Tokenizer::decode_token_arc logic
+    let callback = |token_id: u32, prefill_duration: Duration| -> Result<bool, MetalError> {
         if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)? {
             if tx
                 .send(AppEvent::Token {
                     text,
-                    prompt_processing: prompt_duration,
+                    prompt_processing: prefill_duration,
                     iteration: None, // Foundry doesn't report per-token time yet in callback
                 })
                 .is_err()
@@ -1123,7 +1122,7 @@ pub fn generate_streaming_foundry(
 
     model.generate_with_seed_streaming(
         foundry,
-        &prompt_tokens,
+        prompt_tokens,
         cfg.max_tokens,
         &[eos],
         cfg.temperature,
@@ -1133,9 +1132,7 @@ pub fn generate_streaming_foundry(
         callback,
     )?;
 
-    // Send generation completion event with total generation time
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
-
     Ok(())
 }

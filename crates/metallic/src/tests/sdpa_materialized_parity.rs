@@ -114,6 +114,9 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
             n_dim: seq_len as u32,
             weights_per_block: 32,
             alpha: scale,
+            residual: scores_h.clone(),
+            has_residual: 0,
+            beta: 0.0,
         };
         foundry.run(&qk_kernel.bind(qk_args, qk_dispatch))?;
 
@@ -133,15 +136,18 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
         // ColMajor: weights[k * N + n]. k=seq, n=head_dim.
         let av_args = GemvV2Args {
             weights: v_h.clone(),
-            scale_bytes: v_h, // dummy
+            scale_bytes: v_h.clone(), // dummy
             input: probs_h,
             output: out_h.clone(),
-            bias: out_h, // dummy
+            bias: out_h.clone(), // dummy
             has_bias: 0,
             k_dim: seq_len as u32,
             n_dim: head_dim as u32,
             weights_per_block: 32,
             alpha: 1.0,
+            residual: out_h.clone(),
+            has_residual: 0,
+            beta: 0.0,
         };
         foundry.run(&av_kernel.bind(av_args, av_dispatch))?;
     }

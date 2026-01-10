@@ -415,11 +415,10 @@ impl DefaultKernelInvocable for MatMulMlxOp {
         // Compute tile counts before deciding swizzle using default tile sizes
         let tn_base = div_ceil(n, tile_bn);
         let tm_base = div_ceil(m, tile_bm);
-        let swizzle_log = if tm_base >= 8 && tn_base >= 8 { 1 } else { 0 };
-        let tile = 1usize << swizzle_log;
-        let tn = tn_base * tile;
-        let mut tm = tm_base;
-        tm = div_ceil(tm, tile);
+        // Disable swizzle for MLX comparison consistency
+        let swizzle_log = 0;
+        let tn = tn_base;
+        let tm = tm_base;
 
         let tiles_n = i32::try_from(tn).map_err(|_| MetalError::InvalidOperation("tiles_n exceeds i32".to_string()))?;
         let tiles_m = i32::try_from(tm).map_err(|_| MetalError::InvalidOperation("tiles_m exceeds i32".to_string()))?;

@@ -70,6 +70,9 @@ fn run_gemv_parity_test(k: usize, n: usize, with_bias: bool, layout: Layout) -> 
         n_dim: n as u32,
         weights_per_block: 32,
         alpha: 1.0,
+        residual: TensorArg::from_tensor(&output_v2),
+        has_residual: 0,
+        beta: 0.0,
     };
 
     let kernel = get_gemv_v2_kernel_f16(layout, GemvStrategy::Vectorized);

@@ -3,12 +3,16 @@ use std::sync::OnceLock;
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
-use super::{SwigluParamsResolved, stages::SwigluStage};
+use rustc_hash::FxHashMap;
+
+use super::{SwigluParamsResolved, stages::SwigluStage, ffn_stages::{FfnDualProjectStage, FfnSwigluWriteStage, FfnWarpReduceStage}};
 use crate::{
     MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, foundry::{
         Foundry, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}
-    }, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, metals::rmsnorm::stages::RmsNormComputeStage, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
+use crate::compound::stages::{Quantization, WarpLayoutStage};
+use crate::metals::gemv::step::warp_dispatch_config_2d;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SwigluStep {
@@ -219,8 +223,22 @@ impl Step for FusedSwigluStep {
         "SwiGluF16CanonicalFusedRmsnorm"
     }
 
-    fn execute(&self, _foundry: &mut Foundry, _bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        Err(MetalError::OperationNotSupported("FusedSwiglu only supports compile()".into()))
+    fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
+        let mut symbols = SymbolTable::new();
+        let compiled = self.compile(bindings, &mut symbols);
+        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+
+        for (name, symbol_id) in symbols.iter() {
+            if let Ok(tensor) = bindings.get(name) {
+                fast_bindings.set(*symbol_id, tensor);
+            }
+        }
+
+        for step in compiled {
+            step.execute(foundry, &fast_bindings, bindings)?;
+        }
+
+        Ok(())
     }
 
     fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
@@ -258,19 +276,306 @@ impl Step for FusedSwigluStep {
 impl CompiledStep for CompiledFusedSwigluStep {
     fn execute(
         &self,
-        _foundry: &mut Foundry,
+        foundry: &mut Foundry,
         _fast_bindings: &crate::foundry::spec::FastBindings,
-        _bindings: &TensorBindings,
+        bindings: &TensorBindings,
     ) -> Result<(), MetalError> {
-        // TODO: Implement proper fused kernel
-        // For now, this is a stub that will need implementation
-        // The legacy kernel fused: RMSNorm → Gate/Up GEMVs → SwiGLU
-        Err(MetalError::OperationNotSupported(
-            "FusedSwiglu execution not yet implemented - use legacy kernel".into(),
-        ))
+        let get = |idx| _fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
+
+        let input = get(self.input_idx)?;
+        let gamma = get(self.gamma_idx)?;
+        let w_gate = get(self.wg_idx)?;
+        let w_up = get(self.wu_idx)?;
+        let output = get(self.out_idx)?;
+
+        let (b_gate, has_b_gate) = if let Some(idx) = self.bg_idx {
+            (TensorArg::from_tensor(get(idx)?), 1u32)
+        } else {
+            (TensorArg::from_tensor(output), 0u32)
+        };
+
+        let (b_up, has_b_up) = if let Some(idx) = self.bu_idx {
+            (TensorArg::from_tensor(get(idx)?), 1u32)
+        } else {
+            (TensorArg::from_tensor(output), 0u32)
+        };
+
+        let input_shape = input.dims.as_slice();
+        let output_shape = output.dims.as_slice();
+        if input_shape.is_empty() || output_shape.is_empty() {
+            return Err(MetalError::InvalidShape("FusedSwiglu expects non-empty input/output shapes".into()));
+        }
+
+        let k_dim = *input_shape.last().unwrap() as u32;
+        let n_dim = *output_shape.last().unwrap() as u32;
+
+        if gamma.dims.len() != 1 || gamma.dims[0] as u32 != k_dim {
+            return Err(MetalError::DimensionMismatch {
+                expected: k_dim as usize,
+                actual: gamma.dims.iter().product(),
+            });
+        }
+        if has_b_gate != 0 && (b_gate.dims.len() != 1 || b_gate.dims[0] as u32 != n_dim) {
+            return Err(MetalError::DimensionMismatch {
+                expected: n_dim as usize,
+                actual: b_gate.dims.iter().product(),
+            });
+        }
+        if has_b_up != 0 && (b_up.dims.len() != 1 || b_up.dims[0] as u32 != n_dim) {
+            return Err(MetalError::DimensionMismatch {
+                expected: n_dim as usize,
+                actual: b_up.dims.iter().product(),
+            });
+        }
+
+        let weights_per_block = self.step.weights_per_block;
+        let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
+
+        let args = FusedFfnArgs {
+            w_gate: TensorArg::from_tensor(w_gate),
+            s_gate: TensorArg::from_tensor(w_gate), // F16 path ignores scales
+            w_up: TensorArg::from_tensor(w_up),
+            s_up: TensorArg::from_tensor(w_up),     // F16 path ignores scales
+            input: TensorArg::from_tensor(input),
+            output: TensorArg::from_tensor(output),
+            k_dim,
+            n_dim,
+            weights_per_block,
+            gamma: TensorArg::from_tensor(gamma),
+            b_gate,
+            b_up,
+            has_b_gate,
+            has_b_up,
+        };
+
+        let kernel = get_fused_ffn_kernel(Quantization::F16);
+        let dispatch = warp_dispatch_config_2d(n_dim, batch);
+
+        foundry.run(&kernel.bind(args, dispatch))
     }
 
     fn name(&self) -> &'static str {
         "FusedSwiglu"
     }
+}
+
+// =============================================================================
+// FusedFfnSwiGluRmsNorm Step (FoundryV2)
+// =============================================================================
+
+/// Fused FFN Step: RMSNorm(Input) → Gate/Up GEMVs → SwiGLU
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FusedFfnSwiGluRmsNormStep {
+    pub input: Ref,
+    pub gamma: Ref,
+    pub w_gate: Ref,
+    pub w_up: Ref,
+    pub b_gate: Option<Ref>,
+    pub b_up: Option<Ref>,
+    pub output: Ref,
+    #[serde(default = "default_wpb")]
+    pub weights_per_block: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompiledFusedFfnSwiGluRmsNormStep {
+    pub input_idx: usize,
+    pub gamma_idx: usize,
+    pub w_gate_idx: usize,
+    pub w_up_idx: usize,
+    pub b_gate_idx: Option<usize>,
+    pub b_up_idx: Option<usize>,
+    pub output_idx: usize,
+    pub weights_per_block: u32,
+}
+
+#[derive(Debug, KernelArgs)]
+pub struct FusedFfnArgs {
+    #[arg(buffer = 0)]
+    pub w_gate: TensorArg,
+    #[arg(buffer = 1)]
+    pub s_gate: TensorArg,
+    #[arg(buffer = 2)]
+    pub w_up: TensorArg,
+    #[arg(buffer = 3)]
+    pub s_up: TensorArg,
+    #[arg(buffer = 4)]
+    pub input: TensorArg,
+    #[arg(buffer = 5, output)]
+    pub output: TensorArg,
+    #[arg(buffer = 6)]
+    pub k_dim: u32,
+    #[arg(buffer = 7)]
+    pub n_dim: u32,
+    #[arg(buffer = 8)]
+    pub weights_per_block: u32,
+    #[arg(buffer = 9)]
+    pub gamma: TensorArg,
+    #[arg(buffer = 10)]
+    pub b_gate: TensorArg,
+    #[arg(buffer = 11)]
+    pub b_up: TensorArg,
+    #[arg(buffer = 12)]
+    pub has_b_gate: u32,
+    #[arg(buffer = 13)]
+    pub has_b_up: u32,
+}
+
+#[typetag::serde(name = "FusedFfnSwiGluRmsNorm")]
+impl Step for FusedFfnSwiGluRmsNormStep {
+    fn name(&self) -> &'static str {
+        "FusedFfnSwiGluRmsNorm"
+    }
+
+    fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
+        let mut symbols = SymbolTable::new();
+        let compiled = self.compile(bindings, &mut symbols);
+        let mut fast_bindings = crate::foundry::spec::FastBindings::new(symbols.len());
+
+        for (name, symbol_id) in symbols.iter() {
+            if let Ok(tensor) = bindings.get(name) {
+                fast_bindings.set(*symbol_id, tensor);
+            }
+        }
+
+        for step in compiled {
+            step.execute(foundry, &fast_bindings, bindings)?;
+        }
+
+        Ok(())
+    }
+
+    fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
+        let input_idx = symbols.get_or_create(bindings.interpolate(self.input.0.clone()));
+        let gamma_idx = symbols.get_or_create(bindings.interpolate(self.gamma.0.clone()));
+        let w_gate_idx = symbols.get_or_create(bindings.interpolate(self.w_gate.0.clone()));
+        let w_up_idx = symbols.get_or_create(bindings.interpolate(self.w_up.0.clone()));
+        let b_gate_idx = self.b_gate.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
+        let b_up_idx = self.b_up.as_ref().map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
+        let output_idx = symbols.get_or_create(bindings.interpolate(self.output.0.clone()));
+
+        vec![Box::new(CompiledFusedFfnSwiGluRmsNormStep {
+            input_idx,
+            gamma_idx,
+            w_gate_idx,
+            w_up_idx,
+            b_gate_idx,
+            b_up_idx,
+            output_idx,
+            weights_per_block: self.weights_per_block,
+        })]
+    }
+}
+
+impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
+    fn execute(
+        &self,
+        foundry: &mut Foundry,
+        fast_bindings: &crate::foundry::spec::FastBindings,
+        bindings: &TensorBindings,
+    ) -> Result<(), MetalError> {
+        let get = |idx| fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
+
+        let input = get(self.input_idx)?;
+        let gamma = get(self.gamma_idx)?;
+        let w_gate = get(self.w_gate_idx)?;
+        let w_up = get(self.w_up_idx)?;
+        let output = get(self.output_idx)?;
+
+        let (b_gate, has_b_gate) = if let Some(idx) = self.b_gate_idx {
+            (TensorArg::from_tensor(get(idx)?), 1u32)
+        } else {
+            (TensorArg::from_tensor(output), 0u32)
+        };
+
+        let (b_up, has_b_up) = if let Some(idx) = self.b_up_idx {
+            (TensorArg::from_tensor(get(idx)?), 1u32)
+        } else {
+            (TensorArg::from_tensor(output), 0u32)
+        };
+
+        let input_shape = input.dims.as_slice();
+        let output_shape = output.dims.as_slice();
+        if input_shape.is_empty() || output_shape.is_empty() {
+            return Err(MetalError::InvalidShape("FusedFfnSwiGluRmsNorm expects non-empty input/output shapes".into()));
+        }
+
+        let k_dim = *input_shape.last().unwrap() as u32;
+        let n_dim = *output_shape.last().unwrap() as u32;
+
+        if gamma.dims.len() != 1 || gamma.dims[0] as u32 != k_dim {
+            return Err(MetalError::DimensionMismatch {
+                expected: k_dim as usize,
+                actual: gamma.dims.iter().product(),
+            });
+        }
+        if has_b_gate != 0 && (b_gate.dims.len() != 1 || b_gate.dims[0] as u32 != n_dim) {
+            return Err(MetalError::DimensionMismatch {
+                expected: n_dim as usize,
+                actual: b_gate.dims.iter().product(),
+            });
+        }
+        if has_b_up != 0 && (b_up.dims.len() != 1 || b_up.dims[0] as u32 != n_dim) {
+            return Err(MetalError::DimensionMismatch {
+                expected: n_dim as usize,
+                actual: b_up.dims.iter().product(),
+            });
+        }
+
+        let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
+
+        let args = FusedFfnArgs {
+            w_gate: TensorArg::from_tensor(w_gate),
+            s_gate: TensorArg::from_tensor(w_gate), // F16 path ignores scales
+            w_up: TensorArg::from_tensor(w_up),
+            s_up: TensorArg::from_tensor(w_up),     // F16 path ignores scales
+            input: TensorArg::from_tensor(input),
+            output: TensorArg::from_tensor(output),
+            k_dim,
+            n_dim,
+            weights_per_block: self.weights_per_block,
+            gamma: TensorArg::from_tensor(gamma),
+            b_gate,
+            b_up,
+            has_b_gate,
+            has_b_up,
+        };
+
+        let kernel = get_fused_ffn_kernel(Quantization::F16);
+        let dispatch = warp_dispatch_config_2d(n_dim, batch);
+
+        foundry.run(&kernel.bind(args, dispatch))
+    }
+
+    fn name(&self) -> &'static str {
+        "FusedFfnSwiGluRmsNorm"
+    }
+}
+
+fn get_fused_ffn_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+    let mut cache = cache.lock().unwrap();
+
+    if let Some(kernel) = cache.get(&quant) {
+        return *kernel;
+    }
+
+    let policy_name = quant.policy_name();
+    let kernel_name = format!("fused_ffn_swiglu_rmsnorm_{}", policy_name.to_lowercase().replace("policy", ""));
+
+    let compiled = Box::new(
+        CompoundKernel::new(&kernel_name)
+            .with_manual_output(true)
+            .prologue(WarpLayoutStage::row_major().with_warps(8))
+            .prologue(RmsNormComputeStage::new(4, 6).with_quantization(quant))
+            .main(FfnDualProjectStage::new(quant).with_norm(9, "inv_rms"))
+            .epilogue(FfnWarpReduceStage)
+            .epilogue(FfnSwigluWriteStage)
+            .compile(),
+    );
+
+    let static_ref = Box::leak(compiled);
+    cache.insert(quant, static_ref);
+    static_ref
 }

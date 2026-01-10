@@ -60,7 +60,7 @@ impl Stage for RmsNormComputeStage {
         (const device uchar*)input, 
         (const device uchar*)input, // Dummy scale_bytes (F16 ignores)
         k_dim, // feature_dim
-        0,     // row_idx (Input is vector, always row 0)
+        batch_idx, // row_idx (batched: one row per token)
         lane_id,
         warp_id,
         &tg_inv_rms_storage

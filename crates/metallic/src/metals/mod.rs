@@ -1,8 +1,11 @@
 pub mod elemwise;
 pub mod embedding;
+pub mod gemm;
 pub mod gemv;
 pub mod kv_cache_write;
 pub mod kv_rearrange;
+pub mod matmul;
+pub mod mma;
 pub mod repeat_kv_heads;
 pub mod rmsnorm;
 pub mod rope;

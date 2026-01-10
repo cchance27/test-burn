@@ -11,13 +11,13 @@ pub use dispatch::{DispatchConfig, GridSize, ThreadgroupSize};
 // Thread-safe Metal wrappers.
 // Thread-safe Metal wrappers.
 #[derive(Clone, Debug)]
-pub struct MetalDevice(pub(crate) Retained<ProtocolObject<dyn MTLDevice>>);
+pub struct MetalDevice(pub Retained<ProtocolObject<dyn MTLDevice>>);
 
 #[derive(Clone, Debug)]
-pub struct MetalQueue(pub(crate) Retained<ProtocolObject<dyn MTLCommandQueue>>);
+pub struct MetalQueue(pub Retained<ProtocolObject<dyn MTLCommandQueue>>);
 
 #[derive(Clone, Debug)]
-pub struct MetalBuffer(pub(crate) Retained<ProtocolObject<dyn MTLBuffer>>);
+pub struct MetalBuffer(pub Retained<ProtocolObject<dyn MTLBuffer>>);
 
 unsafe impl Send for MetalDevice {}
 unsafe impl Sync for MetalDevice {}

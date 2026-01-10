@@ -1,9 +1,8 @@
 use std::sync::{Arc, OnceLock};
-use objc2::rc::Retained;
-use objc2::runtime::ProtocolObject;
-use objc2_metal::MTLComputePipelineState;
 
 use metallic_macros::KernelArgs;
+use objc2::{rc::Retained, runtime::ProtocolObject};
+use objc2_metal::MTLComputePipelineState;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -416,11 +415,11 @@ impl CompiledStep for CompiledSdpaStep {
 
         // Optimized dispatch
         let pipeline = if let Some(p) = self.pipeline.get() {
-             p
+            p
         } else {
-             let p = foundry.load_kernel(kernel)?;
-             let _ = self.pipeline.set(p);
-             self.pipeline.get().unwrap()
+            let p = foundry.load_kernel(kernel)?;
+            let _ = self.pipeline.set(p);
+            self.pipeline.get().unwrap()
         };
 
         let bound = kernel.bind(args, config);
@@ -439,13 +438,18 @@ impl CompiledStep for CompiledSdpaStep {
 use half::f16;
 
 use crate::{
-    compound::stages::Layout, foundry::pool::MemoryPool, metals::{
-        gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel_f16, warp_dispatch_config}, softmax::{SoftmaxV2Args, get_softmax_v2_kernel}
-    }, tensor::{Dtype, dtypes::F16}
+    compound::stages::Layout,
+    foundry::constants,
+    metals::{
+        gemm::step::{get_gemm_kernel, gemm_dispatch_config, GemmParams, GemmV2Args},
+        gemv::{get_gemv_v2_kernel_f16, warp_dispatch_config, GemvStrategy, GemvV2Args},
+        mma::stages::TileConfig,
+        softmax::{get_softmax_v2_kernel, get_softmax_v2_sdpa_batched_kernel, SoftmaxV2Args, SoftmaxV2SdpaBatchedArgs},
+    },
 };
 
-/// Materialized SDPA (Gemv + Softmax + Gemv).
-/// Replaces fused SDPA to avoid hang issues.
+/// Materialized SDPA (Gemv/Gemm + Softmax + Gemv/Gemm).
+/// Uses GEMV for M=1 (decode) and GEMM for M>1 (prefill).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SdpaMaterializedStep {
     pub q: Ref,
@@ -458,6 +462,9 @@ pub struct SdpaMaterializedStep {
     pub n_heads: DynamicValue<u32>,
     pub head_dim: DynamicValue<u32>,
     pub kv_seq_len: DynamicValue<u32>,
+    /// Query sequence length (M=1 for decode, M>1 for prefill)
+    #[serde(default)]
+    pub m: DynamicValue<u32>,
     #[serde(default)]
     pub kv_head_major: bool,
 }
@@ -526,129 +533,262 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
         let kv_seq_len = self.step.kv_seq_len.resolve(bindings);
         let n_heads = self.step.n_heads.resolve(bindings);
         let q_offset_val = self.step.query_offset.resolve(bindings);
+        let m = self.step.m.resolve(bindings).max(1); // Query sequence length (M=1 for decode, M>1 for prefill)
 
         let scale = 1.0 / (head_dim as f32).sqrt();
-
-        // 2. Allocate Temps (scores and probs) -> Size = n_heads * kv_seq_len
-        // We need separate scratch for each head to pipeline safely.
-        // Also allocate scale buffer for Softmax
-        let (scores_all, probs_all, scale_arg) = {
-            let pool = foundry
-                .get_resource::<MemoryPool>()
-                .ok_or(MetalError::ResourceNotCached("MemoryPool".to_string()))?;
-
-            let total_scratch_len = (n_heads * kv_seq_len) as usize;
-            let alloc_scores = pool.alloc::<F16>(&[total_scratch_len])?;
-            let alloc_probs = pool.alloc::<F16>(&[total_scratch_len])?;
-            let alloc_scale = pool.alloc::<F16>(&[1])?;
-
-            // Upload scale
-            pool.upload(&alloc_scale, &f16::ONE.to_ne_bytes())?;
-
-            let s = TensorArg::from_buffer(alloc_scores.buffer, Dtype::F16, vec![total_scratch_len], vec![1]);
-            let mut s = s;
-            s.offset = alloc_scores.offset;
-
-            let p = TensorArg::from_buffer(alloc_probs.buffer, Dtype::F16, vec![total_scratch_len], vec![1]);
-            let mut p = p;
-            p.offset = alloc_probs.offset;
-
-            let sc = TensorArg::from_buffer(alloc_scale.buffer, Dtype::F16, vec![1], vec![1]);
-            let mut sc = sc;
-            sc.offset = alloc_scale.offset;
-
-            (s, p, sc)
-        };
-
-        // Pre-resolve kernels and dispatch configs to avoid overhead in loop
-        let qk_kernel = get_gemv_v2_kernel_f16(Layout::RowMajor, GemvStrategy::Vectorized);
-        let qk_dispatch = warp_dispatch_config(kv_seq_len);
-
-        let softmax_kernel = get_softmax_v2_kernel();
-        let softmax_dispatch = DispatchConfig {
-            grid: GridSize::d2(1, 1),
-            group: ThreadgroupSize::d1(256),
-        };
-
-        let av_kernel = get_gemv_v2_kernel_f16(Layout::ColMajor, GemvStrategy::Vectorized);
-        let av_dispatch = warp_dispatch_config(head_dim);
 
         // Bytes per element
         let elem_size = std::mem::size_of::<f16>();
 
-        // Strides (assuming Head-Major K/V if kv_head_major=true, which is typical for our cache)
-        // Q: [Heads, HeadDim]
-        // K/V: [Heads, Seq, HeadDim]
-        // Output: [Heads, HeadDim]
-        let q_head_stride = (head_dim as usize) * elem_size;
-        let k_head_stride = (kv_seq_len as usize) * (head_dim as usize) * elem_size;
-        let v_head_stride = (kv_seq_len as usize) * (head_dim as usize) * elem_size;
+        // 2. Allocate Temps (scores and probs) -> Size = n_heads * m * kv_seq_len
+        // For M>1 prefill, each query produces kv_seq_len scores
+        let (scores_all, probs_all) = crate::metals::sdpa::scratch::get_sdpa_scratch_f16(foundry, n_heads, m, kv_seq_len)?;
+
+        // Softmax scaling is applied in the QK matmul (alpha=scale). For softmax itself, we use 1.0.
+        // IMPORTANT: this must not allocate+upload per call; it kills decode throughput.
+        let scale_arg = constants::f16_scalar(foundry, f16::ONE)?;
+
+        // Strides
+        // Q: Head-major [n_heads, M, head_dim]
+        // K/V: Head-major [n_heads, Seq, head_dim]
+        // Output: token-major [M, d_model] (so subsequent MatMul sees [M, K])
+
+        // Offset (in bytes) to move from Head H to Head H+1.
+        // NOTE: Q is produced by KvRearrange and is head-major; for M>1, each head occupies M*head_dim elements.
+        let q_head_stride = (m as usize) * (head_dim as usize) * elem_size;
+
+        // K/V may be either:
+        // - tightly packed history (e.g. RepeatKvHeads output): [n_heads, kv_seq_len, head_dim]
+        // - full cache view: [n_heads, max_seq_len, head_dim] (stride uses max_seq_len)
+        let k_seq_stride = k.dims.get(1).copied().unwrap_or(kv_seq_len as usize);
+        let v_seq_stride = v.dims.get(1).copied().unwrap_or(kv_seq_len as usize);
+        let k_head_stride = k_seq_stride * (head_dim as usize) * elem_size;
+        let v_head_stride = v_seq_stride * (head_dim as usize) * elem_size;
+
         let out_head_stride = (head_dim as usize) * elem_size;
-        let scratch_head_stride = (kv_seq_len as usize) * elem_size;
+        let scratch_head_stride = (m as usize) * (kv_seq_len as usize) * elem_size;
 
-        for h in 0..n_heads {
-            let h_idx = h as usize;
+        let d_model_dim = (n_heads as usize) * (head_dim as usize);
 
-            // Offset Inputs
-            let mut q_h = TensorArg::from_tensor(q);
-            q_h.offset += h_idx * q_head_stride;
+        // Get softmax kernel (same for both paths)
+        let softmax_kernel = get_softmax_v2_kernel();
 
-            let mut k_h = TensorArg::from_tensor(k);
-            k_h.offset += h_idx * k_head_stride;
+        let force_gemv_decode = std::env::var("METALLIC_SDPA_DECODE_GEMV").is_ok();
 
-            let mut v_h = TensorArg::from_tensor(v);
-            v_h.offset += h_idx * v_head_stride;
+        if m == 1 && force_gemv_decode {
+            // =========== DECODE PATH (M=1): Legacy per-head GEMV ===========
+            // NOTE: This is significantly slower due to per-head dispatch overhead. The default path
+            // uses batched GEMM even for M=1.
+            let qk_kernel = get_gemv_v2_kernel_f16(Layout::RowMajor, GemvStrategy::Vectorized);
+            let qk_dispatch = warp_dispatch_config(kv_seq_len);
 
-            let mut out_h = TensorArg::from_tensor(output);
-            out_h.offset += h_idx * out_head_stride;
-
-            // Offset Scratch
-            let mut scores_h = scores_all.clone();
-            scores_h.offset += h_idx * scratch_head_stride;
-
-            let mut probs_h = probs_all.clone();
-            probs_h.offset += h_idx * scratch_head_stride;
-
-            // 3. Dispatch GEMV 1: Q @ K^T -> Scores
-            let qk_args = GemvV2Args {
-                weights: k_h.clone(),     // K
-                scale_bytes: k_h.clone(), // Dummy
-                input: q_h,               // Q
-                output: scores_h.clone(),
-                bias: scores_h.clone(), // Dummy
-                has_bias: 0,
-                k_dim: head_dim,
-                n_dim: kv_seq_len,
-                weights_per_block: 32,
-                alpha: scale,
+            let softmax_dispatch = DispatchConfig {
+                grid: GridSize::d2(1, 1),
+                group: ThreadgroupSize::d1(256),
             };
-            foundry.run(&qk_kernel.bind(qk_args, qk_dispatch))?;
 
-            // 4. Dispatch Softmax: Scores -> Probs
-            let softmax_args = SoftmaxV2Args {
-                input: scores_h,
+            let av_kernel = get_gemv_v2_kernel_f16(Layout::ColMajor, GemvStrategy::Vectorized);
+            let av_dispatch = warp_dispatch_config(head_dim);
+
+            for h in 0..n_heads {
+                let h_idx = h as usize;
+
+                // Offset Inputs
+                let mut q_h = TensorArg::from_tensor(q);
+                q_h.offset += h_idx * q_head_stride;
+
+                let mut k_h = TensorArg::from_tensor(k);
+                k_h.offset += h_idx * k_head_stride;
+
+                let mut v_h = TensorArg::from_tensor(v);
+                v_h.offset += h_idx * v_head_stride;
+
+                let mut out_h = TensorArg::from_tensor(output);
+                out_h.offset += h_idx * out_head_stride;
+
+                // Offset Scratch
+                let mut scores_h = scores_all.clone();
+                scores_h.offset += h_idx * scratch_head_stride;
+
+                let mut probs_h = probs_all.clone();
+                probs_h.offset += h_idx * scratch_head_stride;
+
+                // GEMV 1: Q @ K^T -> Scores
+                let qk_args = GemvV2Args {
+                    weights: k_h.clone(),
+                    scale_bytes: k_h.clone(),
+                    input: q_h,
+                    output: scores_h.clone(),
+                    bias: scores_h.clone(),
+                    has_bias: 0,
+                    k_dim: head_dim,
+                    n_dim: kv_seq_len,
+                    weights_per_block: 32,
+                    alpha: scale,
+                    residual: scores_h.clone(),
+                    has_residual: 0,
+                    beta: 0.0,
+                };
+                foundry.run(&qk_kernel.bind(qk_args, qk_dispatch))?;
+
+                // Softmax: Scores -> Probs
+                let softmax_args = SoftmaxV2Args {
+                    input: scores_h,
+                    scale: scale_arg.clone(),
+                    output: probs_h.clone(),
+                    seq_k: kv_seq_len,
+                    causal: if self.step.causal { 1 } else { 0 },
+                    query_offset: q_offset_val,
+                };
+                foundry.run(&softmax_kernel.bind(softmax_args, softmax_dispatch))?;
+
+                // GEMV 2: Probs @ V -> Output
+                let out_h_arg = out_h.clone();
+                let av_args = GemvV2Args {
+                    weights: v_h.clone(),
+                    scale_bytes: v_h,
+                    input: probs_h,
+                    output: out_h_arg.clone(),
+                    bias: out_h_arg.clone(),
+                    has_bias: 0,
+                    k_dim: kv_seq_len,
+                    n_dim: head_dim,
+                    weights_per_block: 32,
+                    alpha: 1.0,
+                    residual: out_h_arg,
+                    has_residual: 0,
+                    beta: 0.0,
+                };
+                foundry.run(&av_kernel.bind(av_args, av_dispatch))?;
+            }
+        } else {
+            // =========== DEFAULT PATH: Batched GEMM over heads (M>=1) ===========
+            use crate::compound::stages::Quantization;
+
+            let tile_config = TileConfig::default();
+
+            // Get GEMM kernels for Q@K^T and Probs@V
+            // Q@K^T: [M, head_dim] @ [head_dim, kv_seq_len] = [M, kv_seq_len]
+            // K is stored as [kv_seq_len, head_dim] row-major, so K^T is ColMajor read
+            let qk_gemm_kernel = get_gemm_kernel(
+                Quantization::F16,
+                Quantization::F16,
+                false,
+                true, // transpose_a=false, transpose_b=true (K^T)
+                tile_config,
+                true,  // has_alpha_beta (needed for scale)
+                false, // has_bias
+            );
+
+            // Probs@V: [M, kv_seq_len] @ [kv_seq_len, head_dim] = [M, head_dim]
+            let av_gemm_kernel = get_gemm_kernel(
+                Quantization::F16,
+                Quantization::F16,
+                false,
+                false, // No transpose
+                tile_config,
+                false, // has_alpha_beta (alpha=1.0)
+                false, // has_bias
+            );
+
+            // Batch heads over GEMM's gid.z dimension to avoid per-head dispatch overhead.
+            // Q: [n_heads, M, head_dim] contiguous per head
+            // K/V: [n_heads, kv_seq_len, head_dim] contiguous per head
+            // Scores/Probs: [n_heads, M, kv_seq_len] contiguous per head
+            // Output: token-major [M, d_model]; each head writes to a column slice, so
+            //         the per-head batch stride is head_dim elements (column offset).
+
+            // GEMM 1: Q @ K^T -> Scores [M, kv_seq_len]
+            let mut qk_params = GemmParams::simple(
+                m as i32,
+                kv_seq_len as i32,
+                head_dim as i32,
+                false,
+                true, // transpose_b=true for K^T (K stored as [kv_seq_len, head_dim])
+                tile_config,
+            );
+            qk_params.batch_stride_a = (m as i64) * (head_dim as i64);
+            qk_params.batch_stride_b = (k_seq_stride as i64) * (head_dim as i64);
+            qk_params.batch_stride_c = (m as i64) * (kv_seq_len as i64);
+            qk_params.batch_stride_d = (m as i64) * (kv_seq_len as i64);
+
+            let qk_dispatch = {
+                let base = gemm_dispatch_config(&qk_params, tile_config);
+                DispatchConfig {
+                    grid: GridSize::new(qk_params.tiles_n as usize, qk_params.tiles_m as usize, n_heads as usize),
+                    group: base.group,
+                }
+            };
+
+            let q_base = TensorArg::from_tensor(q);
+            let k_base = TensorArg::from_tensor(k);
+
+            let qk_args = GemmV2Args {
+                a: q_base,
+                b: k_base,
+                d: scores_all.clone(),
+                c: scores_all.clone(),        // Dummy - no residual
+                bias: scores_all.clone(),     // Dummy - no bias
+                b_scales: scores_all.clone(), // Dummy - F16 weights
+                weights_per_block: 32,
+                params: qk_params,
+                alpha: scale,
+                beta: 0.0,
+            };
+            foundry.run(&qk_gemm_kernel.bind(qk_args, qk_dispatch))?;
+
+            // Softmax: flatten heads into the row dimension to dispatch once.
+            // Row index is (head * M + row), but causal masking must use (row % M).
+            let softmax_sdpa_kernel = get_softmax_v2_sdpa_batched_kernel();
+            let softmax_dispatch = DispatchConfig {
+                grid: GridSize::d1((n_heads as usize) * (m as usize)),
+                group: ThreadgroupSize::d1(256),
+            };
+
+            let softmax_args = SoftmaxV2SdpaBatchedArgs {
+                input: scores_all.clone(),
                 scale: scale_arg.clone(),
-                output: probs_h.clone(),
+                output: probs_all.clone(),
                 seq_k: kv_seq_len,
                 causal: if self.step.causal { 1 } else { 0 },
                 query_offset: q_offset_val,
+                rows_per_batch: m,
             };
-            foundry.run(&softmax_kernel.bind(softmax_args, softmax_dispatch))?;
+            foundry.run(&softmax_sdpa_kernel.bind(softmax_args, softmax_dispatch))?;
 
-            // 5. Dispatch GEMV 2: Probs @ V -> Output
-            let av_args = GemvV2Args {
-                weights: v_h.clone(), // V
-                scale_bytes: v_h,     // Dummy
-                input: probs_h,       // Probs
-                output: out_h.clone(),
-                bias: out_h, // Dummy
-                has_bias: 0,
-                k_dim: kv_seq_len,
-                n_dim: head_dim,
-                weights_per_block: 32,
-                alpha: 1.0,
+            // GEMM 2: Probs @ V -> Output [M, head_dim] written into token-major [M, d_model].
+            let mut av_params = GemmParams::simple(m as i32, head_dim as i32, kv_seq_len as i32, false, false, tile_config);
+            av_params.ldd = d_model_dim as i32;
+            av_params.ldc = d_model_dim as i32;
+            av_params.batch_stride_a = (m as i64) * (kv_seq_len as i64);
+            av_params.batch_stride_b = (v_seq_stride as i64) * (head_dim as i64);
+            av_params.batch_stride_c = head_dim as i64;
+            av_params.batch_stride_d = head_dim as i64;
+
+            let av_dispatch = {
+                let base = gemm_dispatch_config(&av_params, tile_config);
+                DispatchConfig {
+                    grid: GridSize::new(av_params.tiles_n as usize, av_params.tiles_m as usize, n_heads as usize),
+                    group: base.group,
+                }
             };
-            foundry.run(&av_kernel.bind(av_args, av_dispatch))?;
+
+            let v_base = TensorArg::from_tensor(v);
+            let out_base = TensorArg::from_tensor(output);
+
+            let av_args = GemmV2Args {
+                a: probs_all,
+                b: v_base,
+                d: out_base.clone(),
+                c: out_base.clone(),    // Dummy - no residual
+                bias: out_base.clone(), // Dummy - no bias
+                b_scales: out_base,     // Dummy - F16 weights
+                weights_per_block: 32,
+                params: av_params,
+                alpha: 1.0,
+                beta: 0.0,
+            };
+            foundry.run(&av_gemm_kernel.bind(av_args, av_dispatch))?;
         }
 
         Ok(())

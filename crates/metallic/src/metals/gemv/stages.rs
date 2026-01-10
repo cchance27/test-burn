@@ -226,13 +226,14 @@ impl Stage for VectorizedDotStage {
     
     float acc = 0.0f;
     uint k_base = 0;
+    const uint input_row_base = batch_idx * k_dim;
     
     // Fast path: no bounds checks (K_CHUNK_SIZE = 256)
     while (k_base + K_CHUNK_SIZE <= k_dim) {{
         uint k = k_base + lane_id * {vec_width}u;
         
         // Vector load {vec_width} halves from input
-        float4 xv_raw = *(const device float4*)(input + k);
+        float4 xv_raw = *(const device float4*)(input + input_row_base + k);
         half4 xv_lo = as_type<half4>(xv_raw.xy);
         half4 xv_hi = as_type<half4>(xv_raw.zw);
 
@@ -276,11 +277,11 @@ impl Stage for VectorizedDotStage {
         uint valid_count = 0;
         
         if (k + {vec_width}u <= k_dim) {{
-            xv_raw = *(const device float4*)(input + k);
+            xv_raw = *(const device float4*)(input + input_row_base + k);
             valid_count = {vec_width}u;
         }} else if (k < k_dim) {{
             for (uint i = 0; i < {vec_width}u && k + i < k_dim; ++i) {{
-                ((thread half*)&xv_raw)[i] = input[k + i];
+                ((thread half*)&xv_raw)[i] = input[input_row_base + k + i];
                 valid_count++;
             }}
         }}
@@ -404,6 +405,7 @@ impl Stage for CanonicalDotStage {
     // Uses 4-way unrolling with warp-interleaved access
     // Each thread processes 4 elements, stride = 32 * 4 = 128
     const uint blocks_per_k = (k_dim + weights_per_block - 1) / weights_per_block;
+    const device half* input_row = input + batch_idx * k_dim;
     
     float acc = 0.0f;
     uint k_step = 32u * 4u; // 128
@@ -417,7 +419,7 @@ impl Stage for CanonicalDotStage {
          acc += gemv_dot_canonical<{policy}>(
              weights,
              scale_bytes,
-             input,
+             input_row,
              row_idx,
              k,
              k + 4u,
@@ -482,6 +484,21 @@ impl Stage for WarpWriteOutputStage {
                 metal_type: "constant float&",
                 buffer_index: 9,
             },
+            BufferArg {
+                name: "residual",
+                metal_type: "const device half*",
+                buffer_index: 10,
+            },
+            BufferArg {
+                name: "has_residual",
+                metal_type: "constant uint&",
+                buffer_index: 11,
+            },
+            BufferArg {
+                name: "beta",
+                metal_type: "constant float&",
+                buffer_index: 12,
+            },
         ]
     }
 
@@ -495,11 +512,148 @@ impl Stage for WarpWriteOutputStage {
     if (lane_id == 0) {
         // Apply alpha scaling to the reduced sum
         float scaled_sum = row_sum * alpha;
-        gemv_write_output(output, bias, row_idx, scaled_sum, has_bias != 0);
+        float result = scaled_sum;
+        if (has_bias != 0) {
+            result += (float)bias[row_idx];
+        }
+        if (has_residual != 0) {
+            result += ((float)residual[batch_idx * n_dim + row_idx]) * beta;
+        }
+        output[batch_idx * n_dim + row_idx] = (half)result;
     }
 "#
         .to_string();
 
         ("void".to_string(), code)
+    }
+}
+
+// =============================================================================
+// ScalarDotStage - Thread-per-row dot product (Large N optimized)
+// =============================================================================
+
+/// Dot product stage for thread-per-row dispatch.
+///
+/// Designed for Layout::ColMajor (KxN weights) where N is the contiguous dimension.
+/// Threads in a warp access adjacent weights (W[k, n], W[k, n+1]...), enabling
+/// full memory coalescing without implicit vector loads.
+#[derive(Debug, Clone)]
+pub struct ScalarDotStage {
+    quantization: Quantization,
+    unroll: usize,
+}
+
+impl ScalarDotStage {
+    pub fn new(quantization: Quantization) -> Self {
+        Self { quantization, unroll: 8 }
+    }
+}
+
+impl Stage for ScalarDotStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec![self.quantization.include_path()]
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        // Same arguments as VectorizedDotStage
+        vec![
+            BufferArg {
+                name: "weights",
+                metal_type: "const device uchar*",
+                buffer_index: 0,
+            },
+            BufferArg {
+                name: "scale_bytes",
+                metal_type: "const device uchar*",
+                buffer_index: 1,
+            },
+            BufferArg {
+                name: "input",
+                metal_type: "const device half*",
+                buffer_index: 2,
+            },
+            BufferArg {
+                name: "k_dim",
+                metal_type: "constant uint&",
+                buffer_index: 4,
+            },
+            BufferArg {
+                name: "n_dim",
+                metal_type: "constant uint&",
+                buffer_index: 5,
+            },
+            BufferArg {
+                name: "weights_per_block",
+                metal_type: "constant uint&",
+                buffer_index: 6,
+            },
+        ]
+    }
+
+    fn struct_defs(&self) -> String {
+        // Scalar dot doesn't need extra helper functions beyond standard policy loads
+        "".to_string()
+    }
+
+    fn emit(&self, _prev: &str) -> (String, String) {
+        let policy = self.quantization.policy_name();
+
+        let code = format!(
+            r#"
+    // Scalar Dot Product ({{policy}})
+    // Thread-per-row: One thread computes one output element.
+    // Relies on warp coalescing for ColMajor weights.
+    
+    float acc = 0.0f;
+    uint k = 0;
+    
+    // Main loop with unrolling
+    while (k + {unroll} <= k_dim) {{
+        #pragma unroll
+        for (int i = 0; i < {unroll}; ++i) {{
+            uint curr_k = k + i;
+            
+            // Load input (broadcast)
+            // Note: input is half*, casting to float
+            float val_x = (float)input[curr_k];
+            
+            // Load weight (coalesced)
+            // Use scalar load<1> because each thread loads 1 scalar weight
+            // But collectively the warp loads a vector (coalesced)
+            ulong idx = WEIGHT_INDEX(row_idx, curr_k, k_dim, n_dim);
+            float w;
+            {policy}::template load_weights<1>(weights, idx, &w);
+            
+            // Load scale
+            // Scale logic: one scale per block of K.
+            uint blocks_per_k_dim = (k_dim + weights_per_block - 1) / weights_per_block;
+            half scale = {policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k_dim + (curr_k / weights_per_block));
+            
+            acc += val_x * w * (float)scale;
+        }}
+        k += {unroll};
+    }}
+    
+    // Tail loop
+    while (k < k_dim) {{
+        float val_x = (float)input[k];
+        ulong idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        float w;
+        {policy}::template load_weights<1>(weights, idx, &w);
+        
+        uint blocks_per_k_dim = (k_dim + weights_per_block - 1) / weights_per_block;
+        half scale = {policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k_dim + (k / weights_per_block));
+        
+        acc += val_x * w * (float)scale;
+        k++;
+    }}
+    
+    float row_sum = acc;     // Result is full sum
+"#,
+            policy = policy,
+            unroll = self.unroll
+        );
+
+        ("row_sum".to_string(), code)
     }
 }
