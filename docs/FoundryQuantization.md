@@ -110,7 +110,7 @@ Follow this checklist to implement a new quantization format (e.g., Q4_0).
 1.  **Update Enum**: Add `Q4_0` to `QuantizationType` in `crates/metallic/src/compound/stages.rs`.
 2.  **Create Policy**: Create `crates/metallic/src/foundry/policy/q4.rs`.
     - Implement `QuantizationPolicy` for `PolicyQ4`.
-    - Implement `LoaderStage` for `Q4LoaderStage`.
+    - Implement `LoaderStage` directly on `PolicyQ4`.
     - In `bind()`, use `resolved.weights` (and scales) to get tensors from `FastBindings`.
 3.  **Register Policy**: Update `resolve_policy` in `crates/metallic/src/foundry/policy.rs` to return `PolicyQ4` for `QuantizationType::Q4_0`.
 
@@ -144,7 +144,7 @@ let step = GemvCanonicalStep {
 
 The system will automatically:
 1.  Route to `PolicyQ4`.
-2.  Use `Q4LoaderStage` to bind your packed Q4 weights.
+2.  Use `PolicyQ4` to bind your packed Q4 weights.
 3.  Dispatch the `gemv_q4` Metal kernel.
 
 ---

@@ -6,9 +6,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct F16LoaderStage;
+pub struct PolicyF16;
 
-impl crate::compound::Stage for F16LoaderStage {
+impl crate::compound::Stage for PolicyF16 {
     fn includes(&self) -> Vec<&'static str> {
         vec![]
     }
@@ -23,7 +23,7 @@ impl crate::compound::Stage for F16LoaderStage {
     }
 }
 
-impl LoaderStage for F16LoaderStage {
+impl LoaderStage for PolicyF16 {
     fn params_struct(&self) -> String {
         // F16 doesn't need extra params in the loader struct
         "".to_string()
@@ -35,16 +35,13 @@ impl LoaderStage for F16LoaderStage {
 
         // Match existing behavior: [weight, dummy_scale]
         // where dummy_scale is just the weight again (unused by kernel)
-        // DEBT: We should avoid this? Or at least assess is as it seems like a hack and might affect memory?
+        // DEBT: We should avoid this, or at least assess is as it seems like a hack and might affect memory?
         smallvec![tensor.clone(), tensor.clone()]
     }
     fn quantization_type(&self) -> Quantization {
         Quantization::F16
     }
 }
-
-#[derive(Debug)]
-pub struct PolicyF16;
 
 impl QuantizationPolicy for PolicyF16 {
     fn name(&self) -> &'static str {
@@ -69,7 +66,7 @@ impl QuantizationPolicy for PolicyF16 {
     }
 
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
-        Box::new(F16LoaderStage)
+        Box::new(self.clone())
     }
 
     fn load_weights(

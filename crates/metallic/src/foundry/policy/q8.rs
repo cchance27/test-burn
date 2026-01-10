@@ -10,9 +10,9 @@ use crate::{
 };
 
 #[derive(Debug, Clone)]
-pub struct Q8LoaderStage;
+pub struct PolicyQ8;
 
-impl crate::compound::Stage for Q8LoaderStage {
+impl crate::compound::Stage for PolicyQ8 {
     fn includes(&self) -> Vec<&'static str> {
         vec![]
     }
@@ -26,7 +26,7 @@ impl crate::compound::Stage for Q8LoaderStage {
     }
 }
 
-impl LoaderStage for Q8LoaderStage {
+impl LoaderStage for PolicyQ8 {
     fn params_struct(&self) -> String {
         "".to_string()
     }
@@ -49,9 +49,6 @@ impl LoaderStage for Q8LoaderStage {
         Quantization::Q8
     }
 }
-
-#[derive(Debug)]
-pub struct PolicyQ8;
 
 impl QuantizationPolicy for PolicyQ8 {
     fn name(&self) -> &'static str {
@@ -76,7 +73,7 @@ impl QuantizationPolicy for PolicyQ8 {
     }
 
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
-        Box::new(Q8LoaderStage)
+        Box::new(self.clone())
     }
 
     fn load_weights(

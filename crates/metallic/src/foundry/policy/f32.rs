@@ -29,7 +29,7 @@ impl QuantizationPolicy for PolicyF32 {
     }
 
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
-        Box::new(super::f16::F16LoaderStage)
+        Box::new(super::f16::PolicyF16)
     }
 
     fn load_weights(
