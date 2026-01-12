@@ -183,7 +183,9 @@ impl GpuProfilerState {
 
         // Group records by (base op_name without '#sequence', backend) and aggregate CPU durations for weighting
         // This collapses multiple encoder dispatches for the same logical op into a single group
-        let mut groups: FxHashMap<(String, String), (Vec<Duration>, Option<FxHashMap<String, String>>)> = FxHashMap::default();
+        type GroupKey = (String, String);
+        type GroupValue = (Vec<Duration>, Option<FxHashMap<String, String>>);
+        let mut groups: FxHashMap<GroupKey, GroupValue> = FxHashMap::default();
         for rec in records {
             let base_name = rec.op_name.split('#').next().unwrap_or(&rec.op_name).to_string();
             let entry = groups.entry((base_name, rec.backend)).or_insert_with(|| (Vec::new(), None));

@@ -14,7 +14,6 @@ The following are design goals and rules for our Agents and Developers for the p
    a. Run `cargo +nightly fmt` && `cargo clippy --fix --allow-dirty --allow-staged` && `cargo build`
 - NEVER return a task or mark it as complete with PLACEHOLDER functions are placeholder comments, we implement functions and components fully. Only ever use placeholders if we plan to replace the placeholder in our next step that we're already planning to execute, and placeholders should have todo!() so that it will crash out if we forget to finish them.
 - Always use idiomatic rust where possible.
-- When creating test and validating our code and functions, we should use pytorch or numpy for 1 off experiments or to generate expected outputs, for more complex tests that need large comparison data we can use burn-rs as a comparison tool (only in tests)
 - Don't force tests to pass ever, tests should be properly setup and logical, if a test fails it either has a mistake OR its showing a valid issue in our code that should be researched and fixed correctly.
 - Make sure we use strongly typed errors whenever possible (avoid unwraps and expect outside of tests)
 - Remember performance is #1 priority, so cloning should be minimized we should try to use zero copy abstractions where possible. 

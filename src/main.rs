@@ -3,10 +3,10 @@ use std::{
 };
 
 use anyhow::Result;
-use metallic::{
+use metallic_cli_helpers::prelude::*;
+use metallic_context::{
     Context, F16Element, TensorElement, Tokenizer, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
-use metallic_cli_helpers::prelude::*;
 use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
 use rustc_hash::FxHashMap;
 
@@ -117,7 +117,7 @@ fn main() -> AppResult<()> {
                         emit_startup_memory_update(&worker_tx)?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Instantiating model...".to_string()))?;
-                        let mut qwen: metallic::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
+                        let mut qwen: metallic_context::models::qwen25::Qwen25<F16Element> = gguf_model.instantiate(&mut ctx)?;
 
                         // Report model weights breakdown
                         report_model_weight_breakdown(&qwen);
@@ -140,7 +140,7 @@ fn main() -> AppResult<()> {
 
                         emit_startup_memory_update(&worker_tx)?;
 
-                        let cfg = metallic::generation::GenerationConfig {
+                        let cfg = metallic_context::generation::GenerationConfig {
                             max_tokens: cli_config.generation.max_tokens,
                             temperature: cli_config.generation.temperature as f32,
                             top_p: cli_config.generation.top_p as f32,
@@ -150,7 +150,9 @@ fn main() -> AppResult<()> {
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                        metallic::generation::generate_streaming_from_tokens(&mut qwen, &tokenizer, &mut ctx, &tokens, &cfg, &worker_tx)?;
+                        metallic_context::generation::generate_streaming_from_tokens(
+                            &mut qwen, &tokenizer, &mut ctx, &tokens, &cfg, &worker_tx,
+                        )?;
                     }
 
                     cli::config::Engine::Foundry => {
@@ -165,7 +167,7 @@ fn main() -> AppResult<()> {
                         worker_tx.send(AppEvent::StatusUpdate(format!("Detected architecture: {:?}", arch_name)))?;
 
                         // Determine spec file path
-                        let spec_path = if let metallic::gguf::GGUFValue::String(arch) = arch_name.clone() {
+                        let spec_path = if let metallic_context::gguf::GGUFValue::String(arch) = arch_name.clone() {
                             if arch.contains("qwen2") {
                                 "models/qwen25.json"
                             } else {
@@ -181,10 +183,10 @@ fn main() -> AppResult<()> {
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
-                        let mut foundry = metallic::foundry::Foundry::new()?;
+                        let mut foundry = metallic_foundry::Foundry::new()?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Building compiled model...".to_string()))?;
-                        let model = metallic::foundry::model::ModelBuilder::new()
+                        let model = metallic_foundry::model::ModelBuilder::new()
                             .with_spec_file(std::path::PathBuf::from(spec_path))
                             .unwrap()
                             .with_gguf(&gguf_path)
@@ -205,7 +207,7 @@ fn main() -> AppResult<()> {
                         let tokenization_duration = tokenization_start.elapsed();
                         worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
 
-                        let cfg = metallic::generation::GenerationConfig {
+                        let cfg = metallic_foundry::generation::GenerationConfig {
                             max_tokens: cli_config.generation.max_tokens,
                             temperature: cli_config.generation.temperature as f32,
                             top_p: cli_config.generation.top_p as f32,
@@ -215,7 +217,7 @@ fn main() -> AppResult<()> {
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                        metallic::generation::generate_streaming_foundry_from_tokens(
+                        metallic_foundry::generation::generate_streaming_from_tokens(
                             &mut foundry,
                             &model,
                             &tokenizer,
@@ -257,7 +259,7 @@ fn main() -> AppResult<()> {
     Ok(())
 }
 
-fn report_model_weight_breakdown(qwen: &metallic::models::Qwen25<F16Element>) {
+fn report_model_weight_breakdown(qwen: &metallic_context::models::Qwen25<F16Element>) {
     // Report model weights breakdown
     let mut breakdown = FxHashMap::default();
     let mut total_weights_size = 0u64;
@@ -644,6 +646,7 @@ fn run_text_mode(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn process_text_mode_event(
     event: AppEvent,
     cli_config: &cli::CliConfig,

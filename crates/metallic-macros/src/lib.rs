@@ -1,3 +1,4 @@
+#![allow(clippy::all)]
 use proc_macro::TokenStream;
 use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Ident, Span};
@@ -37,15 +38,63 @@ fn validate_metal_template(template: &str, span: Span) -> syn::Result<()> {
     Ok(())
 }
 
-fn metallic_root() -> proc_macro2::TokenStream {
-    match crate_name("metallic") {
-        Ok(FoundCrate::Itself) => quote::quote! { crate },
-        Ok(FoundCrate::Name(name)) => {
-            let ident = Ident::new(&name, Span::call_site());
-            quote::quote! { ::#ident }
+fn foundry_crate() -> proc_macro2::TokenStream {
+    // 1. Check if we are compiling metallic-foundry itself
+    if let Ok(pkg_name) = std::env::var("CARGO_PKG_NAME") {
+        if pkg_name == "metallic-foundry" {
+            return quote::quote! { crate };
         }
-        Err(_) => quote::quote! { ::metallic },
+        // If compiling the facade 'metallic', foundry is likely at crate::foundry
+        if pkg_name == "metallic" {
+            return quote::quote! { crate::foundry };
+        }
     }
+
+    // 2. Try to find metallic-foundry directly
+    if let Ok(found) = crate_name("metallic-foundry") {
+        return match found {
+            FoundCrate::Itself => quote::quote! { crate },
+            FoundCrate::Name(n) => {
+                let ident = Ident::new(&n, Span::call_site());
+                quote::quote! { ::#ident }
+            }
+        };
+    }
+
+    // 3. Try metallic (facade) and access foundry module
+    if let Ok(found) = crate_name("metallic") {
+        return match found {
+            FoundCrate::Itself => quote::quote! { crate::foundry },
+            FoundCrate::Name(n) => {
+                let ident = Ident::new(&n, Span::call_site());
+                quote::quote! { ::#ident::foundry }
+            }
+        };
+    }
+
+    // Fallback - assume ::metallic_foundry exists or fail gracefully?
+    // Let's try one more common alias
+    if let Ok(found) = crate_name("metallic_foundry") {
+        return match found {
+            FoundCrate::Itself => quote::quote! { crate },
+            FoundCrate::Name(n) => {
+                let ident = Ident::new(&n, Span::call_site());
+                return quote::quote! { ::#ident };
+            }
+        };
+    }
+
+    // Fallback
+    let pkg = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "UNSET".to_string());
+    // If we can't find it, we might be inside a crate that defines it but hasn't published it in a way we see.
+    // Default to ::metallic_foundry as a safe bet for external consumers?
+    // Or ::metallic::foundry?
+    // Let's error out to be safe, or default to crate if we think we might be in it (covered by step 1).
+    let msg = format!(
+        "Failed to resolve 'metallic-foundry' crate path. CARGO_PKG_NAME={}. Please ensure metallic-foundry is a dependency.",
+        pkg
+    );
+    quote::quote! { compile_error!(#msg); }
 }
 
 // Helper to map Rust types to Metal types for MetalStruct
@@ -185,7 +234,7 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
     let mut bindings = Vec::new();
     let mut auto_buffer_idx: u64 = 0; // Auto-increment counter for buffer indices
 
-    let root = quote::quote! { ::metallic };
+    let root = foundry_crate();
 
     if let Fields::Named(fields) = fields {
         for f in &fields.named {
@@ -328,6 +377,8 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
 pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
+
+    let root = foundry_crate();
 
     // Get optional struct-level #[metal(name = "...")] override
     let mut metal_struct_name = name.to_string();
@@ -498,11 +549,11 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
                 pub const METAL_STRUCT_DEF: &'static str = #resolved_metal_def;
             }
 
-            impl crate::foundry::spec::Resolvable for #name {
+            impl #root::spec::Resolvable for #name {
                 type Resolved = #resolved_name;
 
                 /// Resolve all DynamicValue fields from bindings.
-                fn resolve(&self, bindings: &crate::foundry::spec::TensorBindings) -> Self::Resolved {
+                fn resolve(&self, bindings: &#root::spec::TensorBindings) -> Self::Resolved {
                     #resolved_name {
                         #(#resolve_field_assigns),*
                     }
@@ -512,10 +563,10 @@ pub fn derive_metal_struct(input: TokenStream) -> TokenStream {
     } else {
         // No dynamic fields - trivial Resolvable impl (returns clone of self)
         quote! {
-            impl crate::foundry::spec::Resolvable for #name {
+            impl #root::spec::Resolvable for #name {
                 type Resolved = Self;
 
-                fn resolve(&self, _bindings: &crate::foundry::spec::TensorBindings) -> Self::Resolved {
+                fn resolve(&self, _bindings: &#root::spec::TensorBindings) -> Self::Resolved {
                     self.clone()
                 }
             }
@@ -561,7 +612,7 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
 
-    let root = metallic_root();
+    let root = foundry_crate();
 
     // Parse #[policy(header = "...", struct_name = "...")]
     let mut header = String::new();
@@ -651,8 +702,7 @@ pub fn derive_kernel_args(input: TokenStream) -> TokenStream {
     let name = input.ident;
 
     // Determine crate root path
-    // Always refer to metallic as ::metallic (requires extern crate self as metallic in lib.rs)
-    let root = quote::quote! { ::metallic };
+    let root = foundry_crate();
 
     let (mut arg_infos, bindings) = match input.data {
         Data::Struct(data) => collect_arg_infos(&data.fields),
@@ -731,7 +781,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
 
-    let root = metallic_root();
+    let root = foundry_crate();
 
     let mut source = None;
     let mut function = None;
@@ -1130,7 +1180,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
         #[doc(hidden)]
         pub struct #id_name;
 
-        impl #impl_generics #root::foundry::Kernel for #name #ty_generics #where_clause {
+        impl #impl_generics #root::Kernel for #name #ty_generics #where_clause {
             type Args = #args_type;
             type Id = #id_name;
 
@@ -1138,12 +1188,12 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                 #function
             }
 
-            fn source(&self) -> #root::foundry::KernelSource {
-                #root::foundry::KernelSource::File(#source)
+            fn source(&self) -> #root::KernelSource {
+                #root::KernelSource::File(#source)
             }
 
-            fn includes(&self) -> #root::foundry::Includes {
-                #root::foundry::Includes(vec![#(#includes),*])
+            fn includes(&self) -> #root::Includes {
+                #root::Includes(vec![#(#includes),*])
             }
 
             fn dtype(&self) -> Option<#root::tensor::Dtype> {
@@ -1197,7 +1247,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             .map(|info| {
                 let fname = info.name_ident.as_ref().unwrap();
                 if info.rust_type.contains("TensorArg") {
-                    quote! { pub #fname: #root::foundry::spec::Ref }
+                    quote! { pub #fname: #root::spec::Ref }
                 } else if info.rust_type.contains("Resolved") {
                     // For *Resolved types, use the non-Resolved version with DynamicValue for deserialization
                     // Convention: FooParamsResolved -> FooParams
@@ -1240,7 +1290,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     quote! { #fname: bindings.resolve(&self.#fname)? }
                 } else if info.rust_type.contains("Params") {
                     // Params types need to resolve DynamicValue fields via Resolvable trait
-                    quote! { #fname: crate::foundry::spec::Resolvable::resolve(&self.#fname, bindings) }
+                    quote! { #fname: #root::spec::Resolvable::resolve(&self.#fname, bindings) }
                 } else {
                     quote! { #fname: self.#fname.clone() }
                 }
@@ -1273,7 +1323,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     }
                 } else if info.rust_type.contains("Params") {
                      // Note: using 'globals' (the TensorBindings ref) for resolving vars
-                     quote! { #fname: crate::foundry::spec::Resolvable::resolve(&self.#fname, globals) }
+                     quote! { #fname: #root::spec::Resolvable::resolve(&self.#fname, globals) }
                 } else {
                     quote! { #fname: self.#fname.clone() }
                 }
@@ -1295,8 +1345,8 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             }
 
             #[typetag::serde(name = #name_str)]
-            impl #root::foundry::spec::Step for #step_name {
-                fn execute(&self, foundry: &mut #root::foundry::Foundry, bindings: &mut #root::foundry::spec::TensorBindings) -> Result<(), #root::error::MetalError> {
+            impl #root::spec::Step for #step_name {
+                fn execute(&self, foundry: &mut #root::Foundry, bindings: &mut #root::spec::TensorBindings) -> Result<(), #root::error::MetalError> {
                     // Use Default for fields without #[arg] annotations
                     let kernel = #name {
                         #(#resolve_fields,)*
@@ -1305,7 +1355,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     foundry.run(&kernel)
                 }
 
-                fn compile(&self, resolver: &mut #root::foundry::spec::TensorBindings, symbols: &mut #root::foundry::spec::SymbolTable) -> Vec<Box<dyn #root::foundry::spec::CompiledStep>> {
+                fn compile(&self, resolver: &mut #root::spec::TensorBindings, symbols: &mut #root::spec::SymbolTable) -> Vec<Box<dyn #root::spec::CompiledStep>> {
                     let compiled = #compiled_step_name {
                         #(#compile_fields,)*
                         // Using Default is safe because compiled fields cover all struct fields if derived correctly
@@ -1319,8 +1369,8 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl #root::foundry::spec::CompiledStep for #compiled_step_name {
-                                fn execute(&self, foundry: &mut #root::foundry::Foundry, bindings: & #root::foundry::spec::FastBindings, globals: & #root::foundry::spec::TensorBindings, _symbols: &#root::foundry::spec::SymbolTable) -> Result<(), #root::error::MetalError> {
+            impl #root::spec::CompiledStep for #compiled_step_name {
+                                fn execute(&self, foundry: &mut #root::Foundry, bindings: & #root::spec::FastBindings, globals: & #root::spec::TensorBindings, _symbols: &#root::spec::SymbolTable) -> Result<(), #root::error::MetalError> {
                     let kernel = #name {
                         #(#execute_fields,)*
                         ..Default::default()
@@ -1370,7 +1420,7 @@ pub fn derive_epilogue(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
 
-    let root = metallic_root();
+    let root = foundry_crate();
 
     let mut include = None;
     let mut emit = None;
@@ -1625,14 +1675,13 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
     // Generate unique ID type
     let id_name = syn::Ident::new(&format!("{}Id", name), name.span());
 
-    // Always refer to metallic as ::metallic (requires extern crate self as metallic in lib.rs)
-    let root = quote::quote! { ::metallic };
+    let root = foundry_crate();
 
     let expanded = quote! {
         /// Unique ID for kernel caching.
         pub struct #id_name;
 
-        impl #impl_generics #root::foundry::Kernel for #name #ty_generics #where_clause {
+        impl #impl_generics #root::Kernel for #name #ty_generics #where_clause {
             type Args = Self;
             type Id = #id_name;
 
@@ -1640,7 +1689,7 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
                 #kernel_name
             }
 
-            fn source(&self) -> #root::foundry::KernelSource {
+            fn source(&self) -> #root::KernelSource {
                 // Build compound kernel from stages
                 let mut kernel_builder = #root::compound::CompoundKernel::new(#kernel_name)
                     .with_manual_output(#manual_output);
@@ -1660,10 +1709,10 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
 
                 // Build and return source
                 let fused = kernel_builder.build();
-                #root::foundry::KernelSource::String(fused.source_code().to_string())
+                #root::KernelSource::String(fused.source_code().to_string())
             }
 
-            fn includes(&self) -> #root::foundry::Includes {
+            fn includes(&self) -> #root::Includes {
                 // Reconstruct builder to collect includes
                 let mut kernel_builder = #root::compound::CompoundKernel::new(#kernel_name)
                     .with_manual_output(#manual_output);
@@ -1683,7 +1732,7 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
 
                 // Delegate to built kernel
                 let fused = kernel_builder.build();
-                <_ as #root::foundry::Kernel>::includes(&fused)
+                <_ as #root::Kernel>::includes(&fused)
             }
 
             fn struct_defs(&self) -> String {
@@ -1706,14 +1755,14 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
 
                 // Delegate to built kernel
                 let fused = kernel_builder.build();
-                <_ as #root::foundry::Kernel>::struct_defs(&fused)
+                <_ as #root::Kernel>::struct_defs(&fused)
             }
 
             fn bind(&self, encoder: &#root::types::ComputeCommandEncoder) {
                 self.bind_args(encoder);
             }
 
-            fn dispatch_config(&self) -> #root::foundry::DispatchConfig {
+            fn dispatch_config(&self) -> #root::DispatchConfig {
                 Self::dispatch_config(self)
             }
         }
@@ -1822,7 +1871,7 @@ pub fn derive_compiled_step(input: TokenStream) -> TokenStream {
     let name = input.ident.clone();
     let compiled_name = quote::format_ident!("Compiled{}", name);
 
-    let root = metallic_root();
+    let root = foundry_crate();
 
     // Parse attributes
     let mut kernel_type: Option<syn::Type> = None;
@@ -1934,20 +1983,20 @@ pub fn derive_compiled_step(input: TokenStream) -> TokenStream {
 
         impl #name {
             /// Compile this step into an optimized form.
-            pub fn do_compile(&self, resolver: &mut #root::foundry::spec::TensorBindings, symbols: &mut #root::foundry::spec::SymbolTable) -> #compiled_name {
+            pub fn do_compile(&self, resolver: &mut #root::spec::TensorBindings, symbols: &mut #root::spec::SymbolTable) -> #compiled_name {
                 #compiled_name {
                     #(#compile_mappings),*
                 }
             }
         }
 
-        impl #root::foundry::spec::CompiledStep for #compiled_name {
+        impl #root::spec::CompiledStep for #compiled_name {
             fn execute(
                 &self,
-                foundry: &mut #root::foundry::Foundry,
-                fast_bindings: &#root::foundry::spec::FastBindings,
-                _bindings: &#root::foundry::spec::TensorBindings,
-                _symbols: &#root::foundry::spec::SymbolTable,
+                foundry: &mut #root::Foundry,
+                fast_bindings: &#root::spec::FastBindings,
+                _bindings: &#root::spec::TensorBindings,
+                _symbols: &#root::spec::SymbolTable,
             ) -> Result<(), #root::error::MetalError> {
                 #(#tensor_fetches)*
 
@@ -1987,7 +2036,7 @@ pub fn derive_stage(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = input.ident.clone();
 
-    let root = metallic_root();
+    let root = foundry_crate();
 
     let mut include: Option<String> = None;
     let mut emit: Option<String> = None;

@@ -107,12 +107,12 @@ struct Q8Policy {
 Follow this checklist to implement a new quantization format (e.g., Q4_0).
 
 ### 1. Rust Implementation
-1.  **Update Enum**: Add `Q4_0` to `QuantizationType` in `crates/metallic/src/compound/stages.rs`.
-2.  **Create Policy**: Create `crates/metallic/src/foundry/policy/q4.rs`.
+1.  **Update Enum**: Add `Q4_0` to `QuantizationType` in `src/compound/stages.rs`.
+2.  **Create Policy**: Create `src/foundry/policy/q4.rs`.
     - Implement `QuantizationPolicy` for `PolicyQ4`.
     - Implement `LoaderStage` directly on `PolicyQ4`.
     - In `bind()`, use `resolved.weights` (and scales) to get tensors from `FastBindings`.
-3.  **Register Policy**: Update `resolve_policy` in `crates/metallic/src/foundry/policy.rs` to return `PolicyQ4` for `QuantizationType::Q4_0`.
+3.  **Register Policy**: Update `resolve_policy` in `src/foundry/policy.rs` to return `PolicyQ4` for `QuantizationType::Q4_0`.
 
 ### 2. Metal Implementation
 1.  **Create Metal Policy**: In your kernel file (or a shared header like `policies/q4.metal`), define `struct Q4Policy`.
