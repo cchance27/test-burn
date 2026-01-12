@@ -172,6 +172,8 @@ pub struct WarpLayoutStage {
     warps_per_tg: u32,
     /// SIMD width (32 for Apple Silicon)
     simd_width: u32,
+    /// Elements processed per thread per iteration (default 8)
+    elems_per_thread: u32,
 }
 
 impl WarpLayoutStage {
@@ -180,6 +182,7 @@ impl WarpLayoutStage {
             layout,
             warps_per_tg: 1,
             simd_width: 32,
+            elems_per_thread: 8,
         }
     }
 
@@ -207,6 +210,12 @@ impl WarpLayoutStage {
     /// Configure SIMD width.
     pub fn with_simd_width(mut self, width: u32) -> Self {
         self.simd_width = width;
+        self
+    }
+
+    /// Configure elements per thread.
+    pub fn with_elems_per_thread(mut self, elems: u32) -> Self {
+        self.elems_per_thread = elems;
         self
     }
 
@@ -264,8 +273,8 @@ impl Stage for WarpLayoutStage {
         };
 
         format!(
-            "{}\n#define WARPS_PER_TG {}\n#define SIMD_WIDTH {}\n#define ELEMS_PER_THREAD 8\n#define K_CHUNK_SIZE (SIMD_WIDTH * ELEMS_PER_THREAD)\n",
-            layout_defs, self.warps_per_tg, self.simd_width
+            "{}\n#define WARPS_PER_TG {}\n#define SIMD_WIDTH {}\n#define ELEMS_PER_THREAD {}\n#define K_CHUNK_SIZE (SIMD_WIDTH * ELEMS_PER_THREAD)\n",
+            layout_defs, self.warps_per_tg, self.simd_width, self.elems_per_thread
         )
     }
 

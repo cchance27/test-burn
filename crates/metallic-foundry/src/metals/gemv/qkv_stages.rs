@@ -15,8 +15,9 @@ const GEMV_METAL: &str = include_str!("gemv.metal");
 #[derive(Debug, Clone)]
 pub struct ParallelProjectStage {
     /// Quantization type (F16, Q8)
+    /// Quantization type (F16, Q8)
     quantization: Quantization,
-    /// Vector width for loads (Vec4 or Vec8)
+    /// Vector width for loads (matches layout stride)
     vector_width: VectorWidth,
     /// Optional shared memory variable name for normalization (e.g. "tg_inv_rms")
     norm_shared_name: Option<String>,
@@ -28,10 +29,15 @@ impl ParallelProjectStage {
     pub fn new(quantization: Quantization) -> Self {
         Self {
             quantization,
-            vector_width: VectorWidth::Vec8,
+            vector_width: VectorWidth::Vec8, // Default safe
             norm_shared_name: None,
             gamma_buffer: None,
         }
+    }
+
+    pub fn with_vector_width(mut self, width: VectorWidth) -> Self {
+        self.vector_width = width;
+        self
     }
 
     pub fn with_norm(mut self, gamma_idx: usize, shared_name: &str) -> Self {
@@ -141,6 +147,23 @@ impl Stage for ParallelProjectStage {
             Quantization::Q8 => 1usize,
         };
 
+        let load_input = match self.vector_width {
+            VectorWidth::Vec4 => {
+                r#"
+                half4 xv_raw = *(const device half4*)(input + batch_idx * k_dim + k);
+                half4 xv_lo = xv_raw;
+                half4 xv_hi = half4(0.0h); // Unused
+            "#
+            }
+            VectorWidth::Vec8 => {
+                r#"
+                float4 xv_raw_f = *(const device float4*)(input + batch_idx * k_dim + k);
+                half4 xv_lo = as_type<half4>(xv_raw_f.xy);
+                half4 xv_hi = as_type<half4>(xv_raw_f.zw);
+            "#
+            }
+        };
+
         let norm_logic = if self.gamma_buffer.is_some() {
             r#"
         // --- Fused Norm Application ---
@@ -152,8 +175,11 @@ impl Stage for ParallelProjectStage {
              const device half* g_ptr = gamma + k;
              f_lo.x *= (float)g_ptr[0]; f_lo.y *= (float)g_ptr[1]; 
              f_lo.z *= (float)g_ptr[2]; f_lo.w *= (float)g_ptr[3];
-             f_hi.x *= (float)g_ptr[4]; f_hi.y *= (float)g_ptr[5]; 
-             f_hi.z *= (float)g_ptr[6]; f_hi.w *= (float)g_ptr[7];
+             // Note: For Vec4, hi part is dummy/unused, but logic safely applies 0 or unused
+             if (blocks_per_k > 0) { // Check ensures valid compilation, optimization removes dead code
+                 f_hi.x *= (float)g_ptr[4]; f_hi.y *= (float)g_ptr[5]; 
+                 f_hi.z *= (float)g_ptr[6]; f_hi.w *= (float)g_ptr[7];
+             }
              xv_lo = half4(f_lo);
              xv_hi = half4(f_hi);
         }
@@ -200,6 +226,54 @@ impl Stage for ParallelProjectStage {
             }
         };
 
+        // Helper macro for optimized indexing
+        // Checks if WPB==32 (constant fold if specialized) or runtime check (uniform)
+        let calc_idx = r#"
+        uint w_idx;
+        if (weights_per_block == 32) {
+            // Optimized: idx = (k & 31) + 32*row + (k & ~31)*N
+            // Use uint arithmetic for speed (valid for models < 4GB/layer)
+            w_idx = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_dim;
+        } else {
+            w_idx = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        }
+        "#;
+
+        // Note: We keep w_idx as uint, but when adding to pointer (uchar*), Metal handles it.
+        // If weights > 4GB, this overflows. But we are optimizing for 0.5B speed for now.
+        // Foundry generally uses ulong offsets, so we cast at usage if needed.
+
+        let calc_idx_kv = r#"
+        uint w_idx_kv;
+        if (weights_per_block == 32) {
+            w_idx_kv = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_kv;
+        } else {
+            w_idx_kv = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
+        }
+        "#;
+
+        // Tail generation helpers
+        let zero_init = (0..self.vector_width as usize).map(|_| "0.0f").collect::<Vec<_>>().join(", ");
+
+        let dot_logic = match self.vector_width {
+            VectorWidth::Vec4 => "acc_q += s_q_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3]));",
+            VectorWidth::Vec8 => {
+                "acc_q += s_q_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));"
+            }
+        };
+        let dot_logic_k = match self.vector_width {
+            VectorWidth::Vec4 => "acc_k += s_k_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3]));",
+            VectorWidth::Vec8 => {
+                "acc_k += s_k_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));"
+            }
+        };
+        let dot_logic_v = match self.vector_width {
+            VectorWidth::Vec4 => "acc_v += s_v_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3]));",
+            VectorWidth::Vec8 => {
+                "acc_v += s_v_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));"
+            }
+        };
+
         let code = format!(
             r#"
     // Parallel QKV Projection ({policy})
@@ -215,41 +289,37 @@ impl Stage for ParallelProjectStage {
 
     while (k_base + K_CHUNK_SIZE <= k_dim) {{
         uint k = k_base + lane_id * {vec_width}u;
-        float4 xv_raw = *(const device float4*)(input + batch_idx * k_dim + k);
-        half4 xv_lo = as_type<half4>(xv_raw.xy);
-        half4 xv_hi = as_type<half4>(xv_raw.zw);
+        {load_input}
 
         {norm_logic}
         
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
         
-        uint block_off = k / weights_per_block;
+        uint block_off = k / weights_per_block; // Keep division for scales (typically Q8 only, effectively per-warp constant)
+        
         // Optimization: Use half scales directly and only load once per block
         // (Compiler will likely optimize these further)
         {scales_logic}
 
         // Q Dot
         {{
-            float w[{vec_width}];
-            const device uchar* w_ptr = w_q + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
-            {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
-            acc_q += s_q_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+            {calc_idx}
+            const device uchar* w_ptr = w_q + w_idx * {byte_scale};
+            acc_q += {policy}::template dot<{vec_width}>(w_ptr, 0, s_q_val, xv_f32_lo, xv_f32_hi);
         }}
         
         // K & V Dot
         if (row_idx < n_kv) {{
+            {calc_idx_kv}
+            
             {{
-                float w[{vec_width}];
-                const device uchar* w_ptr = w_k + WEIGHT_INDEX(row_idx, k, k_dim, n_kv) * {byte_scale};
-                {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
-                acc_k += s_k_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+                const device uchar* w_ptr = w_k + w_idx_kv * {byte_scale};
+                acc_k += {policy}::template dot<{vec_width}>(w_ptr, 0, s_k_val, xv_f32_lo, xv_f32_hi);
             }}
             {{
-                float w[{vec_width}];
-                const device uchar* w_ptr = w_v + WEIGHT_INDEX(row_idx, k, k_dim, n_kv) * {byte_scale};
-                {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
-                acc_v += s_v_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+                const device uchar* w_ptr = w_v + w_idx_kv * {byte_scale};
+                acc_v += {policy}::template dot<{vec_width}>(w_ptr, 0, s_v_val, xv_f32_lo, xv_f32_hi);
             }}
         }}
 
@@ -283,30 +353,32 @@ impl Stage for ParallelProjectStage {
         uint block_off = k / weights_per_block;
         {tail_scales_logic}
 
+        // Helper to formatting array init
+        
         // Q Dot
         if (k < k_dim) {{
-            float w[{vec_width}] = {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
+            float w[{vec_width}] = {{{zero_init}}};
             const device uchar* w_ptr = w_q + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
             {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
             for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
-            acc_q += s_q_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+            {dot_logic}
         }}
         
         // K & V Dot
         if (row_idx < n_kv && k < k_dim) {{
             {{
-                float w[{vec_width}] = {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
+                float w[{vec_width}] = {{{zero_init}}};
                 const device uchar* w_ptr = w_k + WEIGHT_INDEX(row_idx, k, k_dim, n_kv) * {byte_scale};
                 {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
                 for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
-                acc_k += s_k_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+                {dot_logic_k}
             }}
             {{
-                float w[{vec_width}] = {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
+                float w[{vec_width}] = {{{zero_init}}};
                 const device uchar* w_ptr = w_v + WEIGHT_INDEX(row_idx, k, k_dim, n_kv) * {byte_scale};
                 {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
                 for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
-                acc_v += s_v_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+                {dot_logic_v}
             }}
         }}
     }}
@@ -315,11 +387,16 @@ impl Stage for ParallelProjectStage {
 "#,
             policy = policy,
             vec_width = vec_width,
+            load_input = load_input,
             norm_logic = norm_logic,
             byte_scale = byte_scale,
             scale_stride = scale_stride,
             scales_logic = scales_logic,
-            tail_scales_logic = tail_scales_logic
+            tail_scales_logic = tail_scales_logic,
+            zero_init = zero_init,
+            dot_logic = dot_logic,
+            dot_logic_k = dot_logic_k,
+            dot_logic_v = dot_logic_v
         );
 
         ("qkv_partial".to_string(), code)

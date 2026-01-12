@@ -27,6 +27,31 @@ struct PolicyQ8 {
     }
 
     /**
+     * Compute dot product with dequantized weights.
+     * Encapsulates the load-and-dot pattern to match PolicyF16's optimized interface.
+     */
+    template<int N>
+    static ALWAYS_INLINE float dot(
+        const device uchar *ptr, 
+        ulong offset, 
+        float scale,
+        float4 xv_lo,
+        float4 xv_hi
+    ) {
+        thread float w[N];
+        load_weights<N>(ptr, offset, w);
+        
+        float res = 0.0f;
+        if constexpr (N >= 4) {
+           res += metal::dot(xv_lo, float4(w[0], w[1], w[2], w[3]));
+        }
+        if constexpr (N >= 8) {
+           res += metal::dot(xv_hi, float4(w[4], w[5], w[6], w[7]));
+        }
+        return scale * res;
+    }
+
+    /**
      * Load and expand Q8 weights to floats (pre-scaled).
      * 
      * Note: This method loads raw integer values. Scaling is typically applied 

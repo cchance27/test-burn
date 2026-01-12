@@ -15,6 +15,42 @@ struct PolicyF16 {
         return 1.0h;
     }
 
+    // Optimized specialized dot product for F16.
+    // Bypasses the generic load_weights + pack/unpack overhead.
+    template<int N>
+    static ALWAYS_INLINE float dot(
+        const device uchar *ptr, 
+        ulong offset, 
+        float scale,
+        float4 xv_lo,
+        float4 xv_hi
+    ) {
+        if constexpr (N == 8) {
+            // Optimized: Load 16 bytes (8 halves) via single float4 (128-bit) load.
+            float4 raw = *(const device float4*)(ptr + offset);
+            half4 lo = as_type<half4>(raw.xy);
+            half4 hi = as_type<half4>(raw.zw);
+            return scale * (metal::dot(xv_lo, float4(lo)) + metal::dot(xv_hi, float4(hi)));
+        } else if constexpr (N == 4) {
+            const device half *w_ptr = (const device half *)(ptr + offset);
+            float4 w = float4(*(const device half4*)w_ptr);
+            return scale * metal::dot(xv_lo, w);
+        } else {
+            // Fallback for non-standard widths (logic matches manual expansion)
+            thread float w[N];
+            load_weights<N>(ptr, offset, w);
+            
+            float res = 0.0f;
+            if constexpr (N >= 4) {
+               res += metal::dot(xv_lo, float4(w[0], w[1], w[2], w[3]));
+            }
+            if constexpr (N >= 8) {
+               res += metal::dot(xv_hi, float4(w[4], w[5], w[6], w[7]));
+            }
+            return scale * res;
+        }
+    }
+
     /**
      * Load and expand F16 weights to floats.
      * 

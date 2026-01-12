@@ -327,13 +327,29 @@ fn get_fused_qkv_kernel(strategy: GemvStrategy, quant: Quantization, has_norm: b
     let norm_suffix = if has_norm { "_rmsnorm" } else { "" };
     let kernel_name = format!("fused_qkv{}_{}", norm_suffix, policy_name.to_lowercase().replace("policy", ""));
 
+    // Determine vector width based on quantization policy
+    // F16: Can use Vec8 (128-bit loads) or Vec4. Default to Vec8 for efficiency.
+    // Q8:  Uses Vec8 (N=8) inherently.
+    // Future: Could query policy for recommended width.
+    let vec_width = match quant {
+        Quantization::F16 => 8, // Force Vec8 for now as it's optimal
+        Quantization::Q8 => 8,
+    };
+
+    // Configure layout with correct stride
     let mut compound = CompoundKernel::new(&kernel_name)
         .with_manual_output(true)
-        .prologue(WarpLayoutStage::canonical().with_warps(8))
+        .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width))
         .prologue(RmsNormComputeStage::new(6, 7)); // Stage 1: RMSNorm compute
 
     // Stage 2: QKV Projection
-    let mut proj = ParallelProjectStage::new(quant);
+    let vw = match vec_width {
+        4 => super::stages::VectorWidth::Vec4,
+        8 => super::stages::VectorWidth::Vec8,
+        _ => panic!("Unsupported vector width: {}", vec_width),
+    };
+
+    let mut proj = ParallelProjectStage::new(quant).with_vector_width(vw);
     if has_norm {
         proj = proj.with_norm(18, "inv_rms");
     }
