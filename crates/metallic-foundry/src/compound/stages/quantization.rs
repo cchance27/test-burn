@@ -10,8 +10,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Each variant maps to a `PolicyXXX` struct in Metal that implements
 /// `load_weights<N>()` and `load_scale()` methods.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum Quantization {
     /// FP16 weights (no quantization, scale = 1.0)
     #[default]
@@ -62,4 +61,3 @@ impl Quantization {
         }
     }
 }
-

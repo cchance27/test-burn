@@ -1,11 +1,11 @@
 use half::f16;
 use metallic_foundry::{
-    {
-        Foundry, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::Tensor as FoundryTensor
-    },
     metals::softmax::SoftmaxV2Step, // V2 moved to main
     tensor::{TensorInit, dtypes::F16 as F16Dtype},
     types::TensorArg,
+    {
+        Foundry, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::Tensor as FoundryTensor
+    },
 };
 
 // CPU Reference implementation

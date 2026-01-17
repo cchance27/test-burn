@@ -120,13 +120,15 @@ impl DefaultKernelInvocable for MatmulGemvQ2FusedOp {
         n0 = w0.logical_dims[1];
         n1 = w1.logical_dims[1];
         if let Some(b) = &b0_opt
-            && b.len() != n0 {
-                return Err(MetalError::InvalidShape("bias0 len mismatch".into()));
-            }
+            && b.len() != n0
+        {
+            return Err(MetalError::InvalidShape("bias0 len mismatch".into()));
+        }
         if let Some(b) = &b1_opt
-            && b.len() != n1 {
-                return Err(MetalError::InvalidShape("bias1 len mismatch".into()));
-            }
+            && b.len() != n1
+        {
+            return Err(MetalError::InvalidShape("bias1 len mismatch".into()));
+        }
 
         let y = Tensor::new(vec![n0 + n1], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         let mut inputs: Vec<&Tensor<T>> = vec![x, &y];

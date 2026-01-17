@@ -65,7 +65,11 @@ const SHAPES: &[MatmulShape] = &[
     },
 ];
 
-fn make_fp16_tensor(ctx: &mut Context<metallic_context::tensor::F16>, dims: Vec<usize>, seed: u64) -> Result<Tensor<metallic_context::tensor::F16>, MetalError> {
+fn make_fp16_tensor(
+    ctx: &mut Context<metallic_context::tensor::F16>,
+    dims: Vec<usize>,
+    seed: u64,
+) -> Result<Tensor<metallic_context::tensor::F16>, MetalError> {
     // Simple deterministic pattern to avoid host RNG overhead
     let len = dims.iter().product();
     let mut data = Vec::with_capacity(len);
@@ -79,7 +83,12 @@ fn make_fp16_tensor(ctx: &mut Context<metallic_context::tensor::F16>, dims: Vec<
     Tensor::<metallic_context::tensor::F16>::from_f32_slice(dims, TensorStorage::Pooled(ctx), &data)
 }
 
-fn make_q8_canonical(ctx: &Context<metallic_context::tensor::F16>, k: usize, n: usize, seed: u64) -> Result<QuantizedQ8_0Tensor, MetalError> {
+fn make_q8_canonical(
+    ctx: &Context<metallic_context::tensor::F16>,
+    k: usize,
+    n: usize,
+    seed: u64,
+) -> Result<QuantizedQ8_0Tensor, MetalError> {
     // Canonical layout expects blocks ordered by block_k then n.
     let blocks_per_k = k.div_ceil(Q8_0_WEIGHTS_PER_BLOCK);
     let total_blocks = blocks_per_k * n;
@@ -168,7 +177,12 @@ fn bench_q8_direct_gemv(shape: MatmulShape, iters: usize) -> Result<f64, MetalEr
     let start = Instant::now();
     for _ in 0..iters {
         let _ = ctx.call::<MatmulGemvOp>(
-            (&a, TensorType::Quant(metallic_context::tensor::QuantizedTensor::Q8_0(&q8)), false, None),
+            (
+                &a,
+                TensorType::Quant(metallic_context::tensor::QuantizedTensor::Q8_0(&q8)),
+                false,
+                None,
+            ),
             None,
         )?;
     }
@@ -185,7 +199,12 @@ fn bench_q8_smallm_kernel_direct(shape: MatmulShape, iters: usize) -> Result<f64
     for _ in 0..iters {
         if shape.m == 1 {
             let _ = ctx.call::<MatmulGemvOp>(
-                (&a, TensorType::Quant(metallic_context::tensor::QuantizedTensor::Q8_0(&q8)), false, None),
+                (
+                    &a,
+                    TensorType::Quant(metallic_context::tensor::QuantizedTensor::Q8_0(&q8)),
+                    false,
+                    None,
+                ),
                 None,
             )?;
         } else {

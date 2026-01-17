@@ -1,6 +1,5 @@
-use metallic_env::FORCE_MATMUL_BACKEND_VAR;
-
 use metallic_context::{Context, F32Element, MetalError, Tensor, TensorInit, TensorStorage, context::MatmulAlphaBeta, tensor::TensorType};
+use metallic_env::FORCE_MATMUL_BACKEND_VAR;
 
 fn new_context_for_backend(backend: &str) -> Result<Context<F32Element>, MetalError> {
     let previous = FORCE_MATMUL_BACKEND_VAR.get().unwrap_or(None);

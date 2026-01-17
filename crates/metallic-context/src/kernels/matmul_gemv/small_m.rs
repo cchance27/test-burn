@@ -108,9 +108,10 @@ impl DefaultKernelInvocable for MatmulGemvSmallMOp {
         }
 
         if let Some(b) = &bias
-            && b.len() != n {
-                return Err(MetalError::InvalidShape(format!("Bias len {} != N {}", b.len(), n)));
-            }
+            && b.len() != n
+        {
+            return Err(MetalError::InvalidShape(format!("Bias len {} != N {}", b.len(), n)));
+        }
 
         let y = Tensor::new(vec![m, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         if let Some(b) = bias {

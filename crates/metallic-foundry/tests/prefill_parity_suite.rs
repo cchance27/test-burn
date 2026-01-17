@@ -1,8 +1,8 @@
 use half::f16;
 use metallic_foundry::{
-    compound::stages::Quantization, {Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::{
+    Foundry, compound::stages::Quantization, metals::{
         gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig
-    }, tensor::{F16, TensorInit}, types::TensorArg
+    }, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;

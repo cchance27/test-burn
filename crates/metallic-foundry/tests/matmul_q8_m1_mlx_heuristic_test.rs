@@ -1,12 +1,15 @@
 #![cfg(test)]
 
 use half::f16;
-
 use metallic_context::{
     Context, MetalError, Tensor, TensorStorage, tensor::{Q8_0_WEIGHTS_PER_BLOCK, TensorType, quantized::QuantizedQ8_0Tensor}
 };
 
-fn make_fp16_tensor(ctx: &mut Context<metallic_context::tensor::F16>, dims: Vec<usize>, seed: u64) -> Result<Tensor<metallic_context::tensor::F16>, MetalError> {
+fn make_fp16_tensor(
+    ctx: &mut Context<metallic_context::tensor::F16>,
+    dims: Vec<usize>,
+    seed: u64,
+) -> Result<Tensor<metallic_context::tensor::F16>, MetalError> {
     let len = dims.iter().product();
     let mut data = Vec::with_capacity(len);
     let mut x = seed;

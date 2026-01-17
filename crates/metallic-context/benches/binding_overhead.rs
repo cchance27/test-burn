@@ -59,11 +59,12 @@ fn main() {
 fn interpolate(s: &str, scope: &HashMap<String, String>) -> String {
     let mut res = s.to_string();
     if let Some(start) = res.find('{')
-        && let Some(end) = res[start..].find('}') {
-            let key = &res[start + 1..start + end];
-            if let Some(val) = scope.get(key) {
-                res.replace_range(start..=start + end, val);
-            }
+        && let Some(end) = res[start..].find('}')
+    {
+        let key = &res[start + 1..start + end];
+        if let Some(val) = scope.get(key) {
+            res.replace_range(start..=start + end, val);
         }
+    }
     res
 }

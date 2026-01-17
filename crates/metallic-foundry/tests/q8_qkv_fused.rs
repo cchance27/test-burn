@@ -3,15 +3,18 @@
 use std::time::Instant;
 
 use half::f16;
-use serial_test::serial;
-
 use metallic_context::{
     Context, MetalError, kernels::{elemwise_add::BroadcastElemwiseAddInplaceOp, matmul_gemv_qkv_fused::MatmulGemvQkvFusedOp, matmul_mlx::MatMulMlxOp}, tensor::{
         Tensor, TensorStorage, TensorType, quantized::{Q8_0_SCALE_BYTES_PER_BLOCK, QuantizedQ8_0Tensor}
     }
 };
+use serial_test::serial;
 
-fn make_fp16_tensor(ctx: &mut Context<metallic_context::tensor::F16>, dims: Vec<usize>, seed: u64) -> Result<Tensor<metallic_context::tensor::F16>, MetalError> {
+fn make_fp16_tensor(
+    ctx: &mut Context<metallic_context::tensor::F16>,
+    dims: Vec<usize>,
+    seed: u64,
+) -> Result<Tensor<metallic_context::tensor::F16>, MetalError> {
     let len = dims.iter().product();
     let mut data = Vec::with_capacity(len);
     let mut x = seed;

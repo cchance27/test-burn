@@ -7,9 +7,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::Quantization}, {
-        Foundry, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}
-    }, metals::embedding::{EmbeddingParams, EmbeddingParamsResolved}, types::{DispatchConfig, GridSize, TensorArg}
+    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::Quantization}, metals::embedding::{EmbeddingParams, EmbeddingParamsResolved}, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg}
 };
 
 /// Manual Embedding Step with runtime dtype dispatch (F16 vs Q8_0).

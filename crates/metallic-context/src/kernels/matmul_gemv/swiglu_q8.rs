@@ -187,13 +187,15 @@ impl DefaultKernelInvocable for MatmulGemvQ8SwiGluOp {
         }
 
         if let Some(b) = &bias_gate
-            && b.len() != n_gate {
-                return Err(MetalError::InvalidShape("Gate bias len mismatch".into()));
-            }
+            && b.len() != n_gate
+        {
+            return Err(MetalError::InvalidShape("Gate bias len mismatch".into()));
+        }
         if let Some(b) = &bias_up
-            && b.len() != n_up {
-                return Err(MetalError::InvalidShape("Up bias len mismatch".into()));
-            }
+            && b.len() != n_up
+        {
+            return Err(MetalError::InvalidShape("Up bias len mismatch".into()));
+        }
 
         // Output size: [1, N] (rank 2 required by MatmulGemvOp downstream)
         let y = Tensor::new(vec![1, n_gate], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
@@ -315,13 +317,15 @@ impl DefaultKernelInvocable for MatmulGemvQ8SwiGluRmsnormOp {
             return Err(MetalError::InvalidShape("Gate and Up dims must match for SwiGLU".into()));
         }
         if let Some(b) = &bias_gate
-            && b.len() != n_gate {
-                return Err(MetalError::InvalidShape("Gate bias len mismatch".into()));
-            }
+            && b.len() != n_gate
+        {
+            return Err(MetalError::InvalidShape("Gate bias len mismatch".into()));
+        }
         if let Some(b) = &bias_up
-            && b.len() != n_up {
-                return Err(MetalError::InvalidShape("Up bias len mismatch".into()));
-            }
+            && b.len() != n_up
+        {
+            return Err(MetalError::InvalidShape("Up bias len mismatch".into()));
+        }
 
         let y = Tensor::new(vec![1, n_gate], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
 

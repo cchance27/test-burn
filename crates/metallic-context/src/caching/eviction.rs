@@ -41,7 +41,6 @@ pub enum EvictionStrategy {
     SizeLimitedLru { max_entries: usize },
 }
 
-
 /// Configuration for cache eviction behavior.
 ///
 /// Policies can be combined - for example, size limits with idle timeouts.

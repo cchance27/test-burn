@@ -1,9 +1,9 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    {Foundry, storage::Pooled, tensor::Tensor}, metals::{
+    Foundry, metals::{
         rope::{Rope, RopeParamsResolved}, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
-    }, tensor::{TensorInit, dtypes::F16}, types::TensorArg
+    }, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 
 fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len: usize, head_dim: usize, iterations: usize) {

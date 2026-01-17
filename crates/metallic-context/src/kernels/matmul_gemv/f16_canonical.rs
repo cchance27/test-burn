@@ -126,13 +126,14 @@ impl DefaultKernelInvocable for MatmulF16CanonicalOp {
         }
 
         if let Some(bias_tensor) = &bias
-            && bias_tensor.len() != n {
-                return Err(MetalError::InvalidShape(format!(
-                    "Bias len {} does not match N {}",
-                    bias_tensor.len(),
-                    n
-                )));
-            }
+            && bias_tensor.len() != n
+        {
+            return Err(MetalError::InvalidShape(format!(
+                "Bias len {} does not match N {}",
+                bias_tensor.len(),
+                n
+            )));
+        }
 
         let y = Tensor::new(vec![m, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         if let Some(bias_tensor) = bias {
@@ -251,13 +252,14 @@ impl DefaultKernelInvocable for MatmulF16CanonicalRows16Op {
         }
 
         if let Some(bias_tensor) = &bias
-            && bias_tensor.len() != n {
-                return Err(MetalError::InvalidShape(format!(
-                    "Bias len {} does not match N {}",
-                    bias_tensor.len(),
-                    n
-                )));
-            }
+            && bias_tensor.len() != n
+        {
+            return Err(MetalError::InvalidShape(format!(
+                "Bias len {} does not match N {}",
+                bias_tensor.len(),
+                n
+            )));
+        }
 
         let y = Tensor::new(vec![m, n], TensorStorage::Pooled(ctx), TensorInit::Uninitialized)?;
         if let Some(bias_tensor) = bias {

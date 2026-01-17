@@ -18,6 +18,8 @@ impl JsonlExporter {
     pub fn new<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         Ok(Self {
+            // Buffered for low overhead; `AsyncMetricRecorder` is responsible for draining
+            // and shutting down cleanly so data is flushed on exit.
             writer: Mutex::new(BufWriter::new(file)),
         })
     }

@@ -5,7 +5,7 @@
 use metallic_macros::KernelArgs;
 
 use crate::{
-    compound::Stage, {Includes, Kernel, KernelSource}, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Includes, Kernel, KernelSource, compound::Stage, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// Arange kernel.

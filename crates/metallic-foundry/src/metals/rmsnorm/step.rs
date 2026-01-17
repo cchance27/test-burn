@@ -8,9 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{RmsNorm, RmsNormParamsResolved};
 use crate::{
-    MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, stages::Quantization}, {
-        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
-    }, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, stages::Quantization}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// RMSNorm Step

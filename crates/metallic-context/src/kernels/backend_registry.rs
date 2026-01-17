@@ -18,14 +18,12 @@ impl KernelBackendKind {
 }
 
 /// Override policy for backend selection.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum KernelBackendOverride {
     #[default]
     Auto,
     Force(KernelBackendKind),
 }
-
 
 /// Programmatic overrides supplied by CLI/config at runtime.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

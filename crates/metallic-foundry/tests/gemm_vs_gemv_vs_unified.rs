@@ -1,9 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    compound::stages::{Layout, Quantization}, {
-        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::Tensor
-    }, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, tensor::{TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::stages::{Layout, Quantization}, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 

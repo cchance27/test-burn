@@ -6,9 +6,7 @@
 
 use half::f16;
 use metallic_foundry::{
-    compound::stages::Layout, {
-        Foundry, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::Tensor as FoundryTensor
-    }, metals::gemv::step::{GemvStrategy, GemvV2Step}, tensor::{F16, TensorInit}, types::TensorArg
+    Foundry, compound::stages::Layout, metals::gemv::step::{GemvStrategy, GemvV2Step}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;

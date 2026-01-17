@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_foundry::{
-    compound::CompoundKernel, {Foundry, storage::Pooled, tensor::Tensor}, metals::swiglu::{SwigluParamsResolved, stages::SwigluStage, step::SwigluArgs}, tensor::{F16, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, compound::CompoundKernel, metals::swiglu::{SwigluParamsResolved, stages::SwigluStage, step::SwigluArgs}, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use rand::Rng;
 use serial_test::serial;

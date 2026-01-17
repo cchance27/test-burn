@@ -12,9 +12,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::Quantization}, {
-        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
-    }, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::Quantization}, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 // =============================================================================
@@ -52,7 +50,6 @@ impl GemmParams {
         let bn = bn as i32;
         let bk = bk as i32;
 
-        
         GemmParams {
             m,
             n,

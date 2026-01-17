@@ -8,11 +8,9 @@ use super::{
     SwigluParamsResolved, ffn_stages::{FfnDualProjectStage, FfnSwigluWriteStage, FfnWarpReduceStage}, stages::SwigluStage
 };
 use crate::{
-    MetalError, compound::{
+    Foundry, MetalError, compound::{
         CompiledCompoundKernel, CompoundKernel, stages::{Quantization, WarpLayoutStage}
-    }, {
-        Foundry, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}
-    }, metals::{gemv::step::warp_dispatch_config_2d, rmsnorm::stages::RmsNormComputeStage}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, metals::{gemv::step::warp_dispatch_config_2d, rmsnorm::stages::RmsNormComputeStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 #[derive(Debug, Serialize, Deserialize)]

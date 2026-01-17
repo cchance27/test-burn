@@ -447,8 +447,7 @@ impl<T: TensorElement> Context<T> {
             let cache_ref = internal_cache_opt.as_mut().expect("internal cache must exist");
             command_buffer.record(&*operation, cache_ref)?;
         } else {
-            let cache_ref = ext
-                .expect("external cache reference must exist when using_internal=false");
+            let cache_ref = ext.expect("external cache reference must exist when using_internal=false");
             command_buffer.record(&*operation, cache_ref)?;
         }
 
@@ -541,8 +540,7 @@ impl<T: TensorElement> Context<T> {
             let cache_ref = internal_cache_opt.as_mut().expect("internal cache must exist");
             command_buffer.record(&*operation, cache_ref)?;
         } else {
-            let cache_ref = ext
-                .expect("external cache reference must exist when using_internal=false");
+            let cache_ref = ext.expect("external cache reference must exist when using_internal=false");
             command_buffer.record(&*operation, cache_ref)?;
         }
 
