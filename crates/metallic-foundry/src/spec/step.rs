@@ -182,6 +182,11 @@ impl TensorBindings {
         let resolved_name = self.interpolate(name.to_string());
         self.bindings.contains_key(&resolved_name)
     }
+
+    /// Iterate over all bindings.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &TensorArg)> {
+        self.bindings.iter()
+    }
 }
 
 /// A step in a model execution plan.

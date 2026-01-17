@@ -29,6 +29,18 @@ fn main() -> AppResult<()> {
     // Parse command line arguments using CLAP
     let cli_config = cli::CliConfig::parse();
 
+    // If output format is TUI, signal to instrumentation system to enable metrics
+    if matches!(cli_config.output_format, cli::config::OutputFormat::Tui) {
+        // SAFETY: This is called early in main, before other threads are spawned or environment accessed concurrently.
+        unsafe {
+            std::env::set_var("METALLIC_TUI_MODE", "1");
+            // Note: Per-kernel profiling is controlled by:
+            // 1. Runtime toggle via Ctrl+P (AppConfig::profiling_forced())
+            // 2. User env var METALLIC_FOUNDRY_PER_KERNEL_PROFILING
+            // We don't force it off here to allow user control.
+        }
+    }
+
     // Load instrumentation config from the environment so exporter selection honours CLI env vars.
     let app_config = AppConfig::get_or_init_from_env().map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
 
@@ -190,6 +202,10 @@ fn main() -> AppResult<()> {
                             .with_gguf(&gguf_path)
                             .unwrap()
                             .build(&mut foundry)?;
+
+                        // Report memory metrics for Foundry model
+                        model.report_memory_metrics();
+                        emit_startup_memory_update(&worker_tx)?;
 
                         let load_duration = load_start.elapsed();
                         worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
@@ -382,8 +398,9 @@ fn run_tui_mode(
             match crossterm::event::read()? {
                 CrosstermEvent::Key(key) => {
                     if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                        // Toggle the state, then get the new state
+                        // Toggle profiling state for both Context and Foundry backends
                         profiling_state::toggle_profiling_state();
+                        metallic_foundry::instrument::toggle_profiling_state();
                         let new_state = profiling_state::get_profiling_state();
                         app.set_profiling_active(new_state);
                     } else {

@@ -20,7 +20,7 @@ mod error;
 pub mod fusion;
 pub mod generation;
 pub mod gguf;
-mod instrument;
+pub mod instrument;
 pub mod metals;
 pub mod model;
 pub mod policy;
@@ -419,6 +419,7 @@ impl Foundry {
         pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
         kernel: &K,
         config: DispatchConfig,
+        // FIXME: why don't we just grab dispatch config from kernel, why pass it here? we could make this an option and if not provided we pull from kernel we're dispatching
     ) -> Result<(), MetalError> {
         use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _, MTLComputeCommandEncoder as _, MTLSize};
 
@@ -436,11 +437,44 @@ impl Foundry {
                 enc
             };
 
+            // Measure full dispatch overhead (pipeline state + bind + dispatch call)
+            let dispatch_start = std::time::Instant::now();
             encoder.setComputePipelineState(pipeline);
             let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
             kernel.bind(&encoder_wrapper);
             let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
             encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
+
+            // Profiling mode: sync after each dispatch to get actual GPU timing
+            // Non-profiling mode: just use dispatch overhead (batched CB wait handles GPU time)
+            let duration_us = if instrument::foundry_per_kernel_profiling_enabled() {
+                encoder.endEncoding();
+                self.active_compute_encoder = None;
+
+                let cmd = self.active_command_buffer.take().unwrap();
+                let kernel_start = std::time::Instant::now();
+                cmd.commit();
+                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                let kernel_duration = kernel_start.elapsed();
+
+                // Start a new command buffer for the next kernel
+                self.start_capture()?;
+
+                kernel_duration.as_micros().min(u128::from(u64::MAX)) as u64
+            } else {
+                dispatch_start.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
+            };
+
+            // Emit metric unconditionally (single call point)
+            if instrument::foundry_metrics_enabled() {
+                let op_name = kernel.function_name();
+                metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    op_name: format!("Generation Loop/Forward Step/{}", op_name),
+                    backend: "Foundry".to_string(),
+                    duration_us,
+                    data: None,
+                });
+            }
         } else {
             // Non-batched path
             let command_buffer = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
@@ -516,6 +550,7 @@ impl Foundry {
         self.dispatch_pipeline(&pipeline, kernel, config)
     }
 
+    // FIXME: why are we ever calling this instead of always wrapping a policy since all of our kernels require a policy dont they?
     /// Simplified dispatch using the kernel's built-in dispatch configuration.
     /// Requires the kernel to implement `dispatch_config()`.
     ///

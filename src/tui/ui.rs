@@ -379,7 +379,19 @@ fn render_metric(metric: &HierarchicalMetric, depth: usize, max_depth: usize, li
     });
     let residual_last = (inclusive_last_ms - child_last_sum).max(0.0);
     let residual_avg = (inclusive_average_ms - child_average_sum).max(0.0);
-    lines.push(format_latency_line(level, &metric.label, inclusive_last_ms, inclusive_average_ms));
+
+    // Check for metadata like batch_size
+    let display_label = if let Some(meta) = &metric.metadata {
+        if let Some(batch_size) = meta.get("batch_size") {
+            format!("{} [Batch Size: {}]", metric.label, batch_size)
+        } else {
+            metric.label.clone()
+        }
+    } else {
+        metric.label.clone()
+    };
+
+    lines.push(format_latency_line(level, &display_label, inclusive_last_ms, inclusive_average_ms));
 
     if depth == max_depth {
         return;
@@ -578,14 +590,14 @@ impl App {
             metric.running_average.record(self.prompt_processing_total_last_ms);
         } else {
             // For non-prompt processing metrics, add normally
-            self.upsert_latency_path(&segments, row.last_ms);
+            self.upsert_latency_path(&segments, row.last_ms, row.metadata);
         }
 
         // Recalculate max depth for latency metrics since the tree structure may have changed
         self.latency_collapse_depth.calculate_max_depth(&self.latency_tree);
     }
 
-    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64) {
+    fn upsert_latency_path(&mut self, path: &[&str], last_ms: f64, metadata: Option<std::collections::HashMap<String, String>>) {
         if path.is_empty() {
             return;
         }
@@ -605,10 +617,12 @@ impl App {
         if path.len() == 1 {
             metric.last_ms = last_ms;
             metric.running_average.record(last_ms);
+            // Store metadata on the leaf node
+            metric.metadata = metadata;
             return;
         }
 
-        metric.upsert_path(&path[1..], last_ms);
+        metric.upsert_path_with_metadata(&path[1..], last_ms, metadata);
     }
 }
 

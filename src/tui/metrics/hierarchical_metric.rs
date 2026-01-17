@@ -6,6 +6,8 @@ pub struct HierarchicalMetric {
     pub last_ms: f64,
     pub running_average: RunningAverage,
     pub children: Vec<HierarchicalMetric>,
+    /// Optional metadata for display (e.g., batch_size)
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 impl HierarchicalMetric {
@@ -17,6 +19,19 @@ impl HierarchicalMetric {
             last_ms,
             running_average,
             children: Vec::new(),
+            metadata: None,
+        }
+    }
+
+    pub fn with_metadata(label: String, last_ms: f64, metadata: Option<std::collections::HashMap<String, String>>) -> Self {
+        let mut running_average = RunningAverage::default();
+        running_average.record(last_ms);
+        Self {
+            label,
+            last_ms,
+            running_average,
+            children: Vec::new(),
+            metadata,
         }
     }
 
@@ -44,6 +59,23 @@ impl HierarchicalMetric {
             child.running_average.record(last_ms);
         } else {
             child.upsert_path(&path[1..], last_ms);
+        }
+    }
+
+    pub fn upsert_path_with_metadata(&mut self, path: &[&str], last_ms: f64, metadata: Option<std::collections::HashMap<String, String>>) {
+        if path.is_empty() {
+            return;
+        }
+
+        let label = path[0];
+        let child = self.ensure_child(label);
+
+        if path.len() == 1 {
+            child.last_ms = last_ms;
+            child.running_average.record(last_ms);
+            child.metadata = metadata;
+        } else {
+            child.upsert_path_with_metadata(&path[1..], last_ms, metadata);
         }
     }
 

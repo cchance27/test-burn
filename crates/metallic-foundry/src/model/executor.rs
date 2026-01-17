@@ -937,10 +937,8 @@ impl CompiledModel {
         let nested_capture = foundry.is_capturing();
         let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
 
-        if !nested_capture && !profiling_per_kernel {
-            // Start a new command buffer for this forward pass (token)
-            // Reuse the existing command buffer if one is active but not capturing?
-            // No, start_capture() handles creation.
+        // Always start capture, even in profiling mode (dispatch_pipeline handles per-kernel sync)
+        if !nested_capture {
             foundry.start_capture()?;
         }
 
@@ -948,10 +946,8 @@ impl CompiledModel {
             step.execute(foundry, fast_bindings, bindings, &self.symbol_table)?;
         }
 
+        // End capture only if we're not profiling per-kernel (profiling mode syncs per dispatch)
         if !nested_capture && !profiling_per_kernel {
-            // Commit but do NOT wait - standard async dispatch
-            // Note: If we are in autoregressive loop, caller might need to wait if reading back to CPU.
-            // But forward() itself should be async.
             foundry.end_capture()?;
         }
 
@@ -1035,7 +1031,7 @@ impl CompiledModel {
         mut callback: F,
     ) -> Result<Vec<u32>, MetalError>
     where
-        F: FnMut(u32, std::time::Duration, std::time::Duration) -> Result<bool, MetalError>,
+        F: FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     {
         if prompt_tokens.is_empty() {
             return Err(MetalError::InvalidShape("generate requires non-empty prompt_tokens".into()));
@@ -1283,16 +1279,20 @@ impl CompiledModel {
         let ignore_eos_stop = Self::ignore_eos_stop_enabled();
         let emit_host_metrics = crate::instrument::foundry_metrics_enabled();
         let mut batch_encode_start: Option<std::time::Instant> = None;
+        let mut iteration_duration: Option<std::time::Duration> = None;
 
         for step in 0..max_new_tokens {
             let batch_idx = pending_count;
 
-            // Start capture at the beginning of a batch
-            if batch_idx == 0 && !profiling_per_kernel {
+            // Start capture at the beginning of a batch (only if not already capturing)
+            // In profiling mode, dispatch_pipeline() restarts capture after each kernel sync
+            if batch_idx == 0 && !foundry.is_capturing() {
                 foundry.start_capture()?;
-                if emit_host_metrics {
-                    batch_encode_start = Some(std::time::Instant::now());
-                }
+            }
+            // Track timing for different modes
+            let step_start = std::time::Instant::now();
+            if emit_host_metrics && !profiling_per_kernel && batch_idx == 0 {
+                batch_encode_start = Some(step_start);
             }
 
             // 1. Get logits from previous forward pass (or prefill)
@@ -1343,45 +1343,69 @@ impl CompiledModel {
             // 6. If batch is full or we are done, sync and process
             if pending_count >= batch_size || step == max_new_tokens - 1 {
                 if !profiling_per_kernel {
-                    if emit_host_metrics {
-                        if let Some(start) = batch_encode_start.take() {
-                            let encode_duration = start.elapsed();
-                            if !encode_duration.is_zero() {
-                                metallic_instrumentation::record_metric_async!(
-                                    metallic_instrumentation::MetricEvent::InternalKernelCompleted {
-                                        parent_op_name: "foundry_decode".to_string(),
-                                        internal_kernel_name: "batch_encode_total".to_string(),
-                                        duration_us: encode_duration.as_micros().min(u128::from(u64::MAX)) as u64,
-                                    }
-                                );
-                            }
-                        }
-                    }
-
+                    // 1. Commit/End Capture
                     let end_capture_start = std::time::Instant::now();
                     let cmd = foundry.end_capture()?;
                     let end_capture_duration = end_capture_start.elapsed();
-                    if emit_host_metrics && !end_capture_duration.is_zero() {
+
+                    if emit_host_metrics {
                         metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::InternalKernelCompleted {
-                            parent_op_name: "foundry_decode".to_string(),
+                            parent_op_name: "generation_loop".to_string(),
                             internal_kernel_name: "end_capture".to_string(),
                             duration_us: end_capture_duration.as_micros().min(u128::from(u64::MAX)) as u64,
                         });
                     }
 
-                    // Sync CPU to read back the tokens.
+                    // 2. Synchronize (Wait)
                     let wait_start = std::time::Instant::now();
                     objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
                     let wait_duration = wait_start.elapsed();
-                    if emit_host_metrics && !wait_duration.is_zero() {
-                        metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::InternalKernelCompleted {
-                            parent_op_name: "foundry_decode".to_string(),
-                            internal_kernel_name: "cb_wait".to_string(),
+
+                    if emit_host_metrics {
+                        // Emit CB Wait as GpuOpCompleted so it shows under Forward Step in TUI
+                        // Include batch_size in data so TUI can show "Xms for Y tokens"
+                        let mut cb_data = rustc_hash::FxHashMap::default();
+                        cb_data.insert("batch_size".to_string(), pending_count.to_string());
+                        metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                            op_name: "Generation Loop/Forward Step/CB Wait".to_string(),
+                            backend: "Foundry".to_string(),
                             duration_us: wait_duration.as_micros().min(u128::from(u64::MAX)) as u64,
+                            data: Some(cb_data),
                         });
+
+                        // 3. Record Total Step Time (Dispatch + Wait) - PER TOKEN
+                        // logic: calculating from the start of the batch (batch_encode_start) ensures we capture
+                        // the entire wall-clock time for this step/batch.
+                        if let Some(start) = batch_encode_start.take() {
+                            let total_duration = start.elapsed();
+
+                            // Capture duration for callback (tok/s reporting)
+                            // Use the full wall-clock time for accurate throughput calculation
+                            iteration_duration = Some(total_duration);
+
+                            // Emit PER-TOKEN latency for the TUI (total_duration / tokens_in_batch)
+                            // This ensures the Latency View shows ~10ms for 100 tok/s instead of ~160ms batch time.
+                            let per_token_us = (total_duration.as_micros() / pending_count as u128).min(u128::from(u64::MAX)) as u64;
+                            metallic_instrumentation::record_metric_async!(
+                                metallic_instrumentation::MetricEvent::InternalKernelCompleted {
+                                    parent_op_name: "generation_loop".to_string(),
+                                    internal_kernel_name: "forward_step_total".to_string(),
+                                    duration_us: per_token_us,
+                                }
+                            );
+                        }
                     }
                 } else {
+                    // Profiling mode: per-kernel metrics already emitted in dispatch_pipeline()
+                    // But we still need to track iteration_duration for tok/s in the footer
+
+                    // Synchronize any remaining work (shouldn't be much - dispatch_pipeline synced per kernel)
                     foundry.synchronize()?;
+
+                    // Measure actual step duration for accurate tok/s
+                    if emit_host_metrics {
+                        iteration_duration = Some(step_start.elapsed());
+                    }
                 }
 
                 // Process the batch results
@@ -1401,7 +1425,12 @@ impl CompiledModel {
                         batch_done = true;
                         break;
                     }
-                    if !callback(token, prefill_duration, setup_duration)? {
+                    if !callback(
+                        token,
+                        prefill_duration,
+                        setup_duration,
+                        iteration_duration.map(|d| d / pending_count as u32),
+                    )? {
                         batch_done = true;
                         break;
                     }
@@ -1409,8 +1438,8 @@ impl CompiledModel {
                 let process_duration = process_start.elapsed();
                 if emit_host_metrics && !process_duration.is_zero() {
                     metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::InternalKernelCompleted {
-                        parent_op_name: "foundry_decode".to_string(),
-                        internal_kernel_name: "batch_process".to_string(),
+                        parent_op_name: "generation_loop".to_string(),
+                        internal_kernel_name: "token_callback".to_string(),
                         duration_us: process_duration.as_micros().min(u128::from(u64::MAX)) as u64,
                     });
                 }
@@ -1450,13 +1479,108 @@ impl CompiledModel {
             top_k,
             top_p,
             seed,
-            |_, _, _| Ok(true),
+            |_, _, _, _| Ok(true),
         )
+    }
+
+    /// Report memory metrics for the model weights and host memory (activations + KV cache).
+    pub fn report_memory_metrics(&self) {
+        use std::collections::BTreeMap;
+
+        use rustc_hash::FxHashMap;
+
+        use crate::gguf::model_loader::GGUFModel;
+
+        // 1. Report Model Weights
+        let mut weight_breakdown = FxHashMap::default();
+        let mut total_weights = 0u64;
+
+        // Iterate via tensor_names to be safe and robust
+        for name in self.weights.tensor_names() {
+            if let Some(tensor) = self.weights.get_tensor(name) {
+                let dtype = GGUFModel::map_dtype(tensor.data_type());
+                let size = tensor.len() as u64 * dtype.size_bytes() as u64;
+                weight_breakdown.insert(name.clone(), size);
+                total_weights += size;
+            }
+        }
+
+        metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::ModelWeights {
+            total_bytes: total_weights,
+            breakdown: weight_breakdown,
+        });
+
+        // 2. Report Host Memory (Activations + KV Cache)
+        if let Some(session) = &*self.session.borrow() {
+            let mut tensor_pool_used = 0u64;
+            let mut kv_pool_used = 0u64;
+
+            // HostMemory breakdown expects BTreeMap<usize, (String, BTreeMap<String, u64>)>
+            let mut forward_breakdown: BTreeMap<usize, (String, BTreeMap<String, u64>)> = BTreeMap::new();
+
+            let mut io_map = BTreeMap::new();
+            let mut act_map = BTreeMap::new();
+            let mut kv_map = BTreeMap::new();
+
+            let mut visited_ptrs = std::collections::HashSet::new();
+
+            for (name, arg) in session.bindings.iter() {
+                // Identify buffer uniqueness by pointer
+                // TensorArg buffer is Option<MetalBuffer>
+                if let Some(buf) = &arg.buffer {
+                    // Use Retained::as_ptr to get the raw pointer
+                    let ptr = objc2::rc::Retained::as_ptr(&buf.0) as usize;
+
+                    // Skip if already counted (aliased bindings)
+                    if !visited_ptrs.insert(ptr) {
+                        continue;
+                    }
+
+                    // Skip weights (heuristic: name in GGUF or starts with "rope")
+                    if self.weights.get_tensor(name).is_some() || name.starts_with("rope") {
+                        continue;
+                    }
+
+                    use objc2_metal::MTLBuffer;
+                    let size = buf.0.length() as u64;
+
+                    // Classify
+                    if name.contains("cache") {
+                        kv_pool_used += size;
+                        kv_map.insert(name.clone(), size);
+                    } else if name.starts_with("input_ids") || name.starts_with("sample_out") {
+                        tensor_pool_used += size;
+                        io_map.insert(name.clone(), size);
+                    } else {
+                        tensor_pool_used += size;
+                        act_map.insert(name.clone(), size);
+                    }
+                }
+            }
+
+            if !io_map.is_empty() {
+                forward_breakdown.insert(0, ("IO".to_string(), io_map));
+            }
+            if !act_map.is_empty() {
+                forward_breakdown.insert(1, ("Activations".to_string(), act_map));
+            }
+            if !kv_map.is_empty() {
+                forward_breakdown.insert(2, ("KV Cache".to_string(), kv_map));
+            }
+
+            metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::HostMemory {
+                total_bytes: tensor_pool_used + kv_pool_used,
+                tensor_pool_reserved_bytes: tensor_pool_used,
+                tensor_pool_used_bytes: tensor_pool_used,
+                kv_pool_reserved_bytes: kv_pool_used,
+                kv_pool_used_bytes: kv_pool_used,
+                forward_pass_breakdown: forward_breakdown,
+            });
+        }
     }
 
     /// Convenience helper: apply the model's chat template (when available), tokenize, and generate.
     ///
-    /// Returns only the newly generated token ids (not including the prompt tokens).
     pub fn generate_from_prompt(
         &self,
         foundry: &mut Foundry,

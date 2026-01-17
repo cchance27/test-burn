@@ -55,3 +55,32 @@ Then it:
 
 This keeps memory bounded by the requested run length while still respecting the model’s max sequence length.
 
+## DSL & Performance Instrumentation
+
+**Status:** Initial implementation (unconditional emission + batch tracking) complete. Requires model-agnostic refinement.
+
+### 1. Model-Agnostic Block Hierarchy
+Current TUI hierarchy (`Generation Loop/Forward Step/block_X`) relies on hardcoded kernel name parsing or manual context.
+- **TODO:** Implement DSL scope tracking in `executor.rs`.
+- **Goal:** Push scopes (e.g., `StartBlock(0)`) in the executor so that `Step::execute()` automatically inherits the current hierarchical path.
+- **Benefit:** Supports arbitrary architectures (MOE, Diffusion, DiT) without regex-based metric mapping.
+
+### 2. Full Step Instrumentation
+Currently, "Other" time is dominated by command buffer waits, but individual step overhead (binding, blits) isn't granularly tracked.
+- **TODO:** Wrap `Step::execute()` in a span that records CPU-side dispatch overhead per step.
+- **TODO:** Instrument `blit_copy` and other helper functions to emit `GpuOpCompleted` events with proper labels (e.g., `.../Cast`, `.../Blit`), if blit-copy isn't used we should probably remove it to cleanup the codebase.
+- **TODO:** Optimize metric metadata emission. Currently uses `to_string()` in `HashMap` for batch size, causing allocations in the hot path. Consider using `Cow<str>` or pre-allocated/static strings. Also remember we should stop using HashMap and use FxHashMap where available.
+- **TODO:** We should assess overlap between our instrumentation metallic crate, and the way we handle metallic logging and the tracing crate, maybe we could make better use of tracing macros, including things like spans and events to see where we're recreating tried and true patterns/functions from tracing that we could deduplicate.
+
+## Logging & Diagnostics
+
+**Status:** Basic stdout printing; TUI log box integration is partial.
+
+### 1. Structured Log Emission
+Foundry currently uses `println!` for many debug outputs.
+- **TODO:** Replace `println!` with `metallic_instrumentation:` to emit log's to the CLI like `metallic-context` does.
+- **Goal:** Ensure all engine logs flow into the TUI Log Box widget via the event loop.
+
+### 2. Latency/Throughput Logging
+- **TODO:** Emit a structured log event at the end of generation with summary stats (tok/s, total time, batch size).
+- **Benefit:** Allows persistent performance tracking beyond the ephemeral TUI view.

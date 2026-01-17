@@ -9,6 +9,9 @@ pub struct LatencyRow {
     pub last_ms: f64,
     pub average_ms: f64,
     pub level: u8,
+    /// Optional metadata for display (e.g., batch_size)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Clone, Debug, Serialize)]
