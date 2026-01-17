@@ -1,9 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    compound::stages::Layout, {
-        Foundry, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::Tensor
-    }, metals::gemv::{GemvStrategy, GemvV2Step}, tensor::{TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Step}, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 }; // Added GemvStrategy
 
 fn run_benchmark_case(
@@ -136,6 +134,30 @@ fn benchmark_gemv_v2_perf() {
         run_benchmark_case(&mut foundry, *k, *n, Layout::ColMajor, Some(GemvStrategy::Scalar), 1.0, iterations);
         // Auto (Should match Scalar)
         run_benchmark_case(&mut foundry, *k, *n, Layout::ColMajor, Some(GemvStrategy::Auto), 1.0, iterations);
+    }
+
+    println!("\n=== Decode Shapes (RowMajor) ===");
+    let decode_cases = vec![(896, 896), (896, 151_936)];
+    let decode_iterations = 200;
+    for (k, n) in &decode_cases {
+        run_benchmark_case(
+            &mut foundry,
+            *k,
+            *n,
+            Layout::RowMajor,
+            Some(GemvStrategy::Vectorized),
+            1.0,
+            decode_iterations,
+        );
+        run_benchmark_case(
+            &mut foundry,
+            *k,
+            *n,
+            Layout::RowMajor,
+            Some(GemvStrategy::Auto),
+            1.0,
+            decode_iterations,
+        );
     }
 
     println!("\n=== Blocked (Canonical) Layout - GemvV2 ===");

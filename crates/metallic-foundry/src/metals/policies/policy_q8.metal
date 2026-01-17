@@ -1,5 +1,10 @@
 #include "base.metal"
 
+#undef METALLIC_POLICY_HAS_SCALE
+#define METALLIC_POLICY_HAS_SCALE 1
+#undef METALLIC_POLICY_WEIGHTS_FP16
+#define METALLIC_POLICY_WEIGHTS_FP16 0
+
 #ifndef POLICY_Q8_DEFINED
 #define POLICY_Q8_DEFINED
 
@@ -13,6 +18,7 @@
  *   compatibility with standard GEMM/GEMV tiling.
  */
 struct PolicyQ8 {
+    static constant bool HAS_SCALE = true;
     /**
      * Load the block scale (FP16).
      * 

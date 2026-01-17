@@ -5,6 +5,7 @@ use std::{
 };
 
 pub use error::MetalError;
+use instrument::CaptureMetrics;
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_metal::{MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice as _, MTLLibrary};
 use rustc_hash::FxHashMap;
@@ -19,6 +20,7 @@ mod error;
 pub mod fusion;
 pub mod generation;
 pub mod gguf;
+mod instrument;
 pub mod metals;
 pub mod model;
 pub mod policy;
@@ -41,6 +43,8 @@ pub struct Foundry {
     active_command_buffer: Option<Retained<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>>,
     /// Helper: Active compute encoder to reuse across dispatches
     active_compute_encoder: Option<Retained<ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>>,
+    /// Optional capture-level metrics accumulator (enabled only when profiling is on).
+    capture_metrics: Option<CaptureMetrics>,
 }
 
 /// Metal kernel source (file path or raw string).
@@ -71,6 +75,7 @@ impl Foundry {
             pipelines: FxHashMap::default(),
             active_command_buffer: None,
             active_compute_encoder: None,
+            capture_metrics: None,
         })
     }
 
@@ -87,6 +92,7 @@ impl Foundry {
             pipelines: FxHashMap::default(),
             active_command_buffer: None,
             active_compute_encoder: None,
+            capture_metrics: None,
         }
     }
 
@@ -109,6 +115,9 @@ impl Foundry {
         let buffer = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
         self.active_command_buffer = Some(buffer);
         self.active_compute_encoder = None;
+        if instrument::emit_cb_timing_metrics() {
+            self.capture_metrics = Some(CaptureMetrics::new(instrument::next_capture_id()));
+        }
         Ok(())
     }
 
@@ -124,6 +133,57 @@ impl Foundry {
             .active_command_buffer
             .take()
             .ok_or(MetalError::OperationFailed("No active capture".to_string()))?;
+
+        // Attach capture-level completion metrics before commit so the handler is retained by Metal.
+        if instrument::emit_cb_timing_metrics() {
+            use std::{ptr::NonNull, sync::Mutex, time::Instant};
+
+            use block2::RcBlock;
+
+            let commit_instant = Instant::now();
+            let captured = self
+                .capture_metrics
+                .take()
+                .unwrap_or_else(|| CaptureMetrics::new(instrument::next_capture_id()));
+            let op_name = format!("foundry_capture#{}", captured.id);
+            let data = instrument::summarize_kernel_counts(&captured, 12);
+
+            let handler = Mutex::new(Some((op_name, data, commit_instant)));
+            let block = RcBlock::new(move |_cmd: NonNull<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>| {
+                let Some((op_name, data, commit_instant)) = handler.lock().ok().and_then(|mut slot| slot.take()) else {
+                    return;
+                };
+                let cpu_elapsed_us = commit_instant.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                let gpu_elapsed_us = unsafe {
+                    let cmd = _cmd.as_ref();
+                    // NOTE: Some command buffers can report 0.0 for GPUStartTime/GPUEndTime; fall back to CPU wall time.
+                    let start = cmd.GPUStartTime();
+                    let end = cmd.GPUEndTime();
+                    if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
+                        ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
+                    } else {
+                        cpu_elapsed_us
+                    }
+                };
+                let mut data = data;
+                data.insert("cpu_elapsed_us".to_string(), cpu_elapsed_us.to_string());
+                data.insert("gpu_elapsed_us".to_string(), gpu_elapsed_us.to_string());
+                metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                    op_name,
+                    backend: "Foundry".to_string(),
+                    duration_us: gpu_elapsed_us,
+                    data: Some(data),
+                });
+            });
+
+            // Hand ownership to Metal; it will release after invocation.
+            let raw_block = RcBlock::into_raw(block);
+            unsafe {
+                buffer.addCompletedHandler(raw_block.cast());
+            }
+        } else {
+            self.capture_metrics = None;
+        }
 
         buffer.commit();
         Ok(buffer)
@@ -292,6 +352,35 @@ impl Foundry {
             }
         }
 
+        if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
+            let mut safe_name = function_name
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                        c
+                    } else {
+                        '_'
+                    }
+                })
+                .collect::<String>();
+            if safe_name.is_empty() {
+                safe_name = "kernel".to_string();
+            }
+
+            let dump_dir = std::path::Path::new(&dump_dir);
+            std::fs::create_dir_all(dump_dir).map_err(|e| {
+                MetalError::LoadLibraryFailed(format!(
+                    "Failed to create METALLIC_DUMP_METAL_SOURCE_DIR {}: {}",
+                    dump_dir.display(),
+                    e
+                ))
+            })?;
+
+            let dump_path = dump_dir.join(format!("{}.metal", safe_name));
+            std::fs::write(&dump_path, &full_source)
+                .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to write Metal source dump {}: {}", dump_path.display(), e)))?;
+        }
+
         let _library_options = None::<&objc2_metal::MTLCompileOptions>;
 
         let options = objc2_metal::MTLCompileOptions::new();
@@ -335,6 +424,9 @@ impl Foundry {
 
         if self.active_command_buffer.is_some() {
             // Batched dispatch path
+            if let Some(metrics) = self.capture_metrics.as_mut() {
+                metrics.record_kernel(kernel.function_name());
+            }
             let encoder = if let Some(enc) = self.active_compute_encoder.clone() {
                 enc
             } else {
@@ -362,6 +454,48 @@ impl Foundry {
             let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
             encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
             encoder.endEncoding();
+            if instrument::emit_cb_timing_metrics() {
+                use std::{ptr::NonNull, sync::Mutex, time::Instant};
+
+                use block2::RcBlock;
+
+                let op_name = kernel.function_name();
+                let metric_data = kernel.metric_data();
+                let commit_instant = Instant::now();
+                let handler = Mutex::new(Some((op_name, metric_data, commit_instant)));
+                let block = RcBlock::new(move |_cmd: NonNull<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>| {
+                    let Some((op_name, metric_data, commit_instant)) = handler.lock().ok().and_then(|mut slot| slot.take()) else {
+                        return;
+                    };
+                    let cpu_elapsed_us = commit_instant.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                    let gpu_elapsed_us = unsafe {
+                        let cmd = _cmd.as_ref();
+                        let start = cmd.GPUStartTime();
+                        let end = cmd.GPUEndTime();
+                        if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
+                            ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
+                        } else {
+                            cpu_elapsed_us
+                        }
+                    };
+                    let metric_data = metric_data.map(|mut data| {
+                        data.insert("cpu_elapsed_us".to_string(), cpu_elapsed_us.to_string());
+                        data.insert("gpu_elapsed_us".to_string(), gpu_elapsed_us.to_string());
+                        data
+                    });
+                    metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                        op_name: op_name.to_string(),
+                        backend: "Foundry".to_string(),
+                        duration_us: gpu_elapsed_us,
+                        data: metric_data,
+                    });
+                });
+
+                let raw_block = RcBlock::into_raw(block);
+                unsafe {
+                    command_buffer.addCompletedHandler(raw_block.cast());
+                }
+            }
             command_buffer.commit();
             command_buffer.waitUntilCompleted();
         }
@@ -562,6 +696,14 @@ pub trait Kernel {
     /// Used to inline structs like `GemvParams` that implement `MetalStruct`.
     fn struct_defs(&self) -> String {
         String::new()
+    }
+
+    /// Optional metric metadata to attach to `GpuOpCompleted` events when profiling is enabled.
+    ///
+    /// This is only consulted when instrumentation is active (e.g. `METALLIC_ENABLE_PROFILING=1`
+    /// with a configured metrics sink).
+    fn metric_data(&self) -> Option<FxHashMap<String, String>> {
+        None
     }
 
     /// Convert this kernel into a Stage for use in a CompoundKernel.

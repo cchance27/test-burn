@@ -79,27 +79,28 @@ impl Step for Repeat {
                     };
 
                     if let Some(name) = tensor_name
-                        && let Ok(arg) = bindings.get(name) {
-                            let len = arg.dims().iter().product::<usize>().min(5);
-                            if len > 0 {
-                                // Sync if capturing
-                                if foundry.is_capturing() {
-                                    let cmd = foundry.end_capture()?;
-                                    {
-                                        use objc2_metal::MTLCommandBuffer;
-                                        cmd.waitUntilCompleted();
-                                    }
-                                    foundry.start_capture()?;
+                        && let Ok(arg) = bindings.get(name)
+                    {
+                        let len = arg.dims().iter().product::<usize>().min(5);
+                        if len > 0 {
+                            // Sync if capturing
+                            if foundry.is_capturing() {
+                                let cmd = foundry.end_capture()?;
+                                {
+                                    use objc2_metal::MTLCommandBuffer;
+                                    cmd.waitUntilCompleted();
                                 }
-
-                                let data: Vec<half::f16> = unsafe {
-                                    use objc2_metal::MTLBuffer;
-                                    let ptr = arg.buffer().contents().as_ptr() as *const half::f16;
-                                    std::slice::from_raw_parts(ptr, len).to_vec()
-                                };
-                                eprintln!("      → {} first {}: {:?}", name, len, data);
+                                foundry.start_capture()?;
                             }
+
+                            let data: Vec<half::f16> = unsafe {
+                                use objc2_metal::MTLBuffer;
+                                let ptr = arg.buffer().contents().as_ptr() as *const half::f16;
+                                std::slice::from_raw_parts(ptr, len).to_vec()
+                            };
+                            eprintln!("      → {} first {}: {:?}", name, len, data);
                         }
+                    }
                 }
             }
 

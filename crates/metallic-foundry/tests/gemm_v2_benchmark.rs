@@ -142,8 +142,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
     let mut mlx_micros = 0.0;
 
     // LegacyTensor uses dedicated storage on F16 ctx for F16 tensors
-    let a_leg =
-        LegacyTensor::<LegacyF16>::new(vec![a_rows, a_cols], LegacyStorage::Dedicated(ctx), LegacyInit::CopyFrom(&a_data)).unwrap();
+    let a_leg = LegacyTensor::<LegacyF16>::new(vec![a_rows, a_cols], LegacyStorage::Dedicated(ctx), LegacyInit::CopyFrom(&a_data)).unwrap();
 
     let run_mlx_f16 = |c: &mut Context<LegacyF16>, b_leg: &LegacyTensor<LegacyF16>| -> Result<(), metallic_foundry::MetalError> {
         c.call::<MatMulMlxOp>(
@@ -267,6 +266,7 @@ fn benchmark_qwen25_shapes() {
     let mut foundry = Foundry::new().unwrap();
     let mut ctx = Context::<LegacyF16>::new().unwrap();
     let iterations = 1000;
+    const RUN_Q8: bool = false;
 
     let hidden = 896;
     let intermediate = 4864;
@@ -291,19 +291,21 @@ fn benchmark_qwen25_shapes() {
                 iterations,
             },
         );
-        run_gemm_benchmark_case(
-            &mut foundry,
-            &mut ctx,
-            BenchmarkConfig {
-                m,
-                n: intermediate,
-                k: hidden,
-                transpose_a: false,
-                transpose_b: true,
-                quant_b: Quantization::Q8,
-                iterations,
-            },
-        );
+        if RUN_Q8 {
+            run_gemm_benchmark_case(
+                &mut foundry,
+                &mut ctx,
+                BenchmarkConfig {
+                    m,
+                    n: intermediate,
+                    k: hidden,
+                    transpose_a: false,
+                    transpose_b: true,
+                    quant_b: Quantization::Q8,
+                    iterations,
+                },
+            );
+        }
 
         // MLP Down
         run_gemm_benchmark_case(
@@ -319,19 +321,21 @@ fn benchmark_qwen25_shapes() {
                 iterations,
             },
         );
-        run_gemm_benchmark_case(
-            &mut foundry,
-            &mut ctx,
-            BenchmarkConfig {
-                m,
-                n: hidden,
-                k: intermediate,
-                transpose_a: false,
-                transpose_b: true,
-                quant_b: Quantization::Q8,
-                iterations,
-            },
-        );
+        if RUN_Q8 {
+            run_gemm_benchmark_case(
+                &mut foundry,
+                &mut ctx,
+                BenchmarkConfig {
+                    m,
+                    n: hidden,
+                    k: intermediate,
+                    transpose_a: false,
+                    transpose_b: true,
+                    quant_b: Quantization::Q8,
+                    iterations,
+                },
+            );
+        }
 
         // LM Head
         run_gemm_benchmark_case(
@@ -347,34 +351,36 @@ fn benchmark_qwen25_shapes() {
                 iterations,
             },
         );
-        run_gemm_benchmark_case(
-            &mut foundry,
-            &mut ctx,
-            BenchmarkConfig {
-                m,
-                n: vocab_subset,
-                k: hidden,
-                transpose_a: false,
-                transpose_b: true,
-                quant_b: Quantization::Q8,
-                iterations,
-            },
-        );
+        if RUN_Q8 {
+            run_gemm_benchmark_case(
+                &mut foundry,
+                &mut ctx,
+                BenchmarkConfig {
+                    m,
+                    n: vocab_subset,
+                    k: hidden,
+                    transpose_a: false,
+                    transpose_b: true,
+                    quant_b: Quantization::Q8,
+                    iterations,
+                },
+            );
 
-        // Extra Q8 benchmarks with transpose_b = false for MLX comparison
-        // (Pre-transposed weights scenario)
-        run_gemm_benchmark_case(
-            &mut foundry,
-            &mut ctx,
-            BenchmarkConfig {
-                m,
-                n: vocab_subset,
-                k: hidden,
-                transpose_a: false,
-                transpose_b: false, // Explicitly false for comparison
-                quant_b: Quantization::Q8,
-                iterations,
-            },
-        );
+            // Extra Q8 benchmarks with transpose_b = false for MLX comparison
+            // (Pre-transposed weights scenario)
+            run_gemm_benchmark_case(
+                &mut foundry,
+                &mut ctx,
+                BenchmarkConfig {
+                    m,
+                    n: vocab_subset,
+                    k: hidden,
+                    transpose_a: false,
+                    transpose_b: false, // Explicitly false for comparison
+                    quant_b: Quantization::Q8,
+                    iterations,
+                },
+            );
+        }
     }
 }

@@ -32,11 +32,9 @@ fn main() -> AppResult<()> {
     // Load instrumentation config from the environment so exporter selection honours CLI env vars.
     let app_config = AppConfig::get_or_init_from_env().map_err(|err| -> Box<dyn std::error::Error> { Box::new(err) })?;
 
-    // Initialize instrumentation system with async recorder for zero-overhead metrics
-    let (sender, receiver) = mpsc::channel();
-    let channel_exporter = Box::new(ChannelExporter::new(sender));
-
-    let mut exporters: Vec<Box<dyn MetricExporter>> = vec![channel_exporter];
+    // Initialize instrumentation system with async recorder for zero-overhead metrics.
+    // NOTE: The recorder always installs an in-process channel exporter (receiver returned below).
+    let mut exporters: Vec<Box<dyn MetricExporter>> = Vec::new();
 
     if let Some(path) = app_config.metrics_jsonl_path.clone() {
         match JsonlExporter::new(&path) {
@@ -251,9 +249,11 @@ fn main() -> AppResult<()> {
 
     // Based on output format, run the appropriate mode
     match cli_config.output_format {
-        cli::config::OutputFormat::Tui => run_tui_mode(&receiver, &rx, generation_handle)?,
-        cli::config::OutputFormat::Text | cli::config::OutputFormat::None => run_text_mode(&cli_config, &receiver, &rx, generation_handle)?,
-        cli::config::OutputFormat::Json => run_json_mode(&receiver, &rx, generation_handle)?,
+        cli::config::OutputFormat::Tui => run_tui_mode(&async_recorder.receiver, &rx, generation_handle)?,
+        cli::config::OutputFormat::Text | cli::config::OutputFormat::None => {
+            run_text_mode(&cli_config, &async_recorder.receiver, &rx, generation_handle)?
+        }
+        cli::config::OutputFormat::Json => run_json_mode(&async_recorder.receiver, &rx, generation_handle)?,
     }
 
     Ok(())
@@ -539,6 +539,7 @@ fn run_text_mode(
 ) -> AppResult<()> {
     let mut generated_tokens: u64 = 0;
     let mut prompt_processing: Option<Duration> = None;
+    let mut setup_duration: Option<Duration> = None;
     let mut total_generation_time: Option<Duration> = None;
     let mut tokenization_time: Option<Duration> = None;
     let mut model_load_time: Option<Duration> = None;
@@ -556,6 +557,7 @@ fn run_text_mode(
                 event,
                 cli_config,
                 &mut generated_tokens,
+                &mut setup_duration,
                 &mut prompt_processing,
                 &mut total_generation_time,
                 &mut model_load_time,
@@ -578,6 +580,7 @@ fn run_text_mode(
             event,
             cli_config,
             &mut generated_tokens,
+            &mut setup_duration,
             &mut prompt_processing,
             &mut total_generation_time,
             &mut model_load_time,
@@ -623,7 +626,15 @@ fn run_text_mode(
             };
             eprintln!("[metallic]   Prompt Processing: {:.3}s ({:.2} tok/s)", prompt_s, pp_tok_s);
 
-            let decode_s = total.saturating_sub(prompt).as_secs_f64().max(1e-9);
+            if let Some(setup) = setup_duration {
+                eprintln!("[metallic]   Setup:             {:.3}s", setup.as_secs_f64());
+            }
+
+            let mut decode_time = total.saturating_sub(prompt);
+            if let Some(setup) = setup_duration {
+                decode_time = decode_time.saturating_sub(setup);
+            }
+            let decode_s = decode_time.as_secs_f64().max(1e-9);
             let tps_decode = (generated_tokens as f64) / decode_s;
             eprintln!("[metallic]   Decode:            {:.3}s ({:.2} tokens/s)", decode_s, tps_decode);
         }
@@ -651,6 +662,7 @@ fn process_text_mode_event(
     event: AppEvent,
     cli_config: &cli::CliConfig,
     generated_tokens: &mut u64,
+    setup_duration: &mut Option<Duration>,
     prompt_processing: &mut Option<Duration>,
     total_generation_time: &mut Option<Duration>,
     model_load_time: &mut Option<Duration>,
@@ -660,6 +672,7 @@ fn process_text_mode_event(
     match event {
         AppEvent::Token {
             text,
+            setup_duration: setup,
             prompt_processing: prompt,
             ..
         } => {
@@ -671,6 +684,11 @@ fn process_text_mode_event(
                 }
             }
             *generated_tokens = generated_tokens.saturating_add(1);
+            if let Some(setup) = setup
+                && !setup.is_zero()
+            {
+                setup_duration.get_or_insert(setup);
+            }
             prompt_processing.get_or_insert(prompt);
         }
         AppEvent::GenerationComplete {
@@ -839,6 +857,7 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
     match event {
         AppEvent::Token {
             text,
+            setup_duration: _,
             prompt_processing,
             iteration,
         } => {

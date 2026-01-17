@@ -2,7 +2,7 @@
 
 use half::f16;
 use metallic_foundry::{
-    {Foundry, storage::Pooled, tensor::Tensor as FoundryTensor}, metals::sampling::SampleTopK, tensor::{F16, TensorInit, dtypes::U32}, types::TensorArg
+    Foundry, metals::sampling::SampleTopK, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, dtypes::U32}, types::TensorArg
 };
 use serial_test::serial;
 

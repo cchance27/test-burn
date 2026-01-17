@@ -11,11 +11,9 @@ use super::{
     stages::{VectorizedDotStage, WarpWriteOutputStage}, step::{GemvStrategy, warp_dispatch_config}
 };
 use crate::{
-    MetalError, compound::{
+    Foundry, MetalError, compound::{
         CompiledCompoundKernel, CompoundKernel, stages::{Layout, Quantization, WarpLayoutStage, WarpReduceStage}
-    }, {
-        Foundry, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}
-    }, metals::rmsnorm::stages::RmsNormComputeStage, types::TensorArg
+    }, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// Fused GEMV Step: RMSNorm(Input) -> GEMV(Input_Norm, Weights) -> Output
@@ -160,7 +158,21 @@ impl CompiledStep for CompiledFusedGemvStep {
         let kernel = get_fused_gemv_kernel(self.step.strategy, quantization);
         let dispatch = warp_dispatch_config(n_dim);
 
-        foundry.run(&kernel.bind(args, dispatch))
+        if crate::instrument::emit_cb_timing_metrics() {
+            // Fused GEMV (matmul + RMSNorm) - still useful to classify as matmul for comparisons.
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), "matmul".to_string());
+            data.insert("backend".to_string(), "gemv".to_string());
+            data.insert("batch".to_string(), "1".to_string());
+            data.insert("m".to_string(), "1".to_string());
+            data.insert("n".to_string(), n_dim.to_string());
+            data.insert("k".to_string(), k_dim.to_string());
+            data.insert("tA".to_string(), "0".to_string());
+            data.insert("tB".to_string(), "1".to_string());
+            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))
+        } else {
+            foundry.run(&kernel.bind(args, dispatch))
+        }
     }
 
     fn name(&self) -> &'static str {

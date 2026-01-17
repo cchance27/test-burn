@@ -30,13 +30,79 @@ ALWAYS_INLINE float gemv_dot_vectorized(
     const uint weights_per_block,
     const uint lane_id  // 0-31 within warp
 ) {
-    const uint blocks_per_k = (K + weights_per_block - 1) / weights_per_block;
+    const uint blocks_per_k = Policy::HAS_SCALE ? ((K + weights_per_block - 1) / weights_per_block) : 0u;
     const uint k_chunk_size = 32 * ELEMS_PER_THREAD; // 256 elements per chunk
     
     float acc = 0.0f;
     uint k_base = 0;
     
     // Fast path: process 256 elements per iteration (no bounds checks)
+#if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
+    if (!Policy::HAS_SCALE) {
+        const device half *w_ptr = (const device half *)data;
+        const device half *row_ptr = w_ptr + (ulong)row_idx * (ulong)K;
+
+        while (k_base + k_chunk_size <= K) {
+            uint k = k_base + lane_id * ELEMS_PER_THREAD;
+
+            // Vector load 8 halves from input
+            float4 xv_raw = *(const device float4*)(input + k);
+            half4 xv_lo = as_type<half4>(xv_raw.xy);
+            half4 xv_hi = as_type<half4>(xv_raw.zw);
+            float4 xv_f32_lo = float4(xv_lo);
+            float4 xv_f32_hi = float4(xv_hi);
+
+            float4 w_raw = *(const device float4*)(row_ptr + k);
+            half4 w_lo = as_type<half4>(w_raw.xy);
+            half4 w_hi = as_type<half4>(w_raw.zw);
+
+            acc += dot(xv_f32_lo, float4(w_lo)) + dot(xv_f32_hi, float4(w_hi));
+
+            k_base += k_chunk_size;
+        }
+
+        // Tail: bounds-checked
+        if (k_base < K) {
+            uint k = k_base + lane_id * ELEMS_PER_THREAD;
+
+            float4 xv_raw = float4(0.0f);
+            uint valid_count = 0;
+
+            if (k + 8 <= K) {
+                xv_raw = *(const device float4*)(input + k);
+                valid_count = 8;
+            } else if (k < K) {
+                for (uint i = 0; i < 8 && k + i < K; ++i) {
+                    ((thread half*)&xv_raw)[i] = input[k + i];
+                    valid_count++;
+                }
+            }
+
+            half4 xv_lo = as_type<half4>(xv_raw.xy);
+            half4 xv_hi = as_type<half4>(xv_raw.zw);
+            float4 xv_f32_lo = float4(xv_lo);
+            float4 xv_f32_hi = float4(xv_hi);
+
+            float4 w_raw = float4(0.0f);
+            if (k + 8 <= K) {
+                w_raw = *(const device float4*)(row_ptr + k);
+            } else if (k < K) {
+                for (uint i = 0; i < 8 && k + i < K; ++i) {
+                    ((thread half*)&w_raw)[i] = row_ptr[k + i];
+                }
+            }
+
+            half4 w_lo = as_type<half4>(w_raw.xy);
+            half4 w_hi = as_type<half4>(w_raw.zw);
+
+            if (valid_count > 0) {
+                acc += dot(xv_f32_lo, float4(w_lo)) + dot(xv_f32_hi, float4(w_hi));
+            }
+        }
+
+        return acc;
+    }
+#endif
     while (k_base + k_chunk_size <= K) {
         uint k = k_base + lane_id * ELEMS_PER_THREAD;
         
@@ -47,12 +113,14 @@ ALWAYS_INLINE float gemv_dot_vectorized(
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
         
-        // Load 8 weights via Policy
-        float w[8];
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
         ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
-        Policy::template load_weights<8>(data, base_idx, w);
+        float scale = Policy::HAS_SCALE
+            ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+            : 1.0f;
+        acc += Policy::template dot<8>(data, base_idx, scale, xv_f32_lo, xv_f32_hi);
 #else
+        float w[8];
         #pragma unroll
         for (int i = 0; i < 8; ++i) {
             ulong idx = WEIGHT_INDEX(row_idx, k + i, K, N);
@@ -60,15 +128,17 @@ ALWAYS_INLINE float gemv_dot_vectorized(
             Policy::template load_weights<1>(data, idx, temp_w);
             w[i] = temp_w[0];
         }
-#endif
-        
+
         // Load scale for this block
-        half scale = Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
-        
+        float scale = Policy::HAS_SCALE
+            ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+            : 1.0f;
+
         float4 w_lo = float4(w[0], w[1], w[2], w[3]);
         float4 w_hi = float4(w[4], w[5], w[6], w[7]);
         
-        acc += (float)scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+        acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+#endif
         
         k_base += k_chunk_size;
     }
@@ -95,12 +165,28 @@ ALWAYS_INLINE float gemv_dot_vectorized(
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
         
-        float w[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
         if (k < K) {
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
-            ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
-            Policy::template load_weights<8>(data, base_idx, w);
+            if (valid_count == 8) {
+                ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
+                float scale = Policy::HAS_SCALE
+                    ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+                    : 1.0f;
+                acc += Policy::template dot<8>(data, base_idx, scale, xv_f32_lo, xv_f32_hi);
+            } else {
+                float w[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+                ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
+                Policy::template load_weights<8>(data, base_idx, w);
+                for (uint i = valid_count; i < 8; ++i) w[i] = 0.0f;
+                float scale = Policy::HAS_SCALE
+                    ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+                    : 1.0f;
+                float4 w_lo = float4(w[0], w[1], w[2], w[3]);
+                float4 w_hi = float4(w[4], w[5], w[6], w[7]);
+                acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+            }
 #else
+            float w[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
             #pragma unroll
             for (int i = 0; i < 8; ++i) {
                 ulong idx = WEIGHT_INDEX(row_idx, k + i, K, N);
@@ -108,16 +194,15 @@ ALWAYS_INLINE float gemv_dot_vectorized(
                 Policy::template load_weights<1>(data, idx, temp_w);
                 w[i] = temp_w[0];
             }
-#endif
             for (uint i = valid_count; i < 8; ++i) w[i] = 0.0f;
+            float scale = Policy::HAS_SCALE
+                ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+                : 1.0f;
+            float4 w_lo = float4(w[0], w[1], w[2], w[3]);
+            float4 w_hi = float4(w[4], w[5], w[6], w[7]);
+            acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+#endif
         }
-        
-        half scale = (k < K) ? Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block)) : half(0.0h);
-        
-        float4 w_lo = float4(w[0], w[1], w[2], w[3]);
-        float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-        
-        acc += (float)scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
     }
     
     return acc;

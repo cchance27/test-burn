@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::{Arc, mpsc}, time::{Duration, Instant}
+    cell::Cell, collections::BTreeMap, env, fs::OpenOptions, io::Write, path::PathBuf, sync::{Arc, OnceLock, mpsc}, time::{Duration, Instant}
 };
 
 use metallic_cli_helpers::app_event::AppEvent;
@@ -14,6 +14,23 @@ use crate::{
 
 const METALLIC_LOG_CACHE_STATS_ENV: &str = "METALLIC_LOG_CACHE_STATS";
 const METALLIC_LOG_CACHE_STATS_DEFAULT_FILE: &str = "metal-cache-stats.log";
+const METALLIC_IGNORE_EOS_STOP_ENV: &str = "METALLIC_IGNORE_EOS_STOP";
+
+#[inline]
+fn ignore_eos_stop_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        let Ok(value) = env::var(METALLIC_IGNORE_EOS_STOP_ENV) else {
+            return false;
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        !matches!(lowered.as_str(), "0" | "false" | "no" | "off")
+    })
+}
 
 fn embed_single_token_cached<T: TensorElement>(qwen: &Qwen25<T>, token_id: u32, ctx: &mut Context<T>) -> Result<Tensor<T>, MetalError> {
     let mut indices = ctx.shared_u32_host_tensor(1)?;
@@ -745,16 +762,20 @@ pub fn generate_streaming_from_tokens<T: TensorElement>(
     tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError> {
     let generation_start = Instant::now();
-    let prompt_start = Instant::now();
+    let setup_duration = Cell::new(None);
+    let prompt_processing_duration = Cell::new(None);
 
-    let mut prompt_processing_duration: Option<Duration> = None;
     let mut token_callback = |_token_id, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
-        let now = Instant::now();
-        let prompt_duration = *prompt_processing_duration.get_or_insert_with(|| now.duration_since(prompt_start));
+        let setup = setup_duration.get();
+        let prompt_duration = prompt_processing_duration
+            .get()
+            // Fallback: preserve the previous behavior if timings aren't emitted for any reason.
+            .unwrap_or_else(|| generation_start.elapsed());
 
         if tx
             .send(AppEvent::Token {
                 text: decoded_token,
+                setup_duration: setup,
                 prompt_processing: prompt_duration,
                 iteration: (!iteration_duration.is_zero()).then_some(iteration_duration),
             })
@@ -765,7 +786,17 @@ pub fn generate_streaming_from_tokens<T: TensorElement>(
         Ok(true)
     };
 
-    generate_autoregressive_with_kv_cache_streaming(qwen, tokenizer, ctx, input_ids, cfg, &mut token_callback, tx)?;
+    generate_autoregressive_with_kv_cache_streaming_with_timings(
+        qwen,
+        tokenizer,
+        ctx,
+        input_ids,
+        cfg,
+        &mut token_callback,
+        tx,
+        &setup_duration,
+        &prompt_processing_duration,
+    )?;
 
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
@@ -786,6 +817,42 @@ pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(
 where
     F: FnMut(u32, Arc<str>, Duration) -> Result<bool, MetalError>,
 {
+    let setup_duration_out = Cell::new(None);
+    let prompt_processing_duration_out = Cell::new(None);
+    generate_autoregressive_with_kv_cache_streaming_with_timings(
+        qwen,
+        tokenizer,
+        ctx,
+        input_ids,
+        cfg,
+        token_callback,
+        _tx,
+        &setup_duration_out,
+        &prompt_processing_duration_out,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn generate_autoregressive_with_kv_cache_streaming_with_timings<F, T: TensorElement>(
+    qwen: &mut Qwen25<T>,
+    tokenizer: &Tokenizer,
+    ctx: &mut Context<T>,
+    input_ids: &[u32],
+    cfg: &GenerationConfig,
+    token_callback: &mut F,
+    _tx: &mpsc::Sender<AppEvent>,
+    setup_duration_out: &Cell<Option<Duration>>,
+    prompt_processing_duration_out: &Cell<Option<Duration>>,
+) -> Result<(), MetalError>
+where
+    F: FnMut(u32, Arc<str>, Duration) -> Result<bool, MetalError>,
+{
+    let setup_start = Instant::now();
+    let ignore_eos_stop = ignore_eos_stop_enabled();
+    if cfg.max_tokens == 0 {
+        return Ok(());
+    }
+
     // Pre-allocate KV cache for all layers
     let n_layers = qwen.config.n_layers;
     let seq_len = qwen.config.seq_len;
@@ -864,9 +931,15 @@ where
         ctx.clear_cache();
     }
 
+    // Everything above is "setup" (KV allocations, pool reservations, cache invalidation).
+    // Emit as soon as we know the prompt pass is about to begin so downstream metrics can compute Decode cleanly.
+    setup_duration_out.set(Some(setup_start.elapsed()));
+
     // --- Prompt Processing Pass ---
     let mut logits_tensor: Option<Tensor<T>> = None;
+    let mut prompt_pass_start: Option<Instant> = None;
     if !input_ids.is_empty() {
+        prompt_pass_start = Some(Instant::now());
         ctx.with_gpu_scope("Prompt Processing", |ctx| {
             for (i, &token_id) in input_ids.iter().enumerate() {
                 let input_tensor = qwen.embed(&[token_id], ctx)?;
@@ -902,6 +975,11 @@ where
         initial_future.mark_submitted();
         ctx.poll_command_buffer_completions();
         let initial_sample = initial_future.wait(ctx)?;
+        if let Some(start) = prompt_pass_start {
+            // Include GPU execution time for the prompt pass by measuring until the first logits-dependent sample completes.
+            // This aligns with foundry's "Prompt Processing" meaning "prefill wall time".
+            prompt_processing_duration_out.set(Some(start.elapsed()));
+        }
         Some(CompletedToken::from_sample(initial_sample))
     } else {
         Some(CompletedToken {
@@ -1036,7 +1114,7 @@ where
                 &mut metric_recording_overhead,
                 token_callback,
             )?;
-            if outcome.is_eos || !outcome.continue_generation {
+            if (!ignore_eos_stop && outcome.is_eos) || !outcome.continue_generation {
                 let _ = sample_future.wait(ctx)?;
                 pending_output = None;
                 break;

@@ -19,6 +19,12 @@ use crate::{
     }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
+fn use_f16_cols8() -> bool {
+    // Default ON: this path mirrors the legacy Context RowMajor FP16 GEMV pointer arithmetic and is consistently faster
+    // for decode-heavy shapes (e.g. K=896, K=4864). Allow an escape hatch to disable for debugging/regressions.
+    std::env::var("METALLIC_GEMV_F16_COLS8").ok().map(|val| val != "0").unwrap_or(true)
+}
+
 /// GemvV2 step - full-featured GEMV using Stage composition.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GemvV2Step {
@@ -65,16 +71,29 @@ pub enum GemvStrategy {
 pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'static CompiledCompoundKernel {
     match (layout, strategy) {
         (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
-            static NK_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            NK_KERNEL_F16_VEC.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_nk_f16_vec")
-                    .prologue(WarpLayoutStage::row_major().with_warps(8))
-                    .prologue(VectorizedDotStage::new(Quantization::F16))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
+            if use_f16_cols8() {
+                static NK_KERNEL_F16_COLS8: OnceLock<CompiledCompoundKernel> = OnceLock::new();
+                NK_KERNEL_F16_COLS8.get_or_init(|| {
+                    CompoundKernel::new("gemv_v2_nk_f16_cols8")
+                        .prologue(WarpLayoutStage::row_major().with_warps(8))
+                        .prologue(VectorizedDotStage::new(Quantization::F16).with_f16_cols8(true))
+                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                        .main(WarpWriteOutputStage::new())
+                        .with_manual_output(true)
+                        .compile()
+                })
+            } else {
+                static NK_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
+                NK_KERNEL_F16_VEC.get_or_init(|| {
+                    CompoundKernel::new("gemv_v2_nk_f16_vec")
+                        .prologue(WarpLayoutStage::row_major().with_warps(8))
+                        .prologue(VectorizedDotStage::new(Quantization::F16))
+                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                        .main(WarpWriteOutputStage::new())
+                        .with_manual_output(true)
+                        .compile()
+                })
+            }
         }
         (Layout::RowMajor, GemvStrategy::Canonical) => {
             static NK_KERNEL_F16_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
@@ -509,7 +528,20 @@ impl CompiledStep for CompiledGemvV2Step {
             warp_dispatch_config_2d(n_dim, batch)
         };
 
-        foundry.run(&kernel.bind(args, dispatch))?;
+        if crate::instrument::emit_cb_timing_metrics() {
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), "matmul".to_string());
+            data.insert("backend".to_string(), "gemv".to_string());
+            data.insert("batch".to_string(), batch.to_string());
+            data.insert("m".to_string(), "1".to_string());
+            data.insert("n".to_string(), n_dim.to_string());
+            data.insert("k".to_string(), k_dim.to_string());
+            data.insert("tA".to_string(), "0".to_string());
+            data.insert("tB".to_string(), "1".to_string());
+            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))?;
+        } else {
+            foundry.run(&kernel.bind(args, dispatch))?;
+        }
 
         Ok(())
     }
@@ -735,7 +767,20 @@ impl CompiledStep for CompiledGemvCanonicalStep {
             _ => get_gemv_v2_kernel_f16(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical),
         };
 
-        foundry.run(&kernel.bind(args, dispatch))?;
+        if crate::instrument::emit_cb_timing_metrics() {
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), "matmul".to_string());
+            data.insert("backend".to_string(), "gemv".to_string());
+            data.insert("batch".to_string(), batch.to_string());
+            data.insert("m".to_string(), "1".to_string());
+            data.insert("n".to_string(), n_dim.to_string());
+            data.insert("k".to_string(), k_dim.to_string());
+            data.insert("tA".to_string(), "0".to_string());
+            data.insert("tB".to_string(), "1".to_string());
+            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))?;
+        } else {
+            foundry.run(&kernel.bind(args, dispatch))?;
+        }
 
         Ok(())
     }
@@ -981,7 +1026,20 @@ impl CompiledStep for CompiledGemvColMajorStep {
             std::io::Write::flush(&mut std::io::stderr()).ok();
         }
 
-        foundry.run(&kernel.bind(args, dispatch))?;
+        if crate::instrument::emit_cb_timing_metrics() {
+            let mut data = rustc_hash::FxHashMap::default();
+            data.insert("op".to_string(), "matmul".to_string());
+            data.insert("backend".to_string(), "gemv".to_string());
+            data.insert("batch".to_string(), "1".to_string());
+            data.insert("m".to_string(), "1".to_string());
+            data.insert("n".to_string(), n_dim.to_string());
+            data.insert("k".to_string(), k_dim.to_string());
+            data.insert("tA".to_string(), "0".to_string());
+            data.insert("tB".to_string(), "1".to_string());
+            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))?;
+        } else {
+            foundry.run(&kernel.bind(args, dispatch))?;
+        }
 
         if debug {
             eprintln!("  [GemvColMajor] Kernel dispatched successfully.");

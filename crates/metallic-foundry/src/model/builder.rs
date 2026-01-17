@@ -139,7 +139,7 @@ impl ModelBuilder<WithWeights> {
     }
 
     /// Compile the model into an executable form.
-    pub fn build(self, _foundry: &mut Foundry) -> Result<CompiledModel, MetalError> {
+    pub fn build(self, foundry: &mut Foundry) -> Result<CompiledModel, MetalError> {
         let spec = self
             .spec
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: spec not loaded".to_string()))?;
@@ -147,6 +147,13 @@ impl ModelBuilder<WithWeights> {
             .weights
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: weights not loaded".to_string()))?;
 
-        CompiledModel::new(spec, weights)
+        let model = CompiledModel::new(spec, weights)?;
+
+        // Prepare a reusable execution session during model load so generation doesn't pay the one-time
+        // weight materialization / buffer allocation cost. This aligns Foundry's "cold start" behavior
+        // with Context (heavy work in model load, cheap per-generation setup).
+        model.initialize_session(foundry)?;
+
+        Ok(model)
     }
 }

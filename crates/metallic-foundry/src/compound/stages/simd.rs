@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use crate::compound::{BufferArg, Stage};
 
 /// Operation type for SIMD reduction.
@@ -184,6 +186,20 @@ pub struct WarpReduceStage {
     dtype: String,
 }
 
+#[inline]
+fn force_simd_sum_reduce() -> bool {
+    static FORCE: OnceLock<bool> = OnceLock::new();
+    *FORCE.get_or_init(|| {
+        std::env::var("METALLIC_GEMV_FORCE_SIMD_SUM_REDUCE")
+            .ok()
+            .map(|value| {
+                let lowered = value.trim().to_ascii_lowercase();
+                !matches!(lowered.as_str(), "" | "0" | "false" | "no" | "off")
+            })
+            .unwrap_or(false)
+    })
+}
+
 impl WarpReduceStage {
     pub fn new(op: WarpReduceOp, input_var: impl Into<String>, output_var: impl Into<String>) -> Self {
         Self {
@@ -233,19 +249,98 @@ impl Stage for WarpReduceStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let func = match self.op {
-            WarpReduceOp::Sum => "simd_sum",
-            WarpReduceOp::Max => "simd_max",
-        };
+        let mut code = String::new();
+        code.push_str(&format!("    // Warp-level SIMD {:?} reduction\n", self.op));
 
-        let code = format!(
-            "    // Warp-level SIMD {op:?} reduction\n    {dtype} {out} = {func}({in_var});",
-            op = self.op,
-            dtype = self.dtype,
-            out = self.output_var,
-            func = func,
-            in_var = self.input_var
-        );
+        if force_simd_sum_reduce() {
+            let func = match self.op {
+                WarpReduceOp::Sum => "simd_sum",
+                WarpReduceOp::Max => "simd_max",
+            };
+            code.push_str(&format!(
+                "    {dtype} {out} = {func}({in_var});",
+                dtype = self.dtype,
+                out = self.output_var,
+                func = func,
+                in_var = self.input_var
+            ));
+            return (self.output_var.clone(), code);
+        }
+
+        // Prefer explicit shuffle-xor reductions (what this stage is documented to do) to better
+        // match the monolithic Context kernels and avoid backend-dependent lowering of `simd_sum`.
+        //
+        // Fall back to `simd_sum/simd_max` if the configured SIMD width is unexpected.
+        let simd_width = self.simd_width;
+        let is_pow2 = simd_width.is_power_of_two();
+        let supported = is_pow2 && simd_width >= 2 && simd_width <= 64;
+
+        if supported {
+            code.push_str(&format!(
+                "    {dtype} {out} = {in_var};\n",
+                dtype = self.dtype,
+                out = self.output_var,
+                in_var = self.input_var
+            ));
+
+            // Emit a fixed, compile-time reduction tree for the common 32-wide SIMD groups.
+            // (Apple GPUs are 32; keeping this unrolled helps the Metal compiler.)
+            if simd_width == 32 {
+                match self.op {
+                    WarpReduceOp::Sum => {
+                        for offset in [16u32, 8, 4, 2, 1] {
+                            code.push_str(&format!(
+                                "    {out} += simd_shuffle_xor({out}, (ushort){off});\n",
+                                out = self.output_var,
+                                off = offset
+                            ));
+                        }
+                    }
+                    WarpReduceOp::Max => {
+                        for offset in [16u32, 8, 4, 2, 1] {
+                            code.push_str(&format!(
+                                "    {out} = max({out}, simd_shuffle_xor({out}, (ushort){off}));\n",
+                                out = self.output_var,
+                                off = offset
+                            ));
+                        }
+                    }
+                }
+            } else {
+                // Generic path: let Metal decide if it can unroll.
+                code.push_str(&format!(
+                    "    for (uint off = {simd_width}u >> 1; off > 0; off >>= 1) {{\n",
+                    simd_width = simd_width
+                ));
+                match self.op {
+                    WarpReduceOp::Sum => {
+                        code.push_str(&format!(
+                            "        {out} += simd_shuffle_xor({out}, (ushort)off);\n",
+                            out = self.output_var
+                        ));
+                    }
+                    WarpReduceOp::Max => {
+                        code.push_str(&format!(
+                            "        {out} = max({out}, simd_shuffle_xor({out}, (ushort)off));\n",
+                            out = self.output_var
+                        ));
+                    }
+                }
+                code.push_str("    }\n");
+            }
+        } else {
+            let func = match self.op {
+                WarpReduceOp::Sum => "simd_sum",
+                WarpReduceOp::Max => "simd_max",
+            };
+            code.push_str(&format!(
+                "    {dtype} {out} = {func}({in_var});",
+                dtype = self.dtype,
+                out = self.output_var,
+                func = func,
+                in_var = self.input_var
+            ));
+        }
 
         (self.output_var.clone(), code)
     }

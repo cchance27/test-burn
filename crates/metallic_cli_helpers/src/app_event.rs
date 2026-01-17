@@ -86,6 +86,12 @@ impl Alert {
 pub enum AppEvent {
     Token {
         text: Arc<str>,
+        /// Time spent in engine-side setup before the first prompt forward pass.
+        ///
+        /// This is primarily useful for performance breakdowns so that "Decode" can exclude
+        /// one-time setup costs (buffer allocation, pipeline warmup, etc.). Engines that don't
+        /// report this should set it to `None`.
+        setup_duration: Option<Duration>,
         prompt_processing: Duration,
         iteration: Option<Duration>,
     },

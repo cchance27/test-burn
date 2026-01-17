@@ -152,6 +152,8 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
     matmul_backend_samples: Dict[str, List[int]] = defaultdict(list)
     matmul_variant_samples: Dict[Tuple[str, str], List[int]] = defaultdict(list)
     sync_samples: List[int] = []
+    foundry_capture_kernel_counts: Counter[str] = Counter()
+    foundry_capture_dispatches: List[int] = []
 
     total_events = 0
     with path.open("r") as handle:
@@ -201,6 +203,29 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
                     gpu_wait_samples[op_name].append(duration_int)
                 else:
                     gpu_kernel_samples[op_name].append(duration_int)
+                    # Foundry capture aggregates kernel counts in a nested data map.
+                    if op_name.startswith("foundry_capture#"):
+                        capture_data = data.get("data")
+                        if isinstance(capture_data, dict):
+                            for key, value in capture_data.items():
+                                if key == "dispatches":
+                                    try:
+                                        foundry_capture_dispatches.append(int(value))
+                                    except (TypeError, ValueError):
+                                        continue
+                                    continue
+                                if not key.startswith("k"):
+                                    continue
+                                if not isinstance(value, str):
+                                    continue
+                                if ":" not in value:
+                                    continue
+                                name, count_str = value.rsplit(":", 1)
+                                try:
+                                    count = int(count_str)
+                                except ValueError:
+                                    continue
+                                foundry_capture_kernel_counts[name] += count
                     # Extract the optional data field for structured metadata
                     event_data = data.get("data")
                     matmul_meta = parse_matmul_scope(op_name, event_data)
@@ -324,6 +349,14 @@ def analyze_file(filename: str, top_n: int, kernel_top: int, include_kernel_tota
             base_totals.sort(key=lambda item: item[1]["total_ms"], reverse=True)
             for base_name, stats in base_totals[:top_n]:
                 print(render_summary(base_name, stats, indent=2))
+
+    if foundry_capture_kernel_counts:
+        print("\nFoundry capture kernel counts:")
+        total_dispatches = sum(foundry_capture_dispatches)
+        if total_dispatches:
+            print(f"  total dispatches (reported): {total_dispatches}")
+        for name, count in foundry_capture_kernel_counts.most_common(top_n):
+            print(f"  {name}: {count}")
 
     if matmul_backend_samples:
         print("\nMatmul backend summary:")

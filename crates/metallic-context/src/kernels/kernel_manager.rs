@@ -145,6 +145,41 @@ impl KernelManager {
             let lib = match kernel {
                 KernelSource::Text(src) => {
                     let source_ns = NSString::from_str(src);
+
+                    if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
+                        let mut safe_name = format!("context_{:?}", lib_id)
+                            .chars()
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                                    c
+                                } else {
+                                    '_'
+                                }
+                            })
+                            .collect::<String>();
+                        if safe_name.is_empty() {
+                            safe_name = "context_kernel".to_string();
+                        }
+
+                        let dump_dir = std::path::Path::new(&dump_dir);
+                        std::fs::create_dir_all(dump_dir).map_err(|e| {
+                            MetalError::LibraryCompilationFailed(format!(
+                                "Failed to create METALLIC_DUMP_METAL_SOURCE_DIR {}: {}",
+                                dump_dir.display(),
+                                e
+                            ))
+                        })?;
+
+                        let dump_path = dump_dir.join(format!("{}.metal", safe_name));
+                        std::fs::write(&dump_path, src).map_err(|e| {
+                            MetalError::LibraryCompilationFailed(format!(
+                                "Failed to write Metal source dump {}: {}",
+                                dump_path.display(),
+                                e
+                            ))
+                        })?;
+                    }
+
                     let options = MTLCompileOptions::new();
                     options.setLanguageVersion(MTLLanguageVersion::Version4_0);
                     options.setEnableLogging(true);

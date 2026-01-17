@@ -3,6 +3,7 @@ pub mod embedding;
 pub mod gemm;
 pub mod gemv;
 pub mod kv_cache_write;
+pub mod kv_prep;
 pub mod kv_rearrange;
 pub mod matmul;
 pub mod mma;

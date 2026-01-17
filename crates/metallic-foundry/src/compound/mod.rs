@@ -172,6 +172,7 @@ pub struct BoundCompiledCompoundKernel<A: BindArgs> {
     template: &'static CompiledCompoundKernel,
     args: A,
     dispatch: DispatchConfig,
+    metric_data: Option<rustc_hash::FxHashMap<String, String>>,
 }
 
 impl CompoundKernel<Unfused> {
@@ -420,6 +421,22 @@ impl CompiledCompoundKernel {
             template: self,
             args,
             dispatch,
+            metric_data: None,
+        }
+    }
+
+    #[inline]
+    pub fn bind_with_metrics<A: BindArgs>(
+        &'static self,
+        args: A,
+        dispatch: DispatchConfig,
+        metric_data: rustc_hash::FxHashMap<String, String>,
+    ) -> BoundCompiledCompoundKernel<A> {
+        BoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: Some(metric_data),
         }
     }
 }
@@ -473,6 +490,10 @@ impl<A: BindArgs> Kernel for BoundCompiledCompoundKernel<A> {
 
     fn dispatch_config(&self) -> DispatchConfig {
         self.dispatch
+    }
+
+    fn metric_data(&self) -> Option<rustc_hash::FxHashMap<String, String>> {
+        self.metric_data.clone()
     }
 }
 

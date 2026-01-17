@@ -65,11 +65,12 @@ pub fn generate_streaming_from_tokens(
     let mut decode_scratch = Vec::new();
     let mut decoded_chunk = String::new();
 
-    let callback = |token_id: u32, prefill_duration: Duration| -> Result<bool, MetalError> {
+    let callback = |token_id: u32, prefill_duration: Duration, setup_duration: Duration| -> Result<bool, MetalError> {
         if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
             && tx
                 .send(AppEvent::Token {
                     text,
+                    setup_duration: Some(setup_duration),
                     prompt_processing: prefill_duration,
                     iteration: None, // Foundry doesn't report per-token time yet in callback
                 })
