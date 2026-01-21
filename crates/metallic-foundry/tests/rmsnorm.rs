@@ -89,10 +89,10 @@ fn run_f16_parity_test(cfg: TestConfig) {
     )
     .unwrap();
 
-    let _output_legacy = ctx
+    let output_legacy = ctx
         .call::<RMSNormOp>((input_legacy.clone(), gamma_legacy, cfg.feature_dim as u32), None)
         .unwrap();
-    let legacy_result = input_legacy.to_vec();
+    let legacy_result = output_legacy.to_vec();
 
     // CPU Reference
     let cpu_expected = cpu_rmsnorm(&input_data, cfg.feature_dim, &gamma_data);

@@ -33,6 +33,7 @@ pub struct App {
     pub text_area: ratatui::layout::Rect,
     pub metrics_area: ratatui::layout::Rect,
     pub log_area: ratatui::layout::Rect,
+    pub input_area: ratatui::layout::Rect,
     pub alert_queue: std::collections::VecDeque<Alert>,
     pub active_alert: Option<Alert>,
     // Track prompt processing metrics separately for aggregation
@@ -47,6 +48,9 @@ pub struct App {
     pub text_selection_start: Option<Position>,
     pub text_selection_end: Option<Position>,
     pub is_selecting: bool,
+    // Interactive chat functionality
+    pub input_buffer: String,
+    pub is_processing: bool,
 
     // Stats metrics rows for the stats view
     pub tensor_preparation_stats: Vec<metallic_cli_helpers::app_event::StatsRow>,
@@ -74,7 +78,7 @@ impl App {
             metrics_view: MetricsView::Memory,
             latency_collapse_depth: CollapseDepth::new(),
             memory_collapse_depth: MemoryCollapseDepth::new(),
-            focus: FocusArea::GeneratedText,
+            focus: FocusArea::Input,
             text_scroll: 0,
             metrics_scroll: 0,
             text_follow_bottom: true,
@@ -82,6 +86,7 @@ impl App {
             text_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             metrics_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             log_area: ratatui::layout::Rect::new(0, 0, 0, 0),
+            input_area: ratatui::layout::Rect::new(0, 0, 0, 0),
             alert_queue: std::collections::VecDeque::new(),
             active_alert: None,
             prompt_processing_total_last_ms: 0.0,
@@ -93,6 +98,8 @@ impl App {
             text_selection_start: None,
             text_selection_end: None,
             is_selecting: false,
+            input_buffer: String::new(),
+            is_processing: true, // Start as true since we auto-start generation
             tensor_preparation_stats: Vec::new(),
             resource_cache_stats: FxHashMap::default(),
             status_bar: StatusBar::new(StatusBarState::Normal),
@@ -135,6 +142,9 @@ impl App {
             }
             FocusArea::LogBox => {
                 self.adjust_log_scroll(delta);
+            }
+            FocusArea::Input => {
+                // Input box scrolling not implemented yet (single line mostly)
             }
         }
     }
@@ -267,14 +277,19 @@ impl App {
             }
             FocusArea::Metrics => self.metrics_scroll = 0,
             FocusArea::LogBox => self.log_scroll = 0,
+            FocusArea::Input => {} // Cursor move?
         }
+    }
+
+    pub fn scroll_text_to_end(&mut self) {
+        self.text_follow_bottom = true;
+        self.request_follow_text = true;
     }
 
     pub fn scroll_active_to_end(&mut self) {
         match self.focus {
             FocusArea::GeneratedText => {
-                self.text_follow_bottom = true;
-                self.request_follow_text = true;
+                self.scroll_text_to_end();
             }
             FocusArea::Metrics => {
                 self.metrics_scroll = u16::MAX;
@@ -289,6 +304,7 @@ impl App {
                     self.log_scroll = 0;
                 }
             }
+            FocusArea::Input => {}
         }
     }
 
@@ -296,7 +312,8 @@ impl App {
         self.focus = match self.focus {
             FocusArea::GeneratedText => FocusArea::Metrics,
             FocusArea::Metrics => FocusArea::LogBox,
-            FocusArea::LogBox => FocusArea::GeneratedText,
+            FocusArea::LogBox => FocusArea::Input,
+            FocusArea::Input => FocusArea::GeneratedText,
         };
     }
 
@@ -825,6 +842,7 @@ pub enum FocusArea {
     GeneratedText,
     Metrics,
     LogBox,
+    Input,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

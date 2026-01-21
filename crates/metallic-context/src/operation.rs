@@ -266,6 +266,20 @@ impl CommandBuffer {
     where
         F: Fn(&ProtocolObject<dyn MTLCommandBuffer>) + 'static,
     {
+        // Metal asserts if a completed handler is registered after commit.
+        // If callers try to attach a completion callback after commit (which can
+        // happen on host-access/readback paths), we defensively skip registration.
+        //
+        // NOTE: Some call sites use completion callbacks only as an optimization
+        // (for early collection without a blocking wait). Correctness is preserved
+        // because those sites also fall back to `wait()` when needed.
+        if self.is_committed() {
+            if self.is_completed() {
+                callback(self.inner.buffer.as_ref());
+            }
+            return;
+        }
+
         let block = RcBlock::new(move |command_buffer: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             let command_buffer = unsafe { command_buffer.as_ref() };
             callback(command_buffer);
@@ -331,6 +345,16 @@ impl ProfiledCommandBuffer for CommandBuffer {
     }
 
     fn on_completed(&self, handler: CommandBufferCompletionHandler) {
+        // Metal asserts if a completed handler is registered after commit.
+        // For committed buffers, fall back to synchronous completion when we can,
+        // otherwise skip registration and rely on explicit waits.
+        if self.is_committed() {
+            if self.is_completed() {
+                handler(self.inner.buffer.as_ref());
+            }
+            return;
+        }
+
         let handler = std::sync::Mutex::new(Some(handler));
         let block = RcBlock::new(move |cmd: NonNull<ProtocolObject<dyn MTLCommandBuffer>>| {
             if let Some(callback) = handler.lock().unwrap().take() {

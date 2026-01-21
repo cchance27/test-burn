@@ -28,6 +28,40 @@ fn upload_tensor(foundry: &mut Foundry, data: &Array2<f32>, name: &str) -> Resul
     Ok(tensor)
 }
 
+fn pack_canonical_weights_f16(matrix: &Array2<f32>, weights_per_block: usize) -> Vec<f16> {
+    let n = matrix.nrows();
+    let k = matrix.ncols();
+    let blocks_per_k = k.div_ceil(weights_per_block);
+    let canonical_len = blocks_per_k * n * weights_per_block;
+    let mut canonical = vec![f16::from_f32(0.0); canonical_len];
+
+    for out_idx in 0..n {
+        for block in 0..blocks_per_k {
+            let k_base = block * weights_per_block;
+            let dst_base = (block * n + out_idx) * weights_per_block;
+            let remaining = k.saturating_sub(k_base);
+            let copy = remaining.min(weights_per_block);
+            for i in 0..copy {
+                canonical[dst_base + i] = f16::from_f32(matrix[[out_idx, k_base + i]]);
+            }
+        }
+    }
+
+    canonical
+}
+
+fn upload_canonical_weights(
+    foundry: &mut Foundry,
+    matrix: &Array2<f32>,
+    weights_per_block: usize,
+    name: &str,
+) -> Result<FoundryTensor<F16, Pooled>, Box<dyn std::error::Error>> {
+    let packed = pack_canonical_weights_f16(matrix, weights_per_block);
+    let tensor = FoundryTensor::<F16, Pooled>::new(foundry, vec![packed.len()], TensorInit::CopyFrom(&packed))
+        .map_err(|e| format!("Failed to create canonical tensor {}: {:?}", name, e))?;
+    Ok(tensor)
+}
+
 // Helper: Download via FoundryTensor mechanisms
 // We can't easily turn TensorArg back into FoundryTensor because FoundryTensor expects to own/track the buffer.
 // But we can peek into the buffer directly like before, or we can use the `TensorArg::buffer` + manual download.
@@ -71,15 +105,14 @@ fn test_batched_pipeline_parity() -> Result<(), Box<dyn std::error::Error>> {
     let mut foundry = create_foundry();
     let mut bindings = TensorBindings::new();
 
-    // Test with M=1 - batched prefill (M>1) works for inference but this parity test
-    // uses RowMajor test weights while FusedQkvStep kernel expects Canonical layout.
-    // The actual GGUF inference works correctly with Canonical weights.
-    let m = 1;
+    // Test with M>1 to exercise batched kernels used by prefill.
+    let m = 4;
     let d_model = 896;
     let head_dim = 64;
     let n_heads = 14;
     let n_kv_heads = 2;
     let kv_dim = n_kv_heads * head_dim;
+    let weights_per_block = 32usize;
 
     bindings.set_int_global("m", m);
     bindings.set_int_global("seq_len", m);
@@ -112,13 +145,14 @@ fn test_batched_pipeline_parity() -> Result<(), Box<dyn std::error::Error>> {
     let hidden_tensor = upload_tensor(&mut foundry, &hidden_cpu, "hidden")?;
     let hidden_arg = TensorArg::from_tensor(&hidden_tensor);
 
-    let w_q_tensor = upload_tensor(&mut foundry, &w_q_cpu, "w_q")?;
+    // FusedQkvStep expects canonical (blocked) weights; pack before upload.
+    let w_q_tensor = upload_canonical_weights(&mut foundry, &w_q_cpu, weights_per_block, "w_q")?;
     let w_q_arg = TensorArg::from_tensor(&w_q_tensor);
 
-    let w_k_tensor = upload_tensor(&mut foundry, &w_k_cpu, "w_k")?;
+    let w_k_tensor = upload_canonical_weights(&mut foundry, &w_k_cpu, weights_per_block, "w_k")?;
     let w_k_arg = TensorArg::from_tensor(&w_k_tensor);
 
-    let w_v_tensor = upload_tensor(&mut foundry, &w_v_cpu, "w_v")?;
+    let w_v_tensor = upload_canonical_weights(&mut foundry, &w_v_cpu, weights_per_block, "w_v")?;
     let w_v_arg = TensorArg::from_tensor(&w_v_tensor);
 
     bindings.insert("hidden".to_string(), hidden_arg);
@@ -129,7 +163,7 @@ fn test_batched_pipeline_parity() -> Result<(), Box<dyn std::error::Error>> {
     // Verify Input Upload
     println!("Verifying Hidden Input Upload...");
     let hidden_gpu_vec = hidden_tensor.to_vec(&foundry);
-    check_parity("Hidden Input (M=4)", &hidden_gpu_vec, &hidden_cpu, 0.001)?;
+    check_parity("Hidden Input", &hidden_gpu_vec, &hidden_cpu, 0.001)?;
 
     // Enable debug prints in kernel
     bindings.set_global("i", "0".to_string());
@@ -173,7 +207,7 @@ fn test_batched_pipeline_parity() -> Result<(), Box<dyn std::error::Error>> {
         k_dim: DynamicValue::Literal(d_model as u32),
         n_dim: DynamicValue::Literal(d_model as u32),
         n_kv: DynamicValue::Literal(kv_dim as u32),
-        weights_per_block: DynamicValue::Literal(32),
+        weights_per_block: DynamicValue::Literal(weights_per_block as u32),
         m: DynamicValue::Variable("m".into()),
         strategy: GemvStrategy::Vectorized,
     };

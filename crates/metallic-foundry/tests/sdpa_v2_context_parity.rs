@@ -106,17 +106,17 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
     // =========================================================================
     let mut foundry = Foundry::new()?;
 
-    let q_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![total_batch, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
+    let q_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
     // Use pre-roped K for V2
     let k_v2 = FoundryTensor::<F16Type, Pooled>::new(
         &mut foundry,
-        vec![total_batch, kv_len, head_dim],
+        vec![batch, heads, kv_len, head_dim],
         TensorInit::CopyFrom(&k_roped_data),
     )?;
-    let v_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![total_batch, kv_len, head_dim], TensorInit::CopyFrom(&v_data))?;
+    let v_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, kv_len, head_dim], TensorInit::CopyFrom(&v_data))?;
     let cos_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![kv_len, dim_half], TensorInit::CopyFrom(&cos_data))?;
     let sin_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![kv_len, dim_half], TensorInit::CopyFrom(&sin_data))?;
-    let out_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![total_batch, q_len, head_dim], TensorInit::Uninitialized)?;
+    let out_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::Uninitialized)?;
 
     let rope_params = RopeParamsResolved {
         dim: head_dim as u32,
@@ -128,8 +128,8 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),
-        stride_k_s: k_v2.strides()[1] as u32,
-        stride_v_s: v_v2.strides()[1] as u32,
+        stride_k_s: k_v2.strides()[2] as u32,
+        stride_v_s: v_v2.strides()[2] as u32,
     };
 
     let q_strides = (q_v2.strides()[0] as u32, q_v2.strides()[1] as u32);
@@ -233,7 +233,9 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
     println!("K RoPE max diff (CPU vs Context): {}", k_diff);
 
     // Run SDPA on the roped Q and K
-    let out_ctx = ctx.scaled_dot_product_attention(&q_roped, &k_roped, &v_ctx, true).unwrap();
+    let out_ctx = ctx
+        .scaled_dot_product_attention_with_offset(&q_roped, &k_roped, &v_ctx, true, kv_len - 1)
+        .unwrap();
 
     ctx.synchronize();
     let res_ctx = out_ctx.try_to_vec().unwrap();
@@ -268,16 +270,16 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
     // V2 FusedMhaStep
     let mut foundry = Foundry::new()?;
 
-    let q_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![total_batch, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
+    let q_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
     let k_v2 = FoundryTensor::<F16Type, Pooled>::new(
         &mut foundry,
-        vec![total_batch, kv_len, head_dim],
+        vec![batch, heads, kv_len, head_dim],
         TensorInit::CopyFrom(&k_roped_data),
     )?;
-    let v_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![total_batch, kv_len, head_dim], TensorInit::CopyFrom(&v_data))?;
+    let v_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, kv_len, head_dim], TensorInit::CopyFrom(&v_data))?;
     let cos_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![kv_len, dim_half], TensorInit::CopyFrom(&cos_data))?;
     let sin_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![kv_len, dim_half], TensorInit::CopyFrom(&sin_data))?;
-    let out_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![total_batch, q_len, head_dim], TensorInit::Uninitialized)?;
+    let out_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::Uninitialized)?;
 
     let v2_step = FusedMhaStep::compile(
         &mut foundry,
@@ -297,8 +299,8 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
             kv_len: kv_len as u32,
             head_dim: head_dim as u32,
             scale: 1.0 / (head_dim as f32).sqrt(),
-            stride_k_s: k_v2.strides()[1] as u32,
-            stride_v_s: v_v2.strides()[1] as u32,
+            stride_k_s: k_v2.strides()[2] as u32,
+            stride_v_s: v_v2.strides()[2] as u32,
         },
         batch as u32, // batch (not total_batch)
         heads as u32, // heads (not 1)
@@ -321,19 +323,19 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
     // Context: RoPE + SDPA
     let mut ctx = Context::<F16Element>::new().unwrap();
     let q_ctx = LegacyTensor::<LegacyF16>::new(
-        vec![1, q_len, head_dim],
+        vec![total_batch, q_len, head_dim],
         LegacyStorage::Pooled(&mut ctx),
         LegacyInit::CopyFrom(&q_data),
     )
     .unwrap();
     let k_ctx = LegacyTensor::<LegacyF16>::new(
-        vec![1, kv_len, head_dim],
+        vec![total_batch, kv_len, head_dim],
         LegacyStorage::Pooled(&mut ctx),
         LegacyInit::CopyFrom(&k_data),
     )
     .unwrap();
     let v_ctx = LegacyTensor::<LegacyF16>::new(
-        vec![1, kv_len, head_dim],
+        vec![total_batch, kv_len, head_dim],
         LegacyStorage::Pooled(&mut ctx),
         LegacyInit::CopyFrom(&v_data),
     )
@@ -360,7 +362,9 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
     let k_roped = ctx
         .call::<RoPEOp>((k_ctx, cos_ctx, sin_ctx, head_dim as u32, kv_len as u32, 0), None)
         .unwrap();
-    let out_ctx = ctx.scaled_dot_product_attention(&q_roped, &k_roped, &v_ctx, true).unwrap();
+    let out_ctx = ctx
+        .scaled_dot_product_attention_with_offset(&q_roped, &k_roped, &v_ctx, true, kv_len - 1)
+        .unwrap();
 
     ctx.synchronize();
     let res_ctx = out_ctx.try_to_vec().unwrap();

@@ -803,6 +803,64 @@ pub fn generate_streaming_from_tokens<T: TensorElement>(
     Ok(())
 }
 
+/// Streaming generation that also returns the generated token ids.
+///
+/// This is primarily useful for multi-turn chat drivers that need to append assistant tokens
+/// to a growing prompt without re-encoding decoded text.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_streaming_from_tokens_collect<T: TensorElement>(
+    qwen: &mut Qwen25<T>,
+    tokenizer: &Tokenizer,
+    ctx: &mut Context<T>,
+    input_ids: &[u32],
+    cfg: &GenerationConfig,
+    tx: &mpsc::Sender<AppEvent>,
+) -> Result<Vec<u32>, MetalError> {
+    let generation_start = Instant::now();
+    let setup_duration = Cell::new(None);
+    let prompt_processing_duration = Cell::new(None);
+    let mut generated_ids: Vec<u32> = Vec::new();
+
+    let mut token_callback = |token_id: u32, decoded_token: Arc<str>, iteration_duration: Duration| -> Result<bool, MetalError> {
+        generated_ids.push(token_id);
+
+        let setup = setup_duration.get();
+        let prompt_duration = prompt_processing_duration
+            .get()
+            // Fallback: preserve the previous behavior if timings aren't emitted for any reason.
+            .unwrap_or_else(|| generation_start.elapsed());
+
+        if tx
+            .send(AppEvent::Token {
+                text: decoded_token,
+                setup_duration: setup,
+                prompt_processing: prompt_duration,
+                iteration: (!iteration_duration.is_zero()).then_some(iteration_duration),
+            })
+            .is_err()
+        {
+            return Ok(false); // Stop generation if UI thread has disconnected
+        }
+        Ok(true)
+    };
+
+    generate_autoregressive_with_kv_cache_streaming_with_timings(
+        qwen,
+        tokenizer,
+        ctx,
+        input_ids,
+        cfg,
+        &mut token_callback,
+        tx,
+        &setup_duration,
+        &prompt_processing_duration,
+    )?;
+
+    let total_generation_time = generation_start.elapsed();
+    let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
+    Ok(generated_ids)
+}
+
 /// High-level autoregressive generation loop with streaming support using Qwen25 with KV Caching.
 #[allow(clippy::too_many_arguments)]
 pub fn generate_autoregressive_with_kv_cache_streaming<F, T: TensorElement>(

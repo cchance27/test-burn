@@ -815,6 +815,76 @@ impl Stage for WarpWriteOutputStage {
     }
 }
 
+/// Stage that writes the reduced result to output with optional bias (no residual).
+///
+/// This is used by kernels that already consume higher buffer slots (e.g. fused RMSNorm paths)
+/// and don't support/need residual accumulation in the write stage.
+#[derive(Debug, Clone)]
+pub struct WarpWriteOutputNoResidualStage;
+
+impl WarpWriteOutputNoResidualStage {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for WarpWriteOutputNoResidualStage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Stage for WarpWriteOutputNoResidualStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec![]
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        vec![
+            BufferArg {
+                name: "output",
+                metal_type: "device half*",
+                buffer_index: 3,
+            },
+            BufferArg {
+                name: "bias",
+                metal_type: "const device half*",
+                buffer_index: 7,
+            },
+            BufferArg {
+                name: "has_bias",
+                metal_type: "constant uint&",
+                buffer_index: 8,
+            },
+            BufferArg {
+                name: "alpha",
+                metal_type: "constant float&",
+                buffer_index: 9,
+            },
+        ]
+    }
+
+    fn struct_defs(&self) -> String {
+        GEMV_METAL.to_string()
+    }
+
+    fn emit(&self, _prev: &str) -> (String, String) {
+        let code = r#"
+    // Write output (only lane 0 of each warp)
+    if (lane_id == 0) {
+        float result = row_sum * alpha;
+        if (has_bias != 0) {
+            result += (float)bias[row_idx];
+        }
+        output[batch_idx * n_dim + row_idx] = (half)result;
+    }
+"#
+        .to_string();
+
+        ("void".to_string(), code)
+    }
+}
+
 // =============================================================================
 // ScalarDotStage - Thread-per-row dot product (Large N optimized)
 // =============================================================================

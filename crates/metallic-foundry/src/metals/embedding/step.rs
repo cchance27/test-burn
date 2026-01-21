@@ -149,7 +149,7 @@ pub struct EmbeddingStage {
 
 impl Stage for EmbeddingStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec!["embedding/embedding.metal", self.quant.include_path()]
+        vec!["embedding/embedding.metal"]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -183,14 +183,18 @@ impl Stage for EmbeddingStage {
     }
 
     fn emit(&self, _input_var: &str) -> (String, String) {
-        let policy_name = self.quant.policy_name();
         (
             "output".to_string(),
-            format!(
-                r#"
-    run_embedding_core<{policy_name}>(table, scale_bytes, indices, output, params, gid);
+            match self.quant {
+                Quantization::F16 => r#"
+    run_embedding_core_f16(table, indices, output, params, gid.x);
 "#
-            ),
+                .to_string(),
+                Quantization::Q8 => r#"
+    run_embedding_core_q8(table, scale_bytes, indices, output, params, gid.x);
+"#
+                .to_string(),
+            },
         )
     }
 

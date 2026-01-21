@@ -36,6 +36,7 @@ struct ModelSession {
     input_ids_full: crate::types::MetalBuffer,
     input_ids_capacity: usize,
     sample_out_buffers: Vec<crate::types::MetalBuffer>,
+    current_pos: usize,
 }
 
 impl CompiledModel {
@@ -234,6 +235,7 @@ impl CompiledModel {
             input_ids_full,
             input_ids_capacity: max_seq_len,
             sample_out_buffers,
+            current_pos: 0,
         });
         Ok(())
     }
@@ -1049,6 +1051,13 @@ impl CompiledModel {
         let session = session_guard
             .as_mut()
             .ok_or_else(|| MetalError::OperationFailed("Foundry session missing after initialization".into()))?;
+        let start_pos = session.current_pos;
+        tracing::info!(
+            "Foundry generate start: pos={}, prompt_tokens len={}, tokens={:?}",
+            start_pos,
+            prompt_tokens.len(),
+            prompt_tokens
+        );
         let bindings = &mut session.bindings;
         let fast_bindings = &mut session.fast_bindings;
 
@@ -1059,9 +1068,9 @@ impl CompiledModel {
         let ff_dim = arch.ff_dim;
 
         let prompt_len = prompt_tokens.len();
-        if prompt_len > session.input_ids_capacity {
+        if prompt_len + start_pos > session.input_ids_capacity {
             return Err(MetalError::InvalidShape(format!(
-                "Prompt length {prompt_len} exceeds max_seq_len {}",
+                "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_seq_len {}",
                 session.input_ids_capacity
             )));
         }
@@ -1070,7 +1079,7 @@ impl CompiledModel {
         unsafe {
             use objc2_metal::MTLBuffer;
             let ptr = session.input_ids_full.0.contents().as_ptr() as *mut u32;
-            std::ptr::copy_nonoverlapping(prompt_tokens.as_ptr(), ptr, prompt_len);
+            std::ptr::copy_nonoverlapping(prompt_tokens.as_ptr(), ptr.add(start_pos), prompt_len);
         }
 
         // Defaults for single-token inference (MatMul dispatch). Batched prefill overrides these.
@@ -1107,7 +1116,15 @@ impl CompiledModel {
         //
         // Set `METALLIC_DISABLE_BATCHED_PREFILL=1` to force fully sequential prefill for isolation.
         let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
-        let disable_batched_prefill = profiling_per_kernel || std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
+        let disable_batched_prefill_env = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
+        let force_batched_prefill_env = std::env::var("METALLIC_FORCE_BATCHED_PREFILL").is_ok();
+
+        // DEBT: Batched prefill with a non-zero `start_pos` is currently unstable for multi-turn chat
+        // (prefill over a context that already has KV history). Until we have a robust parity test for
+        // `position_offset > 0` and fix the underlying issue, we fall back to sequential prefill for
+        // continuation prompts.
+        let disable_batched_prefill =
+            profiling_per_kernel || disable_batched_prefill_env || (!force_batched_prefill_env && start_pos > 0 && prompt_len > 1);
 
         // We use "prefill_chunk_size" as the vector width (m) for batched prefill and as a capture
         // batching knob in sequential mode.
@@ -1147,7 +1164,7 @@ impl CompiledModel {
             for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(chunk_size).enumerate() {
                 let m = chunk_tokens.len();
                 last_prefill_m = m;
-                let base_pos = chunk_idx * chunk_size;
+                let base_pos = start_pos + chunk_idx * chunk_size;
 
                 if debug_sync && !profiling_per_kernel {
                     foundry.start_capture()?;
@@ -1195,7 +1212,7 @@ impl CompiledModel {
             bindings.set_int_global("total_elements_ffn", ff_dim);
 
             for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
-                let base_pos = chunk_idx * prefill_chunk_size;
+                let base_pos = start_pos + chunk_idx * prefill_chunk_size;
 
                 if !profiling_per_kernel && (debug_sync || chunk_idx == 0) {
                     foundry.start_capture()?;
@@ -1333,7 +1350,7 @@ impl CompiledModel {
 
             // 4. Update globals for the NEXT forward pass
             // We are about to run forward for position `prompt_len + step` (the token we just sampled)
-            update_pos_globals(bindings, prompt_len + step);
+            update_pos_globals(bindings, start_pos + prompt_len + step);
 
             // 5. Run Forward (predicts next token's logits)
             self.forward(foundry, bindings, &*fast_bindings)?;
@@ -1450,6 +1467,14 @@ impl CompiledModel {
                 }
             }
         }
+
+        session.current_pos += prompt_len + generated.len();
+        tracing::info!(
+            "Foundry loop done. Tokens: {:?} (len={}), New Pos: {}",
+            generated,
+            generated.len(),
+            session.current_pos
+        );
 
         Ok(generated)
     }

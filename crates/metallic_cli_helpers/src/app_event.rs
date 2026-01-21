@@ -110,4 +110,7 @@ pub enum AppEvent {
     StatsUpdate(Vec<StatsRow>),
     Alert(Alert),
     LogMessage(String),
+    /// UI-only: append a user prompt to the transcript (e.g. queued CLI turns when running the TUI).
+    UserPrompt(String),
+    Input(String),
 }

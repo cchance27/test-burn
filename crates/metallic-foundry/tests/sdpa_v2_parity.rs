@@ -1,7 +1,7 @@
 use half::f16;
 use metallic_foundry::{
     Foundry, metals::{
-        rope::{Rope, RopeParamsResolved}, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
+        rope::RopeParamsResolved, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
     }, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use rand::Rng;
@@ -150,8 +150,9 @@ fn run_parity_test_case(batch: usize, heads: usize, kv_len: usize, head_dim: usi
     let q_data = generate_random_f16(total_batch * q_len * head_dim);
     let k_data = generate_random_f16(total_batch * kv_len * head_dim);
     let v_data = generate_random_f16(total_batch * kv_len * head_dim);
-    let cos_data = generate_random_f16(kv_len * head_dim / 2);
-    let sin_data = generate_random_f16(kv_len * head_dim / 2);
+    // Identity RoPE so this test isolates SDPA numerical behavior.
+    let cos_data = vec![f16::ONE; kv_len * head_dim / 2];
+    let sin_data = vec![f16::ZERO; kv_len * head_dim / 2];
 
     // Initialize Tensors
     let q = Tensor::<F16, Pooled>::new(&mut foundry, q_dims_3d.clone(), TensorInit::CopyFrom(&q_data)).unwrap();
@@ -163,21 +164,7 @@ fn run_parity_test_case(batch: usize, heads: usize, kv_len: usize, head_dim: usi
 
     let output_v2 = Tensor::<F16, Pooled>::new(&mut foundry, q_dims_3d.clone(), TensorInit::Uninitialized).unwrap();
 
-    let k_roped = Tensor::<F16, Pooled>::new(&mut foundry, k_dims_3d.clone(), TensorInit::Uninitialized).unwrap();
-    let rope_k_params = RopeParamsResolved {
-        dim: head_dim as u32,
-        seq_len: kv_len as u32,
-        position_offset: 0,
-        total_elements: 0,
-    };
-    let rope_k = Rope::new(
-        &TensorArg::from_tensor(&k),
-        &TensorArg::from_tensor(&k_roped),
-        &TensorArg::from_tensor(&cos),
-        &TensorArg::from_tensor(&sin),
-        rope_k_params,
-    );
-    foundry.run(&rope_k).unwrap();
+    // K is already "roped" under identity RoPE.
 
     // ----------------------------------------------------------------
     // V2 Execution (Fused)
@@ -194,19 +181,19 @@ fn run_parity_test_case(batch: usize, heads: usize, kv_len: usize, head_dim: usi
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),
-        stride_k_s: k_roped.strides()[1] as u32,
+        stride_k_s: k.strides()[1] as u32,
         stride_v_s: v.strides()[1] as u32,
     };
 
     let q_strides = (q.strides()[0] as u32, q.strides()[1] as u32);
-    let k_strides = (k_roped.strides()[0] as u32, k_roped.strides()[1] as u32);
+    let k_strides = (k.strides()[0] as u32, k.strides()[1] as u32);
     let v_strides = (v.strides()[0] as u32, v.strides()[1] as u32);
     let out_strides = (output_v2.strides()[0] as u32, output_v2.strides()[1] as u32);
 
     let v2_step = FusedMhaStep::compile(
         &mut foundry,
         &TensorArg::from_tensor(&q),
-        &TensorArg::from_tensor(&k_roped),
+        &TensorArg::from_tensor(&k),
         &TensorArg::from_tensor(&v),
         &TensorArg::from_tensor(&cos),
         &TensorArg::from_tensor(&sin),

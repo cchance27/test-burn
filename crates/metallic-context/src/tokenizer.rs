@@ -79,6 +79,11 @@ pub struct Tokenizer {
     merges_results: FxHashMap<(u32, u32), u32>,
     /// Array for O(1) byte-to-unicode mapping
     byte_encoder_array: [char; 256],
+    /// LUT for inverse byte decoding (unicode codepoint -> byte+1).
+    ///
+    /// The GPT-2 byte encoder maps all 256 bytes into the range U+0021..U+00FF and U+0100..U+01FF,
+    /// so a small fixed LUT is enough for the hot path.
+    byte_decoder_lut: [u16; 512],
     /// Cache for single-character token lookups
     char_vocab: FxHashMap<char, u32>,
 }
@@ -126,6 +131,15 @@ impl Tokenizer {
             byte_encoder_array[*b as usize] = *c;
         }
 
+        let mut byte_decoder_lut = [0u16; 512];
+        for (b, c) in &byte_encoder {
+            let idx = *c as usize;
+            if idx >= byte_decoder_lut.len() {
+                return Err(TokenizerError::InitializationFailed("byte decoder LUT overflow".to_string()).into());
+            }
+            byte_decoder_lut[idx] = (*b as u16) + 1;
+        }
+
         // Create a cache for single-character tokens
         let mut char_vocab = FxHashMap::default();
         for (token, &id) in &vocab_r {
@@ -153,6 +167,7 @@ impl Tokenizer {
             merges_ranks,
             merges_results,
             byte_encoder_array,
+            byte_decoder_lut,
             char_vocab,
         })
     }
@@ -542,6 +557,11 @@ impl Tokenizer {
             }
         }
 
+        if !byte_scratch.is_empty() {
+            result.push_str(&String::from_utf8_lossy(&byte_scratch));
+            byte_scratch.clear();
+        }
+
         Ok(result)
     }
 
@@ -568,29 +588,88 @@ impl Tokenizer {
         }
 
         let token = self.vocab.get(&token_id).ok_or(TokenizerError::InvalidTokenId(token_id))?;
+        let token_str = token.as_ref();
 
-        let arc = match token_type {
+        // Fast path: pure ASCII tokens can be returned directly (most special/chat tokens).
+        if token_type != 6 && token_str.is_ascii() {
+            return Ok(Some(Arc::clone(token)));
+        }
+
+        match token_type {
             6 => {
-                byte_scratch.clear();
-                let token_str = token.as_ref();
+                // GGUF byte token representation (rare for Qwen, but supported).
                 if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
                     let byte = u8::from_str_radix(&token_str[3..5], 16).map_err(|_| TokenizerError::InvalidTokenId(token_id))?;
                     byte_scratch.push(byte);
-                    scratch.push_str(&String::from_utf8_lossy(byte_scratch));
-                    Arc::<str>::from(std::mem::take(scratch))
                 } else {
                     return Err(TokenizerError::InvalidTokenId(token_id).into());
                 }
             }
-            _ if Self::needs_post_process(token.as_ref()) => {
-                scratch.push_str(token.as_ref());
-                self.post_process_in_place(scratch);
-                Arc::<str>::from(std::mem::take(scratch))
+            _ => {
+                // GPT-2 byte decoder: map token unicode chars back to bytes.
+                for ch in token_str.chars() {
+                    let idx = ch as usize;
+                    if idx < self.byte_decoder_lut.len() {
+                        let v = self.byte_decoder_lut[idx];
+                        if v != 0 {
+                            byte_scratch.push((v - 1) as u8);
+                            continue;
+                        }
+                    }
+                    // Fallback: encode the character as UTF-8 bytes.
+                    let mut tmp = [0u8; 4];
+                    let encoded = ch.encode_utf8(&mut tmp);
+                    byte_scratch.extend_from_slice(encoded.as_bytes());
+                }
             }
-            _ => Arc::clone(token),
-        };
+        }
 
-        Ok(Some(arc))
+        if byte_scratch.is_empty() {
+            return Ok(None);
+        }
+
+        // Streaming UTF-8 decode: emit valid prefix, keep incomplete tail (<=3 bytes).
+        match std::str::from_utf8(byte_scratch) {
+            Ok(s) => {
+                scratch.push_str(s);
+                byte_scratch.clear();
+            }
+            Err(err) => {
+                let valid = err.valid_up_to();
+                if valid > 0 {
+                    // SAFETY: `valid_up_to` is always on a UTF-8 boundary.
+                    let prefix = unsafe { std::str::from_utf8_unchecked(&byte_scratch[..valid]) };
+                    scratch.push_str(prefix);
+                }
+
+                match err.error_len() {
+                    None => {
+                        // Incomplete sequence at the end: keep the tail for the next token.
+                        let len = byte_scratch.len();
+                        if valid < len {
+                            byte_scratch.copy_within(valid.., 0);
+                            byte_scratch.truncate(len - valid);
+                        } else {
+                            byte_scratch.clear();
+                        }
+                    }
+                    Some(_) => {
+                        // Invalid bytes: fall back to lossy decode and reset.
+                        scratch.push_str(&String::from_utf8_lossy(byte_scratch));
+                        byte_scratch.clear();
+                    }
+                }
+            }
+        }
+
+        if Self::needs_post_process(scratch) {
+            self.post_process_in_place(scratch);
+        }
+
+        if scratch.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(Arc::<str>::from(std::mem::take(scratch))))
     }
 
     fn start_index(&self, tokens: &[u32]) -> usize {
@@ -691,6 +770,38 @@ impl Tokenizer {
         self.encode(&formatted)
     }
 
+    /// Format a continuation chat prompt (User + Assistant start) without System prompt.
+    pub fn format_chat_continuation_prompt(&self, prompt: &str) -> String {
+        const IM_START: &str = "<|im_start|>";
+        const IM_END: &str = "<|im_end|>";
+
+        if prompt.contains(IM_START) {
+            return prompt.to_string();
+        }
+        if self.chat_template.is_none() {
+            return prompt.to_string();
+        }
+
+        // Continue a chat by appending a new user turn and opening the assistant turn.
+        //
+        // Note: The previous assistant message is typically already closed by the generation stop token
+        // (`<|im_end|>` for Qwen-style templates), so we do not prepend another `<|im_end|>` here.
+        let mut out = String::with_capacity(prompt.len() + 64);
+        out.push_str(IM_START);
+        out.push_str("user\n");
+        out.push_str(prompt);
+        out.push_str(IM_END);
+        out.push('\n');
+        out.push_str(IM_START);
+        out.push_str("assistant\n");
+        out
+    }
+
+    pub fn encode_chat_continuation_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
+        let formatted = self.format_chat_continuation_prompt(prompt);
+        self.encode(&formatted)
+    }
+
     /// Get a token by ID (for testing purposes)
     #[cfg(test)]
     pub fn get_token(&self, id: u32) -> Option<Arc<str>> {
@@ -719,5 +830,53 @@ impl Tokenizer {
             .read()
             .map_err(|_| TokenizerError::InitializationFailed("Cache lock poisoned".to_string()))?;
         Ok(cache.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rustc_hash::FxHashMap;
+
+    use super::{SpecialTokens, Tokenizer};
+
+    #[test]
+    fn format_chat_continuation_prompt_inserts_turn_boundary_for_chat_templates() {
+        let tokenizer = Tokenizer::new(
+            FxHashMap::default(),
+            Vec::new(),
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            Some("dummy".to_string()),
+        )
+        .unwrap();
+
+        let formatted = tokenizer.format_chat_continuation_prompt("hello");
+        assert_eq!(formatted, "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n");
+    }
+
+    #[test]
+    fn decode_maps_gpt2_byte_encoder_space() {
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0u32, "Ġ".to_string()); // byte-encoded space (0x20)
+        vocab.insert(1u32, "h".to_string());
+
+        let tokenizer = Tokenizer::new(vocab, Vec::new(), FxHashMap::default(), SpecialTokens::default(), false, None).unwrap();
+
+        let decoded = tokenizer.decode_lossless(&[0, 1]).unwrap();
+        assert_eq!(decoded, " h");
+    }
+
+    #[test]
+    fn decode_streaming_joins_multibyte_utf8_sequences() {
+        // UTF-8 for "é" is 0xC3 0xA9, which appears as "Ã©" when not byte-decoded.
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0u32, "Ã".to_string());
+        vocab.insert(1u32, "©".to_string());
+
+        let tokenizer = Tokenizer::new(vocab, Vec::new(), FxHashMap::default(), SpecialTokens::default(), false, None).unwrap();
+
+        let decoded = tokenizer.decode_lossless(&[0, 1]).unwrap();
+        assert_eq!(decoded, "é");
     }
 }

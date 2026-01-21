@@ -8,7 +8,7 @@ use metallic_foundry::{
         gemv::{
             qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage
-    }, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, storage::Pooled, tensor::{F16, Tensor, TensorInit, U8}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use objc2_metal::MTLCommandBuffer as _;
 use rand::Rng;
@@ -189,6 +189,34 @@ fn quantize_q8_legacy(k: usize, n: usize, weights: &[f16]) -> (Vec<u8>, Vec<u8>)
     (data, scales)
 }
 
+fn swizzle_q8_weights_nk(rows_n: usize, cols_k: usize, raw_weights: &[u8]) -> Vec<u8> {
+    let weights_per_block = 32;
+    let blocks_per_row = cols_k.div_ceil(weights_per_block);
+    let expected_bytes = rows_n * blocks_per_row * weights_per_block;
+    assert_eq!(
+        raw_weights.len(),
+        expected_bytes,
+        "swizzle_q8_weights_nk: expected {} bytes for rows_n={} cols_k={} (blocks_per_row={}), got {}",
+        expected_bytes,
+        rows_n,
+        cols_k,
+        blocks_per_row,
+        raw_weights.len()
+    );
+
+    let mut swizzled = vec![0u8; raw_weights.len()];
+    for k_block in 0..blocks_per_row {
+        for row in 0..rows_n {
+            let src_block = row * blocks_per_row + k_block;
+            let dst_block = k_block * rows_n + row;
+            let src = src_block * weights_per_block;
+            let dst = dst_block * weights_per_block;
+            swizzled[dst..dst + weights_per_block].copy_from_slice(&raw_weights[src..src + weights_per_block]);
+        }
+    }
+    swizzled
+}
+
 #[test]
 #[serial]
 #[allow(clippy::too_many_arguments)]
@@ -251,19 +279,19 @@ fn test_qkv_parity() {
     let x_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![k_dim], TensorInit::CopyFrom(&x_data)).unwrap();
     let gamma_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![k_dim], TensorInit::CopyFrom(&gamma_data)).unwrap();
 
-    let wq_f16 = unsafe { std::slice::from_raw_parts(wq_bytes.as_ptr() as *const f16, wq_bytes.len() / 2) };
-    let sq_f16 = unsafe { std::slice::from_raw_parts(sq_bytes.as_ptr() as *const f16, sq_bytes.len() / 2) };
-    let wk_f16 = unsafe { std::slice::from_raw_parts(wk_bytes.as_ptr() as *const f16, wk_bytes.len() / 2) };
-    let sk_f16 = unsafe { std::slice::from_raw_parts(sk_bytes.as_ptr() as *const f16, sk_bytes.len() / 2) };
-    let wv_f16 = unsafe { std::slice::from_raw_parts(wv_bytes.as_ptr() as *const f16, wv_bytes.len() / 2) };
-    let sv_f16 = unsafe { std::slice::from_raw_parts(sv_bytes.as_ptr() as *const f16, sv_bytes.len() / 2) };
+    // QKV kernels use a K-block-major (Canonical) weight layout for streaming efficiency.
+    // Scales remain row-major (per-row block scales are indexed separately).
+    let wq_swizzled = swizzle_q8_weights_nk(n_dim, k_dim, &wq_bytes);
+    let wk_swizzled = swizzle_q8_weights_nk(n_kv, k_dim, &wk_bytes);
+    let wv_swizzled = swizzle_q8_weights_nk(n_kv, k_dim, &wv_bytes);
 
-    let wq_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![wq_bytes.len() / 2], TensorInit::CopyFrom(wq_f16)).unwrap();
-    let sq_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![sq_bytes.len() / 2], TensorInit::CopyFrom(sq_f16)).unwrap();
-    let wk_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![wk_bytes.len() / 2], TensorInit::CopyFrom(wk_f16)).unwrap();
-    let sk_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![sk_bytes.len() / 2], TensorInit::CopyFrom(sk_f16)).unwrap();
-    let wv_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![wv_bytes.len() / 2], TensorInit::CopyFrom(wv_f16)).unwrap();
-    let sv_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![sv_bytes.len() / 2], TensorInit::CopyFrom(sv_f16)).unwrap();
+    // Q8_0 weights + scales are packed bytes on GPU (`device uchar*`), so upload as raw U8 tensors.
+    let wq_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![wq_swizzled.len()], TensorInit::CopyFrom(&wq_swizzled)).unwrap();
+    let sq_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![sq_bytes.len()], TensorInit::CopyFrom(&sq_bytes)).unwrap();
+    let wk_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![wk_swizzled.len()], TensorInit::CopyFrom(&wk_swizzled)).unwrap();
+    let sk_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![sk_bytes.len()], TensorInit::CopyFrom(&sk_bytes)).unwrap();
+    let wv_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![wv_swizzled.len()], TensorInit::CopyFrom(&wv_swizzled)).unwrap();
+    let sv_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![sv_bytes.len()], TensorInit::CopyFrom(&sv_bytes)).unwrap();
 
     let b_q_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_q_data)).unwrap();
     let b_k_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_kv], TensorInit::CopyFrom(&b_k_data)).unwrap();
@@ -277,7 +305,7 @@ fn test_qkv_parity() {
     let kernel = Box::leak(Box::new(
         CompoundKernel::new("fused_qkv_rmsnorm_test")
             .with_manual_output(true)
-            .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
+            .prologue(WarpLayoutStage::new(Layout::Canonical).with_warps(8))
             .prologue(RmsNormComputeStage::new(6, 7))
             .main(ParallelProjectStage::new(Quantization::Q8).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)

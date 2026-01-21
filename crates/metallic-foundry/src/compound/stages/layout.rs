@@ -249,6 +249,7 @@ impl Stage for WarpLayoutStage {
 #define WEIGHT_STRIDE_K 1
 #define WEIGHT_STRIDE_ROW K
 #define IS_K_CONTIGUOUS 1
+#define IS_CANONICAL 0
 #define WEIGHT_INDEX(row, k, K, N) ((row) * (K) + (k))
 "#
             }
@@ -259,6 +260,7 @@ impl Stage for WarpLayoutStage {
 #define WEIGHT_STRIDE_K N
 #define WEIGHT_STRIDE_ROW 1
 #define IS_K_CONTIGUOUS 0
+#define IS_CANONICAL 0
 #define WEIGHT_INDEX(row, k, K, N) ((k) * (N) + (row))
 "#
             }
@@ -267,6 +269,7 @@ impl Stage for WarpLayoutStage {
 // Layout: Canonical Blocked - Weights shape [N, K] with K blocked
 // weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
 #define IS_K_CONTIGUOUS 1
+#define IS_CANONICAL 1
 #define WEIGHT_INDEX(row, k, K, N) ((k % weights_per_block) + weights_per_block * ((row) + ((k) / weights_per_block) * (N)))
 "#
             }

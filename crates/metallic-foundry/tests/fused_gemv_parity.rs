@@ -4,11 +4,11 @@ use metallic_foundry::{
         CompoundKernel, stages::{Layout, Quantization, WarpLayoutStage, WarpReduceStage}
     }, metals::{
         gemv::{
-            fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputStage}, warp_dispatch_config
+            fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, warp_dispatch_config
         }, rmsnorm::stages::RmsNormComputeStage
     }, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}, types::TensorArg
 };
-use rand::{Rng, rng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use serial_test::serial;
 
 // ============================================================================
@@ -111,7 +111,9 @@ impl Default for FusedTestConfig {
 #[allow(clippy::too_many_arguments)]
 fn run_fused_gemv_test(cfg: FusedTestConfig) {
     let mut foundry = Foundry::new().unwrap();
-    let mut rng = rng();
+    let seed =
+        (cfg.k as u64) ^ ((cfg.n as u64) << 32) ^ ((cfg.with_bias as u64) << 1) ^ ((cfg.with_norm as u64) << 2) ^ 0x9e37_79b9_7f4a_7c15;
+    let mut rng = StdRng::seed_from_u64(seed);
 
     // Setup Data
     let block_size = 32;
@@ -155,7 +157,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
     // 2. Run Fused Kernel
     let mut builder = CompoundKernel::new("test_fused_gemv")
         .with_manual_output(true)
-        .prologue(WarpLayoutStage::new(Layout::RowMajor)); // Defines row_idx, lane_id
+        .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)); // Defines row_idx, lane_id
 
     if cfg.with_norm {
         builder = builder.prologue(RmsNormComputeStage::new(2, 4));
@@ -170,7 +172,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         builder
             .main(dot_stage)
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .epilogue(WarpWriteOutputStage::new())
+            .epilogue(WarpWriteOutputNoResidualStage::new())
             .compile(),
     ));
 

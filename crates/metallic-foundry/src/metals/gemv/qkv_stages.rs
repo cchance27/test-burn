@@ -230,13 +230,18 @@ impl Stage for ParallelProjectStage {
         // Checks if WPB==32 (constant fold if specialized) or runtime check (uniform)
         let calc_idx = r#"
         uint w_idx;
+        #if defined(IS_CANONICAL) && IS_CANONICAL
         if (weights_per_block == 32) {
-            // Optimized: idx = (k & 31) + 32*row + (k & ~31)*N
+            // Canonical layout fast path:
+            // idx = (k % 32) + 32 * (row + (k / 32) * N)
             // Use uint arithmetic for speed (valid for models < 4GB/layer)
             w_idx = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_dim;
         } else {
             w_idx = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
         }
+        #else
+        w_idx = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        #endif
         "#;
 
         // Note: We keep w_idx as uint, but when adding to pointer (uchar*), Metal handles it.
@@ -245,11 +250,15 @@ impl Stage for ParallelProjectStage {
 
         let calc_idx_kv = r#"
         uint w_idx_kv;
+        #if defined(IS_CANONICAL) && IS_CANONICAL
         if (weights_per_block == 32) {
             w_idx_kv = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_kv;
         } else {
             w_idx_kv = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
         }
+        #else
+        w_idx_kv = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
+        #endif
         "#;
 
         // Tail generation helpers

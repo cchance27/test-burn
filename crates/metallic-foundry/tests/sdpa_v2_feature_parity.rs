@@ -73,10 +73,10 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
 
     // --- Foundry Setup (V2) ---
     let mut foundry = Foundry::new()?;
-    let q_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![total_batch, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
-    let k_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![total_batch, kv_len, head_dim], TensorInit::CopyFrom(&k_data))?;
-    let v_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![total_batch, kv_len, head_dim], TensorInit::CopyFrom(&v_data))?;
-    let out_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![total_batch, q_len, head_dim], TensorInit::Uninitialized)?;
+    let q_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
+    let k_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![batch, heads, kv_len, head_dim], TensorInit::CopyFrom(&k_data))?;
+    let v_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![batch, heads, kv_len, head_dim], TensorInit::CopyFrom(&v_data))?;
+    let out_f = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::Uninitialized)?;
 
     let cos_data = vec![f16::ONE; kv_len * head_dim / 2]; // Identity rotation
     let sin_data = vec![f16::ZERO; kv_len * head_dim / 2];
@@ -94,8 +94,8 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
         kv_len: kv_len as u32,
         head_dim: head_dim as u32,
         scale: 1.0 / (head_dim as f32).sqrt(),
-        stride_k_s: k_f.strides()[1] as u32,
-        stride_v_s: v_f.strides()[1] as u32,
+        stride_k_s: k_f.strides()[2] as u32,
+        stride_v_s: v_f.strides()[2] as u32,
     };
 
     let q_strides = (q_f.strides()[0] as u32, q_f.strides()[1] as u32);
@@ -113,8 +113,8 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
         &metallic_foundry::TensorArg::from_tensor(&out_f),
         rope_params,
         sdpa_params,
-        total_batch as u32,
-        1,
+        batch as u32,
+        heads as u32,
         head_dim as u32,
         q_strides,
         k_strides,
@@ -137,27 +137,29 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
     let mut ctx = Context::<F16Element>::new().unwrap();
 
     let q_leg = LegacyTensor::<LegacyF16>::new(
-        vec![1, q_len, head_dim],
+        vec![total_batch, q_len, head_dim],
         LegacyStorage::Pooled(&mut ctx),
         LegacyInit::CopyFrom(&q_data),
     )
     .map_err(map_legacy_err)?;
 
     let k_leg = LegacyTensor::<LegacyF16>::new(
-        vec![1, kv_len, head_dim],
+        vec![total_batch, kv_len, head_dim],
         LegacyStorage::Pooled(&mut ctx),
         LegacyInit::CopyFrom(&k_data),
     )
     .map_err(map_legacy_err)?;
 
     let v_leg = LegacyTensor::<LegacyF16>::new(
-        vec![1, kv_len, head_dim],
+        vec![total_batch, kv_len, head_dim],
         LegacyStorage::Pooled(&mut ctx),
         LegacyInit::CopyFrom(&v_data),
     )
     .map_err(map_legacy_err)?;
 
-    let out_ctx = ctx.scaled_dot_product_attention(&q_leg, &k_leg, &v_leg, true).unwrap();
+    let out_ctx = ctx
+        .scaled_dot_product_attention_with_offset(&q_leg, &k_leg, &v_leg, true, kv_len - 1)
+        .unwrap();
 
     let res_c_vec = out_ctx.try_to_vec().unwrap();
 

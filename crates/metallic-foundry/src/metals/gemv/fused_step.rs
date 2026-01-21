@@ -8,7 +8,7 @@ use objc2_metal::MTLComputePipelineState;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    stages::{VectorizedDotStage, WarpWriteOutputStage}, step::{GemvStrategy, warp_dispatch_config}
+    stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, step::{GemvStrategy, warp_dispatch_config}
 };
 use crate::{
     Foundry, MetalError, compound::{
@@ -195,11 +195,11 @@ fn get_fused_gemv_kernel(_strategy: GemvStrategy, quant: Quantization) -> &'stat
     let compiled = Box::leak(Box::new(
         CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
-            .prologue(WarpLayoutStage::new(Layout::RowMajor)) // Defines row_idx, lane_id
+            .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)) // Defines row_idx, lane_id
             .prologue(RmsNormComputeStage::new(2, 4))
             .main(VectorizedDotStage::new(quant).with_norm(10, "inv_rms"))
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .epilogue(WarpWriteOutputStage::new())
+            .epilogue(WarpWriteOutputNoResidualStage::new())
             .compile(),
     ));
 

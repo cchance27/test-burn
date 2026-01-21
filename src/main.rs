@@ -13,12 +13,32 @@ use rustc_hash::FxHashMap;
 mod cli;
 mod tui;
 
+use std::sync::OnceLock;
+
 use clap::Parser;
 use crossterm::event::{self, Event as CrosstermEvent, MouseButton, MouseEvent};
 use ratatui::{
     Terminal, backend::{Backend, CrosstermBackend}, layout::Position
 };
 use tui::{App, AppResult, app::FocusArea, ui};
+
+static LOG_SENDER: OnceLock<mpsc::Sender<AppEvent>> = OnceLock::new();
+
+struct AppLogWriter;
+
+impl std::io::Write for AppLogWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let msg = String::from_utf8_lossy(buf).trim_end().to_string();
+        if let Some(tx) = LOG_SENDER.get() {
+            let _ = tx.send(AppEvent::LogMessage(msg));
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
 
 fn main() -> AppResult<()> {
     // Ensure profiling state is initialized from the environment before anything else.
@@ -67,9 +87,33 @@ fn main() -> AppResult<()> {
 
     alert::init_error_logging();
     let gguf_path = cli_config.gguf_path.clone();
-    let prompt = cli_config.get_prompt();
+    let prompts = cli_config.get_prompts();
+    let worker_generation = cli_config.generation;
+    let worker_backend = cli_config.backend;
+    let worker_sdpa_backend = cli_config.sdpa_backend;
+    let worker_engine = cli_config.engine;
+    let worker_output_format = cli_config.output_format.clone();
 
     let (tx, rx) = mpsc::channel();
+    let (cmd_tx, cmd_rx) = mpsc::channel();
+
+    // Initialize logging based on mode
+    if matches!(cli_config.output_format, cli::config::OutputFormat::Tui) {
+        // In TUI mode, redirect logs to the app event channel
+        let _ = LOG_SENDER.set(tx.clone());
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with_writer(|| AppLogWriter)
+            .with_target(false)
+            .without_time() // TUI log pane is narrow, save space
+            .init();
+    } else {
+        // In text/JSON mode, log to stderr (default) so stdout is clean for output
+        tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
+            .with_writer(std::io::stderr)
+            .init();
+    }
 
     let generation_handle = {
         let worker_tx = tx.clone();
@@ -94,7 +138,7 @@ fn main() -> AppResult<()> {
                 let mut ctx = Context::<F16Element>::new()?;
 
                 // Apply global backend override first (affects all kernels that consult the registry)
-                if let Some(choice) = cli_config.backend {
+                if let Some(choice) = worker_backend {
                     let override_policy = match choice {
                         cli::config::GlobalBackendChoice::Auto => KernelBackendOverride::Auto,
                         cli::config::GlobalBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
@@ -104,7 +148,7 @@ fn main() -> AppResult<()> {
                 }
 
                 // Then apply per-op SDPA override if provided (takes precedence for sdpa)
-                if let Some(choice) = cli_config.sdpa_backend {
+                if let Some(choice) = worker_sdpa_backend {
                     let override_policy = match choice {
                         cli::config::SdpaBackendChoice::Auto => KernelBackendOverride::Auto,
                         cli::config::SdpaBackendChoice::Legacy => KernelBackendOverride::Force(KernelBackendKind::Legacy),
@@ -118,7 +162,7 @@ fn main() -> AppResult<()> {
 
                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
-                match cli_config.engine {
+                match worker_engine {
                     cli::config::Engine::Context => {
                         worker_tx.send(AppEvent::StatusUpdate("Loading model...".to_string()))?;
                         let loader = GGUFModelLoader::new(gguf);
@@ -141,28 +185,60 @@ fn main() -> AppResult<()> {
                         let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
                         emit_startup_memory_update(&worker_tx)?;
 
+                        let cfg = metallic_context::generation::GenerationConfig {
+                            max_tokens: worker_generation.max_tokens,
+                            temperature: worker_generation.temperature as f32,
+                            top_p: worker_generation.top_p as f32,
+                            top_k: worker_generation.top_k,
+                            kv_initial_headroom_tokens: (worker_generation.max_tokens / 4).max(32),
+                            seed: worker_generation.seed,
+                        };
+
                         worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                        let tokens = tokenizer.encode_single_turn_chat_prompt(&prompt)?;
-                        worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
+                        let mut conversation_tokens = tokenizer.encode_single_turn_chat_prompt(&prompts[0])?;
 
                         let tokenization_duration = tokenization_start.elapsed();
                         worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
 
                         emit_startup_memory_update(&worker_tx)?;
 
-                        let cfg = metallic_context::generation::GenerationConfig {
-                            max_tokens: cli_config.generation.max_tokens,
-                            temperature: cli_config.generation.temperature as f32,
-                            top_p: cli_config.generation.top_p as f32,
-                            top_k: cli_config.generation.top_k,
-                            kv_initial_headroom_tokens: (cli_config.generation.max_tokens / 4).max(32),
-                            seed: cli_config.generation.seed,
-                        };
-
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                        metallic_context::generation::generate_streaming_from_tokens(
-                            &mut qwen, &tokenizer, &mut ctx, &tokens, &cfg, &worker_tx,
-                        )?;
+
+                        if prompts.len() == 1 {
+                            worker_tx.send(AppEvent::TokenCount(conversation_tokens.len()))?;
+                            metallic_context::generation::generate_streaming_from_tokens(
+                                &mut qwen,
+                                &tokenizer,
+                                &mut ctx,
+                                &conversation_tokens,
+                                &cfg,
+                                &worker_tx,
+                            )?;
+                        } else {
+                            for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
+                                if turn_idx > 0 {
+                                    let mut next_tokens = tokenizer.encode_chat_continuation_prompt(turn_prompt)?;
+                                    if let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                        && !next_tokens.is_empty()
+                                        && next_tokens[0] == bos
+                                    {
+                                        next_tokens.remove(0);
+                                    }
+                                    conversation_tokens.extend(next_tokens);
+                                }
+
+                                worker_tx.send(AppEvent::TokenCount(conversation_tokens.len()))?;
+                                let generated_ids = metallic_context::generation::generate_streaming_from_tokens_collect(
+                                    &mut qwen,
+                                    &tokenizer,
+                                    &mut ctx,
+                                    &conversation_tokens,
+                                    &cfg,
+                                    &worker_tx,
+                                )?;
+                                conversation_tokens.extend(generated_ids);
+                            }
+                        }
                     }
 
                     cli::config::Engine::Foundry => {
@@ -214,31 +290,108 @@ fn main() -> AppResult<()> {
                         let tokenization_start = std::time::Instant::now();
                         let tokenizer = model.tokenizer()?;
 
+                        let interactive = matches!(worker_output_format, cli::config::OutputFormat::Tui);
+
                         worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                        let tokens = tokenizer.encode_single_turn_chat_prompt(&prompt)?;
-                        worker_tx.send(AppEvent::TokenCount(tokens.len()))?;
+                        let tokens0 = tokenizer.encode_single_turn_chat_prompt(&prompts[0])?;
 
                         let tokenization_duration = tokenization_start.elapsed();
                         worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
 
                         let cfg = metallic_foundry::generation::GenerationConfig {
-                            max_tokens: cli_config.generation.max_tokens,
-                            temperature: cli_config.generation.temperature as f32,
-                            top_p: cli_config.generation.top_p as f32,
-                            top_k: cli_config.generation.top_k,
+                            max_tokens: worker_generation.max_tokens,
+                            temperature: worker_generation.temperature as f32,
+                            top_p: worker_generation.top_p as f32,
+                            top_k: worker_generation.top_k,
                             kv_initial_headroom_tokens: 0,
-                            seed: cli_config.generation.seed,
+                            seed: worker_generation.seed,
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
-                        metallic_foundry::generation::generate_streaming_from_tokens(
-                            &mut foundry,
-                            &model,
-                            &tokenizer,
-                            &tokens,
-                            &cfg,
-                            &worker_tx,
-                        )?;
+
+                        if !interactive {
+                            for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
+                                let mut current_tokens = if turn_idx == 0 {
+                                    tokens0.clone()
+                                } else {
+                                    tokenizer.encode_chat_continuation_prompt(turn_prompt)?
+                                };
+
+                                // Remove BOS if present to avoid polluting the context in the middle of a chat.
+                                if turn_idx > 0
+                                    && let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                    && !current_tokens.is_empty()
+                                    && current_tokens[0] == bos
+                                {
+                                    current_tokens.remove(0);
+                                }
+
+                                worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                                metallic_foundry::generation::generate_streaming_from_tokens(
+                                    &mut foundry,
+                                    &model,
+                                    &tokenizer,
+                                    &current_tokens,
+                                    &cfg,
+                                    &worker_tx,
+                                )?;
+                            }
+                        } else {
+                            let mut current_tokens = tokens0;
+                            worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                            let mut queued_cli_turns = prompts.iter().skip(1);
+                            loop {
+                                metallic_foundry::generation::generate_streaming_from_tokens(
+                                    &mut foundry,
+                                    &model,
+                                    &tokenizer,
+                                    &current_tokens,
+                                    &cfg,
+                                    &worker_tx,
+                                )?;
+
+                                // If the user provided multiple prompts on the CLI for a TUI session, consume them
+                                // as queued user turns before switching to interactive input.
+                                if let Some(turn_prompt) = queued_cli_turns.next() {
+                                    // Echo queued CLI prompts into the transcript so interactive users don't see the chat "lag"
+                                    // behind (the model will answer this queued prompt next).
+                                    worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
+                                    worker_tx.send(AppEvent::StatusUpdate("Processing queued prompt...".to_string()))?;
+                                    current_tokens = tokenizer.encode_chat_continuation_prompt(turn_prompt)?;
+
+                                    // Remove BOS if present to avoid polluting the context in middle of generation
+                                    if let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                        && !current_tokens.is_empty()
+                                        && current_tokens[0] == bos
+                                    {
+                                        current_tokens.remove(0);
+                                    }
+
+                                    worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                                    continue;
+                                }
+
+                                // Wait for user input for continuous chat
+                                match cmd_rx.recv() {
+                                    Ok(AppEvent::Input(input)) => {
+                                        worker_tx.send(AppEvent::StatusUpdate("Processing input...".to_string()))?;
+                                        current_tokens = tokenizer.encode_chat_continuation_prompt(&input)?;
+
+                                        // Remove BOS if present to avoid polluting the context in middle of generation
+                                        if let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                            && !current_tokens.is_empty()
+                                            && current_tokens[0] == bos
+                                        {
+                                            current_tokens.remove(0);
+                                        }
+
+                                        worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
+                                    }
+                                    Ok(_) => {}      // Ignore other events
+                                    Err(_) => break, // Channel closed (app exit)
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -265,7 +418,7 @@ fn main() -> AppResult<()> {
 
     // Based on output format, run the appropriate mode
     match cli_config.output_format {
-        cli::config::OutputFormat::Tui => run_tui_mode(&async_recorder.receiver, &rx, generation_handle)?,
+        cli::config::OutputFormat::Tui => run_tui_mode(&async_recorder.receiver, &rx, &cmd_tx, generation_handle)?,
         cli::config::OutputFormat::Text | cli::config::OutputFormat::None => {
             run_text_mode(&cli_config, &async_recorder.receiver, &rx, generation_handle)?
         }
@@ -383,6 +536,7 @@ fn report_model_weight_breakdown(qwen: &metallic_context::models::Qwen25<F16Elem
 fn run_tui_mode(
     receiver: &std::sync::mpsc::Receiver<EnrichedMetricEvent>,
     rx: &std::sync::mpsc::Receiver<AppEvent>,
+    cmd_tx: &std::sync::mpsc::Sender<AppEvent>,
     generation_handle: thread::JoinHandle<Result<()>>,
 ) -> AppResult<()> {
     let mut terminal = setup_terminal()?;
@@ -398,93 +552,137 @@ fn run_tui_mode(
             match crossterm::event::read()? {
                 CrosstermEvent::Key(key) => {
                     if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                        // Toggle profiling state for both Context and Foundry backends
+                        // Toggle profiling state
                         profiling_state::toggle_profiling_state();
                         metallic_foundry::instrument::toggle_profiling_state();
                         let new_state = profiling_state::get_profiling_state();
                         app.set_profiling_active(new_state);
                     } else {
-                        match key.code {
-                            crossterm::event::KeyCode::Char('q') => app.quit(),
-                            crossterm::event::KeyCode::Enter | crossterm::event::KeyCode::Char(' ') | crossterm::event::KeyCode::Esc => {
-                                if app.has_active_alert() {
-                                    app.dismiss_active_alert();
+                        // Handle Input Mode
+                        let handled = if app.focus == FocusArea::Input {
+                            match key.code {
+                                crossterm::event::KeyCode::Char(c) if !key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) => {
+                                    app.input_buffer.push(c);
+                                    true
                                 }
+                                crossterm::event::KeyCode::Backspace => {
+                                    app.input_buffer.pop();
+                                    true
+                                }
+                                crossterm::event::KeyCode::Enter => {
+                                    if !app.input_buffer.trim().is_empty() {
+                                        if app.is_processing {
+                                            app.push_alert(Alert::warning(
+                                                "Still generating; wait for completion before sending the next message.",
+                                            ));
+                                            app.input_buffer.clear();
+                                        } else {
+                                            let input = app.input_buffer.clone();
+                                            app.input_buffer.clear();
+
+                                            // Echo to UI
+                                            if !app.generated_text.is_empty() && !app.generated_text.ends_with("\n\n") {
+                                                app.generated_text.push_str("\n\n");
+                                            }
+                                            app.generated_text.push_str(&format!("> {}\n\n", input));
+
+                                            app.is_processing = true;
+                                            app.scroll_text_to_end();
+
+                                            let _ = cmd_tx.send(AppEvent::Input(input));
+                                        }
+                                    }
+                                    true
+                                }
+                                crossterm::event::KeyCode::Esc => {
+                                    app.focus = FocusArea::GeneratedText;
+                                    true
+                                }
+                                _ => false,
                             }
-                            crossterm::event::KeyCode::Char('m') => {
-                                app.metrics_view = tui::app::MetricsView::Memory;
-                                app.reset_metrics_scroll();
-                            }
-                            crossterm::event::KeyCode::Char('l') => {
-                                // Check if it's Control+L for log toggle
-                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                    app.toggle_log_visibility();
-                                } else {
-                                    // Regular 'l' key to switch to latency view
-                                    app.metrics_view = tui::app::MetricsView::Latency;
+                        } else {
+                            false
+                        };
+
+                        if !handled {
+                            match key.code {
+                                crossterm::event::KeyCode::Char('q') => app.quit(),
+                                crossterm::event::KeyCode::Enter
+                                | crossterm::event::KeyCode::Char(' ')
+                                | crossterm::event::KeyCode::Esc => {
+                                    if app.has_active_alert() {
+                                        app.dismiss_active_alert();
+                                    }
+                                }
+                                crossterm::event::KeyCode::Char('m') => {
+                                    app.metrics_view = tui::app::MetricsView::Memory;
                                     app.reset_metrics_scroll();
                                 }
-                            }
-                            crossterm::event::KeyCode::Char('s') => {
-                                app.metrics_view = tui::app::MetricsView::Stats;
-                                app.reset_metrics_scroll();
-                            }
-                            crossterm::event::KeyCode::Char('c') => {
-                                // Check if it's Control+C for copying all content from focused widget
-                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                    // Copy all content from the currently focused widget
-                                    let content_to_copy = match app.focus {
-                                        FocusArea::GeneratedText => app.generated_text.clone(),
-                                        FocusArea::Metrics => {
-                                            let metrics_help = match app.metrics_view {
-                                                tui::app::MetricsView::Memory => "[m] Memory [l] Latency [s] Stats [c] Collapse",
-                                                tui::app::MetricsView::Latency => "[m] Memory [l] Latency [s] Stats [c] Collapse",
-                                                tui::app::MetricsView::Stats => "[m] Memory [l] Latency [s] Stats [c] Collapse",
-                                            };
-                                            let metrics_content = match app.metrics_view {
-                                                tui::app::MetricsView::Memory => ui::render_memory_metrics(
-                                                    &app.memory_rows,
-                                                    app.memory_collapse_depth.get_current_depth(),
-                                                ),
-                                                tui::app::MetricsView::Latency => ui::render_hierarchical_latency_metrics(
-                                                    &app.latency_tree,
-                                                    app.latency_collapse_depth.get_current_depth(),
-                                                ),
-                                                tui::app::MetricsView::Stats => ui::render_stats_metrics_from_app(&app),
-                                            };
-                                            format!("{}\n\n{}", metrics_help, metrics_content)
-                                        }
-                                        FocusArea::LogBox => app.log_messages.join("\n"),
-                                    };
-                                    copy_text_to_clipboard(&content_to_copy);
-                                } else {
-                                    app.toggle_collapse();
+                                crossterm::event::KeyCode::Char('l') => {
+                                    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                        app.toggle_log_visibility();
+                                    } else {
+                                        app.metrics_view = tui::app::MetricsView::Latency;
+                                        app.reset_metrics_scroll();
+                                    }
                                 }
-                            }
-                            // Add new key binding for toggling between markdown and plain text display
-                            crossterm::event::KeyCode::Tab => {
-                                app.focus_next();
-                                app.reset_metrics_scroll();
-                            }
-                            crossterm::event::KeyCode::Char('d') => {
-                                if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
-                                    // Toggle between markdown and plain text display
-                                    app.text_display_mode = match app.text_display_mode {
-                                        tui::app::TextDisplayMode::Plain => tui::app::TextDisplayMode::Markdown,
-                                        tui::app::TextDisplayMode::Markdown => tui::app::TextDisplayMode::Plain,
-                                    };
-                                } else {
-                                    // For regular 'd' key, could add some other functionality if wanted
-                                    // For now, just handle as a normal character key - but since it's not mapped to anything, it's ignored
+                                crossterm::event::KeyCode::Char('s') => {
+                                    app.metrics_view = tui::app::MetricsView::Stats;
+                                    app.reset_metrics_scroll();
                                 }
+                                crossterm::event::KeyCode::Char('c') => {
+                                    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                        let content_to_copy = match app.focus {
+                                            FocusArea::GeneratedText => app.generated_text.clone(),
+                                            FocusArea::Metrics => {
+                                                // ... (reused existing logic for metrics string gen would be ideal, but repeating is safer for update)
+                                                // I'll copy the block content from the file to avoid error
+                                                let metrics_help = match app.metrics_view {
+                                                    tui::app::MetricsView::Memory => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                    tui::app::MetricsView::Latency => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                    tui::app::MetricsView::Stats => "[m] Memory [l] Latency [s] Stats [c] Collapse",
+                                                };
+                                                let metrics_content = match app.metrics_view {
+                                                    tui::app::MetricsView::Memory => ui::render_memory_metrics(
+                                                        &app.memory_rows,
+                                                        app.memory_collapse_depth.get_current_depth(),
+                                                    ),
+                                                    tui::app::MetricsView::Latency => ui::render_hierarchical_latency_metrics(
+                                                        &app.latency_tree,
+                                                        app.latency_collapse_depth.get_current_depth(),
+                                                    ),
+                                                    tui::app::MetricsView::Stats => ui::render_stats_metrics_from_app(&app),
+                                                };
+                                                format!("{}\n\n{}", metrics_help, metrics_content)
+                                            }
+                                            FocusArea::LogBox => app.log_messages.join("\n"),
+                                            FocusArea::Input => app.input_buffer.clone(),
+                                        };
+                                        copy_text_to_clipboard(&content_to_copy);
+                                    } else {
+                                        app.toggle_collapse();
+                                    }
+                                }
+                                crossterm::event::KeyCode::Tab => {
+                                    app.focus_next();
+                                    app.reset_metrics_scroll();
+                                }
+                                crossterm::event::KeyCode::Char('d') => {
+                                    if key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                                        app.text_display_mode = match app.text_display_mode {
+                                            tui::app::TextDisplayMode::Plain => tui::app::TextDisplayMode::Markdown,
+                                            tui::app::TextDisplayMode::Markdown => tui::app::TextDisplayMode::Plain,
+                                        };
+                                    }
+                                }
+                                crossterm::event::KeyCode::Up => app.scroll_active(-1),
+                                crossterm::event::KeyCode::Down => app.scroll_active(1),
+                                crossterm::event::KeyCode::PageUp => app.scroll_active(-10),
+                                crossterm::event::KeyCode::PageDown => app.scroll_active(10),
+                                crossterm::event::KeyCode::Home => app.scroll_active_to_start(),
+                                crossterm::event::KeyCode::End => app.scroll_active_to_end(),
+                                _ => {}
                             }
-                            crossterm::event::KeyCode::Up => app.scroll_active(-1),
-                            crossterm::event::KeyCode::Down => app.scroll_active(1),
-                            crossterm::event::KeyCode::PageUp => app.scroll_active(-10),
-                            crossterm::event::KeyCode::PageDown => app.scroll_active(10),
-                            crossterm::event::KeyCode::Home => app.scroll_active_to_start(),
-                            crossterm::event::KeyCode::End => app.scroll_active_to_end(),
-                            _ => {}
                         }
                     }
                 }
@@ -554,6 +752,9 @@ fn run_text_mode(
     rx: &std::sync::mpsc::Receiver<AppEvent>,
     generation_handle: thread::JoinHandle<Result<()>>,
 ) -> AppResult<()> {
+    let total_turns = cli_config.get_prompts().len();
+    let mut turns_completed: usize = 0;
+
     let mut generated_tokens: u64 = 0;
     let mut prompt_processing: Option<Duration> = None;
     let mut setup_duration: Option<Duration> = None;
@@ -573,6 +774,8 @@ fn run_text_mode(
             Ok(event) => process_text_mode_event(
                 event,
                 cli_config,
+                total_turns,
+                &mut turns_completed,
                 &mut generated_tokens,
                 &mut setup_duration,
                 &mut prompt_processing,
@@ -596,6 +799,8 @@ fn run_text_mode(
         process_text_mode_event(
             event,
             cli_config,
+            total_turns,
+            &mut turns_completed,
             &mut generated_tokens,
             &mut setup_duration,
             &mut prompt_processing,
@@ -678,6 +883,8 @@ fn run_text_mode(
 fn process_text_mode_event(
     event: AppEvent,
     cli_config: &cli::CliConfig,
+    total_turns: usize,
+    turns_completed: &mut usize,
     generated_tokens: &mut u64,
     setup_duration: &mut Option<Duration>,
     prompt_processing: &mut Option<Duration>,
@@ -712,6 +919,13 @@ fn process_text_mode_event(
             total_generation_time: total,
         } => {
             *total_generation_time = Some(total);
+            if total_turns > 1 {
+                *turns_completed = turns_completed.saturating_add(1);
+                if *turns_completed < total_turns && !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
+                    print!("\n\n");
+                    let _ = std::io::stdout().flush();
+                }
+            }
         }
         AppEvent::ModelLoadComplete(duration) => {
             *model_load_time = Some(duration);
@@ -741,6 +955,7 @@ fn process_text_mode_event(
             *prompt_token_count = count;
             tracing::debug!("Prompt token count: {}", count);
         }
+        AppEvent::Input(_) => {}
         _ => {} // Ignore other events in text mode
     }
 }
@@ -853,6 +1068,15 @@ fn run_json_mode(
                     });
                     logs.push(log_entry);
                 }
+                AppEvent::UserPrompt(prompt) => {
+                    let log_entry = serde_json::json!({
+                        "type": "user_prompt",
+                        "prompt": prompt,
+                        "timestamp": chrono::Utc::now().to_rfc3339()
+                    });
+                    logs.push(log_entry);
+                }
+                AppEvent::Input(_) => {}
             }
         }
     }
@@ -890,6 +1114,7 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
             app.reset_generation_metrics();
             app.reset_prompt_processing_metrics();
             app.prompt_token_count = count;
+            app.is_processing = true;
         }
         AppEvent::TokenizationComplete(_) => {
             // No specific TUI update for tokenization complete yet, but we need to handle the event
@@ -946,8 +1171,19 @@ fn handle_app_event(app: &mut App, event: AppEvent) {
         }
         AppEvent::GenerationComplete { total_generation_time } => {
             app.generation_time = total_generation_time;
+            app.is_processing = false;
         }
         AppEvent::ModelLoadComplete(_) => {}
+        AppEvent::Input(_) => {}
+        AppEvent::UserPrompt(prompt) => {
+            if !app.generated_text.is_empty() && !app.generated_text.ends_with("\n\n") {
+                app.generated_text.push_str("\n\n");
+            }
+            app.generated_text.push_str(&format!("> {}\n\n", prompt));
+            if app.text_follow_bottom {
+                app.request_follow_text = true;
+            }
+        }
     }
 }
 
@@ -1015,6 +1251,8 @@ fn handle_mouse_event(event: MouseEvent, app: &mut App) {
                 app.focus = FocusArea::Metrics;
             } else if app.log_visible && app.log_area.contains(position) {
                 app.focus = FocusArea::LogBox;
+            } else if app.input_area.contains(position) {
+                app.focus = FocusArea::Input;
             }
         }
         event::MouseEventKind::Drag(MouseButton::Left) => {

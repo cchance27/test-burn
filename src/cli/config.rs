@@ -1,5 +1,7 @@
 use clap::Parser;
 
+const DEFAULT_PROMPT: &str = "Create a short javascript hello world app.";
+
 /// Command-line interface configuration for the metallic CLI application
 #[derive(Debug, Parser)]
 #[command(name = "metallic_cli")]
@@ -9,9 +11,9 @@ pub struct CliConfig {
     #[arg(value_name = "GGUF_PATH")]
     pub gguf_path: String,
 
-    /// Optional prompt to process (default: Create a short javascript hello world app.)
-    #[arg(value_name = "PROMPT")]
-    pub prompt: Option<String>,
+    /// Prompt(s) to process (repeat to run multiple turns; default: a short demo prompt)
+    #[arg(value_name = "PROMPT", num_args = 0..)]
+    pub prompts: Vec<String>,
 
     /// Generation configuration options
     #[command(flatten)]
@@ -39,7 +41,7 @@ pub struct CliConfig {
 }
 
 /// Generation configuration options
-#[derive(Debug, Parser)]
+#[derive(Debug, Parser, Clone, Copy)]
 pub struct GenerationConfig {
     /// Maximum number of tokens to generate
     #[arg(long, default_value_t = 4096)]
@@ -107,11 +109,18 @@ pub enum Engine {
 }
 
 impl CliConfig {
-    /// Get the prompt text, using default if not provided
+    /// Get the first prompt, using default if not provided.
     pub fn get_prompt(&self) -> String {
-        self.prompt
-            .clone()
-            .unwrap_or_else(|| "Create a short javascript hello world app.".to_string())
+        self.prompts.first().cloned().unwrap_or_else(|| DEFAULT_PROMPT.to_string())
+    }
+
+    /// Get all prompts, using a single default prompt if none were provided.
+    pub fn get_prompts(&self) -> Vec<String> {
+        if self.prompts.is_empty() {
+            vec![self.get_prompt()]
+        } else {
+            self.prompts.clone()
+        }
     }
 }
 
@@ -135,7 +144,7 @@ mod tests {
     fn test_cli_config_default_prompt() {
         let config = CliConfig {
             gguf_path: "test.gguf".to_string(),
-            prompt: None,
+            prompts: Vec::new(),
             generation: GenerationConfig::default(),
             backend: None,
             verbose: 0,
@@ -144,14 +153,15 @@ mod tests {
             engine: Engine::Context,
         };
 
-        assert_eq!(config.get_prompt(), "Create a short javascript hello world app.");
+        assert_eq!(config.get_prompt(), DEFAULT_PROMPT);
+        assert_eq!(config.get_prompts(), vec![DEFAULT_PROMPT.to_string()]);
     }
 
     #[test]
     fn test_cli_config_custom_prompt() {
         let config = CliConfig {
             gguf_path: "test.gguf".to_string(),
-            prompt: Some("Hello, world!".to_string()),
+            prompts: vec!["Hello, world!".to_string()],
             generation: GenerationConfig::default(),
             backend: None,
             verbose: 0,
@@ -161,5 +171,6 @@ mod tests {
         };
 
         assert_eq!(config.get_prompt(), "Hello, world!");
+        assert_eq!(config.get_prompts(), vec!["Hello, world!".to_string()]);
     }
 }

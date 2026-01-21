@@ -88,16 +88,18 @@ impl CommandBufferPipeline {
         let mut state = self.inner.borrow_mut();
         let completion_flag = Arc::new(AtomicBool::new(false));
         let completion_time = Arc::new(Mutex::new(None));
-        let completion_flag_clone = completion_flag.clone();
-        let completion_time_clone = completion_time.clone();
-        command_buffer.on_completed(Box::new({
-            move |_: &ProtocolObject<dyn MTLCommandBuffer>| {
-                completion_flag_clone.store(true, Ordering::Release);
-                if let Ok(mut slot) = completion_time_clone.lock() {
-                    *slot = Some(Instant::now());
+        if !command_buffer.is_committed() {
+            let completion_flag_clone = completion_flag.clone();
+            let completion_time_clone = completion_time.clone();
+            command_buffer.on_completed(Box::new({
+                move |_: &ProtocolObject<dyn MTLCommandBuffer>| {
+                    completion_flag_clone.store(true, Ordering::Release);
+                    if let Ok(mut slot) = completion_time_clone.lock() {
+                        *slot = Some(Instant::now());
+                    }
                 }
-            }
-        }));
+            }));
+        }
         let commit_instant = Instant::now();
         command_buffer.commit();
         state.inflight.push_back(PipelineEntry {

@@ -18,15 +18,25 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .constraints([Constraint::Percentage(75), Constraint::Percentage(25)])
         .split(main_layout[0]);
 
-    // Conditionally split the main text area to have generation text and log box
+    // Split the body layout [0] (Left Column) into Content Area and Input Area
+    let left_column = body_layout[0];
+    let left_column_split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(3)]) // Content + Input
+        .split(left_column);
+
+    let content_area = left_column_split[0];
+    let input_area = left_column_split[1];
+
+    // Conditionally split the content area to have generation text and log box
     let (text_area, log_area) = if app.log_visible {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(0), Constraint::Length(10)]) // Generation area + log box
-            .split(body_layout[0]);
+            .split(content_area);
         (areas[0], Some(areas[1]))
     } else {
-        (body_layout[0], None)
+        (content_area, None)
     };
 
     let text_block = Block::default()
@@ -114,6 +124,14 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         .wrap(Wrap { trim: false })
         .scroll((app.log_scroll, 0));
 
+    // Input Box
+    let input_block = Block::default()
+        .title("Input (Enter to send)")
+        .borders(Borders::ALL)
+        .border_style(border_style(app.focus == FocusArea::Input));
+
+    let input_widget = Paragraph::new(app.input_buffer.as_str()).block(input_block);
+
     frame.render_widget(text_area_widget, text_area); // Render text in the appropriate area
     if let Some(log_area) = log_area {
         frame.render_widget(log_widget, log_area);
@@ -143,9 +161,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // Render the status bar using the component
     app.status_bar.render(frame, main_layout[1]);
 
+    frame.render_widget(input_widget, input_area);
+
     app.text_area = text_area; // Update app.text_area to refer to the actual text area
     app.metrics_area = sidebar_sections[1];
     app.log_area = log_area.unwrap_or_default();
+    app.input_area = input_area;
 
     if let Some(alert) = app.active_alert() {
         render_alert_modal(frame, alert, app.pending_alert_count());
@@ -629,9 +650,19 @@ impl App {
 fn create_text_with_selection(text: &str, app: &App, _area: Rect) -> ratatui::text::Text<'static> {
     use ratatui::text::{Line, Span};
 
-    // If there's no selection, return the text as is
+    // If there's no selection, return the text with coloring
     if !app.is_selecting || app.text_selection_start.is_none() || app.text_selection_end.is_none() {
-        return Text::from(text.to_string());
+        let lines: Vec<Line> = text
+            .lines()
+            .map(|line| {
+                if line.starts_with("> ") {
+                    Line::from(vec![Span::styled(line.to_string(), Style::default().fg(Color::Cyan))])
+                } else {
+                    Line::from(line.to_string())
+                }
+            })
+            .collect();
+        return Text::from(lines);
     }
 
     let lines: Vec<&str> = text.lines().collect();

@@ -23,18 +23,6 @@ impl HierarchicalMetric {
         }
     }
 
-    pub fn with_metadata(label: String, last_ms: f64, metadata: Option<std::collections::HashMap<String, String>>) -> Self {
-        let mut running_average = RunningAverage::default();
-        running_average.record(last_ms);
-        Self {
-            label,
-            last_ms,
-            running_average,
-            children: Vec::new(),
-            metadata,
-        }
-    }
-
     pub fn ensure_child(&mut self, label: &str) -> &mut HierarchicalMetric {
         if let Some(position) = self.children.iter().position(|child| child.label == label) {
             &mut self.children[position]
@@ -43,22 +31,6 @@ impl HierarchicalMetric {
             self.children
                 .last_mut()
                 .expect("children vector cannot be empty immediately after push")
-        }
-    }
-
-    pub fn upsert_path(&mut self, path: &[&str], last_ms: f64) {
-        if path.is_empty() {
-            return;
-        }
-
-        let label = path[0];
-        let child = self.ensure_child(label);
-
-        if path.len() == 1 {
-            child.last_ms = last_ms;
-            child.running_average.record(last_ms);
-        } else {
-            child.upsert_path(&path[1..], last_ms);
         }
     }
 

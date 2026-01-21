@@ -119,9 +119,10 @@ impl Stage for SdpaOnlineStage {
     #define MAX_REDUCE_DIM_VEC 64 // 256/4
     threadgroup float reduce_shared[MAX_REDUCE_DIM_VEC];
     
-    // Load Q vector from shared memory (populated by RopeStage)
-    // q_shared is threadgroup half4*
-    half4 q_vec = q_shared[tid];
+	    // Load Q vector from shared memory (populated by RopeStage)
+	    // q_shared is threadgroup half4*
+	    uint vec_dim = sdpa_params.head_dim / 4;
+	    half4 q_vec = (tid < vec_dim) ? q_shared[tid] : half4(0.0h);
     
     sdpa_decode_vectorized<MAX_REDUCE_DIM_VEC>(
         q_vec,
@@ -173,9 +174,10 @@ impl Stage for SdpaStandaloneStage {
     #define MAX_REDUCE_DIM_VEC 64 // 256/4
     threadgroup float reduce_shared[MAX_REDUCE_DIM_VEC];
     
-    // Load Q vector directly from buffer (no RoPE fusion)
-    // q_ptr is device half* from HeadLayoutStage
-    half4 q_vec = ((const device half4*)q_ptr)[tid];
+	    // Load Q vector directly from buffer (no RoPE fusion)
+	    // q_ptr is device half* from HeadLayoutStage
+	    uint vec_dim = sdpa_params.head_dim / 4;
+	    half4 q_vec = (tid < vec_dim) ? ((const device half4*)q_ptr)[tid] : half4(0.0h);
     
     sdpa_decode_vectorized<MAX_REDUCE_DIM_VEC>(
         q_vec,
