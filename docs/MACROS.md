@@ -65,6 +65,9 @@ struct GemvParams {
 | `f32` | `float` |
 | `f16` | `half` |
 
+> [!NOTE]
+> **Dynamic Values**: The macro automatically unwraps `DynamicValue<T>` fields (e.g., `DynamicValue<u32>` becomes `uint`). It also generates a `{Name}Resolved` companion struct and implements the `Resolvable` trait, allowing these structures to be used in model definitions while maintaining strict C-layout compatibility at runtime.
+
 ---
 
 ## 2. `#[derive(MetalPolicy)]`
@@ -248,10 +251,16 @@ impl Kernel for GemvColMajorKernel {
 | `threadgroup = "..."` | Threadgroup memory declaration for Stage emit (e.g., `"float shared[256]"`) |
 | `epilogue_emit = "..."` | Template for Epilogue emission (enables Epilogue generation) |
 | `epilogue_out_var = "..."` | Optional name for Epilogue output variable |
+| `step = bool` | Enable `Step` implementation (default: `true`) |
+| `dispatch = bool/preset` | Enable default dispatch or use preset (`per_row`, `per_element`, `vec_N`) |
+| `stage = "..."` | Custom Rust expression for `as_stage()` |
+| `stage_emit = "..."` | Template for Stage emission code |
+| `stage_out_var = "..."` | Optional name for Stage output variable |
+| `dtype = Variant` | Optional `Dtype` override (e.g., `F16`, `Q8`) |
 
 ### Stage Generation
 
-When creating a kernel that can be used as a stage in fused compound kernels, use `stage_function`:
+When creating a kernel that can be used as a stage in fused compound kernels, use `stage_function` or `stage_emit`:
 
 ```rust
 #[derive(Kernel, KernelArgs, Clone, Default)]
@@ -260,6 +269,7 @@ When creating a kernel that can be used as a stage in fused compound kernels, us
     function = "rmsnorm_kernel_f16",
     stage_function = "run_rmsnorm_core",  // Enables Stage generation
     args = "RmsNormParams",
+    dispatch = per_row,                   // Auto-generate dispatch_config
     threadgroup = "float tg_inv_rms"
 )]
 pub struct RmsNorm {
@@ -270,24 +280,25 @@ pub struct RmsNorm {
     pub gamma: TensorArg,
     pub params: RmsNormParams,
 }
-
-impl RmsNorm {
-    // ... new() constructor ...
-
-    /// Required: dispatch_config must be defined for #[derive(Kernel)]
-    pub fn dispatch_config(&self) -> DispatchConfig {
-        DispatchConfig {
-            grid: GridSize::d1(self.params.total_elements as usize / self.params.feature_dim as usize),
-            group: ThreadgroupSize::d1(256),
-        }
-    }
-}
 ```
 
 > [!IMPORTANT]
-> **Every kernel using `#[derive(Kernel)]` MUST implement a `dispatch_config(&self)` method.**
-> The macro generates `Kernel::dispatch_config` that calls `Self::dispatch_config(self)`.
-> Missing this method causes infinite recursion (stack overflow).
+> **Every kernel using `#[derive(Kernel)]` MUST provide a dispatch configuration.**
+> You can either implement `dispatch_config(&self)` manually OR use the `dispatch` attribute with a preset.
+>
+> **Available Presets:**
+> - `per_element`: `grid = total / 256`, `group = 256`
+> - `per_row`: `grid = total / feature_dim`, `group = 256`
+> - `vec_N`: Vectorized variant of `per_element` (e.g., `vec_4`)
+
+### Step Generation
+
+When `step = true` (default), the macro automatically generates:
+- `{Kernel}Step` — Serializable struct for use in model DSLs.
+- `Compiled{Kernel}Step` — Optimized runtime step using index-based lookup.
+- `typetag` registration for the Step.
+
+This allows the kernel to be used directly in JSON model definitions.
 
 ### Stage/Epilogue Generation
 

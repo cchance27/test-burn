@@ -1,104 +1,225 @@
-# Foundry Kernels (2025-12) — Composition, Fusion, and SIMD GEMV
+# Foundry Kernels Architecture
 
-This document describes how Foundry kernels are structured, composed, and fused, with special focus on the SIMD GEMV decode path used for QKV + FFN projections.
+Foundry is the kernel backend for Metallic, designed to support **high-performance, low-latency inference** on Apple Silicon. It provides a modular system for writing, composing, and fusing Metal kernels.
 
-## Kernel types
+## Core Concepts
 
-### Standalone kernels
-- A single `[[kernel]]` entry point in Metal.
-- A Rust `Kernel` impl that binds args and dispatches.
-- Use when fusion is not required or the kernel is already “one logical unit”.
+The kernel system is built around three primary abstractions:
 
-### Compound kernels (preferred for fusion)
-- A `CompoundKernel` is assembled from `Stage` pieces in Rust.
-- Stages contribute:
-  - `includes()` (Metal headers)
-  - `buffer_args()` (Metal argument list)
-  - `emit()` (the Metal snippet injected into the final function)
-- This enables **text-level fusion** with **Rust-typed composition** and avoids hand-maintaining “giant fused .metal files”.
+1.  **Standalone Kernels**: Traditional, single-function Metal kernels.
+2.  **Compound Kernels**: Fused kernels composed of multiple "Stages" (Prologue → Main → Epilogue) that are stitched together at runtime or compile-time.
+3.  **Conditional Kernels**: Logic for dispatching to different kernel variants based on runtime conditions (e.g., batch size, sequence length).
 
-## Performance rules (decode path)
+---
 
-Some operations cannot be safely fused as separate stages because they would require a **global synchronization** between threadgroups. The primary example is:
+## 1. Kernel Types
 
-- `RMSNorm stage -> GEMV stage` (not safe to “just fuse” as two independent stages)
+### 1.1 Standalone Kernels
 
-Instead, decode GEMV fusions compute normalization inside each GEMV threadgroup and apply it while loading/using `vector_x`.
+Use standalone kernels for simple operations that do not require fusion or complex configuration.
 
-## SIMD GEMV (decode GEMV template)
+**Rust Definition:**
+```rust
+#[derive(Kernel, KernelArgs, Clone)]
+#[kernel(
+    source = "ops/simple.metal",
+    function = "simple_op",
+    args = "SimpleParams" // Injects SimpleParams C++ struct definition
+)]
+pub struct SimpleKernel {
+    pub input: TensorArg,
+    #[arg(output)]
+    pub output: TensorArg,
+    pub params: SimpleParams,
+}
+```
 
-### Why SIMD GEMV exists
-Decode-time GEMV (seq_len=1) is one of the hottest paths in inference. The SIMD GEMV template is a performance-tuned implementation that follows the **Driver-Strategy-Quant** architecture (see `docs-in-progress/QUANT.md`). We want to keep it “DRY” and composable.
+**Metal Side (`ops/simple.metal`):**
+> **Note:** Do NOT define `struct SimpleParams` here. It is automatically injected by the runtime based on the Rust struct.
 
-### How it is structured
+```metal
+[[kernel]] void simple_op(
+    const device half *input [[buffer(0)]],
+    device half *output [[buffer(1)]],
+    constant SimpleParams *params [[buffer(2)]], // Struct defined by injection
+    // Implicit arguments automatically available:
+    uint3 gid [[threadgroup_position_in_grid]],
+    uint3 lid [[thread_position_in_threadgroup]],
+    uint3 tptg [[threads_per_threadgroup]]
+) {
+    // ...
+}
+```
 
-**Template/common code**
-- `src/metals/matmul_gemv/simd_common.metal`
-  - Defines `run_simd_gemv_template<Policy, HEADS, COLS_PER_TG, FAST_PATH, Epilogue?>`
-  - Contains shared structs (`GemvParams`, `QkvFusedParams`, `Q2FusedParams`) and helpers (e.g. `gemv_compute_inv_rms`).
+### 1.2 Compound Kernels (Fusion)
 
-**Quant/policy code**
-- `src/metals/policies/simd_gemv_*_canonical.metal`
-  - Implements the policy contract required by the template (F16/Q8 today).
-  - New quants should add a new policy header here (do not edit the template).
+Compound kernels are the preferred way to write compute-intensive operations. They allow you to write small, reusable "Stages" in Metal and fuse them together in Rust.
 
-**Hook glue (Rust)**
-- `src/metals/matmul_gemv/hooks.rs`
-  - `#[derive(GemvHook)]` types select:
-    - policy struct name
-    - policy include header(s)
-    - optional preamble (e.g. fused RMSNorm `inv_rms` computation)
-    - policy params initializer snippet
+**Architecture:**
+*   **Prologue:** Handles data loading and dequantization (e.g., `PolicyStage`).
+*   **Main:** The core computation.
+*   **Epilogue:** Post-processing.
 
-**Config glue (Rust)**
-- `#[derive(GemvConfig)]` on a zero-sized struct describes:
-  - number of heads (e.g. 3 for QKV)
-  - pointer names for weights / outputs / biases
-  - N expressions per head
-  - optional scale pointers (for Q8-style scales)
+**Example:**
+```rust
+let kernel = CompoundKernel::new("fused_q8_gemv_silu")
+    .prologue(PolicyStage::<PolicyQ8>::new()) // Load Q8 weights
+    .main(GemvCoreStage::new())               // Compute Dot Product
+    .epilogue(EpilogueStage::<SiLU>::new())   // Apply SiLU
+    .build();
+```
 
-**Epilogues**
-- `GemvEpilogue` is the SIMD GEMV “tail” (e.g. SwiGLU).
-- `#[derive(Epilogue)]` can also implement `GemvEpilogue` via `gemv_struct`/`gemv_id` to avoid duplication.
+---
 
-**Unified GemvKernel (NEW — Preferred)**
-- `#[derive(GemvKernel)]` combines Config + Hook + Epilogue into one derive:
-  ```rust
-  #[derive(GemvKernel)]
-  #[gemv_kernel(
-      args = "SwiGluF16CanonicalFusedRmsnormArgs",
-      heads = 2, cols_per_tg = 8,
-      data_ptrs("data_g", "data_u"), result_ptrs("out_res", "nullptr"),
-      // ... more config ...
-      hook = F16CanonicalRmsnormHook,
-      epilogue = SwiGluEpilogue,
-  )]
-  pub struct SwiGluFused;
-  
-  // Usage:
-  let stage = SwiGluFused::main_stage();
-  ```
-- See `docs-in-progress/MACROS.md` Section 10 for full attribute reference.
+## 2. Developing Compound Stages
 
-### Key DX rule: weight pointers are bytes
+A `Stage` is a Rust struct that wraps a Metal helper function. You can use `#[derive(Kernel)]` to auto-generate the Stage implementation.
 
-The SIMD GEMV stage standardizes the local weight pointer array to bytes:
-- `const device uchar* data_arr[HEADS]`
+### 2.1 Rust Implementation
 
-Hooks/policies cast as needed (`half**`, packed formats, etc.). This keeps quant additions centralized to policy + hook code and prevents “edit every kernel/template” churn.
+```rust
+#[derive(Kernel, KernelArgs, Clone)]
+#[kernel(
+    source = "ops/my_op.metal",
+    function = "my_op_entry",        // Entry point for standalone usage
+    stage_function = "run_my_op",    // Template function for fusion
+    args = "MyParams",
+    threadgroup = "float shared_mem[256]" // Declares shared memory for this stage
+)]
+pub struct MyOp {
+    // Input/Scales are handled by PolicyStage, so we skip them here for the stage signature
+    #[arg(stage_skip)] 
+    pub input: TensorArg,
+    
+    // Output is managed by this stage
+    #[arg(output)]
+    pub output: TensorArg,
+    
+    pub params: MyParams,
+}
+```
 
-## Where to look for an example
+### 2.2 Metal Template Contract
 
-The canonical example is the “Foundry fused” decode GEMVs:
-- `src/metals/matmul_gemv/fused/swiglu.rs`
-- `src/metals/matmul_gemv/fused/qkv.rs`
+When using `stage_function`, your Metal function must follow a strict signature contract to be compatible with the auto-generated code.
 
-These show:
-- How to build a `CompiledCompoundKernel` and cache it in a `OnceLock`
-- How to apply fused RMSNorm inside GEMV (safe + fast)
-- How to keep quant code in policy headers + hooks
-- **NEW**: How to use `#[derive(GemvKernel)]` for cleaner DX
+**Signature:**
+```metal
+template<typename Policy>
+ALWAYS_INLINE void run_my_op(
+    const device uchar *matrix,       // Provided by PolicyStage
+    device half *output,              // Buffer 2 (Your Arg)
+    constant MyParams *params,        // Buffer 3 (Your Arg)
+    const device uchar *scales,       // Provided by PolicyStage
+    uint3 gid,                        // Implicit
+    uint3 lid,                        // Implicit
+    threadgroup float *shared_mem     // Passed from entry point
+) {
+    // ... logic ...
+}
+```
 
-## Adding a new quant
+**Key Rules:**
+1.  **Implicit Arguments:** `matrix`, `scales`, `gid`, `lid` are passed by name from the caller.
+2.  **Threadgroup Memory:** Must be declared in the `threadgroup` attribute in Rust. It is allocated in the `[[kernel]]` entry point and passed as a pointer to your template. **Never** declare `threadgroup` variables inside the template function itself.
+3.  **Struct Injection:** Again, do not define `MyParams` in the Metal file.
 
-See `docs-in-progress/QUANT.md`.
+---
+
+## 3. The Policy System (Quantization)
+
+Foundry abstracts data types (F16, Q8, Q4) using **Policies**. A Policy defines how data is loaded from memory and presented to the kernel.
+
+**Rust Convention:**
+*   **Buffer 0**: `matrix` (Input/Weights) - Managed by `PolicyStage`.
+*   **Buffer 1**: `scales` (Quantization Metadata) - Managed by `PolicyStage`.
+*   **Buffer 2+**: Kernel-specific arguments.
+
+---
+
+## 4. SIMD GEMV System (Decode Path)
+
+For the ultra-critical decode path (Batch Size = 1), Foundry uses a specialized, highly fused GEMV system.
+
+### 4.1 Unified `GemvKernel` Macro (Preferred for New Kernels)
+
+The `#[derive(GemvKernel)]` macro generates a fully fused kernel configuration.
+
+```rust
+#[derive(GemvKernel)]
+#[gemv_kernel(
+    args = "SwiGluParams",
+    heads = 2,
+    cols_per_tg = 8,
+    // Configuration
+    gemv_n0 = "params->N",
+    data_ptrs("data_gate", "data_up"),
+    result_ptrs("out_gate", "nullptr"),
+    // Components
+    hook = F16CanonicalRmsnormHook, // F16 Weights + Fused RMSNorm
+    epilogue = SwiGluEpilogue,      // SwiGLU Activation
+)]
+pub struct SwiGluFused;
+```
+
+### 4.2 Manual Stage Implementation (Advanced/Legacy)
+
+Some complex kernels, such as **FusedQKV** (`qkv_stages.rs`), currently use manual `Stage` implementations instead of the `GemvKernel` macro. This is necessary when:
+*   Binding complex argument sets that exceed standard patterns (e.g., Q, K, V weights + scales = 6 buffers).
+*   Implementing custom emit logic that doesn't fit the standard template.
+
+**Manual Implementation Pattern:**
+1.  Implement the `Stage` trait manually.
+2.  Define `buffer_args()` to return the exact list of buffers (remembering to skip 0/1 if using PolicyStage).
+3.  Implement `emit()` to generate the specific C++ call site for your helper function.
+
+```rust
+// Example from qkv_stages.rs
+impl Stage for ParallelProjectStage {
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        // Manually define 6 buffers for Q/K/V weights & scales
+        vec![
+            BufferArg { name: "w_q", metal_type: "const device uchar*", buffer_index: 0 },
+            // ...
+        ]
+    }
+
+    fn emit(&self, input_var: &str) -> (String, String) {
+        // manually construct the C++ call
+        let code = format!("... {policy}::template dot<{vec_width}>(...); ...");
+        ("qkv_partial".to_string(), code)
+    }
+}
+```
+
+---
+
+## 5. Macro Reference
+
+### `#[derive(MetalStruct)]`
+Generates a C++ struct definition string `METAL_STRUCT_DEF` that matches the Rust struct layout.
+*   **Usage:** Apply to param structs.
+*   **Note:** Handles `DynamicValue<T>` fields automatically for compilation.
+
+### `#[derive(Kernel)]`
+Implements `Kernel` and optionally `Stage` traits.
+*   `source`: Path to `.metal` file.
+*   `function`: Name of `[[kernel]]` function.
+*   `stage_function`: Name of template function (enables Stage generation).
+*   `args`: Name of the params struct (injects its definition).
+*   `threadgroup`: Declaration string for shared memory (e.g., `"float s[256]"`).
+*   `dispatch`: Enables default dispatch config or presets (e.g., `dispatch="per_row"`).
+
+### `#[derive(ConditionalKernel)]`
+Creates a dispatcher enum.
+*   `selector`: Variables used for dispatch (e.g., `"batch: u32"`).
+*   `#[when(condition)]`: Variants selected by condition.
+
+---
+
+## 6. Development Checklist
+
+- **Structs:** Defined in Rust with `#[derive(MetalStruct)]`. **Not** defined in `.metal`.
+- **Threadgroup:** Declared in Rust via `threadgroup` attribute. Passed as pointer in Metal.
+- **Buffers:** `PolicyStage` owns buffers 0 and 1. Your args start at 2 (unless standalone).
+- **Implict Args:** `gid`, `lid`, `tptg` are available in Metal signatures.
