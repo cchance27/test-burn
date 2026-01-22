@@ -34,26 +34,17 @@ This document tracks the state of the Foundry backend transition, highlighting i
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
 
-### 1. Embedding Kernel Polymorphism (Architectural Regression)
-- **Issue:** Moved from a template-based `Policy` approach to explicit `run_embedding_core_f16` and `run_embedding_core_q8` functions.
-- **Impact:** Breaks the "Single Location Policy" for quantization. Adding new quants (Q4_K, etc.) now requires modifying both Rust `step.rs` and Metal source, rather than just adding a Policy struct.
-- **Task:** Refactor `embedding.metal` to restore template-based dispatch.
-
-### 2. Batched Prefill for Multi-Turn (Performance Regression)
+### 1. Batched Prefill for Multi-Turn (Performance Regression)
 - **Issue:** Batched prefill is hard-disabled when `start_pos > 0`.
 - **Reason:** Potential offset calculation bugs in kernels when history exists.
 - **Impact:** User follow-up questions are processed sequentially (slower) instead of in parallel chunks.
 - **Task:** Fix `position_offset` handling in batched kernels and re-enable.
 
-### 3. SDPA Padding Logic
+### 2. SDPA Padding Logic
 - **Issue:** `padded_m` only aligns to 32 if `m > 1`.
 - **Risk:** GEMM kernels might perform out-of-bounds writes on `m=1` if they assume tile alignment without checking boundaries.
 - **Task:** Audit GEMM write-back logic for `M < TileSize`.
 
-### 4. Compound Kernel Cache Collisions (Critical)
-- **Issue:** Dynamic `CompoundKernel` instances might share the same `TypeId` key in the pipeline cache if the ID mechanism is just `String` or `TypeId::of<String>`.
-- **Risk:** Different kernels (e.g. F16 vs Q8) could overwrite each other in the cache, executing wrong code.
-- **Task:** Implement robust content-based hashing (Source + Constants) for pipeline cache keys.
 
 ---
 
@@ -79,10 +70,6 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Risk:** This breaks if a developer uses a type alias (e.g., `type MyTensor = TensorArg;`) or a fully qualified path (`metallic::types::TensorArg`).
 - **Requirement:** Refactor macros to perform proper `syn::Type` traversal for robust type identification.
 
-### 6. Unbounded Kernel Compile Caches
-- **Issue:** Some kernel getters cache compiled variants by leaking them to satisfy `'static` return types (shape/policy/activation combinations).
-- **Risk:** Long-running sessions or highly dynamic workloads can accumulate unbounded memory usage.
-- **Requirement:** Switch caches to `Arc`-backed entries and implement a bounded eviction policy (e.g., LRU keyed by kernel content hash).
 
 ### 6. Raw `objc2` Leaks in Public API
 - **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
@@ -132,7 +119,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 1. Dynamic Context Length (Fix 2048 Cap)
 - **Status:** **Confirmed.** `CompiledModel::RUNTIME_MAX_SEQ_LEN_CAP` is hardcoded to `2048` in `executor.rs` (L43).
 - **Impact:** Any generation requesting >2048 tokens will crash or be clamped, even if the model supports 32k.
-- **Requirement:** Implement "Grow-on-demand" KV caches (e.g., paging or reallocation) to support full model context without allocating worst-case memory at startup.
+- **Requirement:** Implement "Grow-on-demand" KV caches (e.g., paging or reallocation) to support full model context without allocating worst-case memory at startup, we should also default to the models max context size as our maximum, unless we're told a maximum at runtime or via our DSL.
 
 ### 2. SDPA Optimization (Tile Config)
 - **Status:** **Confirmed.** `sdpa/step.rs` (L597) hardcodes `let tile_config = TileConfig::default();`.
@@ -143,6 +130,11 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Status:** **Confirmed.** `executor.rs` loop (L528) iterates steps without pushing structured scopes.
 - **Impact:** TUI metrics are brittle, relying on regex parsing of kernel names (e.g. `Gemm_...`) to guess if something is a "FeedForward" or "Attention" block.
 - **Task:** Implement `foundry.push_scope("Block 0")` in the executor to enable robust, model-agnostic hierarchy.
+
+### 4. Epsilon Usage in RMSNorm
+- **Status:** **Confirmed.** `rmsnorm/step.rs` (L1) hardcodes `epsilon: Option<f32>, // DEBT: Not used in kernel yet (hardcoded 1e-6)`.
+- **Impact:** RMSNorm kernels currently use a hardcoded `1e-6` epsilon value, which is not configurable.
+- **Requirement:** Remove the epsilon parameter from the kernel and use the value from model or from the DSL.
 
 ---
 
@@ -223,3 +215,17 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Fail-fast guardrails (implemented):**
   - Unsupported GGUF tensor dtypes now **panic** during load/mapping rather than silently falling back.
   - Foundry `prepare_bindings()` now validates that any U8-bound quantized weight has a companion `{name}_scales` binding with expected byte shape (and errors early if missing/malformed).
+
+### 3. Embedding Kernel Polymorphism (Restored)
+- **Issue:** Embedding kernel had regressed from template-based `Policy` approach to explicit `run_embedding_core_f16` and `run_embedding_core_q8` functions.
+- **Fix (implemented):** Refactored `embedding.metal` to use unified `run_embedding_core<Policy>` template with `Policy::template load_weights<N>()` and conditional `Policy::HAS_SCALE` for quantization handling. `EmbeddingStage` now implements `Stage` trait with dynamic `Arc<dyn MetalPolicy>` selection based on tensor dtype at runtime.
+
+### 4. Compound Kernel Cache Collisions (Resolved)
+- **Previous issue:** Dynamic `CompoundKernel` instances could share the same cache key and overwrite each other.
+- **Fix (implemented):** Added a global `KernelRegistry` with a content-based `source_hash` on `CompiledCompoundKernel`, and keyed pipeline caching on `(kernel_name_hash, source_hash, device_registry_id)` to prevent cross-kernel collisions.
+- **Notes:** The registry is capacity-bounded and time-to-idle evicts unused entries to avoid unbounded growth in long-running sessions.
+
+### 5. Unbounded Kernel Compile Caches (Resolved)
+- **Previous issue:** Some kernel getters cached compiled variants by leaking them to satisfy `'static` return types, which could grow without bound.
+- **Fix (implemented):** `CompiledCompoundKernel` no longer relies on `'static` leaks, and compiled kernel/pipeline caching is centralized in `KernelRegistry` with bounded capacity and time-to-idle eviction.
+- **Follow-ups:** Consider a weighted cache (by estimated bytes) and plumbing config/env knobs for tuning `max_kernels`/`max_pipelines`/TTLs per workload.

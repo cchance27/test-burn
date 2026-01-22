@@ -192,7 +192,7 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, Activation::None);
     let dispatch = warp_dispatch_config(cfg.n as u32);
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     // ========== Compare Results ==========
     let v2_f16 = FoundryTensor::to_vec(&output_v2, &foundry);
@@ -485,7 +485,7 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), layout, GemvStrategy::Vectorized, Activation::None);
     let dispatch = warp_dispatch_config(cfg.n as u32);
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     // ========== Run CPU Reference (Q8) ==========
     let weights_i8: Vec<i8> = weights_data.iter().map(|&x| x as i8).collect();

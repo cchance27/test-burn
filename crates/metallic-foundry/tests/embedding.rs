@@ -142,7 +142,7 @@ fn run_parity_test(cfg: TestConfig) {
         group: ThreadgroupSize::d1(256),
     };
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     let foundry_result: Vec<f16> = FoundryTensor::to_vec(&output_foundry, &foundry);
 

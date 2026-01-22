@@ -42,7 +42,7 @@ fn run_activation_parity_test(
         beta: 0.0,
     };
 
-    foundry.run(&kernel.bind(args, dispatch))?;
+    foundry.run(&kernel.bind_arc(args, dispatch))?;
 
     let gpu_out: Vec<f16> = output_tensor.to_vec(&foundry);
     let gpu_out_f32: Vec<f32> = gpu_out.iter().map(|x| x.to_f32()).collect();

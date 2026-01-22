@@ -1,8 +1,6 @@
 #![allow(clippy::manual_div_ceil)]
 #![allow(clippy::needless_update)]
-use std::{
-    any::{Any, TypeId}, path::PathBuf
-};
+use std::any::{Any, TypeId};
 
 pub use error::MetalError;
 use instrument::CaptureMetrics;
@@ -21,6 +19,7 @@ pub mod fusion;
 pub mod generation;
 pub mod gguf;
 pub mod instrument;
+pub mod kernel_registry;
 pub mod metals;
 pub mod model;
 pub mod policy;
@@ -31,14 +30,14 @@ pub mod tensor;
 pub mod tokenizer;
 pub mod types;
 
+pub use kernel_registry::kernel_registry;
+
 /// The central hub for Metal operations, managing the device, queue, and resources.
 pub struct Foundry {
     pub device: MetalDevice,
     pub queue: MetalQueue,
     /// Type-safe registry for resources (caches, pools, etc.)
     resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    /// Cache for compiled pipelines
-    pipelines: FxHashMap<(TypeId, u64), Retained<ProtocolObject<dyn MTLComputePipelineState>>>,
     /// Active command buffer for batched dispatch
     active_command_buffer: Option<Retained<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>>,
     /// Helper: Active compute encoder to reuse across dispatches
@@ -72,7 +71,6 @@ impl Foundry {
             device,
             queue,
             resources,
-            pipelines: FxHashMap::default(),
             active_command_buffer: None,
             active_compute_encoder: None,
             capture_metrics: None,
@@ -89,7 +87,6 @@ impl Foundry {
             device,
             queue,
             resources,
-            pipelines: FxHashMap::default(),
             active_command_buffer: None,
             active_compute_encoder: None,
             capture_metrics: None,
@@ -209,202 +206,10 @@ impl Foundry {
 
     /// Loads or retrieves a compute pipeline for the given Kernel type.
     pub fn load_kernel<K: Kernel>(&mut self, kernel: &K) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-        use std::hash::{Hash as _, Hasher as _};
-
-        use objc2_foundation::NSString;
-
-        let mut hasher = rustc_hash::FxHasher::default();
-        kernel.function_name().hash(&mut hasher);
-        let key = (TypeId::of::<K::Id>(), hasher.finish());
-
-        if let Some(pipeline) = self.pipelines.get(&key) {
-            return Ok(pipeline.clone());
-        }
-
-        // 1. Try Default Library (loading from Bundle/built output)
-        let function_name = kernel.function_name();
-        if let Some(lib) = self.device.newDefaultLibrary() {
-            let ns_name = NSString::from_str(function_name);
-            if let Some(func) = lib.newFunctionWithName(&ns_name) {
-                let pipeline = self
-                    .device
-                    .newComputePipelineStateWithFunction_error(&func)
-                    .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
-                self.pipelines.insert(key, pipeline.clone());
-                return Ok(pipeline);
-            }
-        }
-
-        // 2. Fallback to Source
-        // Helper to find include file
-        let find_include = |name: &str, relative_to: Option<&PathBuf>| -> Option<PathBuf> {
-            let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/metals");
-            let p = base_path.join(name);
-            if p.exists() {
-                return Some(p);
-            }
-            if let Some(parent) = relative_to {
-                let p = parent.join(name);
-                if p.exists() {
-                    return Some(p);
-                }
-            }
-            None
-        };
-
-        let mut full_source = String::new();
-        let Includes(mut includes) = kernel.includes();
-
-        // Always include policy base if not explicitly present
-        if !includes.contains(&"policies/base.metal") {
-            includes.insert(0, "policies/base.metal");
-        }
-
-        // Automatic policy inclusion based on Dtype
-        if let Some(dtype) = kernel.dtype() {
-            let policy = crate::policy::resolve_policy(dtype.into());
-            let policy_h = policy.header();
-            if !includes.contains(&policy_h) {
-                includes.push(policy_h);
-            }
-        }
-
-        // Define source_path only for File variant context
-        let mut source_path_ctx: Option<PathBuf> = None;
-
-        // Identify main source content
-        let main_content = match kernel.source() {
-            KernelSource::File(filename) => {
-                let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/metals");
-                let p = base_path.join(filename);
-                if !p.exists() {
-                    return Err(MetalError::LoadLibraryFailed(format!("Kernel source {} not found", p.display())));
-                }
-                source_path_ctx = p.parent().map(|p| p.to_path_buf());
-                std::fs::read_to_string(&p).map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read {}: {}", p.display(), e)))?
-            }
-            KernelSource::String(s) => s,
-        };
-
-        // Helper to check if an include is a policy/system header
-        let is_policy = |inc: &str| inc.starts_with("policies/");
-
-        // 1. Load policy includes (base, f16, q8, etc.)
-        // These provide types (uint, half) needed by struct_defs
-        for include in includes.iter().filter(|&&i| is_policy(i)) {
-            let p = find_include(include, source_path_ctx.as_ref())
-                .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
-            let content = std::fs::read_to_string(&p)
-                .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
-
-            // Strip local includes
-            for line in content.lines() {
-                if line.trim().starts_with("#include \"") {
-                    full_source.push_str(&format!("// Skipped: {}\n", line));
-                } else {
-                    full_source.push_str(line);
-                    full_source.push('\n');
-                }
-            }
-            full_source.push('\n');
-        }
-
-        // 2. Inject struct definitions
-        // These rely on types from policies, and are relied upon by user helper/stage includes
-        let struct_defs = kernel.struct_defs();
-        if !struct_defs.is_empty() {
-            full_source.push_str("// Auto-generated struct definitions\n");
-            full_source.push_str(&struct_defs);
-            full_source.push_str("\n\n");
-        }
-
-        // 3. Load remaining user includes (stages, helpers)
-        for include in includes.iter().filter(|&&i| !is_policy(i)) {
-            let p = find_include(include, source_path_ctx.as_ref())
-                .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
-            let content = std::fs::read_to_string(&p)
-                .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
-
-            // Strip local includes
-            for line in content.lines() {
-                if line.trim().starts_with("#include \"") {
-                    full_source.push_str(&format!("// Skipped: {}\n", line));
-                } else {
-                    full_source.push_str(line);
-                    full_source.push('\n');
-                }
-            }
-            full_source.push('\n');
-        }
-
-        // Also strip includes from main content (if it's from a file, it might have them).
-        for line in main_content.lines() {
-            if line.trim().starts_with("#include \"") {
-                full_source.push_str(&format!("// Skipped: {}\n", line));
-            } else {
-                full_source.push_str(line);
-                full_source.push('\n');
-            }
-        }
-
-        if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
-            let mut safe_name = function_name
-                .chars()
-                .map(|c| {
-                    if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                        c
-                    } else {
-                        '_'
-                    }
-                })
-                .collect::<String>();
-            if safe_name.is_empty() {
-                safe_name = "kernel".to_string();
-            }
-
-            let dump_dir = std::path::Path::new(&dump_dir);
-            std::fs::create_dir_all(dump_dir).map_err(|e| {
-                MetalError::LoadLibraryFailed(format!(
-                    "Failed to create METALLIC_DUMP_METAL_SOURCE_DIR {}: {}",
-                    dump_dir.display(),
-                    e
-                ))
-            })?;
-
-            let dump_path = dump_dir.join(format!("{}.metal", safe_name));
-            std::fs::write(&dump_path, &full_source)
-                .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to write Metal source dump {}: {}", dump_path.display(), e)))?;
-        }
-
-        let _library_options = None::<&objc2_metal::MTLCompileOptions>;
-
-        let options = objc2_metal::MTLCompileOptions::new();
-        // Match legacy kernel compilation settings to avoid source-level feature mismatches
-        // (the matmul_gemv fused kernels rely on newer MSL features).
-        options.setLanguageVersion(objc2_metal::MTLLanguageVersion::Version4_0);
-        options.setEnableLogging(true);
-        // If we had library options, we'd apply them here
-
-        let ns_source = NSString::from_str(&full_source);
-        let library = self
-            .device
-            .newLibraryWithSource_options_error(&ns_source, Some(&options))
-            .map_err(|e| MetalError::LoadLibraryFailed(format!("{:?}", e)))?;
-
-        let ns_name = NSString::from_str(function_name);
-        let function = library
-            .newFunctionWithName(&ns_name)
-            .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Function {} not found in source", function_name)))?;
-
-        let pipeline = self
-            .device
-            .newComputePipelineStateWithFunction_error(&function)
-            .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
-
-        self.pipelines.insert(key, pipeline.clone());
-        Ok(pipeline)
+        let registry = kernel_registry();
+        let pipeline = registry.get_or_load_pipeline(&self.device, kernel)?;
+        Ok((*pipeline).clone())
     }
-
     /// Dispatches a kernel using a pre-loaded pipeline.
     ///
     /// This bypasses the pipeline lookup/compilation step, which is useful for
@@ -691,11 +496,8 @@ pub struct Includes(pub Vec<&'static str>);
 
 pub trait Kernel {
     type Args;
-    /// A static marker type used for pipeline caching.
-    /// This allows kernels to have lifetimes while the cache key remains static.
-    type Id: 'static;
 
-    fn function_name(&self) -> &'static str;
+    fn function_name(&self) -> &str;
     fn source(&self) -> KernelSource;
     fn includes(&self) -> Includes {
         Includes(vec![])
@@ -736,6 +538,11 @@ pub trait Kernel {
         None
     }
 
+    /// Hash of the source code (optional, used for collision-proof caching).
+    fn source_hash(&self) -> u64 {
+        0
+    }
+
     /// Convert this kernel into a Stage for use in a CompoundKernel.
     /// This enables `foundry.run_with_policy(kernel)`.
     ///
@@ -747,4 +554,171 @@ pub trait Kernel {
     {
         Box::new(crate::compound::GenericKernelStage::new(self.clone()))
     }
+}
+/// Internal helper for pipeline compilation from kernel metadata.
+pub fn compile_pipeline<K: Kernel>(
+    device: &MetalDevice,
+    kernel: &K,
+) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+    use std::path::PathBuf;
+
+    use objc2_foundation::NSString;
+
+    // 1. Try Default Library (loading from Bundle/built output)
+    let function_name = kernel.function_name();
+    if let Some(lib) = device.newDefaultLibrary() {
+        let ns_name = NSString::from_str(function_name);
+        if let Some(func) = lib.newFunctionWithName(&ns_name) {
+            let pipeline = device
+                .newComputePipelineStateWithFunction_error(&func)
+                .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
+            return Ok(pipeline);
+        }
+    }
+
+    // 2. Fallback to Source
+    let find_include = |name: &str, relative_to: Option<&PathBuf>| -> Option<PathBuf> {
+        let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/metals");
+        let p = base_path.join(name);
+        if p.exists() {
+            return Some(p);
+        }
+        if let Some(parent) = relative_to {
+            let p = parent.join(name);
+            if p.exists() {
+                return Some(p);
+            }
+        }
+        None
+    };
+
+    let mut full_source = String::new();
+    let Includes(mut includes) = kernel.includes();
+
+    if !includes.contains(&"policies/base.metal") {
+        includes.insert(0, "policies/base.metal");
+    }
+
+    if let Some(dtype) = kernel.dtype() {
+        let policy = crate::policy::resolve_policy(dtype.into());
+        let policy_h = policy.header();
+        if !includes.contains(&policy_h) {
+            includes.push(policy_h);
+        }
+    }
+
+    let mut source_path_ctx: Option<PathBuf> = None;
+    let main_content = match kernel.source() {
+        KernelSource::File(filename) => {
+            let base_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/metals");
+            let p = base_path.join(filename);
+            if !p.exists() {
+                return Err(MetalError::LoadLibraryFailed(format!("Kernel source {} not found", p.display())));
+            }
+            source_path_ctx = p.parent().map(|p| p.to_path_buf());
+            std::fs::read_to_string(&p).map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read {}: {}", p.display(), e)))?
+        }
+        KernelSource::String(s) => s,
+    };
+
+    let is_policy = |inc: &str| inc.starts_with("policies/");
+
+    for include in includes.iter().filter(|&&i| is_policy(i)) {
+        let p = find_include(include, source_path_ctx.as_ref())
+            .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
+        let content = std::fs::read_to_string(&p)
+            .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
+
+        for line in content.lines() {
+            if line.trim().starts_with("#include \"") {
+                full_source.push_str(&format!("// Skipped: {}\n", line));
+            } else {
+                full_source.push_str(line);
+                full_source.push('\n');
+            }
+        }
+        full_source.push('\n');
+    }
+
+    let struct_defs = kernel.struct_defs();
+    if !struct_defs.is_empty() {
+        full_source.push_str("// Auto-generated struct definitions\n");
+        full_source.push_str(&struct_defs);
+        full_source.push_str("\n\n");
+    }
+
+    for include in includes.iter().filter(|&&i| !is_policy(i)) {
+        let p = find_include(include, source_path_ctx.as_ref())
+            .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
+        let content = std::fs::read_to_string(&p)
+            .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
+
+        for line in content.lines() {
+            if line.trim().starts_with("#include \"") {
+                full_source.push_str(&format!("// Skipped: {}\n", line));
+            } else {
+                full_source.push_str(line);
+                full_source.push('\n');
+            }
+        }
+        full_source.push('\n');
+    }
+
+    for line in main_content.lines() {
+        if line.trim().starts_with("#include \"") {
+            full_source.push_str(&format!("// Skipped: {}\n", line));
+        } else {
+            full_source.push_str(line);
+            full_source.push('\n');
+        }
+    }
+
+    if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
+        let mut safe_name = function_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>();
+        if safe_name.is_empty() {
+            safe_name = "kernel".to_string();
+        }
+
+        let dump_dir = std::path::Path::new(&dump_dir);
+        std::fs::create_dir_all(dump_dir).map_err(|e| {
+            MetalError::LoadLibraryFailed(format!(
+                "Failed to create METALLIC_DUMP_METAL_SOURCE_DIR {}: {}",
+                dump_dir.display(),
+                e
+            ))
+        })?;
+
+        let dump_path = dump_dir.join(format!("{}.metal", safe_name));
+        std::fs::write(&dump_path, &full_source)
+            .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to write Metal source dump {}: {}", dump_path.display(), e)))?;
+    }
+
+    let options = objc2_metal::MTLCompileOptions::new();
+    options.setLanguageVersion(objc2_metal::MTLLanguageVersion::Version4_0);
+    options.setEnableLogging(true);
+
+    let ns_source = NSString::from_str(&full_source);
+    let library = device
+        .newLibraryWithSource_options_error(&ns_source, Some(&options))
+        .map_err(|e| MetalError::LoadLibraryFailed(format!("{:?}", e)))?;
+
+    let ns_name = NSString::from_str(function_name);
+    let function = library
+        .newFunctionWithName(&ns_name)
+        .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Function {} not found in source", function_name)))?;
+
+    let pipeline = device
+        .newComputePipelineStateWithFunction_error(&function)
+        .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
+
+    Ok(pipeline)
 }

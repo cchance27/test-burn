@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::CompoundKernel, metals::swiglu::{SwigluParamsResolved, stages::SwigluStage, step::SwigluArgs}, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
@@ -75,12 +77,12 @@ fn test_swiglu_parity() {
     };
 
     // Construct Fused SwiGLU Kernel
-    let kernel = Box::leak(Box::new(
+    let kernel = Arc::new(
         CompoundKernel::new("fused_swiglu")
             .main(SwigluStage::new(params))
             .with_manual_output(true)
             .compile(),
-    ));
+    );
 
     let threads_per_group = 256;
     let vectorized_threads = total_elements / 4;
@@ -91,7 +93,7 @@ fn test_swiglu_parity() {
         group: ThreadgroupSize::d1(threads_per_group),
     };
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     let gpu_result: Vec<f16> = up_tensor.to_vec(&foundry);
 

@@ -1,4 +1,4 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
@@ -290,7 +290,7 @@ impl CompiledStep for CompiledFusedQkvStep {
             );
         }
 
-        foundry.run(&kernel.bind(args, dispatch))?;
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
 
         if bindings.get_var("i").map(|v| v == "0").unwrap_or(false) {
             foundry.synchronize()?;
@@ -303,48 +303,40 @@ impl CompiledStep for CompiledFusedQkvStep {
     }
 }
 
-type FusedKey = (GemvStrategy, String, bool);
-type FusedCache = std::collections::HashMap<FusedKey, &'static CompiledCompoundKernel>;
+fn get_fused_qkv_kernel(strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>, has_norm: bool) -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-fn get_fused_qkv_kernel(strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>, has_norm: bool) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FusedCache>> = OnceLock::new();
-    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
-    let mut cache = cache.lock().unwrap();
+    let variant = format!("{:?}_{}_{}", strategy, policy.short_name(), has_norm).to_lowercase();
+    let key = KernelCacheKey::new("fused_qkv", variant);
 
-    let key = (strategy, policy.short_name().to_string(), has_norm);
-    if let Some(kernel) = cache.get(&key) {
-        return kernel;
-    }
+    let policy_clone = policy.clone();
+    kernel_registry().get_or_build(key, move || {
+        let norm_suffix = if has_norm { "_rmsnorm" } else { "" };
+        let kernel_name = format!("fused_qkv{}_{}", norm_suffix, policy_clone.short_name());
+        let vec_width = policy_clone.optimization_hints().vector_load_size;
 
-    let norm_suffix = if has_norm { "_rmsnorm" } else { "" };
-    let kernel_name = format!("fused_qkv{}_{}", norm_suffix, policy.short_name());
-    let vec_width = policy.optimization_hints().vector_load_size;
+        // Configure layout with correct stride
+        let mut compound = CompoundKernel::new(&kernel_name)
+            .with_manual_output(true)
+            .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width as u32))
+            .prologue(RmsNormComputeStage::new(6, 7)); // Stage 1: RMSNorm compute
 
-    // Configure layout with correct stride
-    let mut compound = CompoundKernel::new(&kernel_name)
-        .with_manual_output(true)
-        .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width as u32))
-        .prologue(RmsNormComputeStage::new(6, 7)); // Stage 1: RMSNorm compute
+        // Stage 2: QKV Projection
+        let vw = match vec_width {
+            4 => super::stages::VectorWidth::Vec4,
+            8 => super::stages::VectorWidth::Vec8,
+            _ => panic!("Unsupported vector width: {}", vec_width),
+        };
 
-    // Stage 2: QKV Projection
-    let vw = match vec_width {
-        4 => super::stages::VectorWidth::Vec4,
-        8 => super::stages::VectorWidth::Vec8,
-        _ => panic!("Unsupported vector width: {}", vec_width),
-    };
+        let mut proj = ParallelProjectStage::new(policy_clone.clone()).with_vector_width(vw);
+        if has_norm {
+            proj = proj.with_norm(18, "inv_rms");
+        }
+        compound = compound.main(proj);
 
-    let mut proj = ParallelProjectStage::new(policy.clone()).with_vector_width(vw);
-    if has_norm {
-        proj = proj.with_norm(18, "inv_rms");
-    }
-    compound = compound.main(proj);
-
-    compound = compound
-        .epilogue(MultiWarpReduceStage) // Stage 3: Reduction
-        .epilogue(MultiWriteOutputStage); // Stage 4: Write Out
-
-    let compiled = Box::new(compound.compile());
-    let static_ref = Box::leak(compiled);
-    cache.insert(key, static_ref);
-    static_ref
+        compound
+            .epilogue(MultiWarpReduceStage) // Stage 3: Reduction
+            .epilogue(MultiWriteOutputStage) // Stage 4: Write Out
+            .compile()
+    })
 }

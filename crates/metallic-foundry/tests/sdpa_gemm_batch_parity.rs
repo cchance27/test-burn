@@ -153,7 +153,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
             alpha: scale,
             beta: 0.0,
         };
-        foundry.run(&qk_gemm_kernel.bind(qk_args, qk_dispatch))?;
+        foundry.run(&qk_gemm_kernel.clone().bind_arc(qk_args, qk_dispatch))?;
 
         // 2. Softmax per row (each query has its own row)
         for row in 0..m {
@@ -177,7 +177,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
                 causal: 0, // Non-causal for simple test
                 query_offset: 0,
             };
-            foundry.run(&softmax_kernel.bind(softmax_args, softmax_dispatch))?;
+            foundry.run(&softmax_kernel.clone().bind_arc(softmax_args, softmax_dispatch))?;
         }
 
         // 3. GEMM: Probs @ V -> Output [m, head_dim]
@@ -196,7 +196,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
             alpha: 1.0,
             beta: 0.0,
         };
-        foundry.run(&av_gemm_kernel.bind(av_args, av_dispatch))?;
+        foundry.run(&av_gemm_kernel.clone().bind_arc(av_args, av_dispatch))?;
     }
 
     // Read back result

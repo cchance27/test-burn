@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{
@@ -168,13 +170,13 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         dot_stage = dot_stage.with_norm(10, "inv_rms");
     }
 
-    let kernel = Box::leak(Box::new(
+    let kernel = Arc::new(
         builder
             .main(dot_stage)
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
             .epilogue(WarpWriteOutputNoResidualStage::new())
             .compile(),
-    ));
+    );
 
     let args = FusedGemvArgs {
         weights: TensorArg::from_tensor(&weights),
@@ -200,7 +202,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
 
     let dispatch = warp_dispatch_config(cfg.n as u32);
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     // 3. Compare Results
     let v2_f16 = FoundryTensor::to_vec(&output, &foundry);

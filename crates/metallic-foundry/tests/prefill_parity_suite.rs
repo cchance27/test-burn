@@ -58,7 +58,7 @@ fn run_parity_check(m: usize, n: usize, k: usize, tile_config: TileConfig) {
         params,
     };
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     let gpu_out = FoundryTensor::to_vec(&output, &foundry);
 

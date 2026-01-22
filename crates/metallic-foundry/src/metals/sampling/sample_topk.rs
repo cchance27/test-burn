@@ -6,7 +6,7 @@
 use metallic_macros::{KernelArgs, MetalStruct};
 
 use crate::{
-    Includes, Kernel, KernelSource, compound::Stage, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Includes, Kernel, KernelSource, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// Parameters for SampleTopK kernel.
@@ -91,18 +91,14 @@ impl SampleTopK {
     }
 }
 
-/// Kernel ID for pipeline caching.
-pub struct SampleTopKId;
-
 impl Kernel for SampleTopK {
     type Args = SampleParams;
-    type Id = SampleTopKId;
 
     fn source(&self) -> KernelSource {
         KernelSource::File("sampling/sample_topk.metal")
     }
 
-    fn function_name(&self) -> &'static str {
+    fn function_name(&self) -> &str {
         "sample_topk_fused_f16"
     }
 
@@ -127,10 +123,6 @@ impl Kernel for SampleTopK {
             grid: GridSize::d1(1), // Single threadgroup for now
             group: ThreadgroupSize::d1(self.threads_per_threadgroup),
         }
-    }
-
-    fn as_stage(&self) -> Box<dyn Stage> {
-        todo!("SampleTopK kernel does not yet support compound kernel staging")
     }
 }
 

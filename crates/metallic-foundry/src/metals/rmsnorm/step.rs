@@ -1,14 +1,11 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use metallic_macros::KernelArgs;
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{RmsNorm, RmsNormParamsResolved};
 use crate::{
-    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, ResolvedSymbols, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// RMSNorm Step
@@ -17,7 +14,7 @@ pub struct RmsNormStep {
     pub input: Ref,
     pub output: Ref,
     pub gamma: Ref,
-    pub epsilon: Option<f32>, // Not used in kernel yet (hardcoded 1e-6)
+    pub epsilon: Option<f32>, // DEBT: Not used in kernel yet (hardcoded 1e-6)
     pub feature_dim: DynamicValue<u32>,
     pub total_elements: DynamicValue<u32>,
 }
@@ -25,10 +22,9 @@ pub struct RmsNormStep {
 #[derive(Debug, Clone)]
 pub struct CompiledRmsNormStep {
     pub step: RmsNormStep,
-    pub input_resolved: crate::spec::ResolvedSymbols,
+    pub input_resolved: ResolvedSymbols,
     pub output_idx: usize,
     pub gamma_idx: usize,
-    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 #[typetag::serde(name = "RmsNormV2")]
@@ -38,9 +34,9 @@ impl Step for RmsNormStep {
     }
 
     fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = crate::spec::SymbolTable::new();
+        let mut symbols = SymbolTable::new();
         let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = crate::spec::FastBindings::new(symbols.len());
+        let mut fast_bindings = FastBindings::new(symbols.len());
 
         // Bind all symbols found in the table
         for (name, symbol_id) in symbols.iter() {
@@ -65,14 +61,13 @@ impl Step for RmsNormStep {
 
         vec![Box::new(CompiledRmsNormStep {
             step: self.clone(),
-            input_resolved: crate::spec::ResolvedSymbols {
+            input_resolved: ResolvedSymbols {
                 weights: input_idx,
                 scales: _input_scales_idx.into(),
                 bias: None,
             },
             output_idx,
             gamma_idx,
-            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
@@ -131,15 +126,7 @@ impl CompiledStep for CompiledRmsNormStep {
 
         let kernel = get_rmsnorm_kernel(policy);
 
-        let pipeline = if let Some(p) = self.pipeline.get() {
-            p
-        } else {
-            let p = foundry.load_kernel(kernel)?;
-            let _ = self.pipeline.set(p);
-            self.pipeline.get().unwrap()
-        };
-
-        foundry.dispatch_pipeline(pipeline, &kernel.bind(args, dispatch), dispatch)
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))
     }
 
     fn name(&self) -> &'static str {
@@ -227,30 +214,24 @@ struct RmsNormParams {
     }
 }
 
-fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
-    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
-    let mut cache = cache.lock().unwrap();
+fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    let key = policy.short_name().to_string();
-    if let Some(kernel) = cache.get(&key) {
-        return kernel;
-    }
+    let variant = policy.short_name().to_string();
+    let key = KernelCacheKey::new("rmsnorm", variant);
 
-    let dummy_params = RmsNormParamsResolved {
-        feature_dim: 0,
-        total_elements: 0,
-    };
-    let stage = RmsNormStandaloneStage {
-        params: dummy_params,
-        policy: policy.clone(),
-    };
+    let policy_clone = policy.clone();
+    kernel_registry().get_or_build(key, move || {
+        let dummy_params = RmsNormParamsResolved {
+            feature_dim: 0,
+            total_elements: 0,
+        };
+        let stage = RmsNormStandaloneStage {
+            params: dummy_params,
+            policy: policy_clone.clone(),
+        };
 
-    let kernel_name = format!("rmsnorm_standalone_{}", policy.short_name());
-    let compiled = Box::leak(Box::new(
-        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile(),
-    ));
-
-    cache.insert(key, compiled);
-    compiled
+        let kernel_name = format!("rmsnorm_standalone_{}", policy_clone.short_name());
+        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile()
+    })
 }

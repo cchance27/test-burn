@@ -1,7 +1,4 @@
-use std::sync::OnceLock;
-
 use metallic_macros::KernelArgs;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -149,22 +146,18 @@ impl CompiledStep for CompiledSwigluStep {
             group: ThreadgroupSize::d1(threads_per_group),
         };
 
-        // JIT Compile Kernel
-        // We use a key based on vector width to allow specializing if needed
-        // Here we just use a single compiled kernel since the code handles both paths
-        static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-        let kernel = KERNEL.get_or_init(|| {
-            // Need a dummy params for init?
-            // Actually CompoundKernel relies on Stage emitting code.
-            // SwigluStage code expects params to be bound.
+        // JIT Compile Kernel using registry
+        use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+        let key = KernelCacheKey::new("swiglu", "v2");
+        let kernel = kernel_registry().get_or_build(key, || {
             let dummy_params = SwigluParamsResolved::default();
             CompoundKernel::new("swiglu_v2")
                 .main_dyn(Box::new(SwigluStage::new(dummy_params)))
-                .with_manual_output(true) // Swiglu writes its own output
+                .with_manual_output(true)
                 .compile()
         });
 
-        foundry.run(&kernel.bind(args, dispatch))
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))
     }
 
     fn name(&self) -> &'static str {
@@ -367,7 +360,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
         let kernel = get_fused_ffn_kernel(policy_gate);
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
-        foundry.run(&kernel.bind(args, dispatch))
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))
     }
 
     fn name(&self) -> &'static str {
@@ -593,7 +586,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let kernel = get_fused_ffn_kernel(policy_gate);
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
-        foundry.run(&kernel.bind(args, dispatch))
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))
     }
 
     fn name(&self) -> &'static str {
@@ -601,31 +594,24 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
     }
 }
 
-fn get_fused_ffn_kernel(policy: std::sync::Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
-    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
-    let mut cache = cache.lock().unwrap();
+fn get_fused_ffn_kernel(policy: std::sync::Arc<dyn MetalPolicy>) -> std::sync::Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    let key = policy.short_name().to_string();
-    if let Some(kernel) = cache.get(&key) {
-        return kernel;
-    }
+    let variant = policy.short_name().to_string();
+    let key = KernelCacheKey::new("fused_ffn_swiglu", variant);
 
-    let kernel_name = format!("fused_ffn_swiglu_rmsnorm_{}", policy.short_name());
+    let policy_clone = policy.clone();
+    kernel_registry().get_or_build(key, move || {
+        let kernel_name = format!("fused_ffn_swiglu_rmsnorm_{}", policy_clone.short_name());
 
-    let compiled = Box::new(
         CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::row_major().with_warps(8))
             // Activation input is always F16; quantization only applies to weight loading stages.
             .prologue(RmsNormComputeStage::new(4, 6))
-            .main(FfnDualProjectStage::new(policy.clone()).with_norm(9, "inv_rms"))
+            .main(FfnDualProjectStage::new(policy_clone.clone()).with_norm(9, "inv_rms"))
             .epilogue(FfnWarpReduceStage)
             .epilogue(FfnSwigluWriteStage::new())
-            .compile(),
-    );
-
-    let static_ref = Box::leak(compiled);
-    cache.insert(key, static_ref);
-    static_ref
+            .compile()
+    })
 }

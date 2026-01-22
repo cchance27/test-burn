@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::{sync::Arc, time::Instant};
 
 use half::f16;
 use metallic_foundry::{
@@ -302,16 +302,16 @@ fn test_qkv_parity() {
     let out_v_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_kv], TensorInit::Uninitialized).unwrap();
 
     // Compile Kernel
-    let kernel = Box::leak(Box::new(
+    let kernel = Arc::new(
         CompoundKernel::new("fused_qkv_rmsnorm_test")
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::Canonical).with_warps(8))
             .prologue(RmsNormComputeStage::new(6, 7))
-            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyQ8)).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(Arc::new(PolicyQ8)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
             .compile(),
-    ));
+    );
 
     let args = FusedQkvArgs {
         w_q: TensorArg::from_tensor(&wq_tensor),
@@ -342,7 +342,7 @@ fn test_qkv_parity() {
         group: ThreadgroupSize::d1(warps_per_tg * 32),
     };
 
-    foundry.run(&kernel.bind(args.clone(), dispatch)).unwrap();
+    foundry.run(&kernel.clone().bind_arc(args.clone(), dispatch)).unwrap();
     let gpu_q = out_q_tensor.to_vec(&foundry);
     let gpu_k = out_k_tensor.to_vec(&foundry);
     let gpu_v = out_v_tensor.to_vec(&foundry);
@@ -356,13 +356,13 @@ fn test_qkv_parity() {
     let iters = 1000;
     println!("Warming up...");
     for _ in 0..10 {
-        foundry.run(&kernel.bind(args.clone(), dispatch)).unwrap();
+        foundry.run(&kernel.clone().bind_arc(args.clone(), dispatch)).unwrap();
     }
 
     let t0 = Instant::now();
     foundry.start_capture().unwrap();
     for _ in 0..iters {
-        foundry.run(&kernel.bind(args.clone(), dispatch)).unwrap();
+        foundry.run(&kernel.clone().bind_arc(args.clone(), dispatch)).unwrap();
     }
     let buf = foundry.end_capture().unwrap();
     buf.waitUntilCompleted();

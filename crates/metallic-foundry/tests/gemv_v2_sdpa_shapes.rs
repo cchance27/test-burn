@@ -48,7 +48,7 @@ fn test_gemv_v2_sdpa_foundry_qk() -> Result<(), MetalError> {
         beta: 0.0,
     };
 
-    foundry.run(&kernel.bind(args, dispatch))?;
+    foundry.run(&kernel.bind_arc(args, dispatch))?;
 
     // Verify
     let gpu_out: Vec<f16> = output_tensor.to_vec(&foundry);
@@ -112,7 +112,7 @@ fn test_gemv_v2_sdpa_foundry_av() -> Result<(), MetalError> {
         beta: 0.0,
     };
 
-    foundry.run(&kernel.bind(args, dispatch))?;
+    foundry.run(&kernel.bind_arc(args, dispatch))?;
 
     // Verify
     let gpu_out: Vec<f16> = output_tensor.to_vec(&foundry);

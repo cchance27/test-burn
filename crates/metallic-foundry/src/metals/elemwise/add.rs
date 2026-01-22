@@ -62,10 +62,6 @@ impl ElemwiseAdd {
     }
 }
 
-/// Kernel ID for pipeline caching.
-#[allow(dead_code)]
-pub struct ElemwiseAddId;
-
 #[cfg(test)]
 mod tests {
     use super::*;

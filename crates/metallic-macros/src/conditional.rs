@@ -539,10 +539,9 @@ pub fn derive_conditional_kernel_impl(input: DeriveInput) -> TokenStream {
         }
 
         impl #root::foundry::Kernel for #name {
-            type Id = String;
             type Args = ();
 
-            fn function_name(&self) -> &'static str {
+            fn function_name(&self) -> &str {
                 match self {
                     #( Self::#variant_names(k) => k.function_name(), )*
                 }

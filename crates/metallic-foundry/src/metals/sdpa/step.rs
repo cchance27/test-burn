@@ -1,8 +1,6 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use metallic_macros::KernelArgs;
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -14,12 +12,13 @@ use crate::{
 };
 
 /// Get the static compiled kernel template.
-fn get_fused_mha_kernel() -> &'static CompiledCompoundKernel {
-    static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-    KERNEL.get_or_init(|| {
-        let name = "fused_mha_rope_decode_v2";
+/// Get the compiled kernel template.
+fn get_fused_mha_kernel() -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    let key = KernelCacheKey::new("fused_mha", "rope_decode_v2");
 
-        // Use dummy values for template definition - only types/structure matter here
+    kernel_registry().get_or_build(key, || {
+        let name = "fused_mha_rope_decode_v2";
         let dummy_tensor = TensorArg::default();
         let dummy_layout = HeadLayoutStage::new(
             dummy_tensor.clone(),
@@ -34,22 +33,12 @@ fn get_fused_mha_kernel() -> &'static CompiledCompoundKernel {
         let dummy_rope = RopeStage::new(dummy_tensor.clone(), dummy_tensor.clone(), RopeParams::default());
         let dummy_core = SdpaOnlineStage::new(SdpaParams::default());
 
-        let kernel = CompoundKernel::new(name)
+        CompoundKernel::new(name)
             .prologue(dummy_layout)
             .prologue(dummy_rope)
             .main(dummy_core)
             .with_manual_output(true)
-            .compile();
-
-        let source_str = match crate::Kernel::source(&kernel) {
-            crate::KernelSource::String(s) => s,
-            _ => "N/A".to_string(),
-        };
-        println!(
-            "\n=== FUSED MHA KERNEL SOURCE ===\n{}\n==============================\n",
-            source_str
-        );
-        kernel
+            .compile()
     })
 }
 
@@ -63,7 +52,7 @@ impl FusedMhaStep {
     /// Get the generated Metal source code for this kernel.
     pub fn source() -> String {
         let kernel = get_fused_mha_kernel();
-        match crate::Kernel::source(kernel) {
+        match crate::Kernel::source(&*kernel) {
             crate::KernelSource::String(s) => s,
             _ => "Source not available (Binary/Other)".to_string(),
         }
@@ -90,7 +79,7 @@ impl FusedMhaStep {
     ) -> Result<CompiledFusedMhaStep, MetalError> {
         // Ensure kernel is initialized
         let kernel = get_fused_mha_kernel();
-        let source = match crate::Kernel::source(kernel) {
+        let source = match crate::Kernel::source(&*kernel) {
             crate::KernelSource::String(s) => s,
             _ => "N/A".to_string(),
         };
@@ -244,7 +233,7 @@ impl CompiledStep for CompiledFusedMhaStep {
         let config = DispatchConfig::new(grid, group);
 
         let kernel = get_fused_mha_kernel();
-        let bound = kernel.bind(args, config);
+        let bound = kernel.clone().bind_arc(args, config);
         foundry.run(&bound)
     }
 
@@ -283,7 +272,6 @@ pub struct CompiledSdpaStep {
     pub k_idx: usize,
     pub v_idx: usize,
     pub output_idx: usize,
-    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 #[typetag::serde(name = "Sdpa")]
@@ -308,15 +296,17 @@ impl Step for SdpaStep {
             k_idx,
             v_idx,
             output_idx,
-            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
 
 /// Get or create static SDPA kernel (standalone, no RoPE fusion)
-fn get_sdpa_standalone_kernel() -> &'static CompiledCompoundKernel {
-    static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-    KERNEL.get_or_init(|| {
+/// Get or create SDPA kernel (standalone, no RoPE fusion)
+fn get_sdpa_standalone_kernel() -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    let key = KernelCacheKey::new("sdpa_standalone", "v2");
+
+    kernel_registry().get_or_build(key, || {
         use crate::metals::sdpa::stages::SdpaStandaloneStage;
 
         let dummy_tensor = TensorArg::default();
@@ -424,17 +414,8 @@ impl CompiledStep for CompiledSdpaStep {
 
         let kernel = get_sdpa_standalone_kernel();
 
-        // Optimized dispatch
-        let pipeline = if let Some(p) = self.pipeline.get() {
-            p
-        } else {
-            let p = foundry.load_kernel(kernel)?;
-            let _ = self.pipeline.set(p);
-            self.pipeline.get().unwrap()
-        };
-
-        let bound = kernel.bind(args, config);
-        foundry.dispatch_pipeline(pipeline, &bound, config)
+        let bound = kernel.clone().bind_arc(args, config);
+        foundry.run(&bound)
     }
 
     fn name(&self) -> &'static str {
@@ -654,7 +635,7 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
                 alpha: scale,
                 beta: 0.0,
             };
-            foundry.run(&qk_gemm_kernel.bind(qk_args, qk_dispatch))?;
+            foundry.run(&qk_gemm_kernel.clone().bind_arc(qk_args, qk_dispatch))?;
 
             // Softmax: flatten heads into the row dimension to dispatch once.
             // Row index is (head * M + row), but causal masking must use (row % M).
@@ -674,7 +655,7 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
                 query_offset: q_offset_val,
                 rows_per_batch: padded_m,
             };
-            foundry.run(&softmax_sdpa_kernel.bind(softmax_args, softmax_dispatch))?;
+            foundry.run(&softmax_sdpa_kernel.clone().bind_arc(softmax_args, softmax_dispatch))?;
 
             // GEMM 2: Probs @ V -> Output [M, head_dim] written into token-major [M, d_model].
             // NOTE: Output is actually [H, M, D] in scratch/temp buffer usually?
@@ -725,7 +706,7 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
                 alpha: 1.0,
                 beta: 0.0,
             };
-            foundry.run(&av_gemm_kernel.bind(av_args, av_dispatch))?;
+            foundry.run(&av_gemm_kernel.clone().bind_arc(av_args, av_dispatch))?;
         }
 
         Ok(())

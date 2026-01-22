@@ -34,6 +34,16 @@ impl std::ops::Deref for MetalDevice {
     }
 }
 
+impl MetalDevice {
+    /// Get the unique registry ID for this device.
+    ///
+    /// Used for pipeline cache keys to support multi-GPU scenarios.
+    pub fn registry_id(&self) -> u64 {
+        use objc2_metal::MTLDevice as _;
+        self.0.registryID()
+    }
+}
+
 impl std::ops::Deref for MetalQueue {
     type Target = ProtocolObject<dyn MTLCommandQueue>;
     fn deref(&self) -> &Self::Target {

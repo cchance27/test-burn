@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
@@ -20,11 +18,14 @@ pub struct SoftmaxV2Step {
 }
 
 // Static cache for the kernel template
-pub fn get_softmax_v2_kernel() -> &'static CompiledCompoundKernel {
-    use crate::compound::stages::SimdStage;
+pub fn get_softmax_v2_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
+    use crate::{
+        compound::stages::SimdStage, kernel_registry::{KernelCacheKey, kernel_registry}
+    };
 
-    static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-    KERNEL.get_or_init(|| {
+    let key = KernelCacheKey::new("softmax", "v2_fused");
+
+    kernel_registry().get_or_build(key, || {
         CompoundKernel::new("softmax_v2_fused")
             // Layout: emit row/col indices
             .prologue(LayoutStage::row_major())
@@ -137,7 +138,7 @@ impl CompiledStep for CompiledSoftmaxV2Step {
             group: ThreadgroupSize::d1(256),
         };
 
-        let bound_kernel = get_softmax_v2_kernel().bind(args, dispatch);
+        let bound_kernel = get_softmax_v2_kernel().bind_arc(args, dispatch);
 
         foundry.run(&bound_kernel)
     }

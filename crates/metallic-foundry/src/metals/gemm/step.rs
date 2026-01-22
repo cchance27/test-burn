@@ -3,12 +3,9 @@
 //! This module provides `GemmV2Step` which wraps the GEMM compound kernel
 //! for use in Foundry model specs.
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use metallic_macros::{KernelArgs, MetalStruct};
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -179,10 +176,7 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
         .compile()
 }
 
-/// Get a cached GEMM kernel for the given quantization types.
-///
-/// This is the unified kernel getter - works for any combination of
-/// quantization types (F16, Q8, future Q4, etc).
+/// Get a cached GEMM kernel for the given configuration.
 pub fn get_gemm_kernel(
     a_quant: Arc<dyn MetalPolicy>,
     b_quant: Arc<dyn MetalPolicy>,
@@ -192,11 +186,10 @@ pub fn get_gemm_kernel(
     has_alpha_beta: bool,
     has_bias: bool,
     activation: Activation,
-) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::RwLock<FxHashMap<GemmKernelKey, &'static CompiledCompoundKernel>>> = OnceLock::new();
-    // DEBT: cache entries are leaked for `'static` return; consider switching to `Arc` + bounded LRU.
+) -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    let key = GemmKernelKey {
+    let gemm_key = GemmKernelKey {
         a_quant: a_quant.short_name().to_string(),
         b_quant: b_quant.short_name().to_string(),
         transpose_a,
@@ -207,27 +200,10 @@ pub fn get_gemm_kernel(
         activation,
     };
 
-    let cache = KERNELS.get_or_init(|| std::sync::RwLock::new(FxHashMap::default()));
+    let variant = format!("{:?}", gemm_key);
+    let key = KernelCacheKey::new("gemm", variant);
 
-    // Fast path: read lock
-    {
-        let reader = cache.read().unwrap();
-        if let Some(kernel) = reader.get(&key) {
-            return kernel;
-        }
-    }
-
-    // Slow path: write lock
-    let mut writer = cache.write().unwrap();
-    // Double check
-    if let Some(kernel) = writer.get(&key) {
-        return kernel;
-    }
-
-    let kernel = build_gemm_kernel(key.clone());
-    let static_kernel = Box::leak(Box::new(kernel));
-    writer.insert(key, static_kernel);
-    static_kernel
+    kernel_registry().get_or_build(key, || build_gemm_kernel(gemm_key))
 }
 
 /// Dispatch configuration for GEMM kernels.
@@ -364,7 +340,6 @@ impl Step for GemmV2Step {
             weights_per_block: self.weights_per_block,
             tile_config: self.tile_config,
             activation: self.activation,
-            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
@@ -394,7 +369,6 @@ pub struct CompiledGemmV2Step {
     pub weights_per_block: u32,
     pub tile_config: Option<TileConfig>,
     pub activation: Activation,
-    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 impl CompiledStep for CompiledGemmV2Step {
@@ -494,17 +468,7 @@ impl CompiledStep for CompiledGemmV2Step {
             params,
         };
 
-        // Get pipeline from cache or load it
-        let pipeline = if let Some(p) = self.pipeline.get() {
-            p
-        } else {
-            let p = foundry.load_kernel(kernel)?;
-            let _ = self.pipeline.set(p);
-            self.pipeline.get().unwrap()
-        };
-
-        let bound_kernel = kernel.bind(args, dispatch);
-        foundry.dispatch_pipeline(pipeline, &bound_kernel, dispatch)
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))
     }
 
     fn name(&self) -> &'static str {

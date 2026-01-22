@@ -7,8 +7,6 @@
 //! - Dynamic block size selection based on K dimension
 //! - Composable stage architecture
 
-use std::sync::OnceLock;
-
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
@@ -70,110 +68,94 @@ pub enum GemvStrategy {
 }
 
 /// Unified kernel getter for GEMV V2.
-/// Uses a HashMap cache keyed by (layout, strategy, policy_name).
+/// Uses centralized KernelRegistry with Arc-based caching.
 pub fn get_gemv_v2_kernel(
     policy: std::sync::Arc<dyn crate::fusion::MetalPolicy>,
     layout: Layout,
     strategy: GemvStrategy,
     activation: Activation,
-) -> &'static CompiledCompoundKernel {
-    use std::sync::Mutex;
+) -> std::sync::Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    use rustc_hash::FxHashMap;
+    let variant = format!("{:?}_{:?}_{}_{}", layout, strategy, policy.short_name(), activation.struct_name());
+    let key = KernelCacheKey::new("gemv", variant);
 
-    static CACHE: OnceLock<Mutex<FxHashMap<(Layout, GemvStrategy, String, Activation), &'static CompiledCompoundKernel>>> = OnceLock::new();
-    // DEBT: cache entries are leaked for `'static` return; consider switching to `Arc` + bounded LRU.
-    let cache = CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+    let policy_clone = policy.clone();
+    kernel_registry().get_or_build(key, move || {
+        let kernel_name = format!(
+            "gemv_v2_{:?}_{:?}_{}_{}",
+            layout,
+            strategy,
+            policy_clone.short_name(),
+            activation.struct_name()
+        )
+        .to_lowercase();
+        let use_f16_cols8 = policy_clone.element_size() == 2 && use_f16_cols8();
 
-    let key = (layout, strategy, policy.short_name().to_string(), activation);
-
-    {
-        let guard = cache.lock().unwrap();
-        if let Some(kernel) = guard.get(&key) {
-            return kernel;
-        }
-    }
-
-    let kernel_name = format!(
-        "gemv_v2_{:?}_{:?}_{}_{}",
-        layout,
-        strategy,
-        policy.short_name(),
-        activation.struct_name()
-    )
-    .to_lowercase();
-    let use_f16_cols8 = policy.element_size() == 2 && use_f16_cols8();
-
-    let compiled: CompiledCompoundKernel = match (layout, strategy) {
-        (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
-            if use_f16_cols8 {
-                CompoundKernel::new(&format!("{}_cols8", kernel_name))
-                    .prologue(WarpLayoutStage::row_major().with_warps(8))
-                    .prologue(VectorizedDotStage::new(policy.clone()).with_f16_cols8(true))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new().with_activation(activation))
-                    .with_manual_output(true)
-                    .compile()
-            } else {
-                CompoundKernel::new(&kernel_name)
-                    .prologue(WarpLayoutStage::row_major().with_warps(8))
-                    .prologue(VectorizedDotStage::new(policy.clone()))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new().with_activation(activation))
-                    .with_manual_output(true)
-                    .compile()
+        match (layout, strategy) {
+            (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
+                if use_f16_cols8 {
+                    CompoundKernel::new(&format!("{}_cols8", kernel_name))
+                        .prologue(WarpLayoutStage::row_major().with_warps(8))
+                        .prologue(VectorizedDotStage::new(policy_clone.clone()).with_f16_cols8(true))
+                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                        .main(WarpWriteOutputStage::new().with_activation(activation))
+                        .with_manual_output(true)
+                        .compile()
+                } else {
+                    CompoundKernel::new(&kernel_name)
+                        .prologue(WarpLayoutStage::row_major().with_warps(8))
+                        .prologue(VectorizedDotStage::new(policy_clone.clone()))
+                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                        .main(WarpWriteOutputStage::new().with_activation(activation))
+                        .with_manual_output(true)
+                        .compile()
+                }
             }
+            (Layout::RowMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
+                .prologue(WarpLayoutStage::row_major().with_warps(8))
+                .prologue(CanonicalDotStage::new(policy_clone.clone()))
+                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
+                .prologue(WarpLayoutStage::col_major().with_warps(8))
+                .prologue(VectorizedDotStage::new(policy_clone.clone()))
+                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            (Layout::ColMajor, GemvStrategy::Scalar) => CompoundKernel::new(&kernel_name)
+                .prologue(ThreadLayoutStage::col_major())
+                .prologue(ScalarDotStage::new(policy_clone.clone()))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            (Layout::ColMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
+                .prologue(WarpLayoutStage::col_major().with_warps(8))
+                .prologue(CanonicalDotStage::new(policy_clone.clone()))
+                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            (Layout::Canonical, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
+                .prologue(WarpLayoutStage::canonical().with_warps(8))
+                .prologue(VectorizedDotStage::new(policy_clone.clone()))
+                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
+                .prologue(WarpLayoutStage::canonical().with_warps(8))
+                .prologue(CanonicalDotStage::new(policy_clone.clone()))
+                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
         }
-        (Layout::RowMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
-            .prologue(WarpLayoutStage::row_major().with_warps(8))
-            .prologue(CanonicalDotStage::new(policy.clone()))
-            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new().with_activation(activation))
-            .with_manual_output(true)
-            .compile(),
-        (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
-            .prologue(WarpLayoutStage::col_major().with_warps(8))
-            .prologue(VectorizedDotStage::new(policy.clone()))
-            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new().with_activation(activation))
-            .with_manual_output(true)
-            .compile(),
-        (Layout::ColMajor, GemvStrategy::Scalar) => CompoundKernel::new(&kernel_name)
-            .prologue(ThreadLayoutStage::col_major())
-            .prologue(ScalarDotStage::new(policy.clone()))
-            .main(WarpWriteOutputStage::new().with_activation(activation))
-            .with_manual_output(true)
-            .compile(),
-        (Layout::ColMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
-            .prologue(WarpLayoutStage::col_major().with_warps(8))
-            .prologue(CanonicalDotStage::new(policy.clone()))
-            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new().with_activation(activation))
-            .with_manual_output(true)
-            .compile(),
-        (Layout::Canonical, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
-            .prologue(WarpLayoutStage::canonical().with_warps(8))
-            .prologue(VectorizedDotStage::new(policy.clone()))
-            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new().with_activation(activation))
-            .with_manual_output(true)
-            .compile(),
-        (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
-            .prologue(WarpLayoutStage::canonical().with_warps(8))
-            .prologue(CanonicalDotStage::new(policy.clone()))
-            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new().with_activation(activation))
-            .with_manual_output(true)
-            .compile(),
-        _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
-    };
-
-    // Leak to get 'static lifetime (same pattern as existing code)
-    let leaked: &'static CompiledCompoundKernel = Box::leak(Box::new(compiled));
-
-    let mut guard = cache.lock().unwrap();
-    guard.insert(key, leaked);
-    leaked
+    })
 }
 
 // NOTE: get_gemv_v2_kernel_f16 and get_gemv_v2_kernel_q8 removed.
@@ -451,9 +433,9 @@ impl CompiledStep for CompiledGemvV2Step {
             data.insert("k".to_string(), k_dim.to_string());
             data.insert("tA".to_string(), "0".to_string());
             data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))?;
+            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))?;
         } else {
-            foundry.run(&kernel.bind(args, dispatch))?;
+            foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
         }
 
         Ok(())
@@ -686,9 +668,9 @@ impl CompiledStep for CompiledGemvCanonicalStep {
             data.insert("k".to_string(), k_dim.to_string());
             data.insert("tA".to_string(), "0".to_string());
             data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))?;
+            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))?;
         } else {
-            foundry.run(&kernel.bind(args, dispatch))?;
+            foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
         }
 
         Ok(())
@@ -930,9 +912,9 @@ impl CompiledStep for CompiledGemvColMajorStep {
             data.insert("k".to_string(), k_dim.to_string());
             data.insert("tA".to_string(), "0".to_string());
             data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))?;
+            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))?;
         } else {
-            foundry.run(&kernel.bind(args, dispatch))?;
+            foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
         }
 
         if debug {
@@ -958,7 +940,7 @@ impl CompiledStep for CompiledGemvColMajorStep {
                 group: ThreadgroupSize::d1(256),
             };
 
-            foundry.run(&add_kernel.bind(add_args, dispatch))?;
+            foundry.run(&add_kernel.clone().bind_arc(add_args, dispatch))?;
         }
 
         if debug {
@@ -1039,9 +1021,10 @@ impl Stage for ElemwiseAddGlobalStage {
     }
 }
 
-fn get_add_kernel() -> &'static CompiledCompoundKernel {
-    static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-    KERNEL.get_or_init(|| {
+fn get_add_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+    let key = KernelCacheKey::new("gemv", "add_residual");
+    kernel_registry().get_or_build(key, || {
         CompoundKernel::new("gemv_add_residual")
             .main(ElemwiseAddGlobalStage)
             .with_manual_output(true)

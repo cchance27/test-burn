@@ -37,9 +37,6 @@ impl Ones {
     }
 }
 
-/// Kernel ID for pipeline caching.
-pub struct OnesId;
-
 #[cfg(test)]
 mod tests {
     use super::*;

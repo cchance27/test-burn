@@ -211,36 +211,43 @@ impl Stage for ParallelProjectStage {
         // Helper macro for optimized indexing
         // Checks if WPB==32 (constant fold if specialized) or runtime check (uniform)
         let calc_idx = r#"
-        uint w_idx;
+        ulong w_idx;
         #if defined(IS_CANONICAL) && IS_CANONICAL
         if (weights_per_block == 32) {
             // Canonical layout fast path:
             // idx = (k % 32) + 32 * (row + (k / 32) * N)
-            // Use uint arithmetic for speed (valid for models < 4GB/layer)
-            w_idx = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_dim;
+            // Use uint arithmetic when safe, otherwise fall back to 64-bit indexing.
+            const ulong U32_MAX_U = 0xFFFFFFFFul;
+            if (((ulong)n_dim) * ((ulong)k_dim) <= U32_MAX_U) {
+                uint w_idx_u32 = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_dim;
+                w_idx = (ulong)w_idx_u32;
+            } else {
+                w_idx = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_dim);
+            }
         } else {
-            w_idx = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+            w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
         }
         #else
-        w_idx = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        w_idx = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
         #endif
         "#;
 
-        // DEBT! 4GB issue!!?!?!?
-        // Note: We keep w_idx as uint, but when adding to pointer (uchar*), Metal handles it.
-        // If weights > 4GB, this overflows. But we are optimizing for 0.5B speed for now.
-        // Foundry generally uses ulong offsets, so we cast at usage if needed.
-
         let calc_idx_kv = r#"
-        uint w_idx_kv;
+        ulong w_idx_kv;
         #if defined(IS_CANONICAL) && IS_CANONICAL
         if (weights_per_block == 32) {
-            w_idx_kv = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_kv;
+            const ulong U32_MAX_U = 0xFFFFFFFFul;
+            if (((ulong)n_kv) * ((ulong)k_dim) <= U32_MAX_U) {
+                uint w_idx_kv_u32 = (k & 31u) + (row_idx << 5u) + (k & ~31u) * n_kv;
+                w_idx_kv = (ulong)w_idx_kv_u32;
+            } else {
+                w_idx_kv = ((ulong)(k & 31u)) + (((ulong)row_idx) << 5ul) + ((ulong)(k & ~31u)) * ((ulong)n_kv);
+            }
         } else {
-            w_idx_kv = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
+            w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
         }
         #else
-        w_idx_kv = (uint)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
+        w_idx_kv = (ulong)WEIGHT_INDEX(row_idx, k, k_dim, n_kv);
         #endif
         "#;
 

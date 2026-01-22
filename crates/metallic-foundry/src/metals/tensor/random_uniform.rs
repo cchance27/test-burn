@@ -5,7 +5,7 @@
 use metallic_macros::{KernelArgs, MetalStruct};
 
 use crate::{
-    Includes, Kernel, KernelSource, compound::Stage, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Includes, Kernel, KernelSource, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// Parameters for RandomUniform kernel.
@@ -49,18 +49,14 @@ impl RandomUniform {
     }
 }
 
-/// Kernel ID for pipeline caching.
-pub struct RandomUniformId;
-
 impl Kernel for RandomUniform {
     type Args = RandomUniformParams;
-    type Id = RandomUniformId;
 
     fn source(&self) -> KernelSource {
         KernelSource::File("tensor/random_uniform.metal")
     }
 
-    fn function_name(&self) -> &'static str {
+    fn function_name(&self) -> &str {
         "random_uniform_kernel_f16"
     }
 
@@ -88,10 +84,6 @@ impl Kernel for RandomUniform {
             grid: GridSize::d1(num_groups),
             group: ThreadgroupSize::d1(threads_per_group),
         }
-    }
-
-    fn as_stage(&self) -> Box<dyn Stage> {
-        todo!("RandomUniform kernel does not yet support compound kernel staging")
     }
 }
 

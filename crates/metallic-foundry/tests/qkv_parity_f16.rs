@@ -2,6 +2,8 @@
 //! Tests the fused QKV kernel with F16 weights (no quantization) directly
 //! using CompoundKernel, mirroring the working Q8 test pattern.
 
+use std::sync::Arc;
+
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{
@@ -148,7 +150,7 @@ fn test_qkv_parity_f16() {
     let out_v_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_kv], TensorInit::Uninitialized).unwrap();
 
     // Compile Kernel using F16 Policy
-    let kernel = Box::leak(Box::new(
+    let kernel = Arc::new(
         CompoundKernel::new("fused_qkv_rmsnorm_f16_test")
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
@@ -157,7 +159,7 @@ fn test_qkv_parity_f16() {
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
             .compile(),
-    ));
+    );
 
     // DUMP KERNEL SOURCE FOR DEBUGGING
     println!("=== Generated Metal Source ===");
@@ -193,7 +195,7 @@ fn test_qkv_parity_f16() {
         group: ThreadgroupSize::d1(warps_per_tg * 32),
     };
 
-    foundry.run(&kernel.bind(args.clone(), dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args.clone(), dispatch)).unwrap();
 
     let gpu_q = out_q_tensor.to_vec(&foundry);
     let gpu_k = out_k_tensor.to_vec(&foundry);
@@ -272,7 +274,7 @@ fn test_qkv_parity_f16_batched() {
     let out_k_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_kv], TensorInit::Uninitialized).unwrap();
     let out_v_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_kv], TensorInit::Uninitialized).unwrap();
 
-    let kernel = Box::leak(Box::new(
+    let kernel = Arc::new(
         CompoundKernel::new("fused_qkv_rmsnorm_f16_batched_test")
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
@@ -281,7 +283,7 @@ fn test_qkv_parity_f16_batched() {
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
             .compile(),
-    ));
+    );
 
     let args = FusedQkvArgs {
         w_q: TensorArg::from_tensor(&wq_tensor),
@@ -316,7 +318,7 @@ fn test_qkv_parity_f16_batched() {
     foundry.start_capture().unwrap();
 
     eprintln!("Dispatching FusedQkv kernel in batched mode...");
-    foundry.dispatch(&kernel.bind(args.clone(), dispatch), dispatch).unwrap();
+    foundry.dispatch(&kernel.bind_arc(args.clone(), dispatch), dispatch).unwrap();
 
     eprintln!("Ending capture and waiting for completion...");
     let buffer = foundry.end_capture().unwrap();

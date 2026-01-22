@@ -1,9 +1,7 @@
-use std::sync::OnceLock;
-
 use metallic_macros::KernelArgs;
 
 use crate::{
-    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage}, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{BufferArg, CompoundKernel, Stage}, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// A simple, compiled element-wise add step: Out = A + B.
@@ -40,11 +38,12 @@ impl CompiledStep for CompiledSimpleAddStep {
             total,
         };
 
-        static ADD_KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-        let kernel = ADD_KERNEL.get_or_init(|| {
+        use crate::kernel_registry::{KernelCacheKey, kernel_registry};
+        let key = KernelCacheKey::new("elemwise_add", "f16_simple");
+        let kernel = kernel_registry().get_or_build(key, || {
             CompoundKernel::new("elemwise_add_f16_simple")
                 .prologue(ElemwiseAddGlobalStage)
-                .with_manual_output(true) // Stage handles writing
+                .with_manual_output(true)
                 .compile()
         });
 
@@ -54,7 +53,7 @@ impl CompiledStep for CompiledSimpleAddStep {
             group: ThreadgroupSize::d1(256),
         };
 
-        foundry.run(&kernel.bind(args, dispatch))?;
+        foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
         Ok(())
     }
 

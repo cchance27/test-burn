@@ -1041,7 +1041,6 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     };
 
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let id_name = quote::format_ident!("{}KernelId", name);
     let stage_name = quote::format_ident!("{}Stage", name);
 
     // Generate as_stage() implementation
@@ -1281,14 +1280,10 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        #[doc(hidden)]
-        pub struct #id_name;
-
         impl #impl_generics #root::Kernel for #name #ty_generics #where_clause {
             type Args = #args_type;
-            type Id = #id_name;
 
-            fn function_name(&self) -> &'static str {
+            fn function_name(&self) -> &str {
                 #function
             }
 
@@ -1776,20 +1771,13 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
         }
     }
 
-    // Generate unique ID type
-    let id_name = syn::Ident::new(&format!("{}Id", name), name.span());
-
     let root = foundry_crate();
 
     let expanded = quote! {
-        /// Unique ID for kernel caching.
-        pub struct #id_name;
-
         impl #impl_generics #root::Kernel for #name #ty_generics #where_clause {
             type Args = Self;
-            type Id = #id_name;
 
-            fn function_name(&self) -> &'static str {
+            fn function_name(&self) -> &str {
                 #kernel_name
             }
 

@@ -154,10 +154,11 @@ pub struct CompoundKernel<State = Unfused> {
 /// since it avoids rebuilding source strings and avoids owning non-cloneable stage graphs.
 #[derive(Clone, Debug, Default)]
 pub struct CompiledCompoundKernel {
-    fn_name: &'static str,
+    fn_name: String,
     includes: Vec<&'static str>,
     struct_defs: String,
     source: String,
+    pub(crate) source_hash: u64,
 }
 
 impl CompiledCompoundKernel {
@@ -168,8 +169,19 @@ impl CompiledCompoundKernel {
 }
 
 /// A bound (dispatchable) compiled compound kernel.
-pub struct BoundCompiledCompoundKernel<A: BindArgs> {
-    template: &'static CompiledCompoundKernel,
+pub struct BoundCompiledCompoundKernel<'a, A: BindArgs> {
+    template: &'a CompiledCompoundKernel,
+    args: A,
+    dispatch: DispatchConfig,
+    metric_data: Option<rustc_hash::FxHashMap<String, String>>,
+}
+
+/// An Arc-based bound kernel for registry-cached kernels.
+///
+/// This variant holds an `Arc<CompiledCompoundKernel>` instead of `&'static`,
+/// enabling bounded eviction from the kernel registry.
+pub struct ArcBoundCompiledCompoundKernel<A: BindArgs> {
+    template: std::sync::Arc<CompiledCompoundKernel>,
     args: A,
     dispatch: DispatchConfig,
     metric_data: Option<rustc_hash::FxHashMap<String, String>>,
@@ -257,12 +269,24 @@ impl CompoundKernel<Unfused> {
         let source = self.generate_source();
         let includes = self.collect_includes();
         let struct_defs = format!("#define FUSED_KERNEL 1\n\n{}", self.collect_struct_defs());
-        let fn_name = Box::leak(self.name.into_boxed_str());
+        let fn_name = self.name;
+
+        use std::hash::{Hash as _, Hasher as _};
+        let mut hasher = rustc_hash::FxHasher::default();
+        // Hash the full compilation input that influences the final pipeline.
+        // This is used by the global pipeline cache key to avoid collisions.
+        fn_name.hash(&mut hasher);
+        includes.hash(&mut hasher);
+        struct_defs.hash(&mut hasher);
+        source.hash(&mut hasher);
+        let source_hash = hasher.finish();
+
         CompiledCompoundKernel {
             fn_name,
             includes,
             struct_defs,
             source,
+            source_hash,
         }
     }
 
@@ -416,7 +440,7 @@ impl<S> CompoundKernel<S> {
 
 impl CompiledCompoundKernel {
     /// Bind this kernel with runtime arguments for dispatch.
-    pub fn bind<A: BindArgs>(&'static self, args: A, dispatch: DispatchConfig) -> BoundCompiledCompoundKernel<A> {
+    pub fn bind<A: BindArgs>(&self, args: A, dispatch: DispatchConfig) -> BoundCompiledCompoundKernel<'_, A> {
         BoundCompiledCompoundKernel {
             template: self,
             args,
@@ -427,11 +451,11 @@ impl CompiledCompoundKernel {
 
     #[inline]
     pub fn bind_with_metrics<A: BindArgs>(
-        &'static self,
+        &self,
         args: A,
         dispatch: DispatchConfig,
         metric_data: rustc_hash::FxHashMap<String, String>,
-    ) -> BoundCompiledCompoundKernel<A> {
+    ) -> BoundCompiledCompoundKernel<'_, A> {
         BoundCompiledCompoundKernel {
             template: self,
             args,
@@ -441,12 +465,42 @@ impl CompiledCompoundKernel {
     }
 }
 
+impl CompiledCompoundKernel {
+    /// Bind an Arc-wrapped kernel with runtime arguments.
+    ///
+    /// This is the preferred method for registry-cached kernels, as it doesn't
+    /// require `&'static` and enables bounded eviction.
+    pub fn bind_arc<A: BindArgs>(self: std::sync::Arc<Self>, args: A, dispatch: DispatchConfig) -> ArcBoundCompiledCompoundKernel<A> {
+        ArcBoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: None,
+        }
+    }
+
+    /// Bind an Arc-wrapped kernel with runtime arguments and metrics.
+    #[inline]
+    pub fn bind_arc_with_metrics<A: BindArgs>(
+        self: std::sync::Arc<Self>,
+        args: A,
+        dispatch: DispatchConfig,
+        metric_data: rustc_hash::FxHashMap<String, String>,
+    ) -> ArcBoundCompiledCompoundKernel<A> {
+        ArcBoundCompiledCompoundKernel {
+            template: self,
+            args,
+            dispatch,
+            metric_data: Some(metric_data),
+        }
+    }
+}
+
 impl Kernel for CompiledCompoundKernel {
-    type Id = String;
     type Args = ();
 
-    fn function_name(&self) -> &'static str {
-        self.fn_name
+    fn function_name(&self) -> &str {
+        &self.fn_name
     }
 
     fn source(&self) -> KernelSource {
@@ -462,14 +516,17 @@ impl Kernel for CompiledCompoundKernel {
     }
 
     fn bind(&self, _encoder: &ComputeCommandEncoder) {}
+
+    fn source_hash(&self) -> u64 {
+        self.source_hash
+    }
 }
 
-impl<A: BindArgs> Kernel for BoundCompiledCompoundKernel<A> {
-    type Id = String;
+impl<'a, A: BindArgs> Kernel for BoundCompiledCompoundKernel<'a, A> {
     type Args = A;
 
-    fn function_name(&self) -> &'static str {
-        self.template.fn_name
+    fn function_name(&self) -> &str {
+        &self.template.fn_name
     }
 
     fn source(&self) -> KernelSource {
@@ -495,16 +552,55 @@ impl<A: BindArgs> Kernel for BoundCompiledCompoundKernel<A> {
     fn metric_data(&self) -> Option<rustc_hash::FxHashMap<String, String>> {
         self.metric_data.clone()
     }
+
+    fn source_hash(&self) -> u64 {
+        self.template.source_hash
+    }
+}
+
+impl<A: BindArgs> Kernel for ArcBoundCompiledCompoundKernel<A> {
+    type Args = A;
+
+    fn function_name(&self) -> &str {
+        &self.template.fn_name
+    }
+
+    fn source(&self) -> KernelSource {
+        KernelSource::String(self.template.source.clone())
+    }
+
+    fn includes(&self) -> Includes {
+        Includes(self.template.includes.clone())
+    }
+
+    fn struct_defs(&self) -> String {
+        self.template.struct_defs.clone()
+    }
+
+    fn bind(&self, encoder: &ComputeCommandEncoder) {
+        self.args.bind_args(encoder);
+    }
+
+    fn dispatch_config(&self) -> DispatchConfig {
+        self.dispatch
+    }
+
+    fn metric_data(&self) -> Option<rustc_hash::FxHashMap<String, String>> {
+        self.metric_data.clone()
+    }
+
+    fn source_hash(&self) -> u64 {
+        self.template.source_hash
+    }
 }
 
 // --- Kernel Trait Implementation ---
 
 impl Kernel for CompoundKernel<Fused> {
-    type Id = String;
     type Args = ();
 
-    fn function_name(&self) -> &'static str {
-        Box::leak(self.name.clone().into_boxed_str())
+    fn function_name(&self) -> &str {
+        &self.name
     }
 
     fn source(&self) -> KernelSource {
@@ -534,11 +630,10 @@ impl Kernel for CompoundKernel<Fused> {
 }
 
 impl<A: BindArgs + 'static> Kernel for CompoundKernel<Bound<A>> {
-    type Id = String;
     type Args = A;
 
-    fn function_name(&self) -> &'static str {
-        Box::leak(self.name.clone().into_boxed_str())
+    fn function_name(&self) -> &str {
+        &self.name
     }
 
     fn source(&self) -> KernelSource {

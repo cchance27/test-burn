@@ -134,9 +134,6 @@ impl Swiglu {
     }
 }
 
-/// Kernel ID for pipeline caching.
-pub struct SwigluId;
-
 #[cfg(test)]
 mod tests {
     use super::*;

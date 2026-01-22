@@ -1,10 +1,6 @@
-use std::{
-    collections::HashMap, sync::{Arc, Mutex, OnceLock}
-};
+use std::sync::Arc;
 
 use metallic_macros::KernelArgs;
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -13,7 +9,7 @@ use super::{
 use crate::{
     Foundry, MetalError, compound::{
         CompiledCompoundKernel, CompoundKernel, stages::{Layout, WarpLayoutStage, WarpReduceStage}
-    }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
+    }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// Fused GEMV Step: RMSNorm(Input) -> GEMV(Input_Norm, Weights) -> Output
@@ -34,12 +30,11 @@ pub struct FusedGemvStep {
 #[derive(Debug, Clone)]
 pub struct CompiledFusedGemvStep {
     pub step: FusedGemvStep,
-    pub weights_resolved: crate::spec::ResolvedSymbols,
+    pub weights_resolved: ResolvedSymbols,
     pub input_idx: usize,
     pub output_idx: usize,
     pub gamma_idx: usize,
     pub bias_idx: Option<usize>,
-    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 #[derive(Debug, KernelArgs)]
@@ -98,7 +93,6 @@ impl Step for FusedGemvStep {
             output_idx,
             gamma_idx,
             bias_idx,
-            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
@@ -168,9 +162,9 @@ impl CompiledStep for CompiledFusedGemvStep {
             data.insert("k".to_string(), k_dim.to_string());
             data.insert("tA".to_string(), "0".to_string());
             data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.bind_with_metrics(args, dispatch, data))
+            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))
         } else {
-            foundry.run(&kernel.bind(args, dispatch))
+            foundry.run(&kernel.bind_arc(args, dispatch))
         }
     }
 
@@ -179,29 +173,23 @@ impl CompiledStep for CompiledFusedGemvStep {
     }
 }
 
-fn get_fused_gemv_kernel(_strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<Mutex<HashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
-    let cache = KERNELS.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().unwrap();
+fn get_fused_gemv_kernel(_strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    let key = policy.short_name().to_string();
-    if let Some(kernel) = cache.get(&key) {
-        return kernel;
-    }
+    let variant = policy.short_name().to_string();
+    let key = KernelCacheKey::new("fused_gemv_rmsnorm", variant);
 
-    let kernel_name = format!("fused_gemv_rmsnorm_{}", policy.short_name());
+    let policy_clone = policy.clone();
+    kernel_registry().get_or_build(key, move || {
+        let kernel_name = format!("fused_gemv_rmsnorm_{}", policy_clone.short_name());
 
-    let compiled = Box::leak(Box::new(
         CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)) // Defines row_idx, lane_id
             .prologue(RmsNormComputeStage::new(2, 4))
-            .main(VectorizedDotStage::new(policy.clone()).with_norm(10, "inv_rms"))
+            .main(VectorizedDotStage::new(policy_clone.clone()).with_norm(10, "inv_rms"))
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
             .epilogue(WarpWriteOutputNoResidualStage::new())
-            .compile(),
-    ));
-
-    cache.insert(key, compiled);
-    compiled
+            .compile()
+    })
 }

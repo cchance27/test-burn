@@ -1,9 +1,6 @@
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use metallic_macros::KernelArgs;
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -29,7 +26,6 @@ pub struct CompiledEmbeddingStep {
     pub table_resolved: ResolvedSymbols,
     pub indices_idx: usize,
     pub output_idx: usize,
-    pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
 #[typetag::serde(name = "Embedding")]
@@ -74,7 +70,6 @@ impl Step for EmbeddingStep {
             },
             indices_idx,
             output_idx,
-            pipeline: Arc::new(OnceLock::new()),
         })]
     }
 }
@@ -125,7 +120,7 @@ impl CompiledStep for CompiledEmbeddingStep {
             group: crate::types::ThreadgroupSize::d1(256),
         };
 
-        foundry.run(&kernel.bind(args, dispatch))?;
+        foundry.run(&kernel.bind_arc(args, dispatch))?;
         Ok(())
     }
 
@@ -200,31 +195,24 @@ impl Stage for EmbeddingStage {
     }
 }
 
-pub fn get_embedding_kernel(policy: Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
-    let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
-    let mut cache = cache.lock().unwrap();
+pub fn get_embedding_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
+    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    let key = policy.short_name().to_string();
-    if let Some(kernel) = cache.get(&key) {
-        return kernel;
-    }
+    let variant = policy.short_name().to_string();
+    let key = KernelCacheKey::new("embedding", variant);
 
-    let dummy_params = EmbeddingParamsResolved {
-        d_model: 0,
-        total_elements: 0,
-        vocab_size: 0,
-    };
-    let stage = EmbeddingStage {
-        params: dummy_params,
-        policy: policy.clone(),
-    };
+    kernel_registry().get_or_build(key, || {
+        let dummy_params = EmbeddingParamsResolved {
+            d_model: 0,
+            total_elements: 0,
+            vocab_size: 0,
+        };
+        let stage = EmbeddingStage {
+            params: dummy_params,
+            policy: policy.clone(),
+        };
 
-    let kernel_name = format!("embedding_standalone_{}", policy.short_name());
-    let compiled = Box::leak(Box::new(
-        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile(),
-    ));
-
-    cache.insert(key, compiled);
-    compiled
+        let kernel_name = format!("embedding_standalone_{}", policy.short_name());
+        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile()
+    })
 }

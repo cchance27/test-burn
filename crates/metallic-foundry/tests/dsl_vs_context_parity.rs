@@ -2381,7 +2381,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     };
 
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
-    foundry.run(&kernel.bind(args_gate, warp_dispatch_config(n_dim))).unwrap();
+    foundry.run(&kernel.bind_arc(args_gate, warp_dispatch_config(n_dim))).unwrap();
 
     let cross_gate_result = FoundryTensor::to_vec(&cross_gate_output, &foundry);
     let cross_gate_f16: Vec<f16> = cross_gate_result.into_iter().collect();

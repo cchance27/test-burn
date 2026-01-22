@@ -219,13 +219,10 @@ impl GemvColMajorKernel {
 ### Generated Output
 
 ```rust
-pub struct GemvColMajorKernelId;  // For pipeline caching
-
 impl Kernel for GemvColMajorKernel {
     type Args = GemvParams;
-    type Id = GemvColMajorKernelId;
     
-    fn function_name(&self) -> &'static str { "gemv_col_major_f16" }
+    fn function_name(&self) -> &str { "gemv_col_major_f16" }
     fn source(&self) -> KernelSource { KernelSource::File("gemv/col_major.metal") }
     fn includes(&self) -> Includes { Includes(vec!["utils/simd.metal", ...]) }
     fn bind(&self, encoder: &ComputeCommandEncoder) { self.bind_args(encoder); }
@@ -482,10 +479,9 @@ pub struct MyKernel {
 }
 
 impl Kernel for MyKernel {
-    type Id = MyKernelId;
     type Args = MyParams;
     
-    fn function_name(&self) -> &'static str { "my_kernel" }
+    fn function_name(&self) -> &str { "my_kernel" }
     fn source(&self) -> KernelSource { KernelSource::File("my_kernel.metal") }
     fn bind(&self, enc: &ComputeCommandEncoder) { self.bind_args(enc); }
     fn dispatch_config(&self) -> DispatchConfig { ... }

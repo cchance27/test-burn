@@ -83,7 +83,7 @@ fn test_gemv_canonical_batched_parity_m4() -> Result<(), MetalError> {
         beta: 0.0,
     };
 
-    foundry.run(&kernel.bind(args, dispatch))?;
+    foundry.run(&kernel.bind_arc(args, dispatch))?;
     foundry.synchronize()?;
 
     let y_gpu: Vec<f16> = y.to_vec(&foundry);

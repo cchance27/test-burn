@@ -1,5 +1,3 @@
-use std::sync::OnceLock;
-
 use metallic_macros::{KernelArgs, Stage};
 
 use crate::{
@@ -128,11 +126,14 @@ impl SoftmaxSdpaBatchedNormStage {
     }
 }
 
-pub fn get_softmax_v2_sdpa_batched_kernel() -> &'static CompiledCompoundKernel {
-    use crate::compound::stages::SimdStage;
+pub fn get_softmax_v2_sdpa_batched_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
+    use crate::{
+        compound::stages::SimdStage, kernel_registry::{KernelCacheKey, kernel_registry}
+    };
 
-    static KERNEL: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-    KERNEL.get_or_init(|| {
+    let key = KernelCacheKey::new("softmax_sdpa_batched", "v2");
+
+    kernel_registry().get_or_build(key, || {
         CompoundKernel::new("softmax_v2_sdpa_batched")
             .prologue(LayoutStage::row_major())
             .prologue(SoftmaxSdpaBatchedMaxStage::new("matrix"))

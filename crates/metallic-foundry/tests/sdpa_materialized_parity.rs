@@ -125,7 +125,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
             has_residual: 0,
             beta: 0.0,
         };
-        foundry.run(&qk_kernel.bind(qk_args, qk_dispatch))?;
+        foundry.run(&qk_kernel.clone().bind_arc(qk_args, qk_dispatch))?;
 
         // 2. Softmax: Scores -> Probs
         let softmax_args = SoftmaxV2Args {
@@ -136,7 +136,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
             causal: 0, // non-causal for simplicity
             query_offset: 0,
         };
-        foundry.run(&softmax_kernel.bind(softmax_args, softmax_dispatch))?;
+        foundry.run(&softmax_kernel.clone().bind_arc(softmax_args, softmax_dispatch))?;
 
         // 3. Probs @ V -> Output (ColMajor GEMV)
         // V is [seq, head_dim]. Probs is [seq]. Result is [head_dim].
@@ -156,7 +156,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
             has_residual: 0,
             beta: 0.0,
         };
-        foundry.run(&av_kernel.bind(av_args, av_dispatch))?;
+        foundry.run(&av_kernel.clone().bind_arc(av_args, av_dispatch))?;
     }
 
     // Read back result

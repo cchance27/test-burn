@@ -5,7 +5,7 @@
 use metallic_macros::KernelArgs;
 
 use crate::{
-    Includes, Kernel, KernelSource, compound::Stage, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Includes, Kernel, KernelSource, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// Arange kernel.
@@ -30,18 +30,14 @@ impl Arange {
     }
 }
 
-/// Kernel ID for pipeline caching.
-pub struct ArangeId;
-
 impl Kernel for Arange {
     type Args = ();
-    type Id = ArangeId;
 
     fn source(&self) -> KernelSource {
         KernelSource::File("tensor/arange.metal")
     }
 
-    fn function_name(&self) -> &'static str {
+    fn function_name(&self) -> &str {
         "arange_kernel_f16"
     }
 
@@ -69,9 +65,5 @@ impl Kernel for Arange {
             grid: GridSize::d1(num_groups),
             group: ThreadgroupSize::d1(threads_per_group),
         }
-    }
-
-    fn as_stage(&self) -> Box<dyn Stage> {
-        todo!("Arange kernel does not yet support compound kernel staging")
     }
 }

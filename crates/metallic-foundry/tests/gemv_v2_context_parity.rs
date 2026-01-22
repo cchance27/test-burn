@@ -82,7 +82,7 @@ fn run_gemv_parity_test(k: usize, n: usize, with_bias: bool, layout: Layout) -> 
 
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, Activation::None);
     let dispatch = warp_dispatch_config(n as u32);
-    foundry.run(&kernel.bind(args, dispatch))?;
+    foundry.run(&kernel.bind_arc(args, dispatch))?;
 
     let res_v2 = output_v2.to_vec(&foundry);
 

@@ -371,7 +371,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         params,
     };
 
-    foundry.run(&kernel.bind(args, dispatch)).unwrap();
+    foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
     // ========== Compare Results ==========
     let gpu_output = FoundryTensor::to_vec(&output, &foundry);

@@ -119,7 +119,7 @@ pub(crate) fn next_capture_id() -> u64 {
 #[derive(Debug)]
 pub(crate) struct CaptureMetrics {
     pub(crate) id: u64,
-    pub(crate) kernel_counts: FxHashMap<&'static str, u32>,
+    pub(crate) kernel_counts: FxHashMap<String, u32>,
     pub(crate) dispatches: u32,
 }
 
@@ -132,9 +132,9 @@ impl CaptureMetrics {
         }
     }
 
-    pub(crate) fn record_kernel(&mut self, name: &'static str) {
+    pub(crate) fn record_kernel(&mut self, name: &str) {
         self.dispatches = self.dispatches.saturating_add(1);
-        let slot = self.kernel_counts.entry(name).or_insert(0);
+        let slot = self.kernel_counts.entry(name.to_string()).or_insert(0);
         *slot = slot.saturating_add(1);
     }
 }
@@ -147,7 +147,7 @@ pub(crate) fn summarize_kernel_counts(metrics: &CaptureMetrics, max_entries: usi
         return summary;
     }
 
-    let mut pairs: Vec<(&'static str, u32)> = metrics.kernel_counts.iter().map(|(k, v)| (*k, *v)).collect();
+    let mut pairs: Vec<(&String, u32)> = metrics.kernel_counts.iter().map(|(k, v)| (k, *v)).collect();
     pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
 
     for (idx, (name, count)) in pairs.into_iter().take(max_entries).enumerate() {
