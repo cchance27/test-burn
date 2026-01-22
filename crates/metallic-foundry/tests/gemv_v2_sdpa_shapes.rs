@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, MetalError, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -29,7 +29,7 @@ fn test_gemv_v2_sdpa_foundry_qk() -> Result<(), MetalError> {
     let k_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n * k], TensorInit::CopyFrom(&k_data))?;
     let output_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized)?;
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
     let dispatch = warp_dispatch_config(n as u32);
 
     let args = GemvV2Args {
@@ -93,7 +93,7 @@ fn test_gemv_v2_sdpa_foundry_av() -> Result<(), MetalError> {
     let v_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k * n], TensorInit::CopyFrom(&v_data))?;
     let output_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n], TensorInit::Uninitialized)?;
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None);
     let dispatch = warp_dispatch_config(n as u32);
 
     let args = GemvV2Args {

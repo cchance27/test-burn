@@ -54,7 +54,7 @@ inline float compute_exp_sum(
         
         if (causal == 0 || i <= mask_pos) {
             float diff = val - row_max;
-            local_sum += exp(diff);
+            local_sum += metal::fast::exp(diff);
         }
     }
     return local_sum;
@@ -85,7 +85,7 @@ inline void normalize_and_write(
             output[input_idx] = 0.0h;
         } else {
             float diff = val - row_max;
-            float prob = exp(diff) / row_sum;
+            float prob = metal::fast::exp(diff) / row_sum;
             output[input_idx] = half(prob);
         }
     }

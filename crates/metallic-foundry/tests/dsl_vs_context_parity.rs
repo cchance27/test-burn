@@ -9,7 +9,7 @@ use metallic_context::{
         backend_registry::KernelBackendKind, elemwise_add::{BroadcastElemwiseAddInplaceOp, BroadcastElemwiseAddOp}, elemwise_mul::ElemwiseMulOp, kv_rearrange::KvRearrangeOp, repeat_kv_heads::RepeatKvHeadsOp, rmsnorm::RMSNormOp, rope::RoPEOp, silu::SiluOp, swiglu::SwiGLUOp
     }, models::Qwen25, tensor::{QuantizedTensor, TensorType}
 };
-use metallic_foundry::{Foundry, model::ModelBuilder, spec::TensorBindings};
+use metallic_foundry::{Foundry, model::ModelBuilder, policy::activation::Activation, spec::TensorBindings};
 use serial_test::serial;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
@@ -2380,7 +2380,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
         beta: 0.0,
     };
 
-    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized);
+    let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
     foundry.run(&kernel.bind(args_gate, warp_dispatch_config(n_dim))).unwrap();
 
     let cross_gate_result = FoundryTensor::to_vec(&cross_gate_output, &foundry);

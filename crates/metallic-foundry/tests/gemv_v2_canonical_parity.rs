@@ -6,7 +6,7 @@
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::stages::Layout, metals::gemv::step::{GemvStrategy, GemvV2Step}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, compound::stages::Layout, metals::gemv::step::{GemvStrategy, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -88,6 +88,7 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
         strategy: Some(GemvStrategy::Canonical),
         alpha,
         beta: 0.0,
+        activation: Activation::None,
     };
     let compiled_steps = step.compile(&mut bindings, &mut symbols);
     let mut fast_bindings = FastBindings::new(symbols.len());

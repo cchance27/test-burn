@@ -4,8 +4,8 @@
 use half::f16;
 use metallic_foundry::{
     Foundry, MetalError, metals::{
-        gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig, softmax::{SoftmaxV2Args, get_softmax_v2_kernel}
-    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
+        gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig, softmax::step::{SoftmaxV2Args, get_softmax_v2_kernel}
+    }, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
@@ -84,6 +84,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
         tile_config,
         true,  // has_alpha_beta for scaling
         false, // has_bias
+        Activation::None,
     );
 
     // Probs @ V: [m, kv_seq_len] @ [kv_seq_len, head_dim] = [m, head_dim]
@@ -95,6 +96,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
         tile_config,
         false, // has_alpha_beta
         false, // has_bias
+        Activation::None,
     );
 
     let softmax_kernel = get_softmax_v2_kernel();

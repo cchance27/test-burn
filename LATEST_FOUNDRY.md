@@ -18,6 +18,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 3. Kernel Optimizations
 - **Fused RMSNorm/Project:** Specialized `WarpWriteOutputNoResidualStage` to reduce register pressure in fused paths.
 - **Quantized Embeddings:** Dedicated F16 and Q8_0 lookup kernels.
+- **Unified Activations:** Activations are now a first-class `Activation` enum option (compiled into kernel variants) across GEMV/GEMM/SwiGLU paths, reducing the need for one-off Metal edits and improving composability.
 
 ### 4. Quantization Policy Architecture (Refactor)
 - **Unified Policy System:** Replaced fragmented `Quantization` enum logic with a unified `Arc<dyn MetalPolicy>` trait object system across all kernel stages (`VectorizedDotStage`, `TileLoad`, etc.).
@@ -77,6 +78,11 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Issue:** `#[derive(KernelArgs)]` currently uses **string matching** (if `type_str.contains("TensorArg")`) to decide how to bind a buffer.
 - **Risk:** This breaks if a developer uses a type alias (e.g., `type MyTensor = TensorArg;`) or a fully qualified path (`metallic::types::TensorArg`).
 - **Requirement:** Refactor macros to perform proper `syn::Type` traversal for robust type identification.
+
+### 6. Unbounded Kernel Compile Caches
+- **Issue:** Some kernel getters cache compiled variants by leaking them to satisfy `'static` return types (shape/policy/activation combinations).
+- **Risk:** Long-running sessions or highly dynamic workloads can accumulate unbounded memory usage.
+- **Requirement:** Switch caches to `Arc`-backed entries and implement a bounded eviction policy (e.g., LRU keyed by kernel content hash).
 
 ### 6. Raw `objc2` Leaks in Public API
 - **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
@@ -217,4 +223,3 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Fail-fast guardrails (implemented):**
   - Unsupported GGUF tensor dtypes now **panic** during load/mapping rather than silently falling back.
   - Foundry `prepare_bindings()` now validates that any U8-bound quantized weight has a companion `{name}_scales` binding with expected byte shape (and errors early if missing/malformed).
-

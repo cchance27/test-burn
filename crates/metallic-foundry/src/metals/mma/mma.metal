@@ -295,6 +295,17 @@ struct SimdgroupMma {
         }
     }
     
+    /// Apply activation to accumulated results.
+    template<typename Activation = ActivationNone>
+    METAL_FUNC void apply_activation() {
+        STEEL_PRAGMA_UNROLL
+        for (short i = 0; i < TM * TN; ++i) {
+            thread auto& accum = results[i].thread_elements();
+            accum[0] = Activation::apply(accum[0]);
+            accum[1] = Activation::apply(accum[1]);
+        }
+    }
+    
     /// Apply row-wise bias.
     METAL_FUNC void apply_bias(const device T* bias, const int col_offset) {
         STEEL_PRAGMA_UNROLL

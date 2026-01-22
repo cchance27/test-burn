@@ -332,7 +332,7 @@ kernel void sample_topk_fused_f16(
         float maxv = final_heap[0].value;
         float sum = 0.0f;
         for (uint i = 0; i < final_heap_size; ++i) {
-            float e = exp(final_heap[i].value - maxv);
+            float e = metal::fast::exp(final_heap[i].value - maxv);
             final_heap[i].value = e;
             sum += e;
         }

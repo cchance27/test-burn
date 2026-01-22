@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
+    Foundry, MetalError, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
 };
 
 /// Unified MatMul step that dynamically dispatches to GEMV or GEMM.
@@ -34,7 +34,8 @@ pub struct MatMulStep {
     pub beta: f32,
     #[serde(default = "default_weights_per_block")]
     pub weights_per_block: u32,
-    // NOTE: a_quant/b_quant removed - runtime dtype derivation is source of truth
+    #[serde(default)]
+    pub activation: Activation,
 }
 
 fn default_alpha() -> f32 {
@@ -66,6 +67,7 @@ impl Default for MatMulStep {
             alpha: 1.0,
             beta: 0.0,
             weights_per_block: 32,
+            activation: Activation::None,
         }
     }
 }
@@ -220,6 +222,7 @@ impl Step for MatMulStep {
                 alpha: self.alpha,
                 beta: self.beta,
                 has_bias: if effective_bias.is_some() { 1 } else { 0 },
+                activation: self.activation,
             };
 
             canonical_step.compile(bindings, symbols)
@@ -241,6 +244,7 @@ impl Step for MatMulStep {
                 alpha: self.alpha,
                 beta: self.beta,
                 strategy: None, // Auto-select
+                activation: self.activation,
             };
 
             gemv_step.compile(bindings, symbols)
@@ -272,6 +276,7 @@ impl Step for MatMulStep {
                 beta: self.beta,
                 weights_per_block: self.weights_per_block,
                 tile_config: None, // Auto
+                activation: self.activation,
             };
 
             gemm_step.compile(bindings, symbols)

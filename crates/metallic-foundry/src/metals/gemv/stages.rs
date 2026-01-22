@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use crate::{
-    compound::{BufferArg, Stage}, fusion::MetalPolicy
+    compound::{BufferArg, Stage}, fusion::MetalPolicy, policy::activation::Activation
 };
 
 /// Metal definitions for GemvV2.
@@ -728,11 +728,20 @@ impl Stage for CanonicalDotStage {
 /// Stage that writes the reduced result to output with optional bias.
 /// Designed for warp-per-row dispatch where only lane 0 writes.
 #[derive(Debug, Clone)]
-pub struct WarpWriteOutputStage;
+pub struct WarpWriteOutputStage {
+    pub activation: Activation,
+}
 
 impl WarpWriteOutputStage {
     pub fn new() -> Self {
-        Self
+        Self {
+            activation: Activation::None,
+        }
+    }
+
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
     }
 }
 
@@ -744,7 +753,7 @@ impl Default for WarpWriteOutputStage {
 
 impl Stage for WarpWriteOutputStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![]
+        vec![self.activation.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -801,13 +810,17 @@ impl Stage for WarpWriteOutputStage {
         if (has_bias != 0) {
             result += (float)bias[row_idx];
         }
+        
+        // Apply activation
+        result = {activation}::apply(result);
+
         if (has_residual != 0) {
             result += ((float)residual[batch_idx * n_dim + row_idx]) * beta;
         }
         output[batch_idx * n_dim + row_idx] = (half)result;
     }
 "#
-        .to_string();
+        .replace("{activation}", self.activation.struct_name());
 
         ("void".to_string(), code)
     }
@@ -818,11 +831,20 @@ impl Stage for WarpWriteOutputStage {
 /// This is used by kernels that already consume higher buffer slots (e.g. fused RMSNorm paths)
 /// and don't support/need residual accumulation in the write stage.
 #[derive(Debug, Clone)]
-pub struct WarpWriteOutputNoResidualStage;
+pub struct WarpWriteOutputNoResidualStage {
+    pub activation: Activation,
+}
 
 impl WarpWriteOutputNoResidualStage {
     pub fn new() -> Self {
-        Self
+        Self {
+            activation: Activation::None,
+        }
+    }
+
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
     }
 }
 
@@ -834,7 +856,7 @@ impl Default for WarpWriteOutputNoResidualStage {
 
 impl Stage for WarpWriteOutputNoResidualStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![]
+        vec![self.activation.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -874,10 +896,14 @@ impl Stage for WarpWriteOutputNoResidualStage {
         if (has_bias != 0) {
             result += (float)bias[row_idx];
         }
+
+        // Apply activation
+        result = {activation}::apply(result);
+
         output[batch_idx * n_dim + row_idx] = (half)result;
     }
 "#
-        .to_string();
+        .replace("{activation}", self.activation.struct_name());
 
         ("void".to_string(), code)
     }

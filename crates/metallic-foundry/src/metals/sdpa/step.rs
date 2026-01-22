@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, metals::{
         rope::{RopeParams, RopeParamsResolved, stage::RopeStage}, sdpa::stages::{HeadLayoutStage, SdpaOnlineStage, SdpaParams, SdpaParamsResolved}
-    }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{
+    }, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
@@ -585,24 +585,26 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
             // Q@K^T: [M, head_dim] @ [head_dim, kv_seq_len] = [M, kv_seq_len]
             // K is stored as [kv_seq_len, head_dim] row-major, so K^T is ColMajor read
             let qk_gemm_kernel = get_gemm_kernel(
-                std::sync::Arc::new(crate::policy::f16::PolicyF16),
-                std::sync::Arc::new(crate::policy::f16::PolicyF16),
+                Arc::new(crate::policy::f16::PolicyF16),
+                Arc::new(crate::policy::f16::PolicyF16),
                 false,
                 true, // transpose_a=false, transpose_b=true (K^T)
                 tile_config,
                 true,  // has_alpha_beta (needed for scale)
                 false, // has_bias
+                Activation::None,
             );
 
             // Probs@V: [M, kv_seq_len] @ [kv_seq_len, head_dim] = [M, head_dim]
             let av_gemm_kernel = get_gemm_kernel(
-                std::sync::Arc::new(crate::policy::f16::PolicyF16),
-                std::sync::Arc::new(crate::policy::f16::PolicyF16),
+                Arc::new(crate::policy::f16::PolicyF16),
+                Arc::new(crate::policy::f16::PolicyF16),
                 false,
                 false, // No transpose
                 tile_config,
                 false, // has_alpha_beta (alpha=1.0)
                 false, // has_bias
+                Activation::None,
             );
 
             // Batch heads over GEMM's gid.z dimension to avoid per-head dispatch overhead.

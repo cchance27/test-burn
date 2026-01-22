@@ -75,8 +75,8 @@ inline void sdpa_decode_vectorized(
         // 3. Online Softmax Update
         float m_prev = max_score;
         float m_new = max(m_prev, score);
-        float exp_score = exp(score - m_new);
-        float exp_prev = exp(m_prev - m_new);
+        float exp_score = metal::fast::exp(score - m_new);
+        float exp_prev = metal::fast::exp(m_prev - m_new);
 
         float scale_v = exp_score;
         float scale_prev = exp_prev;

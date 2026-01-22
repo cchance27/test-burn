@@ -398,7 +398,7 @@ impl Default for MmaLoopStage {
 
 impl Stage for MmaLoopStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![] // No policy needed - works on dequantized data
+        vec!["policies/activations.metal"]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -486,6 +486,8 @@ pub struct GemmEpilogueStage {
     pub has_alpha_beta: bool,
     /// Whether to apply bias
     pub has_bias: bool,
+    /// Activation to apply
+    pub activation: crate::policy::activation::Activation,
 }
 
 impl GemmEpilogueStage {
@@ -493,6 +495,7 @@ impl GemmEpilogueStage {
         Self {
             has_alpha_beta: false,
             has_bias: false,
+            activation: crate::policy::activation::Activation::None,
         }
     }
 
@@ -505,6 +508,11 @@ impl GemmEpilogueStage {
         self.has_bias = true;
         self
     }
+
+    pub fn with_activation(mut self, activation: crate::policy::activation::Activation) -> Self {
+        self.activation = activation;
+        self
+    }
 }
 
 impl Default for GemmEpilogueStage {
@@ -515,7 +523,7 @@ impl Default for GemmEpilogueStage {
 
 impl Stage for GemmEpilogueStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![]
+        vec![self.activation.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -559,6 +567,16 @@ impl Stage for GemmEpilogueStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
+        let activation = self.activation.struct_name();
+        let activation_code = if self.activation != crate::policy::activation::Activation::None {
+            r#"
+    // Apply activation
+    mma_op.apply_activation<{activation}>();
+"#
+            .replace("{activation}", activation)
+        } else {
+            String::new()
+        };
         let epilogue_code = if self.has_alpha_beta {
             r#"
     // Apply alpha/beta epilogue
@@ -570,8 +588,9 @@ impl Stage for GemmEpilogueStage {
         mma_op.apply_epilogue_safe(C_tile, params.ldc, alpha, beta, short2(tgp_bn, tgp_bm));
     }
 "#
+            .replace("{activation}", activation)
         } else {
-            ""
+            String::new()
         };
 
         let bias_code = if self.has_bias {
@@ -579,14 +598,16 @@ impl Stage for GemmEpilogueStage {
     // Apply bias
     mma_op.apply_bias(bias, tile_n * GEMM_BN);
 "#
+            .to_string()
         } else {
-            ""
+            String::new()
         };
 
         let code = format!(
             r#"
     {epilogue}
     {bias}
+    {activation}
     // Write output
     device half* D_tile = D + batch_idx * params.batch_stride_d
                          + tile_m * GEMM_BM * params.ldd + tile_n * GEMM_BN;
@@ -599,7 +620,8 @@ impl Stage for GemmEpilogueStage {
     }}
 "#,
             epilogue = epilogue_code,
-            bias = bias_code
+            bias = bias_code,
+            activation = activation_code
         );
 
         ("void".to_string(), code)

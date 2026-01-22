@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 // =============================================================================
@@ -131,6 +131,7 @@ pub struct GemmKernelKey {
     pub config: TileConfig,
     pub has_alpha_beta: bool,
     pub has_bias: bool,
+    pub activation: Activation,
 }
 
 /// Build and compile a GEMM kernel for the given configuration.
@@ -157,6 +158,8 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
     if key.has_bias {
         epilogue = epilogue.with_bias();
     }
+
+    epilogue = epilogue.with_activation(key.activation);
 
     let a_policy = crate::policy::resolve_policy_by_name(&key.a_quant).expect("Unknown policy A");
     let b_policy = crate::policy::resolve_policy_by_name(&key.b_quant).expect("Unknown policy B");
@@ -188,9 +191,10 @@ pub fn get_gemm_kernel(
     config: TileConfig,
     has_alpha_beta: bool,
     has_bias: bool,
+    activation: Activation,
 ) -> &'static CompiledCompoundKernel {
-    // Use a single static cache for all quantization combinations
-    static KERNELS: OnceLock<FxHashMap<GemmKernelKey, CompiledCompoundKernel>> = OnceLock::new();
+    static KERNELS: OnceLock<std::sync::RwLock<FxHashMap<GemmKernelKey, &'static CompiledCompoundKernel>>> = OnceLock::new();
+    // DEBT: cache entries are leaked for `'static` return; consider switching to `Arc` + bounded LRU.
 
     let key = GemmKernelKey {
         a_quant: a_quant.short_name().to_string(),
@@ -200,54 +204,30 @@ pub fn get_gemm_kernel(
         config,
         has_alpha_beta,
         has_bias,
+        activation,
     };
 
-    let map = KERNELS.get_or_init(|| {
-        let mut m = FxHashMap::default();
+    let cache = KERNELS.get_or_init(|| std::sync::RwLock::new(FxHashMap::default()));
 
-        // Pre-compile common variants
-        let f16_policy: Arc<dyn MetalPolicy> = Arc::new(crate::policy::f16::PolicyF16);
-        let q8_policy: Arc<dyn MetalPolicy> = Arc::new(crate::policy::q8::PolicyQ8);
-
-        for a_q in [f16_policy.clone()] {
-            for b_q in [f16_policy.clone(), q8_policy.clone()] {
-                for ta in [false] {
-                    // A is rarely transposed
-                    for tb in [false, true] {
-                        for cfg in [
-                            TileConfig::Default,
-                            TileConfig::SkinnyM,
-                            TileConfig::SkinnyN,
-                            TileConfig::HighPerformance,
-                        ] {
-                            // Add variants for alpha/beta/bias as needed
-                            for (hab, hb) in [(false, false), (true, false), (false, true), (true, true)] {
-                                let k = GemmKernelKey {
-                                    a_quant: a_q.short_name().to_string(),
-                                    b_quant: b_q.short_name().to_string(),
-                                    transpose_a: ta,
-                                    transpose_b: tb,
-                                    config: cfg,
-                                    has_alpha_beta: hab,
-                                    has_bias: hb,
-                                };
-                                m.insert(k.clone(), build_gemm_kernel(k));
-                            }
-                        }
-                    }
-                }
-            }
+    // Fast path: read lock
+    {
+        let reader = cache.read().unwrap();
+        if let Some(kernel) = reader.get(&key) {
+            return kernel;
         }
-        m
-    });
+    }
 
-    map.get(&key).unwrap_or_else(|| {
-        panic!(
-            "GEMM kernel not pre-compiled for {:?}x{:?} ta={} tb={} config={:?}. \
-             Add this combination to the pre-compile list in get_gemm_kernel().",
-            key.a_quant, key.b_quant, transpose_a, transpose_b, config
-        )
-    })
+    // Slow path: write lock
+    let mut writer = cache.write().unwrap();
+    // Double check
+    if let Some(kernel) = writer.get(&key) {
+        return kernel;
+    }
+
+    let kernel = build_gemm_kernel(key.clone());
+    let static_kernel = Box::leak(Box::new(kernel));
+    writer.insert(key, static_kernel);
+    static_kernel
 }
 
 /// Dispatch configuration for GEMM kernels.
@@ -318,6 +298,9 @@ pub struct GemmV2Step {
     /// Tile configuration (None = auto-select)
     #[serde(default)]
     pub tile_config: Option<TileConfig>,
+    /// Activation to apply
+    #[serde(default)]
+    pub activation: Activation,
 }
 
 fn default_alpha() -> f32 {
@@ -380,6 +363,7 @@ impl Step for GemmV2Step {
             beta: self.beta,
             weights_per_block: self.weights_per_block,
             tile_config: self.tile_config,
+            activation: self.activation,
             pipeline: Arc::new(OnceLock::new()),
         })]
     }
@@ -409,6 +393,7 @@ pub struct CompiledGemmV2Step {
     pub beta: f32,
     pub weights_per_block: u32,
     pub tile_config: Option<TileConfig>,
+    pub activation: Activation,
     pub pipeline: Arc<OnceLock<Retained<ProtocolObject<dyn MTLComputePipelineState>>>>,
 }
 
@@ -476,6 +461,7 @@ impl CompiledStep for CompiledGemmV2Step {
             config,
             has_alpha_beta,
             self.bias_idx.is_some(),
+            self.activation,
         );
 
         // Build scale arg - Q8 requires real scales (default derived name: "{b}_scales").

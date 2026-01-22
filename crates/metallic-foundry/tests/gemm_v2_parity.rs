@@ -15,7 +15,7 @@ use metallic_context::{
 use metallic_foundry::{
     Foundry, metals::{
         gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig
-    }, policy::{f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    }, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -331,6 +331,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         tile_config,
         false,
         false,
+        Activation::None,
     );
 
     // DEBUG: Dump source

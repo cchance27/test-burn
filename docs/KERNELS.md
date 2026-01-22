@@ -62,10 +62,14 @@ Compound kernels are the preferred way to write compute-intensive operations. Th
 
 **Example:**
 ```rust
-let kernel = CompoundKernel::new("fused_q8_gemv_silu")
+use metallic_foundry::policy::activation::Activation;
+
+let kernel = CompoundKernel::new("fused_q8_gemv")
     .prologue(PolicyStage::<PolicyQ8>::new()) // Load Q8 weights
     .main(GemvCoreStage::new())               // Compute Dot Product
-    .epilogue(EpilogueStage::<SiLU>::new())   // Apply SiLU
+    // Activations are typically selected via `Activation` on the write/epilogue stage.
+    // (Some built-in kernels bake this into their stages rather than using EpilogueStage.)
+    .main(WarpWriteOutputStage::new().with_activation(Activation::SiLU))
     .build();
 ```
 
@@ -134,6 +138,28 @@ Foundry abstracts data types (F16, Q8, Q4) using **Policies**. A Policy defines 
 *   **Buffer 0**: `matrix` (Input/Weights) - Managed by `PolicyStage`.
 *   **Buffer 1**: `scales` (Quantization Metadata) - Managed by `PolicyStage`.
 *   **Buffer 2+**: Kernel-specific arguments.
+
+---
+
+## 4. Activations (Foundry Inference)
+
+Foundry’s inference kernels standardize activations via a single Rust-side enum:
+
+- `metallic_foundry::policy::activation::Activation` (`None`, `SiLU`, `ReLU`, `GELU`)
+- Metal implementation lives in `policies/activations.metal` as `ActivationX::apply(...)` with scalar (`float`) and vector (`float2`/`float4`) overloads.
+
+### Where activations are applied
+
+The ordering matters for correctness and for future fusion work:
+
+- **GEMV output write (decode/projections):** `dot + bias` → `activation` → `+ residual * beta` (if enabled).
+- **GEMM epilogue (prefill/batched matmul):** `alpha/beta` blend → `+ bias` (if enabled) → `activation` → store.
+
+### How to enable
+
+Most user-facing entry points expose `activation: Activation` directly (e.g. `MatMulStep`, `GemvV2Step`, `GemmV2Step`).
+
+**Serialization/DX note:** the enum accepts common lowercase names (`"silu"`, `"relu"`, `"gelu"`, `"none"`) and legacy GGUF-style names (`"ActivationSiLU"`, etc.).
 
 ---
 

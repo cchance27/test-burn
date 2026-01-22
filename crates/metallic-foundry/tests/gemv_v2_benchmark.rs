@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Step}, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 }; // Added GemvStrategy
 
 fn run_benchmark_case(
@@ -59,8 +59,9 @@ fn run_benchmark_case(
         weights_per_block: 32,
         layout,
         strategy,
-        alpha,
+        alpha: 1.0,
         beta: 0.0,
+        activation: Activation::None,
     };
 
     let mut symbols = metallic_foundry::spec::SymbolTable::new();

@@ -434,7 +434,7 @@ pub struct GemvQ8SiluCompound {
     pub gemv: GemvCoreStage,
     
     #[epilogue]
-    pub activation: EpilogueStage<SiLUEpilogue>,
+    pub post: EpilogueStage<MyEpilogue>,
     
     // Also include KernelArgs for buffer bindings
     pub matrix: TensorArg,
@@ -451,7 +451,9 @@ impl GemvQ8SiluCompound {
 
 1. **Prologues** — Input loading, dequantization (e.g., `PolicyStage`)
 2. **Main** — Core computation (e.g., `GemvCoreStage`)
-3. **Epilogues** — Post-processing, activations (e.g., `SiLUEpilogue`)
+3. **Epilogues** — Post-processing (e.g., `MyEpilogue`)
+
+**Note:** Many built-in inference kernels (e.g. `GemvV2Step`/`GemmV2Step`/`MatMulStep`) configure activations via `policy::activation::Activation` rather than through an `#[epilogue]` stage.
 
 ### Attributes
 
@@ -944,4 +946,3 @@ let stage = SwiGluFused::main_stage();  // -> GemvStage<...>
 | Unified `GemvKernel` | ~20 | Validated | Moderate |
 
 Use `GemvKernel` for most fused GEMV kernels. Use separate derives when you need unusual configurations or shared hooks/epilogues across multiple kernels.
-

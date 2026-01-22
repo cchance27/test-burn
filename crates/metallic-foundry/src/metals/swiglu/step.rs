@@ -621,7 +621,7 @@ fn get_fused_ffn_kernel(policy: std::sync::Arc<dyn MetalPolicy>) -> &'static Com
             .prologue(RmsNormComputeStage::new(4, 6))
             .main(FfnDualProjectStage::new(policy.clone()).with_norm(9, "inv_rms"))
             .epilogue(FfnWarpReduceStage)
-            .epilogue(FfnSwigluWriteStage)
+            .epilogue(FfnSwigluWriteStage::new())
             .compile(),
     );
 

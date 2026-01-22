@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use crate::{
-    compound::{BufferArg, Stage}, fusion::MetalPolicy, metals::gemv::stages::VectorWidth
+    compound::{BufferArg, Stage}, fusion::MetalPolicy, metals::gemv::stages::VectorWidth, policy::activation::Activation
 };
 
 /// Metal definitions for GEMV helper functions.
@@ -97,7 +97,7 @@ impl Stage for FfnDualProjectStage {
     }
 
     fn struct_defs(&self) -> String {
-        format!("{}\n{}", GEMV_METAL, SWIGLU_METAL)
+        GEMV_METAL.to_string()
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
@@ -136,15 +136,6 @@ impl Stage for FfnDualProjectStage {
             r#"
         float s_gate_val = (float){policy}::load_scale(row_s_gate, block_off);
         float s_up_val = (float){policy}::load_scale(row_s_up, block_off);
-                "#,
-            policy = policy
-        );
-
-        // Unified tail: always use Policy::load_scale
-        let tail_scales_logic = format!(
-            r#"
-        float s_gate_val = (k < k_dim) ? (float){policy}::load_scale(row_s_gate, block_off) : 0.0f;
-        float s_up_val = (k < k_dim) ? (float){policy}::load_scale(row_s_up, block_off) : 0.0f;
                 "#,
             policy = policy
         );
@@ -215,23 +206,23 @@ impl Stage for FfnDualProjectStage {
         float4 xv_f32_hi = float4(xv_hi);
 
         uint block_off = k / weights_per_block;
-        {tail_scales_logic}
+        {scales_logic}
 
-        if (k < k_dim) {{
-            float w[{vec_width}] = {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
+        {{
+            float w[{vec_width}];
             const device uchar* w_ptr = w_gate + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
             {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
-            for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
             acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
         }}
 
-        if (k < k_dim) {{
-            float w[{vec_width}] = {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
+        {{
+            float w[{vec_width}];
             const device uchar* w_ptr = w_up + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
             {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
-            for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
             acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
         }}
+
+        k_base += K_CHUNK_SIZE;
     }}
 
     float2 gu_partial = float2(acc_gate, acc_up);
@@ -241,8 +232,7 @@ impl Stage for FfnDualProjectStage {
             norm_logic = norm_logic,
             byte_scale = byte_scale,
             scale_stride = scale_stride,
-            scales_logic = scales_logic,
-            tail_scales_logic = tail_scales_logic
+            scales_logic = scales_logic
         );
 
         ("gu_partial".to_string(), code)
@@ -280,11 +270,34 @@ impl Stage for FfnWarpReduceStage {
 
 /// Write stage for SwiGLU output.
 #[derive(Debug, Clone)]
-pub struct FfnSwigluWriteStage;
+pub struct FfnSwigluWriteStage {
+    activation: Activation,
+}
+
+impl FfnSwigluWriteStage {
+    pub fn new() -> Self {
+        Self {
+            activation: Activation::SiLU,
+        }
+    }
+
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
+    }
+}
 
 impl Stage for FfnSwigluWriteStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![]
+        vec![self.activation.header()]
+    }
+
+    fn struct_defs(&self) -> String {
+        format!(
+            "#define FUSED_KERNEL 1\n#define ACTIVATION {}\n{}",
+            self.activation.struct_name(),
+            SWIGLU_METAL
+        )
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -318,6 +331,7 @@ impl Stage for FfnSwigluWriteStage {
     }
 
     fn emit(&self, input_var: &str) -> (String, String) {
+        let activation = self.activation.struct_name();
         let code = format!(
             r#"
     if (lane_id == 0) {{
@@ -329,12 +343,13 @@ impl Stage for FfnSwigluWriteStage {
         if (has_b_up != 0) {{
             up += (float)b_up[row_idx];
         }}
-        float silu_gate = gate / (1.0f + exp(-gate));
-        float val = silu_gate * up;
+        float activated_gate = {activation}::apply(gate);
+        float val = activated_gate * up;
         output[batch_idx * n_dim + row_idx] = (half)val;
     }}
 "#,
-            input_var = input_var
+            input_var = input_var,
+            activation = activation
         );
         ("void".to_string(), code)
     }

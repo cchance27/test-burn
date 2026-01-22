@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, policy::f16::PolicyF16, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, policy::{activation::Activation, f16::PolicyF16}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 
@@ -82,6 +82,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         beta: 0.0,
         weights_per_block: 32,
         tile_config: None, // Auto
+        activation: Activation::None,
     };
     let mut sym_gemm = SymbolTable::new();
     let compiled_gemm = gemm.compile(&mut bindings, &mut sym_gemm);
@@ -111,6 +112,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
             strategy: None,
             alpha: 1.0,
             beta: 0.0,
+            activation: Activation::None,
         };
         let mut sym_gemv = SymbolTable::new();
         let compiled_gemv = gemv.compile(&mut bindings, &mut sym_gemv);
@@ -145,6 +147,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         alpha: 1.0,
         beta: 0.0,
         weights_per_block: 32,
+        activation: Activation::None,
     };
     let mut sym_uni = SymbolTable::new();
     let compiled_uni = unified.compile(&mut bindings, &mut sym_uni);

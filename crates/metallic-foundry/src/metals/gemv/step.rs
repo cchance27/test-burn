@@ -16,7 +16,7 @@ use super::stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpW
 use crate::{
     Foundry, MetalError, compound::{
         BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::{Layout, ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
-    }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 fn use_f16_cols8() -> bool {
@@ -43,6 +43,8 @@ pub struct GemvV2Step {
     pub alpha: f32,
     #[serde(default)]
     pub beta: f32,
+    #[serde(default)]
+    pub activation: Activation,
 }
 
 fn default_alpha() -> f32 {
@@ -73,15 +75,17 @@ pub fn get_gemv_v2_kernel(
     policy: std::sync::Arc<dyn crate::fusion::MetalPolicy>,
     layout: Layout,
     strategy: GemvStrategy,
+    activation: Activation,
 ) -> &'static CompiledCompoundKernel {
     use std::sync::Mutex;
 
     use rustc_hash::FxHashMap;
 
-    static CACHE: OnceLock<Mutex<FxHashMap<(Layout, GemvStrategy, String), &'static CompiledCompoundKernel>>> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<FxHashMap<(Layout, GemvStrategy, String, Activation), &'static CompiledCompoundKernel>>> = OnceLock::new();
+    // DEBT: cache entries are leaked for `'static` return; consider switching to `Arc` + bounded LRU.
     let cache = CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
 
-    let key = (layout, strategy, policy.short_name().to_string());
+    let key = (layout, strategy, policy.short_name().to_string(), activation);
 
     {
         let guard = cache.lock().unwrap();
@@ -90,8 +94,14 @@ pub fn get_gemv_v2_kernel(
         }
     }
 
-    // Build kernel
-    let kernel_name = format!("gemv_v2_{:?}_{:?}_{}", layout, strategy, policy.short_name()).to_lowercase();
+    let kernel_name = format!(
+        "gemv_v2_{:?}_{:?}_{}_{}",
+        layout,
+        strategy,
+        policy.short_name(),
+        activation.struct_name()
+    )
+    .to_lowercase();
     let use_f16_cols8 = policy.element_size() == 2 && use_f16_cols8();
 
     let compiled: CompiledCompoundKernel = match (layout, strategy) {
@@ -101,7 +111,7 @@ pub fn get_gemv_v2_kernel(
                     .prologue(WarpLayoutStage::row_major().with_warps(8))
                     .prologue(VectorizedDotStage::new(policy.clone()).with_f16_cols8(true))
                     .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
+                    .main(WarpWriteOutputStage::new().with_activation(activation))
                     .with_manual_output(true)
                     .compile()
             } else {
@@ -109,7 +119,7 @@ pub fn get_gemv_v2_kernel(
                     .prologue(WarpLayoutStage::row_major().with_warps(8))
                     .prologue(VectorizedDotStage::new(policy.clone()))
                     .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
+                    .main(WarpWriteOutputStage::new().with_activation(activation))
                     .with_manual_output(true)
                     .compile()
             }
@@ -118,41 +128,41 @@ pub fn get_gemv_v2_kernel(
             .prologue(WarpLayoutStage::row_major().with_warps(8))
             .prologue(CanonicalDotStage::new(policy.clone()))
             .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new())
+            .main(WarpWriteOutputStage::new().with_activation(activation))
             .with_manual_output(true)
             .compile(),
         (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
             .prologue(WarpLayoutStage::col_major().with_warps(8))
             .prologue(VectorizedDotStage::new(policy.clone()))
             .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new())
+            .main(WarpWriteOutputStage::new().with_activation(activation))
             .with_manual_output(true)
             .compile(),
         (Layout::ColMajor, GemvStrategy::Scalar) => CompoundKernel::new(&kernel_name)
             .prologue(ThreadLayoutStage::col_major())
             .prologue(ScalarDotStage::new(policy.clone()))
-            .main(WarpWriteOutputStage::new())
+            .main(WarpWriteOutputStage::new().with_activation(activation))
             .with_manual_output(true)
             .compile(),
         (Layout::ColMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
             .prologue(WarpLayoutStage::col_major().with_warps(8))
             .prologue(CanonicalDotStage::new(policy.clone()))
             .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new())
+            .main(WarpWriteOutputStage::new().with_activation(activation))
             .with_manual_output(true)
             .compile(),
         (Layout::Canonical, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
             .prologue(WarpLayoutStage::canonical().with_warps(8))
             .prologue(VectorizedDotStage::new(policy.clone()))
             .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new())
+            .main(WarpWriteOutputStage::new().with_activation(activation))
             .with_manual_output(true)
             .compile(),
         (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
             .prologue(WarpLayoutStage::canonical().with_warps(8))
             .prologue(CanonicalDotStage::new(policy.clone()))
             .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-            .main(WarpWriteOutputStage::new())
+            .main(WarpWriteOutputStage::new().with_activation(activation))
             .with_manual_output(true)
             .compile(),
         _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
@@ -225,6 +235,7 @@ pub struct CompiledGemvV2Step {
     pub strategy: GemvStrategy,
     pub alpha: f32,
     pub beta: f32,
+    pub activation: Activation,
 }
 
 /// Arguments for GemvV2 kernel dispatch.
@@ -288,10 +299,6 @@ impl Step for GemvV2Step {
             .as_ref()
             .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
 
-        // Strategy priority:
-        // 1. Explicitly set in struct
-        // 2. Environment variable override
-        // 3. Default (Vectorized)
         let strategy = self.strategy.unwrap_or_else(|| {
             if std::env::var("METALLIC_GEMV_STRATEGY").ok().as_deref() == Some("canonical") {
                 GemvStrategy::Canonical
@@ -321,6 +328,7 @@ impl Step for GemvV2Step {
             strategy,
             alpha: self.alpha,
             beta: self.beta,
+            activation: self.activation,
         })]
     }
 }
@@ -408,7 +416,7 @@ impl CompiledStep for CompiledGemvV2Step {
         }
 
         // Select kernel using unified getter with policy
-        let kernel = get_gemv_v2_kernel(quantization.clone(), self.layout, effective_strategy);
+        let kernel = get_gemv_v2_kernel(quantization.clone(), self.layout, effective_strategy, self.activation);
 
         let args = GemvV2Args {
             weights: weights_arg,
@@ -478,6 +486,8 @@ pub struct GemvCanonicalStep {
     pub beta: f32,
     #[serde(default)]
     pub has_bias: u32,
+    #[serde(default)]
+    pub activation: Activation,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -659,7 +669,12 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
         // Select kernel using unified getter
-        let kernel = get_gemv_v2_kernel(quantization.clone(), Layout::Canonical, GemvStrategy::Canonical);
+        let kernel = get_gemv_v2_kernel(
+            quantization.clone(),
+            Layout::Canonical,
+            GemvStrategy::Canonical,
+            self.step.activation,
+        );
 
         if crate::instrument::emit_cb_timing_metrics() {
             let mut data = rustc_hash::FxHashMap::default();
@@ -701,6 +716,8 @@ pub struct GemvColMajorStep {
     pub beta: f32,
     #[serde(default)]
     pub has_bias: u32,
+    #[serde(default)]
+    pub activation: Activation,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -891,14 +908,12 @@ impl CompiledStep for CompiledGemvColMajorStep {
             std::io::Write::flush(&mut std::io::stderr()).ok();
         }
 
-        // Use Vectorized strategy for ColMajor as it naturally vectorizes
-        // Logic Update: Use Scalar if N > 4096
         let strategy = if n_dim > 4096 {
             GemvStrategy::Scalar
         } else {
             GemvStrategy::Vectorized
         };
-        let kernel = get_gemv_v2_kernel(quantization.clone(), Layout::ColMajor, strategy);
+        let kernel = get_gemv_v2_kernel(quantization.clone(), Layout::ColMajor, strategy, self.step.activation);
 
         if debug {
             eprintln!("  [GemvColMajor] Running kernel dispatch...");

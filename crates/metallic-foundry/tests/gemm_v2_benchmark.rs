@@ -7,7 +7,7 @@ use metallic_context::{
     }
 };
 use metallic_foundry::{
-    Foundry, metals::gemm::step::GemmV2Step, policy::{f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, metals::gemm::step::GemmV2Step, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 
@@ -101,6 +101,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
         transpose_b: cfg.transpose_b,
         alpha: 1.0,
         beta: 0.0,
+        activation: Activation::None,
         bias: None,
         c: None,
         weights_per_block: 32,

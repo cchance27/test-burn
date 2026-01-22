@@ -6,10 +6,8 @@ use std::sync::Arc;
 use half::f16;
 use metallic_foundry::{
     Foundry, MetalError, compound::stages::Layout, metals::{
-        gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, softmax::{SoftmaxV2Args, get_softmax_v2_kernel}
-    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
-        TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
-    }
+        gemv::step::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, softmax::step::{SoftmaxV2Args, get_softmax_v2_kernel}
+    }, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -39,19 +37,27 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
         .collect();
 
     // Upload to Foundry (1D flat tensors)
-    let q_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * head_dim], TensorInit::CopyFrom(&q_data))?;
-    let k_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * seq_len * head_dim], TensorInit::CopyFrom(&k_data))?;
-    let v_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * seq_len * head_dim], TensorInit::CopyFrom(&v_data))?;
+    let q_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * head_dim], TensorInit::CopyFrom(q_data.as_slice()))?;
+    let k_tensor = FoundryTensor::<F16, Pooled>::new(
+        &mut foundry,
+        vec![n_heads * seq_len * head_dim],
+        TensorInit::CopyFrom(k_data.as_slice()),
+    )?;
+    let v_tensor = FoundryTensor::<F16, Pooled>::new(
+        &mut foundry,
+        vec![n_heads * seq_len * head_dim],
+        TensorInit::CopyFrom(v_data.as_slice()),
+    )?;
     let output_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * head_dim], TensorInit::Uninitialized)?;
     let scores_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * seq_len], TensorInit::Uninitialized)?;
     let probs_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_heads * seq_len], TensorInit::Uninitialized)?;
 
     // Scale tensor (1.0 because Gemv applies scale via alpha)
     let scale_buf: Vec<f16> = vec![f16::from_f32(1.0)];
-    let scale_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![1], TensorInit::CopyFrom(&scale_buf))?;
+    let scale_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![1], TensorInit::CopyFrom(scale_buf.as_slice()))?;
 
     // Kernels
-    let qk_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized);
+    let qk_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
     let qk_dispatch = warp_dispatch_config(seq_len as u32);
 
     let softmax_kernel = get_softmax_v2_kernel();
@@ -60,7 +66,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
         group: ThreadgroupSize::d1(256),
     };
 
-    let av_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized);
+    let av_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None);
     let av_dispatch = warp_dispatch_config(head_dim as u32);
 
     // Get base TensorArgs

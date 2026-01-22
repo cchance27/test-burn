@@ -43,8 +43,8 @@ struct SwiGluEpilogue {
             if (has_bias_flags[0] && bias[0]) gate += (float)bias[0][logical_col];
             if (has_bias_flags[1] && bias[1]) up += (float)bias[1][logical_col];
 
-            float silu_gate = gate / (1.0f + exp(-gate));
-            float val = silu_gate * up;
+            float agg_gate = ACTIVATION::apply(gate);
+            float val = agg_gate * up;
 
             result_y[0][logical_col] = (half)val;
         }
@@ -60,8 +60,7 @@ struct SwiGluEpilogue {
 
 /// SwiGLU Fused Activation kernel for half precision.
 ///
-/// Computes: output = SiLU(gate + gate_bias) * (up + up_bias)
-/// where SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
+/// Computes: output = ACTIVATION(gate + gate_bias) * (up + up_bias)
 ///
 /// This kernel uses vectorization (half4) when bias_len is aligned.
 kernel void swiglu_fused_activation_f16(
@@ -116,10 +115,8 @@ kernel void swiglu_fused_activation_f16(
             AccumVec gate_vals = (AccumVec)(gate_vec_ptr[0]) + (AccumVec)(gate_bias_vec[col_vec]);
             AccumVec up_vals = (AccumVec)(up_vec_ptr[0]) + (AccumVec)(up_bias_vec[col_vec]);
             
-            // SiLU: x * sigmoid(x)
-            AccumVec one(1.0f);
-            AccumVec sigmoid = one / (one + exp(-gate_vals));
-            AccumVec activated = gate_vals * sigmoid;
+            // Apply Activation
+            AccumVec activated = ACTIVATION::apply(gate_vals);
             
             // Output
             up_vec_ptr[0] = (ScalarVec)(activated * up_vals);
@@ -135,8 +132,7 @@ kernel void swiglu_fused_activation_f16(
             
             float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
             float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-            float sigmoid = 1.0f / (1.0f + exp(-gate_val));
-            float activated = gate_val * sigmoid;
+            float activated = ACTIVATION::apply(gate_val);
             up_inout[up_index] = (half)(activated * up_val);
             return;
         } else {
@@ -154,8 +150,7 @@ kernel void swiglu_fused_activation_f16(
     
     float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
     float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-    float sigmoid = 1.0f / (1.0f + exp(-gate_val));
-    float activated = gate_val * sigmoid;
+    float activated = ACTIVATION::apply(gate_val);
     up_inout[up_index] = (half)(activated * up_val);
 }
 

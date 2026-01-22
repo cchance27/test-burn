@@ -1,5 +1,5 @@
 use crate::{
-    compound::{BufferArg, Stage}, metals::swiglu::{SwigluParams, SwigluParamsResolved}
+    compound::{BufferArg, Stage}, metals::swiglu::{SwigluParams, SwigluParamsResolved}, policy::activation::Activation
 };
 
 /// Stage for SwiGLU fused activation.
@@ -11,18 +11,27 @@ use crate::{
 pub struct SwigluStage {
     #[allow(dead_code)]
     params: SwigluParamsResolved,
+    activation: Activation,
 }
 
 impl SwigluStage {
     pub fn new(params: SwigluParamsResolved) -> Self {
-        Self { params }
+        Self {
+            params,
+            activation: Activation::SiLU,
+        }
+    }
+
+    pub fn with_activation(mut self, activation: Activation) -> Self {
+        self.activation = activation;
+        self
     }
 }
 
 impl Stage for SwigluStage {
     fn includes(&self) -> Vec<&'static str> {
         // Included manually via struct_defs to ensure correct order with params
-        vec![]
+        vec![self.activation.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -57,28 +66,17 @@ impl Stage for SwigluStage {
 
     fn struct_defs(&self) -> String {
         format!(
-            "#define FUSED_KERNEL 1\n{}\n{}",
+            "#define FUSED_KERNEL 1\n#define ACTIVATION {}\n{}\n{}",
+            self.activation.struct_name(),
             SwigluParams::METAL_STRUCT_DEF,
             include_str!("swiglu.metal")
         )
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        // We emit the function call parameters or body.
-        // Since we are wrapping the existing kernel logic, we can just inline the body here
-        // or call a helper if we refactor swiglu.metal to expose a device function.
-        //
-        // Current swiglu.metal defines a kernel 'swiglu_fused_activation_f16'.
-        // We can't call a kernel from a kernel.
-        //
-        // Best approach: Refactor swiglu.metal to expose a 'run_swiglu_core' device function,
-        // then call it here.
-        // Or inline the logic. Inlining is safer to avoid modifying shared metal files too much yet.
-
-        // However, the logic is complex (vectorized vs scalar).
-        // Let's rely on correct grid dispatch (handled by Step) and just write the per-thread logic.
-
-        let code = r#"
+        let activation = self.activation.struct_name();
+        let code = format!(
+            "
     uint total_elements = params->total_elements;
     uint bias_len = params->bias_len;
     uint vector_width = params->vector_width;
@@ -93,10 +91,7 @@ impl Stage for SwigluStage {
     const uint kVectorWidth = 4;
     const uint row_length = bias_len;
     
-    // ... Copying logic from swiglu_fused_activation_f16 ...
-    
-    // Vectorized path
-    if (vector_width == kVectorWidth) {
+    if (vector_width == kVectorWidth) {{
         const uint vecs_per_row = row_length / kVectorWidth;
         if (vecs_per_row == 0u) return;
         
@@ -104,7 +99,7 @@ impl Stage for SwigluStage {
         const uint total_vector_threads = total_rows * vecs_per_row;
         const uint remainder = total_elements - total_vector_threads * kVectorWidth;
         
-        if (global_id < total_vector_threads) {
+        if (global_id < total_vector_threads) {{
             using ScalarVec = half4;
             using AccumVec = float4;
             
@@ -130,15 +125,12 @@ impl Stage for SwigluStage {
             AccumVec gate_vals = (AccumVec)(gate_vec_ptr[0]) + (AccumVec)(gate_bias_vec[col_vec]);
             AccumVec up_vals = (AccumVec)(up_vec_ptr[0]) + (AccumVec)(up_bias_vec[col_vec]);
             
-            // SiLU: x * sigmoid(x)
-            AccumVec one(1.0f);
-            AccumVec sigmoid = one / (one + metal::fast::exp(-gate_vals));
-            AccumVec activated = gate_vals * sigmoid;
+            AccumVec activated = {activation}::apply(gate_vals);
             
             // Output
             up_vec_ptr[0] = (ScalarVec)(activated * up_vals);
             
-        } else if (global_id < total_vector_threads + remainder) {
+        }} else if (global_id < total_vector_threads + remainder) {{
              // Remainder logic
             const uint scalar_linear = total_vector_threads * kVectorWidth + (global_id - total_vector_threads);
             const uint row = scalar_linear / row_length;
@@ -149,13 +141,12 @@ impl Stage for SwigluStage {
             
             float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
             float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-            float sigmoid = 1.0f / (1.0f + exp(-gate_val));
-            float activated = gate_val * sigmoid;
+            float activated = {activation}::apply(gate_val);
             up_inout[up_index] = (half)(activated * up_val);
-        }
-    } else {
+        }}
+        }} else {{
         // Scalar fallback
-        if (global_id < total_elements) {
+        if (global_id < total_elements) {{
             const uint row = global_id / row_length;
             const uint col = global_id % row_length;
             const uint gate_index = row * gate_leading_stride + col;
@@ -163,12 +154,13 @@ impl Stage for SwigluStage {
             
             float gate_val = (float)gate[gate_index] + (float)gate_bias[col];
             float up_val = (float)up_inout[up_index] + (float)up_bias[col];
-            float sigmoid = 1.0f / (1.0f + exp(-gate_val));
-            float activated = gate_val * sigmoid;
+            float activated = {activation}::apply(gate_val);
             up_inout[up_index] = (half)(activated * up_val);
-        }
-    }
-"#;
-        ("swiglu_output".to_string(), code.to_string())
+        }}
+    }}
+"
+        );
+
+        ("swiglu_output".to_string(), code)
     }
 }

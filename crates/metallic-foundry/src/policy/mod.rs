@@ -84,6 +84,7 @@ pub trait MetalPolicyRuntime: crate::fusion::MetalPolicy + Send + Sync + Debug {
     ) -> Result<Vec<(String, TensorArg)>>;
 }
 
+pub mod activation;
 pub mod f16;
 pub mod f32;
 pub mod q8;
