@@ -1,8 +1,8 @@
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::stages::Quantization, metals::{
+    Foundry, metals::{
         gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig
-    }, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -34,7 +34,15 @@ fn run_parity_check(m: usize, n: usize, k: usize, tile_config: TileConfig) {
 
     let params = GemmParams::simple(m as i32, n as i32, k as i32, false, false, tile_config);
     let dispatch = gemm_dispatch_config(&params, tile_config);
-    let kernel = get_gemm_kernel(Quantization::F16, Quantization::F16, false, false, tile_config, false, false);
+    let kernel = get_gemm_kernel(
+        std::sync::Arc::new(PolicyF16),
+        std::sync::Arc::new(PolicyF16),
+        false,
+        false,
+        tile_config,
+        false,
+        false,
+    );
 
     let args = GemmV2Args {
         a: TensorArg::from_tensor(&a),

@@ -18,7 +18,7 @@ use crate::compound::{BufferArg, Stage};
 /// - `RowMajor`: Weights are [N, K] shape - each output row is contiguous in K
 /// - `ColMajor`: Weights are [K, N] shape - each input column is contiguous in N  
 /// - `Canonical`: Blocked [N, K] with K blocked into chunks
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Layout {
     /// Weights stored as [N, K] (output-major).
     /// Index: weights[n * K + k]

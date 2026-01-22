@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::stages::{Layout, Quantization}, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, policy::f16::PolicyF16, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 
@@ -75,7 +75,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         m_dim: DynamicValue::Literal(shape.m as u32),
         n_dim: DynamicValue::Literal(shape.n as u32),
         k_dim: DynamicValue::Literal(shape.k as u32),
-        b_quant: Quantization::F16,
+        b_quant: std::sync::Arc::new(PolicyF16),
         transpose_a: false,
         transpose_b: false,
         alpha: 1.0,
@@ -140,8 +140,6 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         m: DynamicValue::Literal(shape.m as u32),
         n: DynamicValue::Literal(shape.n as u32),
         k: DynamicValue::Literal(shape.k as u32),
-        a_quant: Quantization::F16,
-        b_quant: Quantization::F16,
         transpose_a: false,
         transpose_b: false,
         alpha: 1.0,

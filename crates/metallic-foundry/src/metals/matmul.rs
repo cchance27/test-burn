@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::stages::{Layout, Quantization}, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
+    Foundry, MetalError, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
 };
 
 /// Unified MatMul step that dynamically dispatches to GEMV or GEMM.
@@ -23,36 +23,29 @@ pub struct MatMulStep {
     pub b_scales: Option<Ref>, // Maps to scale_bytes in Gemv
     /// Optional C/Residual matrix to add: Output = Alpha*A*B + Beta*C
     pub c: Option<Ref>, // Maps to residual
-
-    // Dimensions
     pub m: DynamicValue<u32>,
     pub n: DynamicValue<u32>,
     pub k: DynamicValue<u32>,
-
-    // Parameters
-    // a_quant: A is assumed F16 in V2 kernels for now
-    pub a_quant: Quantization,
-    pub b_quant: Quantization, // F16 or Q8
-
     pub transpose_a: bool,
     pub transpose_b: bool,
-
-    /// Scale factor for A*B (default 1.0)
     #[serde(default = "default_alpha")]
     pub alpha: f32,
-    /// Beta for C (default 0.0)
+    #[serde(default = "default_beta")]
     pub beta: f32,
-
-    /// Weights per block for Quantization (default 32)
-    #[serde(default = "default_wpb")]
+    #[serde(default = "default_weights_per_block")]
     pub weights_per_block: u32,
+    // NOTE: a_quant/b_quant removed - runtime dtype derivation is source of truth
 }
 
 fn default_alpha() -> f32 {
     1.0
 }
 
-fn default_wpb() -> u32 {
+fn default_beta() -> f32 {
+    0.0
+}
+
+fn default_weights_per_block() -> u32 {
     32
 }
 
@@ -68,14 +61,52 @@ impl Default for MatMulStep {
             m: DynamicValue::Literal(1),
             n: DynamicValue::Literal(1),
             k: DynamicValue::Literal(1),
-            a_quant: Quantization::F16,
-            b_quant: Quantization::F16,
             transpose_a: false,
             transpose_b: false,
             alpha: 1.0,
             beta: 0.0,
             weights_per_block: 32,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matmul_step_defaults_round_trip() {
+        let json = r#"{
+            "a": "a",
+            "b": "b",
+            "output": "output",
+            "m": 1,
+            "n": 1,
+            "k": 1,
+            "transpose_a": false,
+            "transpose_b": false,
+            "weights_per_block": 32
+        }"#;
+
+        let step: MatMulStep = serde_json::from_str(json).unwrap();
+        assert_eq!(step.alpha, 1.0);
+        assert_eq!(step.beta, 0.0);
+
+        let json2 = r#"{
+            "a": "a",
+            "b": "b",
+            "output": "output",
+            "m": 1,
+            "n": 1,
+            "k": 1,
+            "transpose_a": false,
+            "transpose_b": false,
+            "alpha": 0.25,
+            "beta": 0.75
+        }"#;
+        let step2: MatMulStep = serde_json::from_str(json2).unwrap();
+        assert_eq!(step2.alpha, 0.25);
+        assert_eq!(step2.beta, 0.75);
     }
 }
 
@@ -217,6 +248,13 @@ impl Step for MatMulStep {
 
         // 2. Prepare GEMM Step (for M>1)
         let gemm_compiled = if gemm_enabled {
+            // Derive b_quant from B tensor dtype at runtime
+            let b_name = bindings.interpolate(self.b.0.clone());
+            let b_quant = bindings
+                .get(&b_name)
+                .map(|t| crate::policy::resolve_policy(t.dtype.into()))
+                .unwrap_or_else(|_| std::sync::Arc::new(crate::policy::f16::PolicyF16) as _);
+
             let gemm_step = GemmV2Step {
                 a: self.a.clone(),
                 b: self.b.clone(),
@@ -227,7 +265,7 @@ impl Step for MatMulStep {
                 m_dim: self.m.clone(),
                 n_dim: self.n.clone(),
                 k_dim: self.k.clone(),
-                b_quant: self.b_quant,
+                b_quant,
                 transpose_a: self.transpose_a,
                 transpose_b: self.transpose_b,
                 alpha: self.alpha,

@@ -1,13 +1,11 @@
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
 use super::step::GemvStrategy;
 use crate::{
-    Foundry, MetalError, compound::{
-        CompiledCompoundKernel, CompoundKernel, stages::{Quantization, WarpLayoutStage}
-    }, metals::{
+    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::WarpLayoutStage}, fusion::MetalPolicy, metals::{
         gemv::qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, rmsnorm::stages::RmsNormComputeStage
     }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
@@ -157,10 +155,6 @@ impl Step for FusedQkvStep {
             .as_ref()
             .map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
 
-        // Ensure kernels are compiled (quantization selected at runtime based on bound weight dtype)
-        get_fused_qkv_kernel(self.strategy, Quantization::F16, gamma_idx.is_some());
-        get_fused_qkv_kernel(self.strategy, Quantization::Q8, gamma_idx.is_some());
-
         vec![Box::new(CompiledFusedQkvStep {
             step: self.clone(),
             input_idx,
@@ -208,7 +202,6 @@ impl CompiledStep for CompiledFusedQkvStep {
         // Centralized Quantization Binding
         let policy = crate::policy::resolve_policy(w_q_tensor.dtype.into());
         let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
 
         let q_args = loader.bind(fast_bindings, &self.w_q_resolved);
         let k_args = loader.bind(fast_bindings, &self.w_k_resolved);
@@ -276,7 +269,7 @@ impl CompiledStep for CompiledFusedQkvStep {
             gamma,
         };
 
-        let kernel = get_fused_qkv_kernel(self.step.strategy, quantization, self.gamma_idx.is_some());
+        let kernel = get_fused_qkv_kernel(self.step.strategy, policy, self.gamma_idx.is_some());
 
         // Manual dispatch to support M dimension (batch)
         const WARPS_PER_TG: usize = 8;
@@ -310,36 +303,27 @@ impl CompiledStep for CompiledFusedQkvStep {
     }
 }
 
-type FusedKey = (GemvStrategy, Quantization, bool);
+type FusedKey = (GemvStrategy, String, bool);
 type FusedCache = std::collections::HashMap<FusedKey, &'static CompiledCompoundKernel>;
 
-fn get_fused_qkv_kernel(strategy: GemvStrategy, quant: Quantization, has_norm: bool) -> &'static CompiledCompoundKernel {
+fn get_fused_qkv_kernel(strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>, has_norm: bool) -> &'static CompiledCompoundKernel {
     static KERNELS: OnceLock<std::sync::Mutex<FusedCache>> = OnceLock::new();
     let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut cache = cache.lock().unwrap();
 
-    let key = (strategy, quant, has_norm);
+    let key = (strategy, policy.short_name().to_string(), has_norm);
     if let Some(kernel) = cache.get(&key) {
         return kernel;
     }
 
-    let policy_name = quant.policy_name();
     let norm_suffix = if has_norm { "_rmsnorm" } else { "" };
-    let kernel_name = format!("fused_qkv{}_{}", norm_suffix, policy_name.to_lowercase().replace("policy", ""));
-
-    // Determine vector width based on quantization policy
-    // F16: Can use Vec8 (128-bit loads) or Vec4. Default to Vec8 for efficiency.
-    // Q8:  Uses Vec8 (N=8) inherently.
-    // Future: Could query policy for recommended width.
-    let vec_width = match quant {
-        Quantization::F16 => 8, // Force Vec8 for now as it's optimal
-        Quantization::Q8 => 8,
-    };
+    let kernel_name = format!("fused_qkv{}_{}", norm_suffix, policy.short_name());
+    let vec_width = policy.optimization_hints().vector_load_size;
 
     // Configure layout with correct stride
     let mut compound = CompoundKernel::new(&kernel_name)
         .with_manual_output(true)
-        .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width))
+        .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width as u32))
         .prologue(RmsNormComputeStage::new(6, 7)); // Stage 1: RMSNorm compute
 
     // Stage 2: QKV Projection
@@ -349,7 +333,7 @@ fn get_fused_qkv_kernel(strategy: GemvStrategy, quant: Quantization, has_norm: b
         _ => panic!("Unsupported vector width: {}", vec_width),
     };
 
-    let mut proj = ParallelProjectStage::new(quant).with_vector_width(vw);
+    let mut proj = ParallelProjectStage::new(policy.clone()).with_vector_width(vw);
     if has_norm {
         proj = proj.with_norm(18, "inv_rms");
     }

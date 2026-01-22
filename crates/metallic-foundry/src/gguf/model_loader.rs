@@ -221,8 +221,15 @@ impl GGUFModel {
             GGUFDataType::F32 => crate::tensor::Dtype::F32,
             GGUFDataType::F16 => crate::tensor::Dtype::F16,
             GGUFDataType::Q8_0 => crate::tensor::Dtype::U8,
-            GGUFDataType::Q8_1 => crate::tensor::Dtype::U8,
-            _ => crate::tensor::Dtype::F16, // Default fallback
+            GGUFDataType::Q8_1 => {
+                panic!("GGUF tensor dtype Q8_1 is not supported by Foundry yet (add support or convert the model).")
+            }
+            other => {
+                panic!(
+                    "Unsupported GGUF tensor dtype {:?} for Foundry (add support or convert the model).",
+                    other
+                )
+            }
         }
     }
 }

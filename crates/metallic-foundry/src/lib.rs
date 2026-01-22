@@ -262,15 +262,10 @@ impl Foundry {
 
         // Automatic policy inclusion based on Dtype
         if let Some(dtype) = kernel.dtype() {
-            let policy_h = match dtype {
-                Dtype::F16 => Some("policies/policy_f16.metal"),
-                Dtype::U8 => Some("policies/policy_q8.metal"),
-                _ => None,
-            };
-            if let Some(h) = policy_h
-                && !includes.contains(&h)
-            {
-                includes.push(h);
+            let policy = crate::policy::resolve_policy(dtype.into());
+            let policy_h = policy.header();
+            if !includes.contains(&policy_h) {
+                includes.push(policy_h);
             }
         }
 

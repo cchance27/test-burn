@@ -614,9 +614,16 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
 
     let root = foundry_crate();
 
-    // Parse #[policy(header = "...", struct_name = "...")]
+    // Parse #[policy(header = "...", struct_name = "...", short_name = "...", element_size = N, ...)]
     let mut header = String::new();
     let mut struct_name = name.to_string();
+    let mut short_name: Option<String> = None;
+    let mut element_size: Option<usize> = None;
+    // Optimization hints
+    let mut block_size: Option<usize> = None;
+    let mut vector_load_size: Option<usize> = None;
+    let mut unroll_factor: Option<usize> = None;
+    let mut active_thread_count: Option<usize> = None;
 
     for attr in &input.attrs {
         if attr.path().is_ident("policy") {
@@ -633,6 +640,42 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
                             if let Expr::Lit(expr_lit) = nv.value {
                                 if let Lit::Str(lit) = expr_lit.lit {
                                     struct_name = lit.value();
+                                }
+                            }
+                        } else if nv.path.is_ident("short_name") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Str(lit) = expr_lit.lit {
+                                    short_name = Some(lit.value());
+                                }
+                            }
+                        } else if nv.path.is_ident("element_size") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    element_size = Some(lit.base10_parse::<usize>().unwrap());
+                                }
+                            }
+                        } else if nv.path.is_ident("block_size") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    block_size = Some(lit.base10_parse::<usize>().unwrap());
+                                }
+                            }
+                        } else if nv.path.is_ident("vector_load_size") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    vector_load_size = Some(lit.base10_parse::<usize>().unwrap());
+                                }
+                            }
+                        } else if nv.path.is_ident("unroll_factor") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    unroll_factor = Some(lit.base10_parse::<usize>().unwrap());
+                                }
+                            }
+                        } else if nv.path.is_ident("active_thread_count") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    active_thread_count = Some(lit.base10_parse::<usize>().unwrap());
                                 }
                             }
                         }
@@ -676,6 +719,48 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
 
     let init_code = init_statements.join(" ");
 
+    // Generate optional method overrides
+    let short_name_impl = if let Some(sn) = short_name {
+        quote! {
+            fn short_name(&self) -> &'static str {
+                #sn
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let element_size_impl = if let Some(es) = element_size {
+        quote! {
+            fn element_size(&self) -> usize {
+                #es
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    // Generate optimization_hints() if any hint attribute was provided
+    let has_any_hint = block_size.is_some() || vector_load_size.is_some() || unroll_factor.is_some() || active_thread_count.is_some();
+    let optimization_hints_impl = if has_any_hint {
+        let bs = block_size.unwrap_or(1);
+        let vls = vector_load_size.unwrap_or(2);
+        let uf = unroll_factor.unwrap_or(1);
+        let atc = active_thread_count.unwrap_or(32);
+        quote! {
+            fn optimization_hints(&self) -> #root::policy::OptimizationMetadata {
+                #root::policy::OptimizationMetadata {
+                    block_size: #bs,
+                    vector_load_size: #vls,
+                    unroll_factor: #uf,
+                    active_thread_count: #atc,
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         impl #root::fusion::MetalPolicy for #name {
             fn header(&self) -> &'static str {
@@ -684,6 +769,25 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
 
             fn struct_name(&self) -> &'static str {
                 #struct_name
+            }
+
+            #short_name_impl
+            #element_size_impl
+            #optimization_hints_impl
+        }
+
+        // Policies need a no-op Stage impl for the loader stage machinery
+        impl #root::compound::Stage for #name {
+            fn includes(&self) -> Vec<&'static str> {
+                vec![]
+            }
+
+            fn buffer_args(&self) -> Vec<#root::compound::BufferArg> {
+                vec![]
+            }
+
+            fn emit(&self, _input_var: &str) -> (String, String) {
+                (String::new(), String::new())
             }
         }
 

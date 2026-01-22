@@ -1,25 +1,22 @@
-use super::{LoaderStage, OptimizationMetadata, QuantizationPolicy, WeightLayout};
+use metallic_macros::MetalPolicy;
+
+use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
 use crate::{
-    Foundry, compound::{BufferArg, stages::Quantization}, dtypes::F16, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::{Tensor, TensorInit}, types::TensorArg
+    F16, Foundry, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::{Tensor, TensorInit}, types::TensorArg
 };
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, MetalPolicy)]
+#[policy(
+    header = "policies/policy_f16.metal",
+    struct_name = "PolicyF16",
+    short_name = "f16",
+    element_size = 2,
+    block_size = 1,
+    vector_load_size = 4,
+    unroll_factor = 4,
+    active_thread_count = 32
+)]
 pub struct PolicyF16;
-
-impl crate::compound::Stage for PolicyF16 {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![]
-    }
-
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![]
-    }
-
-    fn emit(&self, _input_var: &str) -> (String, String) {
-        // Loader stages don't emit code directly; they are used by the Policy template.
-        ("".to_string(), "".to_string())
-    }
-}
 
 impl LoaderStage for PolicyF16 {
     fn params_struct(&self) -> String {
@@ -36,33 +33,12 @@ impl LoaderStage for PolicyF16 {
         // DEBT: We should avoid this, or at least assess is as it seems like a hack and might affect memory?
         smallvec![tensor.clone(), tensor.clone()]
     }
-    fn quantization_type(&self) -> Quantization {
-        Quantization::F16
+    fn quantization_type(&self) -> std::sync::Arc<dyn super::MetalPolicyRuntime> {
+        std::sync::Arc::new(PolicyF16)
     }
 }
 
-impl QuantizationPolicy for PolicyF16 {
-    fn name(&self) -> &'static str {
-        "F16"
-    }
-
-    fn metal_policy_name(&self) -> &'static str {
-        "PolicyF16"
-    }
-
-    fn metal_include(&self) -> &'static str {
-        "policies/policy_f16.metal"
-    }
-
-    fn optimization_hints(&self) -> OptimizationMetadata {
-        OptimizationMetadata {
-            block_size: 1,
-            vector_load_size: 2,
-            unroll_factor: 4,
-            active_thread_count: 32,
-        }
-    }
-
+impl MetalPolicyRuntime for PolicyF16 {
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
         Box::new(self.clone())
     }

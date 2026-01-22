@@ -578,7 +578,6 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
         // use the GEMM path here. We can re-introduce a dedicated small-M attention kernel later.
         {
             // =========== Batched GEMM over heads (M>=1) ===========
-            use crate::compound::stages::Quantization;
 
             let tile_config = TileConfig::default();
 
@@ -586,8 +585,8 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
             // Q@K^T: [M, head_dim] @ [head_dim, kv_seq_len] = [M, kv_seq_len]
             // K is stored as [kv_seq_len, head_dim] row-major, so K^T is ColMajor read
             let qk_gemm_kernel = get_gemm_kernel(
-                Quantization::F16,
-                Quantization::F16,
+                std::sync::Arc::new(crate::policy::f16::PolicyF16),
+                std::sync::Arc::new(crate::policy::f16::PolicyF16),
                 false,
                 true, // transpose_a=false, transpose_b=true (K^T)
                 tile_config,
@@ -597,8 +596,8 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
 
             // Probs@V: [M, kv_seq_len] @ [kv_seq_len, head_dim] = [M, head_dim]
             let av_gemm_kernel = get_gemm_kernel(
-                Quantization::F16,
-                Quantization::F16,
+                std::sync::Arc::new(crate::policy::f16::PolicyF16),
+                std::sync::Arc::new(crate::policy::f16::PolicyF16),
                 false,
                 false, // No transpose
                 tile_config,

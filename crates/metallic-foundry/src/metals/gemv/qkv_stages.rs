@@ -1,7 +1,11 @@
 //! QKV Fused Stages - Componentized N-way dot product for QKV fusion.
 
+use std::sync::Arc;
+
 use super::stages::VectorWidth;
-use crate::compound::{BufferArg, Stage, stages::Quantization};
+use crate::{
+    compound::{BufferArg, Stage}, fusion::MetalPolicy
+};
 
 /// Metal definitions for GEMV helper functions.
 const GEMV_METAL: &str = include_str!("gemv.metal");
@@ -14,9 +18,8 @@ const GEMV_METAL: &str = include_str!("gemv.metal");
 /// It supports GQA by allowing different N dimensions for K and V.
 #[derive(Debug, Clone)]
 pub struct ParallelProjectStage {
-    /// Quantization type (F16, Q8)
-    /// Quantization type (F16, Q8)
-    quantization: Quantization,
+    /// Policy for quantization (F16, Q8)
+    policy: Arc<dyn MetalPolicy>,
     /// Vector width for loads (matches layout stride)
     vector_width: VectorWidth,
     /// Optional shared memory variable name for normalization (e.g. "tg_inv_rms")
@@ -26,9 +29,9 @@ pub struct ParallelProjectStage {
 }
 
 impl ParallelProjectStage {
-    pub fn new(quantization: Quantization) -> Self {
+    pub fn new(policy: Arc<dyn MetalPolicy>) -> Self {
         Self {
-            quantization,
+            policy,
             vector_width: VectorWidth::Vec8, // Default safe
             norm_shared_name: None,
             gamma_buffer: None,
@@ -49,7 +52,7 @@ impl ParallelProjectStage {
 
 impl Stage for ParallelProjectStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -133,7 +136,7 @@ impl Stage for ParallelProjectStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
         let vec_width = self.vector_width.elements();
 
         // Scale stride: Q8 uses 2 bytes per block for scale lookup
@@ -142,10 +145,7 @@ impl Stage for ParallelProjectStage {
 
         // Byte scale: WEIGHT_INDEX returns element offsets, uchar* uses byte arithmetic
         // F16 = 2 bytes per element (half), Q8 = 1 byte per weight
-        let byte_scale = match self.quantization {
-            Quantization::F16 => 2usize,
-            Quantization::Q8 => 1usize,
-        };
+        let byte_scale = self.policy.element_size();
 
         let load_input = match self.vector_width {
             VectorWidth::Vec4 => {
@@ -188,43 +188,25 @@ impl Stage for ParallelProjectStage {
             ""
         };
 
-        let scales_logic = match self.quantization {
-            Quantization::F16 => r#"
-        float s_q_val = 1.0f;
-        float s_k_val = (row_idx < n_kv) ? 1.0f : 0.0f;
-        float s_v_val = (row_idx < n_kv) ? 1.0f : 0.0f;
-                "#
-            .to_string(),
-            Quantization::Q8 => {
-                format!(
-                    r#"
+        // Unified: always use Policy::load_scale (F16 returns 1.0h, Q8 returns actual scale)
+        let scales_logic = format!(
+            r#"
         float s_q_val = (float){policy}::load_scale(row_s_q, block_off);
         float s_k_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
         float s_v_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
-                    "#,
-                    policy = policy
-                )
-            }
-        };
+                "#,
+            policy = policy
+        );
 
-        let tail_scales_logic = match self.quantization {
-            Quantization::F16 => r#"
-        float s_q_val = (k < k_dim) ? 1.0f : 0.0f;
-        float s_k_val = (row_idx < n_kv && k < k_dim) ? 1.0f : 0.0f;
-        float s_v_val = (row_idx < n_kv && k < k_dim) ? 1.0f : 0.0f;
-                "#
-            .to_string(),
-            Quantization::Q8 => {
-                format!(
-                    r#"
+        // Unified tail: always use Policy::load_scale (F16 returns 1.0h, Q8 returns actual scale)
+        let tail_scales_logic = format!(
+            r#"
         float s_q_val = (k < k_dim) ? (float){policy}::load_scale(row_s_q, block_off) : 0.0f;
         float s_k_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
         float s_v_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
-                    "#,
-                    policy = policy
-                )
-            }
-        };
+                "#,
+            policy = policy
+        );
 
         // Helper macro for optimized indexing
         // Checks if WPB==32 (constant fold if specialized) or runtime check (uniform)
@@ -244,6 +226,7 @@ impl Stage for ParallelProjectStage {
         #endif
         "#;
 
+        // DEBT! 4GB issue!!?!?!?
         // Note: We keep w_idx as uint, but when adding to pointer (uchar*), Metal handles it.
         // If weights > 4GB, this overflows. But we are optimizing for 0.5B speed for now.
         // Foundry generally uses ulong offsets, so we cast at usage if needed.

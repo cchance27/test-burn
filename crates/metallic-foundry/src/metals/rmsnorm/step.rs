@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{RmsNorm, RmsNormParamsResolved};
 use crate::{
-    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, stages::Quantization}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// RMSNorm Step
@@ -106,7 +106,6 @@ impl CompiledStep for CompiledRmsNormStep {
 
         let policy = crate::policy::resolve_policy(input.dtype.into());
         let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
 
         let input_args = loader.bind(fast_bindings, &self.input_resolved);
 
@@ -130,7 +129,7 @@ impl CompiledStep for CompiledRmsNormStep {
             group: ThreadgroupSize::d1(256), // matches THREADS_PER_ROW constant in kernel
         };
 
-        let kernel = get_rmsnorm_kernel(quantization);
+        let kernel = get_rmsnorm_kernel(policy);
 
         let pipeline = if let Some(p) = self.pipeline.get() {
             p
@@ -155,12 +154,12 @@ impl CompiledStep for CompiledRmsNormStep {
 #[derive(Debug, Clone, KernelArgs)]
 pub struct RmsNormStandaloneStage {
     pub params: RmsNormParamsResolved,
-    pub quant: Quantization,
+    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl crate::compound::Stage for RmsNormStandaloneStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec!["rmsnorm/rmsnorm.metal", self.quant.include_path()]
+        vec!["rmsnorm/rmsnorm.metal", self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -194,7 +193,7 @@ impl crate::compound::Stage for RmsNormStandaloneStage {
     }
 
     fn emit(&self, _input_var: &str) -> (String, String) {
-        let policy_name = self.quant.policy_name();
+        let policy_name = self.policy.struct_name();
         (
             "output_ptr".to_string(),
             format!(
@@ -228,12 +227,13 @@ struct RmsNormParams {
     }
 }
 
-fn get_rmsnorm_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
     let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let mut cache = cache.lock().unwrap();
 
-    if let Some(kernel) = cache.get(&quant) {
+    let key = policy.short_name().to_string();
+    if let Some(kernel) = cache.get(&key) {
         return kernel;
     }
 
@@ -243,14 +243,14 @@ fn get_rmsnorm_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
     };
     let stage = RmsNormStandaloneStage {
         params: dummy_params,
-        quant,
+        policy: policy.clone(),
     };
 
-    let kernel_name = format!("rmsnorm_standalone_{}", quant.short_name());
+    let kernel_name = format!("rmsnorm_standalone_{}", policy.short_name());
     let compiled = Box::leak(Box::new(
         CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile(),
     ));
 
-    cache.insert(quant, compiled);
+    cache.insert(key, compiled);
     compiled
 }

@@ -41,7 +41,7 @@ pub enum WeightLayout {
     Canonical { expected_k: usize, expected_n: usize },
 }
 
-use crate::compound::{Stage, stages::Quantization};
+use crate::compound::Stage;
 
 /// A stage responsible for defining and binding loader arguments.
 ///
@@ -57,24 +57,14 @@ pub trait LoaderStage: Stage {
     fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]>;
 
     /// Return the quantization type this loader handles.
-    fn quantization_type(&self) -> Quantization;
+    fn quantization_type(&self) -> Arc<dyn MetalPolicyRuntime>;
 }
 
-/// A policy defining how a specific quantization type is loaded, bound, and executed.
-pub trait QuantizationPolicy: Send + Sync + Debug {
-    /// Unique identifier for this policy (e.g. "Q8_0", "F16").
-    fn name(&self) -> &'static str;
-
-    /// The name of the struct in Metal that implements the Policy interface.
-    /// E.g. "PolicyQ8", "PolicyF16".
-    fn metal_policy_name(&self) -> &'static str;
-
-    /// The path or content of the Metal header defining the policy.
-    fn metal_include(&self) -> &'static str;
-
-    /// Optimization hints for runtime dispatch (threadgroup sizing, etc).
-    fn optimization_hints(&self) -> OptimizationMetadata;
-
+/// Runtime behavior for a Metal policy (loading weights, binding buffers).
+///
+/// This trait extends `MetalPolicy` which provides compile-time kernel generation metadata.
+/// `MetalPolicyRuntime` adds the runtime loading and binding capabilities.
+pub trait MetalPolicyRuntime: crate::fusion::MetalPolicy + Send + Sync + Debug {
     /// Return the stage responsible for loading weights/scales.
     /// This stage defines the necessary Metal buffer arguments.
     fn loader_stage(&self) -> Box<dyn LoaderStage>;
@@ -112,11 +102,61 @@ impl From<Dtype> for GGUFDataType {
 }
 
 /// Registry to retrieve policies by GGUF type or name.
-pub fn resolve_policy(dtype: GGUFDataType) -> Arc<dyn QuantizationPolicy> {
+pub fn resolve_policy(dtype: GGUFDataType) -> Arc<dyn MetalPolicyRuntime> {
     match dtype {
         GGUFDataType::Q8_0 => Arc::new(q8::PolicyQ8),
+        GGUFDataType::Q8_1 => {
+            panic!("GGUF tensor dtype Q8_1 is not supported by Foundry yet (add a policy or convert the model).")
+        }
+        GGUFDataType::F16 => Arc::new(f16::PolicyF16),
         GGUFDataType::F32 => Arc::new(f32::PolicyF32),
-        // Default to F16 for F16 and anything else we blindly treat as F16 for now (legacy behavior)
-        _ => Arc::new(f16::PolicyF16),
+        other => {
+            panic!(
+                "Unsupported GGUF tensor dtype {:?} for Foundry (add a policy or convert the model).",
+                other
+            )
+        }
+    }
+}
+
+/// Resolve a policy by its short name (e.g. "f16", "q8").
+pub fn resolve_policy_by_name(name: &str) -> Option<Arc<dyn MetalPolicyRuntime>> {
+    match name {
+        "f16" => Some(Arc::new(f16::PolicyF16)),
+        "q8" => Some(Arc::new(q8::PolicyQ8)),
+        _ => None,
+    }
+}
+
+impl PartialEq for dyn MetalPolicyRuntime + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.short_name() == other.short_name()
+    }
+}
+impl Eq for dyn MetalPolicyRuntime + '_ {}
+impl std::hash::Hash for dyn MetalPolicyRuntime + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.short_name().hash(state);
+    }
+}
+
+pub mod serde {
+    use ::serde::{Deserialize, Deserializer, Serializer};
+
+    use super::*;
+
+    pub fn serialize<S>(policy: &Arc<dyn MetalPolicyRuntime>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(policy.short_name())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Arc<dyn MetalPolicyRuntime>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        resolve_policy_by_name(&s).ok_or_else(|| ::serde::de::Error::custom(format!("Unknown policy: {}", s)))
     }
 }

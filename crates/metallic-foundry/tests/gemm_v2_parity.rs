@@ -13,9 +13,9 @@ use metallic_context::{
     Context, F16Element, kernels::matmul_mlx::MatMulMlxOp, tensor::{Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage, TensorType, quantized::QuantizedQ8_0Tensor}
 };
 use metallic_foundry::{
-    Foundry, compound::stages::Quantization, metals::{
+    Foundry, metals::{
         gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig
-    }, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    }, policy::{f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -23,6 +23,12 @@ use serial_test::serial;
 // ============================================================================
 // Test Configuration
 // ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestQuantization {
+    F16,
+    Q8,
+}
 
 #[derive(Clone)]
 struct GemmTestConfig {
@@ -32,7 +38,7 @@ struct GemmTestConfig {
     transpose_a: bool,
     transpose_b: bool,
     tile_config: Option<TileConfig>,
-    quant_b: Quantization,
+    quant_b: TestQuantization,
 }
 
 impl Default for GemmTestConfig {
@@ -44,7 +50,7 @@ impl Default for GemmTestConfig {
             transpose_a: false,
             transpose_b: false,
             tile_config: None,
-            quant_b: Quantization::F16,
+            quant_b: TestQuantization::F16,
         }
     }
 }
@@ -254,7 +260,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     let ctx_f16 = Context::<metallic_context::F16Element>::new().unwrap();
 
     let (b_quantized, b_f16): (Option<QuantizedQ8_0Tensor>, Option<FoundryTensor<metallic_foundry::F16, Pooled>>) =
-        if cfg.quant_b == Quantization::Q8 {
+        if cfg.quant_b == TestQuantization::Q8 {
             let (w, s) = quantize_q8(&b_data, cfg.n, cfg.k, cfg.transpose_b);
             let q8 = QuantizedQ8_0Tensor::from_split_bytes_in_context(b_dims.clone(), &w, &s, &ctx_f16).unwrap();
             (Some(q8), None)
@@ -315,8 +321,11 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
 
     // Get kernel
     let kernel = get_gemm_kernel(
-        Quantization::F16,
-        cfg.quant_b,
+        std::sync::Arc::new(PolicyF16),
+        match cfg.quant_b {
+            TestQuantization::F16 => std::sync::Arc::new(PolicyF16),
+            TestQuantization::Q8 => std::sync::Arc::new(PolicyQ8),
+        },
         cfg.transpose_a,
         cfg.transpose_b,
         tile_config,
@@ -995,7 +1004,7 @@ fn test_gemm_v2_qwen25_mlp_up_q8() {
         k: 1536,
         transpose_a: false,
         transpose_b: true,
-        quant_b: Quantization::Q8,
+        quant_b: TestQuantization::Q8,
         ..Default::default()
     });
 }

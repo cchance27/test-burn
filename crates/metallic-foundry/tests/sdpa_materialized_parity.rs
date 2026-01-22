@@ -1,11 +1,13 @@
 // Test SdpaMaterialized parity using FoundryTensor for correct TensorArg handling.
 // This directly tests the Gemv+Softmax+Gemv sequence that SdpaMaterializedStep uses.
 
+use std::sync::Arc;
+
 use half::f16;
 use metallic_foundry::{
     Foundry, MetalError, compound::stages::Layout, metals::{
-        gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel_f16, warp_dispatch_config}, softmax::{SoftmaxV2Args, get_softmax_v2_kernel}
-    }, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
+        gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, softmax::{SoftmaxV2Args, get_softmax_v2_kernel}
+    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
@@ -49,7 +51,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
     let scale_tensor = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![1], TensorInit::CopyFrom(&scale_buf))?;
 
     // Kernels
-    let qk_kernel = get_gemv_v2_kernel_f16(Layout::RowMajor, GemvStrategy::Vectorized);
+    let qk_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized);
     let qk_dispatch = warp_dispatch_config(seq_len as u32);
 
     let softmax_kernel = get_softmax_v2_kernel();
@@ -58,7 +60,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
         group: ThreadgroupSize::d1(256),
     };
 
-    let av_kernel = get_gemv_v2_kernel_f16(Layout::ColMajor, GemvStrategy::Vectorized);
+    let av_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized);
     let av_dispatch = warp_dispatch_config(head_dim as u32);
 
     // Get base TensorArgs

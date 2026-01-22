@@ -1,7 +1,9 @@
 //! Fused FFN stages: RMSNorm + Gate/Up projections + SwiGLU writeback.
 
+use std::sync::Arc;
+
 use crate::{
-    compound::{BufferArg, Stage, stages::Quantization}, metals::gemv::stages::VectorWidth
+    compound::{BufferArg, Stage}, fusion::MetalPolicy, metals::gemv::stages::VectorWidth
 };
 
 /// Metal definitions for GEMV helper functions.
@@ -11,16 +13,16 @@ const SWIGLU_METAL: &str = include_str!("swiglu.metal");
 /// Dual projection stage for FFN (gate + up) with optional RMSNorm fusion.
 #[derive(Debug, Clone)]
 pub struct FfnDualProjectStage {
-    quantization: Quantization,
+    policy: Arc<dyn MetalPolicy>,
     vector_width: VectorWidth,
     norm_shared_name: Option<String>,
     gamma_buffer: Option<usize>,
 }
 
 impl FfnDualProjectStage {
-    pub fn new(quantization: Quantization) -> Self {
+    pub fn new(policy: Arc<dyn MetalPolicy>) -> Self {
         Self {
-            quantization,
+            policy,
             vector_width: VectorWidth::Vec8,
             norm_shared_name: None,
             gamma_buffer: None,
@@ -36,7 +38,7 @@ impl FfnDualProjectStage {
 
 impl Stage for FfnDualProjectStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -99,15 +101,12 @@ impl Stage for FfnDualProjectStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
         let vec_width = self.vector_width.elements();
         let norm_var = self.norm_shared_name.as_deref().unwrap_or("inv_rms");
 
         let scale_stride = "(ulong)row_idx * blocks_per_k * 2";
-        let byte_scale = match self.quantization {
-            Quantization::F16 => 2usize,
-            Quantization::Q8 => 1usize,
-        };
+        let byte_scale = self.policy.element_size();
 
         let norm_logic = if self.norm_shared_name.is_some() {
             format!(
@@ -132,39 +131,23 @@ impl Stage for FfnDualProjectStage {
             String::new()
         };
 
-        let scales_logic = match self.quantization {
-            Quantization::F16 => r#"
-        float s_gate_val = 1.0f;
-        float s_up_val = 1.0f;
-                "#
-            .to_string(),
-            Quantization::Q8 => {
-                format!(
-                    r#"
+        // Unified: always use Policy::load_scale (F16 returns 1.0h, Q8 returns actual scale)
+        let scales_logic = format!(
+            r#"
         float s_gate_val = (float){policy}::load_scale(row_s_gate, block_off);
         float s_up_val = (float){policy}::load_scale(row_s_up, block_off);
-                    "#,
-                    policy = policy
-                )
-            }
-        };
+                "#,
+            policy = policy
+        );
 
-        let tail_scales_logic = match self.quantization {
-            Quantization::F16 => r#"
-        float s_gate_val = (k < k_dim) ? 1.0f : 0.0f;
-        float s_up_val = (k < k_dim) ? 1.0f : 0.0f;
-                "#
-            .to_string(),
-            Quantization::Q8 => {
-                format!(
-                    r#"
+        // Unified tail: always use Policy::load_scale
+        let tail_scales_logic = format!(
+            r#"
         float s_gate_val = (k < k_dim) ? (float){policy}::load_scale(row_s_gate, block_off) : 0.0f;
         float s_up_val = (k < k_dim) ? (float){policy}::load_scale(row_s_up, block_off) : 0.0f;
-                    "#,
-                    policy = policy
-                )
-            }
-        };
+                "#,
+            policy = policy
+        );
 
         let code = format!(
             r#"

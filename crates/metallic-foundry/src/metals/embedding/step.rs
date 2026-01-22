@@ -7,7 +7,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::Quantization}, metals::embedding::{EmbeddingParams, EmbeddingParamsResolved}, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg}
+    Foundry, MetalError, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel, Stage}, fusion::MetalPolicy, metals::embedding::{EmbeddingParams, EmbeddingParamsResolved}, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg}
 };
 
 /// Manual Embedding Step with runtime dtype dispatch (F16 vs Q8_0).
@@ -105,19 +105,21 @@ impl CompiledStep for CompiledEmbeddingStep {
 
         let policy = crate::policy::resolve_policy(table.dtype.into());
         let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
-
         let table_args = loader.bind(fast_bindings, &self.table_resolved);
 
         let args = EmbeddingGenericArgs {
             table: table_args[0].clone(),
-            scale_bytes: table_args[1].clone(),
+            scale_bytes: if table_args.len() > 1 {
+                table_args[1].clone()
+            } else {
+                table_args[0].clone() // Dummy for F16
+            },
             indices: TensorArg::from_tensor(indices),
             output: TensorArg::from_tensor(output),
             params,
         };
 
-        let kernel = get_embedding_kernel(quantization);
+        let kernel = get_embedding_kernel(policy);
         let dispatch = DispatchConfig {
             grid: GridSize::d1(params.total_elements as usize),
             group: crate::types::ThreadgroupSize::d1(256),
@@ -144,12 +146,13 @@ pub struct EmbeddingGenericArgs {
 #[derive(Debug, Clone, KernelArgs)]
 pub struct EmbeddingStage {
     pub params: EmbeddingParamsResolved,
-    pub quant: Quantization,
+    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl Stage for EmbeddingStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec!["embedding/embedding.metal"]
+        // Policy header MUST come before embedding.metal since the template uses Policy types
+        vec![self.policy.header(), "embedding/embedding.metal"]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -176,46 +179,34 @@ impl Stage for EmbeddingStage {
             },
             BufferArg {
                 name: "params",
-                metal_type: "constant EmbeddingParamsResolved*",
+                metal_type: "constant EmbeddingParams*",
                 buffer_index: 4,
             },
         ]
     }
 
     fn emit(&self, _input_var: &str) -> (String, String) {
-        (
-            "output".to_string(),
-            match self.quant {
-                Quantization::F16 => r#"
-    run_embedding_core_f16(table, indices, output, params, gid.x);
-"#
-                .to_string(),
-                Quantization::Q8 => r#"
-    run_embedding_core_q8(table, scale_bytes, indices, output, params, gid.x);
-"#
-                .to_string(),
-            },
-        )
+        let code = format!(
+            r#"
+    run_embedding_core<{policy}>(table, scale_bytes, indices, output, params, gid.x);
+"#,
+            policy = self.policy.struct_name()
+        );
+        ("output".to_string(), code)
     }
 
     fn struct_defs(&self) -> String {
-        r#"
-struct EmbeddingParamsResolved {
-    uint d_model;
-    uint total_elements;
-    uint vocab_size;
-};
-"#
-        .to_string()
+        EmbeddingParams::METAL_STRUCT_DEF.to_string()
     }
 }
 
-fn get_embedding_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+pub fn get_embedding_kernel(policy: Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
     let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let mut cache = cache.lock().unwrap();
 
-    if let Some(kernel) = cache.get(&quant) {
+    let key = policy.short_name().to_string();
+    if let Some(kernel) = cache.get(&key) {
         return kernel;
     }
 
@@ -226,14 +217,14 @@ fn get_embedding_kernel(quant: Quantization) -> &'static CompiledCompoundKernel 
     };
     let stage = EmbeddingStage {
         params: dummy_params,
-        quant,
+        policy: policy.clone(),
     };
 
-    let kernel_name = format!("embedding_standalone_{}", quant.short_name());
+    let kernel_name = format!("embedding_standalone_{}", policy.short_name());
     let compiled = Box::leak(Box::new(
         CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile(),
     ));
 
-    cache.insert(quant, compiled);
+    cache.insert(key, compiled);
     compiled
 }

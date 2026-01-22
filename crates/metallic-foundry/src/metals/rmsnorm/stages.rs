@@ -1,9 +1,13 @@
-use crate::compound::{BufferArg, Stage, stages::Quantization};
+use std::sync::Arc;
+
+use crate::{
+    compound::{BufferArg, Stage}, fusion::MetalPolicy
+};
 
 pub struct RmsNormComputeStage {
     pub input_buffer: usize,
     pub k_dim_buffer: usize,
-    pub quantization: Quantization,
+    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl RmsNormComputeStage {
@@ -11,20 +15,19 @@ impl RmsNormComputeStage {
         Self {
             input_buffer,
             k_dim_buffer,
-            quantization: Quantization::F16, // Default - overridden by with_quantization()
+            policy: std::sync::Arc::new(crate::policy::f16::PolicyF16), // Default - overridden by with_policy()
         }
     }
 
-    pub fn with_quantization(mut self, q: Quantization) -> Self {
-        self.quantization = q;
+    pub fn with_policy(mut self, policy: Arc<dyn MetalPolicy>) -> Self {
+        self.policy = policy;
         self
     }
 }
 
 impl Stage for RmsNormComputeStage {
     fn includes(&self) -> Vec<&'static str> {
-        // Including policy via Stage includes now
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -49,7 +52,7 @@ impl Stage for RmsNormComputeStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
         // Cast half* input to uchar* for Policy interface compatibility
         let code = format!(
             r#"

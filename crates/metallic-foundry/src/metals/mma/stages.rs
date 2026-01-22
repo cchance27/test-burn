@@ -3,11 +3,13 @@
 //! These stages wrap the Metal MMA primitives and follow the established
 //! Foundry Stage pattern for composition.
 
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 use super::{MMA_METAL, TILE_LOADER_METAL};
 use crate::{
-    compound::{BufferArg, Stage, stages::Quantization}, metals::gemm::step::GemmParams
+    compound::{BufferArg, Stage}, fusion::MetalPolicy, metals::gemm::step::GemmParams
 };
 
 // =============================================================================
@@ -200,26 +202,26 @@ struct BlockSwizzle {
 /// Uses SimpleTileLoader for F16 (no dequant needed).
 #[derive(Debug, Clone)]
 pub struct TileLoadAStage {
-    /// Quantization type for A (typically F16 for activations)
-    pub quantization: Quantization,
+    /// Policy for A (typically F16 for activations)
+    pub policy: Arc<dyn MetalPolicy>,
     /// Whether A is transposed
     pub transpose_a: bool,
 }
 
 impl TileLoadAStage {
-    pub fn new(quantization: Quantization, transpose_a: bool) -> Self {
-        Self { quantization, transpose_a }
+    pub fn new(policy: Arc<dyn MetalPolicy>, transpose_a: bool) -> Self {
+        Self { policy, transpose_a }
     }
 
     /// Create an F16 loader (most common for activations)
     pub fn f16(transpose_a: bool) -> Self {
-        Self::new(Quantization::F16, transpose_a)
+        Self::new(std::sync::Arc::new(crate::policy::f16::PolicyF16), transpose_a)
     }
 }
 
 impl Stage for TileLoadAStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -236,7 +238,7 @@ impl Stage for TileLoadAStage {
 
     fn emit(&self, _prev: &str) -> (String, String) {
         // Calculate batch base offset in bytes
-        let batch_offset = self.quantization.bytes("batch_idx * params.batch_stride_a");
+        let batch_offset = self.policy.bytes("batch_idx * params.batch_stride_a");
 
         // Tile offset within the batch (in elements)
         let tile_offset_elems = if self.transpose_a {
@@ -244,7 +246,7 @@ impl Stage for TileLoadAStage {
         } else {
             "tile_m * GEMM_BM * params.lda"
         };
-        let tile_offset = self.quantization.bytes(tile_offset_elems);
+        let tile_offset = self.policy.bytes(tile_offset_elems);
 
         let code = format!(
             r#"
@@ -277,29 +279,29 @@ impl Stage for TileLoadAStage {
 /// Uses Policy templates for transparent F16/Q8/Q4 dequantization.
 #[derive(Debug, Clone)]
 pub struct TileLoadBStage {
-    /// Quantization type for B (F16, Q8, etc.)
-    pub quantization: Quantization,
+    /// Policy for B (F16, Q8, etc.)
+    pub policy: Arc<dyn MetalPolicy>,
     /// Whether B is transposed
     pub transpose_b: bool,
 }
 
 impl TileLoadBStage {
-    pub fn new(quantization: Quantization, transpose_b: bool) -> Self {
-        Self { quantization, transpose_b }
+    pub fn new(policy: Arc<dyn MetalPolicy>, transpose_b: bool) -> Self {
+        Self { policy, transpose_b }
     }
 
     pub fn f16(transpose_b: bool) -> Self {
-        Self::new(Quantization::F16, transpose_b)
+        Self::new(std::sync::Arc::new(crate::policy::f16::PolicyF16), transpose_b)
     }
 
     pub fn q8(transpose_b: bool) -> Self {
-        Self::new(Quantization::Q8, transpose_b)
+        Self::new(std::sync::Arc::new(crate::policy::q8::PolicyQ8), transpose_b)
     }
 }
 
 impl Stage for TileLoadBStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -328,10 +330,10 @@ impl Stage for TileLoadBStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
 
         // Calculate batch base offset in bytes
-        let batch_offset = self.quantization.bytes("batch_idx * params.batch_stride_b");
+        let batch_offset = self.policy.bytes("batch_idx * params.batch_stride_b");
 
         let code = format!(
             r#"

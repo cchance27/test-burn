@@ -12,7 +12,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::Quantization}, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, metals::mma::stages::{GemmEpilogueStage, MmaLoopStage, TileConfig, TileLayoutStage, TileLoadAStage, TileLoadBStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 // =============================================================================
@@ -122,10 +122,10 @@ pub struct GemmV2Args {
 // =============================================================================
 
 /// Key for kernel cache lookup.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GemmKernelKey {
-    pub a_quant: Quantization,
-    pub b_quant: Quantization,
+    pub a_quant: String,
+    pub b_quant: String,
     pub transpose_a: bool,
     pub transpose_b: bool,
     pub config: TileConfig,
@@ -137,15 +137,15 @@ pub struct GemmKernelKey {
 pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
     let name = format!(
         "gemm_v2_{}_{}_{}{}_{}",
-        key.a_quant.short_name(),
-        key.b_quant.short_name(),
+        key.a_quant,
+        key.b_quant,
         if key.transpose_a { "t" } else { "n" },
         if key.transpose_b { "t" } else { "n" },
         match key.config {
-            TileConfig::Default => "default",
+            TileConfig::Default => "def",
             TileConfig::SkinnyM => "skinny_m",
             TileConfig::SkinnyN => "skinny_n",
-            TileConfig::HighPerformance => "high_perf",
+            TileConfig::HighPerformance => "perf",
             TileConfig::Custom { .. } => "custom",
         }
     );
@@ -158,12 +158,18 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
         epilogue = epilogue.with_bias();
     }
 
+    let a_policy = crate::policy::resolve_policy_by_name(&key.a_quant).expect("Unknown policy A");
+    let b_policy = crate::policy::resolve_policy_by_name(&key.b_quant).expect("Unknown policy B");
+
     CompoundKernel::new(&name)
         .prologue(TileLayoutStage::new(key.config, key.transpose_a, key.transpose_b))
         // A loader uses a_quant policy
-        .prologue(TileLoadAStage::new(key.a_quant, key.transpose_a))
+        // Coerce Arc<dyn MetalPolicyRuntime> to Arc<dyn MetalPolicy> by creating new Arc or unsafe cast?
+        // Safe way: just use parameter. new() expects Arc<dyn MetalPolicy>.
+        // MetalPolicyRuntime inherits MetalPolicy.
+        .prologue(TileLoadAStage::new(a_policy.clone(), key.transpose_a))
         // B loader uses b_quant policy (typically where quant happens)
-        .prologue(TileLoadBStage::new(key.b_quant, key.transpose_b))
+        .prologue(TileLoadBStage::new(b_policy.clone(), key.transpose_b))
         .main(MmaLoopStage::new().with_k_aligned(false))
         .epilogue(epilogue)
         .with_manual_output(true)
@@ -175,8 +181,8 @@ pub fn build_gemm_kernel(key: GemmKernelKey) -> CompiledCompoundKernel {
 /// This is the unified kernel getter - works for any combination of
 /// quantization types (F16, Q8, future Q4, etc).
 pub fn get_gemm_kernel(
-    a_quant: Quantization,
-    b_quant: Quantization,
+    a_quant: Arc<dyn MetalPolicy>,
+    b_quant: Arc<dyn MetalPolicy>,
     transpose_a: bool,
     transpose_b: bool,
     config: TileConfig,
@@ -187,8 +193,8 @@ pub fn get_gemm_kernel(
     static KERNELS: OnceLock<FxHashMap<GemmKernelKey, CompiledCompoundKernel>> = OnceLock::new();
 
     let key = GemmKernelKey {
-        a_quant,
-        b_quant,
+        a_quant: a_quant.short_name().to_string(),
+        b_quant: b_quant.short_name().to_string(),
         transpose_a,
         transpose_b,
         config,
@@ -200,8 +206,11 @@ pub fn get_gemm_kernel(
         let mut m = FxHashMap::default();
 
         // Pre-compile common variants
-        for a_q in [Quantization::F16] {
-            for b_q in [Quantization::F16, Quantization::Q8] {
+        let f16_policy: Arc<dyn MetalPolicy> = Arc::new(crate::policy::f16::PolicyF16);
+        let q8_policy: Arc<dyn MetalPolicy> = Arc::new(crate::policy::q8::PolicyQ8);
+
+        for a_q in [f16_policy.clone()] {
+            for b_q in [f16_policy.clone(), q8_policy.clone()] {
                 for ta in [false] {
                     // A is rarely transposed
                     for tb in [false, true] {
@@ -214,15 +223,15 @@ pub fn get_gemm_kernel(
                             // Add variants for alpha/beta/bias as needed
                             for (hab, hb) in [(false, false), (true, false), (false, true), (true, true)] {
                                 let k = GemmKernelKey {
-                                    a_quant: a_q,
-                                    b_quant: b_q,
+                                    a_quant: a_q.short_name().to_string(),
+                                    b_quant: b_q.short_name().to_string(),
                                     transpose_a: ta,
                                     transpose_b: tb,
                                     config: cfg,
                                     has_alpha_beta: hab,
                                     has_bias: hb,
                                 };
-                                m.insert(k, build_gemm_kernel(k));
+                                m.insert(k.clone(), build_gemm_kernel(k));
                             }
                         }
                     }
@@ -236,7 +245,7 @@ pub fn get_gemm_kernel(
         panic!(
             "GEMM kernel not pre-compiled for {:?}x{:?} ta={} tb={} config={:?}. \
              Add this combination to the pre-compile list in get_gemm_kernel().",
-            a_quant, b_quant, transpose_a, transpose_b, config
+            key.a_quant, key.b_quant, transpose_a, transpose_b, config
         )
     })
 }
@@ -282,8 +291,9 @@ pub struct GemmV2Step {
     /// K dimension (reduction dim)
     pub k_dim: DynamicValue<u32>,
     /// Quantization for B
-    #[serde(default)]
-    pub b_quant: Quantization,
+    /// Quantization for B
+    #[serde(with = "crate::policy::serde", default = "default_policy_f16")]
+    pub b_quant: std::sync::Arc<dyn crate::policy::MetalPolicyRuntime>,
     /// Transpose A
     #[serde(default)]
     pub transpose_a: bool,
@@ -315,6 +325,10 @@ fn default_alpha() -> f32 {
 }
 fn default_wpb() -> u32 {
     32
+}
+
+fn default_policy_f16() -> std::sync::Arc<dyn crate::policy::MetalPolicyRuntime> {
+    std::sync::Arc::new(crate::policy::f16::PolicyF16)
 }
 
 #[typetag::serde(name = "GemmV2")]
@@ -359,7 +373,7 @@ impl Step for GemmV2Step {
             m_dim: self.m_dim.clone(),
             n_dim: self.n_dim.clone(),
             k_dim: self.k_dim.clone(),
-            b_quant: self.b_quant,
+            b_quant: self.b_quant.clone(),
             transpose_a: self.transpose_a,
             transpose_b: self.transpose_b,
             alpha: self.alpha,
@@ -388,7 +402,7 @@ pub struct CompiledGemmV2Step {
     pub m_dim: DynamicValue<u32>,
     pub n_dim: DynamicValue<u32>,
     pub k_dim: DynamicValue<u32>,
-    pub b_quant: Quantization,
+    pub b_quant: std::sync::Arc<dyn crate::policy::MetalPolicyRuntime>,
     pub transpose_a: bool,
     pub transpose_b: bool,
     pub alpha: f32,
@@ -431,9 +445,9 @@ impl CompiledStep for CompiledGemmV2Step {
 
         // Check if we need alpha/beta/bias
         let has_alpha_beta = self.alpha != 1.0 || self.beta != 0.0 || self.c_idx.is_some();
-        let has_bias = self.bias_idx.is_some();
 
-        // Resolve Policy and LoaderStage
+        // Resolve Policy and LoaderStage from the bound weights dtype (do not rely on DSL hints).
+        // Foundry specs may omit `b_quant`; correctness must be derived from the actual tensor.
         let policy = crate::policy::resolve_policy(b.dtype.into());
         let loader = policy.loader_stage();
 
@@ -441,17 +455,27 @@ impl CompiledStep for CompiledGemmV2Step {
         let loader_args = loader.bind(fast_bindings, &self.b_resolved);
 
         let b_arg = loader_args[0].clone();
-        let b_scales_arg = loader_args[1].clone();
 
-        // Get kernel (cached) - uses unified getter for all quant types
+        // Safety: F16 policy only returns 1 arg (weights). Q8 returns 2 (weights, scales).
+        // If args < 2, use b_arg as dummy for scales to satisfy strict struct packing
+        // (though kernel won't use it if policy is F16).
+        let b_scales_arg = if loader_args.len() > 1 {
+            loader_args[1].clone()
+        } else {
+            b_arg.clone()
+        };
+
+        // Get kernel (cached) - uses unified getter for all quant types.
+        // Important: choose the B policy from the runtime weight dtype, not from the serialized step.
         let kernel = get_gemm_kernel(
-            Quantization::F16, // A is always F16 (activations)
-            loader.quantization_type(),
+            // A assumed F16 for now in V2
+            std::sync::Arc::new(crate::policy::f16::PolicyF16),
+            policy.clone(),
             self.transpose_a,
             self.transpose_b,
             config,
             has_alpha_beta,
-            has_bias,
+            self.bias_idx.is_some(),
         );
 
         // Build scale arg - Q8 requires real scales (default derived name: "{b}_scales").

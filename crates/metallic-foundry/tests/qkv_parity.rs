@@ -3,12 +3,12 @@ use std::time::Instant;
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{
-        CompoundKernel, stages::{Layout, Quantization, WarpLayoutStage}
+        CompoundKernel, stages::{Layout, WarpLayoutStage}
     }, metals::{
         gemv::{
             qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage
-    }, storage::Pooled, tensor::{F16, Tensor, TensorInit, U8}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Tensor, TensorInit, U8}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use objc2_metal::MTLCommandBuffer as _;
 use rand::Rng;
@@ -307,7 +307,7 @@ fn test_qkv_parity() {
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::Canonical).with_warps(8))
             .prologue(RmsNormComputeStage::new(6, 7))
-            .main(ParallelProjectStage::new(Quantization::Q8).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyQ8)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
             .compile(),

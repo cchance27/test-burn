@@ -19,6 +19,16 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Fused RMSNorm/Project:** Specialized `WarpWriteOutputNoResidualStage` to reduce register pressure in fused paths.
 - **Quantized Embeddings:** Dedicated F16 and Q8_0 lookup kernels.
 
+### 4. Quantization Policy Architecture (Refactor)
+- **Unified Policy System:** Replaced fragmented `Quantization` enum logic with a unified `Arc<dyn MetalPolicy>` trait object system across all kernel stages (`VectorizedDotStage`, `TileLoad`, etc.).
+- **Runtime-Driven Selection:** Kernel policies are now strictly derived from runtime `TensorArg` dtypes, eliminating incorrect fallbacks caused by missing model hints.
+- **Extensible Design:** New quantization schemes (Q4, INT8) can be added by implementing `MetalPolicy` without modifying core kernel generation logic.
+- **Zero-Leakage Enforcement**: Successfully removed all explicit `short_name() == "f16"` or `is_q8` branching from kernel stages and execution steps.
+
+### 5. Backend Reliability & Correctness
+- **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
+- **F16 Inference Fixed:** Resolved "Unsupported vector width" panic and added guardrails for scale argument binding in non-quantized policies.
+
 ---
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
@@ -44,11 +54,6 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Risk:** Different kernels (e.g. F16 vs Q8) could overwrite each other in the cache, executing wrong code.
 - **Task:** Implement robust content-based hashing (Source + Constants) for pipeline cache keys.
 
-### 5. Quantization System Fragmentation (Critical Architectural Debt)
-- **Issue:** The codebase currently splits quantization logic between a legacy `MetalPolicy` trait (for static generation) and a modern `QuantizationPolicy` trait (for runtime loading), with some kernels bypassing the trait system entirely to match on the `Quantization` enum directly.
-- **Impact:** Bleeds policy infrastructure into kernel stages (e.g. `VectorizedDotStage` knows about `Q8` enum variant), violating open-closed principle and making it hard to add new quants without modifying every kernel stage.
-- **Task:** Unify the system. Refactor `QuantizationPolicy` to implement (or provide) `MetalPolicy`. Update kernel stages to consume `Arc<dyn MetalPolicy>` trait objects for code generation instead of the `Quantization` enum. Re-enable `derive(MetalPolicy)` to reduce boilerplate for the code-gen aspect.
-
 ---
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
@@ -57,10 +62,6 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Debt:** Chat tokens (`<|im_start|>`, etc.) are currently hardcoded constants in `tokenizer.rs`.
 - **Requirement:** Implement a template parser that respects the `tokenizer.chat_template` field from GGUF metadata.
 - **Goal:** Support Llama 3, Phi, and Mistral without code changes.
-
-### 2. Quantization Policy Leakage
-- **Debt:** Some kernels are beginning to `match` on `Quantization` types internally.
-- **Requirement:** Strengthen the separation of concerns. Kernels should consume generic interfaces (Macros/Templates); the "Policy" should define how to load/unpack data.
 
 ### 3. Memory Alignment & Stride
 - **Debt:** Padded strides in SDPA scratch buffers are manually calculated in `step.rs`.
@@ -100,6 +101,12 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
 - **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
 - **Requirement:** Use the `DispatchConfig` struct everywhere and rename `as_stage` -> `to_stage` or `into_stage`.
+
+### 11. Quantization Safety & Regression Testing
+- **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
+- **Tasks:**
+    - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
+    - Add a regression test that loads a spec without `b_quant` and asserts Foundry still selects Q8 kernels when the bound tensor is Q8.
 
 ---
 
@@ -193,3 +200,21 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Issue:** Native Foundry GEMV is slower than MLX kernels for specific decode shapes (e.g. `M=1, K=4864`).
 - **Task:** Implement shape-based routing to select the optimal kernel backend (Foundry Native vs MLX-port) per operation, similar to the legacy engine.
 - **Optimization:** Caching `CompoundKernel` construction in `run_with_policy` to avoid hot-path allocation overhead.
+
+---
+
+## Historical Items that we've completed, for posterity.
+
+### 1. Quantization System Fragmentation (Critical Architectural Debt)
+- **Issue:** The codebase currently splits quantization logic between a legacy `MetalPolicy` trait (for static generation) and a modern `QuantizationPolicy` trait (for runtime loading), with some kernels bypassing the trait system entirely to match on the `Quantization` enum directly.
+- **Impact:** Bleeds policy infrastructure into kernel stages (e.g. `VectorizedDotStage` knows about `Q8` enum variant), violating open-closed principle and making it hard to add new quants without modifying every kernel stage.
+- **Task:** Unify the system. Refactor `QuantizationPolicy` to implement (or provide) `MetalPolicy`. Update kernel stages to consume `Arc<dyn MetalPolicy>` trait objects for code generation instead of the `Quantization` enum. Re-enable `derive(MetalPolicy)` to reduce boilerplate for the code-gen aspect.
+
+### 2. Q8 GEMM Policy Mis-Selection (Correctness Regression)
+- **Symptom:** Q8 models (`*-Q8_0.gguf`) under `--engine foundry` produced garbage output (often token `0` / repeated `!`) or appeared to “hang” generating nonsense.
+- **Root cause:** After refactoring quantization policies to runtime trait objects, GEMM kernel selection for the **prefill** path (M>1) relied on the serialized `MatMulStep.b_quant` hint. Some specs (e.g. `models/qwen25.json`) do not include `b_quant`, so it defaulted to **F16** even when the bound tensor was **Q8_0**, causing the prefill GEMM to interpret Q8 weights as F16 (silent corruption).
+- **Fix (implemented):** Kernel policy selection is now derived from the **actual bound tensor dtype** (the `TensorArg` dtype) instead of serialized hints.
+- **Fail-fast guardrails (implemented):**
+  - Unsupported GGUF tensor dtypes now **panic** during load/mapping rather than silently falling back.
+  - Foundry `prepare_bindings()` now validates that any U8-bound quantized weight has a companion `{name}_scales` binding with expected byte shape (and errors early if missing/malformed).
+

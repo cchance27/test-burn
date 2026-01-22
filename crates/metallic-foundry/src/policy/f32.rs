@@ -1,33 +1,24 @@
-use super::{LoaderStage, OptimizationMetadata, QuantizationPolicy, WeightLayout};
+use metallic_macros::MetalPolicy;
+
+use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
 use crate::{
     Foundry, dtypes::F16, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, tensor::{Tensor, TensorInit}, types::TensorArg
 };
 
-#[derive(Debug)]
+#[derive(Debug, MetalPolicy)]
+#[policy(
+    header = "policies/policy_f16.metal",  // F32 downcasts to F16
+    struct_name = "PolicyF16",             // Uses F16 policy
+    short_name = "f32",
+    element_size = 4,                      // F32 source
+    block_size = 1,
+    vector_load_size = 2,
+    unroll_factor = 4,
+    active_thread_count = 32
+)]
 pub struct PolicyF32;
 
-impl QuantizationPolicy for PolicyF32 {
-    fn name(&self) -> &'static str {
-        "F32"
-    }
-
-    fn metal_policy_name(&self) -> &'static str {
-        "PolicyF16" // Downcasts to F16, uses F16 policy
-    }
-
-    fn metal_include(&self) -> &'static str {
-        "policies/policy_f16.metal"
-    }
-
-    fn optimization_hints(&self) -> OptimizationMetadata {
-        OptimizationMetadata {
-            block_size: 1,
-            vector_load_size: 2,
-            unroll_factor: 4,
-            active_thread_count: 32,
-        }
-    }
-
+impl MetalPolicyRuntime for PolicyF32 {
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
         Box::new(super::f16::PolicyF16)
     }

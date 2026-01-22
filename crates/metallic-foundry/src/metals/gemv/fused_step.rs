@@ -12,8 +12,8 @@ use super::{
 };
 use crate::{
     Foundry, MetalError, compound::{
-        CompiledCompoundKernel, CompoundKernel, stages::{Layout, Quantization, WarpLayoutStage, WarpReduceStage}
-    }, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
+        CompiledCompoundKernel, CompoundKernel, stages::{Layout, WarpLayoutStage, WarpReduceStage}
+    }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// Fused GEMV Step: RMSNorm(Input) -> GEMV(Input_Norm, Weights) -> Output
@@ -119,7 +119,6 @@ impl CompiledStep for CompiledFusedGemvStep {
         // Centralized Quantization Binding
         let policy = crate::policy::resolve_policy(weights_tensor.dtype.into());
         let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
 
         let weights_args = loader.bind(fast_bindings, &self.weights_resolved);
 
@@ -155,7 +154,7 @@ impl CompiledStep for CompiledFusedGemvStep {
             gamma: TensorArg::from_tensor(gamma),
         };
 
-        let kernel = get_fused_gemv_kernel(self.step.strategy, quantization);
+        let kernel = get_fused_gemv_kernel(self.step.strategy, policy);
         let dispatch = warp_dispatch_config(n_dim);
 
         if crate::instrument::emit_cb_timing_metrics() {
@@ -180,29 +179,29 @@ impl CompiledStep for CompiledFusedGemvStep {
     }
 }
 
-fn get_fused_gemv_kernel(_strategy: GemvStrategy, quant: Quantization) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<Mutex<HashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+fn get_fused_gemv_kernel(_strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<Mutex<HashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
     let cache = KERNELS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().unwrap();
 
-    if let Some(kernel) = cache.get(&quant) {
+    let key = policy.short_name().to_string();
+    if let Some(kernel) = cache.get(&key) {
         return kernel;
     }
 
-    let policy_name = quant.policy_name();
-    let kernel_name = format!("fused_gemv_rmsnorm_{}", policy_name.to_lowercase().replace("policy", ""));
+    let kernel_name = format!("fused_gemv_rmsnorm_{}", policy.short_name());
 
     let compiled = Box::leak(Box::new(
         CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)) // Defines row_idx, lane_id
             .prologue(RmsNormComputeStage::new(2, 4))
-            .main(VectorizedDotStage::new(quant).with_norm(10, "inv_rms"))
+            .main(VectorizedDotStage::new(policy.clone()).with_norm(10, "inv_rms"))
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
             .epilogue(WarpWriteOutputNoResidualStage::new())
             .compile(),
     ));
 
-    cache.insert(quant, compiled);
+    cache.insert(key, compiled);
     compiled
 }

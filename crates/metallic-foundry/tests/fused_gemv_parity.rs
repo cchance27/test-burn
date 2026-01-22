@@ -1,12 +1,12 @@
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{
-        CompoundKernel, stages::{Layout, Quantization, WarpLayoutStage, WarpReduceStage}
+        CompoundKernel, stages::{Layout, WarpLayoutStage, WarpReduceStage}
     }, metals::{
         gemv::{
             fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, warp_dispatch_config
         }, rmsnorm::stages::RmsNormComputeStage
-    }, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}, types::TensorArg
+    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}, types::TensorArg
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serial_test::serial;
@@ -163,7 +163,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         builder = builder.prologue(RmsNormComputeStage::new(2, 4));
     }
 
-    let mut dot_stage = VectorizedDotStage::new(Quantization::Q8);
+    let mut dot_stage = VectorizedDotStage::new(std::sync::Arc::new(PolicyQ8));
     if cfg.with_norm {
         dot_stage = dot_stage.with_norm(10, "inv_rms");
     }

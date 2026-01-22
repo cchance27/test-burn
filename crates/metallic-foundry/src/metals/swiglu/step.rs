@@ -8,9 +8,7 @@ use super::{
     SwigluParamsResolved, ffn_stages::{FfnDualProjectStage, FfnSwigluWriteStage, FfnWarpReduceStage}, stages::SwigluStage
 };
 use crate::{
-    Foundry, MetalError, compound::{
-        CompiledCompoundKernel, CompoundKernel, stages::{Quantization, WarpLayoutStage}
-    }, metals::{gemv::step::warp_dispatch_config_2d, rmsnorm::stages::RmsNormComputeStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel, stages::WarpLayoutStage}, fusion::MetalPolicy, metals::{gemv::step::warp_dispatch_config_2d, rmsnorm::stages::RmsNormComputeStage}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -348,7 +346,6 @@ impl CompiledStep for CompiledFusedSwigluStep {
 
         let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
         let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
-        let quantization = loader_gate.quantization_type();
 
         let args = FusedFfnArgs {
             w_gate: w_gate_arg,
@@ -367,7 +364,7 @@ impl CompiledStep for CompiledFusedSwigluStep {
             has_b_up,
         };
 
-        let kernel = get_fused_ffn_kernel(quantization);
+        let kernel = get_fused_ffn_kernel(policy_gate);
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
         foundry.run(&kernel.bind(args, dispatch))
@@ -531,7 +528,6 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
 
         let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
         let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
-        let is_q8 = loader_gate.quantization_type() == Quantization::Q8;
 
         let (b_gate, has_b_gate) = if let Some(idx) = self.b_gate_idx {
             (TensorArg::from_tensor(get(idx)?), 1u32)
@@ -594,7 +590,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             has_b_up,
         };
 
-        let kernel = get_fused_ffn_kernel(if is_q8 { Quantization::Q8 } else { Quantization::F16 });
+        let kernel = get_fused_ffn_kernel(policy_gate);
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
         foundry.run(&kernel.bind(args, dispatch))
@@ -605,17 +601,17 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
     }
 }
 
-fn get_fused_ffn_kernel(quant: Quantization) -> &'static CompiledCompoundKernel {
-    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<Quantization, &'static CompiledCompoundKernel>>> = OnceLock::new();
+fn get_fused_ffn_kernel(policy: std::sync::Arc<dyn MetalPolicy>) -> &'static CompiledCompoundKernel {
+    static KERNELS: OnceLock<std::sync::Mutex<FxHashMap<String, &'static CompiledCompoundKernel>>> = OnceLock::new();
     let cache = KERNELS.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
     let mut cache = cache.lock().unwrap();
 
-    if let Some(kernel) = cache.get(&quant) {
+    let key = policy.short_name().to_string();
+    if let Some(kernel) = cache.get(&key) {
         return kernel;
     }
 
-    let policy_name = quant.policy_name();
-    let kernel_name = format!("fused_ffn_swiglu_rmsnorm_{}", policy_name.to_lowercase().replace("policy", ""));
+    let kernel_name = format!("fused_ffn_swiglu_rmsnorm_{}", policy.short_name());
 
     let compiled = Box::new(
         CompoundKernel::new(&kernel_name)
@@ -623,13 +619,13 @@ fn get_fused_ffn_kernel(quant: Quantization) -> &'static CompiledCompoundKernel 
             .prologue(WarpLayoutStage::row_major().with_warps(8))
             // Activation input is always F16; quantization only applies to weight loading stages.
             .prologue(RmsNormComputeStage::new(4, 6))
-            .main(FfnDualProjectStage::new(quant).with_norm(9, "inv_rms"))
+            .main(FfnDualProjectStage::new(policy.clone()).with_norm(9, "inv_rms"))
             .epilogue(FfnWarpReduceStage)
             .epilogue(FfnSwigluWriteStage)
             .compile(),
     );
 
     let static_ref = Box::leak(compiled);
-    cache.insert(quant, static_ref);
+    cache.insert(key, static_ref);
     static_ref
 }

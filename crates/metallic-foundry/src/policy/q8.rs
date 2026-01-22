@@ -1,28 +1,57 @@
-use std::ptr;
-
+use metallic_macros::MetalPolicy;
 use objc2_metal::{MTLBuffer as _, MTLDevice};
 
-use super::{LoaderStage, OptimizationMetadata, QuantizationPolicy, WeightLayout};
+use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
 use crate::{
-    Foundry, compound::{BufferArg, stages::Quantization}, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalBuffer, TensorArg}
+    Foundry, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalBuffer, TensorArg}
 };
 
-#[derive(Default, Debug, Clone)]
-pub struct PolicyQ8;
+const Q8_0_WPB: usize = 32;
+const Q8_0_BLOCK_BYTES: usize = 34; // 2 bytes scale + 32 bytes data
+const Q8_0_SCALE_BYTES: usize = 2;
 
-impl crate::compound::Stage for PolicyQ8 {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![]
-    }
+#[inline]
+fn q8_0_canonical_dst_block_idx(src_block_idx: usize, blocks_per_k: usize, target_n: usize) -> usize {
+    let row = src_block_idx / blocks_per_k;
+    let block = src_block_idx - row * blocks_per_k;
+    block * target_n + row
+}
 
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![]
-    }
+fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canonical: bool, data_out: &mut [u8], scales_out: &mut [u8]) {
+    debug_assert_eq!(raw.len() % Q8_0_BLOCK_BYTES, 0);
+    debug_assert_eq!(data_out.len() % Q8_0_WPB, 0);
+    debug_assert_eq!(scales_out.len() % Q8_0_SCALE_BYTES, 0);
 
-    fn emit(&self, _input_var: &str) -> (String, String) {
-        ("".to_string(), "".to_string())
+    for (src_block_idx, chunk) in raw.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
+        // Scales are always indexed in row-major block order (row * blocks_per_k + block),
+        // even when weights are stored in canonical (block-major) order.
+        let scale_dst_block_idx = src_block_idx;
+        let weight_dst_block_idx = if is_canonical {
+            q8_0_canonical_dst_block_idx(src_block_idx, blocks_per_k, target_n)
+        } else {
+            src_block_idx
+        };
+
+        let dst_scale = scale_dst_block_idx * Q8_0_SCALE_BYTES;
+        scales_out[dst_scale..dst_scale + Q8_0_SCALE_BYTES].copy_from_slice(&chunk[..Q8_0_SCALE_BYTES]);
+
+        let dst_data = weight_dst_block_idx * Q8_0_WPB;
+        data_out[dst_data..dst_data + Q8_0_WPB].copy_from_slice(&chunk[Q8_0_SCALE_BYTES..Q8_0_SCALE_BYTES + Q8_0_WPB]);
     }
 }
+
+#[derive(Default, Debug, Clone, MetalPolicy)]
+#[policy(
+    header = "policies/policy_q8.metal",
+    struct_name = "PolicyQ8",
+    short_name = "q8",
+    element_size = 1,
+    block_size = 32,
+    vector_load_size = 8,
+    unroll_factor = 2,
+    active_thread_count = 32
+)]
+pub struct PolicyQ8;
 
 impl LoaderStage for PolicyQ8 {
     fn params_struct(&self) -> String {
@@ -43,33 +72,12 @@ impl LoaderStage for PolicyQ8 {
         smallvec![weight.clone(), scales.clone()]
     }
 
-    fn quantization_type(&self) -> Quantization {
-        Quantization::Q8
+    fn quantization_type(&self) -> std::sync::Arc<dyn super::MetalPolicyRuntime> {
+        std::sync::Arc::new(PolicyQ8)
     }
 }
 
-impl QuantizationPolicy for PolicyQ8 {
-    fn name(&self) -> &'static str {
-        "Q8_0"
-    }
-
-    fn metal_policy_name(&self) -> &'static str {
-        "PolicyQ8"
-    }
-
-    fn metal_include(&self) -> &'static str {
-        "policies/policy_q8.metal"
-    }
-
-    fn optimization_hints(&self) -> OptimizationMetadata {
-        OptimizationMetadata {
-            block_size: 32,      // Q8 works on blocks of 32
-            vector_load_size: 8, // can load 8 bytes (8 ints) at once often
-            unroll_factor: 2,
-            active_thread_count: 32,
-        }
-    }
-
+impl MetalPolicyRuntime for PolicyQ8 {
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
         Box::new(self.clone())
     }
@@ -90,10 +98,6 @@ impl QuantizationPolicy for PolicyQ8 {
         if dims.len() != 2 {
             return Err(anyhow::anyhow!("Q8_0 tensor '{}' must be 2D (got {:?})", gguf_tensor_name, dims));
         }
-
-        const WPB: usize = 32;
-        const BLOCK_BYTES: usize = 34; // 2 bytes scale + 32 bytes data
-        const SCALE_BYTES: usize = 2;
 
         let (target_k, target_n, is_canonical) = match layout {
             WeightLayout::RowMajor => (dims[1], dims[0], false),
@@ -127,7 +131,7 @@ impl QuantizationPolicy for PolicyQ8 {
             dims[1]
         };
 
-        if contiguous_dim_len % WPB != 0 {
+        if contiguous_dim_len % Q8_0_WPB != 0 {
             return Err(anyhow::anyhow!(
                 "Q8_0 tensor '{}' contig dim {} not divisible by 32",
                 gguf_tensor_name,
@@ -136,11 +140,11 @@ impl QuantizationPolicy for PolicyQ8 {
         }
 
         // Block count for contiguous dim
-        let blocks_per_k = contiguous_dim_len / WPB;
+        let blocks_per_k = contiguous_dim_len / Q8_0_WPB;
         let n_dim_len = if is_canonical { target_n } else { dims[0] };
 
         let total_blocks = n_dim_len * blocks_per_k;
-        let expected_bytes = total_blocks * BLOCK_BYTES;
+        let expected_bytes = total_blocks * Q8_0_BLOCK_BYTES;
 
         if raw.len() != expected_bytes {
             return Err(anyhow::anyhow!(
@@ -152,8 +156,8 @@ impl QuantizationPolicy for PolicyQ8 {
         }
 
         // Allocate separate Metal buffers
-        let data_len = total_blocks * WPB;
-        let scales_len = total_blocks * SCALE_BYTES;
+        let data_len = total_blocks * Q8_0_WPB;
+        let scales_len = total_blocks * Q8_0_SCALE_BYTES;
 
         let data_buffer = foundry
             .device
@@ -171,32 +175,17 @@ impl QuantizationPolicy for PolicyQ8 {
             if gguf.layout_hint() != crate::gguf::model_loader::GGUFLayoutHint::Nk {
                 return Err(anyhow::anyhow!("Q8 canonical requires Nk layout"));
             }
-
-            unsafe {
-                let data_ptr = data_buffer.contents().as_ptr() as *mut u8;
-                let scales_ptr = scales_buffer.contents().as_ptr() as *mut u8;
-
-                for (src_block_idx, chunk) in raw.chunks_exact(BLOCK_BYTES).enumerate() {
-                    let row = src_block_idx / blocks_per_k;
-                    let block = src_block_idx - row * blocks_per_k;
-
-                    ptr::copy_nonoverlapping(chunk.as_ptr(), scales_ptr.add(src_block_idx * SCALE_BYTES), SCALE_BYTES);
-
-                    let dst_block_idx = block * target_n + row;
-                    ptr::copy_nonoverlapping(chunk.as_ptr().add(SCALE_BYTES), data_ptr.add(dst_block_idx * WPB), WPB);
-                }
-            }
         } else {
-            // Standard Split
-            unsafe {
-                let data_ptr = data_buffer.contents().as_ptr() as *mut u8;
-                let scales_ptr = scales_buffer.contents().as_ptr() as *mut u8;
+            // Standard split keeps the row-major block order.
+        }
 
-                for (i, chunk) in raw.chunks_exact(BLOCK_BYTES).enumerate() {
-                    ptr::copy_nonoverlapping(chunk.as_ptr(), scales_ptr.add(i * SCALE_BYTES), SCALE_BYTES);
-                    ptr::copy_nonoverlapping(chunk.as_ptr().add(SCALE_BYTES), data_ptr.add(i * WPB), WPB);
-                }
-            }
+        // Split blocks into separate {data, scales} buffers (and reorder if canonical).
+        unsafe {
+            let data_ptr = data_buffer.contents().as_ptr() as *mut u8;
+            let scales_ptr = scales_buffer.contents().as_ptr() as *mut u8;
+            let data_out = std::slice::from_raw_parts_mut(data_ptr, data_len);
+            let scales_out = std::slice::from_raw_parts_mut(scales_ptr, scales_len);
+            split_q8_0_blocks(raw, blocks_per_k, target_n, is_canonical, data_out, scales_out);
         }
 
         let data_arg = TensorArg::from_buffer(
@@ -216,5 +205,41 @@ impl QuantizationPolicy for PolicyQ8 {
             (logical_name.to_string(), data_arg),
             (format!("{}_scales", logical_name), scales_arg),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn q8_0_canonical_reorders_scales_and_data_consistently() {
+        let target_n = 3;
+        let blocks_per_k = 2;
+        let total_blocks = target_n * blocks_per_k;
+
+        let mut raw = vec![0u8; total_blocks * Q8_0_BLOCK_BYTES];
+        for src_block_idx in 0..total_blocks {
+            let start = src_block_idx * Q8_0_BLOCK_BYTES;
+            raw[start] = src_block_idx as u8; // scale byte 0
+            raw[start + 1] = 0xEE; // scale byte 1 sentinel
+            raw[start + Q8_0_SCALE_BYTES..start + Q8_0_BLOCK_BYTES].fill((0x10 + src_block_idx) as u8);
+        }
+
+        let mut data_out = vec![0u8; total_blocks * Q8_0_WPB];
+        let mut scales_out = vec![0u8; total_blocks * Q8_0_SCALE_BYTES];
+
+        split_q8_0_blocks(&raw, blocks_per_k, target_n, true, &mut data_out, &mut scales_out);
+
+        for src_block_idx in 0..total_blocks {
+            let scale_start = src_block_idx * Q8_0_SCALE_BYTES;
+            assert_eq!(scales_out[scale_start], src_block_idx as u8);
+            assert_eq!(scales_out[scale_start + 1], 0xEE);
+
+            let dst = q8_0_canonical_dst_block_idx(src_block_idx, blocks_per_k, target_n);
+            let data_start = dst * Q8_0_WPB;
+            assert_eq!(data_out[data_start], (0x10 + src_block_idx) as u8);
+            assert_eq!(data_out[data_start + Q8_0_WPB - 1], (0x10 + src_block_idx) as u8);
+        }
     }
 }

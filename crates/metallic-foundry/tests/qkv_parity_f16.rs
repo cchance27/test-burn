@@ -5,12 +5,12 @@
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{
-        CompoundKernel, stages::{Layout, Quantization, WarpLayoutStage}
+        CompoundKernel, stages::{Layout, WarpLayoutStage}
     }, metals::{
         gemv::{
             qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage
-    }, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use rand::Rng;
 
@@ -153,7 +153,7 @@ fn test_qkv_parity_f16() {
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
             .prologue(RmsNormComputeStage::new(6, 7))
-            .main(ParallelProjectStage::new(Quantization::F16).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
             .compile(),
@@ -277,7 +277,7 @@ fn test_qkv_parity_f16_batched() {
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
             .prologue(RmsNormComputeStage::new(6, 7))
-            .main(ParallelProjectStage::new(Quantization::F16).with_norm(18, "inv_rms"))
+            .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
             .compile(),

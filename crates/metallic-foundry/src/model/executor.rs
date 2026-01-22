@@ -14,6 +14,185 @@ use crate::{
     }, types::TensorArg
 };
 
+#[inline(never)]
+fn validate_quantized_bindings(symbols: &SymbolTable, fast: &FastBindings) -> Result<(), MetalError> {
+    use crate::tensor::Dtype;
+
+    for (name, &idx) in symbols.iter() {
+        let Some(arg) = fast.get(idx) else { continue };
+        if arg.dtype != Dtype::U8 {
+            continue;
+        }
+
+        // Scales are stored as raw bytes (U8) and must be 1D with an even byte-length.
+        if name.ends_with("_scales") {
+            if arg.dims.len() != 1 {
+                return Err(MetalError::InvalidShape(format!(
+                    "Quantized scales tensor '{}' must be 1D bytes, got dims {:?}",
+                    name, arg.dims
+                )));
+            }
+            let scale_bytes = arg.dims[0];
+            if (scale_bytes % 2) != 0 {
+                return Err(MetalError::InvalidShape(format!(
+                    "Quantized scales tensor '{}' must have even byte-length (f16 per block), got {} bytes",
+                    name, scale_bytes
+                )));
+            }
+            continue;
+        }
+
+        // Any U8 tensor that isn't a *_scales tensor is treated as a quantized weight and must have scales.
+        let mut scales_name = String::with_capacity(name.len() + "_scales".len());
+        scales_name.push_str(name);
+        scales_name.push_str("_scales");
+
+        let scales_idx = symbols.get(&scales_name).ok_or_else(|| {
+            MetalError::InvalidOperation(format!(
+                "Quantized tensor '{}' is bound as U8 but no companion scales symbol '{}' exists. \
+This usually indicates a compile/bind mismatch for Q8 weights.",
+                name, scales_name
+            ))
+        })?;
+
+        let scales = fast.get(scales_idx).ok_or_else(|| {
+            MetalError::InvalidOperation(format!(
+                "Quantized tensor '{}' is bound as U8 but companion scales tensor '{}' is not bound. \
+This must fail fast to avoid silently running the wrong kernels.",
+                name, scales_name
+            ))
+        })?;
+
+        if scales.dtype != Dtype::U8 {
+            return Err(MetalError::DtypeMismatch {
+                expected: Dtype::U8,
+                actual: scales.dtype,
+            });
+        }
+        if scales.dims.len() != 1 {
+            return Err(MetalError::InvalidShape(format!(
+                "Quantized scales tensor '{}' must be 1D bytes, got dims {:?}",
+                scales_name, scales.dims
+            )));
+        }
+        let scale_bytes = scales.dims[0];
+        if (scale_bytes % 2) != 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "Quantized scales tensor '{}' must have even byte-length (f16 per block), got {} bytes",
+                scales_name, scale_bytes
+            )));
+        }
+
+        // Strict size validation for standard (non-canonical) Q8 weights.
+        // Canonical weights are stored as a 1D byte buffer after reordering; skip strict validation there.
+        if arg.dims.len() == 2 {
+            let n = arg.dims[0];
+            let k = arg.dims[1];
+            if (k % 32) != 0 {
+                return Err(MetalError::InvalidShape(format!(
+                    "Quantized tensor '{}' contig dim K={} must be divisible by 32 for Q8_0",
+                    name, k
+                )));
+            }
+            let expected_scale_bytes = n
+                .checked_mul(k / 32)
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| MetalError::InvalidShape(format!("Quantized tensor '{}' has overflowed dims {:?}", name, arg.dims)))?;
+            if scale_bytes != expected_scale_bytes {
+                return Err(MetalError::InvalidShape(format!(
+                    "Quantized tensor '{}' scales mismatch: got {} bytes in '{}', expected {} bytes for dims {:?}",
+                    name, scale_bytes, scales_name, expected_scale_bytes, arg.dims
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod quant_binding_validation_tests {
+    use smallvec::smallvec;
+
+    use super::*;
+    use crate::tensor::Dtype;
+
+    fn u8_arg_2d(n: usize, k: usize) -> crate::types::TensorArg {
+        crate::types::TensorArg {
+            buffer: None,
+            offset: 0,
+            dtype: Dtype::U8,
+            dims: smallvec![n, k],
+            strides: smallvec![k, 1],
+        }
+    }
+
+    fn u8_arg_1d(len: usize) -> crate::types::TensorArg {
+        crate::types::TensorArg {
+            buffer: None,
+            offset: 0,
+            dtype: Dtype::U8,
+            dims: smallvec![len],
+            strides: smallvec![1],
+        }
+    }
+
+    #[test]
+    fn quantized_weight_requires_scales_symbol_and_binding() {
+        let mut symbols = SymbolTable::new();
+        let w_idx = symbols.get_or_create("w".to_string());
+
+        let mut fast = FastBindings::new(symbols.len());
+        fast.set(w_idx, u8_arg_2d(64, 32));
+
+        let err = validate_quantized_bindings(&symbols, &fast).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no companion scales symbol"));
+    }
+
+    #[test]
+    fn quantized_weight_requires_scales_bound() {
+        let mut symbols = SymbolTable::new();
+        let w_idx = symbols.get_or_create("w".to_string());
+        let _s_idx = symbols.get_or_create("w_scales".to_string());
+
+        let mut fast = FastBindings::new(symbols.len());
+        fast.set(w_idx, u8_arg_2d(64, 32));
+
+        let err = validate_quantized_bindings(&symbols, &fast).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("is not bound"));
+    }
+
+    #[test]
+    fn quantized_weight_scales_size_is_validated_for_2d_weights() {
+        let mut symbols = SymbolTable::new();
+        let w_idx = symbols.get_or_create("w".to_string());
+        let s_idx = symbols.get_or_create("w_scales".to_string());
+
+        let mut fast = FastBindings::new(symbols.len());
+        fast.set(w_idx, u8_arg_2d(64, 32));
+        fast.set(s_idx, u8_arg_1d(2)); // wrong: expected 64*(32/32)*2 = 128
+
+        let err = validate_quantized_bindings(&symbols, &fast).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("scales mismatch"));
+    }
+
+    #[test]
+    fn quantized_weight_scales_pass_for_consistent_bindings() {
+        let mut symbols = SymbolTable::new();
+        let w_idx = symbols.get_or_create("w".to_string());
+        let s_idx = symbols.get_or_create("w_scales".to_string());
+
+        let mut fast = FastBindings::new(symbols.len());
+        fast.set(w_idx, u8_arg_2d(64, 32));
+        fast.set(s_idx, u8_arg_1d(128));
+
+        validate_quantized_bindings(&symbols, &fast).unwrap();
+    }
+}
+
 /// A compiled, ready-to-run model.
 ///
 /// Created via `ModelBuilder::build()`, this struct holds everything
@@ -561,9 +740,16 @@ impl CompiledModel {
         // These are precomputed based on model config since they're not in GGUF
         self.compute_and_bind_rope_caches(&mut bindings, &mut fast_bindings, foundry, arch)?;
 
+        // Fail-fast validation: ensure quantized weights/scales bindings are structurally consistent.
+        // This prevents silent correctness regressions where a quantized tensor is bound but its
+        // required companion tensors (e.g. Q8 scales) are missing or malformed.
+        validate_quantized_bindings(&self.symbol_table, &fast_bindings)?;
+
         tracing::info!("Prepared {} bindings (weights + intermediates + RoPE + KV cache)", bindings.len());
         Ok((bindings, fast_bindings))
     }
+
+    // NOTE: keep validation helpers outside of hot paths; this runs once at load time.
 
     /// Compute and bind RoPE cos/sin cache tables.
     ///
@@ -712,9 +898,9 @@ impl CompiledModel {
             if name == logical_name {
                 // Also alias the GGUF name to the same tensor arg
                 self.insert_binding(bindings, fast_bindings, gguf_name.to_string(), tensor_arg);
-                tracing::trace!("Bound '{}' -> '{}' using policy {}", logical_name, gguf_name, policy.name());
+                tracing::trace!("Bound '{}' -> '{}' using policy {}", logical_name, gguf_name, policy.short_name());
             } else {
-                tracing::trace!("Bound derived '{}' using policy {}", name, policy.name());
+                tracing::trace!("Bound derived '{}' using policy {}", name, policy.short_name());
             }
         }
 

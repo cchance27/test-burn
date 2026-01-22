@@ -6,7 +6,11 @@
 //! - Policy templates for transparent Q8/F16 dequantization
 //! - Composable via CompoundKernel
 
-use crate::compound::{BufferArg, Stage, stages::Quantization};
+use std::sync::Arc;
+
+use crate::{
+    compound::{BufferArg, Stage}, fusion::MetalPolicy
+};
 
 /// Metal definitions for GemvV2.
 const GEMV_METAL: &str = include_str!("gemv.metal");
@@ -38,14 +42,14 @@ impl VectorWidth {
 /// Unified vectorized dot product stage for warp-per-row GEMV.
 ///
 /// Features:
-/// - Parameterized by `Quantization` (F16, Q8) - no separate stages per quant
+/// - Parameterized by `Arc<dyn MetalPolicy>` - policy-agnostic via trait
 /// - Uses vectorized Policy::load_weights<8>() for maximum throughput
 /// - Designed for use with `WarpLayoutStage` (warp-per-row dispatch)
 /// - Each lane loads 8 elements per K chunk, all lanes cover 256 elements
 #[derive(Debug, Clone)]
 pub struct VectorizedDotStage {
-    /// Quantization type (determines which Policy to use)
-    quantization: Quantization,
+    /// Policy for code generation (determines header, struct name, etc.)
+    policy: Arc<dyn MetalPolicy>,
     /// Vector width for loads
     vector_width: VectorWidth,
     /// Optional Gamma tensor (for RMSNorm fusion)
@@ -57,9 +61,9 @@ pub struct VectorizedDotStage {
 }
 
 impl VectorizedDotStage {
-    pub fn new(quantization: Quantization) -> Self {
+    pub fn new(policy: Arc<dyn MetalPolicy>) -> Self {
         Self {
-            quantization,
+            policy,
             vector_width: VectorWidth::Vec8,
             gamma_buffer: None,
             norm_shared_name: None,
@@ -86,17 +90,16 @@ impl VectorizedDotStage {
 
 impl Stage for VectorizedDotStage {
     fn includes(&self) -> Vec<&'static str> {
-        // Include the appropriate policy file based on quantization
-        vec![self.quantization.include_path()]
+        // Include the appropriate policy file based on policy
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
         // Buffer args for dot product - weights, scales, input, dimensions.
         // Type weights as `half*` for F16 so PolicyF16 overloads can avoid uchar* aliasing.
-        let weights_type = match self.quantization {
-            Quantization::F16 => "const device half*",
-            _ => "const device uchar*",
-        };
+        // Buffer args for dot product - weights, scales, input, dimensions.
+        // Unified: weights always typed as uchar*, Policy casts if needed.
+        let weights_type = "const device uchar*";
 
         let mut args = vec![
             BufferArg {
@@ -148,9 +151,10 @@ impl Stage for VectorizedDotStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
         let vec_width = self.vector_width.elements();
-        let use_f16_cols8 = self.f16_cols8 && self.quantization == Quantization::F16 && matches!(self.vector_width, VectorWidth::Vec8);
+        // Use F16-optimized path if requested and policy is consistent with F16 (2 bytes per element)
+        let use_f16_cols8 = self.f16_cols8 && self.policy.element_size() == 2 && matches!(self.vector_width, VectorWidth::Vec8);
 
         let (fast_norm_logic, tail_norm_logic) = if self.gamma_buffer.is_some() {
             match self.vector_width {
@@ -268,7 +272,9 @@ impl Stage for VectorizedDotStage {
     uint k_base = 0;
 
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
-    const device half* row_ptr = weights + (ulong)row_idx * (ulong)k_dim;
+    // Helper cast for F16 arithmetic
+    const device half* weights_half = (const device half*)weights;
+    const device half* row_ptr = weights_half + (ulong)row_idx * (ulong)k_dim;
     const device half* w_ptr = row_ptr + lane_id * {vec_width}u;
     const device half* x_ptr = input + input_row_base + lane_id * {vec_width}u;
 
@@ -353,17 +359,14 @@ impl Stage for VectorizedDotStage {
         {shared_norm_logic}
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
-        float w[{vec_width}];
-        #pragma unroll
-        for (int i = 0; i < {vec_width}; ++i) {{
-            ulong idx = WEIGHT_INDEX(row_idx, k + i, k_dim, n_dim);
-            float temp_w[1];
-            {policy}::template load_weights<1>(weights, idx, temp_w);
-            w[i] = temp_w[0];
+        
+        ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        float scale = 1.0f;
+        if ({policy}::HAS_SCALE) {{
+             scale = (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
         }}
-        float4 w_lo = float4(w[0], w[1], w[2], w[3]);
-        float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-        acc += dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi);
+        acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi);
+        
         k_base += K_CHUNK_SIZE;
     }}
     if (k_base < k_dim) {{
@@ -381,19 +384,16 @@ impl Stage for VectorizedDotStage {
         {tail_norm_logic}
         float4 xv_f32_lo = float4(xv_lo);
         float4 xv_f32_hi = float4(xv_hi);
-        float w[{vec_width}] = {{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f}};
+        ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        
+        // Safety: ensure we don't read OOB scales which could be NaNs (0 * NaN = NaN)
         if (k < k_dim) {{
-            #pragma unroll
-            for (int i = 0; i < {vec_width}; ++i) {{
-                ulong idx = WEIGHT_INDEX(row_idx, k + i, k_dim, n_dim);
-                float temp_w[1];
-                {policy}::template load_weights<1>(weights, idx, temp_w);
-                w[i] = temp_w[0];
+            float scale = 1.0f;
+            if ({policy}::HAS_SCALE) {{
+                 scale = (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
             }}
+            acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi);
         }}
-        float4 w_lo = float4(w[0], w[1], w[2], w[3]);
-        float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-        acc += dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi);
     }}
 #endif
 
@@ -475,7 +475,7 @@ impl Stage for VectorizedDotStage {
         
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
 #if defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16
-        const device half* weights_row = weights + (ulong)row_idx * (ulong)k_dim;
+        const device half* weights_row = (const device half*)weights + (ulong)row_idx * (ulong)k_dim;
         acc += {policy}::template dot<{vec_width}>(weights_row, (ulong)k, 1.0f, xv_f32_lo, xv_f32_hi);
 #else
         ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
@@ -626,29 +626,27 @@ impl Stage for VectorizedDotStage {
 /// This acts as a robust fallback or alternative to the vectorized stage.
 #[derive(Debug, Clone)]
 pub struct CanonicalDotStage {
-    quantization: Quantization,
+    policy: Arc<dyn MetalPolicy>,
 }
 
 impl CanonicalDotStage {
-    pub fn new(quantization: Quantization) -> Self {
-        Self { quantization }
+    pub fn new(policy: Arc<dyn MetalPolicy>) -> Self {
+        Self { policy }
     }
 }
 
 impl Stage for CanonicalDotStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
         // Same arguments as VectorizedDotStage
+        // Unified: weights always typed as uchar*, Policy casts if needed.
         vec![
             BufferArg {
                 name: "weights",
-                metal_type: match self.quantization {
-                    Quantization::F16 => "const device half*",
-                    _ => "const device uchar*",
-                },
+                metal_type: "const device uchar*",
                 buffer_index: 0,
             },
             BufferArg {
@@ -684,7 +682,7 @@ impl Stage for CanonicalDotStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
 
         let code = format!(
             r#"
@@ -896,30 +894,28 @@ impl Stage for WarpWriteOutputNoResidualStage {
 /// full memory coalescing without implicit vector loads.
 #[derive(Debug, Clone)]
 pub struct ScalarDotStage {
-    quantization: Quantization,
+    policy: Arc<dyn MetalPolicy>,
     unroll: usize,
 }
 
 impl ScalarDotStage {
-    pub fn new(quantization: Quantization) -> Self {
-        Self { quantization, unroll: 8 }
+    pub fn new(policy: Arc<dyn MetalPolicy>) -> Self {
+        Self { policy, unroll: 8 }
     }
 }
 
 impl Stage for ScalarDotStage {
     fn includes(&self) -> Vec<&'static str> {
-        vec![self.quantization.include_path()]
+        vec![self.policy.header()]
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
         // Same arguments as VectorizedDotStage
+        // Unified: weights always typed as uchar*, Policy casts if needed.
         vec![
             BufferArg {
                 name: "weights",
-                metal_type: match self.quantization {
-                    Quantization::F16 => "const device half*",
-                    _ => "const device uchar*",
-                },
+                metal_type: "const device uchar*",
                 buffer_index: 0,
             },
             BufferArg {
@@ -956,7 +952,7 @@ impl Stage for ScalarDotStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let policy = self.quantization.policy_name();
+        let policy = self.policy.struct_name();
 
         let code = format!(
             r#"

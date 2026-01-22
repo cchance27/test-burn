@@ -1,11 +1,39 @@
+use crate::policy::OptimizationMetadata;
+
 /// Defines a Metal kernel policy (e.g., input loading strategy).
 /// This corresponds to a C++ template class or struct in Metal.
-pub trait MetalPolicy: Send + Sync {
+pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
     /// The name of the header file to include (e.g., "policy_q8.metal").
     fn header(&self) -> &'static str;
 
     /// The name of the Metal struct implementing the policy (e.g., "PolicyQ8").
     fn struct_name(&self) -> &'static str;
+
+    /// Short name for kernel naming (e.g., "f16", "q8").
+    fn short_name(&self) -> &'static str {
+        "unknown"
+    }
+
+    /// Size of a single element in bytes (e.g., 2 for F16, 1 for Q8).
+    fn element_size(&self) -> usize {
+        2 // Default to F16
+    }
+
+    /// Convert an elements expression to a bytes expression for Metal code.
+    /// Uses element_size() to compute the multiplication factor.
+    fn bytes(&self, elements: &str) -> String {
+        match self.element_size() {
+            1 => format!("(ulong)({})", elements),
+            2 => format!("(ulong)({}) * 2", elements),
+            4 => format!("(ulong)({}) * 4", elements),
+            n => format!("(ulong)({}) * {}", elements, n),
+        }
+    }
+
+    /// Optimization hints for kernel compilation and dispatch.
+    fn optimization_hints(&self) -> OptimizationMetadata {
+        OptimizationMetadata::default()
+    }
 
     /// Metal code to initialize policy params from kernel args.
     /// E.g., "pp.matrix = matrix; pp.scales = scale_bytes;"
@@ -69,6 +97,20 @@ pub trait MetalPolicy: Send + Sync {
     /// Threadgroup width for dispatch.
     fn threadgroup_width(&self) -> usize {
         128 // Default: 4 warps * 32 lanes
+    }
+}
+
+impl PartialEq for dyn MetalPolicy + '_ {
+    fn eq(&self, other: &Self) -> bool {
+        self.short_name() == other.short_name()
+    }
+}
+
+impl Eq for dyn MetalPolicy + '_ {}
+
+impl std::hash::Hash for dyn MetalPolicy + '_ {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.short_name().hash(state);
     }
 }
 

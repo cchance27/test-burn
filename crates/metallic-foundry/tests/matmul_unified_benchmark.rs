@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::stages::Quantization, metals::matmul::MatMulStep, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, metals::matmul::MatMulStep, policy::f16::PolicyF16, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 
@@ -39,8 +39,8 @@ fn run_matmul_benchmark(foundry: &mut Foundry, cfg: BenchmarkConfig) {
         m: DynamicValue::Literal(cfg.m as u32),
         n: DynamicValue::Literal(cfg.n as u32),
         k: DynamicValue::Literal(cfg.k as u32),
-        a_quant: Quantization::F16,
-        b_quant: Quantization::F16, // Benchmarking F16 path for simplicity
+        a_quant: std::sync::Arc::new(PolicyF16),
+        b_quant: std::sync::Arc::new(PolicyF16), // Benchmarking F16 path for simplicity
         transpose_a: false,
         transpose_b: false, // Standard layout -> ColMajor for GEMV (KxN weights)
         alpha: 1.0,

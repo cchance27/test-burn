@@ -2,12 +2,18 @@
 //!
 //! Tests the embedding lookup kernel against legacy implementation and CPU reference.
 
+use std::sync::Arc;
+
 use half::f16;
 use metallic_context::{
     Context, F16Element, TensorElement as _, kernels::embedding_lookup::EmbeddingLookupOp, tensor::{Tensor as LegacyTensor, TensorInit as LegacyTensorInit, TensorStorage as LegacyStorage, U32 as LegacyU32}
 };
 use metallic_foundry::{
-    Foundry, metals::embedding::{Embedding, EmbeddingParamsResolved}, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, metals::embedding::{
+        EmbeddingParamsResolved, step::{EmbeddingGenericArgs, get_embedding_kernel}
+    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit}, types::{
+        TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
+    }
 };
 use objc2_metal::MTLDevice as _;
 use rand::{Rng, rng};
@@ -121,8 +127,22 @@ fn run_parity_test(cfg: TestConfig) {
     let indices_arg = TensorArg::from_tensor(&indices_foundry);
     let output_arg = TensorArg::from_tensor(&output_foundry);
 
-    let kernel = Embedding::new(&table_arg, &indices_arg, &output_arg, params);
-    foundry.run(&kernel).unwrap();
+    let args = EmbeddingGenericArgs {
+        table: table_arg.clone(),
+        scale_bytes: table_arg, // F16 uses same buffer for scales placeholder
+        indices: indices_arg,
+        output: output_arg,
+        params,
+    };
+
+    let policy = Arc::new(PolicyF16);
+    let kernel = get_embedding_kernel(policy);
+    let dispatch = DispatchConfig {
+        grid: GridSize::d1(total_elements as usize),
+        group: ThreadgroupSize::d1(256),
+    };
+
+    foundry.run(&kernel.bind(args, dispatch)).unwrap();
 
     let foundry_result: Vec<f16> = FoundryTensor::to_vec(&output_foundry, &foundry);
 

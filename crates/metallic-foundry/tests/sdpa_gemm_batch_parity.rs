@@ -3,9 +3,9 @@
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, compound::stages::Quantization, metals::{
+    Foundry, MetalError, metals::{
         gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig, softmax::{SoftmaxV2Args, get_softmax_v2_kernel}
-    }, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
+    }, policy::f16::PolicyF16, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
 };
@@ -77,8 +77,8 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
     // Q @ K^T: [m, head_dim] @ [head_dim, kv_seq_len] = [m, kv_seq_len]
     // K is [kv_seq_len, head_dim] row-major, so transpose_b=true
     let qk_gemm_kernel = get_gemm_kernel(
-        Quantization::F16,
-        Quantization::F16,
+        std::sync::Arc::new(PolicyF16),
+        std::sync::Arc::new(PolicyF16),
         false,
         true, // transpose_a=false, transpose_b=true
         tile_config,
@@ -88,8 +88,8 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
 
     // Probs @ V: [m, kv_seq_len] @ [kv_seq_len, head_dim] = [m, head_dim]
     let av_gemm_kernel = get_gemm_kernel(
-        Quantization::F16,
-        Quantization::F16,
+        std::sync::Arc::new(PolicyF16),
+        std::sync::Arc::new(PolicyF16),
         false,
         false, // No transpose
         tile_config,

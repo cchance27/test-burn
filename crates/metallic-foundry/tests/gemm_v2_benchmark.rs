@@ -7,9 +7,15 @@ use metallic_context::{
     }
 };
 use metallic_foundry::{
-    Foundry, compound::stages::Quantization, metals::gemm::step::GemmV2Step, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, metals::gemm::step::GemmV2Step, policy::{f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TestQuantization {
+    F16,
+    Q8,
+}
 
 struct BenchmarkConfig {
     m: usize,
@@ -17,14 +23,14 @@ struct BenchmarkConfig {
     k: usize,
     transpose_a: bool,
     transpose_b: bool,
-    quant_b: Quantization,
+    quant_b: TestQuantization,
     iterations: usize,
 }
 
 fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, cfg: BenchmarkConfig) {
     let mode_str = match cfg.quant_b {
-        Quantization::F16 => "F16",
-        Quantization::Q8 => "Q8",
+        TestQuantization::F16 => "F16",
+        TestQuantization::Q8 => "Q8",
     };
     println!(
         "\nBenchmarking GEMM {}: M={}, N={}, K={} (ta={}, tb={})",
@@ -52,7 +58,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
     let _b_weights: Option<FoundryTensor<metallic_foundry::tensor::dtypes::U8, Pooled>>;
     let _b_scales: Option<FoundryTensor<F16, Pooled>>;
 
-    let (b_ref, b_scales_ref) = if cfg.quant_b == Quantization::Q8 {
+    let (b_ref, b_scales_ref) = if cfg.quant_b == TestQuantization::Q8 {
         let blocks_per_k = cfg.k.div_ceil(32);
         let bw = FoundryTensor::<metallic_foundry::tensor::dtypes::U8, Pooled>::new(
             foundry,
@@ -87,7 +93,10 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
         m_dim: DynamicValue::Literal(cfg.m as u32),
         n_dim: DynamicValue::Literal(cfg.n as u32),
         k_dim: DynamicValue::Literal(cfg.k as u32),
-        b_quant: cfg.quant_b,
+        b_quant: match cfg.quant_b {
+            TestQuantization::F16 => std::sync::Arc::new(PolicyF16),
+            TestQuantization::Q8 => std::sync::Arc::new(PolicyQ8),
+        },
         transpose_a: cfg.transpose_a,
         transpose_b: cfg.transpose_b,
         alpha: 1.0,
@@ -180,7 +189,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
         Ok(())
     };
 
-    if cfg.quant_b == Quantization::F16 {
+    if cfg.quant_b == TestQuantization::F16 {
         let b_leg =
             LegacyTensor::<LegacyF16>::new(vec![b_rows, b_cols], LegacyStorage::Dedicated(ctx), LegacyInit::CopyFrom(&b_data)).unwrap();
 
@@ -287,7 +296,7 @@ fn benchmark_qwen25_shapes() {
                 k: hidden,
                 transpose_a: false,
                 transpose_b: true,
-                quant_b: Quantization::F16,
+                quant_b: TestQuantization::F16,
                 iterations,
             },
         );
@@ -301,7 +310,7 @@ fn benchmark_qwen25_shapes() {
                     k: hidden,
                     transpose_a: false,
                     transpose_b: true,
-                    quant_b: Quantization::Q8,
+                    quant_b: TestQuantization::Q8,
                     iterations,
                 },
             );
@@ -317,7 +326,7 @@ fn benchmark_qwen25_shapes() {
                 k: intermediate,
                 transpose_a: false,
                 transpose_b: true,
-                quant_b: Quantization::F16,
+                quant_b: TestQuantization::F16,
                 iterations,
             },
         );
@@ -331,7 +340,7 @@ fn benchmark_qwen25_shapes() {
                     k: intermediate,
                     transpose_a: false,
                     transpose_b: true,
-                    quant_b: Quantization::Q8,
+                    quant_b: TestQuantization::Q8,
                     iterations,
                 },
             );
@@ -347,7 +356,7 @@ fn benchmark_qwen25_shapes() {
                 k: hidden,
                 transpose_a: false,
                 transpose_b: true,
-                quant_b: Quantization::F16,
+                quant_b: TestQuantization::F16,
                 iterations,
             },
         );
@@ -361,7 +370,7 @@ fn benchmark_qwen25_shapes() {
                     k: hidden,
                     transpose_a: false,
                     transpose_b: true,
-                    quant_b: Quantization::Q8,
+                    quant_b: TestQuantization::Q8,
                     iterations,
                 },
             );
@@ -377,7 +386,7 @@ fn benchmark_qwen25_shapes() {
                     k: hidden,
                     transpose_a: false,
                     transpose_b: false, // Explicitly false for comparison
-                    quant_b: Quantization::Q8,
+                    quant_b: TestQuantization::Q8,
                     iterations,
                 },
             );

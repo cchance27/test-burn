@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use super::stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpWriteOutputStage};
 use crate::{
     Foundry, MetalError, compound::{
-        BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::{Layout, Quantization, ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
+        BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::{Layout, ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
     }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
@@ -67,200 +67,107 @@ pub enum GemvStrategy {
     Canonical,
 }
 
-/// Get fast warp-per-row kernel for F16.
-pub fn get_gemv_v2_kernel_f16(layout: Layout, strategy: GemvStrategy) -> &'static CompiledCompoundKernel {
-    match (layout, strategy) {
+/// Unified kernel getter for GEMV V2.
+/// Uses a HashMap cache keyed by (layout, strategy, policy_name).
+pub fn get_gemv_v2_kernel(
+    policy: std::sync::Arc<dyn crate::fusion::MetalPolicy>,
+    layout: Layout,
+    strategy: GemvStrategy,
+) -> &'static CompiledCompoundKernel {
+    use std::sync::Mutex;
+
+    use rustc_hash::FxHashMap;
+
+    static CACHE: OnceLock<Mutex<FxHashMap<(Layout, GemvStrategy, String), &'static CompiledCompoundKernel>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
+
+    let key = (layout, strategy, policy.short_name().to_string());
+
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(kernel) = guard.get(&key) {
+            return kernel;
+        }
+    }
+
+    // Build kernel
+    let kernel_name = format!("gemv_v2_{:?}_{:?}_{}", layout, strategy, policy.short_name()).to_lowercase();
+    let use_f16_cols8 = policy.element_size() == 2 && use_f16_cols8();
+
+    let compiled: CompiledCompoundKernel = match (layout, strategy) {
         (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
-            if use_f16_cols8() {
-                static NK_KERNEL_F16_COLS8: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-                NK_KERNEL_F16_COLS8.get_or_init(|| {
-                    CompoundKernel::new("gemv_v2_nk_f16_cols8")
-                        .prologue(WarpLayoutStage::row_major().with_warps(8))
-                        .prologue(VectorizedDotStage::new(Quantization::F16).with_f16_cols8(true))
-                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                        .main(WarpWriteOutputStage::new())
-                        .with_manual_output(true)
-                        .compile()
-                })
+            if use_f16_cols8 {
+                CompoundKernel::new(&format!("{}_cols8", kernel_name))
+                    .prologue(WarpLayoutStage::row_major().with_warps(8))
+                    .prologue(VectorizedDotStage::new(policy.clone()).with_f16_cols8(true))
+                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                    .main(WarpWriteOutputStage::new())
+                    .with_manual_output(true)
+                    .compile()
             } else {
-                static NK_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-                NK_KERNEL_F16_VEC.get_or_init(|| {
-                    CompoundKernel::new("gemv_v2_nk_f16_vec")
-                        .prologue(WarpLayoutStage::row_major().with_warps(8))
-                        .prologue(VectorizedDotStage::new(Quantization::F16))
-                        .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                        .main(WarpWriteOutputStage::new())
-                        .with_manual_output(true)
-                        .compile()
-                })
+                CompoundKernel::new(&kernel_name)
+                    .prologue(WarpLayoutStage::row_major().with_warps(8))
+                    .prologue(VectorizedDotStage::new(policy.clone()))
+                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                    .main(WarpWriteOutputStage::new())
+                    .with_manual_output(true)
+                    .compile()
             }
         }
-        (Layout::RowMajor, GemvStrategy::Canonical) => {
-            static NK_KERNEL_F16_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            NK_KERNEL_F16_CAN.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_nk_f16_can")
-                    .prologue(WarpLayoutStage::row_major().with_warps(8))
-                    .prologue(CanonicalDotStage::new(Quantization::F16))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => {
-            // Auto defaults to Vectorized for ColMajor unless specifically hitting Large N path at runtime check
-            static KN_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            KN_KERNEL_F16_VEC.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_kn_f16_vec")
-                    .prologue(WarpLayoutStage::col_major().with_warps(8))
-                    .prologue(VectorizedDotStage::new(Quantization::F16))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::ColMajor, GemvStrategy::Scalar) => {
-            static KN_KERNEL_F16_SCALAR: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            KN_KERNEL_F16_SCALAR.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_kn_f16_scalar")
-                    .prologue(ThreadLayoutStage::col_major())
-                    .prologue(ScalarDotStage::new(Quantization::F16))
-                    // No WarpReduce needed, ScalarDot computes full sum
-                    .main(WarpWriteOutputStage::new()) // Works because lane_id=0 defined by ThreadLayout
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::ColMajor, GemvStrategy::Canonical) => {
-            static KN_KERNEL_F16_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            KN_KERNEL_F16_CAN.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_kn_f16_can")
-                    .prologue(WarpLayoutStage::col_major().with_warps(8))
-                    .prologue(CanonicalDotStage::new(Quantization::F16))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::Canonical, GemvStrategy::Vectorized) => {
-            static CAN_KERNEL_F16_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            CAN_KERNEL_F16_VEC.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_can_f16_vec")
-                    .prologue(WarpLayoutStage::canonical().with_warps(8))
-                    .prologue(VectorizedDotStage::new(Quantization::F16))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => {
-            static CAN_KERNEL_F16_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            CAN_KERNEL_F16_CAN.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_can_f16_can")
-                    .prologue(WarpLayoutStage::canonical().with_warps(8))
-                    .prologue(CanonicalDotStage::new(Quantization::F16))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        _ => unreachable!("Unsupported layout/strategy pair for F16"),
-    }
+        (Layout::RowMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
+            .prologue(WarpLayoutStage::row_major().with_warps(8))
+            .prologue(CanonicalDotStage::new(policy.clone()))
+            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+            .main(WarpWriteOutputStage::new())
+            .with_manual_output(true)
+            .compile(),
+        (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
+            .prologue(WarpLayoutStage::col_major().with_warps(8))
+            .prologue(VectorizedDotStage::new(policy.clone()))
+            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+            .main(WarpWriteOutputStage::new())
+            .with_manual_output(true)
+            .compile(),
+        (Layout::ColMajor, GemvStrategy::Scalar) => CompoundKernel::new(&kernel_name)
+            .prologue(ThreadLayoutStage::col_major())
+            .prologue(ScalarDotStage::new(policy.clone()))
+            .main(WarpWriteOutputStage::new())
+            .with_manual_output(true)
+            .compile(),
+        (Layout::ColMajor, GemvStrategy::Canonical) => CompoundKernel::new(&kernel_name)
+            .prologue(WarpLayoutStage::col_major().with_warps(8))
+            .prologue(CanonicalDotStage::new(policy.clone()))
+            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+            .main(WarpWriteOutputStage::new())
+            .with_manual_output(true)
+            .compile(),
+        (Layout::Canonical, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
+            .prologue(WarpLayoutStage::canonical().with_warps(8))
+            .prologue(VectorizedDotStage::new(policy.clone()))
+            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+            .main(WarpWriteOutputStage::new())
+            .with_manual_output(true)
+            .compile(),
+        (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
+            .prologue(WarpLayoutStage::canonical().with_warps(8))
+            .prologue(CanonicalDotStage::new(policy.clone()))
+            .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+            .main(WarpWriteOutputStage::new())
+            .with_manual_output(true)
+            .compile(),
+        _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
+    };
+
+    // Leak to get 'static lifetime (same pattern as existing code)
+    let leaked: &'static CompiledCompoundKernel = Box::leak(Box::new(compiled));
+
+    let mut guard = cache.lock().unwrap();
+    guard.insert(key, leaked);
+    leaked
 }
 
-/// Get fast warp-per-row kernel for Q8.
-pub fn get_gemv_v2_kernel_q8(layout: Layout, strategy: GemvStrategy) -> &'static CompiledCompoundKernel {
-    match (layout, strategy) {
-        (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {
-            static NK_KERNEL_Q8_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            NK_KERNEL_Q8_VEC.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_nk_q8_vec")
-                    .prologue(WarpLayoutStage::row_major().with_warps(8))
-                    .prologue(VectorizedDotStage::new(Quantization::Q8))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::RowMajor, GemvStrategy::Canonical) => {
-            static NK_KERNEL_Q8_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            NK_KERNEL_Q8_CAN.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_nk_q8_can")
-                    .prologue(WarpLayoutStage::row_major())
-                    .prologue(CanonicalDotStage::new(Quantization::Q8))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::ColMajor, GemvStrategy::Vectorized) | (Layout::ColMajor, GemvStrategy::Auto) => {
-            static KN_KERNEL_Q8_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            KN_KERNEL_Q8_VEC.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_kn_q8_vec")
-                    .prologue(WarpLayoutStage::col_major())
-                    .prologue(VectorizedDotStage::new(Quantization::Q8))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::ColMajor, GemvStrategy::Scalar) => {
-            static KN_KERNEL_Q8_SCALAR: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            KN_KERNEL_Q8_SCALAR.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_kn_q8_scalar")
-                    .prologue(ThreadLayoutStage::col_major())
-                    .prologue(ScalarDotStage::new(Quantization::Q8))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::ColMajor, GemvStrategy::Canonical) => {
-            static KN_KERNEL_Q8_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            KN_KERNEL_Q8_CAN.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_kn_q8_can")
-                    .prologue(WarpLayoutStage::col_major())
-                    .prologue(CanonicalDotStage::new(Quantization::Q8))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::Canonical, GemvStrategy::Vectorized) => {
-            static CAN_KERNEL_Q8_VEC: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            CAN_KERNEL_Q8_VEC.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_can_q8_vec")
-                    .prologue(WarpLayoutStage::canonical())
-                    .prologue(VectorizedDotStage::new(Quantization::Q8))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => {
-            static CAN_KERNEL_Q8_CAN: OnceLock<CompiledCompoundKernel> = OnceLock::new();
-            CAN_KERNEL_Q8_CAN.get_or_init(|| {
-                CompoundKernel::new("gemv_v2_can_q8_can")
-                    .prologue(WarpLayoutStage::canonical())
-                    .prologue(CanonicalDotStage::new(Quantization::Q8))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new())
-                    .with_manual_output(true)
-                    .compile()
-            })
-        }
-        _ => unreachable!("Unsupported layout/strategy pair for Q8"),
-    }
-}
+// NOTE: get_gemv_v2_kernel_f16 and get_gemv_v2_kernel_q8 removed.
+// Use unified get_gemv_v2_kernel(policy, layout, strategy) instead.
 
 /// Dispatch configuration for warp-per-row kernels.
 /// Returns (grid, group) matching legacy GEMV dispatch.
@@ -395,10 +302,6 @@ impl Step for GemvV2Step {
             }
         });
 
-        // Pre-warm both variants; quantization is selected at runtime from the bound weight dtype.
-        get_gemv_v2_kernel_f16(self.layout, strategy);
-        get_gemv_v2_kernel_q8(self.layout, strategy);
-
         vec![Box::new(CompiledGemvV2Step {
             weights_name,
             weights_resolved: ResolvedSymbols {
@@ -451,8 +354,14 @@ impl CompiledStep for CompiledGemvV2Step {
         let loader_args = loader.bind(fast_bindings, &self.weights_resolved);
 
         let weights_arg = loader_args[0].clone();
-        let scale_bytes = loader_args[1].clone();
-        let is_q8 = quantization == Quantization::Q8;
+
+        // Scale binding: policies with scales return 2+ args, others return 1
+        let scale_bytes = if loader_args.len() > 1 {
+            loader_args[1].clone()
+        } else {
+            // Dummy bind for F16 (unused by kernel but required by signature)
+            loader_args[0].clone()
+        };
 
         // Handle optional bias
         let (bias, has_bias) = if let Some(idx) = self.bias_idx {
@@ -498,12 +407,8 @@ impl CompiledStep for CompiledGemvV2Step {
             effective_strategy = GemvStrategy::Vectorized;
         }
 
-        // Select Kernel based on effective strategy
-        let kernel = if is_q8 {
-            get_gemv_v2_kernel_q8(self.layout, effective_strategy)
-        } else {
-            get_gemv_v2_kernel_f16(self.layout, effective_strategy)
-        };
+        // Select kernel using unified getter with policy
+        let kernel = get_gemv_v2_kernel(quantization.clone(), self.layout, effective_strategy);
 
         let args = GemvV2Args {
             weights: weights_arg,
@@ -734,15 +639,6 @@ impl CompiledStep for CompiledGemvCanonicalStep {
             (n, x_k)
         };
 
-        // let weights = TensorArg::from_tensor(matrix); // Handled by matrix_args[0]
-        /*
-        let scale_arg = if self.is_q8 {
-            TensorArg::from_tensor(scale_bytes)
-        } else {
-            TensorArg::from_tensor(matrix) // Dummy bind to valid buffer
-        };
-        */
-
         let args = GemvV2Args {
             weights,
             scale_bytes: scale_arg,
@@ -762,10 +658,8 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         let batch = bindings.get_int_global("m").unwrap_or(self.step.params.batch as usize).max(1) as u32;
         let dispatch = warp_dispatch_config_2d(n_dim, batch);
 
-        let kernel = match quantization {
-            Quantization::Q8 => get_gemv_v2_kernel_q8(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical),
-            _ => get_gemv_v2_kernel_f16(crate::compound::stages::Layout::Canonical, GemvStrategy::Canonical),
-        };
+        // Select kernel using unified getter
+        let kernel = get_gemv_v2_kernel(quantization.clone(), Layout::Canonical, GemvStrategy::Canonical);
 
         if crate::instrument::emit_cb_timing_metrics() {
             let mut data = rustc_hash::FxHashMap::default();
@@ -923,7 +817,6 @@ impl CompiledStep for CompiledGemvColMajorStep {
 
         let weights = matrix_args[0].clone();
         let scale_arg = matrix_args[1].clone();
-        let is_q8 = quantization == Quantization::Q8;
 
         if debug {
             eprintln!(
@@ -960,18 +853,14 @@ impl CompiledStep for CompiledGemvColMajorStep {
         };
 
         if debug {
-            eprintln!("  [GemvColMajor] Dimensions: k_dim={}, n_dim={}, is_q8={}", k_dim, n_dim, is_q8);
+            eprintln!(
+                "  [GemvColMajor] Dimensions: k_dim={}, n_dim={}, policy={}",
+                k_dim,
+                n_dim,
+                quantization.short_name()
+            );
             std::io::Write::flush(&mut std::io::stderr()).ok();
         }
-
-        // let weights = TensorArg::from_tensor(matrix); // Handled by matrix_args[0]
-        /*
-        let scale_arg = if self.is_q8 {
-            TensorArg::from_tensor(scale_bytes)
-        } else {
-            TensorArg::from_tensor(matrix)
-        };
-        */
 
         let args = GemvV2Args {
             weights,
@@ -1004,22 +893,12 @@ impl CompiledStep for CompiledGemvColMajorStep {
 
         // Use Vectorized strategy for ColMajor as it naturally vectorizes
         // Logic Update: Use Scalar if N > 4096
-        let kernel = match quantization {
-            Quantization::Q8 => {
-                if n_dim > 4096 {
-                    get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
-                } else {
-                    get_gemv_v2_kernel_q8(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
-                }
-            }
-            _ => {
-                if n_dim > 4096 {
-                    get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Scalar)
-                } else {
-                    get_gemv_v2_kernel_f16(crate::compound::stages::Layout::ColMajor, GemvStrategy::Vectorized)
-                }
-            }
+        let strategy = if n_dim > 4096 {
+            GemvStrategy::Scalar
+        } else {
+            GemvStrategy::Vectorized
         };
+        let kernel = get_gemv_v2_kernel(quantization.clone(), Layout::ColMajor, strategy);
 
         if debug {
             eprintln!("  [GemvColMajor] Running kernel dispatch...");
