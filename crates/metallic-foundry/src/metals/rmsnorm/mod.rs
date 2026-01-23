@@ -18,6 +18,8 @@ pub struct RmsNormParams {
     pub feature_dim: DynamicValue<u32>,
     /// Total number of elements in input tensor.
     pub total_elements: DynamicValue<u32>,
+    /// Epsilon for numerical stability.
+    pub epsilon: DynamicValue<f32>,
 }
 
 /// RMSNorm kernel.
@@ -43,7 +45,7 @@ pub struct RmsNorm {
     pub input: TensorArg,
     /// Scale bytes for Q8 policy (Buffer 1 - Policy Scales).
     #[arg(stage_skip)]
-    pub scale_bytes: TensorArg,
+    pub scale_bytes: Option<TensorArg>,
     /// Output tensor (Buffer 2).
     #[arg(output)]
     pub output: TensorArg,
@@ -62,10 +64,16 @@ impl RmsNorm {
     /// * `output` - Output tensor (same shape as input)
     /// * `gamma` - Scale weights of shape [feature_dim]
     /// * `params` - RMSNorm parameters (feature_dim, total_elements)
-    pub fn new(input: &TensorArg, output: &TensorArg, gamma: &TensorArg, params: RmsNormParamsResolved) -> Self {
+    pub fn new(
+        input: &TensorArg,
+        scale_bytes: Option<TensorArg>,
+        output: &TensorArg,
+        gamma: &TensorArg,
+        params: RmsNormParamsResolved,
+    ) -> Self {
         Self {
             input: input.clone(),
-            scale_bytes: input.clone(), // Default to input for scales (F16 case)
+            scale_bytes,
             output: output.clone(),
             gamma: gamma.clone(),
             params,
@@ -83,6 +91,7 @@ mod tests {
         let def = RmsNormParams::METAL_STRUCT_DEF;
         assert!(def.contains("uint feature_dim;"), "Should have feature_dim: {}", def);
         assert!(def.contains("uint total_elements;"), "Should have total_elements: {}", def);
+        assert!(def.contains("float epsilon;"), "Should have epsilon: {}", def);
         assert!(def.contains("struct RmsNormParams"), "Should have struct name: {}", def);
     }
 

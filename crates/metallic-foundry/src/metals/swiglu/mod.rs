@@ -5,9 +5,8 @@
 //!
 //! This module provides:
 //! - `Swiglu` - Standalone activation kernel
-//! - `SwiGluEpilogue` - SIMD GEMV epilogue for fused decode path
 
-use metallic_macros::{Epilogue, Kernel, KernelArgs, MetalStruct};
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::{
     spec::DynamicValue, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
@@ -16,23 +15,6 @@ use crate::{
 pub mod ffn_stages;
 pub mod stages;
 pub mod step;
-
-// ================================================================================================
-// SIMD GEMV Epilogue (for fused decode path)
-// ================================================================================================
-
-/// SIMD GEMV template epilogue policy: fuses Gate+Up + SiLU activation.
-///
-/// This is *not* a scalar post-stage epilogue (it operates on the GEMV template's
-/// per-warp accumulators), so we only implement `GemvEpilogue`.
-#[derive(Epilogue, Clone, Copy, Default)]
-#[epilogue(
-    include = "swiglu/swiglu.metal",
-    gemv_struct = "SwiGluEpilogue",
-    gemv_id = "swiglu",
-    simd_reduce = "gate: acc[0], up: acc[1]"
-)]
-pub struct SwiGluEpilogue;
 
 // ================================================================================================
 // Standalone Kernel

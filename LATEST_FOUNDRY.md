@@ -34,10 +34,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
 
-### 1. SDPA Padding Logic
-- **Issue:** `padded_m` only aligns to 32 if `m > 1`.
-- **Risk:** GEMM kernels might perform out-of-bounds writes on `m=1` if they assume tile alignment without checking boundaries.
-- **Task:** Audit GEMM write-back logic for `M < TileSize`.
+** None Currently **
 
 ---
 
@@ -58,37 +55,26 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Goal:** Reduce boilerplate and off-by-one errors in dispatch logic.
 - **Validation:** Implement compile-time validation of Metal `emit()` strings to catch syntax errors early.
 
-### 5. Fragile Macro Type-Detection
-- **Issue:** `#[derive(KernelArgs)]` currently uses **string matching** (if `type_str.contains("TensorArg")`) to decide how to bind a buffer.
-- **Risk:** This breaks if a developer uses a type alias (e.g., `type MyTensor = TensorArg;`) or a fully qualified path (`metallic::types::TensorArg`).
-- **Requirement:** Refactor macros to perform proper `syn::Type` traversal for robust type identification.
-
-
-### 6. Raw `objc2` Leaks in Public API
+### 5. Raw `objc2` Leaks in Public API
 - **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
 - **Impact:** This couples the entire project (including the CLI and external crates) to specific versions of the `objc2` and `objc2-metal` crates.
 - **Requirement:** Complete the "Semantic Wrapper" layer (`MetalBuffer`, `MetalDevice`, `MetalCommandQueue`) to encapsulate the raw pointers.
 
-### 7. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
+### 6. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
 - **Issue:** `Tensor<T, Pooled>` holds a reference to a Metal buffer but is not lifetime-bound to the `MemoryPool` that manages the offsets.
 - **Risk:** If `MemoryPool::reset()` is called while a `Pooled` tensor is still alive, the tensor points to reclaimed memory (logical use-after-free).
 - **Requirement:** Implement an "Arena" or "Generational" pattern where `Pooled` tensors hold a guard or generation ID that invalidates them if the pool is reset.
 
-### 8. Macro Robustness (Type Detection)
-- **Issue:** `#[derive(KernelArgs)]` uses fragile string matching (`type_str.contains("TensorArg")`) to detect buffer arguments.
-- **Risk:** Fails for type aliases, fully qualified paths (`crate::types::TensorArg`), or newtypes.
-- **Requirement:** Refactor macros to use `syn`'s type traversal to properly identify types implementing `KernelArg`.
-
-### 9. Non-Standard Include Resolution
+### 7. Non-Standard Include Resolution
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
 
-### 10. Import Hygiene & Naming
+### 8. Import Hygiene & Naming
 - **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
 - **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
 - **Requirement:** Use the `DispatchConfig` struct everywhere and rename `as_stage` -> `to_stage` or `into_stage`.
 
-### 11. Quantization Safety & Regression Testing
+### 9. Quantization Safety & Regression Testing
 - **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
 - **Tasks:**
     - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
@@ -115,6 +101,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Requirement:** Implement "Grow-on-demand" KV caches (e.g., paging or reallocation) to support full model context without allocating worst-case memory at startup, we should also default to the models max context size as our maximum, unless we're told a maximum at runtime or via our DSL.
 
 ### 2. SDPA Optimization (Tile Config)
+- **BLOCKER** Tile Config Auto-Tuning performance rework of auto_select is required, as switching to skinny_m (what auto_select selects), causes the sdpa path to be much slower dropping performance from 163tok/s to 150tok/s for Q8 as an example, meaning we need much better auto selection mechanics.
 - **Status:** **Confirmed.** `sdpa/step.rs` (L597) hardcodes `let tile_config = TileConfig::default();`.
 - **Impact:** Suboptimal performance for prefill. Small `M` or odd-sized `SeqLen` might benefit from different tile shapes (e.g., 32x16 vs 32x32).
 - **Task:** Use `TileConfig::auto_select(m, kv_seq_len)` logic (similar to `gemm` module).
@@ -123,11 +110,6 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Status:** **Confirmed.** `executor.rs` loop (L528) iterates steps without pushing structured scopes.
 - **Impact:** TUI metrics are brittle, relying on regex parsing of kernel names (e.g. `Gemm_...`) to guess if something is a "FeedForward" or "Attention" block.
 - **Task:** Implement `foundry.push_scope("Block 0")` in the executor to enable robust, model-agnostic hierarchy.
-
-### 4. Epsilon Usage in RMSNorm
-- **Status:** **Confirmed.** `rmsnorm/step.rs` (L1) hardcodes `epsilon: Option<f32>, // DEBT: Not used in kernel yet (hardcoded 1e-6)`.
-- **Impact:** RMSNorm kernels currently use a hardcoded `1e-6` epsilon value, which is not configurable.
-- **Requirement:** Remove the epsilon parameter from the kernel and use the value from model or from the DSL.
 
 ---
 
@@ -187,10 +169,26 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Goal:** Implement dedicated **Q8 Blockwise** dequantization-to-AMX path.
 - **Impact:** Higher throughput for Q8 prefill batches by leveraging hardware matrix units directly from quantized data.
 
-### 5. Kernel Routing (MLX Parity)
-- **Issue:** Native Foundry GEMV is slower than MLX kernels for specific decode shapes (e.g. `M=1, K=4864`).
-- **Task:** Implement shape-based routing to select the optimal kernel backend (Foundry Native vs MLX-port) per operation, similar to the legacy engine.
-- **Optimization:** Caching `CompoundKernel` construction in `run_with_policy` to avoid hot-path allocation overhead.
+### 5. Tile Config Auto-Tuning (NEW)
+- **Problem:** The current `TileConfig::auto_select()` heuristic is naive and can pick suboptimal configurations.
+  - Example: Switching from `Default` (32×32×16) to `SkinnyM` (8×128×32) for SDPA caused a **7% regression** (165 → 153 tps).
+  - The "Default" tile config was essentially a guess, not empirically optimized.
+- **Industry Approaches:**
+
+| System | Approach |
+|--------|----------|
+| **cuBLAS** | Runtime profiler picks from pre-tuned kernels based on (M,N,K) |
+| **MLC-LLM** | Offline auto-tuning with search, stores winning configs per device |
+| **FlashAttention** | Hardcoded configs per GPU architecture |
+| **OneDNN** | JIT compilation with heuristic selection |
+
+- **Proposed Strategy:**
+  1. **Immediate:** Add `AttentionTileConfig` specifically tuned for attention patterns (M=1 decode, varying N)
+  2. **Medium-term:** Improve `auto_select` to consider operation type, N/K ratio, and GPU family
+  3. **Long-term:** Offline auto-tuning framework:
+     - Run benchmark sweep over tile config space per op type
+     - Store winning configs in JSON lookup table keyed by `(M_bucket, N_bucket, K_bucket, op_type, gpu_family)`
+     - At runtime, look up best config from table
 
 ---
 
@@ -225,3 +223,24 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Previous issue:** Some kernel getters cached compiled variants by leaking them to satisfy `'static` return types, which could grow without bound.
 - **Fix (implemented):** `CompiledCompoundKernel` no longer relies on `'static` leaks, and compiled kernel/pipeline caching is centralized in `KernelRegistry` with bounded capacity and time-to-idle eviction.
 - **Follow-ups:** Consider a weighted cache (by estimated bytes) and plumbing config/env knobs for tuning `max_kernels`/`max_pipelines`/TTLs per workload.
+
+### 6. Epsilon Usage in RMSNorm (COMPLETED)
+- **Status:** Fixed. Epsilon is now configurable via `RmsNormParams.epsilon` and passed to the Metal kernel.
+- **Impact:** RMSNorm kernels currently use a hardcoded `1e-6` epsilon value, which is not configurable.
+- **Requirement:** Remove the epsilon parameter from the kernel and use the value from model or from the DSL.
+
+### 7. Fragile Macro Type-Detection (COMPLETED)
+- **Status:** Refactored to use `syn::Type` traversal. Handles qualified paths and `Option`/reference wrappers.
+- **Issue:** `#[derive(KernelArgs)]` currently uses **string matching** (if `type_str.contains("TensorArg")`) to decide how to bind a buffer.
+- **Risk:** This breaks if a developer uses a type alias (e.g., `type MyTensor = TensorArg;`) or a fully qualified path (`metallic::types::TensorArg`).
+- **Requirement:** Refactor macros to perform proper `syn::Type` traversal for robust type identification.
+
+### 8. Macro Robustness (COMPLETED)
+- **Status:** Fixed see item #7 above.
+- **Issue:** `#[derive(KernelArgs)]` uses fragile string matching (`type_str.contains("TensorArg")`) to detect buffer arguments.
+- **Risk:** Fails for type aliases, fully qualified paths (`crate::types::TensorArg`), or newtypes.
+- **Requirement:** Refactor macros to use `syn`'s type traversal to properly identify types implementing `KernelArg`.
+
+### 9. SDPA Head-Stride Safety (Post-Padding Removal) (COMPLETED)
+- **Context:** SDPA scratch (Scores/Probs) is head-major and uses `batch_stride_{c,d} = padded_m * kv_seq_len`.
+- **Mitigation (implemented):** `padded_m` is now aligned to the GEMM tile M dimension for `m > 1` (decode keeps `m=1` to preserve throughput), and a regression test covers `m=17` to ensure head isolation.

@@ -585,7 +585,12 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         let matrix_args = loader.bind(fast_bindings, &self.matrix_resolved);
 
         let weights = matrix_args[0].clone();
-        let scale_arg = matrix_args[1].clone();
+        let scale_arg = if matrix_args.len() > 1 {
+            matrix_args[1].clone()
+        } else {
+            // Dummy bind for F16 (unused by kernel but required by signature)
+            matrix_args[0].clone()
+        };
 
         // Handle Bias
         let (bias, has_bias) = if let Some(idx) = self.bias_idx {
@@ -815,7 +820,12 @@ impl CompiledStep for CompiledGemvColMajorStep {
         let matrix_args = loader.bind(fast_bindings, &self.matrix_resolved);
 
         let weights = matrix_args[0].clone();
-        let scale_arg = matrix_args[1].clone();
+        let scale_arg = if matrix_args.len() > 1 {
+            matrix_args[1].clone()
+        } else {
+            // Dummy bind for F16 (unused by kernel but required by signature)
+            matrix_args[0].clone()
+        };
 
         if debug {
             eprintln!(

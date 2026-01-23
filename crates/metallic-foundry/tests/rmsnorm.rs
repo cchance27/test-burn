@@ -105,9 +105,11 @@ fn run_f16_parity_test(cfg: TestConfig) {
     let params = RmsNormParamsResolved {
         feature_dim: cfg.feature_dim as u32,
         total_elements: total_elements as u32,
+        epsilon: 1e-6,
     };
     let kernel = RmsNorm::new(
         &TensorArg::from_tensor(&input),
+        None,
         &TensorArg::from_tensor(&output),
         &TensorArg::from_tensor(&gamma),
         params,
@@ -164,9 +166,11 @@ fn run_cpu_test(cfg: TestConfig) {
     let params = RmsNormParamsResolved {
         feature_dim: cfg.feature_dim as u32,
         total_elements: total_elements as u32,
+        epsilon: 1e-6,
     };
     let kernel = RmsNorm::new(
         &TensorArg::from_tensor(&input),
+        None,
         &TensorArg::from_tensor(&output),
         &TensorArg::from_tensor(&gamma),
         params,
@@ -417,6 +421,7 @@ fn run_q8_policy_test(cfg: TestConfig) {
     let params = RmsNormParamsResolved {
         feature_dim: cfg.feature_dim as u32,
         total_elements: total_elements as u32,
+        epsilon: 1e-6,
     };
 
     // Note: For Q8, the kernel expects (input as uchar*, output, gamma, params, scale_bytes)
@@ -428,7 +433,7 @@ fn run_q8_policy_test(cfg: TestConfig) {
 
     // For now, just test that run_with_policy doesn't crash
     // Full Q8 integration would require kernel buffer layout changes
-    let _kernel = RmsNorm::new(&input_arg, &output_arg, &gamma_arg, params);
+    let _kernel = RmsNorm::new(&input_arg, Some(_scale_arg.clone()), &output_arg, &gamma_arg, params);
 
     // Test run_with_policy call works (doesn't crash)
     // let result = foundry.run_with_policy::<metallic_foundry::policy::q8::PolicyQ8, _>(&kernel);

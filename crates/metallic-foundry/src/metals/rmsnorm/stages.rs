@@ -7,14 +7,16 @@ use crate::{
 pub struct RmsNormComputeStage {
     pub input_buffer: usize,
     pub k_dim_buffer: usize,
+    pub epsilon_buffer: usize,
     pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl RmsNormComputeStage {
-    pub fn new(input_buffer: usize, k_dim_buffer: usize) -> Self {
+    pub fn new(input_buffer: usize, k_dim_buffer: usize, epsilon_buffer: usize) -> Self {
         Self {
             input_buffer,
             k_dim_buffer,
+            epsilon_buffer,
             policy: std::sync::Arc::new(crate::policy::f16::PolicyF16), // Default - overridden by with_policy()
         }
     }
@@ -42,6 +44,11 @@ impl Stage for RmsNormComputeStage {
                 metal_type: "constant uint&",
                 buffer_index: self.k_dim_buffer as u32,
             },
+            BufferArg {
+                name: "epsilon",
+                metal_type: "constant float&",
+                buffer_index: self.epsilon_buffer as u32,
+            },
         ]
     }
 
@@ -66,6 +73,7 @@ impl Stage for RmsNormComputeStage {
         batch_idx, // row_idx (batched: one row per token)
         lane_id,
         warp_id,
+        epsilon,
         &tg_inv_rms_storage
     );
         "#,

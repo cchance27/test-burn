@@ -1,9 +1,6 @@
 use std::{path::PathBuf, sync::Once};
 
-use half::f16;
-use metallic_foundry::{
-    Foundry, MetalError, model::{CompiledModel, ModelBuilder}
-};
+use metallic_foundry::{Foundry, MetalError, model::ModelBuilder};
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
 const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";

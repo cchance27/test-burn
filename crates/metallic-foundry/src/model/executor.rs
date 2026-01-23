@@ -300,6 +300,7 @@ impl CompiledModel {
         resolver.set_global("n_kv_heads", arch.n_kv_heads.to_string());
         resolver.set_global("ff_dim", arch.ff_dim.to_string());
         resolver.set_global("vocab_size", arch.vocab_size.to_string());
+        resolver.set_global("rms_eps", arch.rms_eps.to_string());
         let head_dim = arch.d_model / arch.n_heads;
         resolver.set_global("head_dim", head_dim.to_string());
         let kv_dim = head_dim * arch.n_kv_heads;
@@ -439,6 +440,7 @@ impl CompiledModel {
         bindings.set_global("n_kv_heads", arch.n_kv_heads.to_string());
         bindings.set_global("ff_dim", arch.ff_dim.to_string());
         bindings.set_global("vocab_size", arch.vocab_size.to_string());
+        bindings.set_global("rms_eps", arch.rms_eps.to_string());
         let head_dim = arch.d_model / arch.n_heads;
         bindings.set_global("head_dim", head_dim.to_string());
         let kv_dim = head_dim * arch.n_kv_heads;

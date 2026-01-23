@@ -59,15 +59,15 @@ pub struct FusedQkvArgs {
     #[arg(buffer = 0)]
     pub w_q: TensorArg,
     #[arg(buffer = 1)]
-    pub s_q: TensorArg,
+    pub s_q: Option<TensorArg>,
     #[arg(buffer = 2)]
     pub w_k: TensorArg,
     #[arg(buffer = 3)]
-    pub s_k: TensorArg,
+    pub s_k: Option<TensorArg>,
     #[arg(buffer = 4)]
     pub w_v: TensorArg,
     #[arg(buffer = 5)]
-    pub s_v: TensorArg,
+    pub s_v: Option<TensorArg>,
     #[arg(buffer = 6)]
     pub input: TensorArg,
     #[arg(buffer = 7)]
@@ -94,6 +94,8 @@ pub struct FusedQkvArgs {
     pub has_bias: u32,
     #[arg(buffer = 18)]
     pub gamma: TensorArg,
+    #[arg(buffer = 19)]
+    pub epsilon: f32,
 }
 
 #[typetag::serde(name = "FusedQkv")]
@@ -208,11 +210,11 @@ impl CompiledStep for CompiledFusedQkvStep {
         let v_args = loader.bind(fast_bindings, &self.w_v_resolved);
 
         let w_q = q_args[0].clone();
-        let s_q = q_args[1].clone();
+        let s_q = if q_args.len() > 1 { Some(q_args[1].clone()) } else { None };
         let w_k = k_args[0].clone();
-        let s_k = k_args[1].clone();
+        let s_k = if k_args.len() > 1 { Some(k_args[1].clone()) } else { None };
         let w_v = v_args[0].clone();
-        let s_v = v_args[1].clone();
+        let s_v = if v_args.len() > 1 { Some(v_args[1].clone()) } else { None };
         let out_q = get(self.out_q_idx)?;
         let out_k = get(self.out_k_idx)?;
         let out_v = get(self.out_v_idx)?;
@@ -267,6 +269,7 @@ impl CompiledStep for CompiledFusedQkvStep {
             b_v,
             has_bias,
             gamma,
+            epsilon: bindings.get_var("rms_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1e-6),
         };
 
         let kernel = get_fused_qkv_kernel(self.step.strategy, policy, self.gamma_idx.is_some());
@@ -319,7 +322,7 @@ fn get_fused_qkv_kernel(strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>, ha
         let mut compound = CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::canonical().with_warps(8).with_elems_per_thread(vec_width as u32))
-            .prologue(RmsNormComputeStage::new(6, 7)); // Stage 1: RMSNorm compute
+            .prologue(RmsNormComputeStage::new(6, 7, 19)); // Stage 1: RMSNorm compute
 
         // Stage 2: QKV Projection
         let vw = match vec_width {

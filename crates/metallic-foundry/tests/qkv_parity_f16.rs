@@ -154,7 +154,7 @@ fn test_qkv_parity_f16() {
         CompoundKernel::new("fused_qkv_rmsnorm_f16_test")
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
-            .prologue(RmsNormComputeStage::new(6, 7))
+            .prologue(RmsNormComputeStage::new(k_dim, k_dim, 18))
             .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
@@ -168,11 +168,11 @@ fn test_qkv_parity_f16() {
 
     let args = FusedQkvArgs {
         w_q: TensorArg::from_tensor(&wq_tensor),
-        s_q: TensorArg::from_tensor(&sq_tensor),
+        s_q: Some(TensorArg::from_tensor(&sq_tensor)),
         w_k: TensorArg::from_tensor(&wk_tensor),
-        s_k: TensorArg::from_tensor(&sk_tensor),
+        s_k: Some(TensorArg::from_tensor(&sk_tensor)),
         w_v: TensorArg::from_tensor(&wv_tensor),
-        s_v: TensorArg::from_tensor(&sv_tensor),
+        s_v: Some(TensorArg::from_tensor(&sv_tensor)),
         input: TensorArg::from_tensor(&x_tensor),
         k_dim: k_dim as u32,
         n_dim: n_dim as u32,
@@ -186,6 +186,7 @@ fn test_qkv_parity_f16() {
         b_v: TensorArg::from_tensor(&b_v_tensor),
         has_bias: 1,
         gamma: TensorArg::from_tensor(&gamma_tensor),
+        epsilon: 1e-6,
     };
 
     let warps_per_tg = 8;
@@ -278,7 +279,7 @@ fn test_qkv_parity_f16_batched() {
         CompoundKernel::new("fused_qkv_rmsnorm_f16_batched_test")
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8))
-            .prologue(RmsNormComputeStage::new(6, 7))
+            .prologue(RmsNormComputeStage::new(k_dim, k_dim, 18))
             .main(ParallelProjectStage::new(std::sync::Arc::new(PolicyF16)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)
             .epilogue(MultiWriteOutputStage)
@@ -287,11 +288,11 @@ fn test_qkv_parity_f16_batched() {
 
     let args = FusedQkvArgs {
         w_q: TensorArg::from_tensor(&wq_tensor),
-        s_q: TensorArg::from_tensor(&sq_tensor),
+        s_q: Some(TensorArg::from_tensor(&sq_tensor)),
         w_k: TensorArg::from_tensor(&wk_tensor),
-        s_k: TensorArg::from_tensor(&sk_tensor),
+        s_k: Some(TensorArg::from_tensor(&sk_tensor)),
         w_v: TensorArg::from_tensor(&wv_tensor),
-        s_v: TensorArg::from_tensor(&sv_tensor),
+        s_v: Some(TensorArg::from_tensor(&sv_tensor)),
         input: TensorArg::from_tensor(&x_tensor),
         k_dim: k_dim as u32,
         n_dim: n_dim as u32,
@@ -305,6 +306,7 @@ fn test_qkv_parity_f16_batched() {
         b_v: TensorArg::from_tensor(&b_v_tensor),
         has_bias: 1,
         gamma: TensorArg::from_tensor(&gamma_tensor),
+        epsilon: 1e-6,
     };
 
     let warps_per_tg = 8;

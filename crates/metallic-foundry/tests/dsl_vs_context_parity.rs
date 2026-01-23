@@ -10,6 +10,7 @@ use metallic_context::{
     }, models::Qwen25, tensor::{QuantizedTensor, TensorType}
 };
 use metallic_foundry::{Foundry, model::ModelBuilder, policy::activation::Activation, spec::TensorBindings};
+use objc2_metal::{MTLBuffer, MTLDevice};
 use serial_test::serial;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
@@ -44,16 +45,46 @@ fn compare_f16_slices(a: &[f16], b: &[f16], tolerance: f32) -> (f32, f32, Option
 }
 
 /// Read f16 data from a TensorArg buffer
-fn read_f16_buffer(arg: &metallic_foundry::types::TensorArg) -> Vec<f16> {
+/// Download f16 data from a TensorArg buffer (handles Private and Shared storage)
+fn download_f16_buffer(foundry: &mut Foundry, arg: &metallic_foundry::types::TensorArg) -> Vec<f16> {
     use metallic_foundry::types::KernelArg;
     let buffer = arg.buffer();
     let offset = arg.offset(); // offset is in bytes
-    let len = arg.dims().iter().product::<usize>();
+    let dims = arg.dims().to_vec();
+    let num_elements = dims.iter().product::<usize>();
+    let size_bytes = num_elements * 2; // F16 = 2 bytes
+
+    // If it's already shared, we can read directly
     unsafe {
         use objc2_metal::MTLBuffer;
-        let ptr = (buffer.contents().as_ptr() as *const u8).add(offset) as *const f16;
-        std::slice::from_raw_parts(ptr, len).to_vec()
+        let base_ptr = buffer.contents().as_ptr() as usize;
+        if base_ptr != 0 {
+            let ptr = (base_ptr + offset) as *const f16;
+            // Check alignment for safety
+            if (ptr as usize) % 2 == 0 {
+                return std::slice::from_raw_parts(ptr, num_elements).to_vec();
+            }
+        }
     }
+
+    // Otherwise, or if misaligned, use a blit copy to a shared buffer
+    let device = &foundry.device;
+    let read_buffer = device
+        .newBufferWithLength_options(size_bytes, objc2_metal::MTLResourceOptions::StorageModeShared)
+        .expect("Failed to create read buffer");
+
+    foundry
+        .blit_copy(
+            buffer,
+            offset,
+            &metallic_foundry::types::MetalBuffer(read_buffer.clone()),
+            0,
+            size_bytes,
+        )
+        .expect("Failed to blit copy for download");
+
+    let ptr = read_buffer.contents().as_ptr() as *const f16;
+    unsafe { std::slice::from_raw_parts(ptr, num_elements).to_vec() }
 }
 
 fn tensor_to_f16_vec<T: TensorElement>(tensor: &Tensor<T>) -> Vec<f16> {
@@ -1143,7 +1174,7 @@ fn test_dsl_vs_context_embedding_parity() -> Result<(), MetalError> {
 
     // Read back the hidden tensor
     let hidden_arg = bindings.get("hidden").unwrap();
-    let dsl_embed_data = read_f16_buffer(&hidden_arg);
+    let dsl_embed_data = download_f16_buffer(&mut foundry, &hidden_arg);
     eprintln!(
         "DSL embedding shape: {:?}, first 5: {:?}",
         hidden_arg.dims(),
@@ -1153,7 +1184,8 @@ fn test_dsl_vs_context_embedding_parity() -> Result<(), MetalError> {
     // =========================================================================
     // STEP 6: Compare embeddings
     // =========================================================================
-    let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_embed_data, &dsl_embed_data, 1e-3);
+    let dsl_embed_data_sliced = &dsl_embed_data[..legacy_embed_data.len()];
+    let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_embed_data, dsl_embed_data_sliced, 1e-3);
     eprintln!(
         "Embedding comparison: max_diff={}, avg_diff={}, first_mismatch={:?}",
         max_diff, avg_diff, first_mismatch
@@ -1281,7 +1313,7 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
 
         let logits = bindings.get("logits").unwrap();
         let hidden = bindings.get("final_norm_out").or_else(|_| bindings.get("hidden")).unwrap();
-        Ok((read_f16_buffer(&logits), read_f16_buffer(&hidden)))
+        Ok((download_f16_buffer(foundry, &logits), download_f16_buffer(foundry, &hidden)))
     }
 
     let enable_legacy_v_cache_compare = std::env::var("METALLIC_PARITY_COMPARE_V_CACHE")
@@ -1367,9 +1399,9 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
 
         if pos == 0 {
             if let Ok(attn_out) = bindings.get("attn_out") {
-                let attn_data = read_f16_buffer(&attn_out);
+                let attn_data = download_f16_buffer(&mut foundry, &attn_out);
                 if let Ok(v_expanded) = bindings.get("v_expanded") {
-                    let v_data = read_f16_buffer(&v_expanded);
+                    let v_data = download_f16_buffer(&mut foundry, &v_expanded);
                     let expected_len = n_heads * (pos + 1) * head_dim;
                     let len = expected_len.min(attn_data.len()).min(v_data.len());
                     if len > 0 {
@@ -1385,8 +1417,8 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
             if enable_legacy_v_cache_compare
                 && let (Ok(v_tensor), Ok(v_cache_tensor)) = (bindings.get("v_heads"), bindings.get("v_cache_0"))
             {
-                let v_data = read_f16_buffer(&v_tensor);
-                let v_cache_data = read_f16_buffer(&v_cache_tensor);
+                let v_data = download_f16_buffer(&mut foundry, &v_tensor);
+                let v_cache_data = download_f16_buffer(&mut foundry, &v_cache_tensor);
                 let cache_stride = v_cache_tensor.dims().get(1).copied().unwrap_or(0);
                 for kv_head in 0..n_kv_heads {
                     let v_offset = kv_head * head_dim;
@@ -1412,7 +1444,7 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
                     let Ok(v_cache_tensor) = bindings.get(&cache_name) else {
                         continue;
                     };
-                    let v_cache_data = read_f16_buffer(&v_cache_tensor);
+                    let v_cache_data = download_f16_buffer(&mut foundry, &v_cache_tensor);
                     let cache_stride = v_cache_tensor.dims().get(1).copied().unwrap_or(0);
                     let mut layer_max = 0.0f32;
                     let mut layer_avg_sum = 0.0f32;
@@ -1612,9 +1644,10 @@ fn test_dsl_vs_context_pre_norm_parity() -> Result<(), MetalError> {
     }
 
     let dsl_hidden = bindings.get("hidden").unwrap();
-    let dsl_hidden_data = read_f16_buffer(&dsl_hidden);
+    let dsl_hidden_data = download_f16_buffer(&mut foundry, &dsl_hidden);
 
-    let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_hidden_data, &dsl_hidden_data, 0.1);
+    let dsl_hidden_data_sliced = &dsl_hidden_data[..legacy_hidden_data.len()];
+    let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_hidden_data, dsl_hidden_data_sliced, 0.1);
     eprintln!(
         "Pre-final-norm comparison: max_diff={:.4}, avg_diff={:.6}, mismatch={:?}",
         max_diff, avg_diff, first_mismatch
@@ -1718,7 +1751,7 @@ fn test_dsl_vs_context_sdpa_layer0_parity() -> Result<(), MetalError> {
     }
 
     let dsl_attn_out = bindings.get("attn_out").unwrap();
-    let dsl_attn_data = read_f16_buffer(&dsl_attn_out);
+    let dsl_attn_data = download_f16_buffer(&mut foundry, &dsl_attn_out);
 
     let expected_len = legacy_attn_data.len();
     if dsl_attn_data.len() < expected_len {
@@ -1829,14 +1862,14 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     let legacy_embedded = legacy_model.embed(&[token], &mut ctx).unwrap();
     let legacy_out = legacy_layer0_outputs(&legacy_model, &legacy_embedded, &mut ctx).unwrap();
 
-    let ffn_norm_out = read_f16_buffer(&bindings.get("ffn_norm_out").unwrap());
-    let ffn_norm_gamma = read_f16_buffer(&bindings.get("layer.ffn_norm_0").unwrap());
-    let gate = read_f16_buffer(&bindings.get("gate").unwrap());
-    let swiglu_out = read_f16_buffer(&bindings.get("up").unwrap());
-    let proj_out = read_f16_buffer(&bindings.get("proj_out").unwrap());
-    let residual_1 = read_f16_buffer(&bindings.get("residual_1").unwrap());
-    let ffn_out = read_f16_buffer(&bindings.get("ffn_out").unwrap());
-    let hidden = read_f16_buffer(&bindings.get("hidden").unwrap());
+    let ffn_norm_out = download_f16_buffer(&mut foundry, &bindings.get("ffn_norm_out").unwrap());
+    let ffn_norm_gamma = download_f16_buffer(&mut foundry, &bindings.get("layer.ffn_norm_0").unwrap());
+    let gate = download_f16_buffer(&mut foundry, &bindings.get("gate").unwrap());
+    let swiglu_out = download_f16_buffer(&mut foundry, &bindings.get("up").unwrap());
+    let proj_out = download_f16_buffer(&mut foundry, &bindings.get("proj_out").unwrap());
+    let residual_1 = download_f16_buffer(&mut foundry, &bindings.get("residual_1").unwrap());
+    let ffn_out = download_f16_buffer(&mut foundry, &bindings.get("ffn_out").unwrap());
+    let hidden = download_f16_buffer(&mut foundry, &bindings.get("hidden").unwrap());
 
     let legacy_ffn_norm_gamma = tensor_to_f16_vec(&legacy_model.blocks[0].ffn_norm_gamma);
     let (gamma_max, gamma_avg, _) = compare_f16_slices(&legacy_ffn_norm_gamma, &ffn_norm_gamma, 0.0);
@@ -1850,7 +1883,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
 
     // Compare attn_out (SDPA output) - DSL stores in "attn_out"
     // DSL buffer is pre-allocated at max_seq_len×d_model but only seq_len×d_model elements are valid
-    let dsl_attn_out_full = read_f16_buffer(&bindings.get("attn_out").unwrap());
+    let dsl_attn_out_full = download_f16_buffer(&mut foundry, &bindings.get("attn_out").unwrap());
     let attn_out_full_len = dsl_attn_out_full.len();
     let attn_out_valid_len = seq_len * d_model;
     let dsl_attn_out = if attn_out_full_len > attn_out_valid_len {
@@ -1894,8 +1927,8 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     // Compare Q heads and Q rotated to trace divergence source
     // --- Legacy vs DSL K/V Projection Comparison ---
     if let (Ok(dsl_k_proj_arg), Ok(dsl_v_proj_arg)) = (bindings.get("k"), bindings.get("v")) {
-        let dsl_k_proj = read_f16_buffer(&dsl_k_proj_arg);
-        let dsl_v_proj = read_f16_buffer(&dsl_v_proj_arg);
+        let dsl_k_proj = download_f16_buffer(&mut foundry, &dsl_k_proj_arg);
+        let dsl_v_proj = download_f16_buffer(&mut foundry, &dsl_v_proj_arg);
 
         let (max_diff_k, avg_diff_k, first_k) = compare_f16_slices(&legacy_out.k_proj, &dsl_k_proj, 0.1);
         let (max_diff_v, avg_diff_v, first_v) = compare_f16_slices(&legacy_out.v_proj, &dsl_v_proj, 0.1);
@@ -1941,7 +1974,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
 
     // Check attn_k weight
     if let Ok(dsl_k_weight) = bindings.get("layer.attn_k_0") {
-        let dsl_k = read_f16_buffer(&dsl_k_weight);
+        let dsl_k = download_f16_buffer(&mut foundry, &dsl_k_weight);
         let legacy_k = if let Some(w) = &block.attn_k_weight_canon {
             // In canonical mode, weight might be transposed or packed
             tensor_to_f16_vec(&w.data)
@@ -2023,7 +2056,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     // Check attn_k bias
     eprintln!("\n--- K Bias Analysis ---");
     if let Ok(dsl_k_bias_arg) = bindings.get("layer.attn_k_bias_0") {
-        let dsl_k_bias = read_f16_buffer(&dsl_k_bias_arg);
+        let dsl_k_bias = download_f16_buffer(&mut foundry, &dsl_k_bias_arg);
 
         // Legacy K bias is in attn_qkv_bias at offset d_model
         let d_model = dsl_model.architecture().d_model;
@@ -2049,7 +2082,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     eprintln!("\n--- Q/K/V Path Analysis ---");
 
     // Compare Q projection output (before KvRearrange)
-    let dsl_q_proj = read_f16_buffer(&bindings.get("q").unwrap());
+    let dsl_q_proj = download_f16_buffer(&mut foundry, &bindings.get("q").unwrap());
     eprintln!(
         "  DSL q (before rearrange) len: {}, first 5: {:?}",
         dsl_q_proj.len(),
@@ -2057,8 +2090,8 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     );
 
     // Check if the anomaly is in q_proj or introduced by KvRearrange
-    let dsl_q_heads = read_f16_buffer(&bindings.get("q_heads").unwrap());
-    let dsl_q_rot = read_f16_buffer(&bindings.get("q_rot").unwrap());
+    let dsl_q_heads = download_f16_buffer(&mut foundry, &bindings.get("q_heads").unwrap());
+    let dsl_q_rot = download_f16_buffer(&mut foundry, &bindings.get("q_rot").unwrap());
     eprintln!(
         "  DSL q_heads len: {}, first 5: {:?}",
         dsl_q_heads.len(),
@@ -2101,7 +2134,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     );
 
     // K comparison (after repeat)
-    let dsl_k_expanded = read_f16_buffer(&bindings.get("k_expanded").unwrap());
+    let dsl_k_expanded = download_f16_buffer(&mut foundry, &bindings.get("k_expanded").unwrap());
     let k_compare_len = d_model.min(dsl_k_expanded.len()).min(legacy_out.k_expanded.len());
     let (k_max, k_avg, _) = compare_f16_slices(&legacy_out.k_expanded[..k_compare_len], &dsl_k_expanded[..k_compare_len], 0.1);
     eprintln!(
@@ -2127,7 +2160,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     );
 
     // V comparison (after repeat)
-    let dsl_v_expanded = read_f16_buffer(&bindings.get("v_expanded").unwrap());
+    let dsl_v_expanded = download_f16_buffer(&mut foundry, &bindings.get("v_expanded").unwrap());
     let v_compare_len = d_model.min(dsl_v_expanded.len()).min(legacy_out.v_expanded.len());
     let (v_max, v_avg, _) = compare_f16_slices(&legacy_out.v_expanded[..v_compare_len], &dsl_v_expanded[..v_compare_len], 0.1);
     eprintln!(
@@ -2166,7 +2199,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     eprintln!("  Q weight dims: {:?}, dtype: {:?}", q_weight.dims(), q_weight.dtype());
     eprintln!("  Q bias dims: {:?}, dtype: {:?}", q_bias.dims(), q_bias.dtype());
 
-    let q_bias_data = read_f16_buffer(&q_bias);
+    let q_bias_data = download_f16_buffer(&mut foundry, &q_bias);
     let q_bias_max = q_bias_data.iter().map(|x| x.to_f32().abs()).fold(0.0f32, f32::max);
     eprintln!(
         "  Q bias first 5: {:?}",
@@ -2178,7 +2211,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     eprintln!("  Q bias max abs: {:.4}", q_bias_max);
 
     // Check norm_out (input to Q GEMV)
-    let norm_out_data = read_f16_buffer(&bindings.get("norm_out").unwrap());
+    let norm_out_data = download_f16_buffer(&mut foundry, &bindings.get("norm_out").unwrap());
     let norm_out_max = norm_out_data.iter().map(|x| x.to_f32().abs()).fold(0.0f32, f32::max);
     eprintln!(
         "  norm_out (GEMV input) first 5: {:?}",
@@ -2252,9 +2285,11 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     let cross_params = RmsNormParamsResolved {
         feature_dim: d_model as u32,
         total_elements: d_model as u32,
+        epsilon: 1e-6,
     };
     let cross_kernel = RmsNormKernel::new(
         &metallic_foundry::types::TensorArg::from_tensor(&legacy_res1_tensor),
+        None,
         &metallic_foundry::types::TensorArg::from_tensor(&cross_output),
         &bindings.get("layer.ffn_norm_0").unwrap(),
         cross_params,
@@ -2317,7 +2352,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     eprintln!("  Gate weight dims: {:?}", gate_dims);
 
     // Compare Legacy vs DSL gate weight
-    let dsl_gate_weight_data = read_f16_buffer(&gate_weight);
+    let dsl_gate_weight_data = download_f16_buffer(&mut foundry, &gate_weight);
     if let Some(legacy_gate) = &legacy_model.blocks[0].ffn_gate {
         let legacy_gate_slice = legacy_gate.as_slice();
         eprintln!(
@@ -2531,10 +2566,11 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
         // After embedding, compare with legacy embedding
         if step_name == "Embedding" {
             let dsl_hidden = bindings.get("hidden").unwrap();
-            let dsl_hidden_data = read_f16_buffer(&dsl_hidden);
+            let dsl_hidden_data = download_f16_buffer(&mut foundry, &dsl_hidden);
             let legacy_embed_data: Vec<f16> = legacy_embedded.as_slice().iter().map(|v: &f16| f16::from_f32(v.to_f32())).collect();
 
-            let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_embed_data, &dsl_hidden_data, 0.001);
+            let dsl_hidden_data_sliced = &dsl_hidden_data[..legacy_embed_data.len()];
+            let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_embed_data, dsl_hidden_data_sliced, 0.001);
             eprintln!(
                 "  → hidden: max_diff={:.6}, avg_diff={:.8}, mismatch={:?}",
                 max_diff, avg_diff, first_mismatch
@@ -2553,8 +2589,9 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
         // will always show a diff. We log stats but compare after the final RmsNorm step.
         if step_name == "Repeat" {
             let dsl_hidden = bindings.get("hidden").unwrap();
-            let dsl_hidden_data = read_f16_buffer(&dsl_hidden);
-            let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_hidden_pre_data, &dsl_hidden_data, 0.1);
+            let dsl_hidden_data = download_f16_buffer(&mut foundry, &dsl_hidden);
+            let dsl_hidden_data_sliced = &dsl_hidden_data[..legacy_hidden_pre_data.len()];
+            let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_hidden_pre_data, dsl_hidden_data_sliced, 0.1);
             eprintln!(
                 "  → hidden after layers (pre-final norm): max_diff={:.4}, avg_diff={:.6}, mismatch={:?}",
                 max_diff, avg_diff, first_mismatch
@@ -2575,8 +2612,9 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
                 Ok(arg) => arg,
                 Err(_) => bindings.get("hidden").unwrap(),
             };
-            let dsl_hidden_data = read_f16_buffer(&dsl_final);
-            let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_hidden_data, &dsl_hidden_data, 0.1);
+            let dsl_hidden_data = download_f16_buffer(&mut foundry, &dsl_final);
+            let dsl_hidden_data_sliced = &dsl_hidden_data[..legacy_hidden_data.len()];
+            let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_hidden_data, dsl_hidden_data_sliced, 0.1);
             eprintln!(
                 "  → hidden after final norm: max_diff={:.4}, avg_diff={:.6}, mismatch={:?}",
                 max_diff, avg_diff, first_mismatch
@@ -2593,7 +2631,7 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
 
     // Read logits for final comparison
     let dsl_logits = bindings.get("logits").unwrap();
-    let dsl_logits_data = read_f16_buffer(&dsl_logits);
+    let dsl_logits_data = download_f16_buffer(&mut foundry, &dsl_logits);
     eprintln!("DSL logits shape: {:?}", dsl_logits.dims());
     eprintln!("DSL logits first 10: {:?}", &dsl_logits_data[..10.min(dsl_logits_data.len())]);
 
@@ -2601,7 +2639,8 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
     // STEP 5: Compare logits
     // =========================================================================
     eprintln!("\n--- Comparing Logits ---");
-    let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_logits_data, &dsl_logits_data, 0.1);
+    let dsl_logits_data_sliced = &dsl_logits_data[..legacy_logits_data.len()];
+    let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_logits_data, dsl_logits_data_sliced, 0.1);
     eprintln!(
         "Logits comparison: max_diff={:.4}, avg_diff={:.6}, first_mismatch={:?}",
         max_diff, avg_diff, first_mismatch
@@ -2612,10 +2651,11 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
 
         // Check hidden state after forward (before output projection)
         let dsl_hidden = bindings.get("hidden").unwrap();
-        let dsl_hidden_data = read_f16_buffer(&dsl_hidden);
+        let dsl_hidden_data = download_f16_buffer(&mut foundry, &dsl_hidden);
         let legacy_hidden_data: Vec<f16> = legacy_hidden.as_slice().iter().map(|v: &f16| f16::from_f32(v.to_f32())).collect();
 
-        let (hidden_max, hidden_avg, hidden_mismatch) = compare_f16_slices(&legacy_hidden_data, &dsl_hidden_data, 0.01);
+        let dsl_hidden_data_sliced = &dsl_hidden_data[..legacy_hidden_data.len()];
+        let (hidden_max, hidden_avg, hidden_mismatch) = compare_f16_slices(&legacy_hidden_data, dsl_hidden_data_sliced, 0.01);
         eprintln!(
             "Hidden state comparison: max_diff={:.4}, avg_diff={:.6}, first_mismatch={:?}",
             hidden_max, hidden_avg, hidden_mismatch
@@ -2725,6 +2765,7 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
     bindings.set_global("total_elements_slice", (n_kv_heads * kv_seq_len * head_dim).to_string());
     bindings.set_global("total_elements_repeat", (n_heads * kv_seq_len * head_dim).to_string());
     bindings.set_global("total_elements_write", (n_kv_heads * seq_len * head_dim).to_string());
+    bindings.set_global("m", "1".to_string());
 
     // Set up input_ids for DSL
     let input_buffer = {
@@ -2766,8 +2807,9 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
 
         embedding_step.execute(&mut foundry, &mut bindings).unwrap();
         let dsl_hidden = bindings.get("hidden").unwrap();
-        let dsl_hidden_data = read_f16_buffer(&dsl_hidden);
-        let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_embed_data, &dsl_hidden_data, 0.0);
+        let dsl_hidden_data = download_f16_buffer(&mut foundry, &dsl_hidden);
+        let dsl_hidden_data_slice = &dsl_hidden_data[..legacy_embed_data.len()];
+        let (max_diff, avg_diff, first_mismatch) = compare_f16_slices(&legacy_embed_data, dsl_hidden_data_slice, 0.0);
         eprintln!(
             "Embedding parity: max_diff={:.6} avg_diff={:.8} mismatch={:?}",
             max_diff, avg_diff, first_mismatch
@@ -2791,7 +2833,7 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
 
     // Check attn_q weight binding
     if let Ok(attn_q) = bindings.get("layer.attn_q_0") {
-        let attn_q_data = read_f16_buffer(&attn_q);
+        let attn_q_data = download_f16_buffer(&mut foundry, &attn_q);
         eprintln!(
             "DSL attn_q_0 dims: {:?}, first 5: {:?}",
             attn_q.dims(),
@@ -2811,7 +2853,7 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
         let tol = if strict { strict_tolerance } else { tolerance };
         match bindings.get(dsl_name) {
             Ok(arg) => {
-                let dsl = read_f16_buffer(&arg);
+                let dsl = download_f16_buffer(&mut foundry, &arg);
                 if dsl.len() < legacy.len() {
                     eprintln!(
                         "❌ FAIL {:30} length mismatch: legacy_len={} dsl_len={}",
@@ -2827,8 +2869,15 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
                 let passed = max_diff <= tol;
                 let status = if passed { "✅ PASS" } else { "❌ FAIL" };
                 eprintln!(
-                    "{} {:30} max_diff={:.6} avg_diff={:.8} mismatch={:?}",
-                    status, name, max_diff, avg_diff, first_mismatch
+                    "{} {:30} max_diff={:.6} avg_diff={:.8} mismatch={:?} (dims={:?} offset={} buf_len={})",
+                    status,
+                    name,
+                    max_diff,
+                    avg_diff,
+                    first_mismatch,
+                    arg.dims(),
+                    arg.offset(),
+                    arg.buffer.as_ref().unwrap().length()
                 );
                 if !passed {
                     eprintln!("   Legacy[0..5]: {:?}", &legacy[..5.min(legacy.len())]);

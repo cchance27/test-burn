@@ -5,7 +5,7 @@
 #include <metal_stdlib>
 using namespace metal;
 
-constant float EPS = 1e-6f;
+// constant float EPS = 1e-6f; // Removed in favor of RmsNormParams.epsilon
 constant uint THREADS_PER_ROW = 256;
 
 // RmsNormParams struct is injected by Foundry via struct_defs()
@@ -23,6 +23,7 @@ ALWAYS_INLINE float rmsnorm_compute_inv_rms(
     const uint row_idx,
     const uint lane_id,
     const uint warp_id,
+    const float epsilon,
     threadgroup float *tg_inv_rms
 ) {
     // if (feature_dim == 0u) { // Restore original logic below
@@ -61,7 +62,7 @@ ALWAYS_INLINE float rmsnorm_compute_inv_rms(
         sum_sq = simd_sum(sum_sq);
         
         if (lane_id == 0u) {
-            tg_inv_rms[0] = rsqrt(sum_sq / (float)feature_dim + EPS);
+            tg_inv_rms[0] = rsqrt(sum_sq / (float)feature_dim + epsilon);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -132,7 +133,7 @@ void run_rmsnorm_core(
     
     // Phase 1: Compute inv_rms using parallel reduction
     float inv_rms = rmsnorm_compute_inv_rms<Policy>(
-        input, scale_bytes, feature_dim, row_idx, lane_id, warp_id, tg_inv_rms
+        input, scale_bytes, feature_dim, row_idx, lane_id, warp_id, params->epsilon, tg_inv_rms
     );
     
     // Phase 2: Apply normalization
@@ -200,7 +201,7 @@ kernel void rmsnorm_kernel_f16(
 
         sum_sq = simd_sum(sum_sq);
         if (lane_id == 0u) {
-            tg_inv_rms_storage = rsqrt(sum_sq / (float)feature_dim + EPS);
+            tg_inv_rms_storage = rsqrt(sum_sq / (float)feature_dim + params->epsilon);
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);

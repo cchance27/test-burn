@@ -42,7 +42,7 @@ pub struct FusedGemvArgs {
     #[arg(buffer = 0)]
     pub weights: TensorArg,
     #[arg(buffer = 1)]
-    pub scales: TensorArg,
+    pub scales: Option<TensorArg>,
     #[arg(buffer = 2)]
     pub input: TensorArg,
     #[arg(buffer = 3)]
@@ -61,6 +61,8 @@ pub struct FusedGemvArgs {
     pub alpha: f32,
     #[arg(buffer = 10)]
     pub gamma: TensorArg,
+    #[arg(buffer = 11)]
+    pub epsilon: f32,
 }
 
 #[typetag::serde(name = "FusedGemv")]
@@ -117,7 +119,11 @@ impl CompiledStep for CompiledFusedGemvStep {
         let weights_args = loader.bind(fast_bindings, &self.weights_resolved);
 
         let weights = weights_args[0].clone();
-        let scales = weights_args[1].clone();
+        let scales = if weights_args.len() > 1 {
+            Some(weights_args[1].clone())
+        } else {
+            None
+        };
         let output = fast_bindings
             .get(self.output_idx)
             .ok_or(MetalError::InputNotFound("output".into()))?;
@@ -146,6 +152,7 @@ impl CompiledStep for CompiledFusedGemvStep {
             has_bias,
             alpha: 1.0,
             gamma: TensorArg::from_tensor(gamma),
+            epsilon: bindings.get_var("rms_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1e-6),
         };
 
         let kernel = get_fused_gemv_kernel(self.step.strategy, policy);
@@ -186,7 +193,7 @@ fn get_fused_gemv_kernel(_strategy: GemvStrategy, policy: Arc<dyn MetalPolicy>) 
         CompoundKernel::new(&kernel_name)
             .with_manual_output(true)
             .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)) // Defines row_idx, lane_id
-            .prologue(RmsNormComputeStage::new(2, 4))
+            .prologue(RmsNormComputeStage::new(2, 4, 11))
             .main(VectorizedDotStage::new(policy_clone.clone()).with_norm(10, "inv_rms"))
             .epilogue(WarpReduceStage::sum("partial_dot", "row_sum"))
             .epilogue(WarpWriteOutputNoResidualStage::new())

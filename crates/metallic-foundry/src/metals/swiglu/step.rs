@@ -337,8 +337,10 @@ impl CompiledStep for CompiledFusedSwigluStep {
         let loader_up = policy_up.loader_stage();
         let args_up = loader_up.bind(_fast_bindings, &self.wu_resolved);
 
-        let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
-        let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
+        let w_gate_arg = args_gate[0].clone();
+        let s_gate = if args_gate.len() > 1 { Some(args_gate[1].clone()) } else { None };
+        let w_up_arg = args_up[0].clone();
+        let s_up = if args_up.len() > 1 { Some(args_up[1].clone()) } else { None };
 
         let args = FusedFfnArgs {
             w_gate: w_gate_arg,
@@ -355,6 +357,11 @@ impl CompiledStep for CompiledFusedSwigluStep {
             b_up,
             has_b_gate,
             has_b_up,
+            epsilon: bindings
+                .get_var("rms_eps")
+                .and_then(|v| v.parse::<f32>().ok())
+                .or_else(|| Some(self.step.epsilon))
+                .unwrap_or(1e-6),
         };
 
         let kernel = get_fused_ffn_kernel(policy_gate);
@@ -384,6 +391,7 @@ pub struct FusedFfnSwiGluRmsNormStep {
     pub output: Ref,
     #[serde(default = "default_wpb")]
     pub weights_per_block: u32,
+    pub epsilon: Option<f32>,
 }
 
 #[derive(Debug, Clone)]
@@ -398,6 +406,7 @@ pub struct CompiledFusedFfnSwiGluRmsNormStep {
     pub b_up_idx: Option<usize>,
     pub output_idx: usize,
     pub weights_per_block: u32,
+    pub epsilon: Option<f32>,
 }
 
 #[derive(Debug, KernelArgs)]
@@ -405,11 +414,11 @@ pub struct FusedFfnArgs {
     #[arg(buffer = 0)]
     pub w_gate: TensorArg,
     #[arg(buffer = 1)]
-    pub s_gate: TensorArg,
+    pub s_gate: Option<TensorArg>,
     #[arg(buffer = 2)]
     pub w_up: TensorArg,
     #[arg(buffer = 3)]
-    pub s_up: TensorArg,
+    pub s_up: Option<TensorArg>,
     #[arg(buffer = 4)]
     pub input: TensorArg,
     #[arg(buffer = 5, output)]
@@ -430,6 +439,8 @@ pub struct FusedFfnArgs {
     pub has_b_gate: u32,
     #[arg(buffer = 13)]
     pub has_b_up: u32,
+    #[arg(buffer = 14)]
+    pub epsilon: f32,
 }
 
 #[typetag::serde(name = "FusedFfnSwiGluRmsNorm")]
@@ -491,6 +502,7 @@ impl Step for FusedFfnSwiGluRmsNormStep {
             b_up_idx,
             output_idx,
             weights_per_block: self.weights_per_block,
+            epsilon: self.epsilon,
         })]
     }
 }
@@ -519,8 +531,10 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let loader_up = policy_up.loader_stage();
         let args_up = loader_up.bind(fast_bindings, &self.w_up_resolved);
 
-        let (w_gate_arg, s_gate) = (args_gate[0].clone(), args_gate[1].clone());
-        let (w_up_arg, s_up) = (args_up[0].clone(), args_up[1].clone());
+        let w_gate_arg = args_gate[0].clone();
+        let s_gate = if args_gate.len() > 1 { Some(args_gate[1].clone()) } else { None };
+        let w_up_arg = args_up[0].clone();
+        let s_up = if args_up.len() > 1 { Some(args_up[1].clone()) } else { None };
 
         let (b_gate, has_b_gate) = if let Some(idx) = self.b_gate_idx {
             (TensorArg::from_tensor(get(idx)?), 1u32)
@@ -581,6 +595,11 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             b_up,
             has_b_gate,
             has_b_up,
+            epsilon: bindings
+                .get_var("rms_eps")
+                .and_then(|v| v.parse::<f32>().ok())
+                .or(self.epsilon)
+                .unwrap_or(1e-6),
         };
 
         let kernel = get_fused_ffn_kernel(policy_gate);
@@ -608,7 +627,7 @@ fn get_fused_ffn_kernel(policy: std::sync::Arc<dyn MetalPolicy>) -> std::sync::A
             .with_manual_output(true)
             .prologue(WarpLayoutStage::row_major().with_warps(8))
             // Activation input is always F16; quantization only applies to weight loading stages.
-            .prologue(RmsNormComputeStage::new(4, 6))
+            .prologue(RmsNormComputeStage::new(4, 6, 14))
             .main(FfnDualProjectStage::new(policy_clone.clone()).with_norm(9, "inv_rms"))
             .epilogue(FfnWarpReduceStage)
             .epilogue(FfnSwigluWriteStage::new())

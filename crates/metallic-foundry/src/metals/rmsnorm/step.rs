@@ -14,7 +14,8 @@ pub struct RmsNormStep {
     pub input: Ref,
     pub output: Ref,
     pub gamma: Ref,
-    pub epsilon: Option<f32>, // DEBT: Not used in kernel yet (hardcoded 1e-6)
+    /// Optional epsilon override. If unset, falls back to model global `rms_eps`, then 1e-6.
+    pub epsilon: Option<f32>,
     pub feature_dim: DynamicValue<u32>,
     pub total_elements: DynamicValue<u32>,
 }
@@ -99,6 +100,16 @@ impl CompiledStep for CompiledRmsNormStep {
             _ => input.dims.iter().product::<usize>() as u32,
         };
 
+        // Resolve epsilon:
+        // 1. Model metadata (rms_eps global)
+        // 2. DSL epsilon field
+        // 3. Default 1e-6
+        let epsilon = _bindings
+            .get_var("rms_eps")
+            .and_then(|v| v.parse::<f32>().ok())
+            .or(self.step.epsilon)
+            .unwrap_or(1e-6);
+
         let policy = crate::policy::resolve_policy(input.dtype.into());
         let loader = policy.loader_stage();
 
@@ -107,15 +118,16 @@ impl CompiledStep for CompiledRmsNormStep {
         let params = RmsNormParamsResolved {
             feature_dim,
             total_elements,
+            epsilon,
         };
 
-        let args = RmsNorm {
-            input: input_args[0].clone(),
-            scale_bytes: input_args[1].clone(),
-            output: TensorArg::from_tensor(output),
-            gamma: TensorArg::from_tensor(gamma),
+        let args = RmsNorm::new(
+            &input_args[0].clone(),
+            if input_args.len() > 1 { Some(input_args[1].clone()) } else { None },
+            &TensorArg::from_tensor(output),
+            &TensorArg::from_tensor(gamma),
             params,
-        };
+        );
 
         // Dispatch: per row (warp)
         let n_rows = total_elements / feature_dim;
@@ -208,6 +220,7 @@ impl crate::compound::Stage for RmsNormStandaloneStage {
 struct RmsNormParams {
     uint feature_dim;
     uint total_elements;
+    float epsilon;
 };
 "#
         .to_string()
@@ -225,6 +238,7 @@ fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKerne
         let dummy_params = RmsNormParamsResolved {
             feature_dim: 0,
             total_elements: 0,
+            epsilon: 1e-6,
         };
         let stage = RmsNormStandaloneStage {
             params: dummy_params,

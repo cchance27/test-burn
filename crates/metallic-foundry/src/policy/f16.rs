@@ -14,7 +14,8 @@ use crate::{
     block_size = 1,
     vector_load_size = 4,
     unroll_factor = 4,
-    active_thread_count = 32
+    active_thread_count = 32,
+    has_scale = false
 )]
 pub struct PolicyF16;
 
@@ -27,11 +28,7 @@ impl LoaderStage for PolicyF16 {
     fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]> {
         use smallvec::smallvec;
         let tensor = fast_bindings.get(resolved.weights).expect("F16 weight bound");
-
-        // Match existing behavior: [weight, dummy_scale]
-        // where dummy_scale is just the weight again (unused by kernel)
-        // DEBT: We should avoid this, or at least assess is as it seems like a hack and might affect memory?
-        smallvec![tensor.clone(), tensor.clone()]
+        smallvec![tensor.clone()]
     }
     fn quantization_type(&self) -> std::sync::Arc<dyn super::MetalPolicyRuntime> {
         std::sync::Arc::new(PolicyF16)

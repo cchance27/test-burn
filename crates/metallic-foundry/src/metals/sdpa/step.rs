@@ -535,10 +535,16 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
 
         // 2. Allocate Temps (scores and probs) -> Size = n_heads * m * kv_seq_len
         // For M>1 prefill, each query produces kv_seq_len scores
-        // PADDING: Align M to 32 to prevent GEMM tile overwrites between heads.
-        let m_alignment = if m > 1 { 32 } else { 1 };
-        let padded_m = (m + m_alignment - 1) / m_alignment * m_alignment;
+        // Use default tile config (32x32) - auto_select was causing regression.
+        //
+        // NOTE: We pad the scratch M-stride for M>1 to keep head slices isolated even if a kernel
+        // writes full tiles. For M=1 (decode) we avoid extra work to preserve throughput; the GEMM
+        // epilogue uses safe stores for edge tiles so decode remains correct without padding.
+        let tile_config = TileConfig::default();
+        let bm = tile_config.tile_sizes().0;
+        let padded_m = if m > 1 { ((m + bm - 1) / bm) * bm } else { m };
 
+        // Re-allocate Temps if logic changed (scratch cache handles resizing)
         let (scores_all, probs_all) = crate::metals::sdpa::scratch::get_sdpa_scratch_f16(foundry, n_heads, padded_m, kv_seq_len)?;
 
         // Softmax scaling is applied in the QK matmul (alpha=scale). For softmax itself, we use 1.0.
@@ -553,14 +559,9 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
 
         let d_model_dim = (n_heads as usize) * (head_dim as usize);
 
-        // NOTE: The old GEMV fast-path for small M reused GemvV2 kernels that are designed
-        // for quantized weight projections, not attention activations, and produced incorrect
-        // results (nonsense outputs in decode and small prefill). For correctness we always
-        // use the GEMM path here. We can re-introduce a dedicated small-M attention kernel later.
         {
             // =========== Batched GEMM over heads (M>=1) ===========
-
-            let tile_config = TileConfig::default();
+            // tile_config is already selected above
 
             // Get GEMM kernels for Q@K^T and Probs@V
             // Q@K^T: [M, head_dim] @ [head_dim, kv_seq_len] = [M, kv_seq_len]

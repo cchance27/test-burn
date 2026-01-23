@@ -35,6 +35,11 @@ pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
         OptimizationMetadata::default()
     }
 
+    /// Whether this policy uses a separate scales buffer.
+    fn has_scale(&self) -> bool {
+        true
+    }
+
     /// Metal code to initialize policy params from kernel args.
     /// E.g., "pp.matrix = matrix; pp.scales = scale_bytes;"
     fn init_params_code(&self) -> &'static str {

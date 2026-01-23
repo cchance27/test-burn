@@ -162,7 +162,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)); // Defines row_idx, lane_id
 
     if cfg.with_norm {
-        builder = builder.prologue(RmsNormComputeStage::new(2, 4));
+        builder = builder.prologue(RmsNormComputeStage::new(cfg.k, cfg.k, 10));
     }
 
     let mut dot_stage = VectorizedDotStage::new(std::sync::Arc::new(PolicyQ8));
@@ -180,7 +180,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
 
     let args = FusedGemvArgs {
         weights: TensorArg::from_tensor(&weights),
-        scales: TensorArg::from_tensor(&scales),
+        scales: Some(TensorArg::from_tensor(&scales)),
         input: TensorArg::from_tensor(&input),
         output: TensorArg::from_tensor(&output),
         k_dim: cfg.k as u32,
@@ -198,6 +198,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         } else {
             TensorArg::from_tensor(&input)
         }, // Dummy if unused
+        epsilon: 1e-6,
     };
 
     let dispatch = warp_dispatch_config(cfg.n as u32);

@@ -107,6 +107,7 @@ fn test_fused_ffn_swiglu_rmsnorm_parity_m2() -> Result<(), Box<dyn std::error::E
         b_up: Some("b_up".into()),
         output: "output".into(),
         weights_per_block: 32,
+        epsilon: Some(1e-6),
     };
 
     fused.execute(&mut foundry, &mut bindings)?;
@@ -224,6 +225,7 @@ fn test_fused_ffn_swiglu_rmsnorm_q8_parity_m2() -> Result<(), Box<dyn std::error
         b_up: Some("b_up".into()),
         output: "output".into(),
         weights_per_block: 32,
+        epsilon: Some(1e-6),
     };
 
     fused.execute(&mut foundry, &mut bindings)?;

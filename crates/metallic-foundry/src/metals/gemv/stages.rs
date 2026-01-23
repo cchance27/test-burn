@@ -107,11 +107,17 @@ impl Stage for VectorizedDotStage {
                 metal_type: weights_type,
                 buffer_index: 0,
             },
+            // NOTE: Some policies (e.g. F16) do not use scales at runtime, but many shared GEMV
+            // helpers reference `scale_bytes` in their signature. Keep it in the ABI and bind it
+            // to `None`/a dummy value when unused.
             BufferArg {
                 name: "scale_bytes",
                 metal_type: "const device uchar*",
                 buffer_index: 1,
             },
+        ];
+
+        args.extend([
             BufferArg {
                 name: "input",
                 metal_type: "const device half*",
@@ -132,7 +138,7 @@ impl Stage for VectorizedDotStage {
                 metal_type: "constant uint&",
                 buffer_index: 6,
             },
-        ];
+        ]);
 
         if let Some(idx) = self.gamma_buffer {
             args.push(BufferArg {
