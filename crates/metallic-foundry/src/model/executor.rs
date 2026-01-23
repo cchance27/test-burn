@@ -1303,15 +1303,7 @@ impl CompiledModel {
         // Set `METALLIC_DISABLE_BATCHED_PREFILL=1` to force fully sequential prefill for isolation.
         let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
         let disable_batched_prefill_env = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
-        let force_batched_prefill_env = std::env::var("METALLIC_FORCE_BATCHED_PREFILL").is_ok();
-
-        // DEBT: Batched prefill with a non-zero `start_pos` is currently unstable for multi-turn chat
-        // (prefill over a context that already has KV history). Until we have a robust parity test for
-        // `position_offset > 0` and fix the underlying issue, we fall back to sequential prefill for
-        // continuation prompts.
-        let disable_batched_prefill =
-            profiling_per_kernel || disable_batched_prefill_env || (!force_batched_prefill_env && start_pos > 0 && prompt_len > 1);
-
+        let disable_batched_prefill = profiling_per_kernel || disable_batched_prefill_env;
         // We use "prefill_chunk_size" as the vector width (m) for batched prefill and as a capture
         // batching knob in sequential mode.
         let max_prefill_chunk = bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
@@ -1328,6 +1320,15 @@ impl CompiledModel {
         let mut last_prefill_m = 1usize;
 
         if !disable_batched_prefill {
+            if start_pos > 0 {
+                tracing::debug!(
+                    "Using BATCHED prefill for multi-turn (m={}, start_pos={}). This logic is experimental.",
+                    prompt_tokens.len(),
+                    start_pos
+                );
+            } else {
+                tracing::debug!("Using BATCHED prefill (m={})", prompt_tokens.len());
+            }
             // === BATCHED PREFILL (m>1) ===
             // In debug-sync mode, isolate each chunk into its own synchronous command buffer.
             if !debug_sync && !profiling_per_kernel {
@@ -1386,6 +1387,7 @@ impl CompiledModel {
                 objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
             }
         } else {
+            tracing::info!("Using SEQUENTIAL prefill (m=1)");
             // === SEQUENTIAL PREFILL (seq_len=1) ===
             // Capture the whole prefill to amortize submission overhead, but execute each token
             // with the same semantics as the decode loop.

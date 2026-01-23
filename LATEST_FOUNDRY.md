@@ -34,17 +34,10 @@ This document tracks the state of the Foundry backend transition, highlighting i
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
 
-### 1. Batched Prefill for Multi-Turn (Performance Regression)
-- **Issue:** Batched prefill is hard-disabled when `start_pos > 0`.
-- **Reason:** Potential offset calculation bugs in kernels when history exists.
-- **Impact:** User follow-up questions are processed sequentially (slower) instead of in parallel chunks.
-- **Task:** Fix `position_offset` handling in batched kernels and re-enable.
-
-### 2. SDPA Padding Logic
+### 1. SDPA Padding Logic
 - **Issue:** `padded_m` only aligns to 32 if `m > 1`.
 - **Risk:** GEMM kernels might perform out-of-bounds writes on `m=1` if they assume tile alignment without checking boundaries.
 - **Task:** Audit GEMM write-back logic for `M < TileSize`.
-
 
 ---
 
@@ -202,6 +195,9 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ---
 
 ## Historical Items that we've completed, for posterity.
+### 0. Batched Prefill for Multi-Turn (Performance Regression)
+- **Status:** Fixed. Batched prefill re-enabled with correct `position_offset` handling and experimental warning log.
+- **Impact:** Multi-turn generation now uses batched prefill for improved performance.
 
 ### 1. Quantization System Fragmentation (Critical Architectural Debt)
 - **Issue:** The codebase currently splits quantization logic between a legacy `MetalPolicy` trait (for static generation) and a modern `QuantizationPolicy` trait (for runtime loading), with some kernels bypassing the trait system entirely to match on the `Quantization` enum directly.

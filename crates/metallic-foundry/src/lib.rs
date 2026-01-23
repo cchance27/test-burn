@@ -244,6 +244,7 @@ impl Foundry {
             kernel.bind(&encoder_wrapper);
             let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
             encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
+            encoder.memoryBarrierWithScope(objc2_metal::MTLBarrierScope::Buffers);
 
             // Profiling mode: sync after each dispatch to get actual GPU timing
             // Non-profiling mode: just use dispatch overhead (batched CB wait handles GPU time)
@@ -397,6 +398,7 @@ impl Foundry {
             let config = kernel.dispatch_config();
             let (grid_size, group_size): (objc2_metal::MTLSize, objc2_metal::MTLSize) = config.into();
             encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
+            encoder.memoryBarrierWithScope(objc2_metal::MTLBarrierScope::Buffers);
 
             // Do NOT end encoding or commit - wait for sync() or end_capture()
         } else {
