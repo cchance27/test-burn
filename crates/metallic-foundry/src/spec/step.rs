@@ -62,6 +62,12 @@ impl TensorBindings {
         self.bindings.insert(name.into(), tensor);
     }
 
+    /// Remove a tensor binding.
+    pub fn remove(&mut self, name: &str) -> Option<TensorArg> {
+        let resolved_name = self.interpolate(name.to_string());
+        self.bindings.remove(&resolved_name)
+    }
+
     /// Set (insert or replace) a tensor binding by name.
     ///
     /// Fast-path avoids allocations when `name` does not require interpolation.

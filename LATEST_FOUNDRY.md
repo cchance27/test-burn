@@ -30,6 +30,28 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
 - **F16 Inference Fixed:** Resolved "Unsupported vector width" panic and added guardrails for scale argument binding in non-quantized policies.
 
+### 6. Grow-on-Demand Infrastructure
+Foundry no longer reserves the full model context memory at startup. Instead, it uses a **Geometric Doubling** strategy:
+- **Initial Allocation:** Defaults to 2048 tokens (aligned to 128 for AMX performance).
+- **On-Demand Growth:** When the sequence (prefill or decode) exceeds current capacity, all context-dependent buffers (KV caches, expanded K/V, scratch) are reallocated and doubled.
+- **Max Bound:** Growth respects the `max_context_len` defined in model metadata or overridden by `METALLIC_MAX_CONTEXT_LEN`.
+
+### 7. History Preservation & Stride Alignment
+Growth is seamless and "live" during generation:
+- **Head-by-Head Blit Copy:** Since KV layout is `[heads, capacity, dim]`, a change in `capacity` shifts the memory offset of every head. The system performs a high-speed GPU `blit_copy` to move existing tokens to their new head-relative offsets.
+- **Dynamic Stride Synchronization:** Attention kernels pull the physical `capacity` from `FastBindings` for every dispatch. This ensures that head indexing remains perfectly aligned even if the buffer grew in the previous step.
+
+### 8. Pluggable Eviction
+The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEviction` (fail-fast at max context), the architecture is ready for sliding-window or sparse attention policies by implementing the `evict()` method.
+
+### 9. Post-Review Fixes (Implemented)
+- **Fixed: capacity-dependent intermediates resize correctly:** context-dependent intermediates (`k_expanded`/`v_expanded`, `k_slice`/`v_slice`) are now explicitly reallocated during context growth (no “already bound” short-circuit).
+- **Fixed: max-context override semantics:** `METALLIC_MAX_CONTEXT_LEN` / DSL caps now *cap* runtime max context and are clamped to the model max (never exceed model).
+- **Fixed: RoPE scaling + growth:** RoPE cos/sin tables are sized to the *allocated capacity* and grow incrementally on demand, preserving history via GPU blit copies.
+- **Fixed: storage mode defaults for performance:** hot intermediates now default to `StorageModePrivate` with `METALLIC_INTERMEDIATES_SHARED=1` as a debug/visibility override.
+- **Fixed: test hygiene:** env-mutating context-config tests are now guarded with `serial_test`.
+- **Fixed: avoid panic paths:** growth paths now return typed `MetalError` instead of panicking on missing bindings/buffers.
+
 ---
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
@@ -95,18 +117,13 @@ This document tracks the state of the Foundry backend transition, highlighting i
 
 ## 📅 Verified Backlog (Confirmed Valid 2026-01-21)
 
-### 1. Dynamic Context Length (Fix 2048 Cap)
-- **Status:** **Confirmed.** `CompiledModel::RUNTIME_MAX_SEQ_LEN_CAP` is hardcoded to `2048` in `executor.rs` (L43).
-- **Impact:** Any generation requesting >2048 tokens will crash or be clamped, even if the model supports 32k.
-- **Requirement:** Implement "Grow-on-demand" KV caches (e.g., paging or reallocation) to support full model context without allocating worst-case memory at startup, we should also default to the models max context size as our maximum, unless we're told a maximum at runtime or via our DSL.
-
-### 2. SDPA Optimization (Tile Config)
+### 1. SDPA Optimization (Tile Config)
 - **BLOCKER** Tile Config Auto-Tuning performance rework of auto_select is required, as switching to skinny_m (what auto_select selects), causes the sdpa path to be much slower dropping performance from 163tok/s to 150tok/s for Q8 as an example, meaning we need much better auto selection mechanics.
 - **Status:** **Confirmed.** `sdpa/step.rs` (L597) hardcodes `let tile_config = TileConfig::default();`.
 - **Impact:** Suboptimal performance for prefill. Small `M` or odd-sized `SeqLen` might benefit from different tile shapes (e.g., 32x16 vs 32x32).
 - **Task:** Use `TileConfig::auto_select(m, kv_seq_len)` logic (similar to `gemm` module).
 
-### 3. Advanced Instrumentation (DSL Scopes)
+### 2. Advanced Instrumentation (DSL Scopes)
 - **Status:** **Confirmed.** `executor.rs` loop (L528) iterates steps without pushing structured scopes.
 - **Impact:** TUI metrics are brittle, relying on regex parsing of kernel names (e.g. `Gemm_...`) to guess if something is a "FeedForward" or "Attention" block.
 - **Task:** Implement `foundry.push_scope("Block 0")` in the executor to enable robust, model-agnostic hierarchy.
@@ -244,3 +261,11 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 9. SDPA Head-Stride Safety (Post-Padding Removal) (COMPLETED)
 - **Context:** SDPA scratch (Scores/Probs) is head-major and uses `batch_stride_{c,d} = padded_m * kv_seq_len`.
 - **Mitigation (implemented):** `padded_m` is now aligned to the GEMM tile M dimension for `m > 1` (decode keeps `m=1` to preserve throughput), and a regression test covers `m=17` to ensure head isolation.
+
+### 10. Dynamic Context & History Preservation (COMPLETED)
+- **Issue:** Foundry was hardcoded to 2048 tokens and would crash or lose history when growing history mid-generation.
+- **Fix (implemented):**
+    - Implemented geometric doubling (2x) of KV caches.
+    - Added high-speed GPU `blit_copy` to preserve token history across reallocations.
+    - Synchronized kernel strides with physical buffer capacity via `FastBindings`.
+    - Integrated `sysinfo` for memory-aware pre-allocation.

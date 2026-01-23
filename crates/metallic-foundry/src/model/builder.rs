@@ -58,6 +58,13 @@ impl WeightBundle {
     pub fn tensor_names(&self) -> impl Iterator<Item = &String> {
         self.model.tensors.keys()
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_empty() -> Self {
+        Self {
+            model: crate::gguf::model_loader::GGUFModel::new_empty(),
+        }
+    }
 }
 
 // =============================================================================

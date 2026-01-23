@@ -216,19 +216,11 @@ struct ModelSession {
     input_ids_capacity: usize,
     sample_out_buffers: Vec<crate::types::MetalBuffer>,
     current_pos: usize,
+    context_config: crate::model::ContextConfig,
 }
 
 impl CompiledModel {
     const METALLIC_IGNORE_EOS_STOP_ENV: &'static str = "METALLIC_IGNORE_EOS_STOP";
-    // Foundry currently caps runtime max sequence length to avoid huge persistent allocations
-    // when the spec supports very long contexts (e.g. 32k+). This value must be used consistently
-    // for all KV-related buffers and for the `max_seq_len` global to keep indexing correct.
-    const RUNTIME_MAX_SEQ_LEN_CAP: usize = 2048;
-
-    #[inline]
-    fn runtime_max_seq_len(arch: &crate::spec::Architecture) -> usize {
-        arch.max_seq_len.min(Self::RUNTIME_MAX_SEQ_LEN_CAP).max(1)
-    }
 
     #[inline]
     fn ignore_eos_stop_enabled() -> bool {
@@ -358,14 +350,17 @@ impl CompiledModel {
             return Ok(());
         }
 
-        let (mut bindings, mut fast_bindings) = self.prepare_bindings(foundry)?;
         let arch = self.architecture();
+        let mut context_config = crate::model::ContextConfig::from_architecture(arch, None);
+        context_config.apply_memory_budget(&foundry.device, arch);
+        let (mut bindings, mut fast_bindings) = self.prepare_bindings_with_config(foundry, &context_config)?;
 
-        let max_seq_len = Self::runtime_max_seq_len(arch);
-        bindings.set_int_global("max_seq_len", max_seq_len);
-        bindings.set_global("max_seq_len", max_seq_len.to_string());
+        let max_seq_len = context_config.max_context_len;
+        let allocated_capacity = context_config.allocated_capacity;
+        bindings.set_int_global("max_seq_len", allocated_capacity);
+        bindings.set_global("max_seq_len", allocated_capacity.to_string());
 
-        // Allocate a single prompt/input buffer sized for max_seq_len to avoid per-generation allocations.
+        // Allocate a single prompt/input buffer sized for the full potential context to avoid reallocating IDs.
         let input_ids_full = self.allocate_u32_buffer(foundry, "input_ids_full", max_seq_len)?;
 
         // Seed `input_ids` with a valid buffer. We overwrite it per-step below to point at the sampled-token buffer.
@@ -416,6 +411,7 @@ impl CompiledModel {
             input_ids_capacity: max_seq_len,
             sample_out_buffers,
             current_pos: 0,
+            context_config,
         });
         Ok(())
     }
@@ -424,14 +420,33 @@ impl CompiledModel {
     /// 1. Setting config globals (n_layers, d_model, etc.)
     /// 2. Materializing weight tensors from GGUF using logical name resolution
     /// 3. Allocating intermediate buffers for activations
-    pub fn prepare_bindings(&self, foundry: &mut Foundry) -> Result<(TensorBindings, FastBindings), MetalError> {
+    /// Prepare runtime bindings (weights + intermediates + KV caches) using a caller-provided context config.
+    ///
+    /// Prefer `prepare_bindings()` unless you need to explicitly cap/shape context behavior.
+    pub fn prepare_bindings_with_config(
+        &self,
+        foundry: &mut Foundry,
+        context_config: &crate::model::ContextConfig,
+    ) -> Result<(TensorBindings, FastBindings), MetalError> {
         let mut bindings = TensorBindings::new();
         let mut fast_bindings = FastBindings::new(self.symbol_table.len());
 
         let _gguf = self.weights.gguf_model();
         let arch = &self.spec.architecture;
         let tensor_names = &arch.tensor_names;
-        let max_seq_len = Self::runtime_max_seq_len(arch);
+        let allocated_capacity = context_config.allocated_capacity;
+
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            let estimate = crate::model::ContextConfig::estimate_kv_memory(arch, allocated_capacity);
+            crate::model::ContextConfig::log_system_memory();
+            tracing::debug!(
+                "Context config: max={}, allocated={}, strategy={:?}, estimated KV memory={:.2}MB",
+                context_config.max_context_len,
+                allocated_capacity,
+                context_config.growth_strategy,
+                estimate.kv_cache_bytes as f64 / 1e6
+            );
+        }
 
         // 1. Set config globals for DSL variable interpolation
         bindings.set_global("n_layers", arch.n_layers.to_string());
@@ -689,15 +704,14 @@ impl CompiledModel {
             kv_dim,
         )?;
         // Expanded K/V buffers for GQA (after RepeatKvHeads, same dim as Q).
-        // Must be sized for the runtime max sequence length because they hold repeated history.
-        let expanded_dim = batch * max_seq_len * arch.d_model;
+        // These will grow on demand; initially sized for allocated_capacity.
+        let expanded_dim = batch * allocated_capacity * arch.d_model;
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_expanded", expanded_dim)?;
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_expanded", expanded_dim)?;
 
-        // KV slice buffers for cache reads (sized for runtime max sequence length to avoid reallocation)
-        // These hold the sliced cache [n_kv_heads, current_seq_len, head_dim]
-        // We allocate to max size and track actual usage via globals
-        let kv_slice_dim = arch.n_kv_heads * max_seq_len * head_dim;
+        // KV slice buffers for cache reads
+        // These will grow on demand; initially sized for allocated_capacity.
+        let kv_slice_dim = arch.n_kv_heads * allocated_capacity * head_dim;
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_slice", kv_slice_dim)?;
         self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_slice", kv_slice_dim)?;
 
@@ -706,20 +720,20 @@ impl CompiledModel {
 
         // 6. Allocate KV cache for autoregressive generation
         // Context stores KV already repeated to n_heads (so decode avoids a RepeatKvHeads dispatch).
-        // Shape: [n_heads, max_seq_len, head_dim] per layer
+        // Shape: [n_heads, allocated_capacity, head_dim] per layer
         // We'll create one k_cache and v_cache per layer, named k_cache_0, k_cache_1, etc.
         let head_dim = arch.d_model / arch.n_heads;
         for layer_idx in 0..arch.n_layers {
             let k_cache_name = format!("k_cache_{}", layer_idx);
             let v_cache_name = format!("v_cache_{}", layer_idx);
-            // KV cache: [n_heads, max_seq_len, head_dim]
+            // KV cache: [n_heads, allocated_capacity, head_dim]
             self.allocate_kv_cache(
                 &mut bindings,
                 &mut fast_bindings,
                 foundry,
                 &k_cache_name,
                 arch.n_heads,
-                max_seq_len,
+                allocated_capacity,
                 head_dim,
             )?;
             self.allocate_kv_cache(
@@ -728,19 +742,20 @@ impl CompiledModel {
                 foundry,
                 &v_cache_name,
                 arch.n_heads,
-                max_seq_len,
+                allocated_capacity,
                 head_dim,
             )?;
         }
-        // Store max_seq_len as a global for kernels to use
-        bindings.set_global("max_seq_len", max_seq_len.to_string());
+        // Store current max context as global for kernels to use
+        bindings.set_int_global("max_seq_len", allocated_capacity);
+        bindings.set_global("max_seq_len", allocated_capacity.to_string());
         bindings.set_global("head_dim", head_dim.to_string());
         bindings.set_global("n_kv_heads", arch.n_kv_heads.to_string());
         bindings.set_global("n_heads", arch.n_heads.to_string());
 
-        // 7. Compute and bind RoPE cos/sin caches
-        // These are precomputed based on model config since they're not in GGUF
-        self.compute_and_bind_rope_caches(&mut bindings, &mut fast_bindings, foundry, arch)?;
+        // 7. Compute and bind RoPE cos/sin caches (grow-on-demand, sized to allocated capacity)
+        // These are not stored in GGUF, so we compute/upload them here.
+        self.compute_and_bind_rope_caches(&mut bindings, &mut fast_bindings, foundry, arch, allocated_capacity)?;
 
         // Fail-fast validation: ensure quantized weights/scales bindings are structurally consistent.
         // This prevents silent correctness regressions where a quantized tensor is bound but its
@@ -751,89 +766,203 @@ impl CompiledModel {
         Ok((bindings, fast_bindings))
     }
 
+    /// Prepare runtime bindings using the model defaults, applying memory-budget clamping.
+    pub fn prepare_bindings(&self, foundry: &mut Foundry) -> Result<(TensorBindings, FastBindings), MetalError> {
+        let mut config = crate::model::ContextConfig::from_architecture(self.architecture(), None);
+        config.apply_memory_budget(&foundry.device, self.architecture());
+        self.prepare_bindings_with_config(foundry, &config)
+    }
+
     // NOTE: keep validation helpers outside of hot paths; this runs once at load time.
 
-    /// Compute and bind RoPE cos/sin cache tables.
+    /// Ensure RoPE cos/sin caches cover `rope_len` positions.
     ///
-    /// RoPE caches are not stored in GGUF, so we compute them based on arch config.
-    /// Compute and bind RoPE cos/sin cache tables.
-    ///
-    /// RoPE caches are not stored in GGUF, so we compute them based on arch config.
+    /// RoPE caches are hot-read by the GPU every attention step, so we store them in
+    /// `StorageModePrivate` by default (with a debug override).
     fn compute_and_bind_rope_caches(
         &self,
         bindings: &mut TensorBindings,
         fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         arch: &crate::spec::Architecture,
+        rope_len: usize,
     ) -> Result<(), MetalError> {
-        use half::f16;
-        use objc2_metal::MTLDevice;
-
         let head_dim = arch.d_model / arch.n_heads;
         let dim_half = head_dim / 2;
-        let max_seq_len = arch.max_seq_len.min(4096); // Cap at reasonable size for memory
         let rope_base = arch.rope_base;
 
-        // Compute cos and sin tables
-        let table_size = max_seq_len * dim_half;
-        let mut cos_data: Vec<f16> = vec![f16::ZERO; table_size];
-        let mut sin_data: Vec<f16> = vec![f16::ZERO; table_size];
+        self.ensure_rope_capacity(bindings, fast_bindings, foundry, rope_base, head_dim, dim_half, 0, rope_len)?;
+        tracing::debug!("Prepared RoPE caches: [{}, {}] (rope_base={})", rope_len, dim_half, rope_base);
+        Ok(())
+    }
 
-        for pos in 0..max_seq_len {
-            for i in 0..dim_half {
-                let idx = pos * dim_half + i;
-                let exponent = (2 * i) as f32 / head_dim as f32;
-                let inv_freq = 1.0f32 / rope_base.powf(exponent);
-                let angle = pos as f32 * inv_freq;
-                cos_data[idx] = f16::from_f32(angle.cos());
-                sin_data[idx] = f16::from_f32(angle.sin());
-            }
+    fn ensure_rope_capacity(
+        &self,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        foundry: &mut Foundry,
+        rope_base: f32,
+        head_dim: usize,
+        dim_half: usize,
+        old_len: usize,
+        new_len: usize,
+    ) -> Result<(), MetalError> {
+        use half::f16;
+        use objc2_metal::{MTLBuffer as _, MTLDevice as _, MTLResourceOptions};
+
+        if new_len == 0 || dim_half == 0 {
+            return Err(MetalError::InvalidShape("RoPE cache requires new_len>0 and dim_half>0".into()));
+        }
+        if old_len > new_len {
+            return Err(MetalError::InvalidShape(format!(
+                "RoPE cache cannot shrink: {old_len} -> {new_len}"
+            )));
         }
 
-        // Allocate and fill cos buffer
-        let cos_byte_size = table_size * 2; // F16 = 2 bytes
-        let cos_buffer = foundry
-            .device
-            .0
-            .newBufferWithLength_options(cos_byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
-            .ok_or_else(|| MetalError::OperationFailed("Failed to allocate rope_cos buffer".into()))?;
+        let storage_mode = if std::env::var("METALLIC_ROPE_SHARED").is_ok() {
+            MTLResourceOptions::StorageModeShared
+        } else {
+            MTLResourceOptions::StorageModePrivate
+        };
 
-        unsafe {
-            use objc2_metal::MTLBuffer;
-            let ptr = cos_buffer.contents().as_ptr() as *mut f16;
-            std::ptr::copy_nonoverlapping(cos_data.as_ptr(), ptr, table_size);
-        }
+        let total_elements = new_len
+            .checked_mul(dim_half)
+            .ok_or_else(|| MetalError::InvalidShape("RoPE table size overflow".into()))?;
+        let total_bytes = total_elements
+            .checked_mul(2)
+            .ok_or_else(|| MetalError::InvalidShape("RoPE table byte size overflow".into()))?;
+
+        let alloc_private = |name: &str| -> Result<crate::types::MetalBuffer, MetalError> {
+            let buffer = foundry
+                .device
+                .0
+                .newBufferWithLength_options(total_bytes, storage_mode)
+                .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {name} buffer")))?;
+            Ok(crate::types::MetalBuffer(buffer))
+        };
+
+        // Capture old tensors (if present) before rebinding.
+        let old_cos = bindings.get("rope_cos").ok();
+        let old_sin = bindings.get("rope_sin").ok();
+
+        // Allocate new buffers and bind them.
+        bindings.remove("rope_cos");
+        bindings.remove("rope_sin");
+
+        let new_cos_buf = alloc_private("rope_cos")?;
+        let new_sin_buf = alloc_private("rope_sin")?;
 
         let cos_tensor = TensorArg::from_buffer(
-            crate::types::MetalBuffer(cos_buffer),
+            new_cos_buf.clone(),
             crate::tensor::Dtype::F16,
-            vec![max_seq_len, dim_half],
+            vec![new_len, dim_half],
+            vec![dim_half, 1],
+        );
+        let sin_tensor = TensorArg::from_buffer(
+            new_sin_buf.clone(),
+            crate::tensor::Dtype::F16,
+            vec![new_len, dim_half],
             vec![dim_half, 1],
         );
         self.insert_binding(bindings, fast_bindings, "rope_cos".to_string(), cos_tensor);
-
-        // Allocate and fill sin buffer
-        let sin_buffer = foundry
-            .device
-            .0
-            .newBufferWithLength_options(cos_byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
-            .ok_or_else(|| MetalError::OperationFailed("Failed to allocate rope_sin buffer".into()))?;
-
-        unsafe {
-            use objc2_metal::MTLBuffer;
-            let ptr = sin_buffer.contents().as_ptr() as *mut f16;
-            std::ptr::copy_nonoverlapping(sin_data.as_ptr(), ptr, table_size);
-        }
-
-        let sin_tensor = TensorArg::from_buffer(
-            crate::types::MetalBuffer(sin_buffer),
-            crate::tensor::Dtype::F16,
-            vec![max_seq_len, dim_half],
-            vec![dim_half, 1],
-        );
         self.insert_binding(bindings, fast_bindings, "rope_sin".to_string(), sin_tensor);
 
-        tracing::debug!("Computed RoPE caches: [{}, {}] (rope_base={})", max_seq_len, dim_half, rope_base);
+        // Batch blits into a single command buffer when not already capturing.
+        let nested_capture = foundry.is_capturing();
+        if !nested_capture {
+            foundry.start_capture()?;
+        }
+
+        // Preserve existing history by copying the contiguous prefix.
+        if old_len > 0 {
+            let copy_bytes = old_len
+                .checked_mul(dim_half)
+                .and_then(|v| v.checked_mul(2))
+                .ok_or_else(|| MetalError::InvalidShape("RoPE copy size overflow".into()))?;
+
+            let old_cos = old_cos.ok_or_else(|| MetalError::InvalidOperation("Missing rope_cos during growth".into()))?;
+            let old_sin = old_sin.ok_or_else(|| MetalError::InvalidOperation("Missing rope_sin during growth".into()))?;
+            let old_cos_buf = old_cos
+                .buffer
+                .as_ref()
+                .ok_or_else(|| MetalError::InvalidOperation("rope_cos buffer missing during growth".into()))?;
+            let old_sin_buf = old_sin
+                .buffer
+                .as_ref()
+                .ok_or_else(|| MetalError::InvalidOperation("rope_sin buffer missing during growth".into()))?;
+
+            foundry.blit_copy(old_cos_buf, old_cos.offset, &new_cos_buf, 0, copy_bytes)?;
+            foundry.blit_copy(old_sin_buf, old_sin.offset, &new_sin_buf, 0, copy_bytes)?;
+        }
+
+        // Upload the missing suffix [old_len, new_len).
+        if new_len > old_len {
+            const POS_CHUNK: usize = 1024;
+            let mut pos = old_len;
+            while pos < new_len {
+                let end = (pos + POS_CHUNK).min(new_len);
+                let chunk_len = end - pos;
+                let chunk_elems = chunk_len * dim_half;
+
+                let mut cos_data: Vec<f16> = vec![f16::ZERO; chunk_elems];
+                let mut sin_data: Vec<f16> = vec![f16::ZERO; chunk_elems];
+
+                for p in pos..end {
+                    let local_p = p - pos;
+                    for i in 0..dim_half {
+                        let idx = local_p * dim_half + i;
+                        let exponent = (2 * i) as f32 / head_dim as f32;
+                        let inv_freq = 1.0f32 / rope_base.powf(exponent);
+                        let angle = p as f32 * inv_freq;
+                        cos_data[idx] = f16::from_f32(angle.cos());
+                        sin_data[idx] = f16::from_f32(angle.sin());
+                    }
+                }
+
+                let chunk_bytes = chunk_elems * 2;
+                let staging_cos = foundry
+                    .device
+                    .0
+                    .newBufferWithLength_options(chunk_bytes, MTLResourceOptions::StorageModeShared)
+                    .ok_or_else(|| MetalError::OperationFailed("Failed to allocate RoPE staging buffer".into()))?;
+                let staging_sin = foundry
+                    .device
+                    .0
+                    .newBufferWithLength_options(chunk_bytes, MTLResourceOptions::StorageModeShared)
+                    .ok_or_else(|| MetalError::OperationFailed("Failed to allocate RoPE staging buffer".into()))?;
+
+                unsafe {
+                    let cos_ptr = staging_cos.contents().as_ptr() as *mut f16;
+                    std::ptr::copy_nonoverlapping(cos_data.as_ptr(), cos_ptr, chunk_elems);
+                    let sin_ptr = staging_sin.contents().as_ptr() as *mut f16;
+                    std::ptr::copy_nonoverlapping(sin_data.as_ptr(), sin_ptr, chunk_elems);
+                }
+
+                let dst_offset_bytes = pos * dim_half * 2;
+                foundry.blit_copy(
+                    &crate::types::MetalBuffer(staging_cos),
+                    0,
+                    &new_cos_buf,
+                    dst_offset_bytes,
+                    chunk_bytes,
+                )?;
+                foundry.blit_copy(
+                    &crate::types::MetalBuffer(staging_sin),
+                    0,
+                    &new_sin_buf,
+                    dst_offset_bytes,
+                    chunk_bytes,
+                )?;
+
+                pos = end;
+            }
+        }
+
+        if !nested_capture {
+            let cmd = foundry.end_capture()?;
+            objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+        }
+
         Ok(())
     }
 
@@ -947,17 +1076,27 @@ impl CompiledModel {
     ) -> Result<(), MetalError> {
         use objc2_metal::MTLDevice;
 
+        if size == 0 {
+            return Err(MetalError::InvalidShape(format!("allocate_intermediate '{name}' requires size>0")));
+        }
+
         // Skip if already bound
         if bindings.contains(name) {
             return Ok(());
         }
+
+        let storage_mode = if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
+            objc2_metal::MTLResourceOptions::StorageModeShared
+        } else {
+            objc2_metal::MTLResourceOptions::StorageModePrivate
+        };
 
         // Allocate F16 buffer (2 bytes per element)
         let byte_size = size * 2;
         let buffer = foundry
             .device
             .0
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .newBufferWithLength_options(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(crate::types::MetalBuffer(buffer), crate::tensor::Dtype::F16, vec![size], vec![1]);
@@ -991,12 +1130,18 @@ impl CompiledModel {
             return Ok(());
         }
 
+        let storage_mode = if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
+            objc2_metal::MTLResourceOptions::StorageModeShared
+        } else {
+            objc2_metal::MTLResourceOptions::StorageModePrivate
+        };
+
         let total_elements = rows * cols;
         let byte_size = total_elements * 2; // F16
         let buffer = foundry
             .device
             .0
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .newBufferWithLength_options(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(
@@ -1026,17 +1171,29 @@ impl CompiledModel {
     ) -> Result<(), MetalError> {
         use objc2_metal::MTLDevice;
 
+        if batch == 0 || seq_len == 0 || dim == 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "allocate_intermediate_3d '{name}' requires batch>0, seq_len>0, dim>0"
+            )));
+        }
+
         // Skip if already bound
         if bindings.contains(name) {
             return Ok(());
         }
+
+        let storage_mode = if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
+            objc2_metal::MTLResourceOptions::StorageModeShared
+        } else {
+            objc2_metal::MTLResourceOptions::StorageModePrivate
+        };
 
         let total_elements = batch * seq_len * dim;
         let byte_size = total_elements * 2; // F16 = 2 bytes
         let buffer = foundry
             .device
             .0
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .newBufferWithLength_options(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(
@@ -1114,6 +1271,194 @@ impl CompiledModel {
 
         self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
         tracing::trace!("Allocated KV cache '{}' [{}, {}, {}]", name, n_heads, max_seq_len, head_dim);
+
+        Ok(())
+    }
+
+    /// Ensure that KV caches and related buffers have enough capacity for the requested length.
+    /// Grows buffers on-demand if needed, respecting alignment and max context limits.
+    fn ensure_kv_capacity(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        context_config: &mut crate::model::context::ContextConfig,
+        current_pos: usize,
+        required_len: usize,
+    ) -> Result<(), MetalError> {
+        if required_len <= context_config.allocated_capacity {
+            return Ok(());
+        }
+
+        if required_len > context_config.max_context_len {
+            return Err(MetalError::InvalidOperation(format!(
+                "Requested context length {} exceeds maximum allowed {}",
+                required_len, context_config.max_context_len
+            )));
+        }
+
+        // Calculate new capacity using growth strategy
+        let mut new_capacity = match context_config.growth_strategy {
+            crate::model::context::GrowthStrategy::FullReserve => context_config.max_context_len,
+            crate::model::context::GrowthStrategy::GrowOnDemand { growth_factor, .. } => {
+                let grown = (context_config.allocated_capacity as f32 * growth_factor) as usize;
+                grown.max(required_len).min(context_config.max_context_len)
+            }
+        };
+
+        // Enforce alignment to 128 elements to keep kernels happy
+        new_capacity = crate::model::context::ContextConfig::align_capacity(new_capacity);
+
+        tracing::info!(
+            "Growing KV cache capacity: {} -> {} (requested {})",
+            context_config.allocated_capacity,
+            new_capacity,
+            required_len
+        );
+
+        let old_capacity = context_config.allocated_capacity;
+        self.reallocate_kv_buffers(foundry, bindings, fast_bindings, current_pos, old_capacity, new_capacity)?;
+        context_config.allocated_capacity = new_capacity;
+
+        Ok(())
+    }
+
+    /// Reallocate all context-dependent buffers (KV caches, slice buffers, etc.).
+    fn reallocate_kv_buffers(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        current_pos: usize,
+        old_capacity: usize,
+        new_capacity: usize,
+    ) -> Result<(), MetalError> {
+        let arch = self.architecture();
+        let head_dim = arch.d_model / arch.n_heads;
+
+        // Batch all buffer copies into a single command buffer when possible.
+        let nested_capture = foundry.is_capturing();
+        if !nested_capture {
+            foundry.start_capture()?;
+        }
+
+        // 1. Reallocate Expanded K/V buffers
+        let expanded_dim = new_capacity * arch.d_model;
+        bindings.remove("k_expanded");
+        bindings.remove("v_expanded");
+        self.allocate_intermediate(bindings, fast_bindings, foundry, "k_expanded", expanded_dim)?;
+        self.allocate_intermediate(bindings, fast_bindings, foundry, "v_expanded", expanded_dim)?;
+
+        // 2. Reallocate KV slice buffers
+        let kv_slice_dim = arch.n_kv_heads * new_capacity * head_dim;
+        bindings.remove("k_slice");
+        bindings.remove("v_slice");
+        self.allocate_intermediate(bindings, fast_bindings, foundry, "k_slice", kv_slice_dim)?;
+        self.allocate_intermediate(bindings, fast_bindings, foundry, "v_slice", kv_slice_dim)?;
+
+        // 3. Reallocate KV caches per layer and preserve existing data.
+        for layer_idx in 0..arch.n_layers {
+            let k_cache_name = format!("k_cache_{}", layer_idx);
+            let v_cache_name = format!("v_cache_{}", layer_idx);
+
+            // Capture old tensors for data preservation before reallocating bindings
+            let old_k = bindings.get(&k_cache_name).ok();
+            let old_v = bindings.get(&v_cache_name).ok();
+
+            // Evict if already exists to force reallocation in allocate_kv_cache
+            bindings.remove(&k_cache_name);
+            bindings.remove(&v_cache_name);
+
+            // Reallocate (sets new bindings and updates fast_bindings)
+            self.allocate_kv_cache(
+                bindings,
+                fast_bindings,
+                foundry,
+                &k_cache_name,
+                arch.n_heads,
+                new_capacity,
+                head_dim,
+            )?;
+            self.allocate_kv_cache(
+                bindings,
+                fast_bindings,
+                foundry,
+                &v_cache_name,
+                arch.n_heads,
+                new_capacity,
+                head_dim,
+            )?;
+
+            // If we have existing tokens, copy them from the old buffers to the new ones.
+            // Since layout is [heads, capacity, head_dim], we must copy each head individually
+            // because the stride between heads has changed (from old_capacity to new_capacity).
+            if current_pos > 0 {
+                let new_k = bindings.get(&k_cache_name)?;
+                let new_v = bindings.get(&v_cache_name)?;
+
+                let old_k = old_k.ok_or_else(|| MetalError::InvalidOperation(format!("Missing {k_cache_name} during growth")))?;
+                let old_v = old_v.ok_or_else(|| MetalError::InvalidOperation(format!("Missing {v_cache_name} during growth")))?;
+                let old_k_buf = old_k
+                    .buffer
+                    .as_ref()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("{k_cache_name} buffer missing during growth")))?;
+                let old_v_buf = old_v
+                    .buffer
+                    .as_ref()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("{v_cache_name} buffer missing during growth")))?;
+                let new_k_buf = new_k
+                    .buffer
+                    .as_ref()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("{k_cache_name} buffer missing after growth")))?;
+                let new_v_buf = new_v
+                    .buffer
+                    .as_ref()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("{v_cache_name} buffer missing after growth")))?;
+
+                for h in 0..arch.n_heads {
+                    let old_head_offset = h * old_capacity * head_dim * 2; // F16 = 2 bytes
+                    let new_head_offset = h * new_capacity * head_dim * 2;
+                    let copy_size = current_pos * head_dim * 2;
+
+                    foundry.blit_copy(
+                        old_k_buf,
+                        old_k.offset + old_head_offset,
+                        new_k_buf,
+                        new_k.offset + new_head_offset,
+                        copy_size,
+                    )?;
+                    foundry.blit_copy(
+                        old_v_buf,
+                        old_v.offset + old_head_offset,
+                        new_v_buf,
+                        new_v.offset + new_head_offset,
+                        copy_size,
+                    )?;
+                }
+            }
+        }
+
+        // 4. Grow RoPE tables to match the new physical capacity.
+        let dim_half = head_dim / 2;
+        self.ensure_rope_capacity(
+            bindings,
+            fast_bindings,
+            foundry,
+            arch.rope_base,
+            head_dim,
+            dim_half,
+            old_capacity,
+            new_capacity,
+        )?;
+
+        // 5. Update max_seq_len global for kernels
+        bindings.set_int_global("max_seq_len", new_capacity);
+        bindings.set_global("max_seq_len", new_capacity.to_string());
+
+        if !nested_capture {
+            let cmd = foundry.end_capture()?;
+            objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+        }
 
         Ok(())
     }
@@ -1246,6 +1591,17 @@ impl CompiledModel {
             prompt_tokens.len(),
             prompt_tokens
         );
+        let prompt_len = prompt_tokens.len();
+        // Ensure we have enough KV capacity for this prompt + existing history
+        self.ensure_kv_capacity(
+            foundry,
+            &mut session.bindings,
+            &mut session.fast_bindings,
+            &mut session.context_config,
+            start_pos,
+            prompt_len + start_pos,
+        )?;
+
         let bindings = &mut session.bindings;
         let fast_bindings = &mut session.fast_bindings;
 
@@ -1255,10 +1611,9 @@ impl CompiledModel {
         let head_dim = d_model / n_heads;
         let ff_dim = arch.ff_dim;
 
-        let prompt_len = prompt_tokens.len();
         if prompt_len + start_pos > session.input_ids_capacity {
             return Err(MetalError::InvalidShape(format!(
-                "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_seq_len {}",
+                "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_context_len {}",
                 session.input_ids_capacity
             )));
         }
@@ -1490,6 +1845,23 @@ impl CompiledModel {
 
         for step in 0..max_new_tokens {
             let batch_idx = pending_count;
+
+            // Ensure we have enough KV capacity for the entire upcoming batch.
+            // This avoids having to grow mid-capture (which would break batching and add extra syncs).
+            if batch_idx == 0 {
+                let current_pos = start_pos + prompt_len + step;
+                let remaining = max_new_tokens - step;
+                let lookahead = remaining.min(batch_size);
+                let required_len = current_pos + lookahead;
+                self.ensure_kv_capacity(
+                    foundry,
+                    bindings,
+                    fast_bindings,
+                    &mut session.context_config,
+                    current_pos,
+                    required_len,
+                )?;
+            }
 
             // Start capture at the beginning of a batch (only if not already capturing)
             // In profiling mode, dispatch_pipeline() restarts capture after each kernel sync
@@ -1849,7 +2221,9 @@ impl CompiledModel {
     // Keep old method for backward compatibility, delegating to new one
     #[deprecated(note = "Use prepare_bindings instead")]
     pub fn prepare_weight_bindings(&self, foundry: &mut Foundry) -> Result<TensorBindings, MetalError> {
-        self.prepare_bindings(foundry).map(|(b, _)| b)
+        let mut config = crate::model::ContextConfig::from_architecture(self.architecture(), None);
+        config.apply_memory_budget(&foundry.device, self.architecture());
+        self.prepare_bindings_with_config(foundry, &config).map(|(b, _)| b)
     }
 }
 
@@ -1876,5 +2250,71 @@ mod tests {
         // Degenerate.
         assert_eq!(rebalance(0, 32, 32), 1);
         assert_eq!(rebalance(1, 32, 32), 1);
+    }
+
+    use super::*;
+    use crate::{
+        Foundry, spec::{Architecture, ModelSpec}
+    };
+
+    #[test]
+    #[serial_test::serial]
+    fn test_model_session_kv_growth() -> Result<(), crate::error::MetalError> {
+        let arch = Architecture {
+            d_model: 128,
+            n_heads: 2,
+            n_kv_heads: 1,
+            n_layers: 1,
+            ff_dim: 256,
+            vocab_size: 100,
+            max_seq_len: 4096,
+            rope_base: 10000.0,
+            rms_eps: 1e-6,
+            tensor_names: Default::default(),
+            forward: Vec::new(),
+        };
+        let spec = ModelSpec {
+            name: "test-growth".into(),
+            architecture: arch,
+        };
+        // We don't need real weights for allocation testing
+        let weights = super::WeightBundle::new_empty();
+        let model = CompiledModel {
+            spec,
+            weights,
+            compiled_steps: Vec::new(),
+            symbol_table: crate::model::executor::SymbolTable::new(),
+            session: std::cell::RefCell::new(None),
+        };
+
+        let mut foundry = Foundry::new()?;
+        model.initialize_session(&mut foundry)?;
+
+        {
+            let mut session_guard = model.session.borrow_mut();
+            let session = session_guard.as_mut().unwrap();
+
+            // Initial capacity should be 2048 (default) aligned to 128
+            assert_eq!(session.context_config.allocated_capacity, 2048);
+
+            // Grow to 3000. Geometric growth (2x) from 2048 is 4096.
+            model.ensure_kv_capacity(
+                &mut foundry,
+                &mut session.bindings,
+                &mut session.fast_bindings,
+                &mut session.context_config,
+                session.current_pos,
+                3000,
+            )?;
+            assert_eq!(session.context_config.allocated_capacity, 4096);
+
+            // Should be present in bindings
+            assert!(session.bindings.contains("k_cache_0"));
+            let k_cache = session.bindings.get("k_cache_0")?;
+            // Shape: [n_heads, allocated_capacity, head_dim] -> [2, 4096, 64]
+            assert_eq!(k_cache.dims.as_slice(), &[2, 4096, 64]);
+        }
+
+        Ok(())
     }
 }

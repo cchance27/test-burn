@@ -369,15 +369,18 @@ impl CompiledStep for CompiledSdpaStep {
         let head_dim = self.step.head_dim.resolve(bindings);
         let kv_seq_len = self.step.kv_seq_len.resolve(bindings);
 
-        // Compute strides based on head-major layout
+        // Compute strides based on head-major layout [n_heads, allocated_capacity, head_dim]
         let batch = 1u32;
+        let capacity = k.dims.get(1).copied().unwrap_or(kv_seq_len as usize) as u32;
+
         let (q_stride_b, q_stride_h) = if self.step.kv_head_major {
             (n_heads * head_dim, head_dim)
         } else {
             (head_dim, n_heads * head_dim)
         };
-        let (k_stride_b, k_stride_h) = (n_heads * kv_seq_len * head_dim, kv_seq_len * head_dim);
-        let (v_stride_b, v_stride_h) = (n_heads * kv_seq_len * head_dim, kv_seq_len * head_dim);
+        // Use capacity for head stride to prevent head overlap/corruption
+        let (k_stride_b, k_stride_h) = (n_heads * capacity * head_dim, capacity * head_dim);
+        let (v_stride_b, v_stride_h) = (n_heads * capacity * head_dim, capacity * head_dim);
         let (out_stride_b, out_stride_h) = (n_heads * head_dim, head_dim);
 
         let scale = 1.0 / (head_dim as f32).sqrt();

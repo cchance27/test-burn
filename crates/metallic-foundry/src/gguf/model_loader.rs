@@ -353,4 +353,14 @@ impl GGUFModel {
             None
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn new_empty() -> Self {
+        Self {
+            gguf_file: Arc::new(GGUFFile::new_empty()),
+            tensors: FxHashMap::default(),
+            metadata: crate::gguf::file::GGUFMetadata::default(),
+            layout_hint: GGUFLayoutHint::Nk,
+        }
+    }
 }

@@ -108,7 +108,7 @@ pub struct GGUFHeader {
     pub metadata_count: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GGUFMetadata {
     pub entries: FxHashMap<String, GGUFValue>,
 }
@@ -141,6 +141,25 @@ pub struct GGUFFile {
 }
 
 impl GGUFFile {
+    #[cfg(test)]
+    pub(crate) fn new_empty() -> Self {
+        let mmap = memmap2::MmapMut::map_anon(1).unwrap().make_read_only().unwrap();
+        Self {
+            header: GGUFHeader {
+                magic: *b"GGUF",
+                version: 3,
+                tensor_count: 0,
+                metadata_count: 0,
+            },
+            metadata: GGUFMetadata {
+                entries: FxHashMap::default(),
+            },
+            tensor_metadata: Vec::new(),
+            mmap,
+            file_path: "mock".to_string(),
+        }
+    }
+
     pub fn metadata(&self) -> &GGUFMetadata {
         &self.metadata
     }
