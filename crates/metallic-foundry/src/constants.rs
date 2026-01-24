@@ -1,10 +1,10 @@
 use half::f16;
-use objc2_metal::{MTLBuffer as _, MTLDevice as _, MTLResourceOptions};
+// Trait imports removed
 use rustc_hash::FxHashMap;
 
 use super::Foundry;
 use crate::{
-    error::MetalError, tensor::Dtype, types::{MetalBuffer, MetalDevice, TensorArg}
+    error::MetalError, tensor::Dtype, types::{MetalBuffer, MetalDevice, MetalResourceOptions, TensorArg}
 };
 
 /// Cached scalar buffers for Foundry.
@@ -26,22 +26,19 @@ impl ScalarBufferCache {
         // Use shared storage so we can write CPU-side without a staging blit.
         // Allocate 256 bytes to avoid any alignment quirks for constant reads.
         let buffer = device
-            .newBufferWithLength_options(256, MTLResourceOptions::StorageModeShared)
+            .new_buffer(256, MetalResourceOptions::StorageModeShared)
             .ok_or(MetalError::BufferCreationFailed(256))?;
-        let buffer = MetalBuffer::from_retained(buffer);
 
         // Initialize first 2 bytes to the f16 value, rest zero.
-        unsafe {
-            let ptr = buffer.0.contents().as_ptr() as *mut u8;
-            if ptr.is_null() {
-                return Err(MetalError::NullPointer);
-            }
-            // Zero-fill 256 bytes.
-            std::ptr::write_bytes(ptr, 0u8, 256);
-            // Write f16 bits.
-            let bytes = bits.to_ne_bytes();
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, 2);
+        if buffer.contents().is_null() {
+            return Err(MetalError::NullPointer);
         }
+        buffer.fill_bytes(0, 256);
+
+        // Write f16 bits safe copy
+        let bytes = bits.to_ne_bytes();
+        // Since we write at the start, copy_from_slice works perfectly for [u8; 2]
+        buffer.copy_from_slice(&bytes);
 
         self.f16.insert(bits, buffer.clone());
         Ok(buffer)

@@ -4,7 +4,7 @@
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, gguf::{GGUFDataType, GGUFFile, model_loader::GGUFModelLoader, tensor_info::GGUFRawTensor}, model::ModelBuilder, spec::ModelSpec, types::KernelArg as _
+    Foundry, MetalError, gguf::{GGUFDataType, GGUFFile, model_loader::GGUFModelLoader, tensor_info::GGUFRawTensor}, model::ModelBuilder, spec::ModelSpec, types::{KernelArg as _, MetalResourceOptions}
 };
 use rustc_hash::FxHashMap;
 use serial_test::serial;
@@ -147,8 +147,7 @@ fn read_f16_buffer(arg: &metallic_foundry::types::TensorArg) -> Vec<f16> {
     let buffer = arg.buffer();
     let len = arg.dims().iter().product::<usize>();
     unsafe {
-        use objc2_metal::MTLBuffer;
-        let ptr = buffer.contents().as_ptr() as *const f16;
+        let ptr = buffer.contents() as *const f16;
         std::slice::from_raw_parts(ptr, len).to_vec()
     }
 }
@@ -296,18 +295,16 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
 
     // Upload input ids
     let input_buffer = {
-        use objc2_metal::MTLDevice;
         let byte_size = tokens.len() * 4;
         let buf = foundry
             .device
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(byte_size, MetalResourceOptions::StorageModeShared)
             .expect("Failed to allocate input buffer");
         unsafe {
-            use objc2_metal::MTLBuffer;
-            let ptr = buf.contents().as_ptr() as *mut u32;
+            let ptr = buf.contents() as *mut u32;
             std::ptr::copy_nonoverlapping(tokens.as_ptr(), ptr, tokens.len());
         }
-        metallic_foundry::types::MetalBuffer::from_retained(buf)
+        buf
     };
     let input_tensor =
         metallic_foundry::types::TensorArg::from_buffer(input_buffer, metallic_foundry::tensor::Dtype::U32, vec![tokens.len()], vec![1]);

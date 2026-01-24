@@ -37,18 +37,18 @@ impl<T: FromStr + Copy + Default + 'static> DynamicValue<T> {
                 if TypeId::of::<T>() == TypeId::of::<u32>()
                     && let Some(v) = bindings.get_int_global(name)
                 {
-                    // SAFETY: We verified T is u32 via TypeId.
-                    // We cast usize -> u32 (safe for our params) and then transmute layout.
+                    // Safety: We verified T is u32 via TypeId.
+                    // We cast usize -> u32 (safe for our params) and then use safe casting helper.
                     let val_u32 = v as u32;
-                    return unsafe { std::mem::transmute_copy(&val_u32) };
+                    return crate::types::cast_from_ref(&val_u32).unwrap_or_default();
                 }
 
                 // Optimization: If T is usize, checking int_globals first.
                 if TypeId::of::<T>() == TypeId::of::<usize>()
                     && let Some(v) = bindings.get_int_global(name)
                 {
-                    // SAFETY: T is usize.
-                    return unsafe { std::mem::transmute_copy(&v) };
+                    // Safety: T is usize.
+                    return crate::types::cast_from_ref(&v).unwrap_or_default();
                 }
 
                 // Fallback to string globals

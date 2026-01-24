@@ -10,7 +10,7 @@ use metallic_context::{
     }, models::Qwen25, tensor::{QuantizedTensor, TensorType}
 };
 use metallic_foundry::{Foundry, model::ModelBuilder, policy::activation::Activation, spec::TensorBindings};
-use objc2_metal::{MTLBuffer, MTLDevice};
+use objc2_metal::MTLResourceOptions;
 use serial_test::serial;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
@@ -56,8 +56,7 @@ fn download_f16_buffer(foundry: &mut Foundry, arg: &metallic_foundry::types::Ten
 
     // If it's already shared, we can read directly
     unsafe {
-        use objc2_metal::MTLBuffer;
-        let base_ptr = buffer.contents().as_ptr() as usize;
+        let base_ptr = buffer.contents() as usize;
         if base_ptr != 0 {
             let ptr = (base_ptr + offset) as *const f16;
             // Check alignment for safety
@@ -70,20 +69,14 @@ fn download_f16_buffer(foundry: &mut Foundry, arg: &metallic_foundry::types::Ten
     // Otherwise, or if misaligned, use a blit copy to a shared buffer
     let device = &foundry.device;
     let read_buffer = device
-        .newBufferWithLength_options(size_bytes, objc2_metal::MTLResourceOptions::StorageModeShared)
+        .new_buffer(size_bytes, MTLResourceOptions::StorageModeShared)
         .expect("Failed to create read buffer");
 
     foundry
-        .blit_copy(
-            buffer,
-            offset,
-            &metallic_foundry::types::MetalBuffer(read_buffer.clone()),
-            0,
-            size_bytes,
-        )
+        .blit_copy(buffer, offset, &read_buffer, 0, size_bytes)
         .expect("Failed to blit copy for download");
 
-    let ptr = read_buffer.contents().as_ptr() as *const f16;
+    let ptr = read_buffer.contents() as *const f16;
     unsafe { std::slice::from_raw_parts(ptr, num_elements).to_vec() }
 }
 
@@ -1284,8 +1277,7 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
         ff_dim: usize,
     ) -> Result<(Vec<f16>, Vec<f16>), MetalError> {
         unsafe {
-            use objc2_metal::MTLBuffer;
-            let ptr = input_buffer.contents().as_ptr() as *mut u32;
+            let ptr = input_buffer.contents() as *mut u32;
             *ptr = token;
         }
 

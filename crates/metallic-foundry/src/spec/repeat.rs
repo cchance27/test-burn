@@ -87,17 +87,12 @@ impl Step for Repeat {
                             if foundry.is_capturing() {
                                 let cmd = foundry.end_capture()?;
                                 {
-                                    use objc2_metal::MTLCommandBuffer;
-                                    cmd.waitUntilCompleted();
+                                    cmd.wait_until_completed();
                                 }
                                 foundry.start_capture()?;
                             }
 
-                            let data: Vec<half::f16> = unsafe {
-                                use objc2_metal::MTLBuffer;
-                                let ptr = arg.buffer().contents().as_ptr() as *const half::f16;
-                                std::slice::from_raw_parts(ptr, len).to_vec()
-                            };
+                            let data: Vec<half::f16> = arg.buffer().read_to_vec(len);
                             eprintln!("      → {} first {}: {:?}", name, len, data);
                         }
                     }
@@ -110,19 +105,14 @@ impl Step for Repeat {
                 if foundry.is_capturing() {
                     let cmd = foundry.end_capture()?;
                     {
-                        use objc2_metal::MTLCommandBuffer;
-                        cmd.waitUntilCompleted();
+                        cmd.wait_until_completed();
                     }
                     foundry.start_capture()?;
                 }
 
                 if let Ok(arg) = bindings.get("hidden") {
                     let full_len = arg.dims().iter().product::<usize>();
-                    let data: Vec<half::f16> = unsafe {
-                        use objc2_metal::MTLBuffer;
-                        let ptr = arg.buffer().contents().as_ptr() as *const half::f16;
-                        std::slice::from_raw_parts(ptr, full_len).to_vec()
-                    };
+                    let data: Vec<half::f16> = arg.buffer().read_to_vec(full_len);
                     let mut sum_sq = 0.0f32;
                     for v in data {
                         let vf = v.to_f32();

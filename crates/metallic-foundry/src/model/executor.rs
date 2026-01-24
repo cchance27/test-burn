@@ -11,7 +11,7 @@ use super::builder::WeightBundle;
 use crate::{
     Foundry, error::MetalError, metals::sampling::SampleTopK, policy::{WeightLayout, resolve_policy}, spec::{
         ModelSpec, TensorBindings, compiled::{CompiledStep, FastBindings, SymbolTable}
-    }, types::TensorArg
+    }, types::{MetalResourceOptions, TensorArg}
 };
 
 #[inline(never)]
@@ -815,7 +815,8 @@ impl CompiledModel {
         new_len: usize,
     ) -> Result<(), MetalError> {
         use half::f16;
-        use objc2_metal::{MTLBuffer as _, MTLDevice as _, MTLResourceOptions};
+
+        use crate::types::MetalResourceOptions;
 
         if new_len == 0 || dim_half == 0 {
             return Err(MetalError::InvalidShape("RoPE cache requires new_len>0 and dim_half>0".into()));
@@ -827,9 +828,9 @@ impl CompiledModel {
         }
 
         let storage_mode = if std::env::var("METALLIC_ROPE_SHARED").is_ok() {
-            MTLResourceOptions::StorageModeShared
+            MetalResourceOptions::StorageModeShared
         } else {
-            MTLResourceOptions::StorageModePrivate
+            MetalResourceOptions::StorageModePrivate
         };
 
         let total_elements = new_len
@@ -840,12 +841,10 @@ impl CompiledModel {
             .ok_or_else(|| MetalError::InvalidShape("RoPE table byte size overflow".into()))?;
 
         let alloc_private = |name: &str| -> Result<crate::types::MetalBuffer, MetalError> {
-            let buffer = foundry
+            foundry
                 .device
-                .0
-                .newBufferWithLength_options(total_bytes, storage_mode)
-                .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {name} buffer")))?;
-            Ok(crate::types::MetalBuffer(buffer))
+                .new_buffer(total_bytes, storage_mode)
+                .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {name} buffer")))
         };
 
         // Capture old tensors (if present) before rebinding.
@@ -929,37 +928,19 @@ impl CompiledModel {
                 let chunk_bytes = chunk_elems * 2;
                 let staging_cos = foundry
                     .device
-                    .0
-                    .newBufferWithLength_options(chunk_bytes, MTLResourceOptions::StorageModeShared)
+                    .new_buffer(chunk_bytes, MetalResourceOptions::StorageModeShared)
                     .ok_or_else(|| MetalError::OperationFailed("Failed to allocate RoPE staging buffer".into()))?;
                 let staging_sin = foundry
                     .device
-                    .0
-                    .newBufferWithLength_options(chunk_bytes, MTLResourceOptions::StorageModeShared)
+                    .new_buffer(chunk_bytes, MetalResourceOptions::StorageModeShared)
                     .ok_or_else(|| MetalError::OperationFailed("Failed to allocate RoPE staging buffer".into()))?;
 
-                unsafe {
-                    let cos_ptr = staging_cos.contents().as_ptr() as *mut f16;
-                    std::ptr::copy_nonoverlapping(cos_data.as_ptr(), cos_ptr, chunk_elems);
-                    let sin_ptr = staging_sin.contents().as_ptr() as *mut f16;
-                    std::ptr::copy_nonoverlapping(sin_data.as_ptr(), sin_ptr, chunk_elems);
-                }
+                staging_cos.copy_from_slice(&cos_data);
+                staging_sin.copy_from_slice(&sin_data);
 
                 let dst_offset_bytes = pos * dim_half * 2;
-                foundry.blit_copy(
-                    &crate::types::MetalBuffer(staging_cos),
-                    0,
-                    &new_cos_buf,
-                    dst_offset_bytes,
-                    chunk_bytes,
-                )?;
-                foundry.blit_copy(
-                    &crate::types::MetalBuffer(staging_sin),
-                    0,
-                    &new_sin_buf,
-                    dst_offset_bytes,
-                    chunk_bytes,
-                )?;
+                foundry.blit_copy(&staging_cos, 0, &new_cos_buf, dst_offset_bytes, chunk_bytes)?;
+                foundry.blit_copy(&staging_sin, 0, &new_sin_buf, dst_offset_bytes, chunk_bytes)?;
 
                 pos = end;
             }
@@ -967,7 +948,7 @@ impl CompiledModel {
 
         if !nested_capture {
             let cmd = foundry.end_capture()?;
-            objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+            cmd.wait_until_completed();
         }
 
         Ok(())
@@ -1050,26 +1031,15 @@ impl CompiledModel {
             return Err(MetalError::InvalidShape("zero_tensor_arg size must be > 0".into()));
         }
 
-        use objc2_metal::MTLDevice;
         let byte_size = size * std::mem::size_of::<f16>();
         let buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(byte_size, MetalResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for zero buffer", byte_size)))?;
 
-        unsafe {
-            use objc2_metal::MTLBuffer;
-            let ptr = buffer.contents().as_ptr() as *mut u8;
-            std::ptr::write_bytes(ptr, 0, byte_size);
-        }
+        buffer.fill_bytes(0, byte_size);
 
-        Ok(TensorArg::from_buffer(
-            crate::types::MetalBuffer(buffer),
-            crate::tensor::Dtype::F16,
-            vec![size],
-            vec![1],
-        ))
+        Ok(TensorArg::from_buffer(buffer, crate::tensor::Dtype::F16, vec![size], vec![1]))
     }
 
     /// Allocate an intermediate buffer for activations.
@@ -1081,8 +1051,6 @@ impl CompiledModel {
         name: &str,
         size: usize,
     ) -> Result<(), MetalError> {
-        use objc2_metal::MTLDevice;
-
         if size == 0 {
             return Err(MetalError::InvalidShape(format!("allocate_intermediate '{name}' requires size>0")));
         }
@@ -1093,20 +1061,19 @@ impl CompiledModel {
         }
 
         let storage_mode = if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
-            objc2_metal::MTLResourceOptions::StorageModeShared
+            MetalResourceOptions::StorageModeShared
         } else {
-            objc2_metal::MTLResourceOptions::StorageModePrivate
+            MetalResourceOptions::StorageModePrivate
         };
 
         // Allocate F16 buffer (2 bytes per element)
         let byte_size = size * 2;
         let buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(byte_size, storage_mode)
+            .new_buffer(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
-        let tensor_arg = TensorArg::from_buffer(crate::types::MetalBuffer(buffer), crate::tensor::Dtype::F16, vec![size], vec![1]);
+        let tensor_arg = TensorArg::from_buffer(buffer, crate::tensor::Dtype::F16, vec![size], vec![1]);
 
         self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
         tracing::trace!("Allocated intermediate '{}' ({} elements)", name, size);
@@ -1124,8 +1091,6 @@ impl CompiledModel {
         rows: usize,
         cols: usize,
     ) -> Result<(), MetalError> {
-        use objc2_metal::MTLDevice;
-
         if rows == 0 || cols == 0 {
             return Err(MetalError::InvalidShape(format!(
                 "allocate_intermediate_2d '{name}' requires rows>0 and cols>0"
@@ -1138,21 +1103,20 @@ impl CompiledModel {
         }
 
         let storage_mode = if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
-            objc2_metal::MTLResourceOptions::StorageModeShared
+            MetalResourceOptions::StorageModeShared
         } else {
-            objc2_metal::MTLResourceOptions::StorageModePrivate
+            MetalResourceOptions::StorageModePrivate
         };
 
         let total_elements = rows * cols;
         let byte_size = total_elements * 2; // F16
         let buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(byte_size, storage_mode)
+            .new_buffer(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(buffer),
+            buffer,
             crate::tensor::Dtype::F16,
             vec![rows, cols],
             crate::tensor::compute_strides(&[rows, cols]),
@@ -1176,8 +1140,6 @@ impl CompiledModel {
         seq_len: usize,
         dim: usize,
     ) -> Result<(), MetalError> {
-        use objc2_metal::MTLDevice;
-
         if batch == 0 || seq_len == 0 || dim == 0 {
             return Err(MetalError::InvalidShape(format!(
                 "allocate_intermediate_3d '{name}' requires batch>0, seq_len>0, dim>0"
@@ -1190,21 +1152,20 @@ impl CompiledModel {
         }
 
         let storage_mode = if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
-            objc2_metal::MTLResourceOptions::StorageModeShared
+            MetalResourceOptions::StorageModeShared
         } else {
-            objc2_metal::MTLResourceOptions::StorageModePrivate
+            MetalResourceOptions::StorageModePrivate
         };
 
         let total_elements = batch * seq_len * dim;
         let byte_size = total_elements * 2; // F16 = 2 bytes
         let buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(byte_size, storage_mode)
+            .new_buffer(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(buffer),
+            buffer,
             crate::tensor::Dtype::F16,
             vec![batch, seq_len, dim],
             crate::tensor::compute_strides(&[batch, seq_len, dim]),
@@ -1246,8 +1207,6 @@ impl CompiledModel {
         max_seq_len: usize,
         head_dim: usize,
     ) -> Result<(), MetalError> {
-        use objc2_metal::MTLDevice;
-
         // Skip if already bound
         if bindings.contains(name) {
             return Ok(());
@@ -1259,18 +1218,18 @@ impl CompiledModel {
         // KV caches are hot-read on GPU every decode step; prefer private storage.
         // Shared is only useful for debugging (CPU visibility) and is slower on GPU.
         let storage_mode = if std::env::var("METALLIC_KV_CACHE_SHARED").is_ok() {
-            objc2_metal::MTLResourceOptions::StorageModeShared
+            MetalResourceOptions::StorageModeShared
         } else {
-            objc2_metal::MTLResourceOptions::StorageModePrivate
+            MetalResourceOptions::StorageModePrivate
         };
+
         let buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(byte_size, storage_mode)
+            .new_buffer(byte_size, storage_mode)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
         let tensor_arg = TensorArg::from_buffer(
-            crate::types::MetalBuffer(buffer),
+            buffer,
             crate::tensor::Dtype::F16,
             vec![n_heads, max_seq_len, head_dim],
             crate::tensor::compute_strides(&[n_heads, max_seq_len, head_dim]),
@@ -1464,7 +1423,7 @@ impl CompiledModel {
 
         if !nested_capture {
             let cmd = foundry.end_capture()?;
-            objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+            cmd.wait_until_completed();
         }
 
         Ok(())
@@ -1514,10 +1473,7 @@ impl CompiledModel {
 
         // Commit and wait for the token to complete
         let cmd_buffer = foundry.end_capture()?;
-        {
-            use objc2_metal::MTLCommandBuffer as _;
-            cmd_buffer.waitUntilCompleted();
-        }
+        cmd_buffer.wait_until_completed();
 
         Ok(())
     }
@@ -1626,11 +1582,8 @@ impl CompiledModel {
         }
 
         // Write all prompt tokens to the shared buffer
-        unsafe {
-            use objc2_metal::MTLBuffer;
-            let ptr = session.input_ids_full.0.contents().as_ptr() as *mut u32;
-            std::ptr::copy_nonoverlapping(prompt_tokens.as_ptr(), ptr.add(start_pos), prompt_len);
-        }
+        // input_ids_full is MetalBuffer.
+        session.input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
 
         // Defaults for single-token inference (MatMul dispatch). Batched prefill overrides these.
         bindings.set_int_global("m", 1);
@@ -1742,13 +1695,13 @@ impl CompiledModel {
 
                 if debug_sync && !profiling_per_kernel {
                     let cmd = foundry.end_capture()?;
-                    objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                    cmd.wait_until_completed();
                 }
             }
 
             if !debug_sync && !profiling_per_kernel {
                 let cmd = foundry.end_capture()?;
-                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                cmd.wait_until_completed();
             }
         } else {
             tracing::info!("Using SEQUENTIAL prefill (m=1)");
@@ -1784,13 +1737,13 @@ impl CompiledModel {
 
                 if debug_sync && !profiling_per_kernel {
                     let cmd = foundry.end_capture()?;
-                    objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                    cmd.wait_until_completed();
                 }
             }
 
             if !debug_sync && !profiling_per_kernel {
                 let cmd = foundry.end_capture()?;
-                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                cmd.wait_until_completed();
             }
         }
 
@@ -1944,7 +1897,7 @@ impl CompiledModel {
 
                     // 2. Synchronize (Wait)
                     let wait_start = std::time::Instant::now();
-                    objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                    cmd.wait_until_completed();
                     let wait_duration = wait_start.elapsed();
 
                     if emit_host_metrics {
@@ -1999,11 +1952,7 @@ impl CompiledModel {
                 let mut batch_done = false;
                 for buffer in session.sample_out_buffers.iter().take(pending_count) {
                     let token_buf = buffer;
-                    let token = unsafe {
-                        use objc2_metal::MTLBuffer;
-                        let ptr = token_buf.0.contents().as_ptr() as *const u32;
-                        *ptr
-                    };
+                    let token: u32 = token_buf.read_scalar();
 
                     generated.push(token);
 
@@ -2123,7 +2072,7 @@ impl CompiledModel {
                 // TensorArg buffer is Option<MetalBuffer>
                 if let Some(buf) = &arg.buffer {
                     // Use Retained::as_ptr to get the raw pointer
-                    let ptr = objc2::rc::Retained::as_ptr(&buf.0) as usize;
+                    let ptr = buf.as_ptr_addr();
 
                     // Skip if already counted (aliased bindings)
                     if !visited_ptrs.insert(ptr) {
@@ -2135,8 +2084,7 @@ impl CompiledModel {
                         continue;
                     }
 
-                    use objc2_metal::MTLBuffer;
-                    let size = buf.0.length() as u64;
+                    let size = buf.length() as u64;
 
                     // Classify
                     if name.contains("cache") {
@@ -2207,16 +2155,13 @@ impl CompiledModel {
 
     /// Allocate a U32 buffer for tokens.
     fn allocate_u32_buffer(&self, foundry: &mut Foundry, name: &str, count: usize) -> Result<crate::types::MetalBuffer, MetalError> {
-        use objc2_metal::MTLDevice;
-
         let byte_size = count * 4; // u32 = 4 bytes
         let buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(byte_size, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(byte_size, MetalResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
 
-        Ok(crate::types::MetalBuffer(buffer))
+        Ok(buffer)
     }
 
     // Keep old method for backward compatibility, delegating to new one

@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_context::{Context, F16Element, generation::generate_autoregressive_with_kv_cache, models::Qwen25};
-use metallic_foundry::{Foundry, MetalError, model::ModelBuilder};
+use metallic_foundry::{Dtype, Foundry, MetalError, TensorArg, model::ModelBuilder, types::MetalResourceOptions};
 use serial_test::serial;
 
 const GGUF_PATH_DEFAULT: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -62,7 +62,6 @@ fn run_seed_parity() -> Result<(), MetalError> {
     let _dsl_greedy = dsl_model.generate_with_seed(&mut foundry, &prompt_tokens, 1, &[eos], 0.0, 0, 0.0, base_seed)?;
 
     // --- Legacy / Context model ---
-    // --- Legacy / Context model ---
     let mut ctx = Context::<F16Element>::new().unwrap();
     let gguf_file = metallic_context::gguf::GGUFFile::load_mmap_and_get_metadata(&gguf_path)
         .map_err(|e| MetalError::InvalidShape(format!("GGUF load failed: {e}")))?;
@@ -89,19 +88,13 @@ fn run_seed_parity() -> Result<(), MetalError> {
 
     // Manual DSL step to inspect tensors
     {
-        use objc2_metal::{MTLBuffer, MTLDevice as _};
         let (mut bindings, mut fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
         // allocate input_ids
         let input_buffer = foundry
             .device
-            .newBufferWithLength_options(std::mem::size_of::<u32>(), objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(std::mem::size_of::<u32>(), MetalResourceOptions::StorageModeShared)
             .expect("Failed to allocate input_ids");
-        let input_tensor = metallic_foundry::types::TensorArg::from_buffer(
-            metallic_foundry::types::MetalBuffer::from_retained(input_buffer.clone()),
-            metallic_foundry::tensor::Dtype::U32,
-            vec![1],
-            vec![1],
-        );
+        let input_tensor = TensorArg::from_buffer(input_buffer.clone(), Dtype::U32, vec![1], vec![1]);
 
         // Manual binding - logic matching executor.rs
         bindings.insert("input_ids".to_string(), input_tensor.clone());
@@ -112,7 +105,7 @@ fn run_seed_parity() -> Result<(), MetalError> {
         let _arch = dsl_model.architecture();
         for (pos, &tok) in prompt_tokens.iter().enumerate() {
             unsafe {
-                *(input_buffer.contents().as_ptr() as *mut u32) = tok;
+                *(input_buffer.contents() as *mut u32) = tok;
             }
             let kv_seq_len = pos + 1;
             bindings.set_global("seq_len", "1".to_string());
@@ -130,15 +123,6 @@ fn run_seed_parity() -> Result<(), MetalError> {
             bindings.set_global("total_elements_k", total_k.to_string());
             bindings.set_global("total_elements_hidden", d_model.to_string());
             bindings.set_global("total_elements_write", total_k.to_string());
-            // total_elements_repeat for repeat_kv?
-            // It uses cache_stride * ... ?
-            // Actually RepeatKvHeads parameters in JSON are:
-            // "total_elements": "{total_elements_repeat}"
-            // RepeatKvHeads kernel (if used) might need it.
-            // But for seq=1, it copies 1 seq.
-            // Let's set it to total_k ??
-            // RepeatKvHeads outputs k_expanded: [batch, n_heads, seq, head_dim].
-            // So total elements = batch * n_heads * seq * head_dim = total_q.
             bindings.set_global("total_elements_repeat", total_q.to_string());
 
             dsl_model.forward(&mut foundry, &mut bindings, &fast_bindings)?;
@@ -154,15 +138,10 @@ fn run_seed_parity() -> Result<(), MetalError> {
 
         fn dump_tensor(name: &str, arg: &metallic_foundry::types::TensorArg) {
             use metallic_foundry::types::KernelArg;
-            let buf = arg.buffer(); // returns &MetalBuffer
+            let buf = arg.buffer();
             {
                 let count = 10;
-                // MetalBuffer derefs to MTLBuffer?
-                // Or we need .as_raw() or similar?
-                // Usually it derefs to ProtocolObject<MTLBuffer>.
-                // But let's check content.
-                // If it derefs to MTLBuffer, it has contents().
-                let ptr = buf.contents().as_ptr() as *const f16;
+                let ptr = buf.contents() as *const f16;
                 let mut vals = vec![];
                 for i in 0..count {
                     vals.push(unsafe { *ptr.add(i) }.to_f32());
@@ -199,14 +178,6 @@ fn run_seed_parity() -> Result<(), MetalError> {
     println!("Legacy Decoded: {:?}", legacy_tokenizer.decode(&legacy_greedy));
     println!("DSL Decoded: {:?}", foundry_tokenizer.decode(&dsl_tokens));
     let dsl_greedy = dsl_tokens.to_vec();
-
-    // Print logits
-    // We need to fetch logits from the last step?
-    // The helper functions don't return logits.
-    // We can't easily get logits without modifying the helper or running a manual step.
-
-    // ... manual run last token ...
-    // Let's rely on the mismatch for now.
 
     let dsl_greedy_trimmed = trim_trailing_token(dsl_greedy.clone(), eos);
     let legacy_greedy_trimmed = trim_trailing_token(legacy_greedy.clone(), eos);

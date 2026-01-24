@@ -259,5 +259,3 @@ pub fn generate_metal_signature(
 
     format!("{}(\n{}\n)", func_name, args.join(",\n"))
 }
-
-// Concrete Implementations

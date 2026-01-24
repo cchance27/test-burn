@@ -1,9 +1,10 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::{gemm::GemmV2Step, gemv::{GemvV2Step, GemvV2Params}, matmul::MatMulStep}, policy::{activation::Activation, f16::PolicyF16}, spec::{DynamicValue, FastBindings, Ref, Step, CompiledStep, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, compound::Layout, metals::{
+        gemm::GemmV2Step, gemv::{GemvV2Params, GemvV2Step}, matmul::MatMulStep
+    }, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
-use objc2_metal::MTLCommandBuffer as _;
 
 struct Shape {
     m: usize,
@@ -28,7 +29,7 @@ fn measure_step(
 
     // Explicit sync to clear queue
     if let Ok(buf) = foundry.end_capture() {
-        buf.waitUntilCompleted();
+        buf.wait_until_completed();
     } else {
         foundry.synchronize().unwrap();
     }
@@ -41,7 +42,7 @@ fn measure_step(
         }
     }
     let buf = foundry.end_capture().unwrap();
-    buf.waitUntilCompleted();
+    buf.wait_until_completed();
     let duration = start.elapsed();
 
     duration.as_micros() as f64 / iterations as f64

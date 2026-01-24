@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-use objc2_metal::{MTLBuffer, MTLDevice};
 use rustc_hash::FxHashMap;
 
 use super::{GGUFDataType, GGUFError, GGUFFile};
-use crate::gguf::{
-    GGUFValue, file::GGUFMetadata, tensor_info::{GGUFRawTensor, GGUTensorInfo}
+use crate::{
+    gguf::{
+        GGUFValue, file::GGUFMetadata, tensor_info::{GGUFRawTensor, GGUTensorInfo}
+    }, types::MetalResourceOptions
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -272,16 +273,15 @@ impl GGUFTensor {
         };
 
         let buffer = device
-            .0
-            .newBufferWithLength_options(raw_bytes.len(), objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(raw_bytes.len(), MetalResourceOptions::StorageModeShared)
             .ok_or_else(|| GGUFError::InvalidTensorData(format!("Failed to allocate Metal buffer for tensor '{}'", self.info.name)))?;
 
         unsafe {
-            let ptr = buffer.contents().as_ptr() as *mut u8;
+            let ptr = buffer.contents() as *mut u8;
             std::ptr::copy_nonoverlapping(raw_bytes.as_ptr(), ptr, raw_bytes.len());
         }
 
-        Ok(crate::types::MetalBuffer(buffer))
+        Ok(buffer)
     }
 
     pub fn raw_view<'a>(&self, file: &'a GGUFFile) -> Result<GGUFRawTensor<'a>, GGUFError> {

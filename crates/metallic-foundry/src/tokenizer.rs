@@ -633,7 +633,7 @@ impl Tokenizer {
                 let valid = err.valid_up_to();
                 if valid > 0 {
                     // SAFETY: `valid_up_to` is always on a UTF-8 boundary.
-                    let prefix = unsafe { std::str::from_utf8_unchecked(&byte_scratch[..valid]) };
+                    let prefix = std::str::from_utf8(&byte_scratch[..valid]).expect("valid_up_to guaranteed valid UTF-8");
                     scratch.push_str(prefix);
                 }
 

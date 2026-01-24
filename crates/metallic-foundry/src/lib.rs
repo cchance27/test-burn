@@ -4,8 +4,6 @@ use std::any::{Any, TypeId};
 
 pub use error::MetalError;
 use instrument::CaptureMetrics;
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::{MTLComputePipelineState, MTLCreateSystemDefaultDevice, MTLDevice as _, MTLLibrary};
 use rustc_hash::FxHashMap;
 pub use spec::*;
 pub use tensor::*;
@@ -33,20 +31,6 @@ pub mod types;
 
 pub use kernel_registry::kernel_registry;
 
-/// The central hub for Metal operations, managing the device, queue, and resources.
-pub struct Foundry {
-    pub device: MetalDevice,
-    pub queue: MetalQueue,
-    /// Type-safe registry for resources (caches, pools, etc.)
-    resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    /// Active command buffer for batched dispatch
-    active_command_buffer: Option<Retained<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>>,
-    /// Helper: Active compute encoder to reuse across dispatches
-    active_compute_encoder: Option<Retained<ProtocolObject<dyn objc2_metal::MTLComputeCommandEncoder>>>,
-    /// Optional capture-level metrics accumulator (enabled only when profiling is on).
-    capture_metrics: Option<CaptureMetrics>,
-}
-
 /// Metal kernel source (file path or raw string).
 pub enum KernelSource {
     /// A relative path to a .metal file in `src/metals/`.
@@ -55,16 +39,37 @@ pub enum KernelSource {
     String(String),
 }
 
+/// The central hub for Metal operations, managing the device, queue, and resources.
+pub struct Foundry {
+    pub device: MetalDevice,
+    pub queue: MetalQueue,
+    /// Type-safe registry for resources (caches, pools, etc.)
+    resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
+    /// Active command buffer for batched dispatch
+    active_command_buffer: Option<MetalCommandBuffer>,
+    /// Helper: Active compute encoder to reuse across dispatches
+    active_compute_encoder: Option<ComputeCommandEncoder>,
+    /// Optional capture-level metrics accumulator (enabled only when profiling is on).
+    capture_metrics: Option<CaptureMetrics>,
+}
+
 impl Foundry {
     /// Create a new Foundry with the system default device.
+    #[cfg(target_os = "macos")]
     pub fn new() -> Result<Self, MetalError> {
-        let device = MTLCreateSystemDefaultDevice().ok_or(MetalError::DeviceNotFound)?;
-        let queue = device.newCommandQueue().ok_or(MetalError::CommandQueueCreationFailed)?;
+        let device = crate::types::MetalDevice::create_system_default_device()?;
+        let queue = device.new_command_queue()?;
+        Foundry::new_with_result(device, queue)
+    }
 
-        let device = crate::types::MetalDevice(device);
-        let queue = crate::types::MetalQueue(queue);
+    /// Create a new Foundry with an existing device and queue.
+    pub fn new_with(device: MetalDevice, queue: MetalQueue) -> Self {
+        Self::new_with_result(device, queue).expect("Failed to create Foundry with existing device and queue")
+    }
 
-        let mut resources = FxHashMap::default();
+    /// Internal constructor that returns a Result.
+    fn new_with_result(device: MetalDevice, queue: MetalQueue) -> Result<Self, MetalError> {
+        let mut resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>> = FxHashMap::default();
         let pool = pool::MemoryPool::new(device.clone(), queue.clone())?;
         resources.insert(TypeId::of::<pool::MemoryPool>(), Box::new(pool) as Box<dyn Any + Send + Sync>);
 
@@ -76,22 +81,6 @@ impl Foundry {
             active_compute_encoder: None,
             capture_metrics: None,
         })
-    }
-
-    /// Create a new Foundry with an existing device and queue.
-    pub fn new_with(device: MetalDevice, queue: MetalQueue) -> Self {
-        let mut resources = FxHashMap::default();
-        let pool = pool::MemoryPool::new(device.clone(), queue.clone()).expect("Failed to create memory pool");
-        resources.insert(TypeId::of::<pool::MemoryPool>(), Box::new(pool) as Box<dyn Any + Send + Sync>);
-
-        Self {
-            device,
-            queue,
-            resources,
-            active_command_buffer: None,
-            active_compute_encoder: None,
-            capture_metrics: None,
-        }
     }
 
     /// Retrieve a mutable reference to a registered resource.
@@ -106,11 +95,10 @@ impl Foundry {
 
     /// Start capturing commands into a single command buffer (batched dispatch).
     pub fn start_capture(&mut self) -> Result<(), MetalError> {
-        use objc2_metal::MTLCommandQueue as _;
         if self.active_command_buffer.is_some() {
             return Err(MetalError::OperationFailed("Capture already active".to_string()));
         }
-        let buffer = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
+        let buffer = self.queue.command_buffer()?;
         self.active_command_buffer = Some(buffer);
         self.active_compute_encoder = None;
         if instrument::emit_cb_timing_metrics() {
@@ -120,11 +108,10 @@ impl Foundry {
     }
 
     /// End capture and return the command buffer (committed but not waited).
-    pub fn end_capture(&mut self) -> Result<Retained<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>, MetalError> {
-        use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _};
+    pub fn end_capture(&mut self) -> Result<MetalCommandBuffer, MetalError> {
         // End the persistent encoder before committing
         if let Some(encoder) = self.active_compute_encoder.take() {
-            encoder.endEncoding();
+            encoder.end_encoding();
         }
 
         let buffer = self
@@ -134,9 +121,7 @@ impl Foundry {
 
         // Attach capture-level completion metrics before commit so the handler is retained by Metal.
         if instrument::emit_cb_timing_metrics() {
-            use std::{ptr::NonNull, sync::Mutex, time::Instant};
-
-            use block2::RcBlock;
+            use std::{sync::Mutex, time::Instant};
 
             let commit_instant = Instant::now();
             let captured = self
@@ -147,22 +132,23 @@ impl Foundry {
             let data = instrument::summarize_kernel_counts(&captured, 12);
 
             let handler = Mutex::new(Some((op_name, data, commit_instant)));
-            let block = RcBlock::new(move |_cmd: NonNull<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>| {
+
+            // Use wrapper method
+            buffer.add_completed_handler(move |cmd| {
                 let Some((op_name, data, commit_instant)) = handler.lock().ok().and_then(|mut slot| slot.take()) else {
                     return;
                 };
                 let cpu_elapsed_us = commit_instant.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                let gpu_elapsed_us = unsafe {
-                    let cmd = _cmd.as_ref();
-                    // NOTE: Some command buffers can report 0.0 for GPUStartTime/GPUEndTime; fall back to CPU wall time.
-                    let start = cmd.GPUStartTime();
-                    let end = cmd.GPUEndTime();
-                    if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
-                        ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
-                    } else {
-                        cpu_elapsed_us
-                    }
+
+                let start = cmd.gpu_start_time();
+                let end = cmd.gpu_end_time();
+
+                let gpu_elapsed_us = if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
+                    ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
+                } else {
+                    cpu_elapsed_us
                 };
+
                 let mut data = data;
                 data.insert("cpu_elapsed_us".to_string(), cpu_elapsed_us.to_string());
                 data.insert("gpu_elapsed_us".to_string(), gpu_elapsed_us.to_string());
@@ -173,12 +159,6 @@ impl Foundry {
                     data: Some(data),
                 });
             });
-
-            // Hand ownership to Metal; it will release after invocation.
-            let raw_block = RcBlock::into_raw(block);
-            unsafe {
-                buffer.addCompletedHandler(raw_block.cast());
-            }
         } else {
             self.capture_metrics = None;
         }
@@ -190,10 +170,9 @@ impl Foundry {
     /// Ensure all pending commands have completed.
     /// If capture is active, completes the current batch and starts a new one.
     pub fn synchronize(&mut self) -> Result<(), MetalError> {
-        use objc2_metal::MTLCommandBuffer as _;
         if self.is_capturing() {
             let buf = self.end_capture()?;
-            buf.waitUntilCompleted();
+            buf.wait_until_completed();
             self.start_capture()?;
         } else {
             // Not capturing - commands are already committed and waited in dispatch() but
@@ -206,7 +185,7 @@ impl Foundry {
     }
 
     /// Loads or retrieves a compute pipeline for the given Kernel type.
-    pub fn load_kernel<K: Kernel>(&mut self, kernel: &K) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+    pub fn load_kernel<K: Kernel>(&mut self, kernel: &K) -> Result<MetalPipeline, MetalError> {
         let registry = kernel_registry();
         let pipeline = registry.get_or_load_pipeline(&self.device, kernel)?;
         Ok((*pipeline).clone())
@@ -217,13 +196,11 @@ impl Foundry {
     /// repeatedly dispatching the same kernel (e.g. in autoregressive loops).
     pub fn dispatch_pipeline<K: Kernel>(
         &mut self,
-        pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
+        pipeline: &MetalPipeline,
         kernel: &K,
         config: DispatchConfig,
         // FIXME: why don't we just grab dispatch config from kernel, why pass it here? we could make this an option and if not provided we pull from kernel we're dispatching
     ) -> Result<(), MetalError> {
-        use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _, MTLComputeCommandEncoder as _, MTLSize};
-
         if self.active_command_buffer.is_some() {
             // Batched dispatch path
             if let Some(metrics) = self.capture_metrics.as_mut() {
@@ -233,30 +210,28 @@ impl Foundry {
                 enc
             } else {
                 let active = self.active_command_buffer.as_ref().unwrap();
-                let enc = active.computeCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+                let enc = active.compute_command_encoder()?;
                 self.active_compute_encoder = Some(enc.clone());
                 enc
             };
 
             // Measure full dispatch overhead (pipeline state + bind + dispatch call)
             let dispatch_start = std::time::Instant::now();
-            encoder.setComputePipelineState(pipeline);
-            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
-            kernel.bind(&encoder_wrapper);
-            let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
-            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
-            encoder.memoryBarrierWithScope(objc2_metal::MTLBarrierScope::Buffers);
+            encoder.set_compute_pipeline_state(pipeline);
+            kernel.bind(&encoder);
+            encoder.dispatch_threadgroups(config.grid, config.group);
+            encoder.memory_barrier_with_scope(MetalBarrierScope::Buffers);
 
             // Profiling mode: sync after each dispatch to get actual GPU timing
             // Non-profiling mode: just use dispatch overhead (batched CB wait handles GPU time)
             let duration_us = if instrument::foundry_per_kernel_profiling_enabled() {
-                encoder.endEncoding();
+                encoder.end_encoding();
                 self.active_compute_encoder = None;
 
                 let cmd = self.active_command_buffer.take().unwrap();
                 let kernel_start = std::time::Instant::now();
                 cmd.commit();
-                objc2_metal::MTLCommandBuffer::waitUntilCompleted(&*cmd);
+                cmd.wait_until_completed();
                 let kernel_duration = kernel_start.elapsed();
 
                 // Start a new command buffer for the next kernel
@@ -279,42 +254,36 @@ impl Foundry {
             }
         } else {
             // Non-batched path
-            let command_buffer = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
-            let encoder = command_buffer
-                .computeCommandEncoder()
-                .ok_or(MetalError::CommandQueueCreationFailed)?;
+            let command_buffer = self.queue.command_buffer()?;
+            let encoder = command_buffer.compute_command_encoder()?;
 
-            encoder.setComputePipelineState(pipeline);
-            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
-            kernel.bind(&encoder_wrapper);
-            let (grid_size, group_size): (MTLSize, MTLSize) = config.into();
-            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
-            encoder.endEncoding();
+            encoder.set_compute_pipeline_state(pipeline);
+            kernel.bind(&encoder);
+            encoder.dispatch_threadgroups(config.grid, config.group);
+            encoder.end_encoding();
             if instrument::emit_cb_timing_metrics() {
-                use std::{ptr::NonNull, sync::Mutex, time::Instant};
+                use std::{sync::Mutex, time::Instant};
 
-                use block2::RcBlock;
-
-                let op_name = kernel.function_name();
+                let op_name = kernel.function_name().to_string();
                 let metric_data = kernel.metric_data();
                 let commit_instant = Instant::now();
                 let handler = Mutex::new(Some((op_name, metric_data, commit_instant)));
-                let block = RcBlock::new(move |_cmd: NonNull<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>| {
+
+                command_buffer.add_completed_handler(move |cmd: &crate::types::MetalCommandBuffer| {
                     let Some((op_name, metric_data, commit_instant)) = handler.lock().ok().and_then(|mut slot| slot.take()) else {
                         return;
                     };
                     let cpu_elapsed_us = commit_instant.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
-                    let gpu_elapsed_us = unsafe {
-                        let cmd = _cmd.as_ref();
-                        let start = cmd.GPUStartTime();
-                        let end = cmd.GPUEndTime();
-                        if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
-                            ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
-                        } else {
-                            cpu_elapsed_us
-                        }
+
+                    let start = cmd.gpu_start_time();
+                    let end = cmd.gpu_end_time();
+
+                    let gpu_elapsed_us = if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
+                        ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
+                    } else {
+                        cpu_elapsed_us
                     };
-                    let metric_data = metric_data.map(|mut data| {
+                    let metric_data = metric_data.map(|mut data: FxHashMap<String, String>| {
                         data.insert("cpu_elapsed_us".to_string(), cpu_elapsed_us.to_string());
                         data.insert("gpu_elapsed_us".to_string(), gpu_elapsed_us.to_string());
                         data
@@ -326,14 +295,9 @@ impl Foundry {
                         data: metric_data,
                     });
                 });
-
-                let raw_block = RcBlock::into_raw(block);
-                unsafe {
-                    command_buffer.addCompletedHandler(raw_block.cast());
-                }
             }
             command_buffer.commit();
-            command_buffer.waitUntilCompleted();
+            command_buffer.wait_until_completed();
         }
 
         Ok(())
@@ -380,49 +344,42 @@ impl Foundry {
         let pipeline = self.load_kernel(&fused_kernel)?;
 
         // Dispatch with manual binding
-        use objc2_metal::{MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _, MTLComputeCommandEncoder as _};
-
         if let Some(ref buffer) = self.active_command_buffer {
             // Batched path: reuse or create encoder on active buffer
             let encoder = if let Some(ref active_enc) = self.active_compute_encoder {
                 active_enc.clone()
             } else {
-                let enc = buffer.computeCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+                let enc = buffer.compute_command_encoder()?;
                 self.active_compute_encoder = Some(enc.clone());
                 enc
             };
 
-            encoder.setComputePipelineState(&pipeline);
-            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
-            kernel.bind(&encoder_wrapper);
+            encoder.set_compute_pipeline_state(&pipeline);
+            kernel.bind(&encoder);
 
             let config = kernel.dispatch_config();
-            let (grid_size, group_size): (objc2_metal::MTLSize, objc2_metal::MTLSize) = config.into();
-            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
-            encoder.memoryBarrierWithScope(objc2_metal::MTLBarrierScope::Buffers);
+            encoder.dispatch_threadgroups(config.grid, config.group);
+            encoder.memory_barrier_with_scope(MetalBarrierScope::Buffers);
 
             // Do NOT end encoding or commit - wait for sync() or end_capture()
         } else {
             // Standalone path: create new buffer, encode, and block wait
-            let command_buffer = self.queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
-            let encoder = command_buffer
-                .computeCommandEncoder()
-                .ok_or(MetalError::CommandQueueCreationFailed)?;
+            let command_buffer = self.queue.command_buffer()?;
+            let encoder = command_buffer.compute_command_encoder()?;
 
-            encoder.setComputePipelineState(&pipeline);
+            encoder.set_compute_pipeline_state(&pipeline);
 
             // Bind arguments using the ORIGINAL kernel
-            let encoder_wrapper = crate::types::ComputeCommandEncoder(encoder.clone());
+            let encoder_wrapper = encoder.clone(); // No wrapper wrapping needed anymore
             kernel.bind(&encoder_wrapper);
 
             let config = kernel.dispatch_config();
-            let (grid_size, group_size): (objc2_metal::MTLSize, objc2_metal::MTLSize) = config.into();
-
-            encoder.dispatchThreadgroups_threadsPerThreadgroup(grid_size, group_size);
-            encoder.endEncoding();
+            encoder.dispatch_threadgroups(config.grid, config.group);
+            encoder.end_encoding();
 
             command_buffer.commit();
-            command_buffer.waitUntilCompleted();
+            command_buffer.commit();
+            command_buffer.wait_until_completed();
         }
 
         Ok(())
@@ -446,40 +403,31 @@ impl Foundry {
         dst_offset: usize,
         size_bytes: usize,
     ) -> Result<(), MetalError> {
-        use objc2_metal::{MTLBlitCommandEncoder as _, MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _};
-
         if let Some(ref active_buffer) = self.active_command_buffer {
             // Batched path: encode blit into the active command buffer
 
             // End the compute encoder if one is active (Metal requires only one encoder at a time)
             if let Some(encoder) = self.active_compute_encoder.take() {
-                encoder.endEncoding();
+                encoder.end_encoding();
             }
 
             // Create a blit encoder on the same command buffer
-            let blit = active_buffer.blitCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+            let blit = active_buffer.blit_command_encoder()?;
 
-            unsafe {
-                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    src_buffer, src_offset, dst_buffer, dst_offset, size_bytes,
-                );
-            }
-            blit.endEncoding();
+            blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
+            blit.end_encoding();
 
             // The next dispatch() call will recreate the compute encoder as needed
         } else {
             // Non-batched path: create a standalone command buffer
-            let cmd = self.queue.0.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
-            let blit = cmd.blitCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+            let cmd = self.queue.command_buffer()?;
+            let blit = cmd.blit_command_encoder()?;
 
-            unsafe {
-                blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(
-                    src_buffer, src_offset, dst_buffer, dst_offset, size_bytes,
-                );
-            }
-            blit.endEncoding();
+            blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
+            blit.end_encoding();
             cmd.commit();
-            cmd.waitUntilCompleted();
+            cmd.commit();
+            cmd.wait_until_completed();
         }
 
         Ok(())
@@ -488,9 +436,8 @@ impl Foundry {
 
 impl Drop for Foundry {
     fn drop(&mut self) {
-        use objc2_metal::MTLCommandEncoder as _;
         if let Some(encoder) = self.active_compute_encoder.take() {
-            encoder.endEncoding();
+            encoder.end_encoding();
         }
     }
 }
@@ -559,22 +506,14 @@ pub trait Kernel {
     }
 }
 /// Internal helper for pipeline compilation from kernel metadata.
-pub fn compile_pipeline<K: Kernel>(
-    device: &MetalDevice,
-    kernel: &K,
-) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<MetalPipeline, MetalError> {
     use std::path::PathBuf;
-
-    use objc2_foundation::NSString;
 
     // 1. Try Default Library (loading from Bundle/built output)
     let function_name = kernel.function_name();
-    if let Some(lib) = device.newDefaultLibrary() {
-        let ns_name = NSString::from_str(function_name);
-        if let Some(func) = lib.newFunctionWithName(&ns_name) {
-            let pipeline = device
-                .newComputePipelineStateWithFunction_error(&func)
-                .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
+    if let Some(lib) = device.new_default_library() {
+        if let Some(func) = lib.new_function(function_name) {
+            let pipeline = device.new_compute_pipeline_state_with_function(&func)?;
             return Ok(pipeline);
         }
     }
@@ -676,7 +615,7 @@ pub fn compile_pipeline<K: Kernel>(
         }
     }
 
-    if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
+    if let Some(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR").ok() {
         let mut safe_name = function_name
             .chars()
             .map(|c| {
@@ -705,23 +644,15 @@ pub fn compile_pipeline<K: Kernel>(
             .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to write Metal source dump {}: {}", dump_path.display(), e)))?;
     }
 
-    let options = objc2_metal::MTLCompileOptions::new();
-    options.setLanguageVersion(objc2_metal::MTLLanguageVersion::Version4_0);
-    options.setEnableLogging(true);
+    let options = crate::types::MetalCompileOptions::new();
 
-    let ns_source = NSString::from_str(&full_source);
-    let library = device
-        .newLibraryWithSource_options_error(&ns_source, Some(&options))
-        .map_err(|e| MetalError::LoadLibraryFailed(format!("{:?}", e)))?;
+    let library = device.new_library_with_source(&full_source, Some(&options))?;
 
-    let ns_name = NSString::from_str(function_name);
     let function = library
-        .newFunctionWithName(&ns_name)
+        .new_function(function_name)
         .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Function {} not found in source", function_name)))?;
 
-    let pipeline = device
-        .newComputePipelineStateWithFunction_error(&function)
-        .map_err(|e| MetalError::PipelineCreationFailed(format!("{:?}", e)))?;
+    let pipeline = device.new_compute_pipeline_state_with_function(&function)?;
 
     Ok(pipeline)
 }

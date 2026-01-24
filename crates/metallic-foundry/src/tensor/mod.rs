@@ -1,15 +1,10 @@
 use std::marker::PhantomData;
 
-// Protocol traits must be imported to use methods
-use objc2_metal::{
-    MTLBlitCommandEncoder as _, MTLBuffer as _, MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _, MTLDevice as _, MTLResourceOptions
-};
-
 use super::{
     Foundry, storage::{Dedicated, Pooled, StorageState, View}
 };
 use crate::{
-    error::MetalError, types::{Buffer, KernelArg}
+    error::MetalError, types::{Buffer, KernelArg, MetalResourceOptions}
 };
 
 pub mod dtypes;
@@ -78,22 +73,19 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
         // Dereference to ProtocolObject to match the queue context.
         let device = &foundry.device;
         let read_buffer = device
-            .newBufferWithLength_options(size_bytes, MTLResourceOptions::StorageModeShared)
+            .new_buffer(size_bytes, MetalResourceOptions::StorageModeShared)
             .expect("Failed to create read buffer");
 
-        let cmd = foundry.queue.commandBuffer().expect("Failed to create command buffer");
-        let blit = cmd.blitCommandEncoder().expect("Failed to create blit encoder");
+        let cmd = foundry.queue.command_buffer().expect("Failed to create command buffer");
+        let blit = cmd.blit_command_encoder().expect("Failed to create blit encoder");
 
-        unsafe {
-            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&self.buffer, self.offset, &read_buffer, 0, size_bytes);
-        }
-        blit.endEncoding();
+        blit.copy_from_buffer(&self.buffer, self.offset, &read_buffer, 0, size_bytes);
+        blit.end_encoding();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        cmd.wait_until_completed();
 
         // Read data
-        let ptr = read_buffer.contents().as_ptr() as *const T::Scalar;
-        unsafe { std::slice::from_raw_parts(ptr, num_elements).to_vec() }
+        read_buffer.read_to_vec::<T::Scalar>(num_elements)
     }
 }
 
@@ -130,56 +122,42 @@ impl<T: TensorElement> Tensor<T, Dedicated> {
         let size_bytes = num_elements * T::DTYPE.size_bytes();
 
         let buffer = match init {
-            TensorInit::Uninitialized => {
-                let b = foundry
-                    .device
-                    .newBufferWithLength_options(size_bytes, MTLResourceOptions::StorageModePrivate)
-                    .ok_or(MetalError::BufferCreationFailed(size_bytes))?;
-                crate::types::MetalBuffer(b)
-            }
+            TensorInit::Uninitialized => foundry
+                .device
+                .new_buffer(size_bytes, MetalResourceOptions::StorageModePrivate)
+                .ok_or(MetalError::BufferCreationFailed(size_bytes))?,
             TensorInit::CopyFrom(data) => {
                 // Copy with staging buffer
-                let b = foundry
+                let dest = foundry
                     .device
-                    .newBufferWithLength_options(size_bytes, MTLResourceOptions::StorageModePrivate)
+                    .new_buffer(size_bytes, MetalResourceOptions::StorageModePrivate)
                     .ok_or(MetalError::BufferCreationFailed(size_bytes))?;
-                let dest = crate::types::MetalBuffer(b);
 
                 // Staging
                 let src_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void).unwrap();
-                let staging = unsafe {
-                    foundry
-                        .device
-                        .newBufferWithBytes_length_options(src_ptr, size_bytes, MTLResourceOptions::StorageModeShared)
-                        .ok_or(MetalError::BufferFromBytesCreationFailed)?
-                };
+                let staging = foundry
+                    .device
+                    .new_buffer_with_bytes(src_ptr, size_bytes, MetalResourceOptions::StorageModeShared)
+                    .ok_or(MetalError::BufferFromBytesCreationFailed)?;
 
-                let cmd = foundry.queue.commandBuffer().unwrap();
-                let blit = cmd.blitCommandEncoder().unwrap();
-                unsafe {
-                    blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &dest, 0, size_bytes);
-                }
-                blit.endEncoding();
+                let cmd = foundry.queue.command_buffer().unwrap();
+                let blit = cmd.blit_command_encoder().unwrap();
+
+                blit.copy_from_buffer(&staging, 0, &dest, 0, size_bytes);
+                blit.end_encoding();
                 cmd.commit();
-                cmd.waitUntilCompleted();
+                cmd.wait_until_completed();
 
                 dest
             }
             TensorInit::BorrowHost(data) => {
                 // No copy
                 let src_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void).unwrap();
-                unsafe {
-                    let b = foundry
-                        .device
-                        .newBufferWithBytesNoCopy_length_options_deallocator(
-                            src_ptr,
-                            size_bytes,
-                            MTLResourceOptions::StorageModeShared,
-                            None,
-                        )
-                        .ok_or(MetalError::BufferFromBytesCreationFailed)?;
-                    crate::types::MetalBuffer(b)
-                }
+                let b = foundry
+                    .device
+                    .new_buffer_with_bytes_no_copy(src_ptr, size_bytes, MetalResourceOptions::StorageModeShared, None)
+                    .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+                crate::types::MetalBuffer(b.0)
             }
         };
 
@@ -206,7 +184,8 @@ impl<T: TensorElement> Tensor<T, Pooled> {
         // Handle initialization
         if let TensorInit::CopyFrom(data) = init {
             // Safety: Transmuting &[T] to &[u8]. T is TensorElement which is Pod.
-            let data_u8 = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, std::mem::size_of_val(data)) };
+            // Safety: Transmuting &[T] to &[u8]. T is TensorElement which is Pod.
+            let data_u8 = crate::types::pod_as_bytes(data);
             // Upload data to the allocated buffer
             pool.upload(&alloc, data_u8)?;
         }

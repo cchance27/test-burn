@@ -1,12 +1,4 @@
-use objc2_metal::{MTLBlitCommandEncoder, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLDevice, MTLResourceOptions};
-
-// Protocol traits must be imported to use methods
-// use objc2_metal::{MTLBlitCommandEncoder as _, MTLCommandBuffer as _, MTLCommandEncoder as _, MTLCommandQueue as _};
-
-// Access to pool from Foundry is via TypeId.
-// MemoryPool doesn't use Foundry struct.
-// Remove all
-use crate::{error::MetalError, tensor::TensorElement};
+use crate::{error::MetalError, tensor::TensorElement, types::MetalResourceOptions};
 
 const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
 const GROWTH_FACTOR: f32 = 1.5;
@@ -138,9 +130,8 @@ impl MemoryPool {
     fn allocate_new_chunk(&mut self, size: usize) -> Result<(), MetalError> {
         let buffer = self
             .device
-            .newBufferWithLength_options(size, MTLResourceOptions::StorageModePrivate)
+            .new_buffer(size, MetalResourceOptions::StorageModePrivate)
             .ok_or(MetalError::BufferCreationFailed(size))?;
-        let buffer = crate::types::MetalBuffer(buffer);
 
         self.chunks.push(PoolChunk {
             buffer,
@@ -166,21 +157,18 @@ impl MemoryPool {
 
         // Host -> Shared Staging -> Private (Pooled allocation)
         let src_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
-        let staging = unsafe {
-            self.device
-                .newBufferWithBytes_length_options(src_ptr, size, MTLResourceOptions::StorageModeShared)
-                .ok_or(MetalError::BufferFromBytesCreationFailed)?
-        };
+        let staging = self
+            .device
+            .new_buffer_with_bytes(src_ptr, size, MetalResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferFromBytesCreationFailed)?;
 
-        let cmd = self.command_queue.commandBuffer().ok_or(MetalError::CommandBufferCreationFailed)?;
-        let blit = cmd.blitCommandEncoder().ok_or(MetalError::CommandQueueCreationFailed)?;
+        let cmd = self.command_queue.command_buffer()?;
+        let blit = cmd.blit_command_encoder()?;
 
-        unsafe {
-            blit.copyFromBuffer_sourceOffset_toBuffer_destinationOffset_size(&staging, 0, &allocation.buffer, allocation.offset, size);
-        }
-        blit.endEncoding();
+        blit.copy_from_buffer(&staging, 0, &allocation.buffer, allocation.offset, size);
+        blit.end_encoding();
         cmd.commit();
-        cmd.waitUntilCompleted();
+        cmd.wait_until_completed();
 
         Ok(())
     }

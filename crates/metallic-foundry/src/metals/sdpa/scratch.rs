@@ -1,8 +1,9 @@
-use objc2_metal::{MTLDevice as _, MTLResourceOptions};
+// Trait import removed
+
 use rustc_hash::FxHashMap;
 
 use crate::{
-    Foundry, error::MetalError, tensor::Dtype, types::{MetalBuffer, MetalDevice, TensorArg}
+    Foundry, error::MetalError, tensor::Dtype, types::{MetalBuffer, MetalDevice, MetalResourceOptions, TensorArg}
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -62,20 +63,16 @@ impl SdpaScratchCache {
             };
 
             let bytes = align_256(target_capacity_elems.saturating_mul(elem_size));
-            let opts = MTLResourceOptions::StorageModePrivate;
+            let opts = MetalResourceOptions::StorageModePrivate;
 
-            let scores = device
-                .newBufferWithLength_options(bytes, opts)
-                .ok_or(MetalError::BufferCreationFailed(bytes))?;
-            let probs = device
-                .newBufferWithLength_options(bytes, opts)
-                .ok_or(MetalError::BufferCreationFailed(bytes))?;
+            let scores = device.new_buffer(bytes, opts).ok_or(MetalError::BufferCreationFailed(bytes))?;
+            let probs = device.new_buffer(bytes, opts).ok_or(MetalError::BufferCreationFailed(bytes))?;
 
             self.entries.insert(
                 key,
                 SdpaScratchEntry {
-                    scores: MetalBuffer::from_retained(scores),
-                    probs: MetalBuffer::from_retained(probs),
+                    scores,
+                    probs,
                     capacity_elems: target_capacity_elems,
                 },
             );

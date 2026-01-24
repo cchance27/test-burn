@@ -224,8 +224,7 @@ impl ContextConfig {
 
     /// Get the recommended maximum working set size for the Metal device.
     pub fn gpu_recommended_memory(device: &Device) -> usize {
-        use objc2_metal::MTLDevice as _;
-        device.recommendedMaxWorkingSetSize() as usize
+        device.recommended_max_working_set_size() as usize
     }
 
     /// Log the current system memory state using sysinfo.
@@ -276,14 +275,17 @@ mod tests {
         assert_eq!(config2.max_context_len, 2048);
 
         // 3. Env var acts as a cap
-        unsafe {
-            std::env::set_var("METALLIC_MAX_CONTEXT_LEN", "1024");
-        }
+        set_env_safe("METALLIC_MAX_CONTEXT_LEN", "1024");
         let config3 = ContextConfig::from_architecture(&arch, None);
         assert_eq!(config3.max_context_len, 1024);
-        unsafe {
-            std::env::remove_var("METALLIC_MAX_CONTEXT_LEN");
-        }
+        unset_env_safe("METALLIC_MAX_CONTEXT_LEN");
+    }
+
+    fn set_env_safe(k: &str, v: &str) {
+        unsafe { std::env::set_var(k, v) }
+    }
+    fn unset_env_safe(k: &str) {
+        unsafe { std::env::remove_var(k) }
     }
 
     #[test]

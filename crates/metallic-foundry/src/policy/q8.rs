@@ -1,9 +1,8 @@
 use metallic_macros::MetalPolicy;
-use objc2_metal::{MTLBuffer as _, MTLDevice};
 
 use super::{LoaderStage, MetalPolicyRuntime};
 use crate::{
-    Foundry, compound::Layout, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalBuffer, TensorArg}
+    Foundry, compound::Layout, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalResourceOptions, TensorArg}
 };
 
 const Q8_0_WPB: usize = 32;
@@ -162,14 +161,12 @@ impl MetalPolicyRuntime for PolicyQ8 {
 
         let data_buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(data_len, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(data_len, MetalResourceOptions::StorageModeShared)
             .ok_or_else(|| anyhow::anyhow!("Failed to allocate Q8 data"))?;
 
         let scales_buffer = foundry
             .device
-            .0
-            .newBufferWithLength_options(scales_len, objc2_metal::MTLResourceOptions::StorageModeShared)
+            .new_buffer(scales_len, MetalResourceOptions::StorageModeShared)
             .ok_or_else(|| anyhow::anyhow!("Failed to allocate Q8 scales"))?;
 
         if is_canonical {
@@ -181,16 +178,14 @@ impl MetalPolicyRuntime for PolicyQ8 {
         }
 
         // Split blocks into separate {data, scales} buffers (and reorder if canonical).
-        unsafe {
-            let data_ptr = data_buffer.contents().as_ptr() as *mut u8;
-            let scales_ptr = scales_buffer.contents().as_ptr() as *mut u8;
-            let data_out = std::slice::from_raw_parts_mut(data_ptr, data_len);
-            let scales_out = std::slice::from_raw_parts_mut(scales_ptr, scales_len);
-            split_q8_0_blocks(raw, blocks_per_k, target_n, is_canonical, data_out, scales_out);
-        }
+        data_buffer.write_via_slice(data_len, |data_out| {
+            scales_buffer.write_via_slice(scales_len, |scales_out| {
+                split_q8_0_blocks(raw, blocks_per_k, target_n, is_canonical, data_out, scales_out);
+            });
+        });
 
         let data_arg = TensorArg::from_buffer(
-            MetalBuffer(data_buffer),
+            data_buffer,
             Dtype::U8,
             if is_canonical { vec![data_len] } else { dims.clone() },
             if is_canonical {
@@ -200,7 +195,7 @@ impl MetalPolicyRuntime for PolicyQ8 {
             },
         );
 
-        let scales_arg = TensorArg::from_buffer(MetalBuffer(scales_buffer), Dtype::U8, vec![scales_len], vec![1]);
+        let scales_arg = TensorArg::from_buffer(scales_buffer, Dtype::U8, vec![scales_len], vec![1]);
 
         Ok(vec![
             (logical_name.to_string(), data_arg),

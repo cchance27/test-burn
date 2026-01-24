@@ -52,6 +52,9 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Fixed: test hygiene:** env-mutating context-config tests are now guarded with `serial_test`.
 - **Fixed: avoid panic paths:** growth paths now return typed `MetalError` instead of panicking on missing bindings/buffers.
 
+### 10. Safety & Encapsulation
+- **Safety & Encapsulation:** We centralize all `objc2` interaction and `unsafe` code within the `types` module system. This ensures that the rest of the Foundry codebase (`model`, `executor`, etc.) remains clean, safe Rust.
+
 ---
 
 ## ⚠️ Risks & Regressions (Immediate Priority)
@@ -62,26 +65,21 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
 
-### 1. Raw `objc2` Leaks in Public API
-- **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
-- **Impact:** This couples the entire project (including the CLI and external crates) to specific versions of the `objc2` and `objc2-metal` crates.
-- **Requirement:** Complete the "Semantic Wrapper" layer (`MetalBuffer`, `MetalDevice`, `MetalCommandQueue`) to encapsulate the raw pointers, move everything to these semantic wrappers, make sure we no longer leak objc2 and objc2-metal outside of our semantic wrappers, we shouldn't see objc2 and objc2-metal in source files outside of the semantic wrapper files.
-
-### 3. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
+### 1. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
 - **Issue:** `Tensor<T, Pooled>` holds a reference to a Metal buffer but is not lifetime-bound to the `MemoryPool` that manages the offsets.
 - **Risk:** If `MemoryPool::reset()` is called while a `Pooled` tensor is still alive, the tensor points to reclaimed memory (logical use-after-free).
 - **Requirement:** Implement an "Arena" or "Generational" pattern where `Pooled` tensors hold a guard or generation ID that invalidates them if the pool is reset.
 
-### 4. Non-Standard Include Resolution
+### 2. Non-Standard Include Resolution
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
 
-### 4. Import Hygiene & Naming
+### 3. Import Hygiene & Naming
 - **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
 - **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
 - **Requirement:** Rename `as_stage` -> `to_stage` or `into_stage`.
 
-### 6. Quantization Safety & Regression Testing
+### 4. Quantization Safety & Regression Testing
 - **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
 - **Tasks:**
     - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
@@ -271,3 +269,10 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Feature:** Macros now support `per_element`, `per_row`, `warp_per_row`, and `per_element_vec` presets, eliminating manual `dispatch_config` boilerplate for most kernels.
 - **Feature:** `#[arg(scale_for = "...")]` adds automatic support for derived scales in quantized kernels.
 - **Feature:** `#[derive(Kernel)]` now generates both `Step` and `CompiledStep` implementations, with `Step::execute` automatically routing through the optimized `CompiledStep` path.
+
+### 14. Safety & Type Encapsulation (COMPLETED)
+- **Status:** **Completed.** All direct `objc2` and `objc2-metal` dependencies are now strictly isolated within `src/types/mod.rs`.
+- **Feature:** **Safe Buffer Wrappers:** Extended `MetalBuffer` with robust safe APIs (`read_to_vec`, `write_via_slice`, `copy_from_slice`), enabling the removal of `unsafe` blocks from high-level application logic.
+- **Feature:** **Unsafe Elimination:** application logic (`model`, `executor`, `tokenizer`, `policy`) is now 100% safe code. Raw pointer operations are restricted to the FFI boundary layer.
+- **Feature:** **Error Standardization:** All Metal type wrappers now return `Result<T, MetalError>`, providing proper error propagation instead of fragile `Option` unwrapping.
+- **Impact:** Decouples the codebase from specific `objc2` versions and prevents memory safety regressions in future feature work.

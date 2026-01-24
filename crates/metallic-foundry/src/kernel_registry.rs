@@ -21,8 +21,6 @@ use std::{
 };
 
 use moka::sync::Cache;
-use objc2::{rc::Retained, runtime::ProtocolObject};
-use objc2_metal::MTLComputePipelineState;
 
 use crate::{MetalError, compound::CompiledCompoundKernel, types::MetalDevice};
 
@@ -102,7 +100,7 @@ pub struct CacheStats {
 }
 
 /// Type alias for the Metal pipeline state object.
-pub type Pipeline = Retained<ProtocolObject<dyn MTLComputePipelineState>>;
+pub type Pipeline = crate::types::MetalPipeline;
 
 /// Centralized kernel registry with moka concurrent caching.
 ///
