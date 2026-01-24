@@ -19,6 +19,17 @@ pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
         2 // Default to F16
     }
 
+    /// Size of a quantization block in bytes (e.g., 34 for Q8_0).
+    /// For unquantized types, this is the element size.
+    fn block_size_bytes(&self) -> usize {
+        self.element_size()
+    }
+
+    /// Number of logical weights per quantization block (e.g., 32 for Q8_0, 1 for F16).
+    fn weights_per_block(&self) -> usize {
+        1
+    }
+
     /// Convert an elements expression to a bytes expression for Metal code.
     /// Uses element_size() to compute the multiplication factor.
     fn bytes(&self, elements: &str) -> String {

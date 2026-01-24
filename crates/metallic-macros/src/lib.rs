@@ -772,6 +772,8 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
     let mut unroll_factor: Option<usize> = None;
     let mut active_thread_count: Option<usize> = None;
     let mut has_scale: Option<bool> = None;
+    let mut block_size_bytes: Option<usize> = None;
+    let mut weights_per_block: Option<usize> = None;
 
     for attr in &input.attrs {
         if attr.path().is_ident("policy") {
@@ -830,6 +832,18 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
                             if let Expr::Lit(expr_lit) = nv.value {
                                 if let Lit::Bool(lit) = expr_lit.lit {
                                     has_scale = Some(lit.value);
+                                }
+                            }
+                        } else if nv.path.is_ident("block_size_bytes") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    block_size_bytes = Some(lit.base10_parse::<usize>().unwrap());
+                                }
+                            }
+                        } else if nv.path.is_ident("weights_per_block") {
+                            if let Expr::Lit(expr_lit) = nv.value {
+                                if let Lit::Int(lit) = expr_lit.lit {
+                                    weights_per_block = Some(lit.base10_parse::<usize>().unwrap());
                                 }
                             }
                         }
@@ -925,6 +939,26 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
+    let block_size_bytes_impl = if let Some(bsb) = block_size_bytes {
+        quote! {
+            fn block_size_bytes(&self) -> usize {
+                #bsb
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let weights_per_block_impl = if let Some(wpb) = weights_per_block {
+        quote! {
+            fn weights_per_block(&self) -> usize {
+                #wpb
+            }
+        }
+    } else {
+        quote! {}
+    };
+
     let expanded = quote! {
         impl #root::fusion::MetalPolicy for #name {
             fn header(&self) -> &'static str {
@@ -939,6 +973,8 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
             #element_size_impl
             #optimization_hints_impl
             #has_scale_impl
+            #block_size_bytes_impl
+            #weights_per_block_impl
         }
 
         // Policies need a no-op Stage impl for the loader stage machinery

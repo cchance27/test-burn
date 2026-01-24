@@ -9,11 +9,9 @@ use crate::{
 
 pub mod dtypes;
 pub mod enums;
-pub mod quantized;
 
 pub use dtypes::{Dtype, F16, F32, TensorElement, U8, U32};
 pub use enums::TensorInit;
-pub use quantized::*;
 
 /// A strongly-typed Tensor tied to the Foundry system.
 ///

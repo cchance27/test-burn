@@ -16,6 +16,7 @@ fn q8_0_canonical_dst_block_idx(src_block_idx: usize, blocks_per_k: usize, targe
     block * target_n + row
 }
 
+#[inline]
 fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canonical: bool, data_out: &mut [u8], scales_out: &mut [u8]) {
     debug_assert_eq!(raw.len() % Q8_0_BLOCK_BYTES, 0);
     debug_assert_eq!(data_out.len() % Q8_0_WPB, 0);
@@ -39,7 +40,7 @@ fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canoni
     }
 }
 
-#[derive(Default, Debug, Clone, MetalPolicy)]
+#[derive(Debug, Clone, Default, MetalPolicy)]
 #[policy(
     header = "policies/policy_q8.metal",
     struct_name = "PolicyQ8",
@@ -48,7 +49,9 @@ fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canoni
     block_size = 32,
     vector_load_size = 8,
     unroll_factor = 2,
-    active_thread_count = 32
+    active_thread_count = 32,
+    block_size_bytes = 34,
+    weights_per_block = 32
 )]
 pub struct PolicyQ8;
 
