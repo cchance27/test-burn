@@ -17,6 +17,9 @@ pub struct ModelSpec {
     pub name: String,
     /// Model architecture configuration
     pub architecture: Architecture,
+    /// Optional chat template override (Jinja2)
+    #[serde(default)]
+    pub chat_template: Option<String>,
 }
 
 /// Tensor naming conventions for model weights.

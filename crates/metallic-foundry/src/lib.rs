@@ -26,6 +26,7 @@ pub mod policy;
 pub mod pool;
 pub mod spec;
 pub mod storage;
+pub mod template;
 pub mod tensor;
 pub mod tokenizer;
 pub mod types;

@@ -11,7 +11,9 @@ use rustc_hash::FxHashMap;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
-use crate::{MetalError, gguf::file::GGUFMetadata};
+use crate::{
+    MetalError, gguf::file::GGUFMetadata, template::{ChatTemplate, Message}
+};
 
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
     let mut bs = (b'!'..=b'~').chain(b'\xa1'..=b'\xac').chain(b'\xae'..=b'\xff').collect::<Vec<_>>();
@@ -66,11 +68,8 @@ pub struct Tokenizer {
     special_tokens: SpecialTokens,
     /// Whether to add BOS token
     add_bos_token: bool,
-    /// Optional chat template from GGUF metadata (model-specific).
-    ///
-    /// Note: this is often a Jinja template; Metallic currently uses this as a signal
-    /// to enable a minimal, fast-path formatter for single-turn prompts.
-    chat_template: Option<Arc<str>>,
+    /// Dynamic chat template for formatting multi-turn prompts.
+    chat_template: Option<ChatTemplate>,
     /// Cache for BPE tokenization results
     bpe_cache: RwLock<FxHashMap<String, Vec<u32>>>,
     /// ID-based BPE merges for optimized tokenization
@@ -149,11 +148,7 @@ impl Tokenizer {
             }
         }
 
-        let chat_template = chat_template
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(Arc::<str>::from);
+        let chat_template = chat_template.as_deref().filter(|v| !v.trim().is_empty()).map(ChatTemplate::new);
 
         Ok(Self {
             vocab: vocab_arc,
@@ -728,77 +723,77 @@ impl Tokenizer {
         &self.special_tokens
     }
 
-    pub fn chat_template(&self) -> Option<&str> {
-        self.chat_template.as_deref()
+    pub fn chat_template(&self) -> Option<&ChatTemplate> {
+        self.chat_template.as_ref()
     }
 
-    /// Format a single-turn chat prompt for chat-template models (e.g. Qwen2.5 Instruct).
+    pub fn set_chat_template(&mut self, template: String) {
+        self.chat_template = Some(ChatTemplate::new(&template));
+    }
+
+    /// Format a single-turn chat prompt using the dynamic template.
     ///
-    /// If `prompt` already appears to be templated (contains `<|im_start|>`), it is returned as-is.
-    /// If the tokenizer does not have a chat template, `prompt` is returned as-is.
-    pub fn format_single_turn_chat_prompt(&self, prompt: &str) -> String {
-        const IM_START: &str = "<|im_start|>";
-        const IM_END: &str = "<|im_end|>";
+    /// If the tokenizer does not have a chat template, it returns the prompt as-is.
+    pub fn format_single_turn_chat_prompt(&self, prompt: &str) -> Result<String, MetalError> {
+        let Some(template) = &self.chat_template else {
+            return Ok(prompt.to_string());
+        };
 
-        if prompt.contains(IM_START) {
-            return prompt.to_string();
-        }
-        if self.chat_template.is_none() {
-            return prompt.to_string();
-        }
+        let bos_token = self
+            .special_tokens
+            .bos_token_id
+            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
+        let eos_token = self
+            .special_tokens
+            .eos_token_id
+            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
 
-        // Fast-path for the tools-free branch of the Qwen2.5 chat template.
-        let system = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
-        let mut out = String::with_capacity(prompt.len() + system.len() + 64);
-        out.push_str(IM_START);
-        out.push_str("system\n");
-        out.push_str(system);
-        out.push_str(IM_END);
-        out.push('\n');
-        out.push_str(IM_START);
-        out.push_str("user\n");
-        out.push_str(prompt);
-        out.push_str(IM_END);
-        out.push('\n');
-        out.push_str(IM_START);
-        out.push_str("assistant\n");
-        out
+        let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: "You are a helpful assistant.".to_string(),
+            },
+            Message {
+                role: "user".to_string(),
+                content: prompt.to_string(),
+            },
+        ];
+
+        template.render(&messages, bos_token, eos_token, true)
     }
 
     pub fn encode_single_turn_chat_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
-        let formatted = self.format_single_turn_chat_prompt(prompt);
+        let formatted = self.format_single_turn_chat_prompt(prompt)?;
         self.encode(&formatted)
     }
 
-    /// Format a continuation chat prompt (User + Assistant start) without System prompt.
-    pub fn format_chat_continuation_prompt(&self, prompt: &str) -> String {
-        const IM_START: &str = "<|im_start|>";
-        const IM_END: &str = "<|im_end|>";
+    /// Format a continuation chat prompt using the dynamic template.
+    ///
+    /// This adds the user prompt and opens the assistant turn.
+    pub fn format_chat_continuation_prompt(&self, prompt: &str) -> Result<String, MetalError> {
+        let Some(template) = &self.chat_template else {
+            return Ok(prompt.to_string());
+        };
 
-        if prompt.contains(IM_START) {
-            return prompt.to_string();
-        }
-        if self.chat_template.is_none() {
-            return prompt.to_string();
-        }
+        let bos_token = self
+            .special_tokens
+            .bos_token_id
+            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
+        let eos_token = self
+            .special_tokens
+            .eos_token_id
+            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
 
-        // Continue a chat by appending a new user turn and opening the assistant turn.
-        //
-        // Note: The previous assistant message is typically already closed by the generation stop token
-        // (`<|im_end|>` for Qwen-style templates), so we do not prepend another `<|im_end|>` here.
-        let mut out = String::with_capacity(prompt.len() + 64);
-        out.push_str(IM_START);
-        out.push_str("user\n");
-        out.push_str(prompt);
-        out.push_str(IM_END);
-        out.push('\n');
-        out.push_str(IM_START);
-        out.push_str("assistant\n");
-        out
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: prompt.to_string(),
+        }];
+
+        template.render(&messages, bos_token, eos_token, true)
     }
 
     pub fn encode_chat_continuation_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {
-        let formatted = self.format_chat_continuation_prompt(prompt);
+        let formatted = self.format_chat_continuation_prompt(prompt)?;
         self.encode(&formatted)
     }
 
@@ -841,17 +836,19 @@ mod tests {
 
     #[test]
     fn format_chat_continuation_prompt_inserts_turn_newline_for_chat_templates() {
+        // Use a Qwen-like template for testing
+        let qwen_template = "<|im_start|>user\n{{ messages[0]['content'] }}<|im_end|>\n<|im_start|>assistant\n";
         let tokenizer = Tokenizer::new(
             FxHashMap::default(),
             Vec::new(),
             FxHashMap::default(),
             SpecialTokens::default(),
             false,
-            Some("dummy".to_string()),
+            Some(qwen_template.to_string()),
         )
         .unwrap();
 
-        let formatted = tokenizer.format_chat_continuation_prompt("hello");
+        let formatted = tokenizer.format_chat_continuation_prompt("hello").unwrap();
         assert_eq!(formatted, "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n");
     }
 
@@ -867,23 +864,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(tokenizer.format_chat_continuation_prompt("hello"), "hello");
-    }
-
-    #[test]
-    fn format_chat_continuation_prompt_passthrough_when_already_templated() {
-        let tokenizer = Tokenizer::new(
-            FxHashMap::default(),
-            Vec::new(),
-            FxHashMap::default(),
-            SpecialTokens::default(),
-            false,
-            Some("dummy".to_string()),
-        )
-        .unwrap();
-
-        let already = "<|im_start|>user\nhello<|im_end|>\n<|im_start|>assistant\n";
-        assert_eq!(tokenizer.format_chat_continuation_prompt(already), already);
+        assert_eq!(tokenizer.format_chat_continuation_prompt("hello").unwrap(), "hello");
     }
 
     #[test]

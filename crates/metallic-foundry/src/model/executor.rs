@@ -339,9 +339,16 @@ impl CompiledModel {
         self.weights.gguf_model()
     }
 
-    /// Create a tokenizer from the model's GGUF metadata.
+    /// Create a tokenizer from the model's GGUF metadata, with optional override from ModelSpec.
     pub fn tokenizer(&self) -> Result<crate::Tokenizer, MetalError> {
-        crate::Tokenizer::from_gguf_metadata(self.weights.gguf_model().get_metadata())
+        let mut tokenizer = crate::Tokenizer::from_gguf_metadata(self.weights.gguf_model().get_metadata())?;
+
+        // Prioritize template from ModelSpec (DSL override)
+        if let Some(template_override) = &self.spec.chat_template {
+            tokenizer.set_chat_template(template_override.clone());
+        }
+
+        Ok(tokenizer)
     }
 
     pub fn initialize_session(&self, foundry: &mut Foundry) -> Result<(), MetalError> {
@@ -2276,6 +2283,7 @@ mod tests {
         let spec = ModelSpec {
             name: "test-growth".into(),
             architecture: arch,
+            chat_template: None,
         };
         // We don't need real weights for allocation testing
         let weights = super::WeightBundle::new_empty();

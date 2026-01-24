@@ -62,41 +62,37 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
 
-### 1. Dynamic Chat Templates
-- **Debt:** Chat tokens (`<|im_start|>`, etc.) are currently hardcoded constants in `tokenizer.rs`.
-- **Requirement:** Implement a template parser that respects the `tokenizer.chat_template` field from GGUF metadata.
-- **Goal:** Support Llama 3, Phi, and Mistral without code changes.
 
-### 3. Memory Alignment & Stride
+### 1. Memory Alignment & Stride
 - **Debt:** Padded strides in SDPA scratch buffers are manually calculated in `step.rs`.
 - **Requirement:** Centralize stride/padding logic into `metallic-foundry::compound::layout` to prevent silent corruption when tile sizes change.
 
-### 4. Developer Experience (Kernel Macros)
+### 2. Developer Experience (Kernel Macros)
 - **Debt:** Manually calculating grid/threadgroup sizes in `step.rs` (e.g. `GridSize::new(...)`).
 - **Requirement:** Implement `#[dispatch = "per_row"]` or similar presets in macros to auto-generate dispatch config.
 - **Goal:** Reduce boilerplate and off-by-one errors in dispatch logic.
 - **Validation:** Implement compile-time validation of Metal `emit()` strings to catch syntax errors early.
 
-### 5. Raw `objc2` Leaks in Public API
+### 3. Raw `objc2` Leaks in Public API
 - **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
 - **Impact:** This couples the entire project (including the CLI and external crates) to specific versions of the `objc2` and `objc2-metal` crates.
 - **Requirement:** Complete the "Semantic Wrapper" layer (`MetalBuffer`, `MetalDevice`, `MetalCommandQueue`) to encapsulate the raw pointers.
 
-### 6. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
+### 4. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
 - **Issue:** `Tensor<T, Pooled>` holds a reference to a Metal buffer but is not lifetime-bound to the `MemoryPool` that manages the offsets.
 - **Risk:** If `MemoryPool::reset()` is called while a `Pooled` tensor is still alive, the tensor points to reclaimed memory (logical use-after-free).
 - **Requirement:** Implement an "Arena" or "Generational" pattern where `Pooled` tensors hold a guard or generation ID that invalidates them if the pool is reset.
 
-### 7. Non-Standard Include Resolution
+### 5. Non-Standard Include Resolution
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
 
-### 8. Import Hygiene & Naming
+### 6. Import Hygiene & Naming
 - **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
 - **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
 - **Requirement:** Use the `DispatchConfig` struct everywhere and rename `as_stage` -> `to_stage` or `into_stage`.
 
-### 9. Quantization Safety & Regression Testing
+### 7. Quantization Safety & Regression Testing
 - **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
 - **Tasks:**
     - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
@@ -269,3 +265,10 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
     - Added high-speed GPU `blit_copy` to preserve token history across reallocations.
     - Synchronized kernel strides with physical buffer capacity via `FastBindings`.
     - Integrated `sysinfo` for memory-aware pre-allocation.
+
+### 11. Dynamic Chat Templates (COMPLETED)
+- **Status:** Integrated `minijinja` for dynamic template rendering.
+- **Feature:** Automatically parses and applies `tokenizer.chat_template` from GGUF metadata.
+- **Flexibility:** Supports DSL-level overrides via the `chat_template` field in `ModelSpec`.
+- **Correctness:** Correctly injects `bos_token` and `eos_token` into the template context, enabling parity with Llama 3, Mistral, and Qwen 2.5.
+- **Preservation:** Configured for strict whitespace and trailing newline preservation to match model-specific requirements.
