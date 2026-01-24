@@ -3,7 +3,7 @@ use std::sync::Arc;
 use half::f16;
 use metallic_foundry::{
     Foundry, compound::{
-        CompoundKernel, stages::{Layout, WarpLayoutStage, WarpReduceStage}
+        CompoundKernel, Layout, stages::{WarpLayoutStage, WarpReduceStage}
     }, metals::{
         gemv::{
             fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, warp_dispatch_config

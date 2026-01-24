@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 }; // Added GemvStrategy
 
 fn run_benchmark_case(
@@ -16,7 +16,7 @@ fn run_benchmark_case(
     let layout_str = match layout {
         Layout::RowMajor => "NK (RowMajor)",
         Layout::ColMajor => "KN (ColMajor)",
-        Layout::Canonical => "Blocked (Canonical)",
+        Layout::Canonical { .. } => "Blocked (Canonical)",
     };
     let strategy_str = match strategy {
         Some(GemvStrategy::Auto) => "Auto",
@@ -164,7 +164,29 @@ fn benchmark_gemv_v2_perf() {
     println!("\n=== Blocked (Canonical) Layout - GemvV2 ===");
     let canonical_cases = vec![(128, 128), (4096, 128), (4096, 4096)];
     for (k, n) in &canonical_cases {
-        run_benchmark_case(&mut foundry, *k, *n, Layout::Canonical, None, 1.0, iterations);
+        run_benchmark_case(
+            &mut foundry,
+            *k,
+            *n,
+            Layout::Canonical {
+                expected_k: 0,
+                expected_n: 0,
+            },
+            None,
+            1.0,
+            iterations,
+        );
     }
-    run_benchmark_case(&mut foundry, 4096, 4096, Layout::Canonical, None, 2.0, iterations);
+    run_benchmark_case(
+        &mut foundry,
+        4096,
+        4096,
+        Layout::Canonical {
+            expected_k: 0,
+            expected_n: 0,
+        },
+        None,
+        2.0,
+        iterations,
+    );
 }

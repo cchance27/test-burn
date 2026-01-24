@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::stages::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
+    Foundry, MetalError, compound::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
 };
 
 /// Unified MatMul step that dynamically dispatches to GEMV or GEMM.

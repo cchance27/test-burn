@@ -15,9 +15,11 @@
 //! ```
 
 mod code_builder;
+pub mod layout;
 pub mod stages;
 
 pub use code_builder::CodeBuilder;
+pub use layout::Layout;
 pub use stages::*;
 
 use crate::{

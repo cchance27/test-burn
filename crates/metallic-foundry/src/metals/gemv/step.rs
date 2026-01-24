@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpWriteOutputStage};
 use crate::{
     Foundry, MetalError, compound::{
-        BufferArg, CompiledCompoundKernel, CompoundKernel, Stage, stages::{Layout, ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
+        BufferArg, CompiledCompoundKernel, CompoundKernel, Layout, Stage, stages::{ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
     }, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
@@ -139,20 +139,22 @@ pub fn get_gemv_v2_kernel(
                 .main(WarpWriteOutputStage::new().with_activation(activation))
                 .with_manual_output(true)
                 .compile(),
-            (Layout::Canonical, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
+            (Layout::Canonical { .. }, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
                 .prologue(WarpLayoutStage::canonical().with_warps(8))
                 .prologue(VectorizedDotStage::new(policy_clone.clone()))
                 .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
                 .main(WarpWriteOutputStage::new().with_activation(activation))
                 .with_manual_output(true)
                 .compile(),
-            (Layout::Canonical, GemvStrategy::Canonical) | (Layout::Canonical, GemvStrategy::Auto) => CompoundKernel::new(&kernel_name)
-                .prologue(WarpLayoutStage::canonical().with_warps(8))
-                .prologue(CanonicalDotStage::new(policy_clone.clone()))
-                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                .main(WarpWriteOutputStage::new().with_activation(activation))
-                .with_manual_output(true)
-                .compile(),
+            (Layout::Canonical { .. }, GemvStrategy::Canonical) | (Layout::Canonical { .. }, GemvStrategy::Auto) => {
+                CompoundKernel::new(&kernel_name)
+                    .prologue(WarpLayoutStage::canonical().with_warps(8))
+                    .prologue(CanonicalDotStage::new(policy_clone.clone()))
+                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                    .main(WarpWriteOutputStage::new().with_activation(activation))
+                    .with_manual_output(true)
+                    .compile()
+            }
             _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
         }
     })
@@ -658,7 +660,10 @@ impl CompiledStep for CompiledGemvCanonicalStep {
         // Select kernel using unified getter
         let kernel = get_gemv_v2_kernel(
             quantization.clone(),
-            Layout::Canonical,
+            Layout::Canonical {
+                expected_k: 0,
+                expected_n: 0,
+            },
             GemvStrategy::Canonical,
             self.step.activation,
         );

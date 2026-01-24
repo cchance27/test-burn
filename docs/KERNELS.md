@@ -141,6 +141,37 @@ Foundry abstracts data types (F16, Q8, Q4) using **Policies**. A Policy defines 
 
 ---
 
+## 4. Memory Layout & Striding
+
+Foundry provides a centralized system for managing memory layouts and stride calculations to ensure consistency between different kernel stages (e.g., GEMM and Softmax).
+
+### 4.1 The `Layout` Enum
+
+Located in `metallic_foundry::compound::layout`, this enum unifies weight and activation layouts:
+
+*   **`RowMajor`**: Standard [N, K] output-major layout.
+*   **`ColMajor`**: Standard [K, N] input-major layout.
+*   **`Canonical { expected_k, expected_n }`**: Blocked [N, K] format optimized for cache efficiency.
+
+### 4.2 `TiledLayout` Utility
+
+For kernels that operate on tiles (like SDPA), use `TiledLayout` to calculate strides and padding:
+
+```rust
+use metallic_foundry::compound::layout::TiledLayout;
+
+// Create layout for SDPA scratch buffers (Head-Major: [H, M, SeqLen])
+let layout = TiledLayout::sdpa_scratch(n_heads, m, kv_seq_len, tile_m);
+
+// Use centralized properties for dispatch and parameter binding
+let head_stride = layout.head_stride;
+let padded_m = layout.padded_m;
+```
+
+This ensures that if the underlying tile size changes, all kernels in the fused pipeline remain aligned without manual math updates.
+
+---
+
 ## 4. Activations (Foundry Inference)
 
 Foundry’s inference kernels standardize activations via a single Rust-side enum:

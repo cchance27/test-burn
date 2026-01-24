@@ -92,8 +92,11 @@ fn align_256(bytes: usize) -> usize {
     (bytes + 255) & !255
 }
 
-pub fn get_sdpa_scratch_f16(foundry: &mut Foundry, n_heads: u32, m: u32, kv_seq_len: u32) -> Result<(TensorArg, TensorArg), MetalError> {
-    let needed_elems = (n_heads as usize).saturating_mul(m as usize).saturating_mul(kv_seq_len as usize);
+pub fn get_sdpa_scratch_f16(
+    foundry: &mut Foundry,
+    layout: crate::compound::layout::TiledLayout,
+) -> Result<(TensorArg, TensorArg), MetalError> {
+    let needed_elems = layout.total_elems as usize;
 
     let device = foundry.device.clone();
 
@@ -106,7 +109,7 @@ pub fn get_sdpa_scratch_f16(foundry: &mut Foundry, n_heads: u32, m: u32, kv_seq_
         let cache = foundry
             .get_resource::<SdpaScratchCache>()
             .ok_or_else(|| MetalError::ResourceNotCached("SdpaScratchCache".into()))?;
-        cache.ensure_capacity(&device, Dtype::F16, n_heads, needed_elems)?.clone()
+        cache.ensure_capacity(&device, Dtype::F16, layout.heads, needed_elems)?.clone()
     };
 
     // TensorArg views with the exact logical lengths needed for this call.

@@ -2,9 +2,7 @@ use std::{sync::Arc, time::Instant};
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::{
-        CompoundKernel, stages::{Layout, WarpLayoutStage}
-    }, metals::{
+    Foundry, compound::{CompoundKernel, Layout, stages::WarpLayoutStage}, metals::{
         gemv::{
             qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage
@@ -305,7 +303,13 @@ fn test_qkv_parity() {
     let kernel = Arc::new(
         CompoundKernel::new("fused_qkv_rmsnorm_test")
             .with_manual_output(true)
-            .prologue(WarpLayoutStage::new(Layout::Canonical).with_warps(8))
+            .prologue(
+                WarpLayoutStage::new(Layout::Canonical {
+                    expected_k: 0,
+                    expected_n: 0,
+                })
+                .with_warps(8),
+            )
             .prologue(RmsNormComputeStage::new(k_dim, k_dim, 18))
             .main(ParallelProjectStage::new(Arc::new(PolicyQ8)).with_norm(18, "inv_rms"))
             .epilogue(MultiWarpReduceStage)

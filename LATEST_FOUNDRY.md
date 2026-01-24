@@ -62,37 +62,32 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
 
-
-### 1. Memory Alignment & Stride
-- **Debt:** Padded strides in SDPA scratch buffers are manually calculated in `step.rs`.
-- **Requirement:** Centralize stride/padding logic into `metallic-foundry::compound::layout` to prevent silent corruption when tile sizes change.
-
-### 2. Developer Experience (Kernel Macros)
+### 1. Developer Experience (Kernel Macros)
 - **Debt:** Manually calculating grid/threadgroup sizes in `step.rs` (e.g. `GridSize::new(...)`).
 - **Requirement:** Implement `#[dispatch = "per_row"]` or similar presets in macros to auto-generate dispatch config.
 - **Goal:** Reduce boilerplate and off-by-one errors in dispatch logic.
 - **Validation:** Implement compile-time validation of Metal `emit()` strings to catch syntax errors early.
 
-### 3. Raw `objc2` Leaks in Public API
+### 2. Raw `objc2` Leaks in Public API
 - **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
 - **Impact:** This couples the entire project (including the CLI and external crates) to specific versions of the `objc2` and `objc2-metal` crates.
-- **Requirement:** Complete the "Semantic Wrapper" layer (`MetalBuffer`, `MetalDevice`, `MetalCommandQueue`) to encapsulate the raw pointers.
+- **Requirement:** Complete the "Semantic Wrapper" layer (`MetalBuffer`, `MetalDevice`, `MetalCommandQueue`) to encapsulate the raw pointers, move everything to these semantic wrappers, make sure we no longer leak objc2 and objc2-metal outside of our semantic wrappers, we shouldn't see objc2 and objc2-metal in source files outside of the semantic wrapper files.
 
-### 4. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
+### 3. Memory Safety: Pool Lifetimes (Use-After-Free Risk)
 - **Issue:** `Tensor<T, Pooled>` holds a reference to a Metal buffer but is not lifetime-bound to the `MemoryPool` that manages the offsets.
 - **Risk:** If `MemoryPool::reset()` is called while a `Pooled` tensor is still alive, the tensor points to reclaimed memory (logical use-after-free).
 - **Requirement:** Implement an "Arena" or "Generational" pattern where `Pooled` tensors hold a guard or generation ID that invalidates them if the pool is reset.
 
-### 5. Non-Standard Include Resolution
+### 4. Non-Standard Include Resolution
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
 
-### 6. Import Hygiene & Naming
+### 5. Import Hygiene & Naming
 - **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
 - **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
 - **Requirement:** Use the `DispatchConfig` struct everywhere and rename `as_stage` -> `to_stage` or `into_stage`.
 
-### 7. Quantization Safety & Regression Testing
+### 6. Quantization Safety & Regression Testing
 - **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
 - **Tasks:**
     - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
@@ -272,3 +267,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Flexibility:** Supports DSL-level overrides via the `chat_template` field in `ModelSpec`.
 - **Correctness:** Correctly injects `bos_token` and `eos_token` into the template context, enabling parity with Llama 3, Mistral, and Qwen 2.5.
 - **Preservation:** Configured for strict whitespace and trailing newline preservation to match model-specific requirements.
+
+### 12. Centralized Memory Alignment & Stride (COMPLETED)
+- **Status:** Fixed. Centralized all tile-aware stride and padding logic into `metallic-foundry::compound::layout`.
+- **Impact:** Ensures consistency between GEMM and Softmax kernels in the SDPA path. Scratch buffers (`Scores`, `Probs`) now use `TiledLayout` for robust head-major indexing, eliminating manual math in `step.rs` and preventing corruption when switching to skinny-M or other tile configurations.

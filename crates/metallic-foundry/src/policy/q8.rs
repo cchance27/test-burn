@@ -1,9 +1,9 @@
 use metallic_macros::MetalPolicy;
 use objc2_metal::{MTLBuffer as _, MTLDevice};
 
-use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
+use super::{LoaderStage, MetalPolicyRuntime};
 use crate::{
-    Foundry, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalBuffer, TensorArg}
+    Foundry, compound::Layout, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalBuffer, TensorArg}
 };
 
 const Q8_0_WPB: usize = 32;
@@ -88,7 +88,7 @@ impl MetalPolicyRuntime for PolicyQ8 {
         gguf: &GGUFModel,
         gguf_tensor_name: &str,
         logical_name: &str,
-        layout: WeightLayout,
+        layout: Layout,
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
         let tensor_info = gguf
             .get_tensor(gguf_tensor_name)
@@ -100,8 +100,9 @@ impl MetalPolicyRuntime for PolicyQ8 {
         }
 
         let (target_k, target_n, is_canonical) = match layout {
-            WeightLayout::RowMajor => (dims[1], dims[0], false),
-            WeightLayout::Canonical { expected_k, expected_n } => (expected_k, expected_n, true),
+            Layout::RowMajor => (dims[1], dims[0], false),
+            Layout::ColMajor => (dims[0], dims[1], false),
+            Layout::Canonical { expected_k, expected_n } => (expected_k, expected_n, true),
         };
 
         let view = tensor_info.raw_view(&gguf.gguf_file)?;

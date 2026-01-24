@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -64,7 +64,7 @@ fn run_cpu_gemv_f16(k: usize, n: usize, layout: Layout, weights: &[f16], input: 
             let w_idx = match layout {
                 Layout::RowMajor => row * k + ki,
                 Layout::ColMajor => ki * n + row,
-                Layout::Canonical => (ki % 32) + 32 * (row + (ki / 32) * n),
+                Layout::Canonical { .. } => (ki % 32) + 32 * (row + (ki / 32) * n),
             };
             let w = weights[w_idx].to_f32();
             acc += w * x;
@@ -106,7 +106,7 @@ fn run_cpu_gemv_q8(
                 let w_idx = match layout {
                     Layout::RowMajor => row * k + curr_k,
                     Layout::ColMajor => curr_k * n + row,
-                    Layout::Canonical => (curr_k % weights_per_block) + weights_per_block * (row + (curr_k / weights_per_block) * n),
+                    Layout::Canonical { .. } => (curr_k % weights_per_block) + weights_per_block * (row + (curr_k / weights_per_block) * n),
                 };
                 let w = weights_i8[w_idx] as f32;
                 let x = input[curr_k].to_f32();

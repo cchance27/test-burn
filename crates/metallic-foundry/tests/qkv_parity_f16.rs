@@ -6,9 +6,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::{
-        CompoundKernel, stages::{Layout, WarpLayoutStage}
-    }, metals::{
+    Foundry, compound::{CompoundKernel, Layout, stages::WarpLayoutStage}, metals::{
         gemv::{
             qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage

@@ -8,7 +8,7 @@ use super::{
 };
 use crate::{
     Foundry, MetalError, compound::{
-        CompiledCompoundKernel, CompoundKernel, stages::{Layout, WarpLayoutStage, WarpReduceStage}
+        CompiledCompoundKernel, CompoundKernel, Layout, stages::{WarpLayoutStage, WarpReduceStage}
     }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 

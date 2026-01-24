@@ -545,10 +545,12 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
         // epilogue uses safe stores for edge tiles so decode remains correct without padding.
         let tile_config = TileConfig::default();
         let bm = tile_config.tile_sizes().0;
-        let padded_m = if m > 1 { ((m + bm - 1) / bm) * bm } else { m };
+
+        // Use centralized TiledLayout for scratch and output padding
+        let scratch_layout = crate::compound::layout::TiledLayout::sdpa_scratch(n_heads, m, kv_seq_len, bm);
 
         // Re-allocate Temps if logic changed (scratch cache handles resizing)
-        let (scores_all, probs_all) = crate::metals::sdpa::scratch::get_sdpa_scratch_f16(foundry, n_heads, padded_m, kv_seq_len)?;
+        let (scores_all, probs_all) = crate::metals::sdpa::scratch::get_sdpa_scratch_f16(foundry, scratch_layout)?;
 
         // Softmax scaling is applied in the QK matmul (alpha=scale). For softmax itself, we use 1.0.
         // IMPORTANT: this must not allocate+upload per call; it kills decode throughput.
@@ -612,9 +614,9 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
             qk_params.batch_stride_b = (k_seq_stride as i64) * (head_dim as i64);
 
             // Output C (Scores) is written to Scratch [H, PaddedM, SeqLen] (Head-Major).
-            // So we stride by padded_m * seq_len between heads.
-            qk_params.batch_stride_c = (padded_m as i64) * (kv_seq_len as i64);
-            qk_params.batch_stride_d = (padded_m as i64) * (kv_seq_len as i64);
+            // So we stride by head_stride between heads.
+            qk_params.batch_stride_c = scratch_layout.head_stride as i64;
+            qk_params.batch_stride_d = scratch_layout.head_stride as i64;
 
             let qk_dispatch = {
                 let base = gemm_dispatch_config(&qk_params, tile_config);
@@ -646,7 +648,7 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
             // PADDING: Dispatch over padded_m to match stride.
             let softmax_sdpa_kernel = get_softmax_v2_sdpa_batched_kernel();
             let softmax_dispatch = DispatchConfig {
-                grid: GridSize::d1((n_heads as usize) * (padded_m as usize)),
+                grid: GridSize::d1((n_heads as usize) * (scratch_layout.padded_m as usize)),
                 group: ThreadgroupSize::d1(256),
             };
 
@@ -657,7 +659,7 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
                 seq_k: kv_seq_len,
                 causal: if self.step.causal { 1 } else { 0 },
                 query_offset: q_offset_val,
-                rows_per_batch: padded_m,
+                rows_per_batch: scratch_layout.padded_m,
             };
             foundry.run(&softmax_sdpa_kernel.clone().bind_arc(softmax_args, softmax_dispatch))?;
 
@@ -678,7 +680,7 @@ impl CompiledStep for CompiledSdpaMaterializedStep {
             // This implies Output D IS Interleaved?
 
             // Input A (Probs) is Padded Head-Major.
-            av_params.batch_stride_a = (padded_m as i64) * (kv_seq_len as i64);
+            av_params.batch_stride_a = scratch_layout.head_stride as i64;
 
             // Input B (V Cache). Originally: (v_seq_stride as i64) * (head_dim as i64). (Head-Major).
             av_params.batch_stride_b = (v_seq_stride as i64) * (head_dim as i64);

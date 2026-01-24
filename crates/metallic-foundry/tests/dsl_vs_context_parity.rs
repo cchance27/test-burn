@@ -2344,7 +2344,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     use std::sync::Arc;
 
     use metallic_foundry::{
-        compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::f16::PolicyF16
+        compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::f16::PolicyF16
     };
 
     let gate_weight = bindings.get("layer.ffn_gate_0").unwrap();

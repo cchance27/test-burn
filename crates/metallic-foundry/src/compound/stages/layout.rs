@@ -5,38 +5,7 @@
 //! - `ColMajor`: Weights stored as [K, N] - input dimension first
 //! - `Canonical`: Blocked [N, K] for cache efficiency
 
-use serde::{Deserialize, Serialize};
-
-use crate::compound::{BufferArg, Stage};
-
-/// Memory layout for 2D weight tensors in GEMV.
-///
-/// In GEMV, we compute: output[n] = sum_k(input[k] * weights[n, k])
-/// The `row` variable in indexing refers to the OUTPUT dimension (N).
-///
-/// **IMPORTANT**: The naming indicates how weights are stored in memory:
-/// - `RowMajor`: Weights are [N, K] shape - each output row is contiguous in K
-/// - `ColMajor`: Weights are [K, N] shape - each input column is contiguous in N  
-/// - `Canonical`: Blocked [N, K] with K blocked into chunks
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Layout {
-    /// Weights stored as [N, K] (output-major).
-    /// Index: weights[n * K + k]
-    /// Each output neuron's weights are contiguous in memory.
-    /// Use when weights tensor has shape [N, K].
-    RowMajor,
-
-    /// Weights stored as [K, N] (input-major).
-    /// Index: weights[k * N + n]
-    /// Each input feature's connections are contiguous in memory.
-    /// Use when weights tensor has shape [K, N].
-    ColMajor,
-
-    /// Canonical Blocked format: [N, K] with K dimension blocked.
-    /// Index: weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
-    /// Used by legacy GemvCanonical kernels for cache efficiency.
-    Canonical,
-}
+use crate::compound::{BufferArg, Stage, layout::Layout};
 
 /// A stage that defines layout indexing variables and helpers.
 ///
@@ -75,7 +44,14 @@ impl LayoutStage {
 
     /// Canonical blocked [N, K] format for cache efficiency.
     pub fn canonical() -> Self {
-        Self::new(Layout::Canonical, "gid", "lid")
+        Self::new(
+            Layout::Canonical {
+                expected_k: 0,
+                expected_n: 0,
+            },
+            "gid",
+            "lid",
+        )
     }
 
     /// Get the layout type
@@ -116,7 +92,7 @@ impl Stage for LayoutStage {
 #define WEIGHT_INDEX(row, k, K, N) ((k) * (N) + (row))
 "#
             .to_string(),
-            Layout::Canonical => r#"
+            Layout::Canonical { .. } => r#"
 // Layout: Canonical Blocked - Weights shape [N, K] with K blocked
 // weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
 // Used for cache-efficient GEMV with large K
@@ -141,7 +117,7 @@ impl Stage for LayoutStage {
             layout_name = match self.layout {
                 Layout::RowMajor => "[N, K] (output-major)",
                 Layout::ColMajor => "[K, N] (input-major)",
-                Layout::Canonical => "[N, K] Blocked",
+                Layout::Canonical { .. } => "[N, K] Blocked",
             }
         );
 
@@ -198,7 +174,10 @@ impl WarpLayoutStage {
 
     /// Canonical blocked [N, K] format - warp-per-row dispatch.
     pub fn canonical() -> Self {
-        Self::new(Layout::Canonical)
+        Self::new(Layout::Canonical {
+            expected_k: 0,
+            expected_n: 0,
+        })
     }
 
     /// Configure number of warps per threadgroup.
@@ -264,7 +243,7 @@ impl Stage for WarpLayoutStage {
 #define WEIGHT_INDEX(row, k, K, N) ((k) * (N) + (row))
 "#
             }
-            Layout::Canonical => {
+            Layout::Canonical { .. } => {
                 r#"
 // Layout: Canonical Blocked - Weights shape [N, K] with K blocked
 // weights[(k % wpb) + wpb * (n + (k / wpb) * N)]
@@ -283,22 +262,23 @@ impl Stage for WarpLayoutStage {
 
     fn emit(&self, _prev: &str) -> (String, String) {
         let code = format!(
-            r#"    // Warp-per-row layout indices
-    const uint warp_id = lid.x / SIMD_WIDTH;
-    const uint lane_id = lid.x & (SIMD_WIDTH - 1u);
-    const uint row_idx = gid.x * WARPS_PER_TG + warp_id;  // Output index (N)
-    const uint tid = lane_id;
-    const uint batch_idx = gid.y; // Support batched dispatch
+            r#"    
+// Warp-per-row layout indices
+const uint warp_id = lid.x / SIMD_WIDTH;
+const uint lane_id = lid.x & (SIMD_WIDTH - 1u);
+const uint row_idx = gid.x * WARPS_PER_TG + warp_id;  // Output index (N)
+const uint tid = lane_id;
+const uint batch_idx = gid.y; // Support batched dispatch
     
-    // Early exit if row is out of bounds
-    if (row_idx >= n_dim) return;
+// Early exit if row is out of bounds
+if (row_idx >= n_dim) return;
     
-    // Layout: {layout_name}
+// Layout: {layout_name}
 "#,
             layout_name = match self.layout {
                 Layout::RowMajor => "[N, K] (output-major)",
                 Layout::ColMajor => "[K, N] (input-major)",
-                Layout::Canonical => "[N, K] Blocked",
+                Layout::Canonical { .. } => "[N, K] Blocked",
             }
         );
 
@@ -366,16 +346,17 @@ impl Stage for ThreadLayoutStage {
     }
 
     fn emit(&self, _prev: &str) -> (String, String) {
-        let code = r#"    // Thread-per-row layout indices
-	    const uint row_idx = gid.x;
-	    const uint lane_id = 0; // Scalar mode implies single lane acting as 'warp'
-	    const uint tid = lid.x;
-	    const uint batch_idx = gid.y; // Support batched dispatch (gid.y==0 for d1 grids)
+        let code = r#"    
+// Thread-per-row layout indices
+const uint row_idx = gid.x;
+const uint lane_id = 0; // Scalar mode implies single lane acting as 'warp'
+const uint tid = lid.x;
+const uint batch_idx = gid.y; // Support batched dispatch (gid.y==0 for d1 grids)
 
-	    if (row_idx >= n_dim) return;
-	    
-	    // Define scalar constants
-	    #define SCALAR_DISPATCH 1
+if (row_idx >= n_dim) return;
+
+// Define scalar constants
+#define SCALAR_DISPATCH 1
 "#
         .to_string();
 

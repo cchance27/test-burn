@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, compound::stages::Layout, metals::{
+    Foundry, MetalError, compound::Layout, metals::{
         gemv::step::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, softmax::step::{SoftmaxV2Args, get_softmax_v2_kernel}
     }, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };

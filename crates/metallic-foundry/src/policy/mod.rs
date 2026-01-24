@@ -3,7 +3,7 @@ use std::{fmt::Debug, sync::Arc};
 use anyhow::Result;
 
 use crate::{
-    gguf::{file::GGUFDataType, model_loader::GGUFModel}, spec::{FastBindings, ResolvedSymbols}, types::TensorArg
+    compound::Layout, gguf::{file::GGUFDataType, model_loader::GGUFModel}, spec::{FastBindings, ResolvedSymbols}, types::TensorArg
 };
 
 /// Optimization hints for kernel dispatch.
@@ -30,16 +30,8 @@ impl Default for OptimizationMetadata {
     }
 }
 
-/// Requested layout for the loaded weights.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum WeightLayout {
-    /// Standard row-major layout (NK or KN as per GGUF).
-    /// Used for standard GEMM/GEMV.
-    RowMajor,
-    /// Canonical K-block-major layout for specific kernels (e.g. FusedQkv).
-    /// Requires specifying (k, n) dimensions explicitly for valid reordering.
-    Canonical { expected_k: usize, expected_n: usize },
-}
+/// Compatibility alias for the unified Layout enum.
+pub type WeightLayout = Layout;
 
 use crate::compound::Stage;
 
@@ -80,7 +72,7 @@ pub trait MetalPolicyRuntime: crate::fusion::MetalPolicy + Send + Sync + Debug {
         gguf: &GGUFModel,
         gguf_tensor_name: &str,
         logical_name: &str,
-        layout: WeightLayout,
+        layout: Layout,
     ) -> Result<Vec<(String, TensorArg)>>;
 }
 

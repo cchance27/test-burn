@@ -10,7 +10,7 @@ use metallic_context::{
     Context, F16Element, Tensor as ContextTensor, kernels::matmul_gemv::MatmulGemvOp, tensor::{TensorInit as ContextTensorInit, TensorStorage as ContextTensorStorage, TensorType}
 };
 use metallic_foundry::{
-    Foundry, MetalError, compound::stages::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, MetalError, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -102,7 +102,7 @@ fn run_gemv_parity_test(k: usize, n: usize, with_bias: bool, layout: Layout) -> 
     let (weight_shape, transpose) = match layout {
         Layout::RowMajor => (vec![n, k], true),
         Layout::ColMajor => (vec![k, n], false),
-        Layout::Canonical => (vec![n, k], true),
+        Layout::Canonical { .. } => (vec![n, k], true),
     };
 
     let weights_ctx = ContextTensor::<F16Element>::new(
