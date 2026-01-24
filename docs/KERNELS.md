@@ -24,7 +24,8 @@ Use standalone kernels for simple operations that do not require fusion or compl
 #[kernel(
     source = "ops/simple.metal",
     function = "simple_op",
-    args = "SimpleParams" // Injects SimpleParams C++ struct definition
+    args = "SimpleParams", // Injects SimpleParams C++ struct definition
+    dispatch = "per_element" // Auto-calculates grid based on params.total_elements
 )]
 pub struct SimpleKernel {
     pub input: TensorArg,
@@ -33,6 +34,9 @@ pub struct SimpleKernel {
     pub params: SimpleParams,
 }
 ```
+
+**Auto-Generation:**
+When `step = true` (default), the macro also generates `SimpleKernelStep` and `CompiledSimpleKernelStep`, allowing immediate use in the model DSL without writing any boilerplate glue code.
 
 **Metal Side (`ops/simple.metal`):**
 > **Note:** Do NOT define `struct SimpleParams` here. It is automatically injected by the runtime based on the Rust struct.

@@ -1,7 +1,7 @@
-use metallic_macros::KernelArgs;
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::{
-    Foundry, MetalError, compound::{BufferArg, CompoundKernel, Stage}, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, spec::{CompiledStep, FastBindings, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// A simple, compiled element-wise add step: Out = A + B.
@@ -9,14 +9,32 @@ use crate::{
 /// Unlike `ElemwiseAdd` (which supports broadcasting params), this step
 /// runtime-infers dimensions from the input tensors and performs a direct
 /// index-to-index addition. It assumes A, B, and Out have the same total element count.
-#[derive(Debug)]
-pub struct CompiledSimpleAddStep {
-    pub a_idx: usize,
-    pub b_idx: usize,
-    pub out_idx: usize,
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "elemwise/add.metal",
+    function = "broadcast_add_kernel_f16",
+    args = SimpleElemwiseAddParams,
+    dispatch = per_element,
+    step = true,
+    execute = false
+)]
+pub struct SimpleElemwiseAdd {
+    pub a: TensorArg,
+    pub b: TensorArg,
+    #[arg(output)]
+    pub out: TensorArg,
+    #[arg(skip)]
+    pub params: SimpleElemwiseAddParams,
 }
 
-impl CompiledStep for CompiledSimpleAddStep {
+#[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[repr(C)]
+pub struct SimpleElemwiseAddParams {
+    pub total_elements: u32,
+    pub b_len: u32,
+}
+
+impl CompiledStep for CompiledSimpleElemwiseAddStep {
     fn execute(
         &self,
         foundry: &mut Foundry,
@@ -24,104 +42,28 @@ impl CompiledStep for CompiledSimpleAddStep {
         _bindings: &TensorBindings,
         _symbols: &SymbolTable,
     ) -> Result<(), MetalError> {
-        let a = fast_bindings.get(self.a_idx).ok_or(MetalError::InputNotFound("Add: a".into()))?;
-        let b = fast_bindings.get(self.b_idx).ok_or(MetalError::InputNotFound("Add: b".into()))?;
-        let out = fast_bindings
-            .get(self.out_idx)
-            .ok_or(MetalError::InputNotFound("Add: out".into()))?;
+        let a = fast_bindings.get(self.a).ok_or(MetalError::InputNotFound("Add: a".into()))?;
+        let b = fast_bindings.get(self.b).ok_or(MetalError::InputNotFound("Add: b".into()))?;
+        let out = fast_bindings.get(self.out).ok_or(MetalError::InputNotFound("Add: out".into()))?;
 
         let total = a.dims.iter().product::<usize>() as u32;
-        let args = AddArgs {
+        let b_len = b.dims.iter().product::<usize>() as u32;
+
+        let kernel = SimpleElemwiseAdd {
             a: TensorArg::from_tensor(a),
             b: TensorArg::from_tensor(b),
             out: TensorArg::from_tensor(out),
-            total,
+            params: SimpleElemwiseAddParams {
+                total_elements: total,
+                b_len,
+            },
         };
 
-        use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-        let key = KernelCacheKey::new("elemwise_add", "f16_simple");
-        let kernel = kernel_registry().get_or_build(key, || {
-            CompoundKernel::new("elemwise_add_f16_simple")
-                .prologue(ElemwiseAddGlobalStage)
-                .with_manual_output(true)
-                .compile()
-        });
-
-        let grid_size = total.div_ceil(256) as usize;
-        let dispatch = DispatchConfig {
-            grid: GridSize::d1(grid_size),
-            group: ThreadgroupSize::d1(256),
-        };
-
-        foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
+        foundry.run(&kernel)?;
         Ok(())
     }
 
     fn name(&self) -> &'static str {
         "SimpleElemwiseAdd"
-    }
-}
-
-#[derive(Debug, KernelArgs)]
-struct AddArgs {
-    #[arg(buffer = 0)]
-    a: TensorArg,
-    #[arg(buffer = 1)]
-    b: TensorArg,
-    #[arg(buffer = 2)]
-    out: TensorArg,
-    #[arg(buffer = 3)]
-    total: u32,
-}
-
-#[derive(Debug, Clone, KernelArgs)]
-struct ElemwiseAddGlobalStage;
-
-impl Stage for ElemwiseAddGlobalStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![]
-    }
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![
-            BufferArg {
-                name: "a",
-                metal_type: "const device half*",
-                buffer_index: 0,
-            },
-            BufferArg {
-                name: "b",
-                metal_type: "const device half*",
-                buffer_index: 1,
-            },
-            BufferArg {
-                name: "out",
-                metal_type: "device half*",
-                buffer_index: 2,
-            },
-            BufferArg {
-                name: "total_elements",
-                metal_type: "constant uint&",
-                buffer_index: 3,
-            },
-        ]
-    }
-
-    fn struct_defs(&self) -> String {
-        String::new()
-    }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        (
-            "void".to_string(),
-            r#"
-    // Global linear thread index for a 1D dispatch.
-    // Compound kernels use `gid` as threadgroup_position_in_grid and `lid` as thread_position_in_threadgroup.
-    uint i = gid.x * 256 + lid.x;
-    if (i < total_elements) {
-        out[i] = a[i] + b[i];
-    }
-"#
-            .to_string(),
-        )
     }
 }

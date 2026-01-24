@@ -3,9 +3,9 @@ use std::sync::Arc;
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
-use super::{RmsNorm, RmsNormParamsResolved};
+use super::RmsNormParamsResolved;
 use crate::{
-    Foundry, MetalError, ResolvedSymbols, compound::{BufferArg, CompiledCompoundKernel, CompoundKernel}, fusion::MetalPolicy, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, MetalError, ResolvedSymbols, compound::BufferArg, fusion::MetalPolicy, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, types::TensorArg
 };
 
 /// RMSNorm Step
@@ -121,7 +121,7 @@ impl CompiledStep for CompiledRmsNormStep {
             epsilon,
         };
 
-        let args = RmsNorm::new(
+        let args = super::RmsNorm::new(
             &input_args[0].clone(),
             if input_args.len() > 1 { Some(input_args[1].clone()) } else { None },
             &TensorArg::from_tensor(output),
@@ -129,16 +129,7 @@ impl CompiledStep for CompiledRmsNormStep {
             params,
         );
 
-        // Dispatch: per row (warp)
-        let n_rows = total_elements / feature_dim;
-        let dispatch = DispatchConfig {
-            grid: GridSize::d1(n_rows as usize),
-            group: ThreadgroupSize::d1(256), // matches THREADS_PER_ROW constant in kernel
-        };
-
-        let kernel = get_rmsnorm_kernel(policy);
-
-        foundry.run(&kernel.clone().bind_arc(args, dispatch))
+        foundry.run(&args)
     }
 
     fn name(&self) -> &'static str {
@@ -225,27 +216,4 @@ struct RmsNormParams {
 "#
         .to_string()
     }
-}
-
-fn get_rmsnorm_kernel(policy: Arc<dyn MetalPolicy>) -> Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-
-    let variant = policy.short_name().to_string();
-    let key = KernelCacheKey::new("rmsnorm", variant);
-
-    let policy_clone = policy.clone();
-    kernel_registry().get_or_build(key, move || {
-        let dummy_params = RmsNormParamsResolved {
-            feature_dim: 0,
-            total_elements: 0,
-            epsilon: 1e-6,
-        };
-        let stage = RmsNormStandaloneStage {
-            params: dummy_params,
-            policy: policy_clone.clone(),
-        };
-
-        let kernel_name = format!("rmsnorm_standalone_{}", policy_clone.short_name());
-        CompoundKernel::new(&kernel_name).main(stage).with_manual_output(true).compile()
-    })
 }

@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_foundry::{
-    Foundry, metals::embedding::step::EmbeddingStep, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8, U32}, types::TensorArg
+    Foundry, metals::embedding::EmbeddingStep, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8, U32}, types::TensorArg
 };
 
 #[test]

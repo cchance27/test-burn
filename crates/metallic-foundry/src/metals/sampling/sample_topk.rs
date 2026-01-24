@@ -3,10 +3,10 @@
 //! Fused Top-K + Top-P + Sampling kernel.
 //! Single-stage fusion: Min-heap selection -> Sorting -> Softmax -> Cumulative Sum -> Sampling.
 
-use metallic_macros::{KernelArgs, MetalStruct};
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
 use crate::{
-    Includes, Kernel, KernelSource, tensor::Dtype, types::{ComputeCommandEncoder, DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 
 /// Parameters for SampleTopK kernel.
@@ -26,7 +26,14 @@ pub struct SampleParams {
 ///
 /// Input: logits [vocab_size]
 /// Output: token_id [1]
-#[derive(KernelArgs, Clone)]
+#[derive(Kernel, KernelArgs, Clone)]
+#[kernel(
+    source = "sampling/sample_topk.metal",
+    function = "sample_topk_fused_f16",
+    args = SampleParams,
+    dispatch = true,
+    dtype = F16
+)]
 pub struct SampleTopK {
     /// Input logits [vocab_size].
     pub logits: TensorArg,
@@ -89,36 +96,8 @@ impl SampleTopK {
             threads_per_threadgroup: threads_per_group,
         }
     }
-}
 
-impl Kernel for SampleTopK {
-    type Args = SampleParams;
-
-    fn source(&self) -> KernelSource {
-        KernelSource::File("sampling/sample_topk.metal")
-    }
-
-    fn function_name(&self) -> &str {
-        "sample_topk_fused_f16"
-    }
-
-    fn includes(&self) -> Includes {
-        Includes(vec![])
-    }
-
-    fn dtype(&self) -> Option<Dtype> {
-        Some(Dtype::F16)
-    }
-
-    fn struct_defs(&self) -> String {
-        SampleParams::METAL_STRUCT_DEF.to_string()
-    }
-
-    fn bind(&self, encoder: &ComputeCommandEncoder) {
-        self.bind_args(encoder);
-    }
-
-    fn dispatch_config(&self) -> DispatchConfig {
+    pub fn dispatch_config(&self) -> DispatchConfig {
         DispatchConfig {
             grid: GridSize::d1(1), // Single threadgroup for now
             group: ThreadgroupSize::d1(self.threads_per_threadgroup),

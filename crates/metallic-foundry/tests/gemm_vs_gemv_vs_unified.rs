@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step, matmul::MatMulStep}, policy::{activation::Activation, f16::PolicyF16}, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::Layout, metals::{gemm::GemmV2Step, gemv::{GemvV2Step, GemvV2Params}, matmul::MatMulStep}, policy::{activation::Activation, f16::PolicyF16}, spec::{DynamicValue, FastBindings, Ref, Step, CompiledStep, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 
@@ -55,9 +55,9 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
     let dims_b = vec![shape.k, shape.n];
     let dims_out = vec![shape.m, shape.n];
 
-    let a = Tensor::<F16, Pooled>::new(foundry, dims_a.clone(), TensorInit::Uninitialized).unwrap();
-    let b = Tensor::<F16, Pooled>::new(foundry, dims_b.clone(), TensorInit::Uninitialized).unwrap();
-    let out = Tensor::<F16, Pooled>::new(foundry, dims_out.clone(), TensorInit::Uninitialized).unwrap();
+    let a = FoundryTensor::<F16, Pooled>::new(foundry, dims_a.clone(), TensorInit::Uninitialized).unwrap();
+    let b = FoundryTensor::<F16, Pooled>::new(foundry, dims_b.clone(), TensorInit::Uninitialized).unwrap();
+    let out = FoundryTensor::<F16, Pooled>::new(foundry, dims_out.clone(), TensorInit::Uninitialized).unwrap();
 
     let mut bindings = TensorBindings::new();
     bindings.insert("a".to_string(), TensorArg::from_tensor(&a));
@@ -68,14 +68,14 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
     let gemm = GemmV2Step {
         a: Ref("a".into()),
         b: Ref("b".into()),
-        output: Ref("output".into()),
+        d: Ref("output".into()),
         bias: None,
         b_scales: None,
         c: None,
         m_dim: DynamicValue::Literal(shape.m as u32),
         n_dim: DynamicValue::Literal(shape.n as u32),
         k_dim: DynamicValue::Literal(shape.k as u32),
-        b_quant: std::sync::Arc::new(PolicyF16),
+        b_quant: Some(std::sync::Arc::new(metallic_foundry::policy::f16::PolicyF16)),
         transpose_a: false,
         transpose_b: false,
         alpha: 1.0,
@@ -83,6 +83,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         weights_per_block: 32,
         tile_config: None, // Auto
         activation: Activation::None,
+        params: Default::default(),
     };
     let mut sym_gemm = SymbolTable::new();
     let compiled_gemm = gemm.compile(&mut bindings, &mut sym_gemm);
@@ -105,13 +106,18 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
             bias: None,
             residual: None,
             scale_bytes: None,
-            k_dim: DynamicValue::Literal(shape.k as u32),
-            n_dim: DynamicValue::Literal(shape.n as u32),
-            weights_per_block: 32,
+            params: GemvV2Params {
+                k_dim: DynamicValue::Literal(shape.k as u32),
+                n_dim: DynamicValue::Literal(shape.n as u32),
+                weights_per_block: 32,
+                batch: 1,
+            },
             layout: Layout::ColMajor, // Matches GEMM TransposeB=false
             strategy: None,
             alpha: 1.0,
             beta: 0.0,
+            has_bias: 0,
+            has_residual: 0,
             activation: Activation::None,
         };
         let mut sym_gemv = SymbolTable::new();

@@ -565,7 +565,7 @@ impl Stage for VectorizedDotStage {
             // Full vector tail (aligned for this lane).
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
 #if defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16
-            const device half* weights_row = weights + (ulong)row_idx * (ulong)k_dim;
+            const device half* weights_row = (const device half*)weights + (ulong)row_idx * (ulong)k_dim;
             acc += {policy}::template dot<{vec_width}>(weights_row, (ulong)k, 1.0f, xv_f32_lo, xv_f32_hi);
 #else
             ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);

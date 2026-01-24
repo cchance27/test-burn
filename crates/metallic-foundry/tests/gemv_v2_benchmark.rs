@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Step, GemvV2Params}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 }; // Added GemvStrategy
 
 fn run_benchmark_case(
@@ -54,13 +54,18 @@ fn run_benchmark_case(
         output: Ref("output".to_string()),
         bias: None,
         residual: None,
-        k_dim: DynamicValue::Literal(k as u32),
-        n_dim: DynamicValue::Literal(n as u32),
-        weights_per_block: 32,
+        params: GemvV2Params {
+            k_dim: DynamicValue::Literal(k as u32),
+            n_dim: DynamicValue::Literal(n as u32),
+            weights_per_block: 32,
+            batch: 1,
+        },
         layout,
         strategy,
         alpha: 1.0,
         beta: 0.0,
+        has_bias: 0,
+        has_residual: 0,
         activation: Activation::None,
     };
 

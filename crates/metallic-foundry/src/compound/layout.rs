@@ -25,6 +25,22 @@ pub enum Layout {
     Canonical { expected_k: usize, expected_n: usize },
 }
 
+impl Layout {
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Layout::RowMajor => "rowmajor",
+            Layout::ColMajor => "colmajor",
+            Layout::Canonical { .. } => "canonical",
+        }
+    }
+}
+
+impl Default for Layout {
+    fn default() -> Self {
+        Self::RowMajor
+    }
+}
+
 /// Strategy for tile-aware layout calculations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum LayoutStrategy {

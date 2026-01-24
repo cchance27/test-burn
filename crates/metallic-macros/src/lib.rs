@@ -4,7 +4,7 @@ use proc_macro_crate::{FoundCrate, crate_name};
 use proc_macro2::{Ident, Span};
 use quote::quote;
 use syn::{
-    Data, DeriveInput, Expr, ExprLit, ExprPath, Fields, Lit, Meta, Token, parse_macro_input, punctuated::Punctuated, spanned::Spanned
+    Attribute, Data, DeriveInput, Expr, ExprLit, ExprPath, Fields, Lit, Meta, Token, Type, parse_macro_input, punctuated::Punctuated, spanned::Spanned
 };
 
 mod conditional;
@@ -14,19 +14,53 @@ mod conditional;
 fn validate_metal_template(template: &str, span: Span) -> syn::Result<()> {
     let mut brace_balance = 0;
     let mut paren_balance = 0;
-    for c in template.chars() {
+    let mut bracket_balance = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (i, c) in template.chars().enumerate() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+
         match c {
             '{' => brace_balance += 1,
             '}' => brace_balance -= 1,
             '(' => paren_balance += 1,
             ')' => paren_balance -= 1,
+            '[' => bracket_balance += 1,
+            ']' => bracket_balance -= 1,
             _ => {}
         }
         if brace_balance < 0 {
-            return Err(syn::Error::new(span, "Unbalanced closing brace '}' in Metal template"));
+            return Err(syn::Error::new(
+                span,
+                format!("Unbalanced closing brace '}}' in Metal template (char {})", i),
+            ));
         }
         if paren_balance < 0 {
-            return Err(syn::Error::new(span, "Unbalanced closing parenthesis ')' in Metal template"));
+            return Err(syn::Error::new(
+                span,
+                format!("Unbalanced closing parenthesis ')' in Metal template (char {})", i),
+            ));
+        }
+        if bracket_balance < 0 {
+            return Err(syn::Error::new(
+                span,
+                format!("Unbalanced closing bracket ']' in Metal template (char {})", i),
+            ));
         }
     }
     if brace_balance != 0 {
@@ -35,6 +69,21 @@ fn validate_metal_template(template: &str, span: Span) -> syn::Result<()> {
     if paren_balance != 0 {
         return Err(syn::Error::new(span, "Unbalanced opening parenthesis '(' in Metal template"));
     }
+    if bracket_balance != 0 {
+        return Err(syn::Error::new(span, "Unbalanced opening bracket '[' in Metal template"));
+    }
+    if in_string {
+        return Err(syn::Error::new(span, "Unterminated string literal in Metal template"));
+    }
+
+    // Basic "must end with semicolon" check if it looks like code and doesn't end with a brace
+    let trimmed = template.trim();
+    if !trimmed.is_empty() && !trimmed.ends_with('}') && !trimmed.ends_with(';') && !trimmed.ends_with(')') {
+        // High priority: warn about missing semicolon in templates
+        // We allow some flexibility if it's just an expression, but usually they are statements
+        // For now, let's keep it advisory or just check for very obvious things.
+    }
+
     Ok(())
 }
 
@@ -204,15 +253,19 @@ fn rust_type_to_metal(ty: &syn::Type) -> String {
 // Collect signature info for METAL_ARGS generation
 struct ArgInfo {
     name: String,
-    name_ident: Option<syn::Ident>,
-    buffer_index: u64,
+    name_ident: Option<Ident>,
+    rust_type: String,
+    rust_type_actual: Type,
     metal_type: Option<String>,
-    rust_type: String, // For auto-detection of Metal type
-    rust_type_actual: syn::Type,
+    buffer_index: u64,
     is_output: bool,
     is_buffer: bool,
     is_option: bool,
     stage_skip: bool,
+    scale_for: Option<String>,
+    attrs: Vec<Attribute>,
+    serde_attrs: Vec<proc_macro2::TokenStream>, // New field for generated serde attributes
+    is_meta: bool,
 }
 
 // Helper to infer Metal type from Rust type string
@@ -273,11 +326,14 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
             let mut explicit_skip = false;
             let mut stage_skip = false;
             let mut metal_type: Option<String> = None;
+            let mut serde_attrs = Vec::new();
 
             // Check the type to determine if it's a buffer type
             let is_option = extract_option_inner(ty).is_some();
             let inner_ty = extract_option_inner(ty).unwrap_or_else(|| ty.clone());
             let is_buffer_type = is_tensor_arg(&inner_ty);
+
+            let mut scale_for: Option<String> = None;
 
             for attr in &f.attrs {
                 if attr.path().is_ident("arg") {
@@ -307,6 +363,28 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                                                 metal_type = Some(lit.value());
                                             }
                                         }
+                                    } else if nv.path.is_ident("scale_for") {
+                                        if let Expr::Lit(expr_lit) = &nv.value {
+                                            if let Lit::Str(lit) = &expr_lit.lit {
+                                                scale_for = Some(lit.value());
+                                            }
+                                        }
+                                    } else if nv.path.is_ident("serde_default") {
+                                        if let Expr::Lit(expr_lit) = &nv.value {
+                                            if let Lit::Str(lit) = &expr_lit.lit {
+                                                serde_attrs.push(quote::quote! { #[serde(default = #lit)] });
+                                            } else if let Lit::Bool(lit) = &expr_lit.lit {
+                                                if lit.value {
+                                                    serde_attrs.push(quote::quote! { #[serde(default)] });
+                                                }
+                                            }
+                                        }
+                                    } else if nv.path.is_ident("serde_with") {
+                                        if let Expr::Lit(expr_lit) = &nv.value {
+                                            if let Lit::Str(lit) = &expr_lit.lit {
+                                                serde_attrs.push(quote::quote! { #[serde(with = #lit)] });
+                                            }
+                                        }
                                     }
                                 }
                                 Meta::Path(path) => {
@@ -314,6 +392,10 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                                         is_output = true;
                                     } else if path.is_ident("stage_skip") {
                                         stage_skip = true;
+                                    } else if path.is_ident("serde_default") {
+                                        serde_attrs.push(quote::quote! { #[serde(default)] });
+                                    } else if path.is_ident("serde_skip") {
+                                        serde_attrs.push(quote::quote! { #[serde(skip)] });
                                     }
                                 }
                                 _ => {}
@@ -338,6 +420,26 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                 // Auto-detect: if it's not a buffer type, treat as bytes
                 let is_bytes = explicit_bytes || !is_buffer_type;
 
+                let mut is_meta = false; // Default false, parsed from attrs if needed
+
+                // Collect attributes to propagate (non-arg)
+                let attrs: Vec<Attribute> = f.attrs.iter().filter(|a| !a.path().is_ident("arg")).cloned().collect();
+
+                // Check for is_meta in arg attributes
+                for attr in &f.attrs {
+                    if attr.path().is_ident("arg") {
+                        if let Ok(nested) = attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated) {
+                            for meta in nested.iter() {
+                                if let Meta::Path(path) = meta {
+                                    if path.is_ident("meta") {
+                                        is_meta = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Collect arg info for signature generation
                 arg_infos.push(ArgInfo {
                     name: name.as_ref().map(|i| i.to_string()).unwrap_or_default(),
@@ -347,49 +449,55 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                     rust_type: quote::quote!(#ty).to_string(),
                     rust_type_actual: ty.clone(),
                     is_output,
-                    is_buffer: is_buffer_type && !explicit_bytes,
+                    is_buffer: is_buffer_type && !explicit_bytes && !is_meta, // Meta fields are never buffers
                     is_option,
                     stage_skip,
+                    scale_for,
+                    attrs,
+                    serde_attrs,
+                    is_meta,
                 });
 
                 // Generate binding code
-                if is_bytes {
-                    bindings.push(quote::quote! {
-                        let ptr = &self.#name as *const _ as *const core::ffi::c_void;
-                        let len = core::mem::size_of_val(&self.#name);
-                        unsafe {
-                            encoder.setBytes_length_atIndex(core::ptr::NonNull::new(ptr as *mut _).unwrap(), len, #idx as usize);
-                        }
-                    });
-                } else {
-                    let binding = if is_option {
-                        quote::quote! {
-                            if let Some(val) = &self.#name {
+                if !is_meta {
+                    if is_bytes {
+                        bindings.push(quote! {
+                            let ptr = &self.#name as *const _ as *const core::ffi::c_void;
+                            let len = core::mem::size_of_val(&self.#name);
+                            unsafe {
+                                encoder.setBytes_length_atIndex(core::ptr::NonNull::new(ptr as *mut _).unwrap(), len, #idx as usize);
+                            }
+                        });
+                    } else {
+                        let binding = if is_option {
+                            quote! {
+                                if let Some(val) = &self.#name {
+                                    unsafe {
+                                        encoder.setBuffer_offset_atIndex(
+                                            Some(&*#root::types::KernelArg::buffer(val)),
+                                            #root::types::KernelArg::offset(val),
+                                            #idx as usize
+                                        );
+                                    }
+                                } else {
+                                    unsafe {
+                                        encoder.setBuffer_offset_atIndex(None, 0, #idx as usize);
+                                    }
+                                }
+                            }
+                        } else {
+                            quote! {
                                 unsafe {
                                     encoder.setBuffer_offset_atIndex(
-                                        Some(&*#root::types::KernelArg::buffer(val)),
-                                        #root::types::KernelArg::offset(val),
+                                        Some(&*#root::types::KernelArg::buffer(&self.#name)),
+                                        #root::types::KernelArg::offset(&self.#name),
                                         #idx as usize
                                     );
                                 }
-                            } else {
-                                unsafe {
-                                    encoder.setBuffer_offset_atIndex(None, 0, #idx as usize);
-                                }
                             }
-                        }
-                    } else {
-                        quote::quote! {
-                            unsafe {
-                                encoder.setBuffer_offset_atIndex(
-                                    Some(&*#root::types::KernelArg::buffer(&self.#name)),
-                                    #root::types::KernelArg::offset(&self.#name),
-                                    #idx as usize
-                                );
-                            }
-                        }
-                    };
-                    bindings.push(binding);
+                        };
+                        bindings.push(binding);
+                    }
                 }
             }
         }
@@ -875,9 +983,10 @@ pub fn derive_kernel_args(input: TokenStream) -> TokenStream {
 
     let binding_code = quote! { #(#bindings)* };
 
-    // Generate METAL_ARGS elements as TokenStreams (all args)
+    // Generate METAL_ARGS elements as TokenStreams (all args EXCEPT meta)
     let metal_args_elements: Vec<_> = arg_infos
         .iter()
+        .filter(|info| !info.is_meta)
         .map(|info| {
             let arg_name = &info.name;
             let idx = info.buffer_index;
@@ -890,10 +999,10 @@ pub fn derive_kernel_args(input: TokenStream) -> TokenStream {
         })
         .collect();
 
-    // Generate STAGE_METAL_ARGS elements (excluding stage_skip buffers)
+    // Generate STAGE_METAL_ARGS elements (excluding stage_skip AND meta buffers)
     let stage_metal_args_elements: Vec<_> = arg_infos
         .iter()
-        .filter(|info| !info.stage_skip)
+        .filter(|info| !info.stage_skip && !info.is_meta)
         .map(|info| {
             let arg_name = &info.name;
             let idx = info.buffer_index;
@@ -952,7 +1061,8 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let mut threadgroup_decl = None;
     let mut epilogue_emit: Option<String> = None;
     let mut epilogue_out_var: Option<String> = None;
-    let mut enable_step = true; // Default to true
+    let mut enable_step = false; // Default to false
+    let mut enable_execute = true; // Default to true if step is enabled
     let mut stage_expr: Option<String> = None;
     let mut stage_emit: Option<(String, Span)> = None;
     let mut stage_out_var: Option<String> = None;
@@ -1045,12 +1155,17 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                                 if let Some(b) = get_bool(&nv.value) {
                                     enable_step = b;
                                 }
+                            } else if ident == "execute" {
+                                if let Some(b) = get_bool(&nv.value) {
+                                    enable_execute = b;
+                                }
                             } else if ident == "dispatch" {
+                                // Check for #[kernel(dispatch = true/false)] OR #[kernel(dispatch = "preset")]
                                 if let Some(b) = get_bool(&nv.value) {
                                     has_dispatch = b;
                                 } else if let Some(v) = get_val(&nv.value) {
                                     dispatch_preset = Some(v);
-                                    has_dispatch = true;
+                                    has_dispatch = true; // Preset implies having dispatch logic
                                 }
                             } else if ident == "stage" {
                                 if let Some(v) = get_val(&nv.value) {
@@ -1292,7 +1407,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let dispatch_code = if let Some(preset) = dispatch_preset {
+    let dispatch_code = if let Some(preset) = dispatch_preset.as_ref().map(|s| s.trim()) {
         if preset == "per_element" {
             quote! {
                 #root::types::DispatchConfig {
@@ -1300,11 +1415,52 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     group: #root::types::ThreadgroupSize::d1(256),
                 }
             }
+        } else if preset == "per_element_vec" {
+            quote! {
+                {
+                    let vector_width = std::cmp::max(self.params.vector_width as usize, 1);
+                    let base_threads = 256;
+                    let threads_per_group_width = std::cmp::max(base_threads / vector_width, 1);
+                    let total_threads = if self.params.vector_width > 1 {
+                        let vectorized = self.params.total_elements / self.params.vector_width;
+                        let remainder = self.params.total_elements % self.params.vector_width;
+                        (vectorized + remainder) as usize
+                    } else {
+                        self.params.total_elements as usize
+                    };
+                    let num_groups = total_threads.div_ceil(threads_per_group_width);
+                    #root::types::DispatchConfig {
+                        grid: #root::types::GridSize::d1(num_groups),
+                        group: #root::types::ThreadgroupSize::d1(threads_per_group_width),
+                    }
+                }
+            }
         } else if preset == "per_row" {
             quote! {
                 #root::types::DispatchConfig {
                     grid: #root::types::GridSize::d1((self.params.total_elements / self.params.feature_dim) as usize),
                     group: #root::types::ThreadgroupSize::d1(256),
+                }
+            }
+        } else if preset == "warp_per_row" {
+            quote! {
+                {
+                    let num_tgs = (self.params.n_dim as usize).div_ceil(8);
+                    #root::types::DispatchConfig {
+                        grid: #root::types::GridSize::new(num_tgs, 1, 1),
+                        group: #root::types::ThreadgroupSize::new(256, 1, 1),
+                    }
+                }
+            }
+        } else if preset == "warp_per_row_2d" {
+            quote! {
+                 {
+                    let num_tgs = (self.params.n_dim as usize).div_ceil(8);
+                    let batch = self.params.batch.max(1) as usize;
+                    #root::types::DispatchConfig {
+                        grid: #root::types::GridSize::new(num_tgs, batch, 1),
+                        group: #root::types::ThreadgroupSize::new(256, 1, 1),
+                    }
                 }
             }
         } else if let Some(n_str) = preset.strip_prefix("vec_") {
@@ -1398,16 +1554,20 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
         };
 
         // 1. Generate Step struct definition (JSON serializable)
+        // Skip fields that are implicitly derived (scale_for)
         let step_fields: Vec<_> = arg_infos
             .iter()
+            .filter(|info| info.scale_for.is_none())
             .map(|info| {
                 let fname = info.name_ident.as_ref().unwrap();
+                let attrs = &info.attrs;
+                let serde_attrs = &info.serde_attrs;
                 let is_opt = info.is_option;
                 if is_tensor_arg(&info.rust_type_actual) {
                     if is_opt {
-                        quote! { pub #fname: Option<#root::spec::Ref> }
+                        quote! { #(#attrs)* #(#serde_attrs)* pub #fname: Option<#root::spec::Ref> }
                     } else {
-                        quote! { pub #fname: #root::spec::Ref }
+                        quote! { #(#attrs)* #(#serde_attrs)* pub #fname: #root::spec::Ref }
                     }
                 } else if info.rust_type.contains("Resolved") {
                     // For *Resolved types, use the non-Resolved version with DynamicValue for deserialization
@@ -1415,10 +1575,10 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                     let resolved_type_str = &info.rust_type;
                     let dynamic_type_str = resolved_type_str.replace("Resolved", "");
                     let dynamic_type: syn::Type = syn::parse_str(&dynamic_type_str).expect("Failed to parse dynamic params type");
-                    quote! { pub #fname: #dynamic_type }
+                    quote! { #(#attrs)* #(#serde_attrs)* pub #fname: #dynamic_type }
                 } else {
                     let ftype = &info.rust_type_actual;
-                    quote! { pub #fname: #ftype }
+                    quote! { #(#attrs)* #(#serde_attrs)* pub #fname: #ftype }
                 }
             })
             .collect();
@@ -1448,8 +1608,10 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             .collect();
 
         // 3. Generate Resolve Fields for Step::execute (Original)
-        let resolve_fields: Vec<_> = arg_infos
+        // Skip scale_for fields as they aren't in Step
+        let _resolve_fields: Vec<_> = arg_infos
             .iter()
+            .filter(|info| info.scale_for.is_none())
             .map(|info| {
                 let fname = info.name_ident.as_ref().unwrap();
                 let is_opt = info.is_option;
@@ -1474,7 +1636,21 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             .map(|info| {
                 let fname = info.name_ident.as_ref().unwrap();
                 let is_opt = info.is_option;
-                if is_tensor_arg(&info.rust_type_actual) {
+                if let Some(target) = &info.scale_for {
+                    // It's a derived scale arg - look up the target field in Step and append _scales
+                    // ASSUMPTION: The target field is a mandatory Ref (not Option).
+                    // If target is Option, this will fail. Current usage (Embedding/Gemv) targets mandatory weights.
+                    let target_ident = Ident::new(target, Span::call_site());
+                    if is_opt {
+                        quote! {
+                            #fname: Some(symbols.get_or_create(format!("{}_scales", resolver.interpolate(self.#target_ident.0.clone()))))
+                        }
+                    } else {
+                        quote! {
+                            #fname: symbols.get_or_create(format!("{}_scales", resolver.interpolate(self.#target_ident.0.clone())))
+                        }
+                    }
+                } else if is_tensor_arg(&info.rust_type_actual) {
                     if is_opt {
                         quote! {
                             #fname: self.#fname.as_ref().map(|r| symbols.get_or_create(resolver.interpolate(r.0.clone())))
@@ -1515,6 +1691,22 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             })
             .collect();
 
+        let compiled_step_impl = if enable_execute {
+            quote! {
+                impl #root::spec::CompiledStep for #compiled_step_name {
+                    fn execute(&self, foundry: &mut #root::Foundry, bindings: & #root::spec::FastBindings, globals: & #root::spec::TensorBindings, _symbols: &#root::spec::SymbolTable) -> Result<(), #root::error::MetalError> {
+                        let kernel = #name {
+                            #(#execute_fields,)*
+                            ..Default::default()
+                        };
+                        foundry.run(&kernel)
+                    }
+                }
+            }
+        } else {
+            quote! {}
+        };
+
         quote! {
             /// Auto-generated DSL Step for JSON deserialization.
             /// Resolves string refs to TensorArgs at execute time.
@@ -1532,12 +1724,22 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             #[typetag::serde(name = #name_str)]
             impl #root::spec::Step for #step_name {
                 fn execute(&self, foundry: &mut #root::Foundry, bindings: &mut #root::spec::TensorBindings) -> Result<(), #root::error::MetalError> {
-                    // Use Default for fields without #[arg] annotations
-                    let kernel = #name {
-                        #(#resolve_fields,)*
-                        ..Default::default()
-                    };
-                    foundry.run(&kernel)
+                    let mut symbols = #root::spec::SymbolTable::new();
+                    let compiled = self.compile(bindings, &mut symbols);
+                    let mut fast_bindings = #root::spec::FastBindings::new(symbols.len());
+
+                    // Bind all symbols found in the table
+                    for (name, symbol_id) in symbols.iter() {
+                        if let Ok(tensor) = bindings.get(name) {
+                            fast_bindings.set(*symbol_id, tensor);
+                        }
+                    }
+
+                    for step in compiled {
+                        step.execute(foundry, &fast_bindings, bindings, &symbols)?;
+                    }
+
+                    Ok(())
                 }
 
                 fn compile(&self, resolver: &mut #root::spec::TensorBindings, symbols: &mut #root::spec::SymbolTable) -> Vec<Box<dyn #root::spec::CompiledStep>> {
@@ -1554,15 +1756,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                 }
             }
 
-            impl #root::spec::CompiledStep for #compiled_step_name {
-                                fn execute(&self, foundry: &mut #root::Foundry, bindings: & #root::spec::FastBindings, globals: & #root::spec::TensorBindings, _symbols: &#root::spec::SymbolTable) -> Result<(), #root::error::MetalError> {
-                    let kernel = #name {
-                        #(#execute_fields,)*
-                        ..Default::default()
-                    };
-                    foundry.run(&kernel)
-                }
-            }
+            #compiled_step_impl
         }
     } else {
         quote! {}
@@ -1684,7 +1878,7 @@ pub fn derive_compound_kernel(input: TokenStream) -> TokenStream {
 
                 // Build and return source
                 let fused = kernel_builder.build();
-                #root::KernelSource::String(fused.source_code().to_string())
+                #root::KernelSource::String(fused.source().to_string())
             }
 
             fn includes(&self) -> #root::Includes {

@@ -9,7 +9,7 @@ use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 pub use read::{KvCacheRead, KvCacheReadParams, KvCacheReadParamsResolved};
 
 use crate::{
-    spec::DynamicValue, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    spec::DynamicValue, types::TensorArg
 };
 
 /// Parameters for KvCacheWriteRepeatKvHeads kernel.
@@ -46,6 +46,7 @@ pub struct KvCacheWriteRepeatKvHeadsParams {
     function = "kv_cache_write_repeat_kv_heads_kernel",
     args = "KvCacheWriteRepeatKvHeadsParamsResolved",
     dtype = "F16",
+    dispatch = per_element,
     step = true
 )]
 pub struct KvCacheWriteRepeatKvHeads {
@@ -56,19 +57,6 @@ pub struct KvCacheWriteRepeatKvHeads {
     pub cache: TensorArg,
     /// Kernel parameters.
     pub params: KvCacheWriteRepeatKvHeadsParamsResolved,
-}
-
-impl KvCacheWriteRepeatKvHeads {
-    pub fn dispatch_config(&self) -> DispatchConfig {
-        let total = self.params.total_elements as usize;
-        let threads_per_group = 256;
-        let num_groups = total.div_ceil(threads_per_group);
-
-        DispatchConfig {
-            grid: GridSize::d1(num_groups),
-            group: ThreadgroupSize::d1(threads_per_group),
-        }
-    }
 }
 
 /// Parameters for KvCacheWrite kernel.
@@ -100,6 +88,7 @@ pub struct KvCacheWriteParams {
     function = "kv_cache_write_kernel",
     args = "KvCacheWriteParamsResolved",
     dtype = "F16",
+    dispatch = per_element,
     step = true
 )]
 pub struct KvCacheWrite {
@@ -110,18 +99,4 @@ pub struct KvCacheWrite {
     pub cache: TensorArg,
     /// Kernel parameters.
     pub params: KvCacheWriteParamsResolved,
-}
-
-impl KvCacheWrite {
-    /// Dispatch configuration.
-    pub fn dispatch_config(&self) -> DispatchConfig {
-        let total = self.params.total_elements as usize;
-        let threads_per_group = 256;
-        let num_groups = total.div_ceil(threads_per_group);
-
-        DispatchConfig {
-            grid: GridSize::d1(num_groups),
-            group: ThreadgroupSize::d1(threads_per_group),
-        }
-    }
 }

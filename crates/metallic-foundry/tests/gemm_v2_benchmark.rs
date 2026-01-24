@@ -7,7 +7,7 @@ use metallic_context::{
     }
 };
 use metallic_foundry::{
-    Foundry, metals::gemm::step::GemmV2Step, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, metals::gemm::GemmV2Step, policy::{MetalPolicyRuntime, activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use objc2_metal::MTLCommandBuffer as _;
 
@@ -88,15 +88,15 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
     let step = GemmV2Step {
         a: Ref("a".to_string()),
         b: b_ref,
-        output: Ref("output".to_string()),
+        d: Ref("output".to_string()),
         b_scales: b_scales_ref,
         m_dim: DynamicValue::Literal(cfg.m as u32),
         n_dim: DynamicValue::Literal(cfg.n as u32),
         k_dim: DynamicValue::Literal(cfg.k as u32),
-        b_quant: match cfg.quant_b {
-            TestQuantization::F16 => std::sync::Arc::new(PolicyF16),
-            TestQuantization::Q8 => std::sync::Arc::new(PolicyQ8),
-        },
+        b_quant: Some(match cfg.quant_b {
+            TestQuantization::F16 => std::sync::Arc::new(PolicyF16) as std::sync::Arc<dyn MetalPolicyRuntime>,
+            TestQuantization::Q8 => std::sync::Arc::new(PolicyQ8) as std::sync::Arc<dyn MetalPolicyRuntime>,
+        }),
         transpose_a: cfg.transpose_a,
         transpose_b: cfg.transpose_b,
         alpha: 1.0,
@@ -106,6 +106,7 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
         c: None,
         weights_per_block: 32,
         tile_config: None,
+        params: Default::default(),
     };
 
     let mut symbols = SymbolTable::new();
@@ -119,7 +120,9 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
 
     let execute_v2 = |f: &mut Foundry| {
         for c_step in &compiled_steps {
-            c_step.execute(f, &fast_bindings, &bindings, &symbols).unwrap();
+            if let Err(e) = c_step.execute(f, &fast_bindings, &bindings, &symbols) {
+                panic!("V2 execution failed: {:?}", e);
+            }
         }
     };
 

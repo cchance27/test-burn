@@ -162,7 +162,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         .prologue(WarpLayoutStage::new(Layout::RowMajor).with_warps(8)); // Defines row_idx, lane_id
 
     if cfg.with_norm {
-        builder = builder.prologue(RmsNormComputeStage::new(cfg.k, cfg.k, 10));
+        builder = builder.prologue(RmsNormComputeStage::new(2, 4, 11));
     }
 
     let mut dot_stage = VectorizedDotStage::new(std::sync::Arc::new(PolicyQ8));

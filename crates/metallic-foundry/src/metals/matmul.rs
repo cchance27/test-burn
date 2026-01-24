@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Foundry, MetalError, compound::Layout, metals::{gemm::step::GemmV2Step, gemv::step::GemvV2Step}, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
+    Foundry, MetalError, compound::Layout, metals::{gemm::GemmV2Step, gemv::GemvV2Step}, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}
 };
 
 /// Unified MatMul step that dynamically dispatches to GEMV or GEMM.
@@ -230,6 +230,7 @@ impl Step for MatMulStep {
             // Use GemvV2Step for RowMajor layout (transpose_b = true)
             let layout = Layout::RowMajor;
 
+            use crate::metals::gemv::GemvV2Params;
             let gemv_step = GemvV2Step {
                 input: self.a.clone(),
                 weights: self.b.clone(),
@@ -237,12 +238,17 @@ impl Step for MatMulStep {
                 bias: effective_bias.clone(),
                 residual: effective_c.clone(),
                 scale_bytes: effective_b_scales.clone(),
-                k_dim: self.k.clone(),
-                n_dim: self.n.clone(),
-                weights_per_block: self.weights_per_block,
+                params: GemvV2Params {
+                    k_dim: self.k.clone(),
+                    n_dim: self.n.clone(),
+                    weights_per_block: self.weights_per_block,
+                    batch: 1, // GemvV2 supports batch, default 1
+                },
                 layout,
                 alpha: self.alpha,
                 beta: self.beta,
+                has_bias: if effective_bias.is_some() { 1 } else { 0 },
+                has_residual: if effective_c.is_some() { 1 } else { 0 },
                 strategy: None, // Auto-select
                 activation: self.activation,
             };
@@ -262,14 +268,14 @@ impl Step for MatMulStep {
             let gemm_step = GemmV2Step {
                 a: self.a.clone(),
                 b: self.b.clone(),
-                output: self.output.clone(),
+                d: self.output.clone(),
                 b_scales: effective_b_scales,
                 bias: effective_bias,
                 c: effective_c,
                 m_dim: self.m.clone(),
                 n_dim: self.n.clone(),
                 k_dim: self.k.clone(),
-                b_quant,
+                b_quant: Some(b_quant),
                 transpose_a: self.transpose_a,
                 transpose_b: self.transpose_b,
                 alpha: self.alpha,
@@ -277,6 +283,7 @@ impl Step for MatMulStep {
                 weights_per_block: self.weights_per_block,
                 tile_config: None, // Auto
                 activation: self.activation,
+                params: Default::default(), // Calculated at runtime
             };
 
             gemm_step.compile(bindings, symbols)

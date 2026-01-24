@@ -6,7 +6,7 @@
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::gemv::step::{GemvStrategy, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, compound::Layout, metals::gemv::{GemvV2Step, step::GemvStrategy, GemvV2Params}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -81,9 +81,12 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
         output: Ref("output".to_string()),
         bias: None,
         residual: None,
-        k_dim: DynamicValue::Literal(k as u32),
-        n_dim: DynamicValue::Literal(n as u32),
-        weights_per_block: wpb as u32,
+        params: GemvV2Params {
+            k_dim: DynamicValue::Literal(k as u32),
+            n_dim: DynamicValue::Literal(n as u32),
+            weights_per_block: wpb as u32,
+            batch: 1,
+        },
         layout: Layout::Canonical {
             expected_k: 0,
             expected_n: 0,
@@ -91,8 +94,11 @@ fn run_canonical_parity_test(k: usize, n: usize, alpha: f32) {
         strategy: Some(GemvStrategy::Canonical),
         alpha,
         beta: 0.0,
+        has_bias: 0,
+        has_residual: 0,
         activation: Activation::None,
     };
+
     let compiled_steps = step.compile(&mut bindings, &mut symbols);
     let mut fast_bindings = FastBindings::new(symbols.len());
     for (name, id) in symbols.iter() {

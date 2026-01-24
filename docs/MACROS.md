@@ -173,6 +173,8 @@ impl BindArgs for GemvColMajor { ... }
 |-----------|-------------|
 | `#[arg(output)]` | Mark as output (skips auto-flush) |
 | `#[arg(skip)]` | Exclude from buffer args (not bound to Metal) |
+| `#[arg(meta)]` | Metadata for kernel selection (excluded from buffer binding and Metal signature) |
+| `#[arg(scale_for = "field")]` | Automatically derive scales for the target field (e.g. `{field}_scales`) |
 | `#[arg(stage_skip)]` | Skip in compound stage emit (Policy provides) |
 | `#[arg(metal_type = "...")]` | Override inferred Metal type |
 | `#[arg(buffer = N)]` | **Optional**: Explicit buffer index (auto-assigns from max(N+1) onward) |
@@ -199,20 +201,14 @@ Implements the `Kernel` trait for standalone (non-compound) kernels.
     source = "gemv/col_major.metal",
     function = "gemv_col_major_f16",
     args = "GemvParams",  // Type with METAL_STRUCT_DEF for struct_defs()
-    include = ["utils/simd.metal", "utils/math.metal"]  // Optional
+    include = ["utils/simd.metal", "utils/math.metal"],  // Optional
+    dispatch = "per_row"  // Use a preset dispatch config
 )]
 pub struct GemvColMajorKernel {
     pub matrix: TensorArg,           // Buffer 0 (auto)
     #[arg(output)]
     pub result: TensorArg,           // Buffer 1 (output)
     pub params: GemvParams,          // Buffer 2
-}
-
-impl GemvColMajorKernel {
-    // REQUIRED: implement dispatch_config()
-    fn dispatch_config(&self) -> DispatchConfig {
-        DispatchConfig::d1(self.n / 8, 256)
-    }
 }
 ```
 
@@ -226,7 +222,7 @@ impl Kernel for GemvColMajorKernel {
     fn source(&self) -> KernelSource { KernelSource::File("gemv/col_major.metal") }
     fn includes(&self) -> Includes { Includes(vec!["utils/simd.metal", ...]) }
     fn bind(&self, encoder: &ComputeCommandEncoder) { self.bind_args(encoder); }
-    fn dispatch_config(&self) -> DispatchConfig { Self::dispatch_config(self) }
+    fn dispatch_config(&self) -> DispatchConfig { /* generated from preset or manual impl */ }
     fn struct_defs(&self) -> String { GemvParams::METAL_STRUCT_DEF.to_string() }
 }
 ```
@@ -249,53 +245,34 @@ impl Kernel for GemvColMajorKernel {
 | `epilogue_emit = "..."` | Template for Epilogue emission (enables Epilogue generation) |
 | `epilogue_out_var = "..."` | Optional name for Epilogue output variable |
 | `step = bool` | Enable `Step` implementation (default: `true`) |
-| `dispatch = bool/preset` | Enable default dispatch or use preset (`per_row`, `per_element`, `vec_N`) |
+| `execute = bool` | Enable `execute()` impl for `CompiledStep` (default: `true`) |
+| `dispatch = bool/preset` | Enable default dispatch or use preset |
 | `stage = "..."` | Custom Rust expression for `as_stage()` |
 | `stage_emit = "..."` | Template for Stage emission code |
 | `stage_out_var = "..."` | Optional name for Stage output variable |
 | `dtype = Variant` | Optional `Dtype` override (e.g., `F16`, `Q8`) |
 
-### Stage Generation
+### Dispatch Presets
 
-When creating a kernel that can be used as a stage in fused compound kernels, use `stage_function` or `stage_emit`:
+Presets automatically calculate grid and threadgroup sizes based on fields in the `params` struct.
 
-```rust
-#[derive(Kernel, KernelArgs, Clone, Default)]
-#[kernel(
-    source = "rmsnorm/rmsnorm.metal",
-    function = "rmsnorm_kernel_f16",
-    stage_function = "run_rmsnorm_core",  // Enables Stage generation
-    args = "RmsNormParams",
-    dispatch = per_row,                   // Auto-generate dispatch_config
-    threadgroup = "float tg_inv_rms"
-)]
-pub struct RmsNorm {
-    #[arg(stage_skip)]  // Excluded from Stage (Policy provides)
-    pub input: TensorArg,
-    #[arg(output)]
-    pub output: TensorArg,
-    pub gamma: TensorArg,
-    pub params: RmsNormParams,
-}
-```
-
-> [!IMPORTANT]
-> **Every kernel using `#[derive(Kernel)]` MUST provide a dispatch configuration.**
-> You can either implement `dispatch_config(&self)` manually OR use the `dispatch` attribute with a preset.
->
-> **Available Presets:**
-> - `per_element`: `grid = total / 256`, `group = 256`
-> - `per_row`: `grid = total / feature_dim`, `group = 256`
-> - `vec_N`: Vectorized variant of `per_element` (e.g., `vec_4`)
+| Preset | Description | Required Param Fields |
+|--------|-------------|-----------------------|
+| `per_element` | One thread per element | `total_elements` |
+| `per_element_vec` | One thread per vector chunk | `total_elements`, `vector_width` |
+| `per_row` | One thread per row | `total_elements`, `feature_dim` |
+| `warp_per_row` | One warp (32 threads) per row | `n_dim` |
+| `warp_per_row_2d` | Batched warp-per-row | `n_dim`, `batch` |
+| `vec_N` | Vectorized (e.g. `vec_4`) | `total_elements` |
 
 ### Step Generation
 
 When `step = true` (default), the macro automatically generates:
-- `{Kernel}Step` — Serializable struct for use in model DSLs.
-- `Compiled{Kernel}Step` — Optimized runtime step using index-based lookup.
-- `typetag` registration for the Step.
+- `{Kernel}Step` — Serializable struct for use in model DSLs. String `Ref` fields replace `TensorArg`.
+- `Compiled{Kernel}Step` — Optimized runtime step using `usize` index lookups.
+- `Step` implementation that automatically handles `compile()` and routes `execute()` to the compiled path.
 
-This allows the kernel to be used directly in JSON model definitions.
+**Derived Scales in Steps:** Fields marked `#[arg(scale_for = "...")]` are automatically resolved during compilation to the `{target}_scales` symbol, making quantization transparent to the DSL.
 
 ### Stage/Epilogue Generation
 

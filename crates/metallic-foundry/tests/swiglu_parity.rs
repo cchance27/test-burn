@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::CompoundKernel, metals::swiglu::{SwigluParamsResolved, stages::SwigluStage, step::SwigluArgs}, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    Foundry, compound::CompoundKernel, metals::swiglu::{SwigluArgs, SwigluParamsResolved, stages::SwigluStage}, storage::Pooled, tensor::{F16, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use rand::Rng;
 use serial_test::serial;

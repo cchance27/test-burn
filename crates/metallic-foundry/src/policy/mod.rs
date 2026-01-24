@@ -153,3 +153,33 @@ pub mod serde {
         resolve_policy_by_name(&s).ok_or_else(|| ::serde::de::Error::custom(format!("Unknown policy: {}", s)))
     }
 }
+
+pub mod serde_option {
+    use ::serde::{Deserialize, Deserializer, Serializer};
+
+    use super::*;
+
+    pub fn serialize<S>(policy: &Option<Arc<dyn MetalPolicyRuntime>>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match policy {
+            Some(p) => serializer.serialize_str(p.short_name()),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Arc<dyn MetalPolicyRuntime>>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s: Option<String> = Option::deserialize(deserializer)?;
+        match s {
+            Some(name) => {
+                let p = resolve_policy_by_name(&name).ok_or_else(|| ::serde::de::Error::custom(format!("Unknown policy: {}", name)))?;
+                Ok(Some(p))
+            }
+            None => Ok(None),
+        }
+    }
+}

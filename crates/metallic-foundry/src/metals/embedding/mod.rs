@@ -3,9 +3,9 @@
 //! Gathers rows from an embedding table based on token indices.
 //! Each output element is copied from table[indices[pos], feat].
 
-use metallic_macros::MetalStruct;
+use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::spec::DynamicValue;
+use crate::{spec::DynamicValue, types::TensorArg};
 
 pub mod step;
 
@@ -21,14 +21,25 @@ pub struct EmbeddingParams {
     pub vocab_size: DynamicValue<u32>,
 }
 
-// NOTE: Legacy static kernel structs have been removed.
-// All embedding lookups now go through EmbeddingStep which uses CompoundKernel
-// with dynamic policy selection based on tensor dtype.
-//
-// The pattern is:
-//   EmbeddingStep -> EmbeddingStage -> CompoundKernel::compile()
-//   -> includes policy header first, then embedding.metal template
-//   -> emits: run_embedding_core<{Policy}>(...)
+/// Embedding kernel definition for Step derivation.
+/// Actual execution delegates to dynamic CompoundKernels via manual `execute`.
+#[derive(Kernel, KernelArgs, Clone, Default)]
+#[kernel(
+    source = "embedding/embedding.metal", // Placeholder, not used by manual execute
+    function = "embedding_kernel",        // Placeholder
+    args = EmbeddingParams,               // Unresolved params for Step
+    step = true,
+    execute = false
+)]
+pub struct Embedding {
+    pub table: TensorArg,
+    #[arg(scale_for = "table")]
+    pub scale_bytes: TensorArg, // Derived from table name ("{table}_scales"), populated as index in CompiledStep
+    pub indices: TensorArg,
+    #[arg(output)]
+    pub output: TensorArg,
+    pub params: EmbeddingParamsResolved,
+}
 
 #[cfg(test)]
 mod tests {

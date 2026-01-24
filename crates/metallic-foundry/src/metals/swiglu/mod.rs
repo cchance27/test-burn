@@ -8,13 +8,26 @@
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::{
-    spec::DynamicValue, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
-};
+use crate::{spec::DynamicValue, types::TensorArg};
 
 pub mod ffn_stages;
 pub mod stages;
 pub mod step;
+
+/// Arguments for SwiGLU fused activation kernel (Stage variant).
+#[derive(Debug, KernelArgs)]
+pub struct SwigluArgs {
+    #[arg(buffer = 0)]
+    pub gate: TensorArg,
+    #[arg(buffer = 1, output)]
+    pub up_inout: TensorArg,
+    #[arg(buffer = 2)]
+    pub gate_bias: TensorArg,
+    #[arg(buffer = 3)]
+    pub up_bias: TensorArg,
+    #[arg(buffer = 4)]
+    pub params: SwigluParamsResolved,
+}
 
 // ================================================================================================
 // Standalone Kernel
@@ -40,7 +53,14 @@ pub struct SwigluParams {
 ///
 /// Computes in-place: up_inout = SiLU(gate + gate_bias) * (up_inout + up_bias)
 #[derive(Kernel, KernelArgs, Clone, Default)]
-#[kernel(source = "swiglu/swiglu.metal", function = "swiglu_fused_activation_f16", args = "SwigluParamsResolved")]
+#[kernel(
+    source = "swiglu/swiglu.metal",
+    function = "swiglu_fused_activation_f16",
+    args = "SwigluParamsResolved",
+    dispatch = per_element_vec,
+    step = true,
+    execute = false
+)]
 pub struct Swiglu {
     /// Gate projection output.
     pub gate: TensorArg,
@@ -95,24 +115,6 @@ impl Swiglu {
                 up_leading_stride,
             },
         )
-    }
-
-    pub fn dispatch_config(&self) -> DispatchConfig {
-        let vector_width = std::cmp::max(self.params.vector_width as usize, 1);
-        let base_threads = 256;
-        let threads_per_group_width = std::cmp::max(base_threads / vector_width, 1);
-        let total_threads = if self.params.vector_width > 1 {
-            let vectorized = self.params.total_elements / self.params.vector_width;
-            let remainder = self.params.total_elements % self.params.vector_width;
-            (vectorized + remainder) as usize
-        } else {
-            self.params.total_elements as usize
-        };
-        let num_groups = total_threads.div_ceil(threads_per_group_width);
-        DispatchConfig {
-            grid: GridSize::d1(num_groups),
-            group: ThreadgroupSize::d1(threads_per_group_width),
-        }
     }
 }
 

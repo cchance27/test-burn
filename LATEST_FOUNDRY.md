@@ -62,13 +62,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
 
-### 1. Developer Experience (Kernel Macros)
-- **Debt:** Manually calculating grid/threadgroup sizes in `step.rs` (e.g. `GridSize::new(...)`).
-- **Requirement:** Implement `#[dispatch = "per_row"]` or similar presets in macros to auto-generate dispatch config.
-- **Goal:** Reduce boilerplate and off-by-one errors in dispatch logic.
-- **Validation:** Implement compile-time validation of Metal `emit()` strings to catch syntax errors early.
-
-### 2. Raw `objc2` Leaks in Public API
+### 1. Raw `objc2` Leaks in Public API
 - **Issue:** The `Foundry` struct and many public methods still expose raw Metal types (e.g., `Retained<ProtocolObject<dyn MTLBuffer>>`).
 - **Impact:** This couples the entire project (including the CLI and external crates) to specific versions of the `objc2` and `objc2-metal` crates.
 - **Requirement:** Complete the "Semantic Wrapper" layer (`MetalBuffer`, `MetalDevice`, `MetalCommandQueue`) to encapsulate the raw pointers, move everything to these semantic wrappers, make sure we no longer leak objc2 and objc2-metal outside of our semantic wrappers, we shouldn't see objc2 and objc2-metal in source files outside of the semantic wrapper files.
@@ -82,10 +76,10 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
 
-### 5. Import Hygiene & Naming
+### 4. Import Hygiene & Naming
 - **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
 - **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
-- **Requirement:** Use the `DispatchConfig` struct everywhere and rename `as_stage` -> `to_stage` or `into_stage`.
+- **Requirement:** Rename `as_stage` -> `to_stage` or `into_stage`.
 
 ### 6. Quantization Safety & Regression Testing
 - **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
@@ -271,3 +265,9 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 ### 12. Centralized Memory Alignment & Stride (COMPLETED)
 - **Status:** Fixed. Centralized all tile-aware stride and padding logic into `metallic-foundry::compound::layout`.
 - **Impact:** Ensures consistency between GEMM and Softmax kernels in the SDPA path. Scratch buffers (`Scores`, `Probs`) now use `TiledLayout` for robust head-major indexing, eliminating manual math in `step.rs` and preventing corruption when switching to skinny-M or other tile configurations.
+
+### 13. Developer Experience (Kernel Macros) (COMPLETED)
+- **Status:** Implemented `#[kernel(dispatch = "...")]` presets and automatic `CompiledStep` generation.
+- **Feature:** Macros now support `per_element`, `per_row`, `warp_per_row`, and `per_element_vec` presets, eliminating manual `dispatch_config` boilerplate for most kernels.
+- **Feature:** `#[arg(scale_for = "...")]` adds automatic support for derived scales in quantized kernels.
+- **Feature:** `#[derive(Kernel)]` now generates both `Step` and `CompiledStep` implementations, with `Step::execute` automatically routing through the optimized `CompiledStep` path.
