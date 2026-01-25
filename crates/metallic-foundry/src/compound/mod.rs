@@ -304,13 +304,7 @@ impl CompoundKernel<Unfused> {
     fn generate_source(&self) -> String {
         let mut code = String::new();
 
-        // 1. Collect all includes
-        let all_includes = self.collect_includes();
-
-        for inc in &all_includes {
-            code.push_str(&format!("#include \"{}\"\n", inc));
-        }
-        code.push('\n');
+        // 1. (Includes are handled by Kernel::includes() and the pipeline compiler)
 
         // 2. Generate signature
         let all_args = self.collect_buffer_args();

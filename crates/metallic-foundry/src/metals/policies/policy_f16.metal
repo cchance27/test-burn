@@ -1,4 +1,3 @@
-#include "base.metal"
 
 #undef METALLIC_POLICY_HAS_SCALE
 #define METALLIC_POLICY_HAS_SCALE 0

@@ -2,8 +2,6 @@
 #define METALLIC_V2_ATTENTION_SDPA_DECODE_METAL
 
 #include <metal_stdlib>
-/// FIXME: why is this here shouldn't it be auto included from the rust side?
-#include "../simd.metal"
 
 using namespace metal;
 

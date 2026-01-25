@@ -502,6 +502,23 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
         KernelSource::String(s) => s,
     };
 
+    let process_lines = |target: &mut String, content: &str, source_name: &str| {
+        for line in content.lines() {
+            if line.trim().starts_with("#include \"") {
+                tracing::warn!(
+                    "Ignored local #include in {}: '{}'. Use Kernel::includes() trait method to specify dependencies.",
+                    source_name,
+                    line.trim()
+                );
+                target.push_str(&format!("// Skipped: {}\n", line));
+            } else {
+                target.push_str(line);
+                target.push('\n');
+            }
+        }
+        target.push('\n');
+    };
+
     let is_policy = |inc: &str| inc.starts_with("policies/");
 
     for include in includes.iter().filter(|&&i| is_policy(i)) {
@@ -509,16 +526,7 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
             .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
         let content = std::fs::read_to_string(&p)
             .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
-
-        for line in content.lines() {
-            if line.trim().starts_with("#include \"") {
-                full_source.push_str(&format!("// Skipped: {}\n", line));
-            } else {
-                full_source.push_str(line);
-                full_source.push('\n');
-            }
-        }
-        full_source.push('\n');
+        process_lines(&mut full_source, &content, include);
     }
 
     let struct_defs = kernel.struct_defs();
@@ -533,26 +541,10 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
             .ok_or_else(|| MetalError::LoadLibraryFailed(format!("Include file {} not found", include)))?;
         let content = std::fs::read_to_string(&p)
             .map_err(|e| MetalError::LoadLibraryFailed(format!("Failed to read include {}: {}", p.display(), e)))?;
-
-        for line in content.lines() {
-            if line.trim().starts_with("#include \"") {
-                full_source.push_str(&format!("// Skipped: {}\n", line));
-            } else {
-                full_source.push_str(line);
-                full_source.push('\n');
-            }
-        }
-        full_source.push('\n');
+        process_lines(&mut full_source, &content, include);
     }
 
-    for line in main_content.lines() {
-        if line.trim().starts_with("#include \"") {
-            full_source.push_str(&format!("// Skipped: {}\n", line));
-        } else {
-            full_source.push_str(line);
-            full_source.push('\n');
-        }
-    }
+    process_lines(&mut full_source, &main_content, kernel.function_name());
 
     if let Some(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR").ok() {
         let mut safe_name = function_name

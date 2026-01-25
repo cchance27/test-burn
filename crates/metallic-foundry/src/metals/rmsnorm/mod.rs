@@ -84,6 +84,7 @@ impl RmsNorm {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Kernel;
     use crate::compound::CompoundKernel;
 
     #[test]
@@ -106,7 +107,8 @@ mod tests {
         let source = kernel.source();
 
         // Verify includes
-        assert!(source.contains("#include \"rmsnorm/rmsnorm.metal\""));
+        let includes = kernel.includes();
+        assert!(includes.0.contains(&"rmsnorm/rmsnorm.metal"));
 
         // Verify buffer arguments collected
         let args = kernel.collect_buffer_args();

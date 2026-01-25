@@ -132,6 +132,38 @@ ALWAYS_INLINE void run_my_op(
 2.  **Threadgroup Memory:** Must be declared in the `threadgroup` attribute in Rust. It is allocated in the `[[kernel]]` entry point and passed as a pointer to your template. **Never** declare `threadgroup` variables inside the template function itself.
 3.  **Struct Injection:** Again, do not define `MyParams` in the Metal file.
 
+### 2.3 Include Management
+
+Foundry uses a "virtual filesystem" approach for Metal includes to ensure consistent builds and dependency tracking.
+
+**Best Practices:**
+1.  **Do NOT use `#include` in `.metal` files:** Manual includes (e.g., `#include "utils.metal"`) are strictly forbidden in kernel source files. They bypass the dependency system and will trigger build warnings or errors.
+2.  **Declare Dependencies in Rust:** Use the `Kernel::includes()` trait method (or the `includes` attribute in macros) to specify required files.
+3.  **Standard Libraries:** System includes like `<metal_stdlib>`, `<metal_simdgroup>`, and `<metal_simdgroup_matrix>` are allowed and encouraged.
+
+**Example (Macro):**
+```rust
+#[derive(Kernel)]
+#[kernel(
+    source = "ops/my_op.metal",
+    // Declare dependencies here
+    includes = ["utils/math.metal", "utils/shuffles.metal"] 
+)]
+pub struct MyOp { ... }
+```
+
+**Example (Manual Impl):**
+```rust
+impl Stage for MyManualStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec!["utils/math.metal", "policies/base.metal"]
+    }
+    // ...
+}
+```
+
+The build system will automatically resolve these paths, strip local `#include` directives if present (with a warning), and inline the content into the final source passed to the Metal compiler.
+
 ---
 
 ## 3. The Policy System (Quantization)
