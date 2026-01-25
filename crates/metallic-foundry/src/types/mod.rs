@@ -81,7 +81,7 @@ impl MetalDevice {
         if size == 0 {
             return None;
         }
-        let ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void)?;
+        let ptr = crate::types::nonnull_void_ptr_from_slice(data, "MetalDevice::new_buffer_from_slice").ok()?;
         unsafe { self.0.newBufferWithBytes_length_options(ptr, size, options).map(MetalBuffer) }
     }
     pub fn create_system_default_device() -> Result<MetalDevice, crate::error::MetalError> {
@@ -255,6 +255,15 @@ pub fn cast_from_ref<Src: 'static, Dst: 'static + Copy>(src: &Src) -> Option<Dst
 /// View a POD slice as bytes.
 pub fn pod_as_bytes<T: Copy>(slice: &[T]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(slice.as_ptr() as *const u8, std::mem::size_of_val(slice)) }
+}
+
+#[inline]
+pub fn nonnull_void_ptr_from_slice<T: Copy>(
+    slice: &[T],
+    ctx: &'static str,
+) -> Result<std::ptr::NonNull<std::ffi::c_void>, crate::error::MetalError> {
+    std::ptr::NonNull::new(slice.as_ptr() as *mut std::ffi::c_void)
+        .ok_or_else(|| crate::error::MetalError::InvalidOperation(format!("{ctx}: slice pointer was null")))
 }
 
 pub type Device = MetalDevice;

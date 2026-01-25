@@ -65,6 +65,13 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
 
     /// Read the tensor data back to the host.
     pub fn to_vec(&self, foundry: &Foundry) -> Vec<T::Scalar> {
+        self.try_to_vec(foundry).unwrap_or_else(|e| {
+            panic!("Tensor::to_vec failed: {e}");
+        })
+    }
+
+    /// Read the tensor data back to the host.
+    pub fn try_to_vec(&self, foundry: &Foundry) -> Result<Vec<T::Scalar>, MetalError> {
         let num_elements = self.dims.iter().product::<usize>();
         let size_bytes = num_elements * T::DTYPE.size_bytes();
 
@@ -72,18 +79,12 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
         let device = &foundry.device;
         let read_buffer = device
             .new_buffer(size_bytes, MetalResourceOptions::StorageModeShared)
-            .expect("Failed to create read buffer");
+            .ok_or(MetalError::BufferCreationFailed(size_bytes))?;
 
-        let cmd = foundry.queue.command_buffer().expect("Failed to create command buffer");
-        let blit = cmd.blit_command_encoder().expect("Failed to create blit encoder");
-
-        blit.copy_from_buffer(&self.buffer, self.offset, &read_buffer, 0, size_bytes);
-        blit.end_encoding();
-        cmd.commit();
-        cmd.wait_until_completed();
+        foundry.blit_copy_sync(&self.buffer, self.offset, &read_buffer, 0, size_bytes)?;
 
         // Read data
-        read_buffer.read_to_vec::<T::Scalar>(num_elements)
+        Ok(read_buffer.read_to_vec::<T::Scalar>(num_elements))
     }
 }
 
@@ -132,25 +133,19 @@ impl<T: TensorElement> Tensor<T, Dedicated> {
                     .ok_or(MetalError::BufferCreationFailed(size_bytes))?;
 
                 // Staging
-                let src_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void).unwrap();
+                let src_ptr = crate::types::nonnull_void_ptr_from_slice(data, "TensorInit::CopyFrom")?;
                 let staging = foundry
                     .device
                     .new_buffer_with_bytes(src_ptr, size_bytes, MetalResourceOptions::StorageModeShared)
                     .ok_or(MetalError::BufferFromBytesCreationFailed)?;
 
-                let cmd = foundry.queue.command_buffer().unwrap();
-                let blit = cmd.blit_command_encoder().unwrap();
-
-                blit.copy_from_buffer(&staging, 0, &dest, 0, size_bytes);
-                blit.end_encoding();
-                cmd.commit();
-                cmd.wait_until_completed();
+                foundry.blit_copy(&staging, 0, &dest, 0, size_bytes)?;
 
                 dest
             }
             TensorInit::BorrowHost(data) => {
                 // No copy
-                let src_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void).unwrap();
+                let src_ptr = crate::types::nonnull_void_ptr_from_slice(data, "TensorInit::BorrowHost")?;
                 let b = foundry
                     .device
                     .new_buffer_with_bytes_no_copy(src_ptr, size_bytes, MetalResourceOptions::StorageModeShared, None)
@@ -184,8 +179,7 @@ impl<T: TensorElement> Tensor<T, Pooled> {
             // Safety: Transmuting &[T] to &[u8]. T is TensorElement which is Pod.
             // Safety: Transmuting &[T] to &[u8]. T is TensorElement which is Pod.
             let data_u8 = crate::types::pod_as_bytes(data);
-            // Upload data to the allocated buffer
-            pool.upload(&alloc, data_u8)?;
+            foundry.upload_bytes(&alloc.buffer, alloc.offset, data_u8)?;
         }
 
         let strides = compute_strides(&dims);

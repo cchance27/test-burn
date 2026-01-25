@@ -85,11 +85,7 @@ impl Step for Repeat {
                         if len > 0 {
                             // Sync if capturing
                             if foundry.is_capturing() {
-                                let cmd = foundry.end_capture()?;
-                                {
-                                    cmd.wait_until_completed();
-                                }
-                                foundry.start_capture()?;
+                                foundry.synchronize()?;
                             }
 
                             let data: Vec<half::f16> = arg.buffer().read_to_vec(len);
@@ -103,11 +99,7 @@ impl Step for Repeat {
                 eprintln!("[FOUNDRY] layer {} sync and norm check", i);
                 // Force sync between layers to allow reading intermediate state
                 if foundry.is_capturing() {
-                    let cmd = foundry.end_capture()?;
-                    {
-                        cmd.wait_until_completed();
-                    }
-                    foundry.start_capture()?;
+                    foundry.synchronize()?;
                 }
 
                 if let Ok(arg) = bindings.get("hidden") {

@@ -303,58 +303,6 @@ impl Foundry {
         self.dispatch(kernel, config)
     }
 
-    /// Dispatch a kernel with a specific policy applied via PolicyStage.
-    pub fn run_with_policy<P, K>(&mut self, kernel: &K) -> Result<(), MetalError>
-    where
-        P: crate::fusion::MetalPolicy + Default + 'static,
-        K: Kernel + Clone + Send + Sync + 'static, // Needs Clone+Send+Sync for Stage wrapping
-    {
-        use crate::compound::{CompoundKernel, PolicyStage};
-
-        let fused_kernel = CompoundKernel::new(kernel.function_name())
-            .prologue(PolicyStage::<P>::new())
-            .main_dyn(kernel.as_stage())
-            .with_manual_output(true) // Helper manages output manually
-            .build();
-
-        // 2. Bind inputs
-        let pipeline = self.load_kernel(&fused_kernel)?;
-
-        // Dispatch with manual binding
-        if let Some(stream) = self.active_stream.as_mut() {
-            let encoder = stream.compute_encoder()?;
-
-            encoder.set_compute_pipeline_state(&pipeline);
-            kernel.bind(&encoder);
-
-            let config = kernel.dispatch_config();
-            encoder.dispatch_threadgroups(config.grid, config.group);
-            encoder.memory_barrier(MetalBarrierScope::Buffers);
-
-            // Do NOT end encoding or commit - wait for sync() or end_capture()
-        } else {
-            // Standalone path: create new buffer, encode, and block wait
-            let command_buffer = self.queue.command_buffer()?;
-            let encoder = command_buffer.compute_command_encoder()?;
-
-            encoder.set_compute_pipeline_state(&pipeline);
-
-            // Bind arguments using the ORIGINAL kernel
-            let encoder_wrapper = encoder.clone(); // No wrapper wrapping needed anymore
-            kernel.bind(&encoder_wrapper);
-
-            let config = kernel.dispatch_config();
-            encoder.dispatch_threadgroups(config.grid, config.group);
-            encoder.end_encoding();
-
-            command_buffer.commit();
-            command_buffer.commit();
-            command_buffer.wait_until_completed();
-        }
-
-        Ok(())
-    }
-
     /// Check if command buffer capture is currently active.
     pub fn is_capturing(&self) -> bool {
         self.active_stream.is_some()
@@ -379,17 +327,46 @@ impl Foundry {
             blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
             // The next dispatch() call will switch back to compute as needed
         } else {
-            // Non-batched path: create a standalone command buffer
-            let cmd = self.queue.command_buffer()?;
-            let blit = cmd.blit_command_encoder()?;
-
-            blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
-            blit.end_encoding();
-            cmd.commit();
-            cmd.wait_until_completed();
+            self.blit_copy_sync(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes)?;
         }
 
         Ok(())
+    }
+
+    pub fn blit_copy_sync(
+        &self,
+        src_buffer: &crate::types::MetalBuffer,
+        src_offset: usize,
+        dst_buffer: &crate::types::MetalBuffer,
+        dst_offset: usize,
+        size_bytes: usize,
+    ) -> Result<(), MetalError> {
+        let cmd = self.queue.command_buffer()?;
+        let blit = cmd.blit_command_encoder()?;
+
+        blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
+        blit.end_encoding();
+        cmd.commit();
+        cmd.wait_until_completed();
+        Ok(())
+    }
+
+    pub fn upload_bytes(
+        &mut self,
+        dst_buffer: &crate::types::MetalBuffer,
+        dst_offset: usize,
+        data: &[u8],
+    ) -> Result<(), MetalError> {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let staging = self
+            .device
+            .new_buffer_from_slice(data, MetalResourceOptions::StorageModeShared)
+            .ok_or(MetalError::BufferFromBytesCreationFailed)?;
+
+        self.blit_copy(&staging, 0, dst_buffer, dst_offset, data.len())
     }
 }
 
@@ -453,15 +430,18 @@ pub trait Kernel {
     }
 
     /// Convert this kernel into a Stage for use in a CompoundKernel.
-    /// This enables `foundry.run_with_policy(kernel)`.
     ///
-    /// Default implementation wraps the kernel in a GenericKernelStage.
-    /// Specialized kernels (like Gemv) should override this to return a proper Stage (e.g. GemvCoreStage).
+    /// Only kernels designed for fusion should implement this. The default implementation
+    /// panics to fail fast instead of silently producing an invalid fused kernel.
     fn as_stage(&self) -> Box<dyn crate::compound::Stage>
     where
         Self: Sized + Clone + Send + Sync + 'static,
     {
-        Box::new(crate::compound::GenericKernelStage::new(self.clone()))
+        panic!(
+            "Kernel::as_stage is not implemented for {}. \
+This kernel cannot be used as a Stage in a CompoundKernel.",
+            self.function_name()
+        )
     }
 }
 /// Internal helper for pipeline compilation from kernel metadata.
