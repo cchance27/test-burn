@@ -65,15 +65,11 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
 
-### 1. Quantization Safety & Regression Testing
-- **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
-- **Tasks:**
-    - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
-    - Add a regression test that loads a spec without `b_quant` and asserts Foundry still selects Q8 kernels when the bound tensor is Q8.
+** None Currently ** 
 
 ---
 
-## 🔍 Quality Assurance / Debugging (From Phase 2 Status)
+## ⚠️ Risks & Regressions (Immediate Priority)
 
 ### 1. End-to-End Drift Investigation
 - **Symptom:** Block-level parity is exact, but full-model generation shows `hidden_state` drift (~1.375 after 24 layers) and `logits` drift (~21.4).
@@ -278,3 +274,10 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Status:** **Fixed.** Standardized include resolution in `compile_pipeline` to strip local `#include` directives and warn, enforcing explicit dependency declaration via `Kernel::includes()`. Refactored `CompoundKernel` to stop emitting includes in source strings, resolving double-handling issues.
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
+
+### 18. Quantization Safety & Regression Testing (COMPLETED)
+- **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
+- **Tasks:**
+    - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
+    - Add a regression test that loads a spec without `b_quant` and asserts Foundry still selects Q8 kernels when the bound tensor is Q8.
+- **Verification:** Added `test_gemm_v2_step_runtime_policy_selection_q8` in `gemm_v2_parity.rs` which successfully verifies that Foundry selects Q8 kernels for Q8-bound tensors even without DSL hints.
