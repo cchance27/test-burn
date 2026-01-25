@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use metallic_macros::{Kernel, KernelArgs};
 // Ensure typetag is available for macro expansion
 use typetag;
@@ -52,9 +50,6 @@ pub struct GemmV2 {
     #[arg(meta)]
     pub k_dim: DynamicValue<u32>,
 
-    #[arg(meta, serde_with = "crate::policy::serde_option")]
-    pub b_quant: Option<Arc<dyn crate::policy::MetalPolicyRuntime>>,
-
     #[arg(meta, serde_default)]
     pub transpose_a: bool,
     #[arg(meta, serde_default)]
@@ -84,7 +79,6 @@ impl Default for GemmV2 {
             m_dim: DynamicValue::Literal(1),
             n_dim: DynamicValue::Literal(1),
             k_dim: DynamicValue::Literal(1),
-            b_quant: None,
             transpose_a: false,
             transpose_b: false,
             tile_config: None,

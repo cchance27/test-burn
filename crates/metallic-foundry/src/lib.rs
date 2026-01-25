@@ -45,17 +45,14 @@ pub struct Foundry {
     pub queue: MetalQueue,
     /// Type-safe registry for resources (caches, pools, etc.)
     resources: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
-    /// Active command buffer for batched dispatch
-    active_command_buffer: Option<MetalCommandBuffer>,
-    /// Helper: Active compute encoder to reuse across dispatches
-    active_compute_encoder: Option<ComputeCommandEncoder>,
+    /// Current stream for batched commands
+    active_stream: Option<CommandStream>,
     /// Optional capture-level metrics accumulator (enabled only when profiling is on).
     capture_metrics: Option<CaptureMetrics>,
 }
 
 impl Foundry {
     /// Create a new Foundry with the system default device.
-    #[cfg(target_os = "macos")]
     pub fn new() -> Result<Self, MetalError> {
         let device = crate::types::MetalDevice::create_system_default_device()?;
         let queue = device.new_command_queue()?;
@@ -77,8 +74,7 @@ impl Foundry {
             device,
             queue,
             resources,
-            active_command_buffer: None,
-            active_compute_encoder: None,
+            active_stream: None,
             capture_metrics: None,
         })
     }
@@ -95,12 +91,11 @@ impl Foundry {
 
     /// Start capturing commands into a single command buffer (batched dispatch).
     pub fn start_capture(&mut self) -> Result<(), MetalError> {
-        if self.active_command_buffer.is_some() {
+        if self.active_stream.is_some() {
             return Err(MetalError::OperationFailed("Capture already active".to_string()));
         }
         let buffer = self.queue.command_buffer()?;
-        self.active_command_buffer = Some(buffer);
-        self.active_compute_encoder = None;
+        self.active_stream = Some(CommandStream::new(buffer));
         if instrument::emit_cb_timing_metrics() {
             self.capture_metrics = Some(CaptureMetrics::new(instrument::next_capture_id()));
         }
@@ -109,15 +104,13 @@ impl Foundry {
 
     /// End capture and return the command buffer (committed but not waited).
     pub fn end_capture(&mut self) -> Result<MetalCommandBuffer, MetalError> {
-        // End the persistent encoder before committing
-        if let Some(encoder) = self.active_compute_encoder.take() {
-            encoder.end_encoding();
-        }
-
-        let buffer = self
-            .active_command_buffer
+        let mut stream = self
+            .active_stream
             .take()
             .ok_or(MetalError::OperationFailed("No active capture".to_string()))?;
+
+        stream.end_encoding();
+        let buffer = stream.command_buffer().clone();
 
         // Attach capture-level completion metrics before commit so the handler is retained by Metal.
         if instrument::emit_cb_timing_metrics() {
@@ -167,6 +160,15 @@ impl Foundry {
         Ok(buffer)
     }
 
+    /// End the current capture, commit, wait for completion, and start a new capture.
+    /// Useful for per-kernel profiling or checkpoints.
+    pub fn restart_capture_sync(&mut self) -> Result<MetalCommandBuffer, MetalError> {
+        let buf = self.end_capture()?;
+        buf.wait_until_completed();
+        self.start_capture()?;
+        Ok(buf)
+    }
+
     /// Ensure all pending commands have completed.
     /// If capture is active, completes the current batch and starts a new one.
     pub fn synchronize(&mut self) -> Result<(), MetalError> {
@@ -194,48 +196,24 @@ impl Foundry {
     ///
     /// This bypasses the pipeline lookup/compilation step, which is useful for
     /// repeatedly dispatching the same kernel (e.g. in autoregressive loops).
-    pub fn dispatch_pipeline<K: Kernel>(
-        &mut self,
-        pipeline: &MetalPipeline,
-        kernel: &K,
-        config: DispatchConfig,
-        // FIXME: why don't we just grab dispatch config from kernel, why pass it here? we could make this an option and if not provided we pull from kernel we're dispatching
-    ) -> Result<(), MetalError> {
-        if self.active_command_buffer.is_some() {
+    pub fn dispatch_pipeline<K: Kernel>(&mut self, pipeline: &MetalPipeline, kernel: &K, config: DispatchConfig) -> Result<(), MetalError> {
+        if let Some(stream) = self.active_stream.as_mut() {
             // Batched dispatch path
             if let Some(metrics) = self.capture_metrics.as_mut() {
                 metrics.record_kernel(kernel.function_name());
             }
-            let encoder = if let Some(enc) = self.active_compute_encoder.clone() {
-                enc
-            } else {
-                let active = self.active_command_buffer.as_ref().unwrap();
-                let enc = active.compute_command_encoder()?;
-                self.active_compute_encoder = Some(enc.clone());
-                enc
-            };
+            let encoder = stream.compute_encoder()?;
 
-            // Measure full dispatch overhead (pipeline state + bind + dispatch call)
+            // Unified dispatch logic
             let dispatch_start = std::time::Instant::now();
-            encoder.set_compute_pipeline_state(pipeline);
-            kernel.bind(&encoder);
-            encoder.dispatch_threadgroups(config.grid, config.group);
-            encoder.memory_barrier_with_scope(MetalBarrierScope::Buffers);
+            encoder.execute(pipeline, config.grid, config.group, |e| kernel.bind(e));
 
             // Profiling mode: sync after each dispatch to get actual GPU timing
             // Non-profiling mode: just use dispatch overhead (batched CB wait handles GPU time)
             let duration_us = if instrument::foundry_per_kernel_profiling_enabled() {
-                encoder.end_encoding();
-                self.active_compute_encoder = None;
-
-                let cmd = self.active_command_buffer.take().unwrap();
                 let kernel_start = std::time::Instant::now();
-                cmd.commit();
-                cmd.wait_until_completed();
+                self.restart_capture_sync()?;
                 let kernel_duration = kernel_start.elapsed();
-
-                // Start a new command buffer for the next kernel
-                self.start_capture()?;
 
                 kernel_duration.as_micros().min(u128::from(u64::MAX)) as u64
             } else {
@@ -253,48 +231,47 @@ impl Foundry {
                 });
             }
         } else {
-            // Non-batched path
+            // Non-batched path: use a temporary stream for consistent encoder management
             let command_buffer = self.queue.command_buffer()?;
-            let encoder = command_buffer.compute_command_encoder()?;
+            {
+                let mut stream = CommandStream::new(command_buffer.clone());
+                let encoder = stream.compute_encoder()?;
+                encoder.execute(pipeline, config.grid, config.group, |e| kernel.bind(e));
 
-            encoder.set_compute_pipeline_state(pipeline);
-            kernel.bind(&encoder);
-            encoder.dispatch_threadgroups(config.grid, config.group);
-            encoder.end_encoding();
-            if instrument::emit_cb_timing_metrics() {
-                use std::{sync::Mutex, time::Instant};
+                if instrument::emit_cb_timing_metrics() {
+                    let op_name = kernel.function_name().to_string();
+                    let metric_data = kernel.metric_data();
+                    let commit_instant = std::time::Instant::now();
+                    let handler = std::sync::Mutex::new(Some((op_name, metric_data, commit_instant)));
 
-                let op_name = kernel.function_name().to_string();
-                let metric_data = kernel.metric_data();
-                let commit_instant = Instant::now();
-                let handler = Mutex::new(Some((op_name, metric_data, commit_instant)));
+                    command_buffer.add_completed_handler(move |cmd: &crate::types::MetalCommandBuffer| {
+                        let Some((op_name, metric_data, commit_instant)) = handler.lock().ok().and_then(|mut slot| slot.take()) else {
+                            return;
+                        };
+                        let cpu_elapsed_us = commit_instant.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
 
-                command_buffer.add_completed_handler(move |cmd: &crate::types::MetalCommandBuffer| {
-                    let Some((op_name, metric_data, commit_instant)) = handler.lock().ok().and_then(|mut slot| slot.take()) else {
-                        return;
-                    };
-                    let cpu_elapsed_us = commit_instant.elapsed().as_micros().min(u128::from(u64::MAX)) as u64;
+                        let start = cmd.gpu_start_time();
+                        let end = cmd.gpu_end_time();
 
-                    let start = cmd.gpu_start_time();
-                    let end = cmd.gpu_end_time();
-
-                    let gpu_elapsed_us = if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
-                        ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
-                    } else {
-                        cpu_elapsed_us
-                    };
-                    let metric_data = metric_data.map(|mut data: FxHashMap<String, String>| {
-                        data.insert("cpu_elapsed_us".to_string(), cpu_elapsed_us.to_string());
-                        data.insert("gpu_elapsed_us".to_string(), gpu_elapsed_us.to_string());
-                        data
+                        let gpu_elapsed_us = if start.is_finite() && end.is_finite() && end > start && start > 0.0 {
+                            ((end - start) * 1_000_000.0).clamp(0.0, u64::MAX as f64) as u64
+                        } else {
+                            cpu_elapsed_us
+                        };
+                        let metric_data = metric_data.map(|mut data: FxHashMap<String, String>| {
+                            data.insert("cpu_elapsed_us".to_string(), cpu_elapsed_us.to_string());
+                            data.insert("gpu_elapsed_us".to_string(), gpu_elapsed_us.to_string());
+                            data
+                        });
+                        metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
+                            op_name: op_name.to_string(),
+                            backend: "Foundry".to_string(),
+                            duration_us: gpu_elapsed_us,
+                            data: metric_data,
+                        });
                     });
-                    metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
-                        op_name: op_name.to_string(),
-                        backend: "Foundry".to_string(),
-                        duration_us: gpu_elapsed_us,
-                        data: metric_data,
-                    });
-                });
+                }
+                // End encoding happens implicitly via stream drop
             }
             command_buffer.commit();
             command_buffer.wait_until_completed();
@@ -344,22 +321,15 @@ impl Foundry {
         let pipeline = self.load_kernel(&fused_kernel)?;
 
         // Dispatch with manual binding
-        if let Some(ref buffer) = self.active_command_buffer {
-            // Batched path: reuse or create encoder on active buffer
-            let encoder = if let Some(ref active_enc) = self.active_compute_encoder {
-                active_enc.clone()
-            } else {
-                let enc = buffer.compute_command_encoder()?;
-                self.active_compute_encoder = Some(enc.clone());
-                enc
-            };
+        if let Some(stream) = self.active_stream.as_mut() {
+            let encoder = stream.compute_encoder()?;
 
             encoder.set_compute_pipeline_state(&pipeline);
             kernel.bind(&encoder);
 
             let config = kernel.dispatch_config();
             encoder.dispatch_threadgroups(config.grid, config.group);
-            encoder.memory_barrier_with_scope(MetalBarrierScope::Buffers);
+            encoder.memory_barrier(MetalBarrierScope::Buffers);
 
             // Do NOT end encoding or commit - wait for sync() or end_capture()
         } else {
@@ -387,7 +357,7 @@ impl Foundry {
 
     /// Check if command buffer capture is currently active.
     pub fn is_capturing(&self) -> bool {
-        self.active_command_buffer.is_some()
+        self.active_stream.is_some()
     }
 
     /// Copy data between buffers using a blit encoder.
@@ -403,21 +373,11 @@ impl Foundry {
         dst_offset: usize,
         size_bytes: usize,
     ) -> Result<(), MetalError> {
-        if let Some(ref active_buffer) = self.active_command_buffer {
-            // Batched path: encode blit into the active command buffer
-
-            // End the compute encoder if one is active (Metal requires only one encoder at a time)
-            if let Some(encoder) = self.active_compute_encoder.take() {
-                encoder.end_encoding();
-            }
-
-            // Create a blit encoder on the same command buffer
-            let blit = active_buffer.blit_command_encoder()?;
-
+        if let Some(stream) = self.active_stream.as_mut() {
+            // Batched path: encode blit into the active stream
+            let blit = stream.blit_encoder()?;
             blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
-            blit.end_encoding();
-
-            // The next dispatch() call will recreate the compute encoder as needed
+            // The next dispatch() call will switch back to compute as needed
         } else {
             // Non-batched path: create a standalone command buffer
             let cmd = self.queue.command_buffer()?;
@@ -425,7 +385,6 @@ impl Foundry {
 
             blit.copy_from_buffer(src_buffer, src_offset, dst_buffer, dst_offset, size_bytes);
             blit.end_encoding();
-            cmd.commit();
             cmd.commit();
             cmd.wait_until_completed();
         }
@@ -436,8 +395,8 @@ impl Foundry {
 
 impl Drop for Foundry {
     fn drop(&mut self) {
-        if let Some(encoder) = self.active_compute_encoder.take() {
-            encoder.end_encoding();
+        if let Some(mut stream) = self.active_stream.take() {
+            stream.end_encoding();
         }
     }
 }

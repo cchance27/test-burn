@@ -12,11 +12,15 @@ pub struct RmsNormComputeStage {
 }
 
 impl RmsNormComputeStage {
-    pub fn new(input_buffer: usize, k_dim_buffer: usize, epsilon_buffer: usize) -> Self {
+    /// Create an RMSNorm compute stage.
+    ///
+    /// Note: the arguments are **Metal buffer indices** in the generated kernel signature,
+    /// not tensor dimensions.
+    pub fn new(input_buffer_index: usize, k_dim_buffer_index: usize, epsilon_buffer_index: usize) -> Self {
         Self {
-            input_buffer,
-            k_dim_buffer,
-            epsilon_buffer,
+            input_buffer: input_buffer_index,
+            k_dim_buffer: k_dim_buffer_index,
+            epsilon_buffer: epsilon_buffer_index,
             policy: std::sync::Arc::new(crate::policy::f16::PolicyF16), // Default - overridden by with_policy()
         }
     }

@@ -6,9 +6,9 @@ use metallic_foundry::{
         CompoundKernel, Layout, stages::{WarpLayoutStage, WarpReduceStage}
     }, metals::{
         gemv::{
-            fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, warp_dispatch_config
+            fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}
         }, rmsnorm::stages::RmsNormComputeStage
-    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}, types::TensorArg
+    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}, types::{DispatchConfig, TensorArg}
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serial_test::serial;
@@ -201,7 +201,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
         epsilon: 1e-6,
     };
 
-    let dispatch = warp_dispatch_config(cfg.n as u32);
+    let dispatch = DispatchConfig::warp_per_row(cfg.n as u32, 1);
 
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 

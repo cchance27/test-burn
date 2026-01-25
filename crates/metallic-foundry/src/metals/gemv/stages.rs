@@ -428,13 +428,11 @@ impl Stage for VectorizedDotStage {
 	    uint k_base = 0;
 	    const uint input_row_base = batch_idx * k_dim;
 
-// FP16-only optimization:
-// When `n_dim` is a multiple of `WARPS_PER_TG` (so the warp-per-row layout never produces out-of-bounds rows),
-// we can safely use threadgroup barriers to cooperatively stage the input vector once per K chunk and reuse it
-// across all warps in the threadgroup. This avoids re-reading the same X values WARPS_PER_TG times from device
-// memory. This is only emitted for the FP16-weight policy; for quantized weights we avoid emitting the
-// threadgroup staging code entirely to keep occupancy unchanged and prevent compilation issues.
-#if defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16 && ({vec_width}u == 8u)
+// FP16/Q8 Optimization:
+// When `n_dim` is a multiple of `WARPS_PER_TG`, we utilize threadgroup barriers to cooperatively stage the input vector
+// once per K chunk (x_tile) and reuse it across all warps. This reduces global memory read contention.
+// Enabled for all policies when vector width is 8 (256 elements per chunk).
+#if ({vec_width}u == 8u)
 	    threadgroup half x_tile[K_CHUNK_SIZE];
 	    const bool use_x_tile = ((n_dim & (WARPS_PER_TG - 1u)) == 0u);
 #else
@@ -443,7 +441,7 @@ impl Stage for VectorizedDotStage {
 	    
 	    // Fast path: no bounds checks (K_CHUNK_SIZE = 256)
 	    while (k_base + K_CHUNK_SIZE <= k_dim) {{
-#if defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16 && ({vec_width}u == 8u)
+#if ({vec_width}u == 8u)
 	        if (use_x_tile) {{
 	            // Cooperative load: each thread loads 1 half (256 threads -> 256 halfs).
 	            x_tile[lid.x] = input[input_row_base + k_base + lid.x];
@@ -455,7 +453,7 @@ impl Stage for VectorizedDotStage {
 	        // Vector load {vec_width} halves from input
 	        half4 xv_lo;
 	        half4 xv_hi;
-#if defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16 && ({vec_width}u == 8u)
+#if ({vec_width}u == 8u)
 	        if (use_x_tile) {{
 	            // Read the staged 8 halfs for this lane from threadgroup memory.
 	            const uint base = lane_id * 8u;
@@ -518,7 +516,7 @@ impl Stage for VectorizedDotStage {
         }}
 	#endif
 
-#if defined(METALLIC_POLICY_WEIGHTS_FP16) && METALLIC_POLICY_WEIGHTS_FP16 && ({vec_width}u == 8u)
+#if ({vec_width}u == 8u)
 	        if (use_x_tile) {{
 	            // Ensure all warps are done reading x_tile before overwriting it in the next chunk.
 	            threadgroup_barrier(mem_flags::mem_threadgroup);

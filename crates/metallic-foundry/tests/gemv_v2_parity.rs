@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{DispatchConfig, TensorArg}
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -190,7 +190,7 @@ fn run_gemv_v2_parity_test(cfg: V2TestConfig) {
         TestLayout::KN => Layout::ColMajor,
     };
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, Activation::None);
-    let dispatch = warp_dispatch_config(cfg.n as u32);
+    let dispatch = DispatchConfig::warp_per_row(cfg.n as u32, 1);
 
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
@@ -483,7 +483,7 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
         TestLayout::KN => Layout::ColMajor,
     };
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyQ8), layout, GemvStrategy::Vectorized, Activation::None);
-    let dispatch = warp_dispatch_config(cfg.n as u32);
+    let dispatch = DispatchConfig::warp_per_row(cfg.n as u32, 1);
 
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 

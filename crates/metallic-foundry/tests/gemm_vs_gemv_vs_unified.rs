@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use metallic_foundry::{
     Foundry, compound::Layout, metals::{
-        gemm::GemmV2Step, gemv::{GemvV2Params, GemvV2Step}, matmul::MatMulStep
+        gemm::GemmV2Step, gemv::{GemvV2Params, GemvV2UnifiedExecutionStep}, matmul::MatMulStep
     }, policy::activation::Activation, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 
@@ -53,7 +53,9 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
 
     // Setup Tensors
     let dims_a = vec![shape.m, shape.k];
-    let dims_b = vec![shape.k, shape.n];
+    // Store B as RowMajor [N, K] and set transpose_b=true for GEMM/MatMul.
+    // This keeps GEMV's low-latency RowMajor layout while preserving the same math A[M,K] * B[K,N].
+    let dims_b = vec![shape.n, shape.k];
     let dims_out = vec![shape.m, shape.n];
 
     let a = FoundryTensor::<F16, Pooled>::new(foundry, dims_a.clone(), TensorInit::Uninitialized).unwrap();
@@ -76,9 +78,8 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         m_dim: DynamicValue::Literal(shape.m as u32),
         n_dim: DynamicValue::Literal(shape.n as u32),
         k_dim: DynamicValue::Literal(shape.k as u32),
-        b_quant: Some(std::sync::Arc::new(metallic_foundry::policy::f16::PolicyF16)),
         transpose_a: false,
-        transpose_b: false,
+        transpose_b: true,
         alpha: 1.0,
         beta: 0.0,
         weights_per_block: 32,
@@ -100,9 +101,9 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
 
     // 2. GEMV V2 (Only valid if M=1)
     let lat_gemv = if shape.m == 1 {
-        let gemv = GemvV2Step {
+        let gemv = GemvV2UnifiedExecutionStep {
             input: Ref("a".into()),
-            weights: Ref("b".into()), // Transpose B=false -> ColMajor KxN
+            weights: Ref("b".into()),
             output: Ref("output".into()),
             bias: None,
             residual: None,
@@ -111,9 +112,9 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
                 k_dim: DynamicValue::Literal(shape.k as u32),
                 n_dim: DynamicValue::Literal(shape.n as u32),
                 weights_per_block: 32,
-                batch: 1,
+                batch: DynamicValue::Literal(1),
             },
-            layout: Layout::ColMajor, // Matches GEMM TransposeB=false
+            layout: Layout::RowMajor,
             strategy: None,
             alpha: 1.0,
             beta: 0.0,
@@ -150,7 +151,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         n: DynamicValue::Literal(shape.n as u32),
         k: DynamicValue::Literal(shape.k as u32),
         transpose_a: false,
-        transpose_b: false,
+        transpose_b: true,
         alpha: 1.0,
         beta: 0.0,
         weights_per_block: 32,

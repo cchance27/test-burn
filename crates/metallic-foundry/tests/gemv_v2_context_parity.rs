@@ -10,7 +10,7 @@ use metallic_context::{
     Context, F16Element, Tensor as ContextTensor, kernels::matmul_gemv::MatmulGemvOp, tensor::{TensorInit as ContextTensorInit, TensorStorage as ContextTensorStorage, TensorType}
 };
 use metallic_foundry::{
-    Foundry, MetalError, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::TensorArg
+    Foundry, MetalError, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit}, types::{DispatchConfig, TensorArg}
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -81,7 +81,7 @@ fn run_gemv_parity_test(k: usize, n: usize, with_bias: bool, layout: Layout) -> 
     };
 
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), layout, GemvStrategy::Vectorized, Activation::None);
-    let dispatch = warp_dispatch_config(n as u32);
+    let dispatch = DispatchConfig::warp_per_row(n as u32, 1);
     foundry.run(&kernel.bind_arc(args, dispatch))?;
 
     let res_v2 = output_v2.to_vec(&foundry);

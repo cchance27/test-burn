@@ -2336,7 +2336,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     use std::sync::Arc;
 
     use metallic_foundry::{
-        compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, policy::f16::PolicyF16
+        compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, policy::f16::PolicyF16, types::DispatchConfig
     };
 
     let gate_weight = bindings.get("layer.ffn_gate_0").unwrap();
@@ -2408,7 +2408,9 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
     };
 
     let kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
-    foundry.run(&kernel.bind_arc(args_gate, warp_dispatch_config(n_dim))).unwrap();
+    foundry
+        .run(&kernel.bind_arc(args_gate, DispatchConfig::warp_per_row(n_dim, 1)))
+        .unwrap();
 
     let cross_gate_result = FoundryTensor::to_vec(&cross_gate_output, &foundry);
     let cross_gate_f16: Vec<f16> = cross_gate_result.into_iter().collect();

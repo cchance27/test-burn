@@ -156,10 +156,9 @@ impl MemoryPool {
         }
 
         // Host -> Shared Staging -> Private (Pooled allocation)
-        let src_ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void).ok_or(MetalError::NullPointer)?;
         let staging = self
             .device
-            .new_buffer_with_bytes(src_ptr, size, MetalResourceOptions::StorageModeShared)
+            .new_buffer_from_slice(data, MetalResourceOptions::StorageModeShared)
             .ok_or(MetalError::BufferFromBytesCreationFailed)?;
 
         let cmd = self.command_queue.command_buffer()?;

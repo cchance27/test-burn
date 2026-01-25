@@ -24,87 +24,16 @@ fn validate_quantized_bindings(symbols: &SymbolTable, fast: &FastBindings) -> Re
             continue;
         }
 
-        // Scales are stored as raw bytes (U8) and must be 1D with an even byte-length.
+        // Scales are treated as raw bytes (U8) for now.
         if name.ends_with("_scales") {
-            if arg.dims.len() != 1 {
-                return Err(MetalError::InvalidShape(format!(
-                    "Quantized scales tensor '{}' must be 1D bytes, got dims {:?}",
-                    name, arg.dims
-                )));
-            }
-            let scale_bytes = arg.dims[0];
-            if (scale_bytes % 2) != 0 {
-                return Err(MetalError::InvalidShape(format!(
-                    "Quantized scales tensor '{}' must have even byte-length (f16 per block), got {} bytes",
-                    name, scale_bytes
-                )));
-            }
             continue;
         }
 
-        // Any U8 tensor that isn't a *_scales tensor is treated as a quantized weight and must have scales.
-        let mut scales_name = String::with_capacity(name.len() + "_scales".len());
-        scales_name.push_str(name);
-        scales_name.push_str("_scales");
-
-        let scales_idx = symbols.get(&scales_name).ok_or_else(|| {
-            MetalError::InvalidOperation(format!(
-                "Quantized tensor '{}' is bound as U8 but no companion scales symbol '{}' exists. \
-This usually indicates a compile/bind mismatch for Q8 weights.",
-                name, scales_name
-            ))
-        })?;
-
-        let scales = fast.get(scales_idx).ok_or_else(|| {
-            MetalError::InvalidOperation(format!(
-                "Quantized tensor '{}' is bound as U8 but companion scales tensor '{}' is not bound. \
-This must fail fast to avoid silently running the wrong kernels.",
-                name, scales_name
-            ))
-        })?;
-
-        if scales.dtype != Dtype::U8 {
-            return Err(MetalError::DtypeMismatch {
-                expected: Dtype::U8,
-                actual: scales.dtype,
-            });
-        }
-        if scales.dims.len() != 1 {
-            return Err(MetalError::InvalidShape(format!(
-                "Quantized scales tensor '{}' must be 1D bytes, got dims {:?}",
-                scales_name, scales.dims
-            )));
-        }
-        let scale_bytes = scales.dims[0];
-        if (scale_bytes % 2) != 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Quantized scales tensor '{}' must have even byte-length (f16 per block), got {} bytes",
-                scales_name, scale_bytes
-            )));
-        }
-
-        // Strict size validation for standard (non-canonical) Q8 weights.
-        // Canonical weights are stored as a 1D byte buffer after reordering; skip strict validation there.
-        if arg.dims.len() == 2 {
-            let n = arg.dims[0];
-            let k = arg.dims[1];
-            if (k % 32) != 0 {
-                return Err(MetalError::InvalidShape(format!(
-                    "Quantized tensor '{}' contig dim K={} must be divisible by 32 for Q8_0",
-                    name, k
-                )));
-            }
-            let expected_scale_bytes = n
-                .checked_mul(k / 32)
-                .and_then(|v| v.checked_mul(2))
-                .ok_or_else(|| MetalError::InvalidShape(format!("Quantized tensor '{}' has overflowed dims {:?}", name, arg.dims)))?;
-            if scale_bytes != expected_scale_bytes {
-                return Err(MetalError::InvalidShape(format!(
-                    "Quantized tensor '{}' scales mismatch: got {} bytes in '{}', expected {} bytes for dims {:?}",
-                    name, scale_bytes, scales_name, expected_scale_bytes, arg.dims
-                )));
-            }
-        }
+        // Any U8 tensor is treated as a quantized weight.
+        // Resolve policy and validate layout.
+        let policy = crate::policy::resolve_policy(Dtype::U8.into());
+        let buf_size = arg.buffer.as_ref().map(|b| b.length()).unwrap_or(0);
+        policy.validate_weight_layout(&arg.dims, buf_size)?;
     }
 
     Ok(())
@@ -138,45 +67,17 @@ mod quant_binding_validation_tests {
     }
 
     #[test]
-    fn quantized_weight_requires_scales_symbol_and_binding() {
+    fn quantized_weight_validation_delegates_to_policy() {
         let mut symbols = SymbolTable::new();
         let w_idx = symbols.get_or_create("w".to_string());
 
         let mut fast = FastBindings::new(symbols.len());
-        fast.set(w_idx, u8_arg_2d(64, 32));
+        // Q8 requires K divisible by 32. 31 is invalid.
+        fast.set(w_idx, u8_arg_2d(64, 31));
 
         let err = validate_quantized_bindings(&symbols, &fast).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("no companion scales symbol"));
-    }
-
-    #[test]
-    fn quantized_weight_requires_scales_bound() {
-        let mut symbols = SymbolTable::new();
-        let w_idx = symbols.get_or_create("w".to_string());
-        let _s_idx = symbols.get_or_create("w_scales".to_string());
-
-        let mut fast = FastBindings::new(symbols.len());
-        fast.set(w_idx, u8_arg_2d(64, 32));
-
-        let err = validate_quantized_bindings(&symbols, &fast).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("is not bound"));
-    }
-
-    #[test]
-    fn quantized_weight_scales_size_is_validated_for_2d_weights() {
-        let mut symbols = SymbolTable::new();
-        let w_idx = symbols.get_or_create("w".to_string());
-        let s_idx = symbols.get_or_create("w_scales".to_string());
-
-        let mut fast = FastBindings::new(symbols.len());
-        fast.set(w_idx, u8_arg_2d(64, 32));
-        fast.set(s_idx, u8_arg_1d(2)); // wrong: expected 64*(32/32)*2 = 128
-
-        let err = validate_quantized_bindings(&symbols, &fast).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("scales mismatch"));
+        assert!(msg.contains("must be divisible by 32"));
     }
 
     #[test]

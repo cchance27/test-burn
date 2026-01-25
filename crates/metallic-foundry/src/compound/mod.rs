@@ -56,6 +56,11 @@ pub trait Stage: Send + Sync {
     /// Buffer arguments this stage contributes to the kernel signature.
     fn buffer_args(&self) -> Vec<BufferArg>;
 
+    /// Debug name for diagnostics (used for fail-fast signature validation).
+    fn debug_name(&self) -> &'static str {
+        std::any::type_name::<Self>()
+    }
+
     /// Generate Metal code for this stage.
     ///
     /// # Arguments
@@ -102,6 +107,10 @@ impl<S: Stage + ?Sized> Stage for Box<S> {
 
     fn buffer_args(&self) -> Vec<BufferArg> {
         (**self).buffer_args()
+    }
+
+    fn debug_name(&self) -> &'static str {
+        (**self).debug_name()
     }
 
     fn emit(&self, input_var: &str) -> (String, String) {
@@ -421,22 +430,65 @@ impl<S> CompoundKernel<S> {
 
     /// Collect all buffer arguments from all stages.
     pub fn collect_buffer_args(&self) -> Vec<BufferArg> {
-        let mut args = Vec::new();
+        #[derive(Clone, Copy)]
+        struct SeenArg {
+            name: &'static str,
+            metal_type: &'static str,
+            stage: &'static str,
+        }
+
+        let mut out: Vec<BufferArg> = Vec::new();
+        let mut seen: std::collections::HashMap<u32, SeenArg> = std::collections::HashMap::new();
+
+        let mut visit_stage = |stage: &Box<dyn Stage>| {
+            let stage_name = stage.debug_name();
+            for arg in stage.buffer_args() {
+                if let Some(prev) = seen.get(&arg.buffer_index).copied() {
+                    // Hard fail: a single buffer index must have a single canonical signature.
+                    if prev.name != arg.name || prev.metal_type != arg.metal_type {
+                        panic!(
+                            "CompoundKernel signature conflict for buffer({}):\n\
+                             - {} declares: {} {} [[buffer({})]]\n\
+                             - {} declares: {} {} [[buffer({})]]\n\
+                             Fix: ensure stages use distinct buffer indices, or identical name+type when intentionally shared.",
+                            arg.buffer_index,
+                            prev.stage,
+                            prev.metal_type,
+                            prev.name,
+                            arg.buffer_index,
+                            stage_name,
+                            arg.metal_type,
+                            arg.name,
+                            arg.buffer_index
+                        );
+                    }
+                    continue;
+                }
+
+                seen.insert(
+                    arg.buffer_index,
+                    SeenArg {
+                        name: arg.name,
+                        metal_type: arg.metal_type,
+                        stage: stage_name,
+                    },
+                );
+                out.push(arg);
+            }
+        };
 
         for stage in &self.prologues {
-            args.extend(stage.buffer_args());
+            visit_stage(stage);
         }
         if let Some(main) = &self.main {
-            args.extend(main.buffer_args());
+            visit_stage(main);
         }
         for stage in &self.epilogues {
-            args.extend(stage.buffer_args());
+            visit_stage(stage);
         }
 
-        // Sort by buffer index
-        args.sort_by_key(|a| a.buffer_index);
-        args.dedup_by_key(|a| a.buffer_index);
-        args
+        out.sort_by_key(|a| a.buffer_index);
+        out
     }
 }
 

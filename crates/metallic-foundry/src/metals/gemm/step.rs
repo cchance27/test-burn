@@ -325,7 +325,6 @@ impl CompiledStep for super::CompiledGemmV2Step {
             m_dim: self.m_dim.clone(),
             n_dim: self.n_dim.clone(),
             k_dim: self.k_dim.clone(),
-            b_quant: self.b_quant.clone(),
             transpose_a: self.transpose_a,
             transpose_b: self.transpose_b,
             tile_config: self.tile_config,

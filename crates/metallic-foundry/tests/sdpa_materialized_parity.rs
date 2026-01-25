@@ -6,7 +6,7 @@ use std::sync::Arc;
 use half::f16;
 use metallic_foundry::{
     Foundry, MetalError, compound::Layout, metals::{
-        gemv::step::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config}, softmax::step::{SoftmaxV2Args, get_softmax_v2_kernel}
+        gemv::step::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, softmax::step::{SoftmaxV2Args, get_softmax_v2_kernel}
     }, policy::{activation::Activation, f16::PolicyF16}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -58,7 +58,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
 
     // Kernels
     let qk_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::RowMajor, GemvStrategy::Vectorized, Activation::None);
-    let qk_dispatch = warp_dispatch_config(seq_len as u32);
+    let qk_dispatch = DispatchConfig::warp_per_row(seq_len as u32, 1);
 
     let softmax_kernel = get_softmax_v2_kernel();
     let softmax_dispatch = DispatchConfig {
@@ -67,7 +67,7 @@ fn test_sdpa_materialized_parity() -> Result<(), MetalError> {
     };
 
     let av_kernel = get_gemv_v2_kernel(Arc::new(PolicyF16), Layout::ColMajor, GemvStrategy::Vectorized, Activation::None);
-    let av_dispatch = warp_dispatch_config(head_dim as u32);
+    let av_dispatch = DispatchConfig::warp_per_row(head_dim as u32, 1);
 
     // Get base TensorArgs
     let q_arg = TensorArg::from_tensor(&q_tensor);

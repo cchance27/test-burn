@@ -6,7 +6,7 @@ use crate::{
 };
 
 const Q8_0_WPB: usize = 32;
-const Q8_0_BLOCK_BYTES: usize = 34; // 2 bytes scale + 32 bytes data
+const Q8_0_BLOCK_BYTES: usize = 34;
 const Q8_0_SCALE_BYTES: usize = 2;
 
 #[inline]
@@ -23,8 +23,6 @@ fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canoni
     debug_assert_eq!(scales_out.len() % Q8_0_SCALE_BYTES, 0);
 
     for (src_block_idx, chunk) in raw.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
-        // Scales are always indexed in row-major block order (row * blocks_per_k + block),
-        // even when weights are stored in canonical (block-major) order.
         let scale_dst_block_idx = src_block_idx;
         let weight_dst_block_idx = if is_canonical {
             q8_0_canonical_dst_block_idx(src_block_idx, blocks_per_k, target_n)
@@ -55,6 +53,10 @@ fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canoni
 )]
 pub struct PolicyQ8;
 
+// PolicyQ8 implements MetalPolicy via derive macro.
+// Custom validation logic if needed should be added to the macro or a separate trait if we change it again,
+// but for now we follow the project pattern of using derives for boilerplate.
+
 impl LoaderStage for PolicyQ8 {
     fn params_struct(&self) -> String {
         "".to_string()
@@ -74,7 +76,7 @@ impl LoaderStage for PolicyQ8 {
         smallvec![weight.clone(), scales.clone()]
     }
 
-    fn quantization_type(&self) -> std::sync::Arc<dyn super::MetalPolicyRuntime> {
+    fn quantization_type(&self) -> std::sync::Arc<dyn MetalPolicyRuntime> {
         std::sync::Arc::new(PolicyQ8)
     }
 }

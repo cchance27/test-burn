@@ -8,8 +8,10 @@ pub mod dispatch;
 pub mod metal;
 pub mod semantic;
 pub mod storage;
+pub mod stream;
 
 pub use dispatch::{DispatchConfig, GridSize, ThreadgroupSize};
+pub use stream::{CommandStream, StreamEncoder};
 
 use crate::MetalError;
 
@@ -72,6 +74,15 @@ impl MetalDevice {
                 .newBufferWithBytesNoCopy_length_options_deallocator(bytes, length, options, deallocator)
                 .map(MetalBuffer)
         }
+    }
+
+    pub fn new_buffer_from_slice<T: Copy>(&self, data: &[T], options: MetalResourceOptions) -> Option<MetalBuffer> {
+        let size = std::mem::size_of_val(data);
+        if size == 0 {
+            return None;
+        }
+        let ptr = std::ptr::NonNull::new(data.as_ptr() as *mut std::ffi::c_void)?;
+        unsafe { self.0.newBufferWithBytes_length_options(ptr, size, options).map(MetalBuffer) }
     }
     pub fn create_system_default_device() -> Result<MetalDevice, crate::error::MetalError> {
         objc2_metal::MTLCreateSystemDefaultDevice()
@@ -498,16 +509,96 @@ impl ComputeCommandEncoder {
         self.0.setComputePipelineState(pipeline);
     }
 
+    /// Set a buffer at the given index with an offset.
+    pub fn set_buffer(&self, index: u32, buffer: &MetalBuffer, offset: usize) {
+        self.set_buffer_opt(index, Some(buffer), offset);
+    }
+
+    /// Set a buffer at the given index with an offset, allowing for None.
+    pub fn set_buffer_opt(&self, index: u32, buffer: Option<&MetalBuffer>, offset: usize) {
+        use objc2_metal::MTLComputeCommandEncoder as _;
+        unsafe {
+            self.0.setBuffer_offset_atIndex(buffer.map(|b| &**b), offset, index as usize);
+        }
+    }
+
+    /// Set a buffer at the given index from a TensorArg.
+    pub fn set_tensor_arg(&self, index: u32, arg: &crate::types::TensorArg) {
+        if let Some(buffer) = &arg.buffer {
+            self.set_buffer(index, buffer, arg.offset);
+        }
+    }
+
+    /// Set a small amount of literal data at the given index.
+    pub fn set_bytes<T>(&self, index: u32, data: &T) {
+        use objc2_metal::MTLComputeCommandEncoder as _;
+        let ptr = std::ptr::NonNull::from(data).cast();
+        unsafe {
+            self.0.setBytes_length_atIndex(ptr, std::mem::size_of::<T>(), index as usize);
+        }
+    }
+
     pub fn dispatch_threadgroups(&self, grid_size: crate::types::dispatch::GridSize, group_size: crate::types::dispatch::ThreadgroupSize) {
         let (grid, group) = (grid_size.into(), group_size.into());
         self.0.dispatchThreadgroups_threadsPerThreadgroup(grid, group);
+    }
+
+    /// Dispatch threadgroups without inserting a memory barrier.
+    ///
+    /// Use this only when you know the dispatched kernel has no RAW/WAR/WAW hazards with
+    /// subsequent encodes on the same command encoder, or when synchronization is handled
+    /// elsewhere (e.g. explicit barriers or separate command buffers).
+    #[inline]
+    pub fn dispatch_unbarriered(
+        &self,
+        grid_size: crate::types::dispatch::GridSize,
+        group_size: crate::types::dispatch::ThreadgroupSize,
+    ) {
+        self.dispatch_threadgroups(grid_size, group_size);
+    }
+
+    /// Dispatch threadgroups and immediately apply a buffer memory barrier.
+    pub fn dispatch_with_barrier(&self, grid_size: crate::types::dispatch::GridSize, group_size: crate::types::dispatch::ThreadgroupSize) {
+        self.dispatch_threadgroups(grid_size, group_size);
+        self.memory_barrier(MetalBarrierScope::Buffers);
+    }
+
+    /// Convenience helper to set pipeline, bind arguments, and dispatch.
+    pub fn execute<F>(
+        &self,
+        pipeline: &MetalPipeline,
+        grid: crate::types::dispatch::GridSize,
+        group: crate::types::dispatch::ThreadgroupSize,
+        binder: F,
+    ) where
+        F: FnOnce(&Self),
+    {
+        self.set_compute_pipeline_state(pipeline);
+        binder(self);
+        self.dispatch_with_barrier(grid, group);
+    }
+
+    /// Convenience helper to set pipeline, bind arguments, and dispatch without a memory barrier.
+    #[inline]
+    pub fn execute_unbarriered<F>(
+        &self,
+        pipeline: &MetalPipeline,
+        grid: crate::types::dispatch::GridSize,
+        group: crate::types::dispatch::ThreadgroupSize,
+        binder: F,
+    ) where
+        F: FnOnce(&Self),
+    {
+        self.set_compute_pipeline_state(pipeline);
+        binder(self);
+        self.dispatch_unbarriered(grid, group);
     }
 
     pub fn end_encoding(&self) {
         self.0.endEncoding();
     }
 
-    pub fn memory_barrier_with_scope(&self, scope: objc2_metal::MTLBarrierScope) {
+    pub fn memory_barrier(&self, scope: objc2_metal::MTLBarrierScope) {
         self.0.memoryBarrierWithScope(scope);
     }
 }
@@ -602,22 +693,24 @@ impl MetalCommandBuffer {
     where
         F: Fn(&MetalCommandBuffer) + Send + Sync + 'static,
     {
-        use std::ptr::NonNull;
+        use std::{
+            ptr::NonNull, sync::{Arc, Mutex}
+        };
 
         use block2::RcBlock;
         use objc2::runtime::ProtocolObject;
         use objc2_metal::MTLCommandBuffer as _;
 
+        let handler = Arc::new(Mutex::new(Some(handler)));
         let block = RcBlock::new(move |cmd: NonNull<ProtocolObject<dyn objc2_metal::MTLCommandBuffer>>| {
-            // Safety: We are in a callback provided by Metal, cmd is valid.
-            let _cmd_ref = unsafe { cmd.as_ref() }; // Unused raw ref, just validity check
-            // We need to construct a wrapper to pass to the user handler.
-            let retained = unsafe { objc2::rc::Retained::retain(cmd.as_ptr()) }.expect("Command buffer should be valid");
-            let wrapper = MetalCommandBuffer(retained);
-            handler(&wrapper);
+            let mut guard = handler.lock().unwrap();
+            if let Some(h) = guard.take() {
+                let retained = unsafe { objc2::rc::Retained::retain(cmd.as_ptr()) }.expect("Command buffer should be valid");
+                let wrapper = MetalCommandBuffer(retained);
+                h(&wrapper);
+            }
         });
 
-        // This is still using RcBlock logic here, but hidden from lib.rs
         let raw_block = RcBlock::into_raw(block);
         unsafe {
             self.0.addCompletedHandler(raw_block.cast());

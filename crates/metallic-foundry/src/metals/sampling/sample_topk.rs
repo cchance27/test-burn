@@ -5,9 +5,7 @@
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::{
-    types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
-};
+use crate::types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize};
 
 /// Parameters for SampleTopK kernel.
 #[derive(MetalStruct, Clone, Copy, Debug)]

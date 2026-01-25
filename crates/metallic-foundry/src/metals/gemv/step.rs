@@ -10,19 +10,52 @@
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
-use super::{
-    GemvV2ParamsResolved, stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpWriteOutputStage}
-};
+use super::stages::{CanonicalDotStage, ScalarDotStage, VectorizedDotStage, WarpWriteOutputStage};
 use crate::{
-    Foundry, MetalError, compound::{
-        BufferArg, CompiledCompoundKernel, CompoundKernel, Layout, Stage, stages::{ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
-    }, policy::activation::Activation, spec::{CompiledStep, FastBindings, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    compound::{
+        CompiledCompoundKernel, CompoundKernel, Layout, stages::{ThreadLayoutStage, WarpLayoutStage, WarpReduceStage}
+    }, policy::activation::Activation, types::TensorArg
 };
 
 fn use_f16_cols8() -> bool {
     // Default ON: this path mirrors the legacy Context RowMajor FP16 GEMV pointer arithmetic and is consistently faster
     // for decode-heavy shapes (e.g. K=896, K=4864). Allow an escape hatch to disable for debugging/regressions.
     std::env::var("METALLIC_GEMV_F16_COLS8").ok().map(|val| val != "0").unwrap_or(true)
+}
+
+// =============================================================================
+// Parameters and Arguments
+// =============================================================================
+
+/// Arguments for GemvV2 kernel dispatch.
+#[derive(Debug, KernelArgs)]
+pub struct GemvV2Args {
+    #[arg(buffer = 0)]
+    pub weights: TensorArg,
+    #[arg(buffer = 1)]
+    pub scale_bytes: TensorArg,
+    #[arg(buffer = 2)]
+    pub input: TensorArg,
+    #[arg(buffer = 3, output)]
+    pub output: TensorArg,
+    #[arg(buffer = 4)]
+    pub k_dim: u32,
+    #[arg(buffer = 5)]
+    pub n_dim: u32,
+    #[arg(buffer = 6)]
+    pub weights_per_block: u32,
+    #[arg(buffer = 7)]
+    pub bias: TensorArg,
+    #[arg(buffer = 8)]
+    pub has_bias: u32,
+    #[arg(buffer = 9)]
+    pub alpha: f32,
+    #[arg(buffer = 10)]
+    pub residual: TensorArg,
+    #[arg(buffer = 11)]
+    pub has_residual: u32,
+    #[arg(buffer = 12)]
+    pub beta: f32,
 }
 
 // =============================================================================
@@ -53,7 +86,13 @@ pub fn get_gemv_v2_kernel(
 ) -> std::sync::Arc<CompiledCompoundKernel> {
     use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
-    let variant = format!("{}_{:?}_{}_{}", layout.short_name(), strategy, policy.short_name(), activation.struct_name());
+    let variant = format!(
+        "{}_{:?}_{}_{}",
+        layout.short_name(),
+        strategy,
+        policy.short_name(),
+        activation.struct_name()
+    );
     let key = KernelCacheKey::new("gemv", variant);
 
     let policy_clone = policy.clone();
@@ -115,843 +154,41 @@ pub fn get_gemv_v2_kernel(
                 .main(WarpWriteOutputStage::new().with_activation(activation))
                 .with_manual_output(true)
                 .compile(),
-            (Layout::Canonical { .. }, GemvStrategy::Vectorized) => CompoundKernel::new(&kernel_name)
+            // Canonical layout: default to the unrolled dot stage (legacy parity + best Q8 decode performance).
+            (
+                Layout::Canonical {
+                    expected_k: _,
+                    expected_n: _,
+                },
+                GemvStrategy::Auto,
+            )
+            | (
+                Layout::Canonical {
+                    expected_k: _,
+                    expected_n: _,
+                },
+                GemvStrategy::Canonical,
+            ) => CompoundKernel::new(&kernel_name)
+                .prologue(WarpLayoutStage::canonical().with_warps(8))
+                .prologue(CanonicalDotStage::new(policy_clone.clone()))
+                .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
+                .main(WarpWriteOutputStage::new().with_activation(activation))
+                .with_manual_output(true)
+                .compile(),
+            (
+                Layout::Canonical {
+                    expected_k: _,
+                    expected_n: _,
+                },
+                GemvStrategy::Vectorized,
+            ) => CompoundKernel::new(&kernel_name)
                 .prologue(WarpLayoutStage::canonical().with_warps(8))
                 .prologue(VectorizedDotStage::new(policy_clone.clone()))
                 .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
                 .main(WarpWriteOutputStage::new().with_activation(activation))
                 .with_manual_output(true)
                 .compile(),
-            (Layout::Canonical { .. }, GemvStrategy::Canonical) | (Layout::Canonical { .. }, GemvStrategy::Auto) => {
-                CompoundKernel::new(&kernel_name)
-                    .prologue(WarpLayoutStage::canonical().with_warps(8))
-                    .prologue(CanonicalDotStage::new(policy_clone.clone()))
-                    .prologue(WarpReduceStage::sum("partial_dot", "row_sum"))
-                    .main(WarpWriteOutputStage::new().with_activation(activation))
-                    .with_manual_output(true)
-                    .compile()
-            }
             _ => panic!("Unsupported layout/strategy pair: {:?}/{:?}", layout, strategy),
         }
-    })
-}
-
-/// Dispatch configuration for warp-per-row kernels.
-/// Returns (grid, group) matching legacy GEMV dispatch.
-pub fn warp_dispatch_config(n_dim: u32) -> DispatchConfig {
-    const WARPS_PER_TG: usize = 8;
-    const SIMD_WIDTH: usize = 32;
-    const TG_WIDTH: usize = WARPS_PER_TG * SIMD_WIDTH; // 256
-
-    let num_tgs = (n_dim as usize).div_ceil(WARPS_PER_TG);
-    DispatchConfig {
-        grid: GridSize::new(num_tgs, 1, 1),
-        group: ThreadgroupSize::new(TG_WIDTH, 1, 1),
-    }
-}
-
-/// Dispatch configuration for warp-per-row kernels with a batch (M) dimension.
-///
-/// Uses `gid.y` as the batch index.
-pub fn warp_dispatch_config_2d(n_dim: u32, batch: u32) -> DispatchConfig {
-    const WARPS_PER_TG: usize = 8;
-    const SIMD_WIDTH: usize = 32;
-    const TG_WIDTH: usize = WARPS_PER_TG * SIMD_WIDTH; // 256
-
-    let num_tgs = (n_dim as usize).div_ceil(WARPS_PER_TG);
-    DispatchConfig {
-        grid: GridSize::new(num_tgs, (batch.max(1)) as usize, 1),
-        group: ThreadgroupSize::new(TG_WIDTH, 1, 1),
-    }
-}
-
-/// Dispatch configuration for thread-per-row (scalar) kernels.
-pub fn thread_dispatch_config(output_rows: u32) -> DispatchConfig {
-    let threads_per_tg = 256;
-    let threadgroups = output_rows.div_ceil(threads_per_tg);
-
-    DispatchConfig {
-        grid: GridSize::d1(threadgroups as usize),
-        group: ThreadgroupSize::d1(threads_per_tg as usize),
-    }
-}
-
-/// Arguments for GemvV2 kernel dispatch.
-#[derive(Debug, KernelArgs)]
-pub struct GemvV2Args {
-    #[arg(buffer = 0)]
-    pub weights: TensorArg,
-    #[arg(buffer = 1)]
-    pub scale_bytes: TensorArg,
-    #[arg(buffer = 2)]
-    pub input: TensorArg,
-    #[arg(buffer = 3, output)]
-    pub output: TensorArg,
-    #[arg(buffer = 4)]
-    pub k_dim: u32,
-    #[arg(buffer = 5)]
-    pub n_dim: u32,
-    #[arg(buffer = 6)]
-    pub weights_per_block: u32,
-    #[arg(buffer = 7)]
-    pub bias: TensorArg,
-    #[arg(buffer = 8)]
-    pub has_bias: u32,
-    #[arg(buffer = 9)]
-    pub alpha: f32,
-    #[arg(buffer = 10)]
-    pub residual: TensorArg,
-    #[arg(buffer = 11)]
-    pub has_residual: u32,
-    #[arg(buffer = 12)]
-    pub beta: f32,
-}
-
-// Note: GemvV2Step and CompiledGemvV2Step are auto-generated by #[derive(Kernel)] in mod.rs
-
-impl CompiledStep for super::CompiledGemvV2Step {
-    fn execute(
-        &self,
-        foundry: &mut Foundry,
-        fast_bindings: &FastBindings,
-        bindings: &TensorBindings,
-        _symbols: &SymbolTable,
-    ) -> Result<(), MetalError> {
-        let weights = fast_bindings
-            .get(self.weights)
-            .ok_or_else(|| MetalError::InputNotFound(format!("Weights {}", self.weights)))?;
-        let input = fast_bindings
-            .get(self.input)
-            .ok_or_else(|| MetalError::InputNotFound(format!("Input {}", self.input)))?;
-        let output = fast_bindings
-            .get(self.output)
-            .ok_or_else(|| MetalError::InputNotFound(format!("Output {}", self.output)))?;
-
-        // Resolve params manually since MetalStruct macro parameters don't impl generic Resolvable yet
-        // Generated CompiledGemvV2Step has `pub params: GemvV2Params` (dynamic)
-        let resolved_params = GemvV2ParamsResolved {
-            k_dim: self.params.k_dim.resolve(bindings),
-            n_dim: self.params.n_dim.resolve(bindings),
-            weights_per_block: self.params.weights_per_block,
-            batch: self.params.batch,
-        };
-        let k_dim = resolved_params.k_dim;
-        let n_dim = resolved_params.n_dim;
-
-        // Centralized Quantization Binding
-        let policy = crate::policy::resolve_policy(weights.dtype.into());
-        let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
-
-        // We construct a ResolvedSymbols manually to pass to loader
-        // Use explicit scale_bytes if provided (custom/legacy), otherwise fallback to derived scales (implicit convention)
-        let scales_idx = self.scale_bytes.or(Some(self.derived_scales));
-
-        let weights_resolved = ResolvedSymbols {
-            weights: self.weights,
-            scales: scales_idx,
-            bias: None,
-        };
-
-        let loader_args = loader.bind(fast_bindings, &weights_resolved);
-
-        let weights_arg = loader_args[0].clone();
-
-        // Scale binding: policies with scales return 2+ args, others return 1
-        let scale_bytes_arg = if loader_args.len() > 1 {
-            loader_args[1].clone()
-        } else {
-            // Dummy bind for F16 (unused by kernel but required by signature)
-            loader_args[0].clone()
-        };
-
-        // Handle optional bias
-        let (bias_arg, has_bias) = if let Some(idx) = self.bias {
-            let b = fast_bindings
-                .get(idx)
-                .ok_or_else(|| MetalError::InputNotFound(format!("Bias {}", idx)))?;
-            (TensorArg::from_tensor(b), 1u32)
-        } else {
-            // Use output as placeholder for missing bias
-            (TensorArg::from_tensor(output), 0u32)
-        };
-
-        // Handle optional residual
-        let (residual_arg, has_residual) = if let Some(idx) = self.residual {
-            let r = fast_bindings
-                .get(idx)
-                .ok_or_else(|| MetalError::InputNotFound(format!("Residual {}", idx)))?;
-            (TensorArg::from_tensor(r), 1u32)
-        } else {
-            (TensorArg::from_tensor(output), 0u32)
-        };
-
-        let batch = resolved_params.batch;
-
-        // Determine Effective Strategy
-        let strategy_sel = self.strategy.unwrap_or(GemvStrategy::Auto);
-        let mut effective_strategy = match strategy_sel {
-            GemvStrategy::Auto => {
-                // If Auto, choose Scalar for Large N in ColMajor layout
-                // Using cutoff N > 4096 based on typical Warp vs Thread efficiency
-                if self.layout == Layout::ColMajor && n_dim > 4096 {
-                    GemvStrategy::Scalar
-                } else {
-                    GemvStrategy::Vectorized
-                }
-            }
-            s => s,
-        };
-
-        // Batched dispatch requires WarpLayoutStage semantics (uses gid.y = batch_idx).
-        if batch > 1 && effective_strategy == GemvStrategy::Scalar {
-            effective_strategy = GemvStrategy::Vectorized;
-        }
-
-        // Select kernel using unified getter with policy
-        let kernel = get_gemv_v2_kernel(quantization.clone(), self.layout, effective_strategy, self.activation);
-
-        let args = GemvV2Args {
-            weights: weights_arg,
-            scale_bytes: scale_bytes_arg,
-            input: TensorArg::from_tensor(input),
-            output: TensorArg::from_tensor(output),
-            k_dim,
-            n_dim,
-            weights_per_block: resolved_params.weights_per_block,
-            bias: bias_arg,
-            has_bias,
-            alpha: self.alpha,
-            residual: residual_arg,
-            has_residual,
-            beta: self.beta,
-        };
-
-        // Dispatch Logic based on Strategy
-        let dispatch = if effective_strategy == GemvStrategy::Scalar {
-            thread_dispatch_config(n_dim)
-        } else {
-            warp_dispatch_config_2d(n_dim, batch)
-        };
-
-        if crate::instrument::emit_cb_timing_metrics() {
-            let mut data = rustc_hash::FxHashMap::default();
-            data.insert("op".to_string(), "matmul".to_string());
-            data.insert("backend".to_string(), "gemv".to_string());
-            data.insert("batch".to_string(), batch.to_string());
-            data.insert("m".to_string(), "1".to_string());
-            data.insert("n".to_string(), n_dim.to_string());
-            data.insert("k".to_string(), k_dim.to_string());
-            data.insert("tA".to_string(), "0".to_string());
-            data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))?;
-        } else {
-            foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
-        }
-
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "GemvV2"
-    }
-}
-
-// =============================================================================
-// Legacy GemvCanonical and GemvColMajor Step Wrappers
-// These map the old interface to GemvV2
-// =============================================================================
-
-/// Legacy GemvCanonical Step for DSL compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GemvCanonicalStep {
-    pub matrix: Ref,
-    pub scale_bytes: Option<Ref>,
-    pub vector_x: Ref,
-    pub result_y: Ref,
-    pub bias: Option<Ref>,
-    pub residual: Option<Ref>,
-    #[serde(default)]
-    pub params: GemvLegacyParams,
-    #[serde(default = "default_alpha_legacy")]
-    pub alpha: f32,
-    #[serde(default)]
-    pub beta: f32,
-    #[serde(default)]
-    pub has_bias: u32,
-    #[serde(default)]
-    pub activation: Activation,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GemvLegacyParams {
-    #[serde(default = "default_batch")]
-    pub batch: u32,
-    #[serde(default = "default_wpb_legacy")]
-    pub weights_per_block: u32,
-}
-
-fn default_alpha_legacy() -> f32 {
-    1.0
-}
-fn default_batch() -> u32 {
-    1
-}
-fn default_wpb_legacy() -> u32 {
-    32
-}
-
-#[derive(Debug, Clone)]
-pub struct CompiledGemvCanonicalStep {
-    pub step: GemvCanonicalStep,
-    pub matrix_name: String,
-    pub matrix_resolved: ResolvedSymbols,
-    pub vector_x_idx: usize,
-    pub result_y_idx: usize,
-    pub bias_idx: Option<usize>,
-    pub residual_idx: Option<usize>,
-}
-
-#[typetag::serde(name = "GemvCanonical")]
-impl Step for GemvCanonicalStep {
-    fn name(&self) -> &'static str {
-        "GemvCanonical"
-    }
-
-    fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = SymbolTable::new();
-        let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = FastBindings::new(symbols.len());
-
-        // Bind all symbols found in the table
-        for (name, symbol_id) in symbols.iter() {
-            if let Ok(tensor) = bindings.get(name) {
-                fast_bindings.set(*symbol_id, tensor);
-            }
-        }
-
-        for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
-        }
-
-        Ok(())
-    }
-
-    fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let matrix_name = bindings.interpolate(self.matrix.0.clone());
-        let matrix_idx = symbols.get_or_create(matrix_name.clone());
-        let _matrix_scales_idx = symbols.get_or_create(format!("{matrix_name}_scales"));
-        let vector_x_idx = symbols.get_or_create(bindings.interpolate(self.vector_x.0.clone()));
-        let result_y_idx = symbols.get_or_create(bindings.interpolate(self.result_y.0.clone()));
-        let bias_idx = self
-            .bias
-            .as_ref()
-            .filter(|b| b.0 != "zero")
-            .map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
-        let residual_idx = self
-            .residual
-            .as_ref()
-            .filter(|r| r.0 != "zero")
-            .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
-
-        vec![Box::new(CompiledGemvCanonicalStep {
-            step: self.clone(),
-            matrix_name,
-            matrix_resolved: ResolvedSymbols {
-                weights: matrix_idx,
-                scales: _matrix_scales_idx.into(),
-                bias: None,
-            },
-            vector_x_idx,
-            result_y_idx,
-            bias_idx,
-            residual_idx,
-        })]
-    }
-}
-
-impl CompiledStep for CompiledGemvCanonicalStep {
-    fn execute(
-        &self,
-        foundry: &mut Foundry,
-        fast_bindings: &FastBindings,
-        bindings: &TensorBindings,
-        _symbols: &SymbolTable,
-    ) -> Result<(), MetalError> {
-        let matrix = fast_bindings
-            .get(self.matrix_resolved.weights)
-            .ok_or(MetalError::InputNotFound("matrix".into()))?;
-        let vector_x = fast_bindings
-            .get(self.vector_x_idx)
-            .ok_or(MetalError::InputNotFound("vector_x".into()))?;
-        let result_y = fast_bindings
-            .get(self.result_y_idx)
-            .ok_or(MetalError::InputNotFound("result_y".into()))?;
-
-        // Centralized Quantization Binding
-        let policy = crate::policy::resolve_policy(matrix.dtype.into());
-        let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
-
-        let matrix_args = loader.bind(fast_bindings, &self.matrix_resolved);
-
-        let weights = matrix_args[0].clone();
-        let scale_arg = if matrix_args.len() > 1 {
-            matrix_args[1].clone()
-        } else {
-            // Dummy bind for F16 (unused by kernel but required by signature)
-            matrix_args[0].clone()
-        };
-
-        // Handle Bias
-        let (bias, has_bias) = if let Some(idx) = self.bias_idx {
-            let b = fast_bindings.get(idx).ok_or(MetalError::InputNotFound("bias".into()))?;
-            (TensorArg::from_tensor(b), 1)
-        } else {
-            (TensorArg::from_tensor(result_y), 0)
-        };
-
-        // Handle optional residual (fused in write stage)
-        let (residual, has_residual) = if let Some(res_idx) = self.residual_idx {
-            let r = fast_bindings.get(res_idx).ok_or(MetalError::InputNotFound("residual".into()))?;
-            (TensorArg::from_tensor(r), 1)
-        } else {
-            (TensorArg::from_tensor(result_y), 0)
-        };
-
-        // Dimensions detection: Check against vector_x (input) length K
-        let x_k = vector_x.dims.last().copied().unwrap_or(0) as u32;
-        let (n_dim, k_dim) = if matrix.dims.len() >= 2 {
-            let d0 = matrix.dims[0] as u32;
-            let d1 = matrix.dims[1] as u32;
-
-            if d0 == x_k && d1 != x_k {
-                // [K, N] layout (CanonicalF16Tensor standard)
-                (d1, d0)
-            } else if d1 == x_k && d0 != x_k {
-                // [N, K] layout (Standard RowMajor)
-                (d0, d1)
-            } else {
-                // Square or Ambiguous - fall back to assuming [N, K] or [K, N] order dependent on struct
-                // For square [K, K], (d0, d1) works.
-                (d0, d1)
-            }
-        } else {
-            let total = matrix.dims.iter().product::<usize>() as u32;
-            if x_k == 0 {
-                return Err(MetalError::InvalidShape(
-                    "Cannot infer GemvCanonical dimensions: vector_x has 0 dims".into(),
-                ));
-            }
-            let n = total / x_k;
-            (n, x_k)
-        };
-
-        let args = GemvV2Args {
-            weights,
-            scale_bytes: scale_arg,
-            input: TensorArg::from_tensor(vector_x),
-            output: TensorArg::from_tensor(result_y),
-            k_dim,
-            n_dim,
-            weights_per_block: self.step.params.weights_per_block,
-            bias,
-            has_bias,
-            alpha: self.step.alpha,
-            residual,
-            has_residual,
-            beta: self.step.beta,
-        };
-
-        let batch = bindings.get_int_global("m").unwrap_or(self.step.params.batch as usize).max(1) as u32;
-        let dispatch = warp_dispatch_config_2d(n_dim, batch);
-
-        // Select kernel using unified getter
-        let kernel = get_gemv_v2_kernel(
-            quantization.clone(),
-            Layout::Canonical {
-                expected_k: 0,
-                expected_n: 0,
-            },
-            GemvStrategy::Canonical,
-            self.step.activation,
-        );
-
-        if crate::instrument::emit_cb_timing_metrics() {
-            let mut data = rustc_hash::FxHashMap::default();
-            data.insert("op".to_string(), "matmul".to_string());
-            data.insert("backend".to_string(), "gemv".to_string());
-            data.insert("batch".to_string(), batch.to_string());
-            data.insert("m".to_string(), "1".to_string());
-            data.insert("n".to_string(), n_dim.to_string());
-            data.insert("k".to_string(), k_dim.to_string());
-            data.insert("tA".to_string(), "0".to_string());
-            data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))?;
-        } else {
-            foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
-        }
-
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "GemvCanonical"
-    }
-}
-
-/// Legacy GemvColMajor Step for DSL compatibility.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GemvColMajorStep {
-    pub matrix: Ref,
-    pub scale_bytes: Option<Ref>,
-    pub vector_x: Ref,
-    pub result_y: Ref,
-    pub bias: Option<Ref>,
-    pub residual: Option<Ref>,
-    #[serde(default)]
-    pub params: GemvColMajorParams,
-    #[serde(default = "default_alpha_legacy")]
-    pub alpha: f32,
-    #[serde(default)]
-    pub beta: f32,
-    #[serde(default)]
-    pub has_bias: u32,
-    #[serde(default)]
-    pub activation: Activation,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct GemvColMajorParams {
-    #[serde(default)]
-    pub n: u32,
-    #[serde(default = "default_batch")]
-    pub batch: u32,
-    #[serde(default)]
-    pub fused_bias_offset: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct CompiledGemvColMajorStep {
-    pub step: GemvColMajorStep,
-    pub matrix_name: String,
-    pub matrix_resolved: ResolvedSymbols,
-    pub vector_x_idx: usize,
-    pub result_y_idx: usize,
-    pub bias_idx: Option<usize>,
-    pub residual_idx: Option<usize>,
-}
-
-#[typetag::serde(name = "GemvColMajor")]
-impl Step for GemvColMajorStep {
-    fn name(&self) -> &'static str {
-        "GemvColMajor"
-    }
-
-    fn execute(&self, foundry: &mut Foundry, bindings: &mut TensorBindings) -> Result<(), MetalError> {
-        let mut symbols = SymbolTable::new();
-        let compiled = self.compile(bindings, &mut symbols);
-        let mut fast_bindings = FastBindings::new(symbols.len());
-
-        // Bind all symbols found in the table
-        for (name, symbol_id) in symbols.iter() {
-            if let Ok(tensor) = bindings.get(name) {
-                fast_bindings.set(*symbol_id, tensor);
-            }
-        }
-
-        for step in compiled {
-            step.execute(foundry, &fast_bindings, bindings, &symbols)?;
-        }
-
-        Ok(())
-    }
-
-    fn compile(&self, bindings: &mut TensorBindings, symbols: &mut SymbolTable) -> Vec<Box<dyn CompiledStep>> {
-        let matrix_name = bindings.interpolate(self.matrix.0.clone());
-        let matrix_idx = symbols.get_or_create(matrix_name.clone());
-        let _matrix_scales_idx = symbols.get_or_create(format!("{matrix_name}_scales"));
-        let vector_x_idx = symbols.get_or_create(bindings.interpolate(self.vector_x.0.clone()));
-        let result_y_idx = symbols.get_or_create(bindings.interpolate(self.result_y.0.clone()));
-        let bias_idx = self
-            .bias
-            .as_ref()
-            .filter(|b| b.0 != "zero")
-            .map(|b| symbols.get_or_create(bindings.interpolate(b.0.clone())));
-        let residual_idx = self
-            .residual
-            .as_ref()
-            .filter(|r| r.0 != "zero")
-            .map(|r| symbols.get_or_create(bindings.interpolate(r.0.clone())));
-
-        vec![Box::new(CompiledGemvColMajorStep {
-            step: self.clone(),
-            matrix_name,
-            matrix_resolved: ResolvedSymbols {
-                weights: matrix_idx,
-                scales: _matrix_scales_idx.into(),
-                bias: None,
-            },
-            vector_x_idx,
-            result_y_idx,
-            bias_idx,
-            residual_idx,
-        })]
-    }
-}
-
-impl CompiledStep for CompiledGemvColMajorStep {
-    fn execute(
-        &self,
-        foundry: &mut Foundry,
-        fast_bindings: &FastBindings,
-        bindings: &TensorBindings,
-        _symbols: &SymbolTable,
-    ) -> Result<(), MetalError> {
-        // Debug flag for granular tracing
-        let debug = bindings.get_var("DEBUG").is_some();
-
-        if debug {
-            eprintln!("  [GemvColMajor] Resolving tensors...");
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        let matrix = fast_bindings
-            .get(self.matrix_resolved.weights)
-            .ok_or(MetalError::InputNotFound("matrix".into()))?;
-        let vector_x = fast_bindings
-            .get(self.vector_x_idx)
-            .ok_or(MetalError::InputNotFound("vector_x".into()))?;
-        let result_y = fast_bindings
-            .get(self.result_y_idx)
-            .ok_or(MetalError::InputNotFound("result_y".into()))?;
-
-        // Centralized Quantization Binding
-        let policy = crate::policy::resolve_policy(matrix.dtype.into());
-        let loader = policy.loader_stage();
-        let quantization = loader.quantization_type();
-
-        let matrix_args = loader.bind(fast_bindings, &self.matrix_resolved);
-
-        let weights = matrix_args[0].clone();
-        let scale_arg = if matrix_args.len() > 1 {
-            matrix_args[1].clone()
-        } else {
-            // Dummy bind for F16 (unused by kernel but required by signature)
-            matrix_args[0].clone()
-        };
-
-        if debug {
-            eprintln!(
-                "  [GemvColMajor] Tensors resolved. matrix_dims={:?}, vector_x_dims={:?}, result_y_dims={:?}",
-                matrix.dims, vector_x.dims, result_y.dims
-            );
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        // Handle Bias
-        let (bias, has_bias) = if let Some(idx) = self.bias_idx {
-            let b = fast_bindings.get(idx).ok_or(MetalError::InputNotFound("bias".into()))?;
-            (TensorArg::from_tensor(b), 1)
-        } else {
-            (TensorArg::from_tensor(result_y), 0)
-        };
-
-        // Dimensions: ColMajor stores matrix as [N, K] where:
-        // - N = output dimension (rows = result_y size)
-        // - K = input dimension (cols = vector_x size)
-        // matrix_dims[0] = N (output), matrix_dims[1] = K (input)
-        let (n_dim, k_dim) = if matrix.dims.len() >= 2 {
-            (matrix.dims[0] as u32, matrix.dims[1] as u32)
-        } else {
-            let total = matrix.dims.iter().product::<usize>() as u32;
-            let k = vector_x.dims.last().copied().unwrap_or(0) as u32;
-            if k == 0 {
-                return Err(MetalError::InvalidShape(
-                    "Cannot infer GemvColMajor dimensions: vector_x has 0 dims".into(),
-                ));
-            }
-            let n = total / k;
-            (n, k)
-        };
-
-        if debug {
-            eprintln!(
-                "  [GemvColMajor] Dimensions: k_dim={}, n_dim={}, policy={}",
-                k_dim,
-                n_dim,
-                quantization.short_name()
-            );
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        let args = GemvV2Args {
-            weights,
-            scale_bytes: scale_arg,
-            input: TensorArg::from_tensor(vector_x),
-            output: TensorArg::from_tensor(result_y),
-            k_dim,
-            n_dim,
-            weights_per_block: 32,
-            bias,
-            has_bias,
-            alpha: self.step.alpha,
-            residual: TensorArg::from_tensor(result_y),
-            has_residual: 0,
-            beta: 0.0,
-        };
-
-        let dispatch = if n_dim > 4096 {
-            // Use scalar dispatch (thread-per-row) for large N (ColMajor)
-            thread_dispatch_config(n_dim)
-        } else {
-            // Use typical warp dispatch for small N
-            warp_dispatch_config(n_dim)
-        };
-
-        if debug {
-            eprintln!("  [GemvColMajor] Getting kernel...");
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        let strategy = if n_dim > 4096 {
-            GemvStrategy::Scalar
-        } else {
-            GemvStrategy::Vectorized
-        };
-        let kernel = get_gemv_v2_kernel(quantization.clone(), Layout::ColMajor, strategy, self.step.activation);
-
-        if debug {
-            eprintln!("  [GemvColMajor] Running kernel dispatch...");
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        if crate::instrument::emit_cb_timing_metrics() {
-            let mut data = rustc_hash::FxHashMap::default();
-            data.insert("op".to_string(), "matmul".to_string());
-            data.insert("backend".to_string(), "gemv".to_string());
-            data.insert("batch".to_string(), "1".to_string());
-            data.insert("m".to_string(), "1".to_string());
-            data.insert("n".to_string(), n_dim.to_string());
-            data.insert("k".to_string(), k_dim.to_string());
-            data.insert("tA".to_string(), "0".to_string());
-            data.insert("tB".to_string(), "1".to_string());
-            foundry.run(&kernel.clone().bind_arc_with_metrics(args, dispatch, data))?;
-        } else {
-            foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
-        }
-
-        if debug {
-            eprintln!("  [GemvColMajor] Kernel dispatched successfully.");
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        if let Some(res_idx) = self.residual_idx {
-            let residual = fast_bindings.get(res_idx).ok_or(MetalError::InputNotFound("residual".into()))?;
-
-            let total = result_y.dims.iter().product::<usize>() as u32;
-            let add_args = AddArgs {
-                a: TensorArg::from_tensor(result_y),
-                b: TensorArg::from_tensor(residual),
-                out: TensorArg::from_tensor(result_y),
-                total,
-            };
-
-            let add_kernel = get_add_kernel();
-            let grid_size = total.div_ceil(256) as usize;
-            let dispatch = DispatchConfig {
-                grid: GridSize::d1(grid_size),
-                group: ThreadgroupSize::d1(256),
-            };
-
-            foundry.run(&add_kernel.clone().bind_arc(add_args, dispatch))?;
-        }
-
-        if debug {
-            eprintln!("  [GemvColMajor] Execute complete.");
-            std::io::Write::flush(&mut std::io::stderr()).ok();
-        }
-
-        Ok(())
-    }
-
-    fn name(&self) -> &'static str {
-        "GemvColMajor"
-    }
-}
-
-// =============================================================================
-// Helper: Add Kernel for Residual Accumulation
-// =============================================================================
-
-#[derive(Debug, KernelArgs)]
-struct AddArgs {
-    #[arg(buffer = 0)]
-    a: TensorArg,
-    #[arg(buffer = 1)]
-    b: TensorArg,
-    #[arg(buffer = 2)]
-    out: TensorArg,
-    #[arg(buffer = 3)]
-    total: u32,
-}
-
-#[derive(Debug, Clone, KernelArgs)]
-struct ElemwiseAddGlobalStage;
-
-impl Stage for ElemwiseAddGlobalStage {
-    fn includes(&self) -> Vec<&'static str> {
-        vec![]
-    }
-    fn buffer_args(&self) -> Vec<BufferArg> {
-        vec![
-            BufferArg {
-                name: "a",
-                metal_type: "const device half*",
-                buffer_index: 0,
-            },
-            BufferArg {
-                name: "b",
-                metal_type: "const device half*",
-                buffer_index: 1,
-            },
-            BufferArg {
-                name: "out",
-                metal_type: "device half*",
-                buffer_index: 2,
-            },
-            BufferArg {
-                name: "total_elements",
-                metal_type: "constant uint&",
-                buffer_index: 3,
-            },
-        ]
-    }
-
-    fn struct_defs(&self) -> String {
-        String::new()
-    }
-
-    fn emit(&self, _prev: &str) -> (String, String) {
-        (
-            "void".to_string(),
-            r#"
-    idx = gid.x * tptg.x + lid.x;
-    if (idx >= total_elements) return;
-    out[idx] = a[idx] + b[idx];
-            "#
-            .to_string(),
-        )
-    }
-}
-
-fn get_add_kernel() -> std::sync::Arc<CompiledCompoundKernel> {
-    use crate::kernel_registry::{KernelCacheKey, kernel_registry};
-    let key = KernelCacheKey::new("gemv", "add_residual");
-    kernel_registry().get_or_build(key, || {
-        CompoundKernel::new("gemv_add_residual")
-            .main(ElemwiseAddGlobalStage)
-            .with_manual_output(true)
-            .compile()
     })
 }

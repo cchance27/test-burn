@@ -144,6 +144,7 @@ impl CompiledStep for CompiledRmsNormStep {
 #[derive(Debug, Clone, KernelArgs)]
 pub struct RmsNormStandaloneStage {
     pub params: RmsNormParamsResolved,
+    #[arg(skip)]
     pub policy: Arc<dyn MetalPolicy>,
 }
 

@@ -51,6 +51,59 @@ pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
         true
     }
 
+    /// Validate the layout of a weight tensor for this policy.
+    fn validate_weight_layout(&self, dims: &[usize], bytes: usize) -> Result<(), crate::error::MetalError> {
+        use crate::error::MetalError;
+
+        // Only apply structural validation for policies that use companion resources (e.g. scales).
+        // Unquantized policies (F16/F32) should be layout-agnostic here.
+        if !self.has_scale() {
+            return Ok(());
+        }
+
+        let wpb = self.weights_per_block().max(1);
+        match dims {
+            // Row/col-major: we keep logical 2D dims, so we can validate K directly.
+            [_, k] => {
+                if wpb > 1 && (k % wpb) != 0 {
+                    return Err(MetalError::InvalidShape(format!(
+                        "quantized weight K dimension ({k}) must be divisible by {wpb}"
+                    )));
+                }
+            }
+            // Canonical (or other packed layouts): weights may be stored as a flat byte/element stream.
+            // In that case, we can only validate block-alignment, not logical K/N.
+            [len] => {
+                if wpb > 1 && (len % wpb) != 0 {
+                    return Err(MetalError::InvalidShape(format!(
+                        "quantized weight buffer length ({len}) must be divisible by {wpb}"
+                    )));
+                }
+            }
+            _ => {
+                return Err(MetalError::InvalidShape(format!(
+                    "quantized weight tensor must be 1D or 2D, got dims={dims:?}"
+                )));
+            }
+        }
+
+        // Optional size sanity-check (some tests validate shape without an attached buffer).
+        if bytes != 0 {
+            let expected_elems = dims.iter().copied().fold(1usize, |acc, v| acc.saturating_mul(v));
+            let expected_min = expected_elems.saturating_mul(self.element_size());
+            if bytes < expected_min {
+                return Err(MetalError::InvalidShape(format!(
+                    "quantized weight buffer too small: bytes={bytes} expected_at_least={expected_min} dims={dims:?}"
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Bind any associated resources (e.g. scales) for a weight tensor.
+    fn bind_associated_resources(&self, _encoder: &crate::types::ComputeCommandEncoder, _weights: &crate::types::TensorArg) {}
+
     /// Metal code to initialize policy params from kernel args.
     /// E.g., "pp.matrix = matrix; pp.scales = scale_bytes;"
     fn init_params_code(&self) -> &'static str {

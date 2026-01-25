@@ -4,12 +4,12 @@ use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, step::{GemvStrategy, warp_dispatch_config}
+    stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}, step::GemvStrategy
 };
 use crate::{
     Foundry, MetalError, compound::{
         CompiledCompoundKernel, CompoundKernel, Layout, stages::{WarpLayoutStage, WarpReduceStage}
-    }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::TensorArg
+    }, fusion::MetalPolicy, metals::rmsnorm::stages::RmsNormComputeStage, spec::{CompiledStep, DynamicValue, Ref, ResolvedSymbols, Step, SymbolTable, TensorBindings}, types::{DispatchConfig, TensorArg}
 };
 
 /// Fused GEMV Step: RMSNorm(Input) -> GEMV(Input_Norm, Weights) -> Output
@@ -156,7 +156,7 @@ impl CompiledStep for CompiledFusedGemvStep {
         };
 
         let kernel = get_fused_gemv_kernel(self.step.strategy, policy);
-        let dispatch = warp_dispatch_config(n_dim);
+        let dispatch = DispatchConfig::warp_per_row(n_dim, 1);
 
         if crate::instrument::emit_cb_timing_metrics() {
             // Fused GEMV (matmul + RMSNorm) - still useful to classify as matmul for comparisons.

@@ -462,38 +462,24 @@ fn collect_arg_infos(fields: &Fields) -> (Vec<ArgInfo>, Vec<proc_macro2::TokenSt
                 if !is_meta {
                     if is_bytes {
                         bindings.push(quote! {
-                            let ptr = &self.#name as *const _ as *const core::ffi::c_void;
-                            let len = core::mem::size_of_val(&self.#name);
-                            unsafe {
-                                encoder.setBytes_length_atIndex(core::ptr::NonNull::new(ptr as *mut _).unwrap(), len, #idx as usize);
-                            }
+                            encoder.set_bytes(#idx as u32, &self.#name);
                         });
                     } else {
                         let binding = if is_option {
                             quote! {
-                                if let Some(val) = &self.#name {
-                                    unsafe {
-                                        encoder.setBuffer_offset_atIndex(
-                                            Some(&*#root::types::KernelArg::buffer(val)),
-                                            #root::types::KernelArg::offset(val),
-                                            #idx as usize
-                                        );
-                                    }
-                                } else {
-                                    unsafe {
-                                        encoder.setBuffer_offset_atIndex(None, 0, #idx as usize);
-                                    }
-                                }
+                                encoder.set_buffer_opt(
+                                    #idx as u32,
+                                    self.#name.as_ref().map(|v| #root::types::KernelArg::buffer(v)),
+                                    self.#name.as_ref().map(|v| #root::types::KernelArg::offset(v)).unwrap_or(0)
+                                );
                             }
                         } else {
                             quote! {
-                                unsafe {
-                                    encoder.setBuffer_offset_atIndex(
-                                        Some(&*#root::types::KernelArg::buffer(&self.#name)),
-                                        #root::types::KernelArg::offset(&self.#name),
-                                        #idx as usize
-                                    );
-                                }
+                                encoder.set_buffer(
+                                    #idx as u32,
+                                    #root::types::KernelArg::buffer(&self.#name),
+                                    #root::types::KernelArg::offset(&self.#name)
+                                );
                             }
                         };
                         bindings.push(binding);
@@ -975,9 +961,12 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
             #has_scale_impl
             #block_size_bytes_impl
             #weights_per_block_impl
+
+            fn init_params_code(&self) -> &'static str {
+                #init_code
+            }
         }
 
-        // Policies need a no-op Stage impl for the loader stage machinery
         impl #root::compound::Stage for #name {
             fn includes(&self) -> Vec<&'static str> {
                 vec![]
@@ -990,11 +979,6 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
             fn emit(&self, _input_var: &str) -> (String, String) {
                 (String::new(), String::new())
             }
-        }
-
-        impl #name {
-            /// Generated Metal code for initializing policy params.
-            pub const INIT_PARAMS_CODE: &'static str = #init_code;
         }
     };
 

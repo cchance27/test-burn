@@ -83,6 +83,29 @@ impl DispatchConfig {
             group: ThreadgroupSize::d1(group_width),
         }
     }
+
+    /// Create a standard warp-per-row dispatch configuration for GEMV-style kernels.
+    pub fn warp_per_row(n_dim: u32, batch: u32) -> Self {
+        const WARPS_PER_TG: usize = 8;
+        const SIMD_WIDTH: usize = 32;
+        const TG_WIDTH: usize = WARPS_PER_TG * SIMD_WIDTH; // 256
+
+        let num_tgs = (n_dim as usize).div_ceil(WARPS_PER_TG);
+        Self {
+            grid: GridSize::new(num_tgs, batch as usize, 1),
+            group: ThreadgroupSize::new(TG_WIDTH, 1, 1),
+        }
+    }
+
+    /// Create a standard thread-per-row dispatch configuration for scalar kernels.
+    pub fn thread_per_row(output_rows: u32) -> Self {
+        let threads_per_tg = 256;
+        let threadgroups = (output_rows as usize).div_ceil(threads_per_tg);
+        Self {
+            grid: GridSize::d1(threadgroups),
+            group: ThreadgroupSize::d1(threads_per_tg),
+        }
+    }
 }
 
 // --- Internal conversions to MTLSize (not exposed to consumers) ---

@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use metallic_foundry::{
-    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Params, GemvV2Step}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
+    Foundry, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Params, GemvV2UnifiedExecutionStep}, policy::activation::Activation, spec::{DynamicValue, FastBindings, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 }; // Added GemvStrategy
 
 fn run_benchmark_case(
@@ -47,26 +47,26 @@ fn run_benchmark_case(
     bindings.insert("input".to_string(), TensorArg::from_tensor(&input));
     bindings.insert("output".to_string(), TensorArg::from_tensor(&output_v2));
 
-    let step = GemvV2Step {
+    let step = GemvV2UnifiedExecutionStep {
         weights: Ref("weights".to_string()),
-        scale_bytes: None, // F16 benchmark
         input: Ref("input".to_string()),
         output: Ref("output".to_string()),
         bias: None,
         residual: None,
+        scale_bytes: None, // F16 benchmark
         params: GemvV2Params {
             k_dim: DynamicValue::Literal(k as u32),
             n_dim: DynamicValue::Literal(n as u32),
             weights_per_block: 32,
-            batch: 1,
+            batch: DynamicValue::Literal(1),
         },
         layout,
         strategy,
-        alpha: 1.0,
+        activation: Activation::None,
+        alpha,
         beta: 0.0,
         has_bias: 0,
         has_residual: 0,
-        activation: Activation::None,
     };
 
     let mut symbols = metallic_foundry::spec::SymbolTable::new();

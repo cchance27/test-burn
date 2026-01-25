@@ -212,11 +212,6 @@ impl TileLoadAStage {
     pub fn new(policy: Arc<dyn MetalPolicy>, transpose_a: bool) -> Self {
         Self { policy, transpose_a }
     }
-
-    /// Create an F16 loader (most common for activations)
-    pub fn f16(transpose_a: bool) -> Self {
-        Self::new(std::sync::Arc::new(crate::policy::f16::PolicyF16), transpose_a)
-    }
 }
 
 impl Stage for TileLoadAStage {
@@ -227,7 +222,7 @@ impl Stage for TileLoadAStage {
     fn buffer_args(&self) -> Vec<BufferArg> {
         vec![BufferArg {
             name: "A",
-            metal_type: "const device half*", // F16 activations use half directly
+            metal_type: "const device half*",
             buffer_index: 0,
         }]
     }
@@ -288,14 +283,6 @@ pub struct TileLoadBStage {
 impl TileLoadBStage {
     pub fn new(policy: Arc<dyn MetalPolicy>, transpose_b: bool) -> Self {
         Self { policy, transpose_b }
-    }
-
-    pub fn f16(transpose_b: bool) -> Self {
-        Self::new(std::sync::Arc::new(crate::policy::f16::PolicyF16), transpose_b)
-    }
-
-    pub fn q8(transpose_b: bool) -> Self {
-        Self::new(std::sync::Arc::new(crate::policy::q8::PolicyQ8), transpose_b)
     }
 }
 

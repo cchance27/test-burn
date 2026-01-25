@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel, warp_dispatch_config_2d}, policy::{activation::Activation, f16::PolicyF16}, tensor::{Tensor as FoundryTensor, TensorInit}
+    Foundry, MetalError, compound::Layout, metals::gemv::{GemvStrategy, GemvV2Args, get_gemv_v2_kernel}, policy::{activation::Activation, f16::PolicyF16}, tensor::{Tensor as FoundryTensor, TensorInit}, types::DispatchConfig
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 
@@ -72,7 +72,7 @@ fn test_gemv_canonical_batched_parity_m4() -> Result<(), MetalError> {
         GemvStrategy::Canonical,
         Activation::None,
     );
-    let dispatch = warp_dispatch_config_2d(n as u32, m as u32);
+    let dispatch = DispatchConfig::warp_per_row(n as u32, m as u32);
 
     let y_arg = metallic_foundry::TensorArg::from_tensor(&y);
     let args = GemvV2Args {

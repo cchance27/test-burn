@@ -8,9 +8,7 @@ mod read;
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 pub use read::{KvCacheRead, KvCacheReadParams, KvCacheReadParamsResolved};
 
-use crate::{
-    spec::DynamicValue, types::TensorArg
-};
+use crate::{spec::DynamicValue, types::TensorArg};
 
 /// Parameters for KvCacheWriteRepeatKvHeads kernel.
 #[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
