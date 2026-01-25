@@ -1235,11 +1235,11 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let stage_name = quote::format_ident!("{}Stage", name);
 
-    // Generate as_stage() implementation
-    let as_stage_impl = if let Some(expr_str) = &stage_expr {
+    // Generate to_stage() implementation
+    let to_stage_impl = if let Some(expr_str) = &stage_expr {
         let expr: syn::Expr = syn::parse_str(expr_str).expect("Failed to parse stage expression");
         quote! {
-            fn as_stage(&self) -> Box<dyn #root::compound::Stage> {
+            fn to_stage(&self) -> Box<dyn #root::compound::Stage> {
                 #expr
             }
         }
@@ -1255,7 +1255,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
             .collect();
 
         quote! {
-            fn as_stage(&self) -> Box<dyn #root::compound::Stage> {
+            fn to_stage(&self) -> Box<dyn #root::compound::Stage> {
                 Box::new(#stage_name {
                     #( #field_names: self.#field_names.clone() ),*
                 })
@@ -1263,7 +1263,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
         }
     } else {
         quote! {
-            fn as_stage(&self) -> Box<dyn #root::compound::Stage> {
+            fn to_stage(&self) -> Box<dyn #root::compound::Stage> {
                 panic!("Kernel {} does not support staging (no stage_function, stage expression, or epilogue_emit defined)", stringify!(#name))
             }
         }
@@ -1553,7 +1553,7 @@ pub fn derive_kernel(input: TokenStream) -> TokenStream {
                 <#args_type>::METAL_STRUCT_DEF.to_string()
             }
 
-            #as_stage_impl
+            #to_stage_impl
         }
 
         #stage_impl

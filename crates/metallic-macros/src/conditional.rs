@@ -583,9 +583,9 @@ pub fn derive_conditional_kernel_impl(input: DeriveInput) -> TokenStream {
                 }
             }
 
-            fn as_stage(&self) -> Box<dyn #root::compound::Stage> {
+            fn to_stage(&self) -> Box<dyn #root::compound::Stage> {
                 match self {
-                    #( Self::#variant_names(k) => k.as_stage(), )*
+                    #( Self::#variant_names(k) => k.to_stage(), )*
                 }
             }
         }

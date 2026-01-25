@@ -69,12 +69,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Issue:** `Foundry::load_kernel` uses custom logic to resolve `#include` directives by searching and stripping strings. This is a "virtual pre-processor" that might behave differently than the real Metal compiler.
 - **Requirement:** Standardize on `MTLCompileOptions` with explicit header search paths or move toward a more robust Virtual File System (VFS).
 
-### 2. Import Hygiene & Naming
-- **Issue:** `MTLSize` tuples `(grid, group)` are used in several places, forcing callers to import Metal types.
-- **Issue:** `as_stage()` is used for a method that boxes and allocates. Conventionally, `as_` should be a cheap reference conversion.
-- **Requirement:** Rename `as_stage` -> `to_stage` or `into_stage`.
-
-### 3. Quantization Safety & Regression Testing
+### 2. Quantization Safety & Regression Testing
 - **Goal:** Prevent future Q8/F16/OTHERS mismatches by strictly enforcing runtime policy.
 - **Tasks:**
     - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
@@ -278,3 +273,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Feature:** `Tensor<T, Pooled>` and `Tensor<T, View>` hold a generation ID and a reference to the pool's counter.
 - **Feature:** `Tensor::buffer()` and other accessors perform a runtime check. If the pool has been reset (incrementing the generation), any attempt to access the stale tensor results in a panic or a `MetalError::UseAfterFree`, preventing logical use-after-free bugs in the Foundry engine.
 
+### 16. Import Hygiene & Naming (COMPLETED)
+- **Status:** Fixed.
+- **Refactor:** Renamed `Kernel::as_stage` to `to_stage` to reflect that it allocates/boxes.
+- **Hygiene:** Removed public `impl From<DispatchConfig> for (MTLSize, MTLSize)` to prevent `objc2_metal` types from leaking into consumer code. Replaced with crate-private `as_mtl_size()` methods.

@@ -433,12 +433,12 @@ pub trait Kernel {
     ///
     /// Only kernels designed for fusion should implement this. The default implementation
     /// panics to fail fast instead of silently producing an invalid fused kernel.
-    fn as_stage(&self) -> Box<dyn crate::compound::Stage>
+    fn to_stage(&self) -> Box<dyn crate::compound::Stage>
     where
         Self: Sized + Clone + Send + Sync + 'static,
     {
         panic!(
-            "Kernel::as_stage is not implemented for {}. \
+            "Kernel::to_stage is not implemented for {}. \
 This kernel cannot be used as a Stage in a CompoundKernel.",
             self.function_name()
         )

@@ -548,7 +548,7 @@ impl ComputeCommandEncoder {
     }
 
     pub fn dispatch_threadgroups(&self, grid_size: crate::types::dispatch::GridSize, group_size: crate::types::dispatch::ThreadgroupSize) {
-        let (grid, group) = (grid_size.into(), group_size.into());
+        let (grid, group) = (grid_size.as_mtl_size(), group_size.as_mtl_size());
         self.0.dispatchThreadgroups_threadsPerThreadgroup(grid, group);
     }
 

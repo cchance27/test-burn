@@ -110,29 +110,23 @@ impl DispatchConfig {
 
 // --- Internal conversions to MTLSize (not exposed to consumers) ---
 
-impl From<GridSize> for MTLSize {
-    fn from(g: GridSize) -> Self {
+impl GridSize {
+    pub(crate) fn as_mtl_size(&self) -> MTLSize {
         MTLSize {
-            width: g.width,
-            height: g.height,
-            depth: g.depth,
+            width: self.width,
+            height: self.height,
+            depth: self.depth,
         }
     }
 }
 
-impl From<ThreadgroupSize> for MTLSize {
-    fn from(t: ThreadgroupSize) -> Self {
+impl ThreadgroupSize {
+    pub(crate) fn as_mtl_size(&self) -> MTLSize {
         MTLSize {
-            width: t.width,
-            height: t.height,
-            depth: t.depth,
+            width: self.width,
+            height: self.height,
+            depth: self.depth,
         }
-    }
-}
-
-impl From<DispatchConfig> for (MTLSize, MTLSize) {
-    fn from(config: DispatchConfig) -> Self {
-        (config.grid.into(), config.group.into())
     }
 }
 
