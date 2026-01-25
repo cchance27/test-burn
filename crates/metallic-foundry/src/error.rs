@@ -70,6 +70,8 @@ pub enum MetalError {
     Gemv(#[from] GemvError),
     #[error("Input not found: {0}")]
     InputNotFound(String),
+    #[error("Pooled tensor used after pool reset (Use-After-Free)")]
+    UseAfterFree,
 }
 
 impl From<crate::tokenizer::TokenizerError> for MetalError {

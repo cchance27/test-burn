@@ -23,9 +23,10 @@ pub struct Tensor<T: TensorElement, S: StorageState = Dedicated> {
     pub(crate) dims: Vec<usize>,
     pub(crate) strides: Vec<usize>,
     pub(crate) offset: usize,
+    pub(crate) state: S,
 
     // Phantom data to hold types
-    _marker: PhantomData<(T, S)>,
+    _marker: PhantomData<T>,
 }
 
 impl<T: TensorElement, S: StorageState> Tensor<T, S> {
@@ -41,6 +42,9 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
 
     /// Returns the underlying Metal buffer.
     pub fn buffer(&self) -> &Buffer {
+        if let Err(e) = self.state.check_validity() {
+            panic!("Tensor access violation: {}", e);
+        }
         &self.buffer
     }
 
@@ -54,11 +58,13 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
     }
 
     pub fn view(&self, dims: Vec<usize>, strides: Vec<usize>, offset: usize) -> Tensor<T, View> {
+        let guard = self.state.as_view_guard();
         Tensor {
             buffer: self.buffer.clone(),
             dims,
             strides,
             offset,
+            state: View { guard },
             _marker: PhantomData,
         }
     }
@@ -72,6 +78,8 @@ impl<T: TensorElement, S: StorageState> Tensor<T, S> {
 
     /// Read the tensor data back to the host.
     pub fn try_to_vec(&self, foundry: &Foundry) -> Result<Vec<T::Scalar>, MetalError> {
+        self.state.check_validity()?;
+
         let num_elements = self.dims.iter().product::<usize>();
         let size_bytes = num_elements * T::DTYPE.size_bytes();
 
@@ -96,6 +104,7 @@ impl<T: TensorElement> Tensor<T, View> {
             dims,
             strides,
             offset,
+            state: View { guard: None },
             _marker: PhantomData,
         }
     }
@@ -160,6 +169,7 @@ impl<T: TensorElement> Tensor<T, Dedicated> {
             strides,
             dims,
             offset: 0,
+            state: Dedicated,
             _marker: PhantomData,
         })
     }
@@ -188,6 +198,10 @@ impl<T: TensorElement> Tensor<T, Pooled> {
             dims,
             strides,
             offset: alloc.offset,
+            state: Pooled {
+                generation: alloc.generation,
+                pool_generation: alloc.pool_generation,
+            },
             _marker: PhantomData,
         })
     }
@@ -196,6 +210,10 @@ impl<T: TensorElement> Tensor<T, Pooled> {
 // Implement KernelArg trait for auto-binding
 impl<T: TensorElement, S: StorageState> KernelArg for Tensor<T, S> {
     fn buffer(&self) -> &Buffer {
+        // Enforce safety check before handing out the raw buffer
+        if let Err(e) = self.state.check_validity() {
+            panic!("Tensor access violation: {}", e);
+        }
         &self.buffer
     }
     fn offset(&self) -> usize {

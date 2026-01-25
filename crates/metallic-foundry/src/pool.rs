@@ -1,3 +1,5 @@
+use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+
 use crate::{error::MetalError, tensor::TensorElement, types::MetalResourceOptions};
 
 const INITIAL_CHUNK_SIZE: usize = 256 * 1024 * 1024; // 256MB
@@ -24,6 +26,9 @@ pub struct MemoryPool {
     pub bytes_allocated: usize,
     pub allocation_count: usize,
     pub max_pool_size: usize,
+    
+    // Safety
+    current_generation: Arc<AtomicU64>,
 }
 
 // Safety: Metal objects are thread-safe, and we use them via Retained pointers.
@@ -38,6 +43,8 @@ pub struct Allocation {
     pub buffer: crate::types::MetalBuffer,
     pub offset: usize,
     pub size: usize,
+    pub generation: u64,
+    pub pool_generation: Arc<AtomicU64>,
 }
 
 impl MemoryPool {
@@ -58,6 +65,7 @@ impl MemoryPool {
             bytes_allocated: 0,
             allocation_count: 0,
             max_pool_size: max_size,
+            current_generation: Arc::new(AtomicU64::new(0)),
         };
 
         let initial_chunk = INITIAL_CHUNK_SIZE.min(max_size);
@@ -82,6 +90,8 @@ impl MemoryPool {
                     buffer: self.chunks[i].buffer.clone(),
                     offset,
                     size: size_bytes,
+                    generation: self.current_generation.load(Ordering::Relaxed),
+                    pool_generation: self.current_generation.clone(),
                 });
             }
         }
@@ -113,6 +123,8 @@ impl MemoryPool {
             buffer: self.chunks[chunk_idx].buffer.clone(),
             offset,
             size: size_bytes,
+            generation: self.current_generation.load(Ordering::Relaxed),
+            pool_generation: self.current_generation.clone(),
         })
     }
 
@@ -147,6 +159,8 @@ impl MemoryPool {
         }
         self.current_chunk = 0;
         self.bytes_allocated = 0;
+        // Invalidate all previous allocations
+        self.current_generation.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn upload(&self, allocation: &Allocation, data: &[u8]) -> Result<(), MetalError> {
