@@ -558,11 +558,7 @@ impl ComputeCommandEncoder {
     /// subsequent encodes on the same command encoder, or when synchronization is handled
     /// elsewhere (e.g. explicit barriers or separate command buffers).
     #[inline]
-    pub fn dispatch_unbarriered(
-        &self,
-        grid_size: crate::types::dispatch::GridSize,
-        group_size: crate::types::dispatch::ThreadgroupSize,
-    ) {
+    pub fn dispatch_unbarriered(&self, grid_size: crate::types::dispatch::GridSize, group_size: crate::types::dispatch::ThreadgroupSize) {
         self.dispatch_threadgroups(grid_size, group_size);
     }
 

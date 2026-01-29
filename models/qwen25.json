@@ -156,7 +156,7 @@
                         }
                     },
                     {
-                        "op": "SdpaMaterialized",
+                        "op": "FlashAttention",
                         "q": "q_rot",
                         "k": "k_cache_{i}",
                         "v": "v_cache_{i}",

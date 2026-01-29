@@ -19,6 +19,11 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Fused RMSNorm/Project:** Specialized `WarpWriteOutputNoResidualStage` to reduce register pressure in fused paths.
 - **Quantized Embeddings:** Dedicated F16 and Q8_0 lookup kernels.
 - **Unified Activations:** Activations are now a first-class `Activation` enum option (compiled into kernel variants) across GEMV/GEMM/SwiGLU paths, reducing the need for one-off Metal edits and improving composability.
+- **FlashAttention (Metal / Foundry):**
+  - Decode (M=1): fused RoPE → FlashAttention with streaming softmax + fused `P·V` accumulation.
+  - Prefill (M>1): tiled FA1-style online softmax for `head_dim ∈ {64, 128}` with optional Split‑K prefill (2‑phase).
+  - Tuning knobs: `METALLIC_FA_PREFILL_WARPS`, `METALLIC_FA_PREFILL_SPLIT_K`, `METALLIC_DISABLE_FA_PREFILL_SPLITK`, plus decode variant knobs.
+  - Parity tests/sweeps exist to validate correctness and support tuning without editing kernels.
 
 ### 4. Quantization Policy Architecture (Refactor)
 - **Unified Policy System:** Replaced fragmented `Quantization` enum logic with a unified `Arc<dyn MetalPolicy>` trait object system across all kernel stages (`VectorizedDotStage`, `TileLoad`, etc.).
@@ -65,7 +70,27 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 
 ## 🛠️ Technical Debt (Next Sprint Tasks)
 
-** None Currently ** 
+### 1) Typed Tensor Layouts (DX + Correctness)
+
+- **Problem:** Refactors/new kernels repeatedly trip over silent layout mismatches (head-major vs token-major, row-major vs col-major, `m` vs `m_cap`, alignment/contiguity). These failures are often “plausible” (no crash) but cause large downstream drift (e.g. prefill prompt not respected) and are hard to debug.
+- **Proposal:** Introduce *zero-cost* layout wrappers around `TensorArg` that encode invariants in the type system and centralize validation:
+  - `TokenMajor` vs `HeadMajor` (and an explicit adapter for “token-major metadata but head-major packed contents”).
+  - Shape-role views (e.g. `(B,M,DModel)`, `(H,M,D)`, KV cache `(H,capacity,D)`), plus row/col-major roles for GEMM-facing tensors.
+  - Explicit contiguity/alignment guarantees (e.g. last-dim contiguous, 16B-aligned) as constructors that fail-fast.
+  - Kernel entrypoints take typed views instead of raw `&TensorArg`, eliminating ad-hoc stride math in hot code.
+- **Testing:** Add targeted parity/regression tests for each adapter (especially the “metadata != contents” cases) so layout regressions are caught before they become inference drift.
+
+---
+
+### 2) FlashAttention (FA2 + Quantized KV Cache)
+
+- **Current state:** FA1-style attention is implemented for inference:
+  - Decode (M=1): fused kernel with streaming softmax + fused accumulation.
+  - Prefill (M>1): tiled prefill + Split‑K prefill for large KV.
+- **Next for FA2:** pipelined MMA / double-buffered KV staging (reduce stalls, increase utilization).
+- **Correctness/DX:** keep SDPA routing explicit and fail-fast; expand coverage with targeted parity tests for new variants/paths.
+- **Selector work:** auto-select per device + shape (kv_len, m) and expose env overrides for benchmarking.
+- **KV-cache quantization (proposal):** add a policy-driven quantized KV-cache format (e.g. int8 + per-block scales) consumable by FlashAttention tile loaders for bandwidth/memory wins, gated by device/heuristics and protected by parity/regression tests.
 
 ---
 

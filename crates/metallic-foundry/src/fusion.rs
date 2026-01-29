@@ -287,6 +287,10 @@ pub const THREAD_ARGS: &[&str] = &[
     "uint3 gid [[threadgroup_position_in_grid]]",
     "uint3 lid [[thread_position_in_threadgroup]]",
     "uint3 tptg [[threads_per_threadgroup]]",
+    // SIMD-group builtins: required for warp-/simdgroup-tiled kernels (e.g. FlashAttention decode).
+    // Avoid deriving these from `lid.x` since simdgroup mapping is an implementation detail.
+    "ushort __simd_group_id [[simdgroup_index_in_threadgroup]]",
+    "ushort __simd_lane_id [[thread_index_in_simdgroup]]",
 ];
 
 /// Generate a Metal kernel signature from METAL_ARGS and policy buffer_types().

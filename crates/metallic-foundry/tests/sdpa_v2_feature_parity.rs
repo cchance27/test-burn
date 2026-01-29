@@ -4,7 +4,7 @@ use metallic_context::{
 };
 use metallic_foundry::{
     self, Foundry, MetalError, metals::{
-        rope::RopeParamsResolved, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
+        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit}
 };
 use rand::{Rng, rng};
@@ -65,11 +65,9 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
     let q_data = generate_random_f16(batch * heads * q_len * head_dim);
     let k_data = generate_random_f16(batch * heads * kv_len * head_dim);
     let v_data = generate_random_f16(batch * heads * kv_len * head_dim);
-    // Context needs separate RoPE cache maybe?
-    // Or we can pre-rope inputs for simplicity if Context allows raw SDPA.
-    // Context::scaled_dot_product_attention assumes inputs are already ROPED usually?
-    // Let's assume passed Q and K are ROPED.
-    // So we don't need to involve RoPE implementation differences here, just SDPA core.
+    // This test isolates SDPA behavior (not RoPE).
+    // We use identity RoPE tables (cos=1, sin=0) so both implementations effectively see the same
+    // already-roped Q/K values without depending on RoPE kernel/caching behavior.
 
     // --- Foundry Setup (V2) ---
     let mut foundry = Foundry::new()?;
@@ -103,7 +101,7 @@ fn test_sdpa_v2_context_parity() -> Result<(), MetalError> {
     let v_strides = (v_f.strides()[0] as u32, v_f.strides()[1] as u32);
     let out_strides = (out_f.strides()[0] as u32, out_f.strides()[1] as u32);
 
-    let v2_step = FusedMhaStep::compile(
+    let v2_step = RopeFlashDecodeStep::compile(
         &mut foundry,
         &metallic_foundry::TensorArg::from_tensor(&q_f),
         &metallic_foundry::TensorArg::from_tensor(&k_f), // K is passed as-is

@@ -1,5 +1,7 @@
+pub mod attention;
 pub mod elemwise;
 pub mod embedding;
+pub mod flashattention;
 pub mod gemm;
 pub mod gemv;
 pub mod kv_cache_write;

@@ -84,8 +84,7 @@ impl RmsNorm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Kernel;
-    use crate::compound::CompoundKernel;
+    use crate::{Kernel, compound::CompoundKernel};
 
     #[test]
     fn test_rmsnorm_params_metal_struct() {

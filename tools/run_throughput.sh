@@ -103,6 +103,10 @@ run_benchmark() {
     local model="$2"
     local jsonl_path="metrics-throughput-${name}.jsonl"
     local bin_path="target/release/metallic_cli"
+    local foundry_per_kernel_profiling=0
+    if [[ "${ENABLE_PROFILING}" -eq 1 && "${ENGINE}" == "foundry" ]]; then
+        foundry_per_kernel_profiling=1
+    fi
     
     echo "== ${name} =="
 
@@ -129,6 +133,7 @@ run_benchmark() {
         # Run and capture stderr (where metrics are printed)
         local output
         output=$(METALLIC_ENABLE_PROFILING=${ENABLE_PROFILING} \
+          METALLIC_FOUNDRY_PER_KERNEL_PROFILING=${foundry_per_kernel_profiling} \
           METALLIC_PERF_OUTPUT=1 \
           METALLIC_RECORD_CB_GPU_TIMING=1 \
           METALLIC_METRICS_JSONL_PATH="${jsonl_path}" \
@@ -182,6 +187,12 @@ run_benchmark() {
     calculate_stats "End-to-End (tps)" ${e2e_tps[@]+"${e2e_tps[@]}"}
     calculate_stats "Total (s)" ${total_times[@]+"${total_times[@]}"}
     calculate_stats "Total (tps)" ${total_tps[@]+"${total_tps[@]}"}
+
+    if [[ "${ENABLE_PROFILING}" -eq 1 && "${ENGINE}" == "foundry" ]]; then
+        echo
+        echo "== Top GPU ops (from ${jsonl_path}) =="
+        bash ./tools/summarize_metrics_jsonl.sh "${jsonl_path}" 15 || true
+    fi
     echo
 }
 

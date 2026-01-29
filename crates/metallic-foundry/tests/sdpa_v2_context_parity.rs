@@ -1,6 +1,6 @@
 //! SDPA V2 vs Context RoPE+SDPA Parity Test
 //!
-//! Compares the V2 FusedMhaStep (RoPE+SDPA fused) against
+//! Compares the V2 RopeFlashDecodeStep (RoPE+SDPA fused) against
 //! Context's RoPE + SDPA composed operations.
 
 use half::f16;
@@ -11,7 +11,7 @@ use metallic_context::{
 };
 use metallic_foundry::{
     Foundry, MetalError, metals::{
-        rope::RopeParamsResolved, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
+        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F16 as F16Type}, types::TensorArg
 };
 use rand::{Rng, rng};
@@ -75,7 +75,7 @@ fn compare_tensors(a: &[f16], b: &[f16], name: &str, tolerance: f32) {
     );
 }
 
-/// Test FusedMhaStep (V2) vs Context's RoPE + SDPA composition
+/// Test RopeFlashDecodeStep (V2) vs Context's RoPE + SDPA composition
 #[test]
 #[serial]
 fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
@@ -98,11 +98,11 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
     let cos_data: Vec<f16> = vec![f16::ONE; kv_len * dim_half];
     let sin_data: Vec<f16> = vec![f16::ZERO; kv_len * dim_half];
 
-    // Pre-rope K for V2 (FusedMhaStep assumes K is already roped in KV cache)
+    // Pre-rope K for V2 (RopeFlashDecodeStep assumes K is already roped in KV cache)
     let k_roped_data = cpu_rope_k(&k_data, &cos_data, &sin_data, total_batch, kv_len, head_dim);
 
     // =========================================================================
-    // V2 FusedMhaStep (RoPE Q + SDPA with pre-roped K)
+    // V2 RopeFlashDecodeStep (RoPE Q + SDPA with pre-roped K)
     // =========================================================================
     let mut foundry = Foundry::new()?;
 
@@ -137,7 +137,7 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
     let v_strides = (v_v2.strides()[0] as u32, v_v2.strides()[1] as u32);
     let out_strides = (out_v2.strides()[0] as u32, out_v2.strides()[1] as u32);
 
-    let v2_step = FusedMhaStep::compile(
+    let v2_step = RopeFlashDecodeStep::compile(
         &mut foundry,
         &TensorArg::from_tensor(&q_v2),
         &TensorArg::from_tensor(&k_v2),
@@ -241,7 +241,7 @@ fn test_sdpa_v2_vs_context_rope_sdpa() -> Result<(), MetalError> {
     let res_ctx = out_ctx.try_to_vec().unwrap();
 
     // Compare V2 vs Context
-    compare_tensors(&res_v2, &res_ctx, "FusedMhaStep vs Context(RoPE+SDPA)", TOLERANCE);
+    compare_tensors(&res_v2, &res_ctx, "RopeFlashDecodeStep vs Context(RoPE+SDPA)", TOLERANCE);
 
     Ok(())
 }
@@ -267,7 +267,7 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
     // Pre-rope K for V2
     let k_roped_data = cpu_rope_k(&k_data, &cos_data, &sin_data, total_batch, kv_len, head_dim);
 
-    // V2 FusedMhaStep
+    // V2 RopeFlashDecodeStep
     let mut foundry = Foundry::new()?;
 
     let q_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::CopyFrom(&q_data))?;
@@ -281,7 +281,7 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
     let sin_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![kv_len, dim_half], TensorInit::CopyFrom(&sin_data))?;
     let out_v2 = FoundryTensor::<F16Type, Pooled>::new(&mut foundry, vec![batch, heads, q_len, head_dim], TensorInit::Uninitialized)?;
 
-    let v2_step = FusedMhaStep::compile(
+    let v2_step = RopeFlashDecodeStep::compile(
         &mut foundry,
         &TensorArg::from_tensor(&q_v2),
         &TensorArg::from_tensor(&k_v2),
@@ -369,7 +369,7 @@ fn test_sdpa_v2_vs_context_larger() -> Result<(), MetalError> {
     ctx.synchronize();
     let res_ctx = out_ctx.try_to_vec().unwrap();
 
-    compare_tensors(&res_v2, &res_ctx, "FusedMhaStep vs Context (14 heads, 256 kv)", TOLERANCE);
+    compare_tensors(&res_v2, &res_ctx, "RopeFlashDecodeStep vs Context (14 heads, 256 kv)", TOLERANCE);
 
     Ok(())
 }

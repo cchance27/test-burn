@@ -293,11 +293,11 @@ impl Foundry {
         self.dispatch_pipeline(&pipeline, kernel, config)
     }
 
-    // FIXME: why are we ever calling this instead of always wrapping a policy since all of our kernels require a policy dont they?
     /// Simplified dispatch using the kernel's built-in dispatch configuration.
     /// Requires the kernel to implement `dispatch_config()`.
     ///
-    /// Automatically applies policy wrapping if the kernel implements `WithPolicy`.
+    /// Note: this does not implicitly wrap kernels with a policy. Callers should pass the final
+    /// kernel value they intend to dispatch (including any policy wrappers).
     pub fn run<K: Kernel>(&mut self, kernel: &K) -> Result<(), MetalError> {
         let config = kernel.dispatch_config();
         self.dispatch(kernel, config)
@@ -351,12 +351,7 @@ impl Foundry {
         Ok(())
     }
 
-    pub fn upload_bytes(
-        &mut self,
-        dst_buffer: &crate::types::MetalBuffer,
-        dst_offset: usize,
-        data: &[u8],
-    ) -> Result<(), MetalError> {
+    pub fn upload_bytes(&mut self, dst_buffer: &crate::types::MetalBuffer, dst_offset: usize, data: &[u8]) -> Result<(), MetalError> {
         if data.is_empty() {
             return Ok(());
         }
@@ -450,11 +445,11 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
 
     // 1. Try Default Library (loading from Bundle/built output)
     let function_name = kernel.function_name();
-    if let Some(lib) = device.new_default_library() {
-        if let Some(func) = lib.new_function(function_name) {
-            let pipeline = device.new_compute_pipeline_state_with_function(&func)?;
-            return Ok(pipeline);
-        }
+    if let Some(lib) = device.new_default_library()
+        && let Some(func) = lib.new_function(function_name)
+    {
+        let pipeline = device.new_compute_pipeline_state_with_function(&func)?;
+        return Ok(pipeline);
     }
 
     // 2. Fallback to Source
@@ -546,7 +541,7 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
 
     process_lines(&mut full_source, &main_content, kernel.function_name());
 
-    if let Some(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR").ok() {
+    if let Ok(dump_dir) = std::env::var("METALLIC_DUMP_METAL_SOURCE_DIR") {
         let mut safe_name = function_name
             .chars()
             .map(|c| {

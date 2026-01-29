@@ -4,7 +4,7 @@
 //!
 //! Coverage:
 //! - F16 x F16 GEMM
-//! - F16 x Q8 GEMM (TODO: after F16 parity confirmed)
+//! - F16 x Q8 GEMM (quantized weights with scale bytes)
 //! - Various M,N,K shapes: small, prefill-relevant, unaligned
 //! - Transpose modes (NN, NT)
 
@@ -14,17 +14,17 @@ use metallic_context::{
 };
 use metallic_foundry::{
     Foundry, metals::{
-        gemm::step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}, mma::stages::TileConfig,
-        gemm::GemmV2Step,
-    }, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg,
-    spec::{DynamicValue, Ref, Step, TensorBindings},
+        gemm::{
+            GemmV2Step, step::{GemmParams, GemmV2Args, gemm_dispatch_config, get_gemm_kernel}
+        }, mma::stages::TileConfig
+    }, policy::{activation::Activation, f16::PolicyF16, q8::PolicyQ8}, spec::{DynamicValue, Ref, Step, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
 
-// ============================================================================ 
+// ============================================================================
 // Test Configuration
-// ============================================================================ 
+// ============================================================================
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TestQuantization {
@@ -57,9 +57,9 @@ impl Default for GemmTestConfig {
     }
 }
 
-// ============================================================================ 
+// ============================================================================
 // CPU Reference Implementation
-// ============================================================================ 
+// ============================================================================
 
 #[allow(clippy::too_many_arguments)]
 fn run_mlx_gemm_f16(
@@ -224,9 +224,9 @@ fn run_cpu_gemm_f16(
     output
 }
 
-// ============================================================================ 
+// ============================================================================
 // Test Runner
-// ============================================================================ 
+// ============================================================================
 
 fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     let mut foundry = Foundry::new().unwrap();
@@ -273,7 +273,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
 
     let output = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![cfg.m, cfg.n], TensorInit::Uninitialized).unwrap();
 
-    // ========== Run CPU Reference ========== 
+    // ========== Run CPU Reference ==========
     // For CPU ref with Q8, we use the original b_data which is F16.
     // However, to be extra fair, we should dequantize the Q8 back to F16.
     let cpu_b_data = if let Some(q8) = &b_quantized {
@@ -309,7 +309,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     };
     let cpu_output = run_cpu_gemm_f16(cfg.m, cfg.n, cfg.k, &a_data, &cpu_b_data, cfg.transpose_a, cfg.transpose_b);
 
-    // ========== Run V2 GEMM ========== 
+    // ========== Run V2 GEMM ==========
     let tile_config = cfg.tile_config.unwrap_or_else(|| TileConfig::auto_select(cfg.m, cfg.n));
     let params = GemmParams::simple(
         cfg.m as i32,
@@ -375,7 +375,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
 
     foundry.run(&kernel.bind_arc(args, dispatch)).unwrap();
 
-    // ========== Compare Results ========== 
+    // ========== Compare Results ==========
     let gpu_output = FoundryTensor::to_vec(&output, &foundry);
 
     let cpu_f32: Vec<f32> = cpu_output.iter().map(|x| x.to_f32()).collect();
@@ -392,7 +392,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         }
     }
 
-    // ========== Run MLX Reference ========== 
+    // ========== Run MLX Reference ==========
     let mlx_output = if let Some(q8) = &b_quantized {
         run_mlx_gemm_q8(&a_data, q8, cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b)
     } else {
@@ -468,9 +468,9 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     println!("✓ PASSED (CPU & MLX)");
 }
 
-// ============================================================================ 
+// ============================================================================
 // Basic Shape Tests - F16 x F16
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -505,9 +505,9 @@ fn test_gemm_v2_128x128x128() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Prefill-Relevant Shapes
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -545,9 +545,9 @@ fn test_gemm_v2_prefill_64_4864_896() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Transpose Tests
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -576,9 +576,9 @@ fn test_gemm_v2_prefill_32_896_896_nt() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Unaligned Shapes (tests edge handling)
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -603,9 +603,9 @@ fn test_gemm_v2_100x200x150() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Tile Config Tests
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -631,9 +631,9 @@ fn test_gemm_v2_128x128x128_skinny_n() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Qwen2.5 0.5B Specific Shapes
-// ============================================================================ 
+// ============================================================================
 // hidden_size=896, intermediate_size=4864, num_heads=14, head_dim=64
 
 #[test]
@@ -729,9 +729,9 @@ fn test_gemm_v2_qwen25_lm_head_m32() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Edge Cases - Very Small M (Decode-like)
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -778,9 +778,9 @@ fn test_gemm_v2_m8_896x896() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Edge Cases - Unaligned to Various Powers of 2
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -842,9 +842,9 @@ fn test_gemm_v2_unaligned_255x257x259() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Edge Cases - Extreme Aspect Ratios
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -894,9 +894,9 @@ fn test_gemm_v2_shallow_k_32x32x8() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Transpose Combinations with Qwen2.5 Shapes
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -935,9 +935,9 @@ fn test_gemm_v2_qwen25_mlp_down_nt_m32() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Power of 2 Shapes (Optimal alignment)
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -961,9 +961,9 @@ fn test_gemm_v2_pow2_512x512x512() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Larger Prefill Batch Sizes
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -1012,9 +1012,9 @@ fn test_gemm_v2_qwen25_mlp_up_q8() {
     });
 }
 
-// ============================================================================ 
+// ============================================================================
 // Regression Test: Runtime Policy Selection (No DSL Hints)
-// ============================================================================ 
+// ============================================================================
 
 #[test]
 #[serial]
@@ -1035,7 +1035,7 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
     let a_data: Vec<f16> = (0..a_rows * a_cols)
         .map(|_| f16::from_f32(rng.random_range(-1.0f32..1.0f32)))
         .collect();
-    
+
     let b_rows = n;
     let b_cols = k;
     let b_data: Vec<f16> = (0..b_rows * b_cols)
@@ -1043,21 +1043,13 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
         .collect();
 
     // Create A tensor (F16)
-    let a_tensor = FoundryTensor::<metallic_foundry::F16, Pooled>::new(
-        &mut foundry, 
-        vec![a_rows, a_cols], 
-        TensorInit::CopyFrom(&a_data)
-    ).unwrap();
+    let a_tensor =
+        FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![a_rows, a_cols], TensorInit::CopyFrom(&a_data)).unwrap();
 
     // Create B tensor (Q8)
     let ctx_f16 = Context::<metallic_context::F16Element>::new().unwrap();
     let (w, s) = quantize_q8(&b_data, n, k, transpose_b);
-    let q8_tensor = QuantizedQ8_0Tensor::from_split_bytes_in_context(
-        vec![n, k], 
-        &w, 
-        &s, 
-        &ctx_f16
-    ).unwrap();
+    let q8_tensor = QuantizedQ8_0Tensor::from_split_bytes_in_context(vec![n, k], &w, &s, &ctx_f16).unwrap();
 
     // Convert Q8 tensor parts to Foundry TensorArgs
     let b_weights_arg = TensorArg::from_buffer(
@@ -1074,11 +1066,7 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
     );
 
     // Output tensor
-    let d_tensor = FoundryTensor::<metallic_foundry::F16, Pooled>::new(
-        &mut foundry, 
-        vec![m, n], 
-        TensorInit::Uninitialized
-    ).unwrap();
+    let d_tensor = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![m, n], TensorInit::Uninitialized).unwrap();
 
     // Bindings
     let mut bindings = TensorBindings::new();
@@ -1140,5 +1128,9 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
     }
 
     println!("Max diff (Q8 vs CPU F16): {}", max_diff);
-    assert!(max_diff < 1.0, "Difference too high ({}), likely wrong kernel selected or Q8 corruption", max_diff);
+    assert!(
+        max_diff < 1.0,
+        "Difference too high ({}), likely wrong kernel selected or Q8 corruption",
+        max_diff
+    );
 }

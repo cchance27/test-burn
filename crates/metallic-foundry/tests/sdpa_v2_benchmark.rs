@@ -2,7 +2,7 @@ use std::time::Instant;
 
 use metallic_foundry::{
     Foundry, metals::{
-        rope::{Rope, RopeParamsResolved}, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
+        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::{Rope, RopeParamsResolved}
     }, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 
@@ -68,7 +68,7 @@ fn run_benchmark_case(foundry: &mut Foundry, batch: usize, heads: usize, kv_len:
     // Run once setup
     foundry.run(&rope_k_kernel).unwrap();
 
-    let v2_step = FusedMhaStep::compile(
+    let v2_step = RopeFlashDecodeStep::compile(
         foundry,
         &TensorArg::from_tensor(&q),
         &TensorArg::from_tensor(&k_roped),

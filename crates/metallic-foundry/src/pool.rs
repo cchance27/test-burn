@@ -1,4 +1,6 @@
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
+use std::sync::{
+    Arc, atomic::{AtomicU64, Ordering}
+};
 
 use crate::{error::MetalError, tensor::TensorElement, types::MetalResourceOptions};
 
@@ -26,7 +28,7 @@ pub struct MemoryPool {
     pub bytes_allocated: usize,
     pub allocation_count: usize,
     pub max_pool_size: usize,
-    
+
     // Safety
     current_generation: Arc<AtomicU64>,
 }

@@ -1,7 +1,9 @@
-use std::sync::{atomic::{AtomicU64, Ordering}, Arc};
-use crate::error::MetalError;
+use std::sync::{
+    Arc, atomic::{AtomicU64, Ordering}
+};
 
 use super::Foundry;
+use crate::error::MetalError;
 
 /// Marker trait for tensor storage states.
 /// This enforces the Typestate pattern for Tensor lifecycle management.
@@ -51,10 +53,10 @@ pub struct View {
 
 impl StorageState for View {
     fn check_validity(&self) -> Result<(), MetalError> {
-        if let Some((generation, ref pool_gen)) = self.guard {
-            if generation != pool_gen.load(Ordering::Relaxed) {
-                return Err(MetalError::UseAfterFree);
-            }
+        if let Some((generation, ref pool_gen)) = self.guard
+            && generation != pool_gen.load(Ordering::Relaxed)
+        {
+            return Err(MetalError::UseAfterFree);
         }
         Ok(())
     }

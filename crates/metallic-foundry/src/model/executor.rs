@@ -24,7 +24,8 @@ fn validate_quantized_bindings(symbols: &SymbolTable, fast: &FastBindings) -> Re
             continue;
         }
 
-        // Scales are treated as raw bytes (U8) for now.
+        // Quantization scale tensors are stored as raw bytes (`Dtype::U8`) and interpreted by the
+        // active quantization policy (e.g. Q8 block scales). We skip validating those as weights.
         if name.ends_with("_scales") {
             continue;
         }
@@ -328,6 +329,7 @@ impl CompiledModel {
     /// 1. Setting config globals (n_layers, d_model, etc.)
     /// 2. Materializing weight tensors from GGUF using logical name resolution
     /// 3. Allocating intermediate buffers for activations
+    /// 
     /// Prepare runtime bindings (weights + intermediates + KV caches) using a caller-provided context config.
     ///
     /// Prefer `prepare_bindings()` unless you need to explicitly cap/shape context behavior.
@@ -704,6 +706,7 @@ impl CompiledModel {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn ensure_rope_capacity(
         &self,
         bindings: &mut TensorBindings,
@@ -1338,14 +1341,24 @@ impl CompiledModel {
         // If we are already capturing (e.g. batched prompt processing), don't start a new capture.
         let nested_capture = foundry.is_capturing();
         let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
+        let debug_step_log = std::env::var("METALLIC_DEBUG_STEP_LOG").is_ok();
+        let debug_step_sync = std::env::var("METALLIC_DEBUG_COMPILED_STEP_SYNC").is_ok();
 
         // Always start capture, even in profiling mode (dispatch_pipeline handles per-kernel sync)
         if !nested_capture {
             foundry.start_capture()?;
         }
 
-        for step in &self.compiled_steps {
+        for (idx, step) in self.compiled_steps.iter().enumerate() {
+            if debug_step_log {
+                tracing::info!("Forward compiled step {:03}: {}", idx, step.name());
+            }
             step.execute(foundry, fast_bindings, bindings, &self.symbol_table)?;
+            if debug_step_sync {
+                // Flush after each compiled step to isolate GPU hangs.
+                // This is intentionally expensive and intended only for debugging.
+                foundry.restart_capture_sync()?;
+            }
         }
 
         // End capture only if we're not profiling per-kernel (profiling mode syncs per dispatch)
@@ -1796,14 +1809,14 @@ impl CompiledModel {
                         });
                     }
 
-                    // 2. Synchronize (Wait)
+                    // 2. Block until GPU work in this batch completes (command buffer completion).
                     let wait_start = std::time::Instant::now();
                     cmd.wait_until_completed();
                     let wait_duration = wait_start.elapsed();
 
                     if emit_host_metrics {
-                        // Emit CB Wait as GpuOpCompleted so it shows under Forward Step in TUI
-                        // Include batch_size in data so TUI can show "Xms for Y tokens"
+                        // Emit command-buffer completion time so it shows under Forward Step in the TUI.
+                        // Include `batch_size` so the UI can attribute wall time to tokens.
                         let mut cb_data = rustc_hash::FxHashMap::default();
                         cb_data.insert("batch_size".to_string(), pending_count.to_string());
                         metallic_instrumentation::record_metric_async!(metallic_instrumentation::MetricEvent::GpuOpCompleted {
@@ -1813,9 +1826,8 @@ impl CompiledModel {
                             data: Some(cb_data),
                         });
 
-                        // 3. Record Total Step Time (Dispatch + Wait) - PER TOKEN
-                        // logic: calculating from the start of the batch (batch_encode_start) ensures we capture
-                        // the entire wall-clock time for this step/batch.
+                        // 3. Record total forward-step wall time (dispatch + completion), reported per token.
+                        // Measuring from `batch_encode_start` captures the full wall-clock time for the batch.
                         if let Some(start) = batch_encode_start.take() {
                             let total_duration = start.elapsed();
 
@@ -1839,7 +1851,7 @@ impl CompiledModel {
                     // Profiling mode: per-kernel metrics already emitted in dispatch_pipeline()
                     // But we still need to track iteration_duration for tok/s in the footer
 
-                    // Synchronize any remaining work (shouldn't be much - dispatch_pipeline synced per kernel)
+                    // Synchronize any remaining work. In profiling mode, dispatch_pipeline already waits per kernel.
                     foundry.synchronize()?;
 
                     // Measure actual step duration for accurate tok/s

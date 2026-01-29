@@ -1,7 +1,7 @@
 use half::f16;
 use metallic_foundry::{
     Foundry, metals::{
-        rope::RopeParamsResolved, sdpa::{stages::SdpaParamsResolved, step::FusedMhaStep}
+        flashattention::{stages::SdpaParamsResolved, step::RopeFlashDecodeStep}, rope::RopeParamsResolved
     }, storage::Pooled, tensor::{Tensor, TensorInit, dtypes::F16}, types::TensorArg
 };
 use rand::Rng;
@@ -190,7 +190,7 @@ fn run_parity_test_case(batch: usize, heads: usize, kv_len: usize, head_dim: usi
     let v_strides = (v.strides()[0] as u32, v.strides()[1] as u32);
     let out_strides = (output_v2.strides()[0] as u32, output_v2.strides()[1] as u32);
 
-    let v2_step = FusedMhaStep::compile(
+    let v2_step = RopeFlashDecodeStep::compile(
         &mut foundry,
         &TensorArg::from_tensor(&q),
         &TensorArg::from_tensor(&k),
