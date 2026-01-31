@@ -13,11 +13,11 @@ pub(crate) struct SetGlobalsOp {
 }
 
 impl SetGlobalsOp {
-    pub(crate) fn new(model_id: Option<String>, globals: FxHashMap<String, Param<usize>>, apply_derived_globals: bool) -> Self {
+    pub(crate) fn new(spec: crate::workflow::spec::SetGlobalsSpec) -> Self {
         Self {
-            model_id,
-            globals,
-            apply_derived_globals,
+            model_id: spec.model_id,
+            globals: spec.globals,
+            apply_derived_globals: spec.apply_derived_globals,
         }
     }
 }

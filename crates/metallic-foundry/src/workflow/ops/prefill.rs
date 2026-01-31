@@ -18,27 +18,17 @@ pub(crate) struct PrefillOp {
 }
 
 impl PrefillOp {
-    pub(crate) fn new(
-        model_id: Option<String>,
-        input: String,
-        input_ids_binding: Option<String>,
-        logits_binding: Option<String>,
-        position_offset_key: Option<String>,
-        m_key: Option<String>,
-        seq_len_key: Option<String>,
-        apply_derived_globals: bool,
-        description: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(spec: crate::workflow::spec::PrefillSpec) -> Self {
         Self {
-            model_id,
-            input,
-            input_ids_binding: input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
-            logits_binding: logits_binding.unwrap_or_else(|| "logits".to_string()),
-            position_offset_key: position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
-            m_key: m_key.unwrap_or_else(|| "m".to_string()),
-            seq_len_key: seq_len_key.unwrap_or_else(|| "seq_len".to_string()),
-            apply_derived_globals,
-            description,
+            model_id: spec.model_id,
+            input: spec.input,
+            input_ids_binding: spec.input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
+            logits_binding: spec.logits_binding.unwrap_or_else(|| "logits".to_string()),
+            position_offset_key: spec.position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
+            m_key: spec.m_key.unwrap_or_else(|| "m".to_string()),
+            seq_len_key: spec.seq_len_key.unwrap_or_else(|| "seq_len".to_string()),
+            apply_derived_globals: spec.apply_derived_globals,
+            description: spec.description,
         }
     }
 

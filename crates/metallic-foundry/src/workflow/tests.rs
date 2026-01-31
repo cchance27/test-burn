@@ -13,13 +13,11 @@ fn workflow_compile_fails_on_mismatched_logits_binding() {
     let json = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflows/text_generation.json"));
     let mut spec: WorkflowSpec = serde_json::from_str(json).expect("workflow JSON must parse");
 
-    // Mutate graph_forward logits_binding via the legacy "output" field semantics.
+    // Mutate graph_forward logits_binding via params JSON.
     for step in &mut spec.steps {
-        if let super::WorkflowStepSpec::Loop { stages, .. } = step {
-            for stage in stages {
-                if let super::spec::WorkflowStageSpec::GraphForward { logits_binding, .. } = stage {
-                    *logits_binding = "not_logits".to_string();
-                }
+        if step.op == "graph_forward" {
+            if let serde_json::Value::Object(map) = &mut step.params {
+                map.insert("logits_binding".to_string(), serde_json::Value::String("not_logits".to_string()));
             }
         }
     }

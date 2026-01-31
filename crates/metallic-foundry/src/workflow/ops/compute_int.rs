@@ -10,8 +10,11 @@ pub(crate) struct ComputeIntOp {
 }
 
 impl ComputeIntOp {
-    pub(crate) fn new(output_var: String, expr: String) -> Self {
-        Self { output_var, expr }
+    pub(crate) fn new(spec: crate::workflow::spec::ComputeIntSpec) -> Self {
+        Self {
+            output_var: spec.output,
+            expr: spec.expr,
+        }
     }
 }
 

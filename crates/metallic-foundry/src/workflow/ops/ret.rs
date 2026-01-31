@@ -9,8 +9,8 @@ pub(crate) struct ReturnOp {
 }
 
 impl ReturnOp {
-    pub(crate) fn new(output: Option<String>) -> Self {
-        Self { output }
+    pub(crate) fn new(spec: crate::workflow::spec::ReturnSpec) -> Self {
+        Self { output: spec.output }
     }
 }
 

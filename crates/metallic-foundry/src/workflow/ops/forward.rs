@@ -17,21 +17,14 @@ pub(crate) struct ForwardOp {
 }
 
 impl ForwardOp {
-    pub(crate) fn new(
-        model_id: Option<String>,
-        inputs: FxHashMap<String, String>,
-        outputs: FxHashMap<String, String>,
-        update_globals: FxHashMap<String, Param<usize>>,
-        apply_derived_globals: bool,
-        description: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(spec: crate::workflow::spec::ForwardSpec) -> Self {
         Self {
-            model_id,
-            inputs,
-            outputs,
-            update_globals,
-            apply_derived_globals,
-            description,
+            model_id: spec.model_id,
+            inputs: spec.inputs,
+            outputs: spec.outputs,
+            update_globals: spec.update_globals,
+            apply_derived_globals: spec.apply_derived_globals,
+            description: spec.description,
         }
     }
 }

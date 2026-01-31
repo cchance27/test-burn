@@ -160,135 +160,158 @@ pub struct WorkflowInputSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum WorkflowStepSpec {
-    Prefill {
-        #[serde(default)]
-        model_id: Option<String>,
-        input: String,
-        /// Name of the model binding used for token ids (defaults to "input_ids").
-        #[serde(default)]
-        input_ids_binding: Option<String>,
-        #[serde(default)]
-        logits_binding: Option<String>,
-        #[serde(default)]
-        position_offset_key: Option<String>,
-        #[serde(default)]
-        m_key: Option<String>,
-        #[serde(default)]
-        seq_len_key: Option<String>,
-        #[serde(default = "default_true")]
-        apply_derived_globals: bool,
-        #[serde(default)]
-        description: Option<String>,
-    },
-    Forward {
-        #[serde(default)]
-        model_id: Option<String>,
-        /// Bindings from workflow variables to model inputs.
-        #[serde(default)]
-        inputs: FxHashMap<String, String>,
-        /// Extraction from model outputs to workflow variables.
-        #[serde(default)]
-        outputs: FxHashMap<String, String>,
-        /// Update model globals before forward pass.
-        #[serde(default)]
-        update_globals: FxHashMap<String, Param<usize>>,
-        #[serde(default = "default_true")]
-        apply_derived_globals: bool,
-        #[serde(default)]
-        description: Option<String>,
-    },
-    Sample {
-        /// Input logits variable (Tensor).
-        logits: String,
-        /// Output variable for sampled token (u32).
-        output: String,
-        #[serde(default)]
-        temperature: Param<f32>,
-        #[serde(default)]
-        top_k: Param<u32>,
-        #[serde(default)]
-        top_p: Param<f32>,
-        #[serde(default)]
-        seed: Param<u32>,
-    },
-    Tokenize {
-        #[serde(default)]
-        model_id: Option<String>,
-        /// Input text variable.
-        input: String,
-        /// Output tokens variable (TokensU32).
-        output: String,
-    },
-    Detokenize {
-        #[serde(default)]
-        model_id: Option<String>,
-        /// Input tokens variable (TokensU32 or u32).
-        input: String,
-        /// Output text variable.
-        output: String,
-    },
+pub struct PrefillSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    pub input: String,
+    /// Name of the model binding used for token ids (defaults to "input_ids").
+    #[serde(default)]
+    pub input_ids_binding: Option<String>,
+    #[serde(default)]
+    pub logits_binding: Option<String>,
+    #[serde(default)]
+    pub position_offset_key: Option<String>,
+    #[serde(default)]
+    pub m_key: Option<String>,
+    #[serde(default)]
+    pub seq_len_key: Option<String>,
+    #[serde(default = "default_true")]
+    pub apply_derived_globals: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
 
-    SetGlobals {
-        #[serde(default)]
-        model_id: Option<String>,
-        globals: FxHashMap<String, Param<usize>>,
-        #[serde(default = "default_true")]
-        apply_derived_globals: bool,
-    },
-    Synchronize,
-    Return {
-        #[serde(default)]
-        output: Option<String>,
-    },
-    /// Arbitrary integer math for workflow variables.
-    ComputeInt {
-        /// Destination workflow variable.
-        output: String,
-        /// Integer expression using workflow variables (e.g. "{pos} + 1").
-        expr: String,
-    },
-    If {
-        condition: String,
-        then: Vec<WorkflowStepSpec>,
-        #[serde(default)]
-        else_: Vec<WorkflowStepSpec>,
-    },
-    While {
-        condition: String,
-        #[serde(default)]
-        max_iterations: Option<Param<usize>>,
-        body: Vec<WorkflowStepSpec>,
-    },
-    Break,
-    Continue,
-    CheckEos {
-        input: String,
-        output: String,
-        #[serde(default)]
-        eos_token: Param<u32>,
-    },
-    AppendToken {
-        input: String,
-        output: String,
-    },
-    GraphForward {
-        #[serde(default)]
-        model_id: Option<String>,
-        token_var: String,
-        #[serde(default)]
-        input_ids_binding: Option<String>,
-        logits_binding: String,
-        #[serde(default)]
-        position_offset_key: Option<String>,
-        #[serde(default)]
-        position: Option<Param<usize>>,
-        #[serde(default = "default_true")]
-        apply_derived_globals: bool,
-        #[serde(default)]
-        description: Option<String>,
-    },
+#[derive(Debug, Clone, Deserialize)]
+pub struct ForwardSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Bindings from workflow variables to model inputs.
+    #[serde(default)]
+    pub inputs: FxHashMap<String, String>,
+    /// Extraction from model outputs to workflow variables.
+    #[serde(default)]
+    pub outputs: FxHashMap<String, String>,
+    /// Update model globals before forward pass.
+    #[serde(default)]
+    pub update_globals: FxHashMap<String, Param<usize>>,
+    #[serde(default = "default_true")]
+    pub apply_derived_globals: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SampleSpec {
+    /// Input logits variable (Tensor).
+    pub logits: String,
+    /// Output variable for sampled token (u32).
+    pub output: String,
+    #[serde(default)]
+    pub temperature: Param<f32>,
+    #[serde(default)]
+    pub top_k: Param<u32>,
+    #[serde(default)]
+    pub top_p: Param<f32>,
+    #[serde(default)]
+    pub seed: Param<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TokenizeSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Input text variable.
+    pub input: String,
+    /// Output tokens variable (TokensU32).
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DetokenizeSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Input tokens variable (TokensU32 or u32).
+    pub input: String,
+    /// Output text variable.
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SetGlobalsSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    pub globals: FxHashMap<String, Param<usize>>,
+    #[serde(default = "default_true")]
+    pub apply_derived_globals: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ReturnSpec {
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ComputeIntSpec {
+    /// Destination workflow variable.
+    pub output: String,
+    /// Integer expression using workflow variables (e.g. "{pos} + 1").
+    pub expr: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct IfSpec {
+    pub condition: String,
+    pub then: Vec<WorkflowStepSpec>,
+    #[serde(default)]
+    pub else_: Vec<WorkflowStepSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WhileSpec {
+    pub condition: String,
+    #[serde(default)]
+    pub max_iterations: Option<Param<usize>>,
+    pub body: Vec<WorkflowStepSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CheckEosSpec {
+    pub input: String,
+    pub output: String,
+    #[serde(default)]
+    pub eos_token: Param<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppendTokenSpec {
+    pub input: String,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GraphForwardSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    pub token_var: String,
+    #[serde(default)]
+    pub input_ids_binding: Option<String>,
+    pub logits_binding: String,
+    #[serde(default)]
+    pub position_offset_key: Option<String>,
+    #[serde(default)]
+    pub position: Option<Param<usize>>,
+    #[serde(default = "default_true")]
+    pub apply_derived_globals: bool,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowStepSpec {
+    pub op: String,
+    #[serde(flatten)]
+    pub params: serde_json::Value,
 }
 
 fn default_true() -> bool {

@@ -11,8 +11,12 @@ pub(crate) struct CheckEosOp {
 }
 
 impl CheckEosOp {
-    pub(crate) fn new(input: String, output: String, eos_token: Param<u32>) -> Self {
-        Self { input, output, eos_token }
+    pub(crate) fn new(spec: crate::workflow::spec::CheckEosSpec) -> Self {
+        Self {
+            input: spec.input,
+            output: spec.output,
+            eos_token: spec.eos_token,
+        }
     }
 }
 

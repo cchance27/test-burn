@@ -14,21 +14,14 @@ pub(crate) struct SampleOp {
 }
 
 impl SampleOp {
-    pub(crate) fn new(
-        logits_var: String,
-        output_var: String,
-        temperature: Param<f32>,
-        top_k: Param<u32>,
-        top_p: Param<f32>,
-        seed: Param<u32>,
-    ) -> Self {
+    pub(crate) fn new(spec: crate::workflow::spec::SampleSpec) -> Self {
         Self {
-            logits_var,
-            output_var,
-            temperature,
-            top_k,
-            top_p,
-            seed,
+            logits_var: spec.logits,
+            output_var: spec.output,
+            temperature: spec.temperature,
+            top_k: spec.top_k,
+            top_p: spec.top_p,
+            seed: spec.seed,
         }
     }
 }

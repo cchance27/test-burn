@@ -10,8 +10,11 @@ pub(crate) struct AppendTokenOp {
 }
 
 impl AppendTokenOp {
-    pub(crate) fn new(input: String, output: String) -> Self {
-        Self { input, output }
+    pub(crate) fn new(spec: crate::workflow::spec::AppendTokenSpec) -> Self {
+        Self {
+            input: spec.input,
+            output: spec.output,
+        }
     }
 }
 

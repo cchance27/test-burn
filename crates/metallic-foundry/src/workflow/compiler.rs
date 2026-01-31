@@ -1,3 +1,8 @@
+use std::sync::{OnceLock, RwLock};
+
+use rustc_hash::FxHashMap;
+use serde::de::DeserializeOwned;
+
 use super::{
     WorkflowSpec, WorkflowStepSpec, ops::{
         AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, ForwardOp, GraphForwardOp, IfOp, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileOp, WorkflowOp
@@ -9,142 +14,100 @@ pub(crate) struct CompiledWorkflow {
     pub(crate) ops: Vec<Box<dyn WorkflowOp>>,
 }
 
+/// A builder function for creating a `WorkflowOp` from a JSON value.
+pub type OpBuilder = Box<dyn Fn(serde_json::Value) -> Result<Box<dyn WorkflowOp>, MetalError> + Send + Sync>;
+
+/// A global registry for workflow operations.
+/// Usage: `REGISTRY.get().unwrap().read().unwrap().get("op_name")`
+fn get_registry() -> &'static RwLock<FxHashMap<String, OpBuilder>> {
+    static REGISTRY: OnceLock<RwLock<FxHashMap<String, OpBuilder>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| {
+        let mut m = FxHashMap::default();
+        initialize_standard_ops(&mut m);
+        RwLock::new(m)
+    })
+}
+
+/// Registers a new operation into the global registry.
+#[allow(dead_code)]
+pub fn register_op<F>(name: impl Into<String>, builder: F)
+where
+    F: Fn(serde_json::Value) -> Result<Box<dyn WorkflowOp>, MetalError> + Send + Sync + 'static,
+{
+    let registry = get_registry();
+    let mut write_guard = registry.write().unwrap();
+    write_guard.insert(name.into(), Box::new(builder));
+}
+
+/// Helper function to create a builder for a standard operation that takes a `Spec` struct.
+fn make_std_builder<S, O, C>(ctor: C) -> OpBuilder
+where
+    S: DeserializeOwned,
+    O: WorkflowOp + 'static,
+    C: Fn(S) -> O + Send + Sync + 'static,
+{
+    Box::new(move |v| {
+        let spec: S = serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid spec for op: {}", e)))?;
+        Ok(Box::new(ctor(spec)))
+    })
+}
+
+fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
+    // Standard leaf operations
+    m.insert("prefill".to_string(), make_std_builder(PrefillOp::new));
+    m.insert("forward".to_string(), make_std_builder(ForwardOp::new));
+    m.insert("sample".to_string(), make_std_builder(SampleOp::new));
+    m.insert("tokenize".to_string(), make_std_builder(TokenizeOp::new));
+    m.insert("detokenize".to_string(), make_std_builder(DetokenizeOp::new));
+    m.insert("set_globals".to_string(), make_std_builder(SetGlobalsOp::new));
+    m.insert("return".to_string(), make_std_builder(ReturnOp::new));
+    m.insert("compute_int".to_string(), make_std_builder(ComputeIntOp::new));
+    m.insert("check_eos".to_string(), make_std_builder(CheckEosOp::new));
+    m.insert("append_token".to_string(), make_std_builder(AppendTokenOp::new));
+    m.insert("graph_forward".to_string(), make_std_builder(GraphForwardOp::new));
+
+    // Unit operations
+    m.insert("synchronize".to_string(), Box::new(|_| Ok(Box::new(SyncOp))));
+    m.insert("break".to_string(), Box::new(|_| Ok(Box::new(BreakOp))));
+    m.insert("continue".to_string(), Box::new(|_| Ok(Box::new(ContinueOp))));
+
+    // Recursive operations need manual implementation to access compile_steps
+    m.insert(
+        "if".to_string(),
+        Box::new(|v| {
+            let spec: super::spec::IfSpec =
+                serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid if spec: {}", e)))?;
+            Ok(Box::new(IfOp::new(
+                spec.condition,
+                compile_steps(&spec.then)?,
+                compile_steps(&spec.else_)?,
+            )))
+        }),
+    );
+
+    m.insert(
+        "while".to_string(),
+        Box::new(|v| {
+            let spec: super::spec::WhileSpec =
+                serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid while spec: {}", e)))?;
+            Ok(Box::new(WhileOp::new(
+                spec.condition,
+                spec.max_iterations,
+                compile_steps(&spec.body)?,
+            )))
+        }),
+    );
+}
+
 fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<Box<dyn WorkflowOp>>, MetalError> {
     let mut ops: Vec<Box<dyn WorkflowOp>> = Vec::with_capacity(steps.len());
+    let registry = get_registry().read().unwrap();
 
     for step in steps {
-        match step {
-            WorkflowStepSpec::Prefill {
-                model_id,
-                input,
-                input_ids_binding,
-                logits_binding,
-                position_offset_key,
-                m_key,
-                seq_len_key,
-                apply_derived_globals,
-                description,
-            } => {
-                ops.push(Box::new(PrefillOp::new(
-                    model_id.clone(),
-                    input.clone(),
-                    input_ids_binding.clone(),
-                    logits_binding.clone(),
-                    position_offset_key.clone(),
-                    m_key.clone(),
-                    seq_len_key.clone(),
-                    *apply_derived_globals,
-                    description.clone(),
-                )));
-            }
-
-            WorkflowStepSpec::SetGlobals {
-                model_id,
-                globals,
-                apply_derived_globals,
-            } => {
-                ops.push(Box::new(SetGlobalsOp::new(
-                    model_id.clone(),
-                    globals.clone(),
-                    *apply_derived_globals,
-                )));
-            }
-            WorkflowStepSpec::Synchronize => {
-                ops.push(Box::new(SyncOp));
-            }
-            WorkflowStepSpec::Return { output } => {
-                ops.push(Box::new(ReturnOp::new(output.clone())));
-            }
-            WorkflowStepSpec::Forward {
-                model_id,
-                inputs,
-                outputs,
-                update_globals,
-                apply_derived_globals,
-                description,
-            } => {
-                ops.push(Box::new(ForwardOp::new(
-                    model_id.clone(),
-                    inputs.clone(),
-                    outputs.clone(),
-                    update_globals.clone(),
-                    *apply_derived_globals,
-                    description.clone(),
-                )));
-            }
-            WorkflowStepSpec::Sample {
-                logits,
-                output,
-                temperature,
-                top_k,
-                top_p,
-                seed,
-            } => {
-                ops.push(Box::new(SampleOp::new(
-                    logits.clone(),
-                    output.clone(),
-                    temperature.clone(),
-                    top_k.clone(),
-                    top_p.clone(),
-                    seed.clone(),
-                )));
-            }
-            WorkflowStepSpec::Tokenize { model_id, input, output } => {
-                ops.push(Box::new(TokenizeOp::new(model_id.clone(), input.clone(), output.clone())));
-            }
-            WorkflowStepSpec::Detokenize { model_id, input, output } => {
-                ops.push(Box::new(DetokenizeOp::new(model_id.clone(), input.clone(), output.clone())));
-            }
-            WorkflowStepSpec::ComputeInt { output, expr } => {
-                ops.push(Box::new(ComputeIntOp::new(output.clone(), expr.clone())));
-            }
-            WorkflowStepSpec::If { condition, then, else_ } => {
-                ops.push(Box::new(IfOp::new(condition.clone(), compile_steps(then)?, compile_steps(else_)?)));
-            }
-            WorkflowStepSpec::While {
-                condition,
-                max_iterations,
-                body,
-            } => {
-                ops.push(Box::new(WhileOp::new(
-                    condition.clone(),
-                    max_iterations.clone(),
-                    compile_steps(body)?,
-                )));
-            }
-            WorkflowStepSpec::Break => {
-                ops.push(Box::new(BreakOp));
-            }
-            WorkflowStepSpec::Continue => {
-                ops.push(Box::new(ContinueOp));
-            }
-            WorkflowStepSpec::CheckEos { input, output, eos_token } => {
-                ops.push(Box::new(CheckEosOp::new(input.clone(), output.clone(), eos_token.clone())));
-            }
-            WorkflowStepSpec::AppendToken { input, output } => {
-                ops.push(Box::new(AppendTokenOp::new(input.clone(), output.clone())));
-            }
-            WorkflowStepSpec::GraphForward {
-                model_id,
-                token_var,
-                input_ids_binding,
-                logits_binding,
-                position_offset_key,
-                position,
-                apply_derived_globals,
-                description,
-            } => {
-                ops.push(Box::new(GraphForwardOp::new(
-                    model_id.clone(),
-                    token_var.clone(),
-                    input_ids_binding.clone(),
-                    logits_binding.clone(),
-                    position_offset_key.clone(),
-                    position.clone(),
-                    *apply_derived_globals,
-                    description.clone(),
-                )));
-            }
+        if let Some(builder) = registry.get(step.op.as_str()) {
+            ops.push(builder(step.params.clone())?);
+        } else {
+            return Err(MetalError::InvalidOperation(format!("Unknown workflow op: {}", step.op)));
         }
     }
 

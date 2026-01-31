@@ -13,11 +13,11 @@ pub(crate) struct DetokenizeOp {
 }
 
 impl DetokenizeOp {
-    pub(crate) fn new(model_id: Option<String>, input_var: String, output_var: String) -> Self {
+    pub(crate) fn new(spec: crate::workflow::spec::DetokenizeSpec) -> Self {
         Self {
-            model_id,
-            input_var,
-            output_var,
+            model_id: spec.model_id,
+            input_var: spec.input,
+            output_var: spec.output,
         }
     }
 }

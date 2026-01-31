@@ -17,25 +17,16 @@ pub(crate) struct GraphForwardOp {
 }
 
 impl GraphForwardOp {
-    pub(crate) fn new(
-        model_id: Option<String>,
-        token_var: String,
-        input_ids_binding: Option<String>,
-        logits_binding: String,
-        position_offset_key: Option<String>,
-        position: Option<Param<usize>>,
-        apply_derived_globals: bool,
-        description: Option<String>,
-    ) -> Self {
+    pub(crate) fn new(spec: crate::workflow::spec::GraphForwardSpec) -> Self {
         Self {
-            model_id,
-            token_var,
-            input_ids_binding: input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
-            logits_binding,
-            position_offset_key: position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
-            position,
-            apply_derived_globals,
-            description,
+            model_id: spec.model_id,
+            token_var: spec.token_var,
+            input_ids_binding: spec.input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
+            logits_binding: spec.logits_binding,
+            position_offset_key: spec.position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
+            position: spec.position,
+            apply_derived_globals: spec.apply_derived_globals,
+            description: spec.description,
         }
     }
 }
