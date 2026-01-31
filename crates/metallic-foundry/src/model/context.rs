@@ -108,7 +108,7 @@ impl ContextConfig {
             .and_then(|v| v.trim().parse::<usize>().ok());
 
         let requested_cap = override_len.or(env_cap).filter(|v| *v > 0);
-        let model_max = (arch.max_seq_len > 0).then_some(arch.max_seq_len);
+        let model_max: Option<usize> = (arch.max_seq_len() > 0).then_some(arch.max_seq_len());
 
         let max_len = match (model_max, requested_cap) {
             (Some(model), Some(cap)) => model.min(cap),
@@ -166,9 +166,9 @@ impl ContextConfig {
         // K: d_model f16 + V: d_model f16 => 2 * d_model * 2 bytes = 4*d_model bytes per layer.
         // Total: n_layers * 4*d_model.
         let per_token_bytes = arch
-            .d_model
+            .d_model()
             .checked_mul(4)
-            .and_then(|v| v.checked_mul(arch.n_layers))
+            .and_then(|v| v.checked_mul(arch.n_layers()))
             .unwrap_or(usize::MAX);
 
         if per_token_bytes == 0 || budget_bytes == 0 {
@@ -212,10 +212,10 @@ impl ContextConfig {
 
     /// Estimate the memory required for the KV cache.
     pub fn estimate_kv_memory(arch: &Architecture, context_len: usize) -> MemoryEstimate {
-        let head_dim = arch.d_model / arch.n_heads;
+        let head_dim = arch.d_model() / arch.n_heads();
         // 2 (K+V) * n_layers * n_heads * context_len * head_dim * 2 (F16 bytes)
-        let per_layer_bytes = 2 * arch.n_heads * context_len * head_dim * 2;
-        let total = per_layer_bytes * arch.n_layers;
+        let per_layer_bytes = 2 * arch.n_heads() * context_len * head_dim * 2;
+        let total = per_layer_bytes * arch.n_layers();
         MemoryEstimate {
             kv_cache_bytes: total,
             per_layer_bytes,
@@ -243,19 +243,23 @@ impl ContextConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::Architecture;
+    use crate::spec::{Architecture, MetadataValue};
 
     fn mock_arch(max_seq_len: usize) -> Architecture {
+        use crate::spec::MetadataValue;
+        let mut params = rustc_hash::FxHashMap::default();
+        params.insert("d_model".to_string(), MetadataValue::USize(512));
+        params.insert("n_heads".to_string(), MetadataValue::USize(8));
+        params.insert("n_kv_heads".to_string(), MetadataValue::USize(2));
+        params.insert("n_layers".to_string(), MetadataValue::USize(4));
+        params.insert("ff_dim".to_string(), MetadataValue::USize(2048));
+        params.insert("vocab_size".to_string(), MetadataValue::USize(1000));
+        params.insert("max_seq_len".to_string(), MetadataValue::USize(max_seq_len));
+        params.insert("rope_base".to_string(), MetadataValue::F32(10000.0));
+        params.insert("rms_eps".to_string(), MetadataValue::F32(1e-6));
+
         Architecture {
-            d_model: 512,
-            n_heads: 8,
-            n_kv_heads: 2,
-            n_layers: 4,
-            ff_dim: 2048,
-            vocab_size: 1000,
-            max_seq_len,
-            rope_base: 10000.0,
-            rms_eps: 1e-6,
+            params,
             tensor_names: Default::default(),
             metadata_keys: Default::default(),
             prepare: Default::default(),

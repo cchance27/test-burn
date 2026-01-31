@@ -39,7 +39,7 @@ pub struct TensorBindings {
     /// Global variables (e.g. config values like "n_layers")
     globals: FxHashMap<String, String>,
     /// Integer globals for fast lookup without String allocation/parsing
-    int_globals: FxHashMap<&'static str, usize>,
+    int_globals: FxHashMap<std::sync::Arc<str>, usize>,
 }
 
 impl std::fmt::Debug for TensorBindings {
@@ -126,8 +126,8 @@ impl TensorBindings {
     }
 
     /// Set an integer global for fast lookup (no String allocation).
-    pub fn set_int_global(&mut self, key: &'static str, value: usize) {
-        self.int_globals.insert(key, value);
+    pub fn set_int_global(&mut self, key: &str, value: usize) {
+        self.int_globals.insert(std::sync::Arc::from(key), value);
     }
 
     /// Get an integer global directly (no String parsing).

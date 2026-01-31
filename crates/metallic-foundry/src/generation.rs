@@ -5,7 +5,7 @@ use std::{
 use metallic_cli_helpers::app_event::AppEvent;
 use rustc_hash::FxHashMap;
 
-use crate::{Tokenizer, error::MetalError};
+use crate::{BPETokenizer, error::MetalError};
 
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
@@ -55,7 +55,7 @@ pub fn generate_streaming(
 pub fn generate_streaming_from_tokens(
     foundry: &mut crate::Foundry,
     model: &crate::model::CompiledModel,
-    tokenizer: &Tokenizer,
+    tokenizer: &BPETokenizer,
     prompt_tokens: &[u32],
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
@@ -79,19 +79,18 @@ pub fn generate_streaming_from_tokens(
 pub fn generate_streaming_from_tokens_with_workflow(
     foundry: &mut crate::Foundry,
     models: &FxHashMap<String, &crate::model::CompiledModel>,
-    tokenizer: &Tokenizer,
+    tokenizer: &BPETokenizer,
     prompt_tokens: &[u32],
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
     workflow: crate::workflow::WorkflowSpec,
 ) -> Result<(), MetalError> {
     let generation_start = Instant::now();
-    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
 
     let mut decode_scratch = Vec::new();
     let mut decoded_chunk = String::new();
 
-    let callback =
+    let mut callback =
         |token_id: u32, prefill_duration: Duration, setup_duration: Duration, iteration: Option<Duration>| -> Result<bool, MetalError> {
             if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
                 && tx
@@ -120,13 +119,15 @@ pub fn generate_streaming_from_tokens_with_workflow(
     inputs.insert("temperature".to_string(), crate::workflow::Value::F32(cfg.temperature));
     inputs.insert("top_k".to_string(), crate::workflow::Value::U32(cfg.top_k as u32));
     inputs.insert("top_p".to_string(), crate::workflow::Value::F32(cfg.top_p));
+
+    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
     inputs.insert("eos_token".to_string(), crate::workflow::Value::U32(eos));
     inputs.insert(
         "seed".to_string(),
         crate::workflow::Value::U32(cfg.seed.unwrap_or_else(rand::random)),
     );
 
-    let _outputs = runner.run_streaming(&wf_cfg, inputs, callback)?;
+    let _outputs = runner.run_streaming(&wf_cfg.workflow, inputs, &mut callback)?;
 
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });

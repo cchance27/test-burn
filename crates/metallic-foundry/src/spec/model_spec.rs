@@ -87,33 +87,9 @@ pub struct LayerTensorNames {
 /// Architecture configuration and execution graph.
 #[derive(Debug, Deserialize)]
 pub struct Architecture {
-    /// Hidden dimension size
-    #[serde(default)]
-    pub d_model: usize,
-    /// Number of attention heads
-    #[serde(default)]
-    pub n_heads: usize,
-    /// Number of key-value heads (for GQA)
-    #[serde(default)]
-    pub n_kv_heads: usize,
-    /// Number of transformer layers
-    #[serde(default)]
-    pub n_layers: usize,
-    /// FFN intermediate dimension
-    #[serde(default)]
-    pub ff_dim: usize,
-    /// Vocabulary size
-    #[serde(default)]
-    pub vocab_size: usize,
-    /// Maximum sequence length
-    #[serde(default)]
-    pub max_seq_len: usize,
-    /// RoPE base frequency
-    #[serde(default)]
-    pub rope_base: f32,
-    /// RMSNorm epsilon
-    #[serde(default)]
-    pub rms_eps: f32,
+    /// Generic parameters inferred from GGUF metadata or provided in the DSL.
+    #[serde(flatten)]
+    pub params: FxHashMap<String, MetadataValue>,
     /// Tensor naming conventions for GGUF loading
     #[serde(default)]
     pub tensor_names: TensorNames,
@@ -146,21 +122,100 @@ pub struct MetadataKeysSpec {
     pub keys: FxHashMap<String, Vec<String>>,
 }
 
+/// A value inferred from GGUF metadata or provided in the DSL.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MetadataValue {
+    USize(usize),
+    F32(f32),
+}
+
+impl MetadataValue {
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            MetadataValue::USize(v) => Some(*v),
+            MetadataValue::F32(v) => Some(*v as usize),
+        }
+    }
+
+    pub fn as_f32(&self) -> Option<f32> {
+        match self {
+            MetadataValue::USize(v) => Some(*v as f32),
+            MetadataValue::F32(v) => Some(*v),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for MetadataValue {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{Error, Visitor};
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = MetadataValue;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a number (usize or f32)")
+            }
+            fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                Ok(MetadataValue::USize(v as usize))
+            }
+            fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                if v < 0 {
+                    return Err(E::custom("negative integer not allowed for MetadataValue"));
+                }
+                Ok(MetadataValue::USize(v as usize))
+            }
+            fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
+            where
+                E: Error,
+            {
+                Ok(MetadataValue::F32(v as f32))
+            }
+        }
+        deserializer.deserialize_any(V)
+    }
+}
+
 /// Baseline architecture values inferred from GGUF metadata.
 ///
 /// The executor uses the following precedence:
 /// GGUF baseline < DSL overrides < runtime overrides.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct ArchitectureDefaults {
-    pub d_model: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub n_layers: usize,
-    pub ff_dim: usize,
-    pub vocab_size: usize,
-    pub max_seq_len: usize,
-    pub rope_base: f32,
-    pub rms_eps: f32,
+    pub values: FxHashMap<String, MetadataValue>,
+}
+
+impl ArchitectureDefaults {
+    #[inline]
+    pub fn get_usize(&self, key: &str) -> Option<usize> {
+        self.values.get(key).and_then(|v| match v {
+            MetadataValue::USize(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    #[inline]
+    pub fn get_f32(&self, key: &str) -> Option<f32> {
+        self.values.get(key).and_then(|v| match v {
+            MetadataValue::F32(v) => Some(*v),
+            _ => None,
+        })
+    }
+
+    /// Merges these defaults into the provided architecture params if not already set.
+    #[inline]
+    pub fn apply_to(&self, params: &mut FxHashMap<String, MetadataValue>) {
+        for (k, v) in &self.values {
+            params.entry(k.clone()).or_insert(*v);
+        }
+    }
 }
 
 impl Architecture {
@@ -169,77 +224,53 @@ impl Architecture {
     /// Fields that are zero/unset in the DSL are filled from `defaults`.
     /// Non-zero fields are treated as DSL overrides and preserved.
     pub fn apply_metadata_baseline(&mut self, defaults: &ArchitectureDefaults) -> Result<(), MetalError> {
-        if self.d_model == 0 {
-            self.d_model = defaults.d_model;
-        }
-        if self.n_heads == 0 {
-            self.n_heads = defaults.n_heads;
-        }
-        if self.n_kv_heads == 0 {
-            self.n_kv_heads = defaults.n_kv_heads;
-        }
-        if self.n_layers == 0 {
-            self.n_layers = defaults.n_layers;
-        }
-        if self.ff_dim == 0 {
-            self.ff_dim = defaults.ff_dim;
-        }
-        if self.vocab_size == 0 {
-            self.vocab_size = defaults.vocab_size;
-        }
-        if self.max_seq_len == 0 {
-            self.max_seq_len = defaults.max_seq_len;
-        }
-        if self.rope_base == 0.0 {
-            self.rope_base = defaults.rope_base;
-        }
-        if self.rms_eps == 0.0 {
-            self.rms_eps = defaults.rms_eps;
-        }
-
-        self.validate()
+        defaults.apply_to(&mut self.params);
+        Ok(())
     }
 
-    fn validate(&self) -> Result<(), MetalError> {
-        let req = [
-            ("d_model", self.d_model),
-            ("n_heads", self.n_heads),
-            ("n_kv_heads", self.n_kv_heads),
-            ("n_layers", self.n_layers),
-            ("ff_dim", self.ff_dim),
-            ("vocab_size", self.vocab_size),
-            ("max_seq_len", self.max_seq_len),
-        ];
-        for (name, v) in req {
-            if v == 0 {
-                return Err(MetalError::InvalidShape(format!("Architecture.{name} must be > 0")));
-            }
-        }
-        if !self.rope_base.is_finite() || self.rope_base <= 0.0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Architecture.rope_base must be finite and > 0 (got {})",
-                self.rope_base
-            )));
-        }
-        if !self.rms_eps.is_finite() || self.rms_eps <= 0.0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Architecture.rms_eps must be finite and > 0 (got {})",
-                self.rms_eps
-            )));
-        }
-        if self.d_model % self.n_heads != 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Architecture.d_model ({}) must be divisible by n_heads ({})",
-                self.d_model, self.n_heads
-            )));
-        }
-        if self.n_heads % self.n_kv_heads != 0 {
-            return Err(MetalError::InvalidShape(format!(
-                "Architecture.n_heads ({}) must be divisible by n_kv_heads ({})",
-                self.n_heads, self.n_kv_heads
-            )));
-        }
-        Ok(())
+    #[inline]
+    pub fn d_model(&self) -> usize {
+        self.params.get("d_model").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn n_heads(&self) -> usize {
+        self.params.get("n_heads").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn n_kv_heads(&self) -> usize {
+        self.params.get("n_kv_heads").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn n_layers(&self) -> usize {
+        self.params.get("n_layers").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn ff_dim(&self) -> usize {
+        self.params.get("ff_dim").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn vocab_size(&self) -> usize {
+        self.params.get("vocab_size").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn max_seq_len(&self) -> usize {
+        self.params.get("max_seq_len").and_then(|v| v.as_usize()).unwrap_or(0)
+    }
+
+    #[inline]
+    pub fn rope_base(&self) -> f32 {
+        self.params.get("rope_base").and_then(|v| v.as_f32()).unwrap_or(0.0)
+    }
+
+    #[inline]
+    pub fn rms_eps(&self) -> f32 {
+        self.params.get("rms_eps").and_then(|v| v.as_f32()).unwrap_or(0.0)
     }
 }
 
@@ -248,6 +279,9 @@ pub struct PrepareSpec {
     /// One-time globals evaluated at session initialization.
     #[serde(default)]
     pub globals: FxHashMap<String, IntExpr>,
+    /// Dynamic variables (e.g. "m", "seq_len") with default values for compilation/static analysis.
+    #[serde(default)]
+    pub dynamics: FxHashMap<String, usize>,
     /// Derived globals evaluated at runtime (per prefill chunk / per decode step).
     #[serde(default)]
     pub derived_globals: Vec<DerivedGlobalSpec>,

@@ -33,7 +33,7 @@ fn bytes_to_unicode() -> FxHashMap<u8, char> {
 
 /// Error types for tokenizer operations
 #[derive(Debug, Error)]
-pub enum TokenizerError {
+pub enum BPETokenizerError {
     #[error("Invalid token ID: {0}")]
     InvalidTokenId(u32),
     #[error("Invalid UTF-8 sequence")]
@@ -42,7 +42,7 @@ pub enum TokenizerError {
     MissingData,
     #[error("Tokenizer initialization failed: {0}")]
     InitializationFailed(String),
-    #[error("Regex Tokenizer Errors: {0}")]
+    #[error("Regex BPETokenizer Errors: {0}")]
     RegexError(#[from] fancy_regex::Error),
 }
 
@@ -55,7 +55,7 @@ pub struct SpecialTokens {
 }
 
 /// A BPE tokenizer implementation
-pub struct Tokenizer {
+pub struct BPETokenizer {
     /// Vocabulary mapping token IDs to token strings
     vocab: FxHashMap<u32, Arc<str>>,
     /// Reverse vocabulary mapping token strings to token IDs
@@ -87,7 +87,7 @@ pub struct Tokenizer {
     char_vocab: FxHashMap<char, u32>,
 }
 
-impl Tokenizer {
+impl BPETokenizer {
     /// Create a new tokenizer with the given vocabulary and merges
     pub fn new(
         vocab: FxHashMap<u32, String>,
@@ -134,7 +134,7 @@ impl Tokenizer {
         for (b, c) in &byte_encoder {
             let idx = *c as usize;
             if idx >= byte_decoder_lut.len() {
-                return Err(TokenizerError::InitializationFailed("byte decoder LUT overflow".to_string()).into());
+                return Err(BPETokenizerError::InitializationFailed("byte decoder LUT overflow".to_string()).into());
             }
             byte_decoder_lut[idx] = (*b as u16) + 1;
         }
@@ -198,9 +198,15 @@ impl Tokenizer {
     /// Create a tokenizer from GGUF metadata
     pub fn from_gguf_metadata(metadata: &GGUFMetadata) -> Result<Self, MetalError> {
         // Extract vocabulary
-        let tokens_value = metadata.entries.get("tokenizer.ggml.tokens").ok_or(TokenizerError::MissingData)?;
+        let tokens_value = metadata
+            .entries
+            .get("tokenizer.ggml.tokens")
+            .ok_or(BPETokenizerError::MissingData)?;
 
-        let merges_value = metadata.entries.get("tokenizer.ggml.merges").ok_or(TokenizerError::MissingData)?;
+        let merges_value = metadata
+            .entries
+            .get("tokenizer.ggml.merges")
+            .ok_or(BPETokenizerError::MissingData)?;
 
         let token_types_value = metadata.entries.get("tokenizer.ggml.token_type");
 
@@ -240,11 +246,13 @@ impl Tokenizer {
                 .iter()
                 .map(|v| match v {
                     crate::gguf::GGUFValue::String(s) => Ok(s.clone()),
-                    _ => Err(TokenizerError::InitializationFailed("Invalid token type in vocabulary".to_string())),
+                    _ => Err(BPETokenizerError::InitializationFailed(
+                        "Invalid token type in vocabulary".to_string(),
+                    )),
                 })
-                .collect::<Result<Vec<String>, TokenizerError>>()?,
+                .collect::<Result<Vec<String>, BPETokenizerError>>()?,
             _ => {
-                return Err(TokenizerError::InitializationFailed("Invalid tokens format".to_string()).into());
+                return Err(BPETokenizerError::InitializationFailed("Invalid tokens format".to_string()).into());
             }
         };
 
@@ -267,11 +275,11 @@ impl Tokenizer {
                 .iter()
                 .map(|v| match v {
                     crate::gguf::GGUFValue::String(s) => Ok(s.clone()),
-                    _ => Err(TokenizerError::InitializationFailed("Invalid merge type".to_string())),
+                    _ => Err(BPETokenizerError::InitializationFailed("Invalid merge type".to_string())),
                 })
-                .collect::<Result<Vec<String>, TokenizerError>>()?,
+                .collect::<Result<Vec<String>, BPETokenizerError>>()?,
             _ => {
-                return Err(TokenizerError::InitializationFailed("Invalid merges format".to_string()).into());
+                return Err(BPETokenizerError::InitializationFailed("Invalid merges format".to_string()).into());
             }
         };
 
@@ -309,8 +317,9 @@ impl Tokenizer {
     }
 
     fn process_pieces(&self, text: &str, mut processor: impl FnMut(&str) -> Result<(), MetalError>) -> Result<(), MetalError> {
-        let special_re = Regex::new(r"<\|[^>]*\|>")?;
-        let re = Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")?;
+        let special_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e.into()))?;
+        let re = Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
+            .map_err(|e| BPETokenizerError::RegexError(e.into()))?;
         let mut last = 0;
         for mat in special_re.find_iter(text) {
             let mat = mat?;
@@ -582,7 +591,7 @@ impl Tokenizer {
             return Ok(None);
         }
 
-        let token = self.vocab.get(&token_id).ok_or(TokenizerError::InvalidTokenId(token_id))?;
+        let token = self.vocab.get(&token_id).ok_or(BPETokenizerError::InvalidTokenId(token_id))?;
         let token_str = token.as_ref();
 
         // Fast path: pure ASCII tokens can be returned directly (most special/chat tokens).
@@ -594,10 +603,10 @@ impl Tokenizer {
             6 => {
                 // GGUF byte token representation (rare for Qwen, but supported).
                 if token_str.starts_with("<0x") && token_str.ends_with('>') && token_str.len() == 6 {
-                    let byte = u8::from_str_radix(&token_str[3..5], 16).map_err(|_| TokenizerError::InvalidTokenId(token_id))?;
+                    let byte = u8::from_str_radix(&token_str[3..5], 16).map_err(|_| BPETokenizerError::InvalidTokenId(token_id))?;
                     byte_scratch.push(byte);
                 } else {
-                    return Err(TokenizerError::InvalidTokenId(token_id).into());
+                    return Err(BPETokenizerError::InvalidTokenId(token_id).into());
                 }
             }
             _ => {
@@ -838,7 +847,7 @@ impl Tokenizer {
         let mut cache = self
             .bpe_cache
             .write()
-            .map_err(|_| TokenizerError::InitializationFailed("Cache lock poisoned".to_string()))?;
+            .map_err(|_| BPETokenizerError::InitializationFailed("Cache lock poisoned".to_string()))?;
         cache.clear();
         Ok(())
     }
@@ -848,7 +857,7 @@ impl Tokenizer {
         let cache = self
             .bpe_cache
             .read()
-            .map_err(|_| TokenizerError::InitializationFailed("Cache lock poisoned".to_string()))?;
+            .map_err(|_| BPETokenizerError::InitializationFailed("Cache lock poisoned".to_string()))?;
         Ok(cache.len())
     }
 }
@@ -857,13 +866,13 @@ impl Tokenizer {
 mod tests {
     use rustc_hash::FxHashMap;
 
-    use super::{SpecialTokens, Tokenizer};
+    use super::{BPETokenizer, SpecialTokens};
 
     #[test]
     fn format_chat_continuation_prompt_inserts_turn_newline_for_chat_templates() {
         // Use a Qwen-like template for testing
         let qwen_template = "<|im_start|>user\n{{ messages[0]['content'] }}<|im_end|>\n<|im_start|>assistant\n";
-        let tokenizer = Tokenizer::new(
+        let tokenizer = BPETokenizer::new(
             FxHashMap::default(),
             Vec::new(),
             FxHashMap::default(),
@@ -879,7 +888,7 @@ mod tests {
 
     #[test]
     fn format_chat_continuation_prompt_passthrough_without_chat_template() {
-        let tokenizer = Tokenizer::new(
+        let tokenizer = BPETokenizer::new(
             FxHashMap::default(),
             Vec::new(),
             FxHashMap::default(),
@@ -898,7 +907,7 @@ mod tests {
         vocab.insert(0u32, "Ġ".to_string()); // byte-encoded space (0x20)
         vocab.insert(1u32, "h".to_string());
 
-        let tokenizer = Tokenizer::new(vocab, Vec::new(), FxHashMap::default(), SpecialTokens::default(), false, None).unwrap();
+        let tokenizer = BPETokenizer::new(vocab, Vec::new(), FxHashMap::default(), SpecialTokens::default(), false, None).unwrap();
 
         let decoded = tokenizer.decode_lossless(&[0, 1]).unwrap();
         assert_eq!(decoded, " h");
@@ -911,7 +920,7 @@ mod tests {
         vocab.insert(0u32, "Ã".to_string());
         vocab.insert(1u32, "©".to_string());
 
-        let tokenizer = Tokenizer::new(vocab, Vec::new(), FxHashMap::default(), SpecialTokens::default(), false, None).unwrap();
+        let tokenizer = BPETokenizer::new(vocab, Vec::new(), FxHashMap::default(), SpecialTokens::default(), false, None).unwrap();
 
         let decoded = tokenizer.decode_lossless(&[0, 1]).unwrap();
         assert_eq!(decoded, "é");

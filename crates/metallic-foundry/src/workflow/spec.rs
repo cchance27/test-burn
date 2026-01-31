@@ -1,9 +1,16 @@
+use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub enum Param<T> {
     Literal(T),
     Input(String),
+}
+
+impl<T: Default> Default for Param<T> {
+    fn default() -> Self {
+        Param::Literal(T::default())
+    }
 }
 
 fn parse_ref_or_err<E: serde::de::Error>(value: &str) -> Result<String, E> {
@@ -61,8 +68,7 @@ impl<'de> Deserialize<'de> for Param<u32> {
             where
                 E: Error,
             {
-                let vv: u32 = v.try_into().map_err(|_| E::custom("u32 literal out of range"))?;
-                Ok(Param::Literal(vv))
+                Ok(Param::Literal(v as u32))
             }
             fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
             where
@@ -86,7 +92,7 @@ impl<'de> Deserialize<'de> for Param<f32> {
         impl<'de> Visitor<'de> for V {
             type Value = Param<f32>;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a f32 literal or a string like \"{var_name}\"")
+                f.write_str("a float literal or a string like \"{var_name}\"")
             }
             fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
             where
@@ -119,6 +125,9 @@ pub struct WorkflowSpec {
     /// Default model id used when a step omits `model_id`.
     #[serde(default)]
     pub default_model: Option<String>,
+    /// Workflow variable to return as the final result.
+    #[serde(default)]
+    pub return_value: Option<String>,
     #[serde(default)]
     pub resources: Option<WorkflowResourcesSpec>,
     #[serde(default)]
@@ -160,44 +169,94 @@ pub enum WorkflowStepSpec {
         /// Name of the model binding used for token ids (defaults to "input_ids").
         #[serde(default)]
         input_ids_binding: Option<String>,
-        /// Global key for the current position (defaults to "position_offset").
         #[serde(default)]
         position_offset_key: Option<String>,
-        /// Global key for batch width (defaults to "m").
         #[serde(default)]
         m_key: Option<String>,
-        /// Global key for sequence length (defaults to "seq_len").
         #[serde(default)]
         seq_len_key: Option<String>,
-        /// Whether to apply derived globals after updating globals (default true).
         #[serde(default = "default_true")]
         apply_derived_globals: bool,
         #[serde(default)]
         description: Option<String>,
     },
+    Forward {
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Bindings from workflow variables to model inputs.
+        #[serde(default)]
+        inputs: FxHashMap<String, String>,
+        /// Extraction from model outputs to workflow variables.
+        #[serde(default)]
+        outputs: FxHashMap<String, String>,
+        /// Update model globals before forward pass.
+        #[serde(default)]
+        update_globals: FxHashMap<String, Param<usize>>,
+        #[serde(default = "default_true")]
+        apply_derived_globals: bool,
+        #[serde(default)]
+        description: Option<String>,
+    },
+    Sample {
+        /// Input logits variable (Tensor).
+        logits: String,
+        /// Output variable for sampled token (u32).
+        output: String,
+        #[serde(default)]
+        temperature: Param<f32>,
+        #[serde(default)]
+        top_k: Param<u32>,
+        #[serde(default)]
+        top_p: Param<f32>,
+        #[serde(default)]
+        seed: Param<u32>,
+    },
+    Tokenize {
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Input text variable.
+        input: String,
+        /// Output tokens variable (TokensU32).
+        output: String,
+    },
+    Detokenize {
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Input tokens variable (TokensU32 or u32).
+        input: String,
+        /// Output text variable.
+        output: String,
+    },
+    /// Repeat a block of steps.
+    Loop {
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Condition expression (e.g. "{token} != 2").
+        condition: Option<String>,
+        /// Variable names for arguments.
+        #[serde(default)]
+        args: Vec<String>,
+        /// Steps to execute inside the loop.
+        stages: Vec<WorkflowStageSpec>,
+    },
     SetGlobals {
         #[serde(default)]
         model_id: Option<String>,
-        /// Integer globals to set on the target model's bindings.
-        ///
-        /// Values may be literals or "{var}" references to workflow inputs/values.
-        globals: std::collections::BTreeMap<String, Param<usize>>,
-        /// Whether to apply derived globals after updating globals (default true).
+        globals: FxHashMap<String, Param<usize>>,
         #[serde(default = "default_true")]
         apply_derived_globals: bool,
     },
     Synchronize,
-    Loop {
-        #[serde(default)]
-        model_id: Option<String>,
-        #[serde(default)]
-        condition: Option<String>,
-        #[serde(default)]
-        args: Vec<String>,
-        stages: Vec<WorkflowStageSpec>,
-    },
     Return {
+        #[serde(default)]
+        output: Option<String>,
+    },
+    /// Arbitrary integer math for workflow variables.
+    ComputeInt {
+        /// Destination workflow variable.
         output: String,
+        /// Integer expression using workflow variables (e.g. "{pos} + 1").
+        expr: String,
     },
 }
 
@@ -211,18 +270,21 @@ pub enum WorkflowStageSpec {
     Sample {
         #[serde(default)]
         model_id: Option<String>,
-        /// Model binding name for logits (defaults to legacy "input" field name).
-        #[serde(alias = "input")]
         logits_binding: String,
         output: String,
+        #[serde(default)]
         temperature: Param<f32>,
+        #[serde(default)]
         top_k: Param<u32>,
+        #[serde(default)]
         top_p: Param<f32>,
+        #[serde(default)]
         seed: Param<u32>,
     },
     CheckEos {
         input: String,
         output: String,
+        #[serde(default)]
         eos_token: Param<u32>,
     },
     AppendToken {
@@ -232,20 +294,15 @@ pub enum WorkflowStageSpec {
     GraphForward {
         #[serde(default)]
         model_id: Option<String>,
-        /// Token variable name (legacy "input").
-        #[serde(alias = "input")]
         token_var: String,
-        /// Model binding name for the token ids buffer (defaults to "input_ids").
         #[serde(default)]
         input_ids_binding: Option<String>,
-        /// Model binding name for logits (defaults to legacy "output" value).
-        #[serde(alias = "output")]
         logits_binding: String,
-        /// Global key for the current position (defaults to "position_offset").
         #[serde(default)]
         position_offset_key: Option<String>,
-        /// Whether to apply derived globals after updating position (default true).
         #[serde(default = "default_true")]
         apply_derived_globals: bool,
+        #[serde(default)]
+        description: Option<String>,
     },
 }

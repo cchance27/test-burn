@@ -11,7 +11,7 @@ mod step;
 pub use dynamic::{DynamicValue, Resolvable};
 pub use int_expr::IntExpr;
 pub use model_spec::{
-    Architecture, ArchitectureDefaults, LayerTensorNames, MetadataKeysSpec, ModelSpec, StorageClass, TensorAllocSpec, TensorNames, WeightBindingSpec, WeightLayoutSpec
+    Architecture, ArchitectureDefaults, LayerTensorNames, MetadataKeysSpec, MetadataValue, ModelSpec, StorageClass, TensorAllocSpec, TensorNames, WeightBindingSpec, WeightLayoutSpec
 };
 pub use repeat::Repeat;
 pub use step::{Ref, Step, TensorBindings};

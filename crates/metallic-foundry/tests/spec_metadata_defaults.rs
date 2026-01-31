@@ -29,17 +29,17 @@ fn spec_can_omit_arch_numerics_and_fill_from_metadata() {
         }
     }"#;
     let mut spec = ModelSpec::from_json(json).unwrap();
-    assert_eq!(spec.architecture.d_model, 0);
+    assert_eq!(spec.architecture.d_model(), 0);
     let defaults = model::infer_architecture_defaults_from_gguf_metadata(&qwen2_min_metadata()).unwrap();
     spec.architecture.apply_metadata_baseline(&defaults).unwrap();
-    assert_eq!(spec.architecture.d_model, 896);
-    assert_eq!(spec.architecture.n_heads, 14);
-    assert_eq!(spec.architecture.n_kv_heads, 2);
-    assert_eq!(spec.architecture.n_layers, 24);
-    assert_eq!(spec.architecture.ff_dim, 4864);
-    assert_eq!(spec.architecture.vocab_size, 151936);
-    assert_eq!(spec.architecture.max_seq_len, 32768);
-    assert_eq!(spec.architecture.rope_base, 1e6);
+    assert_eq!(spec.architecture.d_model(), 896);
+    assert_eq!(spec.architecture.n_heads(), 14);
+    assert_eq!(spec.architecture.n_kv_heads(), 2);
+    assert_eq!(spec.architecture.n_layers(), 24);
+    assert_eq!(spec.architecture.ff_dim(), 4864);
+    assert_eq!(spec.architecture.vocab_size(), 151936);
+    assert_eq!(spec.architecture.max_seq_len(), 32768);
+    assert_eq!(spec.architecture.rope_base(), 1e6);
 }
 
 #[test]
@@ -56,5 +56,5 @@ fn dsl_override_wins_over_metadata_baseline() {
     let mut spec = ModelSpec::from_json(json).unwrap();
     let defaults = model::infer_architecture_defaults_from_gguf_metadata(&qwen2_min_metadata()).unwrap();
     spec.architecture.apply_metadata_baseline(&defaults).unwrap();
-    assert_eq!(spec.architecture.d_model, 112);
+    assert_eq!(spec.architecture.d_model(), 112);
 }

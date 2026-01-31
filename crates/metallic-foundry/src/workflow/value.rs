@@ -9,6 +9,7 @@ pub enum Value {
     Bool(bool),
     Text(Arc<str>),
     TokensU32(Arc<[u32]>),
+    Tensor(crate::types::TensorArg),
 }
 
 impl Value {
@@ -45,6 +46,25 @@ impl Value {
         match self {
             Value::Text(s) => Some(s.as_ref()),
             _ => None,
+        }
+    }
+
+    pub fn as_tensor(&self) -> Option<&crate::types::TensorArg> {
+        match self {
+            Value::Tensor(t) => Some(t),
+            _ => None,
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        match self {
+            Value::U32(_) => "u32",
+            Value::Usize(_) => "usize",
+            Value::F32(_) => "f32",
+            Value::Bool(_) => "bool",
+            Value::Text(_) => "text",
+            Value::TokensU32(_) => "tokens_u32",
+            Value::Tensor(_) => "tensor",
         }
     }
 }

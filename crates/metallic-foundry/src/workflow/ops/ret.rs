@@ -5,11 +5,11 @@ use crate::{
 };
 
 pub(crate) struct ReturnOp {
-    output: String,
+    output: Option<String>,
 }
 
 impl ReturnOp {
-    pub(crate) fn new(output: String) -> Self {
+    pub(crate) fn new(output: Option<String>) -> Self {
         Self { output }
     }
 }
@@ -20,13 +20,15 @@ impl WorkflowOp for ReturnOp {
         ctx: &mut WorkflowExecutionContext<'_>,
         _on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError> {
-        if !ctx.values.contains_key(&self.output) {
-            return Err(MetalError::InvalidOperation(format!(
-                "workflow return references missing output value '{}'",
-                self.output
-            )));
+        if let Some(output) = &self.output {
+            if !ctx.values.contains_key(output) {
+                return Err(MetalError::InvalidOperation(format!(
+                    "workflow return references missing output value '{}'",
+                    output
+                )));
+            }
+            ctx.return_key = Some(output.clone());
         }
-        ctx.return_key = Some(self.output.clone());
         Ok(WorkflowOpOutcome::Return)
     }
 }

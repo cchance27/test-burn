@@ -18,6 +18,10 @@ For architecture numbers and runtime variables:
 2. **DSL overrides** (values explicitly present in the model JSON) win over baseline.
 3. **Runtime overrides** (values set in `TensorBindings` / config) win over both.
 
+Important note:
+- `max_seq_len` in `TensorBindings` is treated as the **physical KV/rope capacity** (what kernels use for strides).
+  The GGUF-reported max context length is carried separately via `ContextConfig.max_context_len`.
+
 ---
 
 ## What moved into the DSL
@@ -207,3 +211,17 @@ We used “change → immediate inference test” to catch layout regressions:
 - `cargo run --release --package metallic_cli -- models/qwen2.5-coder-0.5b-instruct-fp16.gguf "create very short rust helloworld function" --engine foundry --max-tokens 100 --output-format text`
 
 We also used targeted unit/integration tests for DSL+metadata components (not the full suite due to cost).
+
+### Inference regression fix: runtime override precedence for `max_seq_len`
+
+While integrating workflow ops, inference regressed because `seed_prepare_globals()` re-seeded GGUF baseline params
+*after* `prepare_bindings_with_config()` set runtime `max_seq_len` (memory-budget-clamped physical capacity).
+
+That caused:
+- DSL allocations (KV cache / RoPE caches) to use the GGUF `max_seq_len` (very large),
+- but runtime globals used by kernels to use the clamped `max_seq_len`,
+- leading to incorrect KV strides/corruption when `position_offset > 0`.
+
+Fix:
+- `crates/metallic-foundry/src/model/executor.rs` now preserves any runtime-set int globals during seeding, so runtime overrides win as intended.
+  This restored KV correctness and made `dsl_vs_context_chat_prefill_parity` pass again.

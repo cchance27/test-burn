@@ -40,26 +40,60 @@ impl<'a> WorkflowExecutionContext<'a> {
     pub(crate) fn resolve_param_u32(&self, p: &Param<u32>) -> Result<u32, MetalError> {
         match p {
             Param::Literal(v) => Ok(*v),
-            Param::Input(name) => self
-                .values
-                .get(name)
-                .and_then(|v| match v {
-                    Value::U32(v) => Some(*v),
-                    Value::Usize(v) => (*v).try_into().ok(),
-                    _ => None,
-                })
-                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{name}' (u32)"))),
+            Param::Input(name) => {
+                if let Some((var_name, "len")) = name.split_once('.') {
+                    let val = self
+                        .values
+                        .get(var_name)
+                        .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow variable '{}' for .len", var_name)))?;
+                    match val {
+                        Value::TokensU32(t) => Ok(t.len() as u32),
+                        Value::Tensor(t) => Ok(t.dims().iter().product::<usize>() as u32),
+                        _ => Err(MetalError::InvalidOperation(format!(
+                            "Variable '{}' of type {} does not have .len",
+                            var_name,
+                            val.type_name()
+                        ))),
+                    }
+                } else {
+                    self.values
+                        .get(name)
+                        .and_then(|v| match v {
+                            Value::U32(v) => Some(*v),
+                            Value::Usize(v) => (*v).try_into().ok(),
+                            _ => None,
+                        })
+                        .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{}' (u32)", name)))
+                }
+            }
         }
     }
 
     pub(crate) fn resolve_param_usize(&self, p: &Param<usize>) -> Result<usize, MetalError> {
         match p {
             Param::Literal(v) => Ok(*v),
-            Param::Input(name) => self
-                .values
-                .get(name)
-                .and_then(|v| v.as_usize())
-                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{name}' (usize)"))),
+            Param::Input(name) => {
+                if let Some((var_name, "len")) = name.split_once('.') {
+                    let val = self
+                        .values
+                        .get(var_name)
+                        .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow variable '{}' for .len", var_name)))?;
+                    match val {
+                        Value::TokensU32(t) => Ok(t.len()),
+                        Value::Tensor(t) => Ok(t.dims().iter().product::<usize>()),
+                        _ => Err(MetalError::InvalidOperation(format!(
+                            "Variable '{}' of type {} does not have .len",
+                            var_name,
+                            val.type_name()
+                        ))),
+                    }
+                } else {
+                    self.values
+                        .get(name)
+                        .and_then(|v| v.as_usize())
+                        .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{}' (usize)", name)))
+                }
+            }
         }
     }
 
@@ -73,19 +107,35 @@ impl<'a> WorkflowExecutionContext<'a> {
                     Value::F32(v) => Some(*v),
                     _ => None,
                 })
-                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{name}' (f32)"))),
+                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{}' (f32)", name))),
         }
     }
 
     pub(crate) fn read_usize(&self, name: &str) -> Result<usize, MetalError> {
-        self.values
-            .get(name)
-            .and_then(|v| match v {
-                Value::Usize(v) => Some(*v),
-                Value::U32(v) => Some(*v as usize),
-                _ => None,
-            })
-            .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{name}' (usize/u32)")))
+        if let Some((var_name, "len")) = name.split_once('.') {
+            let val = self
+                .values
+                .get(var_name)
+                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow variable '{}' for .len", var_name)))?;
+            match val {
+                Value::TokensU32(t) => Ok(t.len()),
+                Value::Tensor(t) => Ok(t.dims().iter().product::<usize>()),
+                _ => Err(MetalError::InvalidOperation(format!(
+                    "Variable '{}' of type {} does not have .len",
+                    var_name,
+                    val.type_name()
+                ))),
+            }
+        } else {
+            self.values
+                .get(name)
+                .and_then(|v| match v {
+                    Value::Usize(v) => Some(*v),
+                    Value::U32(v) => Some(*v as usize),
+                    _ => None,
+                })
+                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{}' (usize/u32)", name)))
+        }
     }
 }
 
@@ -99,14 +149,37 @@ impl<'a> WorkflowRunner<'a> {
         Self { foundry, models }
     }
 
+    pub fn run(
+        &mut self,
+        spec: &WorkflowSpec,
+        mut inputs_raw: std::collections::HashMap<String, String>,
+        on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
+    ) -> Result<Value, MetalError> {
+        let mut inputs = FxHashMap::default();
+        for (k, v) in inputs_raw.drain() {
+            inputs.insert(k, Value::Text(v.into()));
+        }
+
+        let values = self.run_streaming(spec, inputs, on_token)?;
+
+        if let Some(return_key) = &spec.return_value {
+            values
+                .get(return_key)
+                .cloned()
+                .ok_or_else(|| MetalError::InvalidOperation(format!("Workflow return_value key '{}' not found", return_key)))
+        } else {
+            Ok(Value::U32(0))
+        }
+    }
+
     pub fn run_streaming(
         &mut self,
-        cfg: &WorkflowRunnerConfig,
+        workflow: &WorkflowSpec,
         mut inputs: FxHashMap<String, Value>,
         mut on_token: impl FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<FxHashMap<String, Value>, MetalError> {
         // Apply defaults from workflow inputs.
-        for inp in &cfg.workflow.inputs {
+        for inp in &workflow.inputs {
             if inputs.contains_key(&inp.name) {
                 continue;
             }
@@ -126,10 +199,10 @@ impl<'a> WorkflowRunner<'a> {
             }
         }
 
-        let compiled = CompiledWorkflow::compile(&cfg.workflow)?;
+        let compiled = CompiledWorkflow::compile(workflow)?;
 
         let mut ctx = WorkflowExecutionContext {
-            workflow: &cfg.workflow,
+            workflow,
             foundry: self.foundry,
             models: &self.models,
             values: inputs,

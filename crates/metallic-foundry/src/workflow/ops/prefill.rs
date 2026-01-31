@@ -93,14 +93,16 @@ impl WorkflowOp for PrefillOp {
                     start_pos + prompt_len,
                 )?;
 
-                if prompt_len + start_pos > session.input_ids_capacity {
+                if prompt_len + start_pos > session.context_config.max_context_len {
                     return Err(MetalError::InvalidShape(format!(
                         "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_context_len {}",
-                        session.input_ids_capacity
+                        session.context_config.max_context_len
                     )));
                 }
 
-                session.input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
+                let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+                let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap();
+                input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
 
                 // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
                 model.set_int_global(&mut session.bindings, &self.m_key, 1);
@@ -158,8 +160,9 @@ impl WorkflowOp for PrefillOp {
                             model.apply_derived_globals(&mut session.bindings);
                         }
 
-                        let mut tensor_input =
-                            TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
+                        let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+                        let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
+                        let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![m], vec![1]);
                         tensor_input.offset = base_pos * 4;
                         model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
 
@@ -193,8 +196,9 @@ impl WorkflowOp for PrefillOp {
                                 model.apply_derived_globals(&mut session.bindings);
                             }
 
-                            let mut tensor_input =
-                                TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                            let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+                            let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
+                            let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
                             tensor_input.offset = pos * 4;
                             model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
 
@@ -225,8 +229,9 @@ impl WorkflowOp for PrefillOp {
 
                 // Ensure input_ids is bound to any valid U32 buffer; decode stage overwrites it to sampled-token buffers.
                 {
-                    let mut tensor_input =
-                        TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                    let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+                    let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
+                    let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
                     tensor_input.offset = 0;
                     model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
                 }

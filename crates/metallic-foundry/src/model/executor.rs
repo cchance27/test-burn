@@ -10,7 +10,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::builder::WeightBundle;
 use crate::{
     Foundry, error::MetalError, metals::sampling::SampleTopK, policy::{WeightLayout, resolve_policy}, spec::{
-        ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
+        MetadataValue, ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
     }, types::{MetalResourceOptions, TensorArg}
 };
 
@@ -119,9 +119,6 @@ pub struct CompiledModel {
 pub(crate) struct ModelSession {
     pub(crate) bindings: TensorBindings,
     pub(crate) fast_bindings: FastBindings,
-    pub(crate) input_ids_full: crate::types::MetalBuffer,
-    pub(crate) input_ids_capacity: usize,
-    pub(crate) sample_out_buffers: Vec<crate::types::MetalBuffer>,
     pub(crate) current_pos: usize,
     pub(crate) context_config: crate::model::ContextConfig,
 }
@@ -184,6 +181,8 @@ impl CompiledModel {
     pub(crate) fn set_int_global(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
         let interned = self.interned_key(key);
         bindings.set_int_global(interned, value);
+        // Also update string global for interpolation support (e.g. KvPrepFused params)
+        bindings.set_global(interned, value.to_string());
     }
 
     #[inline]
@@ -358,31 +357,30 @@ impl CompiledModel {
         let arch = self.architecture();
         let required = self.required_prepare_vars();
 
-        // Baseline globals (GGUF baseline + DSL overrides already applied to arch).
-        // Only seed values that are referenced by the DSL (shapes/derived globals/weight layouts).
-        if required.contains("n_layers") {
-            self.set_global_usize(bindings, "n_layers", arch.n_layers);
+        // Seed all architecture parameters.
+        for (name, val) in &arch.params {
+            // Runtime overrides (e.g. memory-budget-clamped `max_seq_len`) must win over GGUF baseline.
+            // `prepare_bindings_with_config` may seed some globals (like max_seq_len/max_prefill_chunk)
+            // before calling this function.
+            if bindings.get_int_global(name.as_str()).is_some() {
+                continue;
+            }
+            match val {
+                MetadataValue::USize(v) => self.set_global_usize(bindings, name, *v),
+                MetadataValue::F32(v) => self.set_global_f32(bindings, name, *v),
+            }
         }
-        if required.contains("d_model") {
-            self.set_global_usize(bindings, "d_model", arch.d_model);
+
+        // Derived globals often depend on d_model/n_heads (e.g. head_dim).
+        // Ensure these are available as int globals for IntExpr evaluation.
+        if let Some(v) = arch.params.get("d_model").and_then(|v| v.as_usize()) {
+            self.set_int_global(bindings, "d_model", v);
         }
-        if required.contains("n_heads") {
-            self.set_global_usize(bindings, "n_heads", arch.n_heads);
+        if let Some(v) = arch.params.get("n_heads").and_then(|v| v.as_usize()) {
+            self.set_int_global(bindings, "n_heads", v);
         }
-        if required.contains("n_kv_heads") {
-            self.set_global_usize(bindings, "n_kv_heads", arch.n_kv_heads);
-        }
-        if required.contains("ff_dim") {
-            self.set_global_usize(bindings, "ff_dim", arch.ff_dim);
-        }
-        if required.contains("vocab_size") {
-            self.set_global_usize(bindings, "vocab_size", arch.vocab_size);
-        }
-        if required.contains("rope_base") {
-            self.set_global_f32(bindings, "rope_base", arch.rope_base);
-        }
-        if required.contains("rms_eps") {
-            self.set_global_f32(bindings, "rms_eps", arch.rms_eps);
+        if let Some(v) = arch.params.get("n_kv_heads").and_then(|v| v.as_usize()) {
+            self.set_int_global(bindings, "n_kv_heads", v);
         }
 
         // Default runtime globals; workflows can override these at runtime.
@@ -627,17 +625,48 @@ impl CompiledModel {
         let arch = &spec.architecture;
 
         // Set config globals for DSL variable interpolation (needed for Repeat unrolling, etc.)
-        resolver.set_global("n_layers", arch.n_layers.to_string());
-        resolver.set_global("d_model", arch.d_model.to_string());
-        resolver.set_global("n_heads", arch.n_heads.to_string());
-        resolver.set_global("n_kv_heads", arch.n_kv_heads.to_string());
-        resolver.set_global("ff_dim", arch.ff_dim.to_string());
-        resolver.set_global("vocab_size", arch.vocab_size.to_string());
-        resolver.set_global("rms_eps", arch.rms_eps.to_string());
-        let head_dim = arch.d_model / arch.n_heads;
-        resolver.set_global("head_dim", head_dim.to_string());
-        let kv_dim = head_dim * arch.n_kv_heads;
-        resolver.set_global("kv_dim", kv_dim.to_string());
+        for (name, val) in &arch.params {
+            match val {
+                MetadataValue::USize(v) => resolver.set_global(name.clone(), v.to_string()),
+                MetadataValue::F32(v) => resolver.set_global(name.clone(), v.to_string()),
+            }
+        }
+
+        // Ensure essential int globals are available for immediate IntExpr evaluation during compilation.
+        // We also seed "dynamic" globals with default values from the spec so that expressions
+        // depending on them (like kv_seq_len = position_offset + seq_len) can be evaluated.
+        for (name, val) in &arch.prepare.dynamics {
+            resolver.set_int_global(name.as_str(), *val);
+        }
+
+        for (name, val) in &arch.params {
+            if let Some(v) = val.as_usize() {
+                resolver.set_int_global(name.as_str(), v);
+            }
+        }
+
+        // Seed common derived globals if provided in the DSL's prepare.globals.
+        // If not provided, we rely on the DSL declaring them in derived_globals.
+        for (key, expr) in &arch.prepare.globals {
+            let value = expr.eval(&resolver);
+            resolver.set_int_global(key.as_str(), value);
+            resolver.set_global(key.clone(), value.to_string());
+        }
+
+        tracing::info!(
+            "Architecture params: d_model={}, n_heads={}, n_kv_heads={}, n_layers={}",
+            resolver.get_int_global("d_model").unwrap_or(0),
+            resolver.get_int_global("n_heads").unwrap_or(0),
+            resolver.get_int_global("n_kv_heads").unwrap_or(0),
+            resolver.get_int_global("n_layers").unwrap_or(0)
+        );
+
+        // Apply DSL-defined derived globals so they are available for step compilation.
+        for spec in &arch.prepare.derived_globals {
+            let value = spec.expr.eval(&resolver);
+            resolver.set_int_global(spec.name.as_str(), value);
+            resolver.set_global(spec.name.clone(), value.to_string());
+        }
 
         // Compile steps
         let mut compiled_steps = Vec::new();
@@ -717,8 +746,8 @@ impl CompiledModel {
     }
 
     /// Create a tokenizer from the model's GGUF metadata, with optional override from ModelSpec.
-    pub fn tokenizer(&self) -> Result<crate::Tokenizer, MetalError> {
-        let mut tokenizer = crate::Tokenizer::from_gguf_metadata(self.weights.gguf_model().get_metadata())?;
+    pub fn tokenizer(&self) -> Result<crate::BPETokenizer, MetalError> {
+        let mut tokenizer = crate::BPETokenizer::from_gguf_metadata(self.weights.gguf_model().get_metadata())?;
 
         // Prioritize template from ModelSpec (DSL override)
         if let Some(template_override) = &self.spec.chat_template {
@@ -746,11 +775,14 @@ impl CompiledModel {
         // Allocate a single prompt/input buffer sized for the full potential context to avoid reallocating IDs.
         let input_ids_full = self.allocate_u32_buffer(foundry, "input_ids_full", max_seq_len)?;
 
-        // Seed `input_ids` with a valid buffer. We overwrite it per-step below to point at the sampled-token buffer.
+        // Seed `input_ids` and `input_ids_full`.
         {
             let mut tensor_input = TensorArg::from_buffer(input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
             tensor_input.offset = 0;
-            self.set_binding(&mut bindings, &mut fast_bindings, "input_ids", tensor_input);
+            self.set_binding(&mut bindings, &mut fast_bindings, "input_ids", tensor_input.clone());
+
+            let tensor_full = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![max_seq_len], vec![1]);
+            self.set_binding(&mut bindings, &mut fast_bindings, "input_ids_full", tensor_full);
         }
 
         // Pre-allocate decode sample-output buffers to avoid tiny allocations in the hot path.
@@ -768,17 +800,16 @@ impl CompiledModel {
             parsed.unwrap_or(default_decode_batch_size).clamp(1, MAX)
         };
 
-        let mut sample_out_buffers = Vec::with_capacity(decode_batch_size);
+        // Seed any architecture-declared sample output buffers.
         for i in 0..decode_batch_size {
-            sample_out_buffers.push(self.allocate_u32_buffer(foundry, &format!("sample_out_{i}"), 1)?);
+            let buf = self.allocate_u32_buffer(foundry, &format!("sample_out_{i}"), 1)?;
+            let tensor = TensorArg::from_buffer(buf, crate::tensor::Dtype::U32, vec![1], vec![1]);
+            self.set_binding(&mut bindings, &mut fast_bindings, &format!("sample_out_{i}"), tensor);
         }
 
         *session = Some(ModelSession {
             bindings,
             fast_bindings,
-            input_ids_full,
-            input_ids_capacity: max_seq_len,
-            sample_out_buffers,
             current_pos: 0,
             context_config,
         });
@@ -846,8 +877,8 @@ impl CompiledModel {
         // 2. Bind weights either via DSL-declared weight_bindings (preferred) or legacy hardcoded maps.
         if arch.weight_bindings.is_empty() {
             // DEBT: legacy path; remove once all shipped DSL specs declare weight_bindings.
-            let head_dim = arch.d_model / arch.n_heads;
-            let kv_dim = head_dim * arch.n_kv_heads;
+            let head_dim = arch.d_model() / arch.n_heads();
+            let kv_dim = head_dim * arch.n_kv_heads();
 
             // Resolve and bind global weight tensors (legacy).
             let global_keys = ["embedding", "final_norm", "rope_cos", "rope_sin"];
@@ -866,7 +897,7 @@ impl CompiledModel {
             let regular_layer_keys = ["layer.attn_norm", "layer.ffn_norm"];
             let canonical_layer_keys = ["layer.attn_q", "layer.attn_k", "layer.attn_v"];
             let nk_layer_keys = ["layer.attn_output", "layer.ffn_gate", "layer.ffn_up", "layer.ffn_down"];
-            for i in 0..arch.n_layers {
+            for i in 0..arch.n_layers() {
                 for key in regular_layer_keys {
                     if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
                         let logical_name = format!("{key}_{i}");
@@ -877,9 +908,9 @@ impl CompiledModel {
                     if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
                         let logical_name = format!("{key}_{i}");
                         let (expected_k, expected_n) = match key {
-                            "layer.attn_q" => (arch.d_model, arch.d_model),
-                            "layer.attn_k" => (arch.d_model, kv_dim),
-                            "layer.attn_v" => (arch.d_model, kv_dim),
+                            "layer.attn_q" => (arch.d_model(), arch.d_model()),
+                            "layer.attn_k" => (arch.d_model(), kv_dim),
+                            "layer.attn_v" => (arch.d_model(), kv_dim),
                             _ => {
                                 return Err(MetalError::InvalidShape(format!(
                                     "Unhandled canonical weight key '{}'; update executor canonical binding map",
@@ -907,18 +938,18 @@ impl CompiledModel {
             }
 
             // Resolve and bind per-layer bias tensors (fallback to zero if missing) (legacy).
-            let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
+            let kv_dim = arch.d_model() / arch.n_heads() * arch.n_kv_heads();
             let mut zero_cache: FxHashMap<usize, TensorArg> = FxHashMap::default();
             let bias_specs = [
-                ("layer.attn_q_bias", arch.d_model),
+                ("layer.attn_q_bias", arch.d_model()),
                 ("layer.attn_k_bias", kv_dim),
                 ("layer.attn_v_bias", kv_dim),
-                ("layer.ffn_gate_bias", arch.ff_dim),
-                ("layer.ffn_up_bias", arch.ff_dim),
-                ("layer.ffn_down_bias", arch.d_model),
+                ("layer.ffn_gate_bias", arch.ff_dim()),
+                ("layer.ffn_up_bias", arch.ff_dim()),
+                ("layer.ffn_down_bias", arch.d_model()),
             ];
 
-            for i in 0..arch.n_layers {
+            for i in 0..arch.n_layers() {
                 for (key, size) in bias_specs {
                     let logical_name = format!("{key}_{i}");
                     if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
@@ -988,9 +1019,9 @@ impl CompiledModel {
         rope_sin_name: &str,
         rope_len: usize,
     ) -> Result<(), MetalError> {
-        let head_dim = arch.d_model / arch.n_heads;
+        let head_dim = arch.d_model() / arch.n_heads();
         let dim_half = head_dim / 2;
-        let rope_base = arch.rope_base;
+        let rope_base = arch.rope_base();
 
         self.ensure_rope_capacity_named(
             bindings,
@@ -1539,7 +1570,7 @@ impl CompiledModel {
         new_capacity: usize,
     ) -> Result<(), MetalError> {
         let arch = self.architecture();
-        let head_dim = arch.d_model / arch.n_heads;
+        let head_dim = arch.d_model() / arch.n_heads();
 
         // Batch all buffer copies into a single command buffer when possible.
         let nested_capture = foundry.is_capturing();
@@ -1563,16 +1594,22 @@ impl CompiledModel {
                     "KV cache '{name}' must be F16 for growth preservation"
                 )));
             }
-            if old.dims.as_slice() != [arch.n_heads, old_capacity, head_dim].as_slice() {
+            if old.dims.as_slice() != [arch.n_heads(), old_capacity, head_dim].as_slice() {
                 return Err(MetalError::InvalidShape(format!(
                     "KV cache '{name}' old dims mismatch: got {:?}, expected [{}, {}, {}]",
-                    old.dims, arch.n_heads, old_capacity, head_dim
+                    old.dims,
+                    arch.n_heads(),
+                    old_capacity,
+                    head_dim
                 )));
             }
-            if new.dims.as_slice() != [arch.n_heads, new_capacity, head_dim].as_slice() {
+            if new.dims.as_slice() != [arch.n_heads(), new_capacity, head_dim].as_slice() {
                 return Err(MetalError::InvalidShape(format!(
                     "KV cache '{name}' new dims mismatch: got {:?}, expected [{}, {}, {}]",
-                    new.dims, arch.n_heads, new_capacity, head_dim
+                    new.dims,
+                    arch.n_heads(),
+                    new_capacity,
+                    head_dim
                 )));
             }
 
@@ -1586,7 +1623,7 @@ impl CompiledModel {
                 .ok_or_else(|| MetalError::InvalidOperation(format!("{name} buffer missing after growth")))?;
 
             let copy_size = current_pos * head_dim * 2;
-            for h in 0..arch.n_heads {
+            for h in 0..arch.n_heads() {
                 let old_head_offset = h * old_capacity * head_dim * 2;
                 let new_head_offset = h * new_capacity * head_dim * 2;
                 foundry.blit_copy(
@@ -1680,7 +1717,7 @@ impl CompiledModel {
                 bindings,
                 fast_bindings,
                 foundry,
-                arch.rope_base,
+                arch.rope_base(),
                 head_dim,
                 dim_half,
                 &rope.cos,
@@ -1703,6 +1740,14 @@ impl CompiledModel {
     /// Each step in `spec.architecture.forward` is executed via `Step::execute()`.
     /// Run a single forward step by executing all compiled steps.
     pub fn forward(&self, foundry: &mut Foundry, bindings: &mut TensorBindings, fast_bindings: &FastBindings) -> Result<(), MetalError> {
+        //eprintln!(
+        //    "Forward: m={}, seq_len={}, pos={}, kv_seq_len={} | StrPos={}",
+        //    bindings.get_int_global("m").unwrap_or(0),
+        //    bindings.get_int_global("seq_len").unwrap_or(0),
+        //    bindings.get_int_global("position_offset").unwrap_or(0),
+        //    bindings.get_int_global("kv_seq_len").unwrap_or(0),
+        //    bindings.get_var("position_offset").map(|s| s.as_str()).unwrap_or("MISSING")
+        //);
         // If we are already capturing (e.g. batched prompt processing), don't start a new capture.
         let nested_capture = foundry.is_capturing();
         let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
@@ -1810,6 +1855,11 @@ impl CompiledModel {
     where
         F: FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     {
+        //eprintln!(
+        //    "Starting generate_with_seed_streaming: prompt_len={}, max_new={}",
+        //    prompt_tokens.len(),
+        //    max_new_tokens
+        //);
         if prompt_tokens.is_empty() {
             return Err(MetalError::InvalidShape("generate requires non-empty prompt_tokens".into()));
         }
@@ -1847,16 +1897,18 @@ impl CompiledModel {
         let bindings = &mut session.bindings;
         let fast_bindings = &mut session.fast_bindings;
 
-        if prompt_len + start_pos > session.input_ids_capacity {
+        if prompt_len + start_pos > session.context_config.max_context_len {
             return Err(MetalError::InvalidShape(format!(
                 "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_context_len {}",
-                session.input_ids_capacity
+                session.context_config.max_context_len
             )));
         }
 
         // Write all prompt tokens to the shared buffer
         // input_ids_full is MetalBuffer.
-        session.input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
+        let input_ids_full_arg = bindings.get("input_ids_full")?;
+        let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap();
+        input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
 
         // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
         self.set_int_global(bindings, "m", 1);
@@ -1865,7 +1917,7 @@ impl CompiledModel {
         self.apply_derived_globals(bindings);
 
         let greedy = temperature <= 0.0 || !temperature.is_finite() || top_k == 0;
-        let vocab_size = arch.vocab_size as u32;
+        let vocab_size = arch.vocab_size() as u32;
 
         // Prefill KV cache.
         //
@@ -1936,7 +1988,16 @@ impl CompiledModel {
                 self.set_int_global(bindings, "position_offset", base_pos);
                 self.apply_derived_globals(bindings);
 
-                let mut tensor_input = TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
+                //eprintln!(
+                //    "Prefill chunk: m={}, seq_len={}, pos={}, kv_seq_len={}",
+                //    m,
+                //    m,
+                //    base_pos,
+                //    bindings.get_int_global("kv_seq_len").unwrap_or(0)
+                //);
+
+                let input_ids_full = bindings.get("input_ids_full")?.buffer.as_ref().unwrap().clone();
+                let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![m], vec![1]);
                 tensor_input.offset = base_pos * 4;
                 self.set_binding(bindings, fast_bindings, input_ids_key, tensor_input);
 
@@ -1972,8 +2033,8 @@ impl CompiledModel {
                     self.set_int_global(bindings, "position_offset", pos);
                     self.apply_derived_globals(bindings);
 
-                    let mut tensor_input =
-                        TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                    let input_ids_full = bindings.get("input_ids_full")?.buffer.as_ref().unwrap().clone();
+                    let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
                     tensor_input.offset = pos * 4;
                     self.set_binding(bindings, fast_bindings, input_ids_key, tensor_input);
 
@@ -2003,7 +2064,7 @@ impl CompiledModel {
         // Now autoregressive decode: sample from last prompt-token logits, then step forward per token.
         // Reuse the session input buffer as a valid fallback input_ids buffer (we overwrite binding to sampled-token
         // buffers during decode).
-        let single_input_buffer = session.input_ids_full.clone();
+        let single_input_buffer = bindings.get("input_ids_full")?.buffer.as_ref().unwrap().clone();
 
         let default_decode_batch_size = bindings
             .get("output_weight")
@@ -2032,10 +2093,10 @@ impl CompiledModel {
         // BATCHING: We batch multiple tokens into a single command buffer to amortize submission overhead.
         // We keep tokens on GPU (copying Sample -> Input) and only sync when the batch is full.
         let batch_size = if profiling_per_kernel { 1 } else { decode_batch_size() };
-        if batch_size > session.sample_out_buffers.len() {
+        let sample_out_count = bindings.iter().filter(|(k, _)| k.starts_with("sample_out_")).count();
+        if batch_size > sample_out_count {
             return Err(MetalError::InvalidShape(format!(
-                "Decode batch_size {batch_size} exceeds session capacity {}. This typically means METALLIC_FOUNDRY_DECODE_BATCH_SIZE changed after model load.",
-                session.sample_out_buffers.len()
+                "Decode batch_size {batch_size} exceeds session capacity {sample_out_count}. This typically means METALLIC_FOUNDRY_DECODE_BATCH_SIZE changed after model load."
             )));
         }
 
@@ -2089,12 +2150,13 @@ impl CompiledModel {
             // 2. Sample (Greedy or Random) using GPU kernel
             // We use SampleTopK for both to keep execution on GPU. Greedy is just top_k=1.
             let effective_top_k = if greedy { 1 } else { top_k };
-            let sample_out = &session.sample_out_buffers[batch_idx];
+            let sample_out_name = format!("sample_out_{batch_idx}");
+            let sample_out = bindings.get(&sample_out_name)?;
 
             // Create sample kernel with destination buffer
             let sample_kernel = SampleTopK::new(
                 &logits_arg,
-                &TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
+                &sample_out,
                 vocab_size,
                 effective_top_k,
                 top_p,
@@ -2105,17 +2167,22 @@ impl CompiledModel {
 
             // 3. Feed the sampled token directly into the next forward pass by rebinding `input_ids`
             // to the sampled-token buffer. This avoids an extra CopyU32 dispatch per step.
-            self.set_binding(
-                bindings,
-                fast_bindings,
-                input_ids_key,
-                TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
-            );
+            self.set_binding(bindings, fast_bindings, input_ids_key, sample_out.clone());
 
             // 4. Update globals for the NEXT forward pass
             // We are about to run forward for position `start_pos + prompt_len + step` (the token we just sampled).
             self.set_int_global(bindings, "position_offset", start_pos + prompt_len + step);
             self.apply_derived_globals(bindings);
+
+            //if step < 5 {
+            // Avoid spamming loops
+            //eprintln!(
+            //   "Decode step {}: pos={}, kv_seq_len={}",
+            //   step,
+            //   bindings.get_int_global("position_offset").unwrap_or(0),
+            //   bindings.get_int_global("kv_seq_len").unwrap_or(0)
+            //;
+            //}
 
             // 5. Run Forward (predicts next token's logits)
             self.forward(foundry, bindings, &*fast_bindings)?;
@@ -2192,8 +2259,10 @@ impl CompiledModel {
                 // Process the batch results
                 let process_start = std::time::Instant::now();
                 let mut batch_done = false;
-                for buffer in session.sample_out_buffers.iter().take(pending_count) {
-                    let token_buf = buffer;
+                for i in 0..pending_count {
+                    let sample_out_name = format!("sample_out_{i}");
+                    let sample_out_arg = bindings.get(&sample_out_name)?;
+                    let token_buf = sample_out_arg.buffer.as_ref().unwrap();
                     let token: u32 = token_buf.read_scalar();
 
                     generated.push(token);

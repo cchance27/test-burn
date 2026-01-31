@@ -25,8 +25,8 @@ fn test_model_spec_parse() {
 
     let spec = ModelSpec::from_json(json).expect("Failed to parse JSON");
     assert_eq!(spec.name, "test-model");
-    assert_eq!(spec.architecture.d_model, 64);
-    assert_eq!(spec.architecture.n_layers, 2);
+    assert_eq!(spec.architecture.d_model(), 64);
+    assert_eq!(spec.architecture.n_layers(), 2);
 }
 
 /// Test TensorBindings variable interpolation.
@@ -126,7 +126,9 @@ fn test_e2e_forward_pass() {
     let spec = ModelSpec::from_file(spec_path).expect("Failed to load model spec");
     eprintln!(
         "Loaded spec: {} (d_model={}, n_layers={})",
-        spec.name, spec.architecture.d_model, spec.architecture.n_layers
+        spec.name,
+        spec.architecture.d_model(),
+        spec.architecture.n_layers()
     );
 
     // Create foundry
@@ -187,10 +189,10 @@ fn test_e2e_forward_pass() {
 
     // CRITICAL: Set dynamic globals for kernel dispatch
     let seq_len = prompt_tokens.len();
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
     let position_offset = 0usize;
     let kv_seq_len = position_offset + seq_len;

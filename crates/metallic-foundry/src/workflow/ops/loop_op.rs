@@ -243,8 +243,10 @@ impl WorkflowOp for LoopOp {
 
             // Ensure input_ids is bound to any valid U32 buffer; loop overwrites it to sampled-token buffers.
             {
+                let input_ids_full_arg = bindings.get("input_ids_full")?;
+                let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
                 let mut tensor_input = TensorArg::from_buffer(
-                    session.input_ids_full.clone(),
+                    input_ids_full,
                     crate::tensor::Dtype::U32,
                     vec![1],
                     vec![1],
@@ -257,16 +259,16 @@ impl WorkflowOp for LoopOp {
             let emit_host_metrics = crate::instrument::foundry_metrics_enabled();
 
             let batch_size = if profiling_per_kernel { 1 } else { Self::decode_batch_size(bindings) };
-            if batch_size > session.sample_out_buffers.len() {
+            let sample_out_count = bindings.iter().filter(|(k, _)| k.starts_with("sample_out_")).count();
+            if batch_size > sample_out_count {
                 return Err(MetalError::InvalidShape(format!(
-                    "Decode batch_size {batch_size} exceeds session capacity {}. This typically means METALLIC_FOUNDRY_DECODE_BATCH_SIZE changed after model load.",
-                    session.sample_out_buffers.len()
+                    "Decode batch_size {batch_size} exceeds session capacity {sample_out_count}. This typically means METALLIC_FOUNDRY_DECODE_BATCH_SIZE changed after model load."
                 )));
             }
 
             let ignore_eos_stop = Self::ignore_eos_stop_enabled();
             let greedy = temperature <= 0.0 || !temperature.is_finite() || top_k == 0;
-            let vocab_size = model.architecture().vocab_size as u32;
+            let vocab_size = model.architecture().vocab_size() as u32;
 
             let mut pending_count = 0usize;
             let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -308,10 +310,12 @@ impl WorkflowOp for LoopOp {
                 }
 
                 let effective_top_k = if greedy { 1 } else { top_k };
-                let sample_out = &session.sample_out_buffers[batch_idx];
+                let sample_out_name = format!("sample_out_{batch_idx}");
+                let sample_out_arg = bindings.get(&sample_out_name)?;
+                let sample_out = &sample_out_arg;
                 let sample_kernel = SampleTopK::new(
                     &logits_arg,
-                    &TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
+                    sample_out,
                     vocab_size,
                     effective_top_k,
                     top_p,
@@ -324,7 +328,7 @@ impl WorkflowOp for LoopOp {
                     bindings,
                     fast_bindings,
                     &self.input_ids_binding,
-                    TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
+                    (*sample_out).clone(),
                 );
 
                 model.set_int_global(bindings, &self.position_offset_key, start_pos + prompt_len + step);
@@ -387,8 +391,11 @@ impl WorkflowOp for LoopOp {
 
                     let process_start = std::time::Instant::now();
                     let mut batch_done = false;
-                    for buffer in session.sample_out_buffers.iter().take(pending_count) {
-                        let token: u32 = buffer.read_scalar();
+                    for i in 0..pending_count {
+                        let sample_out_name = format!("sample_out_{i}");
+                        let sample_out_arg = bindings.get(&sample_out_name)?;
+                        let token_buf = sample_out_arg.buffer.as_ref().unwrap();
+                        let token: u32 = token_buf.read_scalar::<u32>();
 
                         // Execute the host-side stages in spec order for this token.
                         for stage in &self.stages {
@@ -452,8 +459,11 @@ impl WorkflowOp for LoopOp {
                     }
                     // If the workflow did not append tokens explicitly, treat the sampled tokens as generated.
                     if !self.has_append_stage && pending_count > 0 {
-                        for buffer in session.sample_out_buffers.iter().take(pending_count) {
-                            generated.push(buffer.read_scalar());
+                        for i in 0..pending_count {
+                            let sample_out_name = format!("sample_out_{i}");
+                            let sample_out_arg = bindings.get(&sample_out_name)?;
+                            let token_buf = sample_out_arg.buffer.as_ref().unwrap();
+                            generated.push(token_buf.read_scalar::<u32>());
                         }
                     }
 

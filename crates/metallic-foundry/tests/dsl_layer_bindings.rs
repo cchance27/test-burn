@@ -26,7 +26,7 @@ fn test_layer_weight_bindings_have_indices() -> Result<(), MetalError> {
     assert!(bindings.contains("layer.ffn_down_0"));
 
     // Last layer bindings should exist.
-    let last = model.architecture().n_layers.saturating_sub(1);
+    let last = model.architecture().n_layers().saturating_sub(1);
     let last_attn_norm = format!("layer.attn_norm_{}", last);
     let last_attn_q = format!("layer.attn_q_{}", last);
     let last_ffn_down = format!("layer.ffn_down_{}", last);

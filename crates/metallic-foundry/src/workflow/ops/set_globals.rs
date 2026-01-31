@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use rustc_hash::FxHashMap;
 
 use crate::{
     error::MetalError, workflow::{
@@ -8,12 +8,12 @@ use crate::{
 
 pub(crate) struct SetGlobalsOp {
     model_id: Option<String>,
-    globals: BTreeMap<String, Param<usize>>,
+    globals: FxHashMap<String, Param<usize>>,
     apply_derived_globals: bool,
 }
 
 impl SetGlobalsOp {
-    pub(crate) fn new(model_id: Option<String>, globals: BTreeMap<String, Param<usize>>, apply_derived_globals: bool) -> Self {
+    pub(crate) fn new(model_id: Option<String>, globals: FxHashMap<String, Param<usize>>, apply_derived_globals: bool) -> Self {
         Self {
             model_id,
             globals,

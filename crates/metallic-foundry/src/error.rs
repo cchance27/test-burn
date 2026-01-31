@@ -59,7 +59,7 @@ pub enum MetalError {
     #[error("Resource cache is required but not provided")]
     ResourceCacheRequired,
     #[error("Tokenizer error: {0}")]
-    TokenizerError(Box<crate::tokenizer::TokenizerError>),
+    TokenizerError(Box<crate::tokenizer::BPETokenizerError>),
     #[error("Regex Error: {0}")]
     RegexError(Box<fancy_regex::Error>),
     #[error("Tensor dtype mismatch: expected {expected:?}, got {actual:?}")]
@@ -74,8 +74,8 @@ pub enum MetalError {
     UseAfterFree,
 }
 
-impl From<crate::tokenizer::TokenizerError> for MetalError {
-    fn from(e: crate::tokenizer::TokenizerError) -> Self {
+impl From<crate::tokenizer::BPETokenizerError> for MetalError {
+    fn from(e: crate::tokenizer::BPETokenizerError) -> Self {
         MetalError::TokenizerError(Box::new(e))
     }
 }

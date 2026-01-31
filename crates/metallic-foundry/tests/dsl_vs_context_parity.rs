@@ -1239,10 +1239,10 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
     }
 
     let arch = dsl_model.architecture();
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
 
     let input_buffer = {
@@ -1305,7 +1305,15 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
 
         let logits = bindings.get("logits").unwrap();
         let hidden = bindings.get("final_norm_out").or_else(|_| bindings.get("hidden")).unwrap();
-        Ok((download_f16_buffer(foundry, &logits), download_f16_buffer(foundry, &hidden)))
+        let vocab_size = dsl_model.architecture().vocab_size();
+        let logits_vec = download_f16_buffer(foundry, &logits);
+        let hidden_vec = download_f16_buffer(foundry, &hidden);
+
+        // Slice to active batch (m=1)
+        let logits_slice = logits_vec[..vocab_size].to_vec();
+        let hidden_slice = hidden_vec[..d_model].to_vec();
+
+        Ok((logits_slice, hidden_slice))
     }
 
     let enable_legacy_v_cache_compare = std::env::var("METALLIC_PARITY_COMPARE_V_CACHE")
@@ -1609,10 +1617,10 @@ fn test_dsl_vs_context_pre_norm_parity() -> Result<(), MetalError> {
 
     let arch = dsl_model.architecture();
     let seq_len = tokens.len();
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
     let position_offset = 0usize;
     let kv_seq_len = position_offset + seq_len;
@@ -1716,10 +1724,10 @@ fn test_dsl_vs_context_sdpa_layer0_parity() -> Result<(), MetalError> {
 
     let arch = dsl_model.architecture();
     let seq_len = tokens.len();
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
     let position_offset = 0usize;
     let kv_seq_len = position_offset + seq_len;
@@ -1825,10 +1833,10 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
 
     let arch = dsl_model.architecture();
     let seq_len = 1usize;
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
     let kv_seq_len = seq_len;
 
@@ -2051,7 +2059,7 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
         let dsl_k_bias = download_f16_buffer(&mut foundry, &dsl_k_bias_arg);
 
         // Legacy K bias is in attn_qkv_bias at offset d_model
-        let d_model = dsl_model.architecture().d_model;
+        let d_model = dsl_model.architecture().d_model();
         let k_offset = d_model;
         let kv_dim = 128; // Hardcoded derived from shape
 
@@ -2529,10 +2537,10 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
     // Set all required globals
     let arch = dsl_model.architecture();
     let seq_len = tokens.len();
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
     let position_offset = 0usize;
     let kv_seq_len = position_offset + seq_len;
@@ -2730,15 +2738,16 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
     // STEP 4: Run DSL layer 0
     // =========================================================================
     let arch = dsl_model.architecture();
-    if arch.d_model != d_model {
+    if arch.d_model() != d_model {
         return Err(MetalError::InvalidShape(format!(
             "DSL d_model {} != legacy d_model {}",
-            arch.d_model, d_model
+            arch.d_model(),
+            d_model
         )));
     }
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
 
     let position_offset = 0usize;

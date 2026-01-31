@@ -240,17 +240,17 @@ fn test_gguf_weight_layouts_qwen25() -> Result<(), MetalError> {
 
     let available = gguf_available(&gguf_model);
     let arch = &spec.architecture;
-    let kv_dim = arch.d_model * arch.n_kv_heads / arch.n_heads;
+    let kv_dim = arch.d_model() * arch.n_kv_heads() / arch.n_heads();
 
     let layer = 0usize;
     let weights = [
-        ("layer.attn_q", arch.d_model, arch.d_model),
-        ("layer.attn_k", kv_dim, arch.d_model),
-        ("layer.attn_v", kv_dim, arch.d_model),
-        ("layer.attn_output", arch.d_model, arch.d_model),
-        ("layer.ffn_gate", arch.ff_dim, arch.d_model),
-        ("layer.ffn_up", arch.ff_dim, arch.d_model),
-        ("layer.ffn_down", arch.d_model, arch.ff_dim),
+        ("layer.attn_q", arch.d_model(), arch.d_model()),
+        ("layer.attn_k", kv_dim, arch.d_model()),
+        ("layer.attn_v", kv_dim, arch.d_model()),
+        ("layer.attn_output", arch.d_model(), arch.d_model()),
+        ("layer.ffn_gate", arch.ff_dim(), arch.d_model()),
+        ("layer.ffn_up", arch.ff_dim(), arch.d_model()),
+        ("layer.ffn_down", arch.d_model(), arch.ff_dim()),
     ];
 
     for (key, expected_n, expected_k) in weights {
@@ -268,7 +268,7 @@ fn test_gguf_weight_layouts_qwen25() -> Result<(), MetalError> {
         let tensor = gguf_model
             .get_tensor(&name)
             .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", name)))?;
-        log_layout(&name, tensor.dims(), arch.vocab_size, arch.d_model);
+        log_layout(&name, tensor.dims(), arch.vocab_size(), arch.d_model());
     }
 
     Ok(())
@@ -313,10 +313,10 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
     // Globals
     let arch = dsl_model.architecture();
     let seq_len = tokens.len();
-    let d_model = arch.d_model;
-    let n_heads = arch.n_heads;
-    let n_kv_heads = arch.n_kv_heads;
-    let ff_dim = arch.ff_dim;
+    let d_model = arch.d_model();
+    let n_heads = arch.n_heads();
+    let n_kv_heads = arch.n_kv_heads();
+    let ff_dim = arch.ff_dim();
     let head_dim = d_model / n_heads;
     let position_offset = 0usize;
     let kv_seq_len = position_offset + seq_len;
@@ -390,7 +390,7 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
     if let Some(attn_out_name) = arch.tensor_names.resolve(attn_out_key, Some(layer), &available) {
         let (weights, dims, dtype) = gguf_tensor_f32(dsl_model.gguf_model(), &attn_out_name)?;
         let n = proj_out_f32.len();
-        let k = arch.d_model;
+        let k = arch.d_model();
         let vector_x = slice_prefix(&attn_in_f32, k)?;
 
         eprintln!(

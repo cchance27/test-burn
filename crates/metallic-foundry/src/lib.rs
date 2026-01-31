@@ -7,7 +7,7 @@ use instrument::CaptureMetrics;
 use rustc_hash::FxHashMap;
 pub use spec::*;
 pub use tensor::*;
-pub use tokenizer::Tokenizer;
+pub use tokenizer::BPETokenizer;
 pub use types::*;
 
 pub mod compound;

@@ -1,5 +1,5 @@
 use super::{
-    WorkflowSpec, WorkflowStepSpec, ops::{LoopOp, PrefillOp, ReturnOp, SetGlobalsOp, SyncOp, WorkflowOp}
+    WorkflowSpec, WorkflowStepSpec, ops::{ComputeIntOp, DetokenizeOp, ForwardOp, LoopOp, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WorkflowOp}
 };
 use crate::error::MetalError;
 
@@ -63,6 +63,49 @@ impl CompiledWorkflow {
                 }
                 WorkflowStepSpec::Return { output } => {
                     ops.push(Box::new(ReturnOp::new(output.clone())));
+                }
+                WorkflowStepSpec::Forward {
+                    model_id,
+                    inputs,
+                    outputs,
+                    update_globals,
+                    apply_derived_globals,
+                    description,
+                } => {
+                    ops.push(Box::new(ForwardOp::new(
+                        model_id.clone(),
+                        inputs.clone(),
+                        outputs.clone(),
+                        update_globals.clone(),
+                        *apply_derived_globals,
+                        description.clone(),
+                    )));
+                }
+                WorkflowStepSpec::Sample {
+                    logits,
+                    output,
+                    temperature,
+                    top_k,
+                    top_p,
+                    seed,
+                } => {
+                    ops.push(Box::new(SampleOp::new(
+                        logits.clone(),
+                        output.clone(),
+                        temperature.clone(),
+                        top_k.clone(),
+                        top_p.clone(),
+                        seed.clone(),
+                    )));
+                }
+                WorkflowStepSpec::Tokenize { model_id, input, output } => {
+                    ops.push(Box::new(TokenizeOp::new(model_id.clone(), input.clone(), output.clone())));
+                }
+                WorkflowStepSpec::Detokenize { model_id, input, output } => {
+                    ops.push(Box::new(DetokenizeOp::new(model_id.clone(), input.clone(), output.clone())));
+                }
+                WorkflowStepSpec::ComputeInt { output, expr } => {
+                    ops.push(Box::new(ComputeIntOp::new(output.clone(), expr.clone())));
                 }
             }
         }
