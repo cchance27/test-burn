@@ -27,32 +27,50 @@ impl<T: Default> Default for DynamicValue<T> {
 impl<T: FromStr + Copy + Default + 'static> DynamicValue<T> {
     /// Resolve this value, looking up variables from bindings if needed.
     ///
-    /// Returns the default value if variable lookup or parsing fails.
+    /// Panics if variable lookup or parsing fails.
     pub fn resolve(&self, bindings: &TensorBindings) -> T {
         match self {
             DynamicValue::Literal(v) => *v,
             DynamicValue::Variable(name) => {
                 // Optimization: If T is u32, checking int_globals first avoids String parsing.
                 // This is a compile-time check that optimizes away for other types.
-                if TypeId::of::<T>() == TypeId::of::<u32>()
-                    && let Some(v) = bindings.get_int_global(name)
-                {
-                    // Safety: We verified T is u32 via TypeId.
-                    // We cast usize -> u32 (safe for our params) and then use safe casting helper.
-                    let val_u32 = v as u32;
-                    return crate::types::cast_from_ref(&val_u32).unwrap_or_default();
+                if TypeId::of::<T>() == TypeId::of::<u32>() {
+                    if let Some(v) = bindings.get_int_global(name) {
+                        let val_u32 = v as u32;
+                        return crate::types::cast_from_ref(&val_u32)
+                            .unwrap_or_else(|| panic!("DynamicValue type cast failed for u32 '{}'", name));
+                    }
+                    if let Some(s) = bindings.get_var(name)
+                        && let Ok(v) = s.parse::<u32>()
+                    {
+                        return crate::types::cast_from_ref(&v)
+                            .unwrap_or_else(|| panic!("DynamicValue type cast failed for u32 '{}'", name));
+                    }
+                    panic_missing_dynamic_value(name, std::any::type_name::<T>());
                 }
 
                 // Optimization: If T is usize, checking int_globals first.
-                if TypeId::of::<T>() == TypeId::of::<usize>()
-                    && let Some(v) = bindings.get_int_global(name)
-                {
-                    // Safety: T is usize.
-                    return crate::types::cast_from_ref(&v).unwrap_or_default();
+                if TypeId::of::<T>() == TypeId::of::<usize>() {
+                    if let Some(v) = bindings.get_int_global(name) {
+                        return crate::types::cast_from_ref(&v)
+                            .unwrap_or_else(|| panic!("DynamicValue type cast failed for usize '{}'", name));
+                    }
+                    if let Some(s) = bindings.get_var(name)
+                        && let Ok(v) = s.parse::<usize>()
+                    {
+                        return crate::types::cast_from_ref(&v)
+                            .unwrap_or_else(|| panic!("DynamicValue type cast failed for usize '{}'", name));
+                    }
+                    panic_missing_dynamic_value(name, std::any::type_name::<T>());
                 }
 
                 // Fallback to string globals
-                bindings.get_var(name).and_then(|s| s.parse().ok()).unwrap_or_default()
+                if let Some(s) = bindings.get_var(name)
+                    && let Ok(v) = s.parse::<T>()
+                {
+                    return v;
+                }
+                panic_missing_dynamic_value(name, std::any::type_name::<T>());
             }
         }
     }
@@ -74,6 +92,14 @@ impl<T: FromStr + Copy + Default + 'static> DynamicValue<T> {
             DynamicValue::Variable(_) => None,
         }
     }
+}
+
+#[cold]
+#[inline(never)]
+fn panic_missing_dynamic_value(name: &str, ty: &'static str) -> ! {
+    panic!(
+        "Missing required dynamic value '{name}' (type {ty}). Add it to the DSL (architecture.prepare.globals/derived_globals) or pass a runtime override."
+    )
 }
 
 impl<T: Serialize> Serialize for DynamicValue<T> {
@@ -202,10 +228,11 @@ mod tests {
     }
 
     #[test]
-    fn test_dynamic_value_resolve_missing_variable() {
+    #[should_panic]
+    fn test_dynamic_value_resolve_missing_variable_panics() {
         let val = DynamicValue::<u32>::Variable("missing".to_string());
         let bindings = TensorBindings::new();
-        assert_eq!(val.resolve(&bindings), 0); // Default
+        let _ = val.resolve(&bindings);
     }
 
     #[test]

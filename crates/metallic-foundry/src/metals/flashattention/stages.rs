@@ -93,9 +93,9 @@ impl HeadLayoutStage {
 /// - D=64 uses the half2 kernel + float2 accumulator (lower TG memory, larger KV block)
 /// - D=128 uses the half4 kernel + float4 accumulator (needed for D=128)
 ///
-/// DEBT: This stage currently hardcodes F16 loading and does not use `MetalPolicy`.
-/// This violates the SLP architecture. It should be refactored to take `Arc<dyn MetalPolicy>`
-/// and use `Policy::load` instead of raw pointer arithmetic.
+/// DEBT: This stage currently hardcodes F16 loading instead of using the policy abstraction.
+/// This violates the SLP architecture. It should be refactored to take a policy object
+/// and use policy-driven loads instead of raw pointer arithmetic.
 #[derive(KernelArgs, Clone, Debug)]
 pub struct FlashDecodeFusedStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
@@ -190,9 +190,9 @@ impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
 
 /// Standalone FlashDecode Stage - loads Q directly from buffer (no RoPE fusion).
 ///
-/// // DEBT: This stage currently hardcodes F16 loading and does not use `MetalPolicy`.
-/// // This violates the SLP architecture. It should be refactored to take `Arc<dyn MetalPolicy>`
-/// // and use `Policy::load` instead of raw pointer arithmetic.
+/// // DEBT: This stage currently hardcodes F16 loading instead of using the policy abstraction.
+/// // This violates the SLP architecture. It should be refactored to take a policy object
+/// // and use policy-driven loads instead of raw pointer arithmetic.
 #[derive(KernelArgs, Clone, Debug)]
 pub struct FlashDecodeStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,

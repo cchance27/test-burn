@@ -6,7 +6,9 @@
 use rustc_hash::FxHashMap;
 use serde::Deserialize;
 
-use crate::spec::Step;
+use crate::{
+    error::MetalError, spec::{IntExpr, Step}, tensor::Dtype
+};
 
 /// A model execution specification loaded from JSON.
 ///
@@ -86,39 +88,275 @@ pub struct LayerTensorNames {
 #[derive(Debug, Deserialize)]
 pub struct Architecture {
     /// Hidden dimension size
+    #[serde(default)]
     pub d_model: usize,
     /// Number of attention heads
+    #[serde(default)]
     pub n_heads: usize,
     /// Number of key-value heads (for GQA)
+    #[serde(default)]
     pub n_kv_heads: usize,
     /// Number of transformer layers
+    #[serde(default)]
     pub n_layers: usize,
     /// FFN intermediate dimension
+    #[serde(default)]
     pub ff_dim: usize,
     /// Vocabulary size
+    #[serde(default)]
     pub vocab_size: usize,
     /// Maximum sequence length
+    #[serde(default)]
     pub max_seq_len: usize,
     /// RoPE base frequency
-    #[serde(default = "default_rope_base")]
+    #[serde(default)]
     pub rope_base: f32,
     /// RMSNorm epsilon
-    #[serde(default = "default_rms_eps")]
+    #[serde(default)]
     pub rms_eps: f32,
     /// Tensor naming conventions for GGUF loading
     #[serde(default)]
     pub tensor_names: TensorNames,
+    /// Optional GGUF metadata key mapping used to infer baseline architecture values.
+    ///
+    /// If absent, the loader falls back to a built-in key set (DEBT).
+    #[serde(default)]
+    pub metadata_keys: MetadataKeysSpec,
+    /// Executor preparation plan (globals + intermediates + KV caches).
+    #[serde(default)]
+    pub prepare: PrepareSpec,
+    /// Weight tensors the executor must bind from GGUF before inference.
+    ///
+    /// This is used to avoid hardcoding architecture-specific weight binding logic
+    /// in the executor (e.g. which weights are "canonical" vs row-major).
+    #[serde(default)]
+    pub weight_bindings: Vec<WeightBindingSpec>,
     /// Forward pass execution graph - sequence of kernel steps
     #[serde(default)]
     pub forward: Vec<Box<dyn Step>>,
 }
 
-fn default_rope_base() -> f32 {
-    10000.0
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct MetadataKeysSpec {
+    /// Map from architecture field name -> ordered list of GGUF keys (first match wins).
+    ///
+    /// Expected field names (current): d_model, n_heads, n_kv_heads, n_layers, ff_dim, vocab_size, max_seq_len,
+    /// rope_base, rms_eps.
+    #[serde(default)]
+    pub keys: FxHashMap<String, Vec<String>>,
 }
 
-fn default_rms_eps() -> f32 {
-    1e-6
+/// Baseline architecture values inferred from GGUF metadata.
+///
+/// The executor uses the following precedence:
+/// GGUF baseline < DSL overrides < runtime overrides.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ArchitectureDefaults {
+    pub d_model: usize,
+    pub n_heads: usize,
+    pub n_kv_heads: usize,
+    pub n_layers: usize,
+    pub ff_dim: usize,
+    pub vocab_size: usize,
+    pub max_seq_len: usize,
+    pub rope_base: f32,
+    pub rms_eps: f32,
+}
+
+impl Architecture {
+    /// Apply GGUF-derived baseline values to this spec.
+    ///
+    /// Fields that are zero/unset in the DSL are filled from `defaults`.
+    /// Non-zero fields are treated as DSL overrides and preserved.
+    pub fn apply_metadata_baseline(&mut self, defaults: &ArchitectureDefaults) -> Result<(), MetalError> {
+        if self.d_model == 0 {
+            self.d_model = defaults.d_model;
+        }
+        if self.n_heads == 0 {
+            self.n_heads = defaults.n_heads;
+        }
+        if self.n_kv_heads == 0 {
+            self.n_kv_heads = defaults.n_kv_heads;
+        }
+        if self.n_layers == 0 {
+            self.n_layers = defaults.n_layers;
+        }
+        if self.ff_dim == 0 {
+            self.ff_dim = defaults.ff_dim;
+        }
+        if self.vocab_size == 0 {
+            self.vocab_size = defaults.vocab_size;
+        }
+        if self.max_seq_len == 0 {
+            self.max_seq_len = defaults.max_seq_len;
+        }
+        if self.rope_base == 0.0 {
+            self.rope_base = defaults.rope_base;
+        }
+        if self.rms_eps == 0.0 {
+            self.rms_eps = defaults.rms_eps;
+        }
+
+        self.validate()
+    }
+
+    fn validate(&self) -> Result<(), MetalError> {
+        let req = [
+            ("d_model", self.d_model),
+            ("n_heads", self.n_heads),
+            ("n_kv_heads", self.n_kv_heads),
+            ("n_layers", self.n_layers),
+            ("ff_dim", self.ff_dim),
+            ("vocab_size", self.vocab_size),
+            ("max_seq_len", self.max_seq_len),
+        ];
+        for (name, v) in req {
+            if v == 0 {
+                return Err(MetalError::InvalidShape(format!("Architecture.{name} must be > 0")));
+            }
+        }
+        if !self.rope_base.is_finite() || self.rope_base <= 0.0 {
+            return Err(MetalError::InvalidShape(format!(
+                "Architecture.rope_base must be finite and > 0 (got {})",
+                self.rope_base
+            )));
+        }
+        if !self.rms_eps.is_finite() || self.rms_eps <= 0.0 {
+            return Err(MetalError::InvalidShape(format!(
+                "Architecture.rms_eps must be finite and > 0 (got {})",
+                self.rms_eps
+            )));
+        }
+        if self.d_model % self.n_heads != 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "Architecture.d_model ({}) must be divisible by n_heads ({})",
+                self.d_model, self.n_heads
+            )));
+        }
+        if self.n_heads % self.n_kv_heads != 0 {
+            return Err(MetalError::InvalidShape(format!(
+                "Architecture.n_heads ({}) must be divisible by n_kv_heads ({})",
+                self.n_heads, self.n_kv_heads
+            )));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct PrepareSpec {
+    /// One-time globals evaluated at session initialization.
+    #[serde(default)]
+    pub globals: FxHashMap<String, IntExpr>,
+    /// Derived globals evaluated at runtime (per prefill chunk / per decode step).
+    #[serde(default)]
+    pub derived_globals: Vec<DerivedGlobalSpec>,
+    /// Tensors the executor must allocate and bind before inference.
+    #[serde(default)]
+    pub tensors: Vec<TensorAllocSpec>,
+    /// RoPE cache naming (executor computes/upload values).
+    #[serde(default)]
+    pub rope: Option<RopePrepareSpec>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct DerivedGlobalSpec {
+    pub name: String,
+    pub expr: IntExpr,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RopePrepareSpec {
+    pub cos: String,
+    pub sin: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RepeatAllocSpec {
+    /// Variable name or integer literal for iteration count.
+    /// e.g. "n_layers" or "24"
+    pub count: String,
+    /// Variable name to bind the current index to.
+    /// e.g. "i" -> becomes "0", "1", ...
+    pub var: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum StorageClass {
+    Intermediate,
+    KvCache,
+    RopeCache,
+    Shared,
+    Private,
+}
+
+impl Default for StorageClass {
+    fn default() -> Self {
+        StorageClass::Intermediate
+    }
+}
+
+fn default_dtype_f16() -> Dtype {
+    Dtype::F16
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct TensorAllocSpec {
+    pub name: String,
+    #[serde(default)]
+    pub repeat: Option<RepeatAllocSpec>,
+    #[serde(default = "default_dtype_f16")]
+    pub dtype: Dtype,
+    #[serde(default)]
+    pub storage: StorageClass,
+    pub dims: Vec<IntExpr>,
+    #[serde(default)]
+    pub strides: Option<Vec<IntExpr>>,
+    /// If true, this tensor is resized when KV capacity grows.
+    /// Intended for KV caches and any other buffers indexed by max_seq_len.
+    #[serde(default)]
+    pub grow_with_kv: bool,
+    /// If true, the executor will zero-fill the buffer after allocation.
+    #[serde(default)]
+    pub zero_fill: bool,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct WeightBindingSpec {
+    /// Key used to resolve a GGUF tensor name via `Architecture.tensor_names`.
+    ///
+    /// Examples:
+    /// - "embedding"
+    /// - "output_weight"
+    /// - "layer.attn_q"
+    pub key: String,
+    /// Logical tensor name inserted into bindings (may contain "{i}" with repeat).
+    pub logical_name: String,
+    #[serde(default)]
+    pub repeat: Option<RepeatAllocSpec>,
+    /// Optional fallback: if the GGUF tensor is missing, bind a zero vector of this length (F16).
+    ///
+    /// Intended for optional biases.
+    #[serde(default)]
+    pub fallback_zero_len: Option<IntExpr>,
+    #[serde(default)]
+    pub layout: WeightLayoutSpec,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WeightLayoutSpec {
+    /// Bind weights as-is (row-major / GGUF native layout).
+    RowMajor,
+    /// Bind weights in canonical k-block-major layout (used by some GEMV/GEMM variants).
+    Canonical { expected_k: IntExpr, expected_n: IntExpr },
+}
+
+impl Default for WeightLayoutSpec {
+    fn default() -> Self {
+        WeightLayoutSpec::RowMajor
+    }
 }
 
 impl ModelSpec {

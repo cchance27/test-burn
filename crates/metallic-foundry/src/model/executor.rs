@@ -5,12 +5,12 @@
 use std::{cell::RefCell, sync::OnceLock};
 
 use half::f16;
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::builder::WeightBundle;
 use crate::{
     Foundry, error::MetalError, metals::sampling::SampleTopK, policy::{WeightLayout, resolve_policy}, spec::{
-        ModelSpec, TensorBindings, compiled::{CompiledStep, FastBindings, SymbolTable}
+        ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
     }, types::{MetalResourceOptions, TensorArg}
 };
 
@@ -107,6 +107,8 @@ pub struct CompiledModel {
     compiled_steps: Vec<Box<dyn CompiledStep>>,
     /// Symbol table mapping tensor names to integer indices for fast lookup
     symbol_table: SymbolTable,
+    /// Interned global keys for fast `int_globals` updates without allocations.
+    interned_globals: FxHashMap<String, &'static str>,
     /// Reusable execution session (weights/intermediates + small persistent buffers).
     session: RefCell<Option<ModelSession>>,
 }
@@ -164,6 +166,437 @@ impl CompiledModel {
         (max_prefill_chunk, prefill_chunk_size)
     }
 
+    #[inline]
+    fn interned_key(&self, key: &str) -> &'static str {
+        *self
+            .interned_globals
+            .get(key)
+            .unwrap_or_else(|| panic!("Missing interned global key '{key}'. Add it to CompiledModel::new intern list."))
+    }
+
+    #[inline]
+    fn set_int_global(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
+        let interned = self.interned_key(key);
+        bindings.set_int_global(interned, value);
+    }
+
+    #[inline]
+    fn set_global_usize(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
+        self.set_int_global(bindings, key, value);
+        bindings.set_global(key, value.to_string());
+    }
+
+    #[inline]
+    fn set_global_f32(&self, bindings: &mut TensorBindings, key: &str, value: f32) {
+        bindings.set_global(key, value.to_string());
+    }
+
+    fn apply_derived_globals(&self, bindings: &mut TensorBindings) {
+        for spec in &self.spec.architecture.prepare.derived_globals {
+            let value = spec.expr.eval(bindings);
+            self.set_int_global(bindings, &spec.name, value);
+        }
+    }
+
+    fn required_prepare_vars(&self) -> FxHashSet<&str> {
+        let arch = self.architecture();
+        let mut vars: FxHashSet<&str> = FxHashSet::default();
+
+        // prepare.globals expressions
+        for expr in arch.prepare.globals.values() {
+            for v in expr.vars() {
+                vars.insert(v.as_ref());
+            }
+        }
+        // derived globals expressions
+        for g in &arch.prepare.derived_globals {
+            for v in g.expr.vars() {
+                vars.insert(v.as_ref());
+            }
+        }
+        // tensor dims/strides expressions
+        for t in &arch.prepare.tensors {
+            for e in &t.dims {
+                for v in e.vars() {
+                    vars.insert(v.as_ref());
+                }
+            }
+            if let Some(strides) = &t.strides {
+                for e in strides {
+                    for v in e.vars() {
+                        vars.insert(v.as_ref());
+                    }
+                }
+            }
+            if let Some(rep) = &t.repeat
+                && rep.count.parse::<usize>().is_err()
+            {
+                vars.insert(rep.count.as_str());
+            }
+        }
+        // weight binding expressions
+        for w in &arch.weight_bindings {
+            if let Some(rep) = &w.repeat
+                && rep.count.parse::<usize>().is_err()
+            {
+                vars.insert(rep.count.as_str());
+            }
+            if let Some(z) = &w.fallback_zero_len {
+                for v in z.vars() {
+                    vars.insert(v.as_ref());
+                }
+            }
+            if let WeightLayoutSpec::Canonical { expected_k, expected_n } = &w.layout {
+                for v in expected_k.vars() {
+                    vars.insert(v.as_ref());
+                }
+                for v in expected_n.vars() {
+                    vars.insert(v.as_ref());
+                }
+            }
+        }
+
+        vars
+    }
+
+    fn storage_mode_for(storage: StorageClass) -> MetalResourceOptions {
+        match storage {
+            StorageClass::Intermediate => {
+                if std::env::var("METALLIC_INTERMEDIATES_SHARED").is_ok() {
+                    MetalResourceOptions::StorageModeShared
+                } else {
+                    MetalResourceOptions::StorageModePrivate
+                }
+            }
+            StorageClass::KvCache => {
+                if std::env::var("METALLIC_KV_CACHE_SHARED").is_ok() {
+                    MetalResourceOptions::StorageModeShared
+                } else {
+                    MetalResourceOptions::StorageModePrivate
+                }
+            }
+            StorageClass::RopeCache => {
+                if std::env::var("METALLIC_ROPE_SHARED").is_ok() {
+                    MetalResourceOptions::StorageModeShared
+                } else {
+                    MetalResourceOptions::StorageModePrivate
+                }
+            }
+            StorageClass::Shared => MetalResourceOptions::StorageModeShared,
+            StorageClass::Private => MetalResourceOptions::StorageModePrivate,
+        }
+    }
+
+    fn allocate_tensor_from_spec(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        name: &str,
+        dtype: crate::tensor::Dtype,
+        dims: Vec<usize>,
+        strides: Vec<usize>,
+        storage: StorageClass,
+        zero_fill: bool,
+    ) -> Result<(), MetalError> {
+        if dims.is_empty() {
+            return Err(MetalError::InvalidShape(format!("prepare.tensors '{name}' requires dims.len()>0")));
+        }
+        if dims.iter().any(|&d| d == 0) {
+            return Err(MetalError::InvalidShape(format!(
+                "prepare.tensors '{name}' requires all dims>0, got {dims:?}"
+            )));
+        }
+        if strides.len() != dims.len() {
+            return Err(MetalError::InvalidShape(format!(
+                "prepare.tensors '{name}' strides.len() must equal dims.len() ({} != {})",
+                strides.len(),
+                dims.len()
+            )));
+        }
+        if bindings.contains(name) {
+            return Err(MetalError::InvalidOperation(format!(
+                "prepare.tensors attempted to re-bind existing tensor '{name}'"
+            )));
+        }
+
+        let elements = dims
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(d))
+            .ok_or_else(|| MetalError::InvalidShape(format!("prepare.tensors '{name}' element count overflow")))?;
+        let byte_size = elements
+            .checked_mul(dtype.size_bytes())
+            .ok_or_else(|| MetalError::InvalidShape(format!("prepare.tensors '{name}' byte size overflow")))?;
+
+        let storage_mode = Self::storage_mode_for(storage);
+        let buffer = foundry
+            .device
+            .new_buffer(byte_size, storage_mode)
+            .ok_or_else(|| MetalError::OperationFailed(format!("Failed to allocate {} bytes for '{}'", byte_size, name)))?;
+
+        if zero_fill {
+            if storage_mode != MetalResourceOptions::StorageModeShared {
+                return Err(MetalError::InvalidOperation(format!(
+                    "prepare.tensors '{name}' requested zero_fill=true but storage is not Shared (set storage=shared)"
+                )));
+            }
+            buffer.fill_bytes(0, byte_size);
+        }
+
+        let tensor_arg = TensorArg::from_buffer(buffer, dtype, dims, strides);
+        self.insert_binding(bindings, fast_bindings, name.to_string(), tensor_arg);
+        Ok(())
+    }
+
+    fn seed_prepare_globals(&self, bindings: &mut TensorBindings) {
+        let arch = self.architecture();
+        let required = self.required_prepare_vars();
+
+        // Baseline globals (GGUF baseline + DSL overrides already applied to arch).
+        // Only seed values that are referenced by the DSL (shapes/derived globals/weight layouts).
+        if required.contains("n_layers") {
+            self.set_global_usize(bindings, "n_layers", arch.n_layers);
+        }
+        if required.contains("d_model") {
+            self.set_global_usize(bindings, "d_model", arch.d_model);
+        }
+        if required.contains("n_heads") {
+            self.set_global_usize(bindings, "n_heads", arch.n_heads);
+        }
+        if required.contains("n_kv_heads") {
+            self.set_global_usize(bindings, "n_kv_heads", arch.n_kv_heads);
+        }
+        if required.contains("ff_dim") {
+            self.set_global_usize(bindings, "ff_dim", arch.ff_dim);
+        }
+        if required.contains("vocab_size") {
+            self.set_global_usize(bindings, "vocab_size", arch.vocab_size);
+        }
+        if required.contains("rope_base") {
+            self.set_global_f32(bindings, "rope_base", arch.rope_base);
+        }
+        if required.contains("rms_eps") {
+            self.set_global_f32(bindings, "rms_eps", arch.rms_eps);
+        }
+
+        // Default runtime globals; workflows can override these at runtime.
+        if required.contains("m") {
+            self.set_int_global(bindings, "m", 1);
+        }
+        if required.contains("seq_len") {
+            self.set_int_global(bindings, "seq_len", 1);
+        }
+        if required.contains("position_offset") {
+            self.set_int_global(bindings, "position_offset", 0);
+        }
+
+        // Apply one-time prepare.globals.
+        for (key, expr) in &arch.prepare.globals {
+            let value = expr.eval(bindings);
+            self.set_global_usize(bindings, key, value);
+        }
+
+        // Derived globals may be used by tensor dims (e.g. head_dim/kv_dim).
+        self.apply_derived_globals(bindings);
+    }
+
+    fn allocate_prepare_tensors(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+    ) -> Result<(), MetalError> {
+        let arch = self.architecture();
+
+        // Allocate prepare.tensors.
+        for tensor in &arch.prepare.tensors {
+            if tensor.name.contains('{') && tensor.repeat.is_none() {
+                return Err(MetalError::InvalidShape(format!(
+                    "prepare.tensors '{name}' contains '{{}}' but repeat is not set",
+                    name = tensor.name
+                )));
+            }
+
+            if let Some(repeat) = &tensor.repeat {
+                let count_val = if let Ok(v) = repeat.count.parse::<usize>() {
+                    v
+                } else {
+                    bindings
+                        .get_var(&repeat.count)
+                        .ok_or_else(|| {
+                            MetalError::InvalidOperation(format!("prepare.tensors repeat count variable '{}' not found", repeat.count))
+                        })?
+                        .parse::<usize>()
+                        .map_err(|e| {
+                            MetalError::InvalidOperation(format!(
+                                "prepare.tensors repeat count variable '{}' is not a valid integer: {}",
+                                repeat.count, e
+                            ))
+                        })?
+                };
+
+                bindings.push_scope();
+                for i in 0..count_val {
+                    bindings.set_var(&repeat.var, i.to_string());
+                    let resolved_name = bindings.interpolate(tensor.name.clone());
+
+                    // Compute dims/strides under this scope.
+                    let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect();
+                    let strides: Vec<usize> = if let Some(strides) = &tensor.strides {
+                        strides.iter().map(|e| e.eval(bindings)).collect()
+                    } else {
+                        crate::tensor::compute_strides(&dims)
+                    };
+
+                    self.allocate_tensor_from_spec(
+                        foundry,
+                        bindings,
+                        fast_bindings,
+                        &resolved_name,
+                        tensor.dtype,
+                        dims,
+                        strides,
+                        tensor.storage,
+                        tensor.zero_fill,
+                    )?;
+                }
+                bindings.pop_scope();
+            } else {
+                let resolved_name = bindings.interpolate(tensor.name.clone());
+                let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect();
+                let strides: Vec<usize> = if let Some(strides) = &tensor.strides {
+                    strides.iter().map(|e| e.eval(bindings)).collect()
+                } else {
+                    crate::tensor::compute_strides(&dims)
+                };
+                self.allocate_tensor_from_spec(
+                    foundry,
+                    bindings,
+                    fast_bindings,
+                    &resolved_name,
+                    tensor.dtype,
+                    dims,
+                    strides,
+                    tensor.storage,
+                    tensor.zero_fill,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn bind_weights_from_spec(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        available: &FxHashMap<String, ()>,
+    ) -> Result<(), MetalError> {
+        let arch = &self.spec.architecture;
+        if arch.weight_bindings.is_empty() {
+            return Ok(());
+        }
+
+        let mut zero_cache: FxHashMap<usize, TensorArg> = FxHashMap::default();
+
+        for spec in &arch.weight_bindings {
+            if let Some(repeat) = &spec.repeat {
+                let count_val = if let Ok(v) = repeat.count.parse::<usize>() {
+                    v
+                } else {
+                    bindings
+                        .get_var(&repeat.count)
+                        .ok_or_else(|| {
+                            MetalError::InvalidOperation(format!("weight_bindings repeat count variable '{}' not found", repeat.count))
+                        })?
+                        .parse::<usize>()
+                        .map_err(|e| {
+                            MetalError::InvalidOperation(format!(
+                                "weight_bindings repeat count variable '{}' is not a valid integer: {e}",
+                                repeat.count
+                            ))
+                        })?
+                };
+
+                bindings.push_scope();
+                for i in 0..count_val {
+                    bindings.set_var(&repeat.var, i.to_string());
+                    let layer_idx = if spec.key.starts_with("layer.") { Some(i) } else { None };
+                    self.bind_one_weight_binding(foundry, bindings, fast_bindings, available, &mut zero_cache, spec, layer_idx)?;
+                }
+                bindings.pop_scope();
+            } else {
+                if spec.key.starts_with("layer.") {
+                    return Err(MetalError::InvalidShape(format!(
+                        "weight_bindings key '{}' requires repeat to bind per-layer tensors",
+                        spec.key
+                    )));
+                }
+                self.bind_one_weight_binding(foundry, bindings, fast_bindings, available, &mut zero_cache, spec, None)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn bind_one_weight_binding(
+        &self,
+        foundry: &mut Foundry,
+        bindings: &mut TensorBindings,
+        fast_bindings: &mut FastBindings,
+        available: &FxHashMap<String, ()>,
+        zero_cache: &mut FxHashMap<usize, TensorArg>,
+        spec: &WeightBindingSpec,
+        layer_idx: Option<usize>,
+    ) -> Result<(), MetalError> {
+        let tensor_names = &self.spec.architecture.tensor_names;
+
+        let logical_name = bindings.interpolate(spec.logical_name.clone());
+        if bindings.contains(&logical_name) {
+            return Err(MetalError::InvalidOperation(format!(
+                "weight_bindings attempted to re-bind existing tensor '{logical_name}'"
+            )));
+        }
+
+        if let Some(gguf_name) = tensor_names.resolve(&spec.key, layer_idx, available) {
+            match &spec.layout {
+                WeightLayoutSpec::RowMajor => {
+                    self.bind_gguf_tensor(bindings, fast_bindings, foundry, &gguf_name, &logical_name)?;
+                }
+                WeightLayoutSpec::Canonical { expected_k, expected_n } => {
+                    let k = expected_k.eval(bindings);
+                    let n = expected_n.eval(bindings);
+                    self.bind_gguf_tensor_canonical(bindings, fast_bindings, foundry, &gguf_name, &logical_name, k, n)?;
+                }
+            }
+            return Ok(());
+        }
+
+        if let Some(zero_len_expr) = &spec.fallback_zero_len {
+            let size = zero_len_expr.eval(bindings);
+            if size == 0 {
+                return Err(MetalError::InvalidShape(format!(
+                    "weight_bindings '{logical_name}' fallback_zero_len evaluated to 0"
+                )));
+            }
+            let zero = if let Some(tensor) = zero_cache.get(&size) {
+                tensor.clone()
+            } else {
+                let tensor = self.zero_tensor_arg(foundry, size)?;
+                zero_cache.insert(size, tensor.clone());
+                tensor
+            };
+            self.insert_binding(bindings, fast_bindings, logical_name, zero);
+            return Ok(());
+        }
+
+        Err(MetalError::InputNotFound(format!(
+            "GGUF tensor not found for weight_bindings key='{}' layer_idx={layer_idx:?} logical_name='{}'",
+            spec.key, logical_name
+        )))
+    }
+
     /// Optimized execution steps (compiled from DSL)
     pub fn compiled_steps(&self) -> &[Box<dyn CompiledStep>] {
         &self.compiled_steps
@@ -212,11 +645,57 @@ impl CompiledModel {
             symbols.len()
         );
 
+        let interned_globals = {
+            let mut keys: Vec<String> = Vec::new();
+            // Common runtime keys for text-generation.
+            keys.extend_from_slice(&[
+                "n_layers".to_string(),
+                "d_model".to_string(),
+                "n_heads".to_string(),
+                "n_kv_heads".to_string(),
+                "ff_dim".to_string(),
+                "vocab_size".to_string(),
+                "max_seq_len".to_string(),
+                "rope_base".to_string(),
+                "rms_eps".to_string(),
+                "head_dim".to_string(),
+                "kv_dim".to_string(),
+                "group_size".to_string(),
+                "m".to_string(),
+                "seq_len".to_string(),
+                "position_offset".to_string(),
+                "kv_seq_len".to_string(),
+                "max_prefill_chunk".to_string(),
+                "total_elements_hidden".to_string(),
+                "total_elements_q".to_string(),
+                "total_elements_k".to_string(),
+                "total_elements_write".to_string(),
+                "total_elements_ffn".to_string(),
+                "total_elements_slice".to_string(),
+                "total_elements_repeat".to_string(),
+            ]);
+
+            // DSL-declared globals and derived globals.
+            keys.extend(spec.architecture.prepare.globals.keys().cloned());
+            keys.extend(spec.architecture.prepare.derived_globals.iter().map(|g| g.name.clone()));
+
+            keys.sort();
+            keys.dedup();
+
+            let mut map: FxHashMap<String, &'static str> = FxHashMap::default();
+            for k in keys {
+                let leaked: &'static str = Box::leak(k.clone().into_boxed_str());
+                map.insert(k, leaked);
+            }
+            map
+        };
+
         Ok(Self {
             spec,
             weights,
             compiled_steps,
             symbol_table: symbols,
+            interned_globals,
             session: RefCell::new(None),
         })
     }
@@ -266,8 +745,7 @@ impl CompiledModel {
 
         let max_seq_len = context_config.max_context_len;
         let allocated_capacity = context_config.allocated_capacity;
-        bindings.set_int_global("max_seq_len", allocated_capacity);
-        bindings.set_global("max_seq_len", allocated_capacity.to_string());
+        self.set_global_usize(&mut bindings, "max_seq_len", allocated_capacity);
 
         // Allocate a single prompt/input buffer sized for the full potential context to avoid reallocating IDs.
         let input_ids_full = self.allocate_u32_buffer(foundry, "input_ids_full", max_seq_len)?;
@@ -299,20 +777,6 @@ impl CompiledModel {
             sample_out_buffers.push(self.allocate_u32_buffer(foundry, &format!("sample_out_{i}"), 1)?);
         }
 
-        // Default globals for decode (m=1, seq_len=1).
-        let d_model = arch.d_model;
-        let n_heads = arch.n_heads;
-        let n_kv_heads = arch.n_kv_heads;
-        let head_dim = d_model / n_heads;
-        let ff_dim = arch.ff_dim;
-        bindings.set_int_global("m", 1);
-        bindings.set_int_global("seq_len", 1);
-        bindings.set_int_global("total_elements_hidden", d_model);
-        bindings.set_int_global("total_elements_q", n_heads * head_dim);
-        bindings.set_int_global("total_elements_k", n_kv_heads * head_dim);
-        bindings.set_int_global("total_elements_write", n_kv_heads * head_dim);
-        bindings.set_int_global("total_elements_ffn", ff_dim);
-
         *session = Some(ModelSession {
             bindings,
             fast_bindings,
@@ -329,7 +793,7 @@ impl CompiledModel {
     /// 1. Setting config globals (n_layers, d_model, etc.)
     /// 2. Materializing weight tensors from GGUF using logical name resolution
     /// 3. Allocating intermediate buffers for activations
-    /// 
+    ///
     /// Prepare runtime bindings (weights + intermediates + KV caches) using a caller-provided context config.
     ///
     /// Prefer `prepare_bindings()` unless you need to explicitly cap/shape context behavior.
@@ -358,321 +822,137 @@ impl CompiledModel {
             );
         }
 
-        // 1. Set config globals for DSL variable interpolation
-        bindings.set_global("n_layers", arch.n_layers.to_string());
-        bindings.set_global("d_model", arch.d_model.to_string());
-        bindings.set_global("n_heads", arch.n_heads.to_string());
-        bindings.set_global("n_kv_heads", arch.n_kv_heads.to_string());
-        bindings.set_global("ff_dim", arch.ff_dim.to_string());
-        bindings.set_global("vocab_size", arch.vocab_size.to_string());
-        bindings.set_global("rms_eps", arch.rms_eps.to_string());
-        let head_dim = arch.d_model / arch.n_heads;
-        bindings.set_global("head_dim", head_dim.to_string());
-        let kv_dim = head_dim * arch.n_kv_heads;
-        bindings.set_global("kv_dim", kv_dim.to_string());
+        // 1. Initialize runtime globals needed for DSL evaluation.
+        // Physical max context capacity for allocations/strides.
+        self.set_global_usize(&mut bindings, "max_seq_len", allocated_capacity);
+        // Max prefill chunk (allocation cap) is runtime-tuned; the DSL may reference it for buffer dims.
+        let (max_prefill_chunk, _prefill_chunk_size) = Self::prefill_config();
+        self.set_global_usize(&mut bindings, "max_prefill_chunk", max_prefill_chunk);
+        // Baseline + prepare.globals + prepare.derived_globals.
+        self.seed_prepare_globals(&mut bindings);
 
         // Build a set of available GGUF tensor names for resolution
         let available: FxHashMap<String, ()> = self.weights.tensor_names().map(|name| (name.clone(), ())).collect();
 
-        // 2. Resolve and bind global weight tensors
-        let global_keys = ["embedding", "final_norm", "rope_cos", "rope_sin"];
-        for key in global_keys {
-            if let Some(gguf_name) = tensor_names.resolve(key, None, &available) {
-                self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, key)?;
-            }
-        }
+        // 2. Bind weights either via DSL-declared weight_bindings (preferred) or legacy hardcoded maps.
+        if arch.weight_bindings.is_empty() {
+            // DEBT: legacy path; remove once all shipped DSL specs declare weight_bindings.
+            let head_dim = arch.d_model / arch.n_heads;
+            let kv_dim = head_dim * arch.n_kv_heads;
 
-        // 2b. Bind output_weight (LM Head) as NK row-major ([Vocab, DModel]) to enable GEMM prefill.
-        if let Some(gguf_name) = tensor_names.resolve("output_weight", None, &available) {
-            self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, "output_weight")?;
-        }
-
-        // 3. Resolve and bind per-layer weight tensors
-        // Non-FFN weights use regular binding
-        let regular_layer_keys = ["layer.attn_norm", "layer.ffn_norm"];
-        // Canonical weights (blocked) are needed for FusedQkv.
-        let canonical_layer_keys = ["layer.attn_q", "layer.attn_k", "layer.attn_v"];
-        // NK row-major weights are GEMM-friendly for MatMul (transpose_b=true).
-        let nk_layer_keys = ["layer.attn_output", "layer.ffn_gate", "layer.ffn_up", "layer.ffn_down"];
-        for i in 0..arch.n_layers {
-            for key in regular_layer_keys {
-                if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                    let logical_name = format!("{key}_{i}");
-                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
-                }
-            }
-            for key in canonical_layer_keys {
-                if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                    let logical_name = format!("{key}_{i}");
-                    let (expected_k, expected_n) = match key {
-                        "layer.attn_q" => (arch.d_model, arch.d_model),
-                        "layer.attn_k" => (arch.d_model, kv_dim),
-                        "layer.attn_v" => (arch.d_model, kv_dim),
-                        _ => {
-                            return Err(MetalError::InvalidShape(format!(
-                                "Unhandled canonical weight key '{}'; update executor canonical binding map",
-                                key
-                            )));
-                        }
-                    };
-                    self.bind_gguf_tensor_canonical(
-                        &mut bindings,
-                        &mut fast_bindings,
-                        foundry,
-                        &gguf_name,
-                        &logical_name,
-                        expected_k,
-                        expected_n,
-                    )?;
+            // Resolve and bind global weight tensors (legacy).
+            let global_keys = ["embedding", "final_norm", "rope_cos", "rope_sin"];
+            for key in global_keys {
+                if let Some(gguf_name) = tensor_names.resolve(key, None, &available) {
+                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, key)?;
                 }
             }
 
-            for key in nk_layer_keys {
-                if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                    let logical_name = format!("{key}_{i}");
+            // Bind output_weight (LM Head) as NK row-major ([Vocab, DModel]) to enable GEMM prefill.
+            if let Some(gguf_name) = tensor_names.resolve("output_weight", None, &available) {
+                self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, "output_weight")?;
+            }
 
-                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
+            // Resolve and bind per-layer weight tensors (legacy).
+            let regular_layer_keys = ["layer.attn_norm", "layer.ffn_norm"];
+            let canonical_layer_keys = ["layer.attn_q", "layer.attn_k", "layer.attn_v"];
+            let nk_layer_keys = ["layer.attn_output", "layer.ffn_gate", "layer.ffn_up", "layer.ffn_down"];
+            for i in 0..arch.n_layers {
+                for key in regular_layer_keys {
+                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
+                        let logical_name = format!("{key}_{i}");
+                        self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
+                    }
+                }
+                for key in canonical_layer_keys {
+                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
+                        let logical_name = format!("{key}_{i}");
+                        let (expected_k, expected_n) = match key {
+                            "layer.attn_q" => (arch.d_model, arch.d_model),
+                            "layer.attn_k" => (arch.d_model, kv_dim),
+                            "layer.attn_v" => (arch.d_model, kv_dim),
+                            _ => {
+                                return Err(MetalError::InvalidShape(format!(
+                                    "Unhandled canonical weight key '{}'; update executor canonical binding map",
+                                    key
+                                )));
+                            }
+                        };
+                        self.bind_gguf_tensor_canonical(
+                            &mut bindings,
+                            &mut fast_bindings,
+                            foundry,
+                            &gguf_name,
+                            &logical_name,
+                            expected_k,
+                            expected_n,
+                        )?;
+                    }
+                }
+                for key in nk_layer_keys {
+                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
+                        let logical_name = format!("{key}_{i}");
+                        self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
+                    }
                 }
             }
-        }
 
-        // 3b. Resolve and bind per-layer bias tensors (fallback to zero if missing)
-        let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
-        let mut zero_cache: FxHashMap<usize, TensorArg> = FxHashMap::default();
-        let bias_specs = [
-            ("layer.attn_q_bias", arch.d_model),
-            ("layer.attn_k_bias", kv_dim),
-            ("layer.attn_v_bias", kv_dim),
-            ("layer.ffn_gate_bias", arch.ff_dim),
-            ("layer.ffn_up_bias", arch.ff_dim),
-            ("layer.ffn_down_bias", arch.d_model),
-        ];
+            // Resolve and bind per-layer bias tensors (fallback to zero if missing) (legacy).
+            let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
+            let mut zero_cache: FxHashMap<usize, TensorArg> = FxHashMap::default();
+            let bias_specs = [
+                ("layer.attn_q_bias", arch.d_model),
+                ("layer.attn_k_bias", kv_dim),
+                ("layer.attn_v_bias", kv_dim),
+                ("layer.ffn_gate_bias", arch.ff_dim),
+                ("layer.ffn_up_bias", arch.ff_dim),
+                ("layer.ffn_down_bias", arch.d_model),
+            ];
 
-        for i in 0..arch.n_layers {
-            for (key, size) in bias_specs {
-                let logical_name = format!("{key}_{i}");
-                if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
-                } else {
-                    let zero = if let Some(tensor) = zero_cache.get(&size) {
-                        tensor.clone()
+            for i in 0..arch.n_layers {
+                for (key, size) in bias_specs {
+                    let logical_name = format!("{key}_{i}");
+                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
+                        self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
                     } else {
-                        let tensor = self.zero_tensor_arg(foundry, size)?;
-                        zero_cache.insert(size, tensor.clone());
-                        tensor
-                    };
-                    self.insert_binding(&mut bindings, &mut fast_bindings, logical_name, zero);
+                        let zero = if let Some(tensor) = zero_cache.get(&size) {
+                            tensor.clone()
+                        } else {
+                            let tensor = self.zero_tensor_arg(foundry, size)?;
+                            zero_cache.insert(size, tensor.clone());
+                            tensor
+                        };
+                        self.insert_binding(&mut bindings, &mut fast_bindings, logical_name, zero);
+                    }
                 }
             }
+        } else {
+            self.bind_weights_from_spec(foundry, &mut bindings, &mut fast_bindings, &available)?;
         }
 
-        // 4. Allocate intermediate buffers
-        // These are named buffers used by the forward pass for activations
-        // Pre-allocate for max batch size to support batched prefill (M>1)
-        // Tune via:
-        // - METALLIC_MAX_PREFILL_CHUNK (allocation)
-        // - METALLIC_PREFILL_CHUNK_SIZE (runtime chunking; may raise allocation if larger)
-        let (max_prefill_chunk, _prefill_chunk_size) = Self::prefill_config();
-        bindings.set_int_global("max_prefill_chunk", max_prefill_chunk);
-        let batch = 1;
+        // 3. Allocate intermediates/KV caches as declared by the DSL prepare plan.
+        self.allocate_prepare_tensors(foundry, &mut bindings, &mut fast_bindings)?;
 
-        // 2D buffers for general intermediates (max batch rows).
-        // IMPORTANT: keep the last dim as the feature dim so steps that infer K/N from dims stay correct.
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "hidden",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "norm_out",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "proj_out",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "residual_1",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "ffn_norm_out",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(&mut bindings, &mut fast_bindings, foundry, "gate", max_prefill_chunk, arch.ff_dim)?;
-        self.allocate_intermediate_2d(&mut bindings, &mut fast_bindings, foundry, "up", max_prefill_chunk, arch.ff_dim)?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "ffn_out",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "final_norm_out",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "logits",
-            max_prefill_chunk,
-            arch.vocab_size,
-        )?;
-        self.allocate_intermediate_2d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "attn_out",
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-
-        // 3D buffers for SDPA (batch, seq_len, dim)
-        // For prefill, seq_len dimension can be up to max_prefill_chunk
-        let kv_dim = arch.d_model / arch.n_heads * arch.n_kv_heads;
-        self.allocate_intermediate_3d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "q",
-            batch,
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "k", batch, max_prefill_chunk, kv_dim)?;
-        self.allocate_intermediate_3d(&mut bindings, &mut fast_bindings, foundry, "v", batch, max_prefill_chunk, kv_dim)?;
-        let head_dim = arch.d_model / arch.n_heads;
-        self.allocate_intermediate_3d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "q_heads",
-            batch * arch.n_heads,
-            max_prefill_chunk,
-            head_dim,
-        )?;
-        self.allocate_intermediate_3d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "k_heads",
-            batch * arch.n_kv_heads,
-            max_prefill_chunk,
-            head_dim,
-        )?;
-        self.allocate_intermediate_3d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "v_heads",
-            batch * arch.n_kv_heads,
-            max_prefill_chunk,
-            head_dim,
-        )?;
-        self.allocate_intermediate_3d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "q_rot",
-            batch,
-            max_prefill_chunk,
-            arch.d_model,
-        )?;
-        self.allocate_intermediate_3d(
-            &mut bindings,
-            &mut fast_bindings,
-            foundry,
-            "k_rot",
-            batch,
-            max_prefill_chunk,
-            kv_dim,
-        )?;
-        // Expanded K/V buffers for GQA (after RepeatKvHeads, same dim as Q).
-        // These will grow on demand; initially sized for allocated_capacity.
-        let expanded_dim = batch * allocated_capacity * arch.d_model;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_expanded", expanded_dim)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_expanded", expanded_dim)?;
-
-        // KV slice buffers for cache reads
-        // These will grow on demand; initially sized for allocated_capacity.
-        let kv_slice_dim = arch.n_kv_heads * allocated_capacity * head_dim;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "k_slice", kv_slice_dim)?;
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "v_slice", kv_slice_dim)?;
-
-        // 5. Create a "zero" buffer for unused bias/residual slots
-        self.allocate_intermediate(&mut bindings, &mut fast_bindings, foundry, "zero", 1)?;
-
-        // 6. Allocate KV cache for autoregressive generation
-        // Context stores KV already repeated to n_heads (so decode avoids a RepeatKvHeads dispatch).
-        // Shape: [n_heads, allocated_capacity, head_dim] per layer
-        // We'll create one k_cache and v_cache per layer, named k_cache_0, k_cache_1, etc.
-        let head_dim = arch.d_model / arch.n_heads;
-        for layer_idx in 0..arch.n_layers {
-            let k_cache_name = format!("k_cache_{}", layer_idx);
-            let v_cache_name = format!("v_cache_{}", layer_idx);
-            // KV cache: [n_heads, allocated_capacity, head_dim]
-            self.allocate_kv_cache(
+        // 4. Compute and bind RoPE cos/sin caches (grow-on-demand, sized to allocated capacity).
+        // Names come from the DSL; values are computed/uploaded by the executor.
+        if let Some(rope) = arch.prepare.rope.as_ref() {
+            self.compute_and_bind_rope_caches_named(
                 &mut bindings,
                 &mut fast_bindings,
                 foundry,
-                &k_cache_name,
-                arch.n_heads,
+                arch,
+                &rope.cos,
+                &rope.sin,
                 allocated_capacity,
-                head_dim,
-            )?;
-            self.allocate_kv_cache(
-                &mut bindings,
-                &mut fast_bindings,
-                foundry,
-                &v_cache_name,
-                arch.n_heads,
-                allocated_capacity,
-                head_dim,
             )?;
         }
-        // Store current max context as global for kernels to use
-        bindings.set_int_global("max_seq_len", allocated_capacity);
-        bindings.set_global("max_seq_len", allocated_capacity.to_string());
-        bindings.set_global("head_dim", head_dim.to_string());
-        bindings.set_global("n_kv_heads", arch.n_kv_heads.to_string());
-        bindings.set_global("n_heads", arch.n_heads.to_string());
-
-        // 7. Compute and bind RoPE cos/sin caches (grow-on-demand, sized to allocated capacity)
-        // These are not stored in GGUF, so we compute/upload them here.
-        self.compute_and_bind_rope_caches(&mut bindings, &mut fast_bindings, foundry, arch, allocated_capacity)?;
 
         // Fail-fast validation: ensure quantized weights/scales bindings are structurally consistent.
         // This prevents silent correctness regressions where a quantized tensor is bound but its
         // required companion tensors (e.g. Q8 scales) are missing or malformed.
         validate_quantized_bindings(&self.symbol_table, &fast_bindings)?;
 
-        tracing::info!("Prepared {} bindings (weights + intermediates + RoPE + KV cache)", bindings.len());
+        tracing::info!("Prepared {} bindings (weights + prepare.tensors + RoPE)", bindings.len());
         Ok((bindings, fast_bindings))
     }
 
@@ -689,25 +969,38 @@ impl CompiledModel {
     ///
     /// RoPE caches are hot-read by the GPU every attention step, so we store them in
     /// `StorageModePrivate` by default (with a debug override).
-    fn compute_and_bind_rope_caches(
+    fn compute_and_bind_rope_caches_named(
         &self,
         bindings: &mut TensorBindings,
         fast_bindings: &mut FastBindings,
         foundry: &mut Foundry,
         arch: &crate::spec::Architecture,
+        rope_cos_name: &str,
+        rope_sin_name: &str,
         rope_len: usize,
     ) -> Result<(), MetalError> {
         let head_dim = arch.d_model / arch.n_heads;
         let dim_half = head_dim / 2;
         let rope_base = arch.rope_base;
 
-        self.ensure_rope_capacity(bindings, fast_bindings, foundry, rope_base, head_dim, dim_half, 0, rope_len)?;
+        self.ensure_rope_capacity_named(
+            bindings,
+            fast_bindings,
+            foundry,
+            rope_base,
+            head_dim,
+            dim_half,
+            rope_cos_name,
+            rope_sin_name,
+            0,
+            rope_len,
+        )?;
         tracing::debug!("Prepared RoPE caches: [{}, {}] (rope_base={})", rope_len, dim_half, rope_base);
         Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn ensure_rope_capacity(
+    fn ensure_rope_capacity_named(
         &self,
         bindings: &mut TensorBindings,
         fast_bindings: &mut FastBindings,
@@ -715,6 +1008,8 @@ impl CompiledModel {
         rope_base: f32,
         head_dim: usize,
         dim_half: usize,
+        rope_cos_name: &str,
+        rope_sin_name: &str,
         old_len: usize,
         new_len: usize,
     ) -> Result<(), MetalError> {
@@ -752,30 +1047,56 @@ impl CompiledModel {
         };
 
         // Capture old tensors (if present) before rebinding.
-        let old_cos = bindings.get("rope_cos").ok();
-        let old_sin = bindings.get("rope_sin").ok();
+        let old_cos = bindings.get(rope_cos_name).ok();
+        let old_sin = bindings.get(rope_sin_name).ok();
 
-        // Allocate new buffers and bind them.
-        bindings.remove("rope_cos");
-        bindings.remove("rope_sin");
+        let can_reuse_existing = old_len == 0
+            && old_cos
+                .as_ref()
+                .is_some_and(|t| t.dtype == crate::tensor::Dtype::F16 && t.dims.as_slice() == [new_len, dim_half].as_slice())
+            && old_sin
+                .as_ref()
+                .is_some_and(|t| t.dtype == crate::tensor::Dtype::F16 && t.dims.as_slice() == [new_len, dim_half].as_slice());
 
-        let new_cos_buf = alloc_private("rope_cos")?;
-        let new_sin_buf = alloc_private("rope_sin")?;
+        // Allocate new buffers (or reuse existing) and bind them.
+        let (new_cos_buf, new_sin_buf, dst_cos_offset, dst_sin_offset) = if can_reuse_existing {
+            let cos = old_cos
+                .as_ref()
+                .and_then(|t| t.buffer.as_ref())
+                .ok_or_else(|| MetalError::InvalidOperation("rope_cos buffer missing".into()))?;
+            let sin = old_sin
+                .as_ref()
+                .and_then(|t| t.buffer.as_ref())
+                .ok_or_else(|| MetalError::InvalidOperation("rope_sin buffer missing".into()))?;
+            (
+                cos.clone(),
+                sin.clone(),
+                old_cos.as_ref().map(|t| t.offset).unwrap_or(0),
+                old_sin.as_ref().map(|t| t.offset).unwrap_or(0),
+            )
+        } else {
+            bindings.remove(rope_cos_name);
+            bindings.remove(rope_sin_name);
 
-        let cos_tensor = TensorArg::from_buffer(
-            new_cos_buf.clone(),
-            crate::tensor::Dtype::F16,
-            vec![new_len, dim_half],
-            vec![dim_half, 1],
-        );
-        let sin_tensor = TensorArg::from_buffer(
-            new_sin_buf.clone(),
-            crate::tensor::Dtype::F16,
-            vec![new_len, dim_half],
-            vec![dim_half, 1],
-        );
-        self.insert_binding(bindings, fast_bindings, "rope_cos".to_string(), cos_tensor);
-        self.insert_binding(bindings, fast_bindings, "rope_sin".to_string(), sin_tensor);
+            let new_cos_buf = alloc_private(rope_cos_name)?;
+            let new_sin_buf = alloc_private(rope_sin_name)?;
+
+            let cos_tensor = TensorArg::from_buffer(
+                new_cos_buf.clone(),
+                crate::tensor::Dtype::F16,
+                vec![new_len, dim_half],
+                vec![dim_half, 1],
+            );
+            let sin_tensor = TensorArg::from_buffer(
+                new_sin_buf.clone(),
+                crate::tensor::Dtype::F16,
+                vec![new_len, dim_half],
+                vec![dim_half, 1],
+            );
+            self.insert_binding(bindings, fast_bindings, rope_cos_name.to_string(), cos_tensor);
+            self.insert_binding(bindings, fast_bindings, rope_sin_name.to_string(), sin_tensor);
+            (new_cos_buf, new_sin_buf, 0, 0)
+        };
 
         // Batch blits into a single command buffer when not already capturing.
         let nested_capture = foundry.is_capturing();
@@ -783,8 +1104,8 @@ impl CompiledModel {
             foundry.start_capture()?;
         }
 
-        // Preserve existing history by copying the contiguous prefix.
-        if old_len > 0 {
+        // Preserve existing history by copying the contiguous prefix when growing.
+        if !can_reuse_existing && old_len > 0 {
             let copy_bytes = old_len
                 .checked_mul(dim_half)
                 .and_then(|v| v.checked_mul(2))
@@ -801,8 +1122,8 @@ impl CompiledModel {
                 .as_ref()
                 .ok_or_else(|| MetalError::InvalidOperation("rope_sin buffer missing during growth".into()))?;
 
-            foundry.blit_copy(old_cos_buf, old_cos.offset, &new_cos_buf, 0, copy_bytes)?;
-            foundry.blit_copy(old_sin_buf, old_sin.offset, &new_sin_buf, 0, copy_bytes)?;
+            foundry.blit_copy(old_cos_buf, old_cos.offset, &new_cos_buf, dst_cos_offset, copy_bytes)?;
+            foundry.blit_copy(old_sin_buf, old_sin.offset, &new_sin_buf, dst_sin_offset, copy_bytes)?;
         }
 
         // Upload the missing suffix [old_len, new_len).
@@ -842,8 +1163,9 @@ impl CompiledModel {
                 staging_cos.copy_from_slice(&cos_data);
                 staging_sin.copy_from_slice(&sin_data);
 
-                let dst_offset_bytes = pos * dim_half * 2;
+                let dst_offset_bytes = dst_cos_offset + pos * dim_half * 2;
                 foundry.blit_copy(&staging_cos, 0, &new_cos_buf, dst_offset_bytes, chunk_bytes)?;
+                let dst_offset_bytes = dst_sin_offset + pos * dim_half * 2;
                 foundry.blit_copy(&staging_sin, 0, &new_sin_buf, dst_offset_bytes, chunk_bytes)?;
 
                 pos = end;
@@ -946,6 +1268,7 @@ impl CompiledModel {
         Ok(TensorArg::from_buffer(buffer, crate::tensor::Dtype::F16, vec![size], vec![1]))
     }
 
+    #[allow(dead_code)]
     /// Allocate an intermediate buffer for activations.
     fn allocate_intermediate(
         &self,
@@ -985,6 +1308,7 @@ impl CompiledModel {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Allocate a 2D intermediate buffer for activations (row-major).
     fn allocate_intermediate_2d(
         &self,
@@ -1032,6 +1356,7 @@ impl CompiledModel {
         Ok(())
     }
 
+    #[allow(dead_code)]
     /// Allocate a 3D intermediate buffer for SDPA-style tensors.
     #[allow(clippy::too_many_arguments)]
     fn allocate_intermediate_3d(
@@ -1098,6 +1423,7 @@ impl CompiledModel {
         bindings.set_binding(name, tensor);
     }
 
+    #[allow(dead_code)]
     /// Allocate a KV cache buffer for attention caching.
     /// Shape: [n_heads, max_seq_len, head_dim]
     #[allow(clippy::too_many_arguments)]
@@ -1212,118 +1538,148 @@ impl CompiledModel {
             foundry.start_capture()?;
         }
 
-        // 1. Reallocate Expanded K/V buffers
-        let expanded_dim = new_capacity * arch.d_model;
-        bindings.remove("k_expanded");
-        bindings.remove("v_expanded");
-        self.allocate_intermediate(bindings, fast_bindings, foundry, "k_expanded", expanded_dim)?;
-        self.allocate_intermediate(bindings, fast_bindings, foundry, "v_expanded", expanded_dim)?;
+        // 1. Update physical max context capacity for kernels and expression evaluation.
+        self.set_global_usize(bindings, "max_seq_len", new_capacity);
+        // Derived globals may depend on max_seq_len (e.g. kv_seq_len).
+        self.apply_derived_globals(bindings);
 
-        // 2. Reallocate KV slice buffers
-        let kv_slice_dim = arch.n_kv_heads * new_capacity * head_dim;
-        bindings.remove("k_slice");
-        bindings.remove("v_slice");
-        self.allocate_intermediate(bindings, fast_bindings, foundry, "k_slice", kv_slice_dim)?;
-        self.allocate_intermediate(bindings, fast_bindings, foundry, "v_slice", kv_slice_dim)?;
+        // 2. Reallocate any grow_with_kv tensors declared by the DSL.
+        // Rope caches are handled by the dedicated RoPE grow path below.
+        let preserve_kv_cache = |foundry: &mut Foundry, name: &str, old: &TensorArg, new: &TensorArg| -> Result<(), MetalError> {
+            if current_pos == 0 {
+                return Ok(());
+            }
+            if old.dtype != crate::tensor::Dtype::F16 || new.dtype != crate::tensor::Dtype::F16 {
+                return Err(MetalError::InvalidShape(format!(
+                    "KV cache '{name}' must be F16 for growth preservation"
+                )));
+            }
+            if old.dims.as_slice() != [arch.n_heads, old_capacity, head_dim].as_slice() {
+                return Err(MetalError::InvalidShape(format!(
+                    "KV cache '{name}' old dims mismatch: got {:?}, expected [{}, {}, {}]",
+                    old.dims, arch.n_heads, old_capacity, head_dim
+                )));
+            }
+            if new.dims.as_slice() != [arch.n_heads, new_capacity, head_dim].as_slice() {
+                return Err(MetalError::InvalidShape(format!(
+                    "KV cache '{name}' new dims mismatch: got {:?}, expected [{}, {}, {}]",
+                    new.dims, arch.n_heads, new_capacity, head_dim
+                )));
+            }
 
-        // 3. Reallocate KV caches per layer and preserve existing data.
-        for layer_idx in 0..arch.n_layers {
-            let k_cache_name = format!("k_cache_{}", layer_idx);
-            let v_cache_name = format!("v_cache_{}", layer_idx);
+            let old_buf = old
+                .buffer
+                .as_ref()
+                .ok_or_else(|| MetalError::InvalidOperation(format!("{name} buffer missing during growth")))?;
+            let new_buf = new
+                .buffer
+                .as_ref()
+                .ok_or_else(|| MetalError::InvalidOperation(format!("{name} buffer missing after growth")))?;
 
-            // Capture old tensors for data preservation before reallocating bindings
-            let old_k = bindings.get(&k_cache_name).ok();
-            let old_v = bindings.get(&v_cache_name).ok();
+            let copy_size = current_pos * head_dim * 2;
+            for h in 0..arch.n_heads {
+                let old_head_offset = h * old_capacity * head_dim * 2;
+                let new_head_offset = h * new_capacity * head_dim * 2;
+                foundry.blit_copy(
+                    old_buf,
+                    old.offset + old_head_offset,
+                    new_buf,
+                    new.offset + new_head_offset,
+                    copy_size,
+                )?;
+            }
+            Ok(())
+        };
 
-            // Evict if already exists to force reallocation in allocate_kv_cache
-            bindings.remove(&k_cache_name);
-            bindings.remove(&v_cache_name);
+        for tensor in &arch.prepare.tensors {
+            if !tensor.grow_with_kv {
+                continue;
+            }
+            if tensor.storage == StorageClass::RopeCache {
+                continue;
+            }
 
-            // Reallocate (sets new bindings and updates fast_bindings)
-            self.allocate_kv_cache(
-                bindings,
-                fast_bindings,
-                foundry,
-                &k_cache_name,
-                arch.n_heads,
-                new_capacity,
-                head_dim,
-            )?;
-            self.allocate_kv_cache(
-                bindings,
-                fast_bindings,
-                foundry,
-                &v_cache_name,
-                arch.n_heads,
-                new_capacity,
-                head_dim,
-            )?;
+            let mut alloc_one = |bindings: &mut TensorBindings, name: String| -> Result<(), MetalError> {
+                let old = bindings.get(&name).ok();
+                bindings.remove(&name);
 
-            // If we have existing tokens, copy them from the old buffers to the new ones.
-            // Since layout is [heads, capacity, head_dim], we must copy each head individually
-            // because the stride between heads has changed (from old_capacity to new_capacity).
-            if current_pos > 0 {
-                let new_k = bindings.get(&k_cache_name)?;
-                let new_v = bindings.get(&v_cache_name)?;
+                let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect();
+                let strides: Vec<usize> = if let Some(strides) = &tensor.strides {
+                    strides.iter().map(|e| e.eval(bindings)).collect()
+                } else {
+                    crate::tensor::compute_strides(&dims)
+                };
 
-                let old_k = old_k.ok_or_else(|| MetalError::InvalidOperation(format!("Missing {k_cache_name} during growth")))?;
-                let old_v = old_v.ok_or_else(|| MetalError::InvalidOperation(format!("Missing {v_cache_name} during growth")))?;
-                let old_k_buf = old_k
-                    .buffer
-                    .as_ref()
-                    .ok_or_else(|| MetalError::InvalidOperation(format!("{k_cache_name} buffer missing during growth")))?;
-                let old_v_buf = old_v
-                    .buffer
-                    .as_ref()
-                    .ok_or_else(|| MetalError::InvalidOperation(format!("{v_cache_name} buffer missing during growth")))?;
-                let new_k_buf = new_k
-                    .buffer
-                    .as_ref()
-                    .ok_or_else(|| MetalError::InvalidOperation(format!("{k_cache_name} buffer missing after growth")))?;
-                let new_v_buf = new_v
-                    .buffer
-                    .as_ref()
-                    .ok_or_else(|| MetalError::InvalidOperation(format!("{v_cache_name} buffer missing after growth")))?;
+                self.allocate_tensor_from_spec(
+                    foundry,
+                    bindings,
+                    fast_bindings,
+                    &name,
+                    tensor.dtype,
+                    dims,
+                    strides,
+                    tensor.storage,
+                    tensor.zero_fill,
+                )?;
 
-                for h in 0..arch.n_heads {
-                    let old_head_offset = h * old_capacity * head_dim * 2; // F16 = 2 bytes
-                    let new_head_offset = h * new_capacity * head_dim * 2;
-                    let copy_size = current_pos * head_dim * 2;
-
-                    foundry.blit_copy(
-                        old_k_buf,
-                        old_k.offset + old_head_offset,
-                        new_k_buf,
-                        new_k.offset + new_head_offset,
-                        copy_size,
-                    )?;
-                    foundry.blit_copy(
-                        old_v_buf,
-                        old_v.offset + old_head_offset,
-                        new_v_buf,
-                        new_v.offset + new_head_offset,
-                        copy_size,
-                    )?;
+                if tensor.storage == StorageClass::KvCache {
+                    let old = old.ok_or_else(|| MetalError::InvalidOperation(format!("Missing KV cache '{name}' during growth")))?;
+                    let new = bindings.get(&name)?;
+                    preserve_kv_cache(foundry, &name, &old, &new)?;
                 }
+
+                Ok(())
+            };
+
+            if let Some(repeat) = &tensor.repeat {
+                let count_val = if let Ok(v) = repeat.count.parse::<usize>() {
+                    v
+                } else {
+                    bindings
+                        .get_var(&repeat.count)
+                        .ok_or_else(|| {
+                            MetalError::InvalidOperation(format!(
+                                "prepare.tensors repeat count variable '{}' not found during growth",
+                                repeat.count
+                            ))
+                        })?
+                        .parse::<usize>()
+                        .map_err(|e| {
+                            MetalError::InvalidOperation(format!(
+                                "prepare.tensors repeat count variable '{}' is not a valid integer during growth: {}",
+                                repeat.count, e
+                            ))
+                        })?
+                };
+                bindings.push_scope();
+                for i in 0..count_val {
+                    bindings.set_var(&repeat.var, i.to_string());
+                    let resolved = bindings.interpolate(tensor.name.clone());
+                    alloc_one(bindings, resolved)?;
+                }
+                bindings.pop_scope();
+            } else {
+                let resolved = bindings.interpolate(tensor.name.clone());
+                alloc_one(bindings, resolved)?;
             }
         }
 
-        // 4. Grow RoPE tables to match the new physical capacity.
+        // 3. Grow RoPE tables to match the new physical capacity.
         let dim_half = head_dim / 2;
-        self.ensure_rope_capacity(
-            bindings,
-            fast_bindings,
-            foundry,
-            arch.rope_base,
-            head_dim,
-            dim_half,
-            old_capacity,
-            new_capacity,
-        )?;
-
-        // 5. Update max_seq_len global for kernels
-        bindings.set_int_global("max_seq_len", new_capacity);
-        bindings.set_global("max_seq_len", new_capacity.to_string());
+        if let Some(rope) = arch.prepare.rope.as_ref() {
+            self.ensure_rope_capacity_named(
+                bindings,
+                fast_bindings,
+                foundry,
+                arch.rope_base,
+                head_dim,
+                dim_half,
+                &rope.cos,
+                &rope.sin,
+                old_capacity,
+                new_capacity,
+            )?;
+        }
 
         if !nested_capture {
             let cmd = foundry.end_capture()?;
@@ -1482,12 +1838,6 @@ impl CompiledModel {
         let bindings = &mut session.bindings;
         let fast_bindings = &mut session.fast_bindings;
 
-        let d_model = arch.d_model;
-        let n_heads = arch.n_heads;
-        let n_kv_heads = arch.n_kv_heads;
-        let head_dim = d_model / n_heads;
-        let ff_dim = arch.ff_dim;
-
         if prompt_len + start_pos > session.input_ids_capacity {
             return Err(MetalError::InvalidShape(format!(
                 "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_context_len {}",
@@ -1499,27 +1849,11 @@ impl CompiledModel {
         // input_ids_full is MetalBuffer.
         session.input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
 
-        // Defaults for single-token inference (MatMul dispatch). Batched prefill overrides these.
-        bindings.set_int_global("m", 1);
-        bindings.set_int_global("seq_len", 1);
-        bindings.set_int_global("total_elements_hidden", d_model);
-        bindings.set_int_global("total_elements_q", n_heads * head_dim);
-        bindings.set_int_global("total_elements_k", n_kv_heads * head_dim);
-        bindings.set_int_global("total_elements_write", n_kv_heads * head_dim);
-        bindings.set_int_global("total_elements_ffn", ff_dim);
-
-        // Only position-dependent globals need updating per token
-        // Use int_globals to avoid String allocation on every token
-        let update_pos_globals = |bindings: &mut TensorBindings, pos: usize| {
-            let kv_seq_len = pos + 1; // seq_len is always 1
-
-            // Set integer globals for all steps (manual Sdpa and auto-generated Rope/KvCacheWrite)
-            // DynamicValue::resolve now checks int_globals for u32/usize types efficiently
-            bindings.set_int_global("position_offset", pos);
-            bindings.set_int_global("kv_seq_len", kv_seq_len);
-            bindings.set_int_global("total_elements_slice", n_kv_heads * kv_seq_len * head_dim);
-            bindings.set_int_global("total_elements_repeat", n_heads * kv_seq_len * head_dim);
-        };
+        // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
+        self.set_int_global(bindings, "m", 1);
+        self.set_int_global(bindings, "seq_len", 1);
+        self.set_int_global(bindings, "position_offset", start_pos);
+        self.apply_derived_globals(bindings);
 
         let greedy = temperature <= 0.0 || !temperature.is_finite() || top_k == 0;
         let vocab_size = arch.vocab_size as u32;
@@ -1588,18 +1922,10 @@ impl CompiledModel {
                     foundry.start_capture()?;
                 }
 
-                bindings.set_int_global("m", m);
-                bindings.set_int_global("seq_len", m);
-                bindings.set_int_global("position_offset", base_pos);
-                bindings.set_int_global("kv_seq_len", base_pos + m);
-
-                bindings.set_int_global("total_elements_hidden", m * d_model);
-                bindings.set_int_global("total_elements_q", m * n_heads * head_dim);
-                bindings.set_int_global("total_elements_k", m * n_kv_heads * head_dim);
-                bindings.set_int_global("total_elements_write", m * n_kv_heads * head_dim);
-                bindings.set_int_global("total_elements_ffn", m * ff_dim);
-                bindings.set_int_global("total_elements_slice", n_kv_heads * (base_pos + m) * head_dim);
-                bindings.set_int_global("total_elements_repeat", n_heads * (base_pos + m) * head_dim);
+                self.set_int_global(bindings, "m", m);
+                self.set_int_global(bindings, "seq_len", m);
+                self.set_int_global(bindings, "position_offset", base_pos);
+                self.apply_derived_globals(bindings);
 
                 let mut tensor_input = TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
                 tensor_input.offset = base_pos * 4;
@@ -1622,13 +1948,8 @@ impl CompiledModel {
             // === SEQUENTIAL PREFILL (seq_len=1) ===
             // Capture the whole prefill to amortize submission overhead, but execute each token
             // with the same semantics as the decode loop.
-            bindings.set_int_global("m", 1);
-            bindings.set_int_global("seq_len", 1);
-            bindings.set_int_global("total_elements_hidden", d_model);
-            bindings.set_int_global("total_elements_q", n_heads * head_dim);
-            bindings.set_int_global("total_elements_k", n_kv_heads * head_dim);
-            bindings.set_int_global("total_elements_write", n_kv_heads * head_dim);
-            bindings.set_int_global("total_elements_ffn", ff_dim);
+            self.set_int_global(bindings, "m", 1);
+            self.set_int_global(bindings, "seq_len", 1);
 
             for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
                 let base_pos = start_pos + chunk_idx * prefill_chunk_size;
@@ -1639,7 +1960,8 @@ impl CompiledModel {
 
                 for (i, _token_id) in chunk_tokens.iter().enumerate() {
                     let pos = base_pos + i;
-                    update_pos_globals(bindings, pos);
+                    self.set_int_global(bindings, "position_offset", pos);
+                    self.apply_derived_globals(bindings);
 
                     let mut tensor_input =
                         TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
@@ -1663,14 +1985,11 @@ impl CompiledModel {
 
         let prefill_duration = prefill_start.elapsed();
 
-        // Reset to M=1 for autoregressive decode
-        bindings.set_int_global("m", 1);
-        bindings.set_int_global("seq_len", 1);
-        bindings.set_int_global("total_elements_hidden", d_model);
-        bindings.set_int_global("total_elements_q", n_heads * head_dim);
-        bindings.set_int_global("total_elements_k", n_kv_heads * head_dim);
-        bindings.set_int_global("total_elements_write", n_kv_heads * head_dim);
-        bindings.set_int_global("total_elements_ffn", ff_dim);
+        // Reset to decode mode for autoregressive decode (M=1).
+        self.set_int_global(bindings, "m", 1);
+        self.set_int_global(bindings, "seq_len", 1);
+        self.set_int_global(bindings, "position_offset", start_pos + prompt_len);
+        self.apply_derived_globals(bindings);
 
         // Now autoregressive decode: sample from last prompt-token logits, then step forward per token.
         // Reuse the session input buffer as a valid fallback input_ids buffer (we overwrite binding to sampled-token
@@ -1785,8 +2104,9 @@ impl CompiledModel {
             );
 
             // 4. Update globals for the NEXT forward pass
-            // We are about to run forward for position `prompt_len + step` (the token we just sampled)
-            update_pos_globals(bindings, start_pos + prompt_len + step);
+            // We are about to run forward for position `start_pos + prompt_len + step` (the token we just sampled).
+            self.set_int_global(bindings, "position_offset", start_pos + prompt_len + step);
+            self.apply_derived_globals(bindings);
 
             // 5. Run Forward (predicts next token's logits)
             self.forward(foundry, bindings, &*fast_bindings)?;
@@ -2118,40 +2438,54 @@ mod tests {
     }
 
     use super::*;
-    use crate::{
-        Foundry, spec::{Architecture, ModelSpec}
-    };
+    use crate::{Foundry, spec::ModelSpec};
 
     #[test]
     #[serial_test::serial]
     fn test_model_session_kv_growth() -> Result<(), crate::error::MetalError> {
-        let arch = Architecture {
-            d_model: 128,
-            n_heads: 2,
-            n_kv_heads: 1,
-            n_layers: 1,
-            ff_dim: 256,
-            vocab_size: 100,
-            max_seq_len: 4096,
-            rope_base: 10000.0,
-            rms_eps: 1e-6,
-            tensor_names: Default::default(),
-            forward: Vec::new(),
-        };
-        let spec = ModelSpec {
-            name: "test-growth".into(),
-            architecture: arch,
-            chat_template: None,
-        };
+        let spec = ModelSpec::from_json(
+            r#"
+            {
+              "name": "test-growth",
+              "architecture": {
+                "d_model": 128,
+                "n_heads": 2,
+                "n_kv_heads": 1,
+                "n_layers": 1,
+                "ff_dim": 256,
+                "vocab_size": 100,
+                "max_seq_len": 4096,
+                "rope_base": 10000.0,
+                "rms_eps": 0.000001,
+                "prepare": {
+                  "rope": { "cos": "rope_cos", "sin": "rope_sin" },
+                  "tensors": [
+                    {
+                      "name": "k_cache_{i}",
+                      "repeat": { "count": "n_layers", "var": "i" },
+                      "storage": "kv_cache",
+                      "dims": ["n_heads", "max_seq_len", "d_model / n_heads"],
+                      "grow_with_kv": true
+                    },
+                    {
+                      "name": "v_cache_{i}",
+                      "repeat": { "count": "n_layers", "var": "i" },
+                      "storage": "kv_cache",
+                      "dims": ["n_heads", "max_seq_len", "d_model / n_heads"],
+                      "grow_with_kv": true
+                    }
+                  ]
+                },
+                "forward": []
+              }
+            }
+            "#,
+        )
+        .map_err(|e| crate::error::MetalError::InvalidOperation(e.to_string()))?;
+
         // We don't need real weights for allocation testing
         let weights = super::WeightBundle::new_empty();
-        let model = CompiledModel {
-            spec,
-            weights,
-            compiled_steps: Vec::new(),
-            symbol_table: crate::model::executor::SymbolTable::new(),
-            session: std::cell::RefCell::new(None),
-        };
+        let model = CompiledModel::new(spec, weights)?;
 
         let mut foundry = Foundry::new()?;
         model.initialize_session(&mut foundry)?;

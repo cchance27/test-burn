@@ -257,6 +257,9 @@ mod tests {
             rope_base: 10000.0,
             rms_eps: 1e-6,
             tensor_names: Default::default(),
+            metadata_keys: Default::default(),
+            prepare: Default::default(),
+            weight_bindings: Vec::new(),
             forward: Vec::new(),
         }
     }

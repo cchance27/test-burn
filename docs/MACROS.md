@@ -68,6 +68,14 @@ struct GemvParams {
 > [!NOTE]
 > **Dynamic Values**: The macro automatically unwraps `DynamicValue<T>` fields (e.g., `DynamicValue<u32>` becomes `uint`). It also generates a `{Name}Resolved` companion struct and implements the `Resolvable` trait, allowing these structures to be used in model definitions while maintaining strict C-layout compatibility at runtime.
 
+### DynamicValue resolution contract
+
+`DynamicValue<T>` is used by the Foundry DSL to reference runtime values by name (e.g. `"{seq_len}"`).
+
+- **Resolution sources:** values are resolved from `TensorBindings` at runtime.
+- **Fail-fast behavior:** if a required variable is missing or cannot be parsed into `T`, resolution **panics** and the error message directs you to add the value to the DSL (`architecture.prepare.globals` / `architecture.prepare.derived_globals`) or pass a runtime override.
+- **Performance note:** for integer types (`u32`, `usize`) the resolver checks a fast `int_globals` table first to avoid string parsing in hot paths.
+
 ---
 
 ## 2. `#[derive(MetalPolicy)]`

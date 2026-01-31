@@ -12,6 +12,47 @@ The kernel system is built around three primary abstractions:
 
 ---
 
+## Foundry Executor Preparation (DSL-driven)
+
+Foundry’s executor no longer hardcodes model-specific intermediates (e.g. Qwen2.5). Instead, the model’s DSL (plus GGUF metadata) declares what the executor must prepare before inference.
+
+### Precedence (baseline → overrides)
+
+1. **GGUF metadata baseline** (inferred at load time)
+2. **DSL overrides** (values specified in the model JSON)
+3. **Runtime overrides** (values set in `TensorBindings` / ContextConfig)
+
+### `architecture.metadata_keys` contract
+
+If a model family uses different GGUF metadata key names, the DSL can declare `architecture.metadata_keys.keys` to map each baseline field to an ordered list of GGUF keys (first match wins). This reduces hardcoded “Qwen vs Llama” metadata logic in the loader.
+
+### `architecture.prepare` contract
+
+The DSL `architecture.prepare` section can declare:
+
+- `globals`: one-time integer expressions evaluated at session initialization.
+- `derived_globals`: integer expressions evaluated at runtime (per prefill chunk / per decode step).
+- `tensors`: intermediate/KV/rope tensors the executor must allocate and bind.
+- `rope`: the logical tensor names for RoPE caches (cos/sin). The executor computes and uploads their contents.
+
+### `architecture.weight_bindings` contract
+
+The DSL `architecture.weight_bindings` section declares which GGUF tensors must be materialized and bound before inference.
+
+- Each entry specifies a `key` resolved via `architecture.tensor_names` and a `logical_name` inserted into bindings.
+- Per-layer weights are expressed via `repeat` (`count: "n_layers", var: "i"`), and can use `{i}` interpolation in `logical_name`.
+- Layout-sensitive weights must specify a layout:
+  - `row_major` (default)
+  - `canonical` with `expected_k` / `expected_n` integer expressions (fail-fast validation)
+- Optional bias tensors should use `fallback_zero_len` to bind a shared zero vector when missing in GGUF.
+
+### Expressions and missing values
+
+- Tensor shapes and derived globals can use integer expressions (e.g. `"d_model / n_heads"`, `"{m} * {d_model}"`).
+- If an expression or `DynamicValue` references a missing variable, Foundry **panics** and the error message points to `architecture.prepare.globals/derived_globals` or runtime overrides. This is intentional to avoid silent shape/dispatch correctness bugs.
+
+---
+
 ## 1. Kernel Types
 
 ### 1.1 Standalone Kernels

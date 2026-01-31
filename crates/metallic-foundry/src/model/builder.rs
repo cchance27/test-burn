@@ -147,12 +147,19 @@ impl ModelBuilder<WithWeights> {
 
     /// Compile the model into an executable form.
     pub fn build(self, foundry: &mut Foundry) -> Result<CompiledModel, MetalError> {
-        let spec = self
+        let mut spec = self
             .spec
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: spec not loaded".to_string()))?;
         let weights = self
             .weights
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: weights not loaded".to_string()))?;
+
+        // Baseline architecture comes from GGUF metadata; DSL can override, runtime can override later.
+        let defaults = super::metadata_defaults::infer_from_gguf_with_keys(
+            weights.gguf_model().get_metadata(),
+            Some(&spec.architecture.metadata_keys),
+        )?;
+        spec.architecture.apply_metadata_baseline(&defaults)?;
 
         let model = CompiledModel::new(spec, weights)?;
 

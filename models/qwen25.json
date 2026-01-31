@@ -1,15 +1,40 @@
 {
     "name": "qwen2.5-0.5b",
     "architecture": {
-        "d_model": 896,
-        "n_heads": 14,
-        "n_kv_heads": 2,
-        "n_layers": 24,
-        "ff_dim": 4864,
-        "vocab_size": 151936,
-        "max_seq_len": 32768,
-        "rope_base": 1000000.0,
-        "rms_eps": 1e-06,
+        "metadata_keys": {
+            "keys": {
+                "d_model": [
+                    "qwen2.embedding_length",
+                    "qwen2.d_model",
+                    "model.d_model"
+                ],
+                "n_heads": [
+                    "qwen2.attention.head_count"
+                ],
+                "n_kv_heads": [
+                    "qwen2.attention.head_count_kv"
+                ],
+                "n_layers": [
+                    "qwen2.block_count"
+                ],
+                "ff_dim": [
+                    "qwen2.feed_forward_length"
+                ],
+                "max_seq_len": [
+                    "qwen2.context_length"
+                ],
+                "vocab_size": [
+                    "model.vocab_size",
+                    "tokenizer.ggml.tokens"
+                ],
+                "rope_base": [
+                    "qwen2.rope.freq_base"
+                ],
+                "rms_eps": [
+                    "qwen2.attention.layer_norm_rms_epsilon"
+                ]
+            }
+        },
         "tensor_names": {
             "embedding": [
                 "token_embd.weight",
@@ -95,6 +120,123 @@
                 ]
             }
         },
+        "prepare": {
+            "globals": {},
+            "derived_globals": [
+                { "name": "head_dim", "expr": "d_model / n_heads" },
+                { "name": "kv_dim", "expr": "head_dim * n_kv_heads" },
+                { "name": "group_size", "expr": "n_heads / n_kv_heads" },
+                { "name": "kv_seq_len", "expr": "position_offset + seq_len" },
+                { "name": "total_elements_hidden", "expr": "m * d_model" },
+                { "name": "total_elements_q", "expr": "m * n_heads * head_dim" },
+                { "name": "total_elements_k", "expr": "m * n_kv_heads * head_dim" },
+                { "name": "total_elements_write", "expr": "m * n_kv_heads * head_dim" },
+                { "name": "total_elements_ffn", "expr": "m * ff_dim" },
+                { "name": "total_elements_slice", "expr": "n_kv_heads * kv_seq_len * head_dim" },
+                { "name": "total_elements_repeat", "expr": "n_heads * kv_seq_len * head_dim" }
+            ],
+            "tensors": [
+                { "name": "hidden", "dtype": "F16", "storage": "intermediate", "dims": ["max_prefill_chunk", "d_model"] },
+                { "name": "q", "dtype": "F16", "storage": "intermediate", "dims": [1, "max_prefill_chunk", "d_model"] },
+                { "name": "k", "dtype": "F16", "storage": "intermediate", "dims": [1, "max_prefill_chunk", "kv_dim"] },
+                { "name": "v", "dtype": "F16", "storage": "intermediate", "dims": [1, "max_prefill_chunk", "kv_dim"] },
+                { "name": "q_rot", "dtype": "F16", "storage": "intermediate", "dims": [1, "max_prefill_chunk", "d_model"] },
+                { "name": "attn_out", "dtype": "F16", "storage": "intermediate", "dims": ["max_prefill_chunk", "d_model"] },
+                { "name": "residual_1", "dtype": "F16", "storage": "intermediate", "dims": ["max_prefill_chunk", "d_model"] },
+                { "name": "up", "dtype": "F16", "storage": "intermediate", "dims": ["max_prefill_chunk", "ff_dim"] },
+                { "name": "final_norm_out", "dtype": "F16", "storage": "intermediate", "dims": ["max_prefill_chunk", "d_model"] },
+                { "name": "logits", "dtype": "F16", "storage": "intermediate", "dims": ["max_prefill_chunk", "vocab_size"] },
+                { "name": "zero", "dtype": "F16", "storage": "shared", "dims": [1], "zero_fill": true },
+                { "name": "rope_cos", "dtype": "F16", "storage": "rope_cache", "dims": ["max_seq_len", "head_dim / 2"], "grow_with_kv": true },
+                { "name": "rope_sin", "dtype": "F16", "storage": "rope_cache", "dims": ["max_seq_len", "head_dim / 2"], "grow_with_kv": true },
+                {
+                    "name": "k_cache_{i}",
+                    "repeat": { "count": "n_layers", "var": "i" },
+                    "dtype": "F16",
+                    "storage": "kv_cache",
+                    "dims": ["n_heads", "max_seq_len", "head_dim"],
+                    "grow_with_kv": true
+                },
+                {
+                    "name": "v_cache_{i}",
+                    "repeat": { "count": "n_layers", "var": "i" },
+                    "dtype": "F16",
+                    "storage": "kv_cache",
+                    "dims": ["n_heads", "max_seq_len", "head_dim"],
+                    "grow_with_kv": true
+                }
+            ],
+            "rope": { "cos": "rope_cos", "sin": "rope_sin" }
+        },
+        "weight_bindings": [
+            { "key": "embedding", "logical_name": "embedding" },
+            { "key": "final_norm", "logical_name": "final_norm" },
+            { "key": "output_weight", "logical_name": "output_weight" },
+
+            { "key": "layer.attn_norm", "logical_name": "layer.attn_norm_{i}", "repeat": { "count": "n_layers", "var": "i" } },
+            { "key": "layer.ffn_norm", "logical_name": "layer.ffn_norm_{i}", "repeat": { "count": "n_layers", "var": "i" } },
+
+            {
+                "key": "layer.attn_q",
+                "logical_name": "layer.attn_q_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "layout": { "kind": "canonical", "expected_k": "d_model", "expected_n": "d_model" }
+            },
+            {
+                "key": "layer.attn_k",
+                "logical_name": "layer.attn_k_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "layout": { "kind": "canonical", "expected_k": "d_model", "expected_n": "kv_dim" }
+            },
+            {
+                "key": "layer.attn_v",
+                "logical_name": "layer.attn_v_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "layout": { "kind": "canonical", "expected_k": "d_model", "expected_n": "kv_dim" }
+            },
+
+            { "key": "layer.attn_output", "logical_name": "layer.attn_output_{i}", "repeat": { "count": "n_layers", "var": "i" } },
+            { "key": "layer.ffn_gate", "logical_name": "layer.ffn_gate_{i}", "repeat": { "count": "n_layers", "var": "i" } },
+            { "key": "layer.ffn_up", "logical_name": "layer.ffn_up_{i}", "repeat": { "count": "n_layers", "var": "i" } },
+            { "key": "layer.ffn_down", "logical_name": "layer.ffn_down_{i}", "repeat": { "count": "n_layers", "var": "i" } },
+
+            {
+                "key": "layer.attn_q_bias",
+                "logical_name": "layer.attn_q_bias_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "fallback_zero_len": "d_model"
+            },
+            {
+                "key": "layer.attn_k_bias",
+                "logical_name": "layer.attn_k_bias_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "fallback_zero_len": "kv_dim"
+            },
+            {
+                "key": "layer.attn_v_bias",
+                "logical_name": "layer.attn_v_bias_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "fallback_zero_len": "kv_dim"
+            },
+            {
+                "key": "layer.ffn_gate_bias",
+                "logical_name": "layer.ffn_gate_bias_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "fallback_zero_len": "ff_dim"
+            },
+            {
+                "key": "layer.ffn_up_bias",
+                "logical_name": "layer.ffn_up_bias_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "fallback_zero_len": "ff_dim"
+            },
+            {
+                "key": "layer.ffn_down_bias",
+                "logical_name": "layer.ffn_down_bias_{i}",
+                "repeat": { "count": "n_layers", "var": "i" },
+                "fallback_zero_len": "d_model"
+            }
+        ],
         "forward": [
             {
                 "op": "Embedding",
@@ -102,9 +244,9 @@
                 "indices": "input_ids",
                 "output": "hidden",
                 "params": {
-                    "d_model": 896,
+                    "d_model": "{d_model}",
                     "total_elements": "{total_elements_hidden}",
-                    "vocab_size": 151936
+                    "vocab_size": "{vocab_size}"
                 }
             },
             {
@@ -141,34 +283,34 @@
                         "k_cache": "k_cache_{i}",
                         "v_cache": "v_cache_{i}",
                         "cos": "rope_cos",
-                        "sin": "rope_sin",
-                        "params": {
-                            "d_model": 896,
-                            "kv_dim": 128,
-                            "head_dim": 64,
-                            "n_heads": 14,
-                            "n_kv_heads": 2,
-                            "group_size": 7,
-                            "seq_len": "{seq_len}",
-                            "position_offset": "{position_offset}",
-                            "max_seq_len": "{max_seq_len}",
-                            "total_elements": "{total_elements_q}"
-                        }
-                    },
+	                        "sin": "rope_sin",
+	                        "params": {
+	                            "d_model": "{d_model}",
+	                            "kv_dim": "{kv_dim}",
+	                            "head_dim": "{head_dim}",
+	                            "n_heads": "{n_heads}",
+	                            "n_kv_heads": "{n_kv_heads}",
+	                            "group_size": "{group_size}",
+	                            "seq_len": "{seq_len}",
+	                            "position_offset": "{position_offset}",
+	                            "max_seq_len": "{max_seq_len}",
+	                            "total_elements": "{total_elements_q}"
+	                        }
+	                    },
                     {
                         "op": "FlashAttention",
                         "q": "q_rot",
                         "k": "k_cache_{i}",
                         "v": "v_cache_{i}",
-                        "output": "attn_out",
-                        "causal": true,
-                        "query_offset": "{position_offset}",
-                        "n_heads": 14,
-                        "head_dim": 64,
-                        "kv_seq_len": "{kv_seq_len}",
-                        "m": "{m}",
-                        "kv_head_major": true
-                    },
+	                        "output": "attn_out",
+	                        "causal": true,
+	                        "query_offset": "{position_offset}",
+	                        "n_heads": "{n_heads}",
+	                        "head_dim": "{head_dim}",
+	                        "kv_seq_len": "{kv_seq_len}",
+	                        "m": "{m}",
+	                        "kv_head_major": true
+	                    },
                     {
                         "op": "MatMul",
                         "m": "{m}",
@@ -222,14 +364,14 @@
                     }
                 ]
             },
-            {
-                "op": "RmsNormV2",
-                "input": "hidden",
-                "output": "final_norm_out",
-                "gamma": "final_norm",
-                "feature_dim": 896,
-                "total_elements": "{total_elements_hidden}"
-            },
+	            {
+	                "op": "RmsNormV2",
+	                "input": "hidden",
+	                "output": "final_norm_out",
+	                "gamma": "final_norm",
+	                "feature_dim": "{d_model}",
+	                "total_elements": "{total_elements_hidden}"
+	            },
             {
                 "op": "MatMul",
                 "m": "{m}",

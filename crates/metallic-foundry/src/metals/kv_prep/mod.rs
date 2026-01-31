@@ -9,21 +9,25 @@
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
 
-use crate::{spec::DynamicValue, types::TensorArg};
+use crate::{
+    spec::{DynamicValue, TensorBindings}, types::TensorArg
+};
+
+pub mod step;
 
 #[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
 pub struct KvPrepFusedParams {
     /// d_model (n_heads * head_dim).
-    pub d_model: u32,
+    pub d_model: DynamicValue<u32>,
     /// kv_dim (n_kv_heads * head_dim).
-    pub kv_dim: u32,
+    pub kv_dim: DynamicValue<u32>,
     /// head_dim (must be even for RoPE).
-    pub head_dim: u32,
-    pub n_heads: u32,
-    pub n_kv_heads: u32,
+    pub head_dim: DynamicValue<u32>,
+    pub n_heads: DynamicValue<u32>,
+    pub n_kv_heads: DynamicValue<u32>,
     /// n_heads / n_kv_heads.
-    pub group_size: u32,
+    pub group_size: DynamicValue<u32>,
     /// Number of tokens processed in this step.
     pub seq_len: DynamicValue<u32>,
     /// Offset into the KV cache / RoPE tables.
@@ -33,6 +37,24 @@ pub struct KvPrepFusedParams {
     /// Total Q elements (n_heads * seq_len * head_dim).
     /// Per-element dispatch expects this name.
     pub total_elements: DynamicValue<u32>,
+}
+
+impl KvPrepFusedParams {
+    #[inline]
+    pub fn resolve(&self, bindings: &TensorBindings) -> KvPrepFusedParamsResolved {
+        KvPrepFusedParamsResolved {
+            d_model: self.d_model.resolve(bindings),
+            kv_dim: self.kv_dim.resolve(bindings),
+            head_dim: self.head_dim.resolve(bindings),
+            n_heads: self.n_heads.resolve(bindings),
+            n_kv_heads: self.n_kv_heads.resolve(bindings),
+            group_size: self.group_size.resolve(bindings),
+            seq_len: self.seq_len.resolve(bindings),
+            position_offset: self.position_offset.resolve(bindings),
+            max_seq_len: self.max_seq_len.resolve(bindings),
+            total_elements: self.total_elements.resolve(bindings),
+        }
+    }
 }
 
 /// Fused KV-prep kernel for F16 activations.
@@ -50,7 +72,7 @@ pub struct KvPrepFusedParams {
     args = KvPrepFusedParamsResolved,
     dispatch = per_element,
     dtype = F16,
-    step = true
+    step = false
 )]
 pub struct KvPrepFused {
     pub q: TensorArg,
