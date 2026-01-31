@@ -154,6 +154,29 @@ These remain intentionally for now and are expected to be addressed as we expand
 
 ---
 
+## Remaining hardcoded items limiting future workflows
+
+These are the “next sprint” items we still need to remove or generalize to support new workflow types (image/video/upscaling) and new LLM architectures safely:
+
+1. Workflow ops still implement an LLM-specific autoregressive decode model.
+   - `prefill` + `loop` implicitly mean “KV-cache autoregressive text generation”, and pass state via `_internal.*` keys.
+2. Loop semantics are still specialized.
+   - `condition` is not interpreted yet and the current loop defaults to “repeat until `max_tokens` or EOS”.
+3. Sampling is still hardcoded to `SampleTopK`.
+   - No sampler trait/object pluggability yet (greedy/top-k/top-p are folded into one kernel call).
+4. Tokenization/prompt formatting are still outside the workflow.
+   - Workflows currently begin at `prompt_tokens`; tokenization/chat templating is still driven by Rust-side generation.
+5. CLI Foundry spec selection is still architecture-hardcoded by default.
+   - Without `--workflow` resources, the CLI still routes `general.architecture` containing `"qwen2"` to `models/qwen25.json`.
+6. Metadata fallback key sets are still family-shaped.
+   - Even with DSL overrides, the built-in default metadata key list is primarily Qwen2/Llama oriented.
+7. Executor still seeds compile-time baseline globals for DSL compilation.
+   - `CompiledModel::new` sets globals like `n_layers/d_model/n_heads/...` directly to enable DSL compilation/repeat unrolling.
+8. Legacy executor fallback paths still exist.
+   - There is still a DEBT legacy path for weight bindings if a DSL spec omits `weight_bindings`.
+
+---
+
 ## Validation performed during this sprint
 
 We used “change → immediate inference test” to catch layout regressions:

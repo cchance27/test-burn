@@ -38,6 +38,10 @@ pub struct CliConfig {
     /// Inference engine to use (context or foundry)
     #[arg(long, value_enum, default_value_t = Engine::Context)]
     pub engine: Engine,
+
+    /// Optional workflow JSON file path (Foundry engine only). If provided, may include model resources for multi-model workflows.
+    #[arg(long, value_name = "WORKFLOW_JSON")]
+    pub workflow: Option<String>,
 }
 
 /// Generation configuration options
@@ -151,6 +155,7 @@ mod tests {
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
             engine: Engine::Context,
+            workflow: None,
         };
 
         assert_eq!(config.get_prompt(), DEFAULT_PROMPT);
@@ -168,6 +173,7 @@ mod tests {
             output_format: OutputFormat::Tui,
             sdpa_backend: None,
             engine: Engine::Context,
+            workflow: None,
         };
 
         assert_eq!(config.get_prompt(), "Hello, world!");

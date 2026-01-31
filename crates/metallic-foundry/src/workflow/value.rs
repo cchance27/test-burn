@@ -12,6 +12,28 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn as_u32(&self) -> Option<u32> {
+        match self {
+            Value::U32(v) => Some(*v),
+            _ => None,
+        }
+    }
+
+    pub fn as_usize(&self) -> Option<usize> {
+        match self {
+            Value::Usize(v) => Some(*v),
+            Value::U32(v) => Some(*v as usize),
+            _ => None,
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Value::Bool(v) => Some(*v),
+            _ => None,
+        }
+    }
+
     pub fn as_tokens_u32(&self) -> Option<&[u32]> {
         match self {
             Value::TokensU32(v) => Some(v.as_ref()),

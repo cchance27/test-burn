@@ -60,6 +60,31 @@ pub fn generate_streaming_from_tokens(
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError> {
+    static WORKFLOW_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflows/text_generation.json"));
+    static WORKFLOW: std::sync::OnceLock<crate::workflow::WorkflowSpec> = std::sync::OnceLock::new();
+
+    let workflow = WORKFLOW.get_or_init(|| serde_json::from_str(WORKFLOW_JSON).expect("invalid text_generation workflow JSON"));
+
+    let mut models: FxHashMap<String, &crate::model::CompiledModel> = FxHashMap::default();
+    models.insert("llm".to_string(), model);
+
+    generate_streaming_from_tokens_with_workflow(foundry, &models, tokenizer, prompt_tokens, cfg, tx, workflow.clone())
+}
+
+/// Streaming generation for the Foundry backend using a caller-provided workflow + model map.
+///
+/// This is the entrypoint used by the CLI when running user-provided workflow JSON that may define
+/// multiple models/resources.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_streaming_from_tokens_with_workflow(
+    foundry: &mut crate::Foundry,
+    models: &FxHashMap<String, &crate::model::CompiledModel>,
+    tokenizer: &Tokenizer,
+    prompt_tokens: &[u32],
+    cfg: &GenerationConfig,
+    tx: &mpsc::Sender<AppEvent>,
+    workflow: crate::workflow::WorkflowSpec,
+) -> Result<(), MetalError> {
     let generation_start = Instant::now();
     let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
 
@@ -83,18 +108,8 @@ pub fn generate_streaming_from_tokens(
             Ok(true)
         };
 
-    static WORKFLOW_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflows/text_generation.json"));
-    static WORKFLOW: std::sync::OnceLock<crate::workflow::WorkflowSpec> = std::sync::OnceLock::new();
-
-    let workflow = WORKFLOW.get_or_init(|| serde_json::from_str(WORKFLOW_JSON).expect("invalid text_generation workflow JSON"));
-
-    let mut models: FxHashMap<String, &crate::model::CompiledModel> = FxHashMap::default();
-    models.insert("llm".to_string(), model);
-
-    let mut runner = crate::workflow::WorkflowRunner::new(foundry, models);
-    let wf_cfg = crate::workflow::WorkflowRunnerConfig {
-        workflow: workflow.clone(),
-    };
+    let mut runner = crate::workflow::WorkflowRunner::new(foundry, models.clone());
+    let wf_cfg = crate::workflow::WorkflowRunnerConfig { workflow };
 
     let mut inputs: FxHashMap<String, crate::workflow::Value> = FxHashMap::default();
     inputs.insert(

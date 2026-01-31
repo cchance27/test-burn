@@ -93,6 +93,7 @@ fn main() -> AppResult<()> {
     let worker_sdpa_backend = cli_config.sdpa_backend;
     let worker_engine = cli_config.engine;
     let worker_output_format = cli_config.output_format.clone();
+    let workflow_path = cli_config.workflow.clone();
 
     let (tx, rx) = mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -242,45 +243,83 @@ fn main() -> AppResult<()> {
                     }
 
                     cli::config::Engine::Foundry => {
-                        worker_tx.send(AppEvent::StatusUpdate("Detecting architecture...".to_string()))?;
-                        let arch_name = gguf
-                            .metadata()
-                            .entries
-                            .get("general.architecture")
-                            .expect("Architecture not found in GGUF metadata")
-                            .clone();
-
-                        worker_tx.send(AppEvent::StatusUpdate(format!("Detected architecture: {:?}", arch_name)))?;
-
-                        // Determine spec file path
-                        let spec_path = if let metallic_context::gguf::GGUFValue::String(arch) = arch_name.clone() {
-                            if arch.contains("qwen2") {
-                                "models/qwen25.json"
-                            } else {
-                                // Fallback or error
-                                return Err(anyhow::anyhow!("Unsupported architecture for Foundry: {:?}", arch_name));
-                            }
+                        let workflow_override: Option<metallic_foundry::workflow::WorkflowSpec> = if let Some(path) = &workflow_path {
+                            let f = std::fs::File::open(path)?;
+                            Some(serde_json::from_reader(f)?)
                         } else {
-                            // Fallback or error
-                            return Err(anyhow::anyhow!(
-                                "Architecture not listed in GGUF metadata for Foundry: {:?}",
-                                arch_name
-                            ));
+                            None
+                        };
+
+                        let has_workflow_model_resources = workflow_override
+                            .as_ref()
+                            .and_then(|w| w.resources.as_ref())
+                            .is_some_and(|r| !r.models.is_empty());
+
+                        let spec_path: Option<&'static str> = if has_workflow_model_resources {
+                            None
+                        } else {
+                            worker_tx.send(AppEvent::StatusUpdate("Detecting architecture...".to_string()))?;
+                            let arch_name = gguf
+                                .metadata()
+                                .entries
+                                .get("general.architecture")
+                                .expect("Architecture not found in GGUF metadata")
+                                .clone();
+
+                            worker_tx.send(AppEvent::StatusUpdate(format!("Detected architecture: {:?}", arch_name)))?;
+
+                            // Determine spec file path
+                            if let metallic_context::gguf::GGUFValue::String(arch) = arch_name.clone() {
+                                if arch.contains("qwen2") {
+                                    Some("models/qwen25.json")
+                                } else {
+                                    return Err(anyhow::anyhow!("Unsupported architecture for Foundry: {:?}", arch_name));
+                                }
+                            } else {
+                                return Err(anyhow::anyhow!(
+                                    "Architecture not listed in GGUF metadata for Foundry: {:?}",
+                                    arch_name
+                                ));
+                            }
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
                         let mut foundry = metallic_foundry::Foundry::new()?;
 
-                        worker_tx.send(AppEvent::StatusUpdate("Building compiled model...".to_string()))?;
-                        let model = metallic_foundry::model::ModelBuilder::new()
-                            .with_spec_file(std::path::PathBuf::from(spec_path))
-                            .unwrap()
-                            .with_gguf(&gguf_path)
-                            .unwrap()
-                            .build(&mut foundry)?;
+                        worker_tx.send(AppEvent::StatusUpdate("Building compiled model(s)...".to_string()))?;
+
+                        let mut models_owned: rustc_hash::FxHashMap<String, Box<metallic_foundry::model::CompiledModel>> =
+                            rustc_hash::FxHashMap::default();
+
+                        if has_workflow_model_resources {
+                            let resources = workflow_override
+                                .as_ref()
+                                .and_then(|w| w.resources.as_ref())
+                                .expect("has_workflow_model_resources implies resources");
+                            for m in &resources.models {
+                                let model = metallic_foundry::model::ModelBuilder::new()
+                                    .with_spec_file(std::path::PathBuf::from(&m.spec_path))?
+                                    .with_gguf(&m.gguf_path)?
+                                    .build(&mut foundry)?;
+                                models_owned.insert(m.id.clone(), Box::new(model));
+                            }
+                        } else {
+                            let spec_path = spec_path.expect("spec_path required for single-model Foundry");
+                            let model = metallic_foundry::model::ModelBuilder::new()
+                                .with_spec_file(std::path::PathBuf::from(spec_path))?
+                                .with_gguf(&gguf_path)?
+                                .build(&mut foundry)?;
+                            let model_id = workflow_override
+                                .as_ref()
+                                .and_then(|w| w.default_model.clone())
+                                .unwrap_or_else(|| "llm".to_string());
+                            models_owned.insert(model_id, Box::new(model));
+                        }
 
                         // Report memory metrics for Foundry model
-                        model.report_memory_metrics();
+                        for model in models_owned.values() {
+                            model.report_memory_metrics();
+                        }
                         emit_startup_memory_update(&worker_tx)?;
 
                         let load_duration = load_start.elapsed();
@@ -288,7 +327,15 @@ fn main() -> AppResult<()> {
 
                         worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
                         let tokenization_start = std::time::Instant::now();
-                        let tokenizer = model.tokenizer()?;
+                        let tokenizer_model_id = workflow_override
+                            .as_ref()
+                            .and_then(|w| w.default_model.as_deref())
+                            .or_else(|| models_owned.keys().next().map(|s| s.as_str()))
+                            .unwrap_or("llm");
+                        let tokenizer_model = models_owned
+                            .get(tokenizer_model_id)
+                            .ok_or_else(|| anyhow::anyhow!("Workflow default_model '{tokenizer_model_id}' not found"))?;
+                        let tokenizer = tokenizer_model.tokenizer()?;
 
                         let interactive = matches!(worker_output_format, cli::config::OutputFormat::Tui);
 
@@ -309,6 +356,12 @@ fn main() -> AppResult<()> {
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
+                        let mut models: rustc_hash::FxHashMap<String, &metallic_foundry::model::CompiledModel> =
+                            rustc_hash::FxHashMap::default();
+                        for (id, model) in &models_owned {
+                            models.insert(id.clone(), model.as_ref());
+                        }
+
                         if !interactive {
                             for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
                                 let mut current_tokens = if turn_idx == 0 {
@@ -327,28 +380,65 @@ fn main() -> AppResult<()> {
                                 }
 
                                 worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
-                                metallic_foundry::generation::generate_streaming_from_tokens(
-                                    &mut foundry,
-                                    &model,
-                                    &tokenizer,
-                                    &current_tokens,
-                                    &cfg,
-                                    &worker_tx,
-                                )?;
+                                if let Some(workflow) = &workflow_override {
+                                    metallic_foundry::generation::generate_streaming_from_tokens_with_workflow(
+                                        &mut foundry,
+                                        &models,
+                                        &tokenizer,
+                                        &current_tokens,
+                                        &cfg,
+                                        &worker_tx,
+                                        workflow.clone(),
+                                    )?;
+                                } else {
+                                    // Single-model default workflow path.
+                                    let model_id = "llm";
+                                    let model = models
+                                        .get(model_id)
+                                        .copied()
+                                        .or_else(|| models.values().next().copied())
+                                        .expect("at least one model");
+                                    metallic_foundry::generation::generate_streaming_from_tokens(
+                                        &mut foundry,
+                                        model,
+                                        &tokenizer,
+                                        &current_tokens,
+                                        &cfg,
+                                        &worker_tx,
+                                    )?;
+                                }
                             }
                         } else {
                             let mut current_tokens = tokens0;
                             worker_tx.send(AppEvent::TokenCount(current_tokens.len()))?;
                             let mut queued_cli_turns = prompts.iter().skip(1);
                             loop {
-                                metallic_foundry::generation::generate_streaming_from_tokens(
-                                    &mut foundry,
-                                    &model,
-                                    &tokenizer,
-                                    &current_tokens,
-                                    &cfg,
-                                    &worker_tx,
-                                )?;
+                                if let Some(workflow) = &workflow_override {
+                                    metallic_foundry::generation::generate_streaming_from_tokens_with_workflow(
+                                        &mut foundry,
+                                        &models,
+                                        &tokenizer,
+                                        &current_tokens,
+                                        &cfg,
+                                        &worker_tx,
+                                        workflow.clone(),
+                                    )?;
+                                } else {
+                                    let model_id = "llm";
+                                    let model = models
+                                        .get(model_id)
+                                        .copied()
+                                        .or_else(|| models.values().next().copied())
+                                        .expect("at least one model");
+                                    metallic_foundry::generation::generate_streaming_from_tokens(
+                                        &mut foundry,
+                                        model,
+                                        &tokenizer,
+                                        &current_tokens,
+                                        &cfg,
+                                        &worker_tx,
+                                    )?;
+                                }
 
                                 // If the user provided multiple prompts on the CLI for a TUI session, consume them
                                 // as queued user turns before switching to interactive input.

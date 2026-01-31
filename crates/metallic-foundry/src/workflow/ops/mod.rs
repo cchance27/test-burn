@@ -3,10 +3,14 @@
 mod loop_op;
 mod prefill;
 mod ret;
+mod set_globals;
+mod sync;
 
 pub(crate) use loop_op::LoopOp;
 pub(crate) use prefill::PrefillOp;
 pub(crate) use ret::ReturnOp;
+pub(crate) use set_globals::SetGlobalsOp;
+pub(crate) use sync::SyncOp;
 
 use super::runner::WorkflowExecutionContext;
 use crate::error::MetalError;

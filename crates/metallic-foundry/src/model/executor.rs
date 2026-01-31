@@ -108,7 +108,10 @@ pub struct CompiledModel {
     /// Symbol table mapping tensor names to integer indices for fast lookup
     symbol_table: SymbolTable,
     /// Interned global keys for fast `int_globals` updates without allocations.
-    interned_globals: FxHashMap<String, &'static str>,
+    ///
+    /// This is intentionally lazy-interning so new workflows/DSL can introduce new global keys
+    /// without requiring code changes in the executor.
+    interned_globals: RefCell<FxHashMap<String, &'static str>>,
     /// Reusable execution session (weights/intermediates + small persistent buffers).
     session: RefCell<Option<ModelSession>>,
 }
@@ -168,10 +171,13 @@ impl CompiledModel {
 
     #[inline]
     fn interned_key(&self, key: &str) -> &'static str {
-        *self
-            .interned_globals
-            .get(key)
-            .unwrap_or_else(|| panic!("Missing interned global key '{key}'. Add it to CompiledModel::new intern list."))
+        if let Some(v) = self.interned_globals.borrow().get(key) {
+            return *v;
+        }
+
+        let leaked: &'static str = Box::leak(key.to_string().into_boxed_str());
+        self.interned_globals.borrow_mut().insert(key.to_string(), leaked);
+        leaked
     }
 
     #[inline]
@@ -646,48 +652,38 @@ impl CompiledModel {
         );
 
         let interned_globals = {
-            let mut keys: Vec<String> = Vec::new();
-            // Common runtime keys for text-generation.
-            keys.extend_from_slice(&[
-                "n_layers".to_string(),
-                "d_model".to_string(),
-                "n_heads".to_string(),
-                "n_kv_heads".to_string(),
-                "ff_dim".to_string(),
-                "vocab_size".to_string(),
-                "max_seq_len".to_string(),
-                "rope_base".to_string(),
-                "rms_eps".to_string(),
-                "head_dim".to_string(),
-                "kv_dim".to_string(),
-                "group_size".to_string(),
-                "m".to_string(),
-                "seq_len".to_string(),
-                "position_offset".to_string(),
-                "kv_seq_len".to_string(),
-                "max_prefill_chunk".to_string(),
-                "total_elements_hidden".to_string(),
-                "total_elements_q".to_string(),
-                "total_elements_k".to_string(),
-                "total_elements_write".to_string(),
-                "total_elements_ffn".to_string(),
-                "total_elements_slice".to_string(),
-                "total_elements_repeat".to_string(),
-            ]);
-
-            // DSL-declared globals and derived globals.
-            keys.extend(spec.architecture.prepare.globals.keys().cloned());
-            keys.extend(spec.architecture.prepare.derived_globals.iter().map(|g| g.name.clone()));
-
-            keys.sort();
-            keys.dedup();
-
+            // Pre-intern DSL-declared globals and derived globals to avoid one-time allocations
+            // at runtime, but allow any missing keys to be lazily interned.
             let mut map: FxHashMap<String, &'static str> = FxHashMap::default();
-            for k in keys {
+
+            for k in spec.architecture.prepare.globals.keys() {
                 let leaked: &'static str = Box::leak(k.clone().into_boxed_str());
-                map.insert(k, leaked);
+                map.insert(k.clone(), leaked);
             }
-            map
+            for g in &spec.architecture.prepare.derived_globals {
+                let leaked: &'static str = Box::leak(g.name.clone().into_boxed_str());
+                map.insert(g.name.clone(), leaked);
+            }
+
+            // Pre-intern baseline architecture keys commonly referenced by DSL.
+            for k in [
+                "n_layers",
+                "d_model",
+                "n_heads",
+                "n_kv_heads",
+                "ff_dim",
+                "vocab_size",
+                "max_seq_len",
+                "rope_base",
+                "rms_eps",
+                "head_dim",
+                "kv_dim",
+            ] {
+                let leaked: &'static str = Box::leak(k.to_string().into_boxed_str());
+                map.insert(k.to_string(), leaked);
+            }
+
+            RefCell::new(map)
         };
 
         Ok(Self {

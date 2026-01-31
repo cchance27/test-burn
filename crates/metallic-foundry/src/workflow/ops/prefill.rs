@@ -7,15 +7,34 @@ use crate::{
 pub(crate) struct PrefillOp {
     model_id: Option<String>,
     input: String,
+    input_ids_binding: String,
+    position_offset_key: String,
+    m_key: String,
+    seq_len_key: String,
+    apply_derived_globals: bool,
     #[allow(dead_code)]
     description: Option<String>,
 }
 
 impl PrefillOp {
-    pub(crate) fn new(model_id: Option<String>, input: String, description: Option<String>) -> Self {
+    pub(crate) fn new(
+        model_id: Option<String>,
+        input: String,
+        input_ids_binding: Option<String>,
+        position_offset_key: Option<String>,
+        m_key: Option<String>,
+        seq_len_key: Option<String>,
+        apply_derived_globals: bool,
+        description: Option<String>,
+    ) -> Self {
         Self {
             model_id,
             input,
+            input_ids_binding: input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
+            position_offset_key: position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
+            m_key: m_key.unwrap_or_else(|| "m".to_string()),
+            seq_len_key: seq_len_key.unwrap_or_else(|| "seq_len".to_string()),
+            apply_derived_globals,
             description,
         }
     }
@@ -84,10 +103,12 @@ impl WorkflowOp for PrefillOp {
                 session.input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
 
                 // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
-                model.set_int_global(&mut session.bindings, "m", 1);
-                model.set_int_global(&mut session.bindings, "seq_len", 1);
-                model.set_int_global(&mut session.bindings, "position_offset", start_pos);
-                model.apply_derived_globals(&mut session.bindings);
+                model.set_int_global(&mut session.bindings, &self.m_key, 1);
+                model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
+                model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos);
+                if self.apply_derived_globals {
+                    model.apply_derived_globals(&mut session.bindings);
+                }
 
                 let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
                 let disable_batched_prefill_env = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
@@ -102,7 +123,7 @@ impl WorkflowOp for PrefillOp {
                 let setup_duration = prefill_start.duration_since(setup_start);
                 let mut last_prefill_m = 1usize;
 
-                let input_ids_key = "input_ids";
+                let input_ids_key = self.input_ids_binding.as_str();
 
                 if !disable_batched_prefill {
                     if !debug_sync && !profiling_per_kernel {
@@ -130,10 +151,12 @@ impl WorkflowOp for PrefillOp {
                             foundry.start_capture()?;
                         }
 
-                        model.set_int_global(&mut session.bindings, "m", m);
-                        model.set_int_global(&mut session.bindings, "seq_len", m);
-                        model.set_int_global(&mut session.bindings, "position_offset", base_pos);
-                        model.apply_derived_globals(&mut session.bindings);
+                        model.set_int_global(&mut session.bindings, &self.m_key, m);
+                        model.set_int_global(&mut session.bindings, &self.seq_len_key, m);
+                        model.set_int_global(&mut session.bindings, &self.position_offset_key, base_pos);
+                        if self.apply_derived_globals {
+                            model.apply_derived_globals(&mut session.bindings);
+                        }
 
                         let mut tensor_input =
                             TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![m], vec![1]);
@@ -153,8 +176,8 @@ impl WorkflowOp for PrefillOp {
                         cmd.wait_until_completed();
                     }
                 } else {
-                    model.set_int_global(&mut session.bindings, "m", 1);
-                    model.set_int_global(&mut session.bindings, "seq_len", 1);
+                    model.set_int_global(&mut session.bindings, &self.m_key, 1);
+                    model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
 
                     for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
                         let base_pos = start_pos + chunk_idx * prefill_chunk_size;
@@ -165,8 +188,10 @@ impl WorkflowOp for PrefillOp {
 
                         for i in 0..chunk_tokens.len() {
                             let pos = base_pos + i;
-                            model.set_int_global(&mut session.bindings, "position_offset", pos);
-                            model.apply_derived_globals(&mut session.bindings);
+                            model.set_int_global(&mut session.bindings, &self.position_offset_key, pos);
+                            if self.apply_derived_globals {
+                                model.apply_derived_globals(&mut session.bindings);
+                            }
 
                             let mut tensor_input =
                                 TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
@@ -191,17 +216,19 @@ impl WorkflowOp for PrefillOp {
                 let prefill_duration = prefill_start.elapsed();
 
                 // Reset to decode mode for autoregressive decode (M=1).
-                model.set_int_global(&mut session.bindings, "m", 1);
-                model.set_int_global(&mut session.bindings, "seq_len", 1);
-                model.set_int_global(&mut session.bindings, "position_offset", start_pos + prompt_len);
-                model.apply_derived_globals(&mut session.bindings);
+                model.set_int_global(&mut session.bindings, &self.m_key, 1);
+                model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
+                model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos + prompt_len);
+                if self.apply_derived_globals {
+                    model.apply_derived_globals(&mut session.bindings);
+                }
 
                 // Ensure input_ids is bound to any valid U32 buffer; decode stage overwrites it to sampled-token buffers.
                 {
                     let mut tensor_input =
                         TensorArg::from_buffer(session.input_ids_full.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
                     tensor_input.offset = 0;
-                    model.set_binding(&mut session.bindings, &mut session.fast_bindings, "input_ids", tensor_input);
+                    model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
                 }
 
                 Ok((

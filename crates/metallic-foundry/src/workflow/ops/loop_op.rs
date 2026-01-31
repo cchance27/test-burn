@@ -12,6 +12,12 @@ pub(crate) struct LoopOp {
     args: Vec<String>,
     stages: Vec<WorkflowStageSpec>,
     append_output: String,
+    sample_logits_binding: String,
+    sample_token_var: String,
+    input_ids_binding: String,
+    position_offset_key: String,
+    apply_derived_globals: bool,
+    has_append_stage: bool,
 }
 
 #[derive(Clone)]
@@ -37,16 +43,32 @@ impl LoopOp {
         if stages.is_empty() {
             return Err(MetalError::InvalidOperation("loop must contain at least one stage".into()));
         }
+
         let mut append_output: Option<String> = None;
-        let mut has_sample = false;
+        let mut has_append_stage = false;
+        let mut sample_logits_binding: Option<String> = None;
+        let mut sample_token_var: Option<String> = None;
         let mut has_check_eos = false;
+        let mut input_ids_binding: Option<String> = None;
+        let mut graph_forward_logits_binding: Option<String> = None;
+        let mut graph_forward_token_var: Option<String> = None;
+        let mut position_offset_key: Option<String> = None;
+        let mut apply_derived_globals = true;
         let mut has_graph_forward = false;
+
         for stage in &stages {
             match stage {
                 WorkflowStageSpec::Sample {
-                    model_id: stage_model_id, ..
+                    model_id: stage_model_id,
+                    logits_binding,
+                    output,
+                    ..
                 } => {
-                    has_sample = true;
+                    if sample_logits_binding.is_some() || sample_token_var.is_some() {
+                        return Err(MetalError::InvalidOperation("loop must contain exactly one 'sample' stage".into()));
+                    }
+                    sample_logits_binding = Some(logits_binding.clone());
+                    sample_token_var = Some(output.clone());
                     if let (Some(step_id), Some(stage_id)) = (model_id.as_deref(), stage_model_id.as_deref())
                         && step_id != stage_id
                     {
@@ -60,11 +82,23 @@ impl LoopOp {
                 }
                 WorkflowStageSpec::AppendToken { output, .. } => {
                     append_output = Some(output.clone());
+                    has_append_stage = true;
                 }
                 WorkflowStageSpec::GraphForward {
-                    model_id: stage_model_id, ..
+                    model_id: stage_model_id,
+                    token_var,
+                    input_ids_binding: stage_input_ids_binding,
+                    logits_binding,
+                    position_offset_key: stage_position_offset_key,
+                    apply_derived_globals: stage_apply_derived_globals,
+                    ..
                 } => {
                     has_graph_forward = true;
+                    graph_forward_logits_binding = Some(logits_binding.clone());
+                    graph_forward_token_var = Some(token_var.clone());
+                    input_ids_binding = Some(stage_input_ids_binding.clone().unwrap_or_else(|| "input_ids".to_string()));
+                    position_offset_key = Some(stage_position_offset_key.clone().unwrap_or_else(|| "position_offset".to_string()));
+                    apply_derived_globals = *stage_apply_derived_globals;
                     if let (Some(step_id), Some(stage_id)) = (model_id.as_deref(), stage_model_id.as_deref())
                         && step_id != stage_id
                     {
@@ -75,9 +109,12 @@ impl LoopOp {
                 }
             }
         }
-        if !has_sample {
-            return Err(MetalError::InvalidOperation("loop missing required stage 'sample'".into()));
-        }
+
+        let sample_logits_binding =
+            sample_logits_binding.ok_or_else(|| MetalError::InvalidOperation("loop missing required stage 'sample'".into()))?;
+        let sample_token_var =
+            sample_token_var.ok_or_else(|| MetalError::InvalidOperation("loop missing required stage 'sample'".into()))?;
+
         if !has_check_eos {
             return Err(MetalError::InvalidOperation("loop missing required stage 'check_eos'".into()));
         }
@@ -85,12 +122,37 @@ impl LoopOp {
             return Err(MetalError::InvalidOperation("loop missing required stage 'graph_forward'".into()));
         }
         let append_output = append_output.unwrap_or_else(|| "generated_tokens".to_string());
+
+        let input_ids_binding = input_ids_binding.unwrap_or_else(|| "input_ids".to_string());
+        let position_offset_key = position_offset_key.unwrap_or_else(|| "position_offset".to_string());
+        let graph_forward_logits_binding = graph_forward_logits_binding
+            .ok_or_else(|| MetalError::InvalidOperation("loop missing required stage 'graph_forward'".into()))?;
+        let graph_forward_token_var =
+            graph_forward_token_var.ok_or_else(|| MetalError::InvalidOperation("loop missing required stage 'graph_forward'".into()))?;
+
+        if graph_forward_token_var != sample_token_var {
+            return Err(MetalError::InvalidOperation(format!(
+                "graph_forward.token_var '{graph_forward_token_var}' must match sample.output '{sample_token_var}'"
+            )));
+        }
+        if graph_forward_logits_binding != sample_logits_binding {
+            return Err(MetalError::InvalidOperation(format!(
+                "graph_forward.logits_binding '{graph_forward_logits_binding}' must match sample.logits_binding '{sample_logits_binding}'"
+            )));
+        }
+
         Ok(Self {
             model_id,
             condition,
             args,
             stages,
             append_output,
+            sample_logits_binding,
+            sample_token_var,
+            input_ids_binding,
+            position_offset_key,
+            apply_derived_globals,
+            has_append_stage,
         })
     }
 
@@ -129,12 +191,6 @@ impl WorkflowOp for LoopOp {
         on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError> {
         let model = ctx.resolve_model(self.model_id.as_deref())?;
-
-        let prompt_tokens = ctx
-            .values
-            .get("prompt_tokens")
-            .and_then(|v| v.as_tokens_u32())
-            .ok_or_else(|| MetalError::InvalidOperation("Workflow missing input 'prompt_tokens' (u32[])".into()))?;
 
         let max_tokens_key = self.args.get(0).map(|s| s.as_str()).unwrap_or("max_tokens");
         let max_new_tokens = ctx.read_usize(max_tokens_key)?;
@@ -181,10 +237,6 @@ impl WorkflowOp for LoopOp {
         let seed = ctx.resolve_param_u32(&sample_cfg.seed)?;
         let eos_token = ctx.resolve_param_u32(&eos_cfg.eos_token)?;
 
-        if prompt_tokens.is_empty() {
-            return Err(MetalError::InvalidShape("loop requires non-empty prompt_tokens".into()));
-        }
-
         let generated = model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
             let bindings = &mut session.bindings;
             let fast_bindings = &mut session.fast_bindings;
@@ -198,7 +250,7 @@ impl WorkflowOp for LoopOp {
                     vec![1],
                 );
                 tensor_input.offset = 0;
-                model.set_binding(bindings, fast_bindings, "input_ids", tensor_input);
+                model.set_binding(bindings, fast_bindings, &self.input_ids_binding, tensor_input);
             }
 
             let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
@@ -215,8 +267,6 @@ impl WorkflowOp for LoopOp {
             let ignore_eos_stop = Self::ignore_eos_stop_enabled();
             let greedy = temperature <= 0.0 || !temperature.is_finite() || top_k == 0;
             let vocab_size = model.architecture().vocab_size as u32;
-
-            let stop_tokens = [eos_token];
 
             let mut pending_count = 0usize;
             let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
@@ -251,7 +301,7 @@ impl WorkflowOp for LoopOp {
                     batch_encode_start = Some(step_start);
                 }
 
-                let logits = bindings.get("logits")?;
+                let logits = bindings.get(&self.sample_logits_binding)?;
                 let mut logits_arg = logits.clone();
                 if step == 0 && last_prefill_m > 1 {
                     logits_arg.offset += (last_prefill_m - 1) * (vocab_size as usize) * 2;
@@ -273,12 +323,14 @@ impl WorkflowOp for LoopOp {
                 model.set_binding(
                     bindings,
                     fast_bindings,
-                    "input_ids",
+                    &self.input_ids_binding,
                     TensorArg::from_buffer(sample_out.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]),
                 );
 
-                model.set_int_global(bindings, "position_offset", start_pos + prompt_len + step);
-                model.apply_derived_globals(bindings);
+                model.set_int_global(bindings, &self.position_offset_key, start_pos + prompt_len + step);
+                if self.apply_derived_globals {
+                    model.apply_derived_globals(bindings);
+                }
 
                 model.forward(foundry, bindings, &*fast_bindings)?;
 
@@ -337,10 +389,54 @@ impl WorkflowOp for LoopOp {
                     let mut batch_done = false;
                     for buffer in session.sample_out_buffers.iter().take(pending_count) {
                         let token: u32 = buffer.read_scalar();
-                        generated.push(token);
 
-                        if !ignore_eos_stop && stop_tokens.contains(&token) {
-                            batch_done = true;
+                        // Execute the host-side stages in spec order for this token.
+                        for stage in &self.stages {
+                            match stage {
+                                WorkflowStageSpec::Sample { .. } => {}
+                                WorkflowStageSpec::GraphForward { .. } => {}
+                                WorkflowStageSpec::CheckEos { input, output, .. } => {
+                                    let tok = if input == &self.sample_token_var {
+                                        token
+                                    } else {
+                                        ctx.values
+                                            .get(input)
+                                            .and_then(|v| v.as_u32())
+                                            .ok_or_else(|| {
+                                                MetalError::InvalidOperation(format!(
+                                                    "check_eos missing token input '{input}' (u32)"
+                                                ))
+                                            })?
+                                    };
+                                    let should_stop = tok == eos_token;
+                                    ctx.values.insert(output.clone(), Value::Bool(should_stop));
+                                    if should_stop && !ignore_eos_stop {
+                                        batch_done = true;
+                                    }
+                                }
+                                WorkflowStageSpec::AppendToken { input, .. } => {
+                                    let tok = if input == &self.sample_token_var {
+                                        token
+                                    } else {
+                                        ctx.values
+                                            .get(input)
+                                            .and_then(|v| v.as_u32())
+                                            .ok_or_else(|| {
+                                                MetalError::InvalidOperation(format!(
+                                                    "append_token missing token input '{input}' (u32)"
+                                                ))
+                                            })?
+                                    };
+                                    generated.push(tok);
+                                }
+                            }
+
+                            if batch_done {
+                                break;
+                            }
+                        }
+
+                        if batch_done {
                             break;
                         }
 
@@ -352,6 +448,12 @@ impl WorkflowOp for LoopOp {
                         )? {
                             batch_done = true;
                             break;
+                        }
+                    }
+                    // If the workflow did not append tokens explicitly, treat the sampled tokens as generated.
+                    if !self.has_append_stage && pending_count > 0 {
+                        for buffer in session.sample_out_buffers.iter().take(pending_count) {
+                            generated.push(buffer.read_scalar());
                         }
                     }
 

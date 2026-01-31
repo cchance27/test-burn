@@ -55,7 +55,7 @@
         {
           "op": "sample",
           "model_id": "llm",
-          "input": "logits",
+          "logits_binding": "logits",
           "output": "next_token",
           "temperature": "{temperature}",
           "top_k": "{top_k}",
@@ -64,7 +64,7 @@
         },
         { "op": "check_eos", "input": "next_token", "output": "should_stop", "eos_token": "{eos_token}" },
         { "op": "append_token", "input": "next_token", "output": "generated_tokens" },
-        { "op": "graph_forward", "model_id": "llm", "input": "next_token", "output": "logits" }
+        { "op": "graph_forward", "model_id": "llm", "token_var": "next_token", "logits_binding": "logits" }
       ]
     },
     { "op": "return", "output": "generated_tokens" }

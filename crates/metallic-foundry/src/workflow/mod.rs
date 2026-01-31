@@ -9,5 +9,8 @@ mod spec;
 mod value;
 
 pub use runner::{WorkflowRunner, WorkflowRunnerConfig};
-pub use spec::{Param, WorkflowSpec, WorkflowStepSpec};
+pub use spec::{Param, WorkflowModelResourceSpec, WorkflowResourcesSpec, WorkflowSpec, WorkflowStepSpec};
 pub use value::Value;
+
+#[cfg(test)]
+mod tests;

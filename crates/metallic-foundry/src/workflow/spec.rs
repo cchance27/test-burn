@@ -120,8 +120,23 @@ pub struct WorkflowSpec {
     #[serde(default)]
     pub default_model: Option<String>,
     #[serde(default)]
+    pub resources: Option<WorkflowResourcesSpec>,
+    #[serde(default)]
     pub inputs: Vec<WorkflowInputSpec>,
     pub steps: Vec<WorkflowStepSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowResourcesSpec {
+    #[serde(default)]
+    pub models: Vec<WorkflowModelResourceSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WorkflowModelResourceSpec {
+    pub id: String,
+    pub gguf_path: String,
+    pub spec_path: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -142,9 +157,36 @@ pub enum WorkflowStepSpec {
         #[serde(default)]
         model_id: Option<String>,
         input: String,
+        /// Name of the model binding used for token ids (defaults to "input_ids").
+        #[serde(default)]
+        input_ids_binding: Option<String>,
+        /// Global key for the current position (defaults to "position_offset").
+        #[serde(default)]
+        position_offset_key: Option<String>,
+        /// Global key for batch width (defaults to "m").
+        #[serde(default)]
+        m_key: Option<String>,
+        /// Global key for sequence length (defaults to "seq_len").
+        #[serde(default)]
+        seq_len_key: Option<String>,
+        /// Whether to apply derived globals after updating globals (default true).
+        #[serde(default = "default_true")]
+        apply_derived_globals: bool,
         #[serde(default)]
         description: Option<String>,
     },
+    SetGlobals {
+        #[serde(default)]
+        model_id: Option<String>,
+        /// Integer globals to set on the target model's bindings.
+        ///
+        /// Values may be literals or "{var}" references to workflow inputs/values.
+        globals: std::collections::BTreeMap<String, Param<usize>>,
+        /// Whether to apply derived globals after updating globals (default true).
+        #[serde(default = "default_true")]
+        apply_derived_globals: bool,
+    },
+    Synchronize,
     Loop {
         #[serde(default)]
         model_id: Option<String>,
@@ -159,13 +201,19 @@ pub enum WorkflowStepSpec {
     },
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum WorkflowStageSpec {
     Sample {
         #[serde(default)]
         model_id: Option<String>,
-        input: String,
+        /// Model binding name for logits (defaults to legacy "input" field name).
+        #[serde(alias = "input")]
+        logits_binding: String,
         output: String,
         temperature: Param<f32>,
         top_k: Param<u32>,
@@ -184,7 +232,20 @@ pub enum WorkflowStageSpec {
     GraphForward {
         #[serde(default)]
         model_id: Option<String>,
-        input: String,
-        output: String,
+        /// Token variable name (legacy "input").
+        #[serde(alias = "input")]
+        token_var: String,
+        /// Model binding name for the token ids buffer (defaults to "input_ids").
+        #[serde(default)]
+        input_ids_binding: Option<String>,
+        /// Model binding name for logits (defaults to legacy "output" value).
+        #[serde(alias = "output")]
+        logits_binding: String,
+        /// Global key for the current position (defaults to "position_offset").
+        #[serde(default)]
+        position_offset_key: Option<String>,
+        /// Whether to apply derived globals after updating position (default true).
+        #[serde(default = "default_true")]
+        apply_derived_globals: bool,
     },
 }

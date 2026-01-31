@@ -52,6 +52,17 @@ impl<'a> WorkflowExecutionContext<'a> {
         }
     }
 
+    pub(crate) fn resolve_param_usize(&self, p: &Param<usize>) -> Result<usize, MetalError> {
+        match p {
+            Param::Literal(v) => Ok(*v),
+            Param::Input(name) => self
+                .values
+                .get(name)
+                .and_then(|v| v.as_usize())
+                .ok_or_else(|| MetalError::InvalidOperation(format!("Missing workflow input '{name}' (usize)"))),
+        }
+    }
+
     pub(crate) fn resolve_param_f32(&self, p: &Param<f32>) -> Result<f32, MetalError> {
         match p {
             Param::Literal(v) => Ok(*v),
