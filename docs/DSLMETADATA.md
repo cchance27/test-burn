@@ -125,14 +125,32 @@ The executor seeds baseline globals (from architecture + derived expressions), b
 
 ---
 
+## Workflow execution (current state)
+
+Text generation is now executed through a **workflow JSON** (`crates/metallic-foundry/workflows/text_generation.json`) instead of a single hardcoded executor path.
+
+The workflow spec is intentionally op-based:
+
+- `prefill`
+- `loop` with stages like `sample`, `check_eos`, `append_token`, `graph_forward`
+- `return`
+
+Execution is implemented as Rust op trait objects (one per step) so runtime state lives with the ops, while the workflow JSON remains data-only.
+
+---
+
 ## What is still not fully DSL/metadata-driven (known gaps)
 
-These remain intentionally for now and are expected to be addressed by the upcoming “workflow-based” system:
+These remain intentionally for now and are expected to be addressed as we expand workflows + metadata:
 
-1. The `generate()` loop is still a **text-generation workflow** baked into the executor.
-   - It manages runtime keys like `m`, `seq_len`, `position_offset`, `max_seq_len`, `max_prefill_chunk`.
-2. Some “common runtime keys” are still interned for fast `int_globals` updates.
-   - This is a performance optimization but will likely be reshaped once workflows own runtime state.
+1. Baseline globals are still partially seeded from architecture fields.
+   - Even though GGUF fills architecture numerics, some globals are still explicitly set in the executor rather than purely derived from DSL expressions.
+2. The runtime key set is still text-generation oriented.
+   - `m`, `seq_len`, `position_offset`, `max_seq_len`, `max_prefill_chunk`, etc. are assumed by the current workflow ops.
+3. GGUF metadata inference is still hardcoded to specific key sets in defaults.
+   - `crates/metallic-foundry/src/model/metadata_defaults.rs` still primarily knows Qwen2/Llama-style GGUF keys unless overridden by DSL `metadata_keys`.
+4. Multi-model workflows are not yet supported end-to-end.
+   - The schema carries `model_id`, but cross-model value passing and per-op model routing needs more work (e.g. LLM → image in one workflow).
 
 ---
 
@@ -144,4 +162,3 @@ We used “change → immediate inference test” to catch layout regressions:
 - `cargo run --release --package metallic_cli -- models/qwen2.5-coder-0.5b-instruct-fp16.gguf "create very short rust helloworld function" --engine foundry --max-tokens 100 --output-format text`
 
 We also used targeted unit/integration tests for DSL+metadata components (not the full suite due to cost).
-

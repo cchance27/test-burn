@@ -28,6 +28,7 @@ pub mod template;
 pub mod tensor;
 pub mod tokenizer;
 pub mod types;
+pub mod workflow;
 
 pub use kernel_registry::kernel_registry;
 

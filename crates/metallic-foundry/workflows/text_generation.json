@@ -1,0 +1,72 @@
+{
+  "name": "TextGeneration",
+  "description": "Standard autoregressive text generation workflow",
+  "default_model": "llm",
+  "inputs": [
+    {
+      "name": "prompt_tokens",
+      "type": "u32[]",
+      "description": "Tokenized prompt"
+    },
+    {
+      "name": "max_tokens",
+      "type": "u32",
+      "default": 256
+    },
+    {
+      "name": "temperature",
+      "type": "f32",
+      "default": 0.7
+    },
+    {
+      "name": "top_k",
+      "type": "u32",
+      "default": 40
+    },
+    {
+      "name": "top_p",
+      "type": "f32",
+      "default": 0.95
+    },
+    {
+      "name": "seed",
+      "type": "u32",
+      "default": 42
+    },
+    {
+      "name": "eos_token",
+      "type": "u32",
+      "default": 151645
+    }
+  ],
+  "steps": [
+    {
+      "op": "prefill",
+      "model_id": "llm",
+      "input": "prompt_tokens",
+      "description": "Process prompt tokens through forward pass, populating KV cache"
+    },
+    {
+      "op": "loop",
+      "model_id": "llm",
+      "condition": "tokens_remaining",
+      "args": ["max_tokens", "eos_token"],
+      "stages": [
+        {
+          "op": "sample",
+          "model_id": "llm",
+          "input": "logits",
+          "output": "next_token",
+          "temperature": "{temperature}",
+          "top_k": "{top_k}",
+          "top_p": "{top_p}",
+          "seed": "{seed}"
+        },
+        { "op": "check_eos", "input": "next_token", "output": "should_stop", "eos_token": "{eos_token}" },
+        { "op": "append_token", "input": "next_token", "output": "generated_tokens" },
+        { "op": "graph_forward", "model_id": "llm", "input": "next_token", "output": "logits" }
+      ]
+    },
+    { "op": "return", "output": "generated_tokens" }
+  ]
+}

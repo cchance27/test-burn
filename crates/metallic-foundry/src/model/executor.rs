@@ -113,14 +113,14 @@ pub struct CompiledModel {
     session: RefCell<Option<ModelSession>>,
 }
 
-struct ModelSession {
-    bindings: TensorBindings,
-    fast_bindings: FastBindings,
-    input_ids_full: crate::types::MetalBuffer,
-    input_ids_capacity: usize,
-    sample_out_buffers: Vec<crate::types::MetalBuffer>,
-    current_pos: usize,
-    context_config: crate::model::ContextConfig,
+pub(crate) struct ModelSession {
+    pub(crate) bindings: TensorBindings,
+    pub(crate) fast_bindings: FastBindings,
+    pub(crate) input_ids_full: crate::types::MetalBuffer,
+    pub(crate) input_ids_capacity: usize,
+    pub(crate) sample_out_buffers: Vec<crate::types::MetalBuffer>,
+    pub(crate) current_pos: usize,
+    pub(crate) context_config: crate::model::ContextConfig,
 }
 
 impl CompiledModel {
@@ -175,13 +175,13 @@ impl CompiledModel {
     }
 
     #[inline]
-    fn set_int_global(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
+    pub(crate) fn set_int_global(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
         let interned = self.interned_key(key);
         bindings.set_int_global(interned, value);
     }
 
     #[inline]
-    fn set_global_usize(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
+    pub(crate) fn set_global_usize(&self, bindings: &mut TensorBindings, key: &str, value: usize) {
         self.set_int_global(bindings, key, value);
         bindings.set_global(key, value.to_string());
     }
@@ -191,7 +191,7 @@ impl CompiledModel {
         bindings.set_global(key, value.to_string());
     }
 
-    fn apply_derived_globals(&self, bindings: &mut TensorBindings) {
+    pub(crate) fn apply_derived_globals(&self, bindings: &mut TensorBindings) {
         for spec in &self.spec.architecture.prepare.derived_globals {
             let value = spec.expr.eval(bindings);
             self.set_int_global(bindings, &spec.name, value);
@@ -787,6 +787,19 @@ impl CompiledModel {
             context_config,
         });
         Ok(())
+    }
+
+    pub(crate) fn with_session_mut<T>(
+        &self,
+        foundry: &mut Foundry,
+        f: impl FnOnce(&mut Foundry, &mut ModelSession) -> Result<T, MetalError>,
+    ) -> Result<T, MetalError> {
+        self.initialize_session(foundry)?;
+        let mut session_guard = self.session.borrow_mut();
+        let session = session_guard
+            .as_mut()
+            .ok_or_else(|| MetalError::OperationFailed("Foundry session missing after initialization".into()))?;
+        f(foundry, session)
     }
 
     /// Prepare tensor bindings by:
@@ -1416,7 +1429,7 @@ impl CompiledModel {
 
     /// Helper to update an existing binding without allocating a new String key.
     /// Falls back to insert if the binding isn't present (should be rare on hot paths).
-    fn set_binding(&self, bindings: &mut TensorBindings, fast_bindings: &mut FastBindings, name: &str, tensor: TensorArg) {
+    pub(crate) fn set_binding(&self, bindings: &mut TensorBindings, fast_bindings: &mut FastBindings, name: &str, tensor: TensorArg) {
         if let Some(id) = self.symbol_table.get(name) {
             fast_bindings.set(id, tensor.clone());
         }
@@ -1473,7 +1486,7 @@ impl CompiledModel {
 
     /// Ensure that KV caches and related buffers have enough capacity for the requested length.
     /// Grows buffers on-demand if needed, respecting alignment and max context limits.
-    fn ensure_kv_capacity(
+    pub(crate) fn ensure_kv_capacity(
         &self,
         foundry: &mut Foundry,
         bindings: &mut TensorBindings,

@@ -3,6 +3,7 @@ use std::{
 };
 
 use metallic_cli_helpers::app_event::AppEvent;
+use rustc_hash::FxHashMap;
 
 use crate::{Tokenizer, error::MetalError};
 
@@ -82,17 +83,35 @@ pub fn generate_streaming_from_tokens(
             Ok(true)
         };
 
-    model.generate_with_seed_streaming(
-        foundry,
-        prompt_tokens,
-        cfg.max_tokens,
-        &[eos],
-        cfg.temperature,
-        cfg.top_k as u32,
-        cfg.top_p,
-        cfg.seed.unwrap_or_else(rand::random),
-        callback,
-    )?;
+    static WORKFLOW_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflows/text_generation.json"));
+    static WORKFLOW: std::sync::OnceLock<crate::workflow::WorkflowSpec> = std::sync::OnceLock::new();
+
+    let workflow = WORKFLOW.get_or_init(|| serde_json::from_str(WORKFLOW_JSON).expect("invalid text_generation workflow JSON"));
+
+    let mut models: FxHashMap<String, &crate::model::CompiledModel> = FxHashMap::default();
+    models.insert("llm".to_string(), model);
+
+    let mut runner = crate::workflow::WorkflowRunner::new(foundry, models);
+    let wf_cfg = crate::workflow::WorkflowRunnerConfig {
+        workflow: workflow.clone(),
+    };
+
+    let mut inputs: FxHashMap<String, crate::workflow::Value> = FxHashMap::default();
+    inputs.insert(
+        "prompt_tokens".to_string(),
+        crate::workflow::Value::TokensU32(prompt_tokens.to_vec().into()),
+    );
+    inputs.insert("max_tokens".to_string(), crate::workflow::Value::Usize(cfg.max_tokens));
+    inputs.insert("temperature".to_string(), crate::workflow::Value::F32(cfg.temperature));
+    inputs.insert("top_k".to_string(), crate::workflow::Value::U32(cfg.top_k as u32));
+    inputs.insert("top_p".to_string(), crate::workflow::Value::F32(cfg.top_p));
+    inputs.insert("eos_token".to_string(), crate::workflow::Value::U32(eos));
+    inputs.insert(
+        "seed".to_string(),
+        crate::workflow::Value::U32(cfg.seed.unwrap_or_else(rand::random)),
+    );
+
+    let _outputs = runner.run_streaming(&wf_cfg, inputs, callback)?;
 
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
