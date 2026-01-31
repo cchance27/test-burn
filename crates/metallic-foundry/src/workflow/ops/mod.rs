@@ -1,9 +1,13 @@
 //! Workflow op interfaces (trait objects) and implementations.
 
+mod append_token;
+mod check_eos;
 mod compute_int;
+mod control_flow;
 mod detokenize;
 mod forward;
-mod loop_op;
+mod graph_forward;
+
 mod prefill;
 mod ret;
 mod sample;
@@ -11,10 +15,13 @@ mod set_globals;
 mod sync;
 mod tokenize;
 
+pub(crate) use append_token::AppendTokenOp;
+pub(crate) use check_eos::CheckEosOp;
 pub(crate) use compute_int::ComputeIntOp;
+pub(crate) use control_flow::{BreakOp, ContinueOp, IfOp, WhileOp};
 pub(crate) use detokenize::DetokenizeOp;
 pub(crate) use forward::ForwardOp;
-pub(crate) use loop_op::LoopOp;
+pub(crate) use graph_forward::GraphForwardOp;
 pub(crate) use prefill::PrefillOp;
 pub(crate) use ret::ReturnOp;
 pub(crate) use sample::SampleOp;
@@ -28,6 +35,8 @@ use crate::error::MetalError;
 pub(crate) enum WorkflowOpOutcome {
     Continue,
     Return,
+    Break,
+    LoopContinue,
 }
 
 pub(crate) trait WorkflowOp {

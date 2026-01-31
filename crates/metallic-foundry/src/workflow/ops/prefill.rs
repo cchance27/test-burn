@@ -8,6 +8,7 @@ pub(crate) struct PrefillOp {
     model_id: Option<String>,
     input: String,
     input_ids_binding: String,
+    logits_binding: String,
     position_offset_key: String,
     m_key: String,
     seq_len_key: String,
@@ -21,6 +22,7 @@ impl PrefillOp {
         model_id: Option<String>,
         input: String,
         input_ids_binding: Option<String>,
+        logits_binding: Option<String>,
         position_offset_key: Option<String>,
         m_key: Option<String>,
         seq_len_key: Option<String>,
@@ -31,6 +33,7 @@ impl PrefillOp {
             model_id,
             input,
             input_ids_binding: input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
+            logits_binding: logits_binding.unwrap_or_else(|| "logits".to_string()),
             position_offset_key: position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
             m_key: m_key.unwrap_or_else(|| "m".to_string()),
             seq_len_key: seq_len_key.unwrap_or_else(|| "seq_len".to_string()),
@@ -40,7 +43,6 @@ impl PrefillOp {
     }
 
     fn prefill_config() -> (usize, usize) {
-        // Defaults chosen to be "big enough to matter" but not explode memory (logits = max*V).
         const DEFAULT_MAX_PREFILL_CHUNK: usize = 32;
         const DEFAULT_PREFILL_CHUNK_SIZE: usize = 32;
         const MAX_ALLOWED: usize = 512;
@@ -79,7 +81,7 @@ impl WorkflowOp for PrefillOp {
 
         let setup_start = std::time::Instant::now();
 
-        let (start_pos, prompt_len, last_prefill_m, prefill_us, setup_us) =
+        let (start_pos, prompt_len, last_prefill_m, prefill_us, setup_us, logits_arg) =
             model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
                 let start_pos = session.current_pos;
                 let prompt_len = prompt_tokens.len();
@@ -236,12 +238,16 @@ impl WorkflowOp for PrefillOp {
                     model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
                 }
 
+                // Extract logits for use in subsequent ops.
+                let logits_arg = session.bindings.get(&self.logits_binding)?.clone();
+
                 Ok((
                     start_pos,
                     prompt_len,
                     last_prefill_m,
                     prefill_duration.as_micros() as usize,
                     setup_duration.as_micros() as usize,
+                    logits_arg,
                 ))
             })?;
 
@@ -251,6 +257,7 @@ impl WorkflowOp for PrefillOp {
             .insert("_internal.last_prefill_m".to_string(), Value::Usize(last_prefill_m));
         ctx.values.insert("_internal.prefill_us".to_string(), Value::Usize(prefill_us));
         ctx.values.insert("_internal.setup_us".to_string(), Value::Usize(setup_us));
+        ctx.values.insert(self.logits_binding.clone(), Value::Tensor(logits_arg));
 
         Ok(WorkflowOpOutcome::Continue)
     }

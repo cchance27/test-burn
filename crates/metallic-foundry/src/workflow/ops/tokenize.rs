@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     error::MetalError, workflow::{
         Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext
@@ -46,7 +44,7 @@ impl WorkflowOp for TokenizeOp {
         };
 
         let tokens = tokenizer.encode(text)?;
-        ctx.values.insert(self.output_var.clone(), Value::TokensU32(Arc::from(tokens)));
+        ctx.values.insert(self.output_var.clone(), Value::TokensU32(tokens));
 
         Ok(WorkflowOpOutcome::Continue)
     }

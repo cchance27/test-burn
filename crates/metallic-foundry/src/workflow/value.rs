@@ -8,7 +8,7 @@ pub enum Value {
     F32(f32),
     Bool(bool),
     Text(Arc<str>),
-    TokensU32(Arc<[u32]>),
+    TokensU32(Vec<u32>),
     Tensor(crate::types::TensorArg),
 }
 

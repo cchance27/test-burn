@@ -170,6 +170,8 @@ pub enum WorkflowStepSpec {
         #[serde(default)]
         input_ids_binding: Option<String>,
         #[serde(default)]
+        logits_binding: Option<String>,
+        #[serde(default)]
         position_offset_key: Option<String>,
         #[serde(default)]
         m_key: Option<String>,
@@ -227,18 +229,7 @@ pub enum WorkflowStepSpec {
         /// Output text variable.
         output: String,
     },
-    /// Repeat a block of steps.
-    Loop {
-        #[serde(default)]
-        model_id: Option<String>,
-        /// Condition expression (e.g. "{token} != 2").
-        condition: Option<String>,
-        /// Variable names for arguments.
-        #[serde(default)]
-        args: Vec<String>,
-        /// Steps to execute inside the loop.
-        stages: Vec<WorkflowStageSpec>,
-    },
+
     SetGlobals {
         #[serde(default)]
         model_id: Option<String>,
@@ -258,29 +249,20 @@ pub enum WorkflowStepSpec {
         /// Integer expression using workflow variables (e.g. "{pos} + 1").
         expr: String,
     },
-}
-
-fn default_true() -> bool {
-    true
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum WorkflowStageSpec {
-    Sample {
+    If {
+        condition: String,
+        then: Vec<WorkflowStepSpec>,
         #[serde(default)]
-        model_id: Option<String>,
-        logits_binding: String,
-        output: String,
-        #[serde(default)]
-        temperature: Param<f32>,
-        #[serde(default)]
-        top_k: Param<u32>,
-        #[serde(default)]
-        top_p: Param<f32>,
-        #[serde(default)]
-        seed: Param<u32>,
+        else_: Vec<WorkflowStepSpec>,
     },
+    While {
+        condition: String,
+        #[serde(default)]
+        max_iterations: Option<Param<usize>>,
+        body: Vec<WorkflowStepSpec>,
+    },
+    Break,
+    Continue,
     CheckEos {
         input: String,
         output: String,
@@ -300,9 +282,15 @@ pub enum WorkflowStageSpec {
         logits_binding: String,
         #[serde(default)]
         position_offset_key: Option<String>,
+        #[serde(default)]
+        position: Option<Param<usize>>,
         #[serde(default = "default_true")]
         apply_derived_globals: bool,
         #[serde(default)]
         description: Option<String>,
     },
+}
+
+fn default_true() -> bool {
+    true
 }

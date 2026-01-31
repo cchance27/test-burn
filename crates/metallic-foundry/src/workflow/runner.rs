@@ -238,6 +238,10 @@ impl<'a> WorkflowRunner<'a> {
             match op.execute(&mut ctx, &mut on_token)? {
                 WorkflowOpOutcome::Continue => {}
                 WorkflowOpOutcome::Return => break,
+                WorkflowOpOutcome::Break => return Err(MetalError::InvalidOperation("Unexpected 'break' outside of loop".into())),
+                WorkflowOpOutcome::LoopContinue => {
+                    return Err(MetalError::InvalidOperation("Unexpected 'continue' outside of loop".into()));
+                }
             }
         }
 

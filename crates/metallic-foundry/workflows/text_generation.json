@@ -44,29 +44,65 @@
       "op": "prefill",
       "model_id": "llm",
       "input": "prompt_tokens",
+      "logits_binding": "logits",
       "description": "Process prompt tokens through forward pass, populating KV cache"
     },
     {
-      "op": "loop",
-      "model_id": "llm",
-      "condition": "tokens_remaining",
-      "args": ["max_tokens", "eos_token"],
-      "stages": [
+      "op": "compute_int",
+      "output": "current_pos",
+      "expr": "{prompt_tokens.len}"
+    },
+    {
+      "op": "while",
+      "condition": "max_tokens",
+      "max_iterations": "{max_tokens}",
+      "body": [
         {
           "op": "sample",
-          "model_id": "llm",
-          "logits_binding": "logits",
+          "logits": "logits",
           "output": "next_token",
           "temperature": "{temperature}",
           "top_k": "{top_k}",
           "top_p": "{top_p}",
           "seed": "{seed}"
         },
-        { "op": "check_eos", "input": "next_token", "output": "should_stop", "eos_token": "{eos_token}" },
-        { "op": "append_token", "input": "next_token", "output": "generated_tokens" },
-        { "op": "graph_forward", "model_id": "llm", "token_var": "next_token", "logits_binding": "logits" }
+        {
+          "op": "check_eos",
+          "input": "next_token",
+          "output": "is_eos",
+          "eos_token": "{eos_token}"
+        },
+        {
+          "op": "if",
+          "condition": "is_eos",
+          "then": [
+            {
+              "op": "break"
+            }
+          ]
+        },
+        {
+          "op": "append_token",
+          "input": "next_token",
+          "output": "generated_tokens"
+        },
+        {
+          "op": "graph_forward",
+          "model_id": "llm",
+          "token_var": "next_token",
+          "logits_binding": "logits",
+          "position": "{current_pos}"
+        },
+        {
+          "op": "compute_int",
+          "output": "current_pos",
+          "expr": "{current_pos} + 1"
+        }
       ]
     },
-    { "op": "return", "output": "generated_tokens" }
+    {
+      "op": "return",
+      "output": "generated_tokens"
+    }
   ]
 }
