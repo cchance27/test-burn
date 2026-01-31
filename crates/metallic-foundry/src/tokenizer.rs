@@ -735,6 +735,30 @@ impl Tokenizer {
     ///
     /// If the tokenizer does not have a chat template, it returns the prompt as-is.
     pub fn format_single_turn_chat_prompt(&self, prompt: &str) -> Result<String, MetalError> {
+        // Fast-path: if the prompt is already chat-formatted, do not wrap it again.
+        if prompt.contains("<|im_start|>") {
+            return Ok(prompt.to_string());
+        }
+
+        // Qwen2/Qwen2.5 models typically use the <|im_start|> chat format.
+        // Metallic Context uses a specific system prompt string; keep Foundry aligned for parity.
+        const QWEN_SYSTEM_PROMPT: &str = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
+        let has_qwen_chat_tokens = self.vocab_r.contains_key("<|im_start|>") && self.vocab_r.contains_key("<|im_end|>");
+
+        if has_qwen_chat_tokens {
+            // Match the canonical Qwen chat formatting expected by many instruct fine-tunes.
+            // We intentionally do not consult tokenizer.chat_template here because some GGUFs omit it.
+            let mut s = String::with_capacity(prompt.len() + 128);
+            s.push_str("<|im_start|>system\n");
+            s.push_str(QWEN_SYSTEM_PROMPT);
+            s.push_str("<|im_end|>\n");
+            s.push_str("<|im_start|>user\n");
+            s.push_str(prompt);
+            s.push_str("<|im_end|>\n");
+            s.push_str("<|im_start|>assistant\n");
+            return Ok(s);
+        }
+
         let Some(template) = &self.chat_template else {
             return Ok(prompt.to_string());
         };
@@ -748,6 +772,7 @@ impl Tokenizer {
             .eos_token_id
             .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
 
+        // Default system prompt for generic chat templates (non-Qwen).
         let messages = vec![
             Message {
                 role: "system".to_string(),

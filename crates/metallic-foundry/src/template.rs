@@ -29,6 +29,11 @@ impl ChatTemplate {
         }
     }
 
+    #[inline]
+    pub fn raw(&self) -> &str {
+        &self.template_str
+    }
+
     pub fn render(
         &self,
         messages: &[Message],

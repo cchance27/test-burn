@@ -139,6 +139,28 @@ Execution is implemented as Rust op trait objects (one per step) so runtime stat
 
 ---
 
+## Qwen chat prompt parity (important)
+
+Qwen2/Qwen2.5 instruct GGUFs often require the canonical `<|im_start|>` chat format and the Qwen system prompt to behave correctly.
+
+Foundry now aligns its single-turn chat formatting with the legacy Context engine by default when Qwen chat tokens are present:
+
+- System prompt: `You are Qwen, created by Alibaba Cloud. You are a helpful assistant.`
+- Format:
+  - `<|im_start|>system\n...<|im_end|>\n`
+  - `<|im_start|>user\n...<|im_end|>\n`
+  - `<|im_start|>assistant\n`
+
+This eliminates “token-count mismatch” style parity issues and improves reliability when swapping engines.
+
+### Regression test (ignored; requires local GGUF)
+
+- `crates/metallic-foundry/tests/dsl_vs_context_chat_prefill_parity.rs`
+  - Ensures Foundry and Context produce identical **chat prompt tokens**
+  - Ensures the greedy next token after chat prefill matches (KV/attention correctness smoke)
+
+---
+
 ## What is still not fully DSL/metadata-driven (known gaps)
 
 These remain intentionally for now and are expected to be addressed as we expand workflows + metadata:
