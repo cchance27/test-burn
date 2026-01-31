@@ -141,6 +141,15 @@ The workflow spec is intentionally op-based:
 
 Execution is implemented as Rust op trait objects (one per step) so runtime state lives with the ops, while the workflow JSON remains data-only.
 
+### Multi-Model Support
+
+The system supports two patterns for multi-model workflows:
+
+1. **Dependency Injection (Runtime/CLI)**: The host application (CLI) loads models and injects them into the runner. Ops reference them by ID (e.g., "llm"), allowing generic workflows like `text_generation.json` to work with any provided model.
+2. **Self-Contained (Workflow-Defined)**: The workflow JSON defines `resources.models` with explicit paths (`gguf_path`, `spec_path`). The `WorkflowRunner` automatically loads these models at startup. This enables fully defined, executable workflows for specific applications (e.g., specific agentic pipelines).
+
+Ops such as `prefill`, `forward`, and `set_globals` targets specific models via `model_id`. Cross-model value passing is supported via the shared `WorkflowExecutionContext.values`.
+
 ---
 
 ## Qwen chat prompt parity (important)

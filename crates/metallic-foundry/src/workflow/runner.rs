@@ -1,9 +1,13 @@
+use std::sync::Arc;
+
 use rustc_hash::FxHashMap;
 
 use super::{
     Value, compiler::CompiledWorkflow, ops::WorkflowOpOutcome, spec::{Param, WorkflowSpec}
 };
-use crate::{Foundry, error::MetalError, model::CompiledModel};
+use crate::{
+    Foundry, error::MetalError, model::{CompiledModel, ModelBuilder}
+};
 
 pub struct WorkflowRunnerConfig {
     pub workflow: WorkflowSpec,
@@ -12,13 +16,13 @@ pub struct WorkflowRunnerConfig {
 pub(crate) struct WorkflowExecutionContext<'a> {
     pub(crate) workflow: &'a WorkflowSpec,
     pub(crate) foundry: &'a mut Foundry,
-    pub(crate) models: &'a FxHashMap<String, &'a CompiledModel>,
+    pub(crate) models: &'a FxHashMap<String, Arc<CompiledModel>>,
     pub(crate) values: FxHashMap<String, Value>,
     pub(crate) return_key: Option<String>,
 }
 
 impl<'a> WorkflowExecutionContext<'a> {
-    pub(crate) fn resolve_model(&self, model_id: Option<&str>) -> Result<&'a CompiledModel, MetalError> {
+    pub(crate) fn resolve_model(&self, model_id: Option<&str>) -> Result<Arc<CompiledModel>, MetalError> {
         let id = if let Some(id) = model_id {
             id
         } else if let Some(default) = self.workflow.default_model.as_deref() {
@@ -33,7 +37,7 @@ impl<'a> WorkflowExecutionContext<'a> {
 
         self.models
             .get(id)
-            .copied()
+            .cloned()
             .ok_or_else(|| MetalError::InvalidOperation(format!("Workflow references unknown model_id '{id}'")))
     }
 
@@ -141,12 +145,30 @@ impl<'a> WorkflowExecutionContext<'a> {
 
 pub struct WorkflowRunner<'a> {
     foundry: &'a mut Foundry,
-    models: FxHashMap<String, &'a CompiledModel>,
+    models: FxHashMap<String, Arc<CompiledModel>>,
 }
 
 impl<'a> WorkflowRunner<'a> {
-    pub fn new(foundry: &'a mut Foundry, models: FxHashMap<String, &'a CompiledModel>) -> Self {
+    pub fn new(foundry: &'a mut Foundry, models: FxHashMap<String, Arc<CompiledModel>>) -> Self {
         Self { foundry, models }
+    }
+
+    pub fn load_resources(&mut self, spec: &WorkflowSpec) -> Result<(), MetalError> {
+        if let Some(resources) = &spec.resources {
+            for model_spec in &resources.models {
+                if self.models.contains_key(&model_spec.id) {
+                    continue; // Already loaded or injected
+                }
+
+                let model = ModelBuilder::new()
+                    .with_spec_file(std::path::PathBuf::from(&model_spec.spec_path))?
+                    .with_gguf(&model_spec.gguf_path)?
+                    .build(self.foundry)?;
+
+                self.models.insert(model_spec.id.clone(), Arc::new(model));
+            }
+        }
+        Ok(())
     }
 
     pub fn run(
@@ -178,6 +200,9 @@ impl<'a> WorkflowRunner<'a> {
         mut inputs: FxHashMap<String, Value>,
         mut on_token: impl FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<FxHashMap<String, Value>, MetalError> {
+        // Ensure any resources defined in the workflow are loaded.
+        self.load_resources(workflow)?;
+
         // Apply defaults from workflow inputs.
         for inp in &workflow.inputs {
             if inputs.contains_key(&inp.name) {

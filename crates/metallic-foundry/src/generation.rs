@@ -1,11 +1,13 @@
 use std::{
-    sync::mpsc, time::{Duration, Instant}
+    sync::{Arc, OnceLock, mpsc}, time::{Duration, Instant}
 };
 
 use metallic_cli_helpers::app_event::AppEvent;
 use rustc_hash::FxHashMap;
 
-use crate::{BPETokenizer, error::MetalError};
+use crate::{
+    BPETokenizer, error::MetalError, model::CompiledModel, workflow::{Value, WorkflowRunner, WorkflowRunnerConfig, WorkflowSpec}
+};
 
 /// Generation configuration (defaults chosen by user)
 pub struct GenerationConfig {
@@ -38,7 +40,7 @@ impl Default for GenerationConfig {
 #[allow(clippy::too_many_arguments)]
 pub fn generate_streaming(
     foundry: &mut crate::Foundry,
-    model: &crate::model::CompiledModel,
+    model: Arc<crate::model::CompiledModel>,
     prompt: &str,
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
@@ -54,18 +56,18 @@ pub fn generate_streaming(
 #[allow(clippy::too_many_arguments)]
 pub fn generate_streaming_from_tokens(
     foundry: &mut crate::Foundry,
-    model: &crate::model::CompiledModel,
+    model: Arc<CompiledModel>,
     tokenizer: &BPETokenizer,
     prompt_tokens: &[u32],
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
 ) -> Result<(), MetalError> {
     static WORKFLOW_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/workflows/text_generation.json"));
-    static WORKFLOW: std::sync::OnceLock<crate::workflow::WorkflowSpec> = std::sync::OnceLock::new();
+    static WORKFLOW: OnceLock<WorkflowSpec> = OnceLock::new();
 
     let workflow = WORKFLOW.get_or_init(|| serde_json::from_str(WORKFLOW_JSON).expect("invalid text_generation workflow JSON"));
 
-    let mut models: FxHashMap<String, &crate::model::CompiledModel> = FxHashMap::default();
+    let mut models: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
     models.insert("llm".to_string(), model);
 
     generate_streaming_from_tokens_with_workflow(foundry, &models, tokenizer, prompt_tokens, cfg, tx, workflow.clone())
@@ -78,12 +80,12 @@ pub fn generate_streaming_from_tokens(
 #[allow(clippy::too_many_arguments)]
 pub fn generate_streaming_from_tokens_with_workflow(
     foundry: &mut crate::Foundry,
-    models: &FxHashMap<String, &crate::model::CompiledModel>,
+    models: &FxHashMap<String, Arc<CompiledModel>>,
     tokenizer: &BPETokenizer,
     prompt_tokens: &[u32],
     cfg: &GenerationConfig,
     tx: &mpsc::Sender<AppEvent>,
-    workflow: crate::workflow::WorkflowSpec,
+    workflow: WorkflowSpec,
 ) -> Result<(), MetalError> {
     let generation_start = Instant::now();
 
@@ -107,25 +109,19 @@ pub fn generate_streaming_from_tokens_with_workflow(
             Ok(true)
         };
 
-    let mut runner = crate::workflow::WorkflowRunner::new(foundry, models.clone());
-    let wf_cfg = crate::workflow::WorkflowRunnerConfig { workflow };
+    let mut runner = WorkflowRunner::new(foundry, models.clone());
+    let wf_cfg = WorkflowRunnerConfig { workflow };
 
-    let mut inputs: FxHashMap<String, crate::workflow::Value> = FxHashMap::default();
-    inputs.insert(
-        "prompt_tokens".to_string(),
-        crate::workflow::Value::TokensU32(prompt_tokens.to_vec().into()),
-    );
-    inputs.insert("max_tokens".to_string(), crate::workflow::Value::Usize(cfg.max_tokens));
-    inputs.insert("temperature".to_string(), crate::workflow::Value::F32(cfg.temperature));
-    inputs.insert("top_k".to_string(), crate::workflow::Value::U32(cfg.top_k as u32));
-    inputs.insert("top_p".to_string(), crate::workflow::Value::F32(cfg.top_p));
+    let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
+    inputs.insert("prompt_tokens".to_string(), Value::TokensU32(prompt_tokens.to_vec().into()));
+    inputs.insert("max_tokens".to_string(), Value::Usize(cfg.max_tokens));
+    inputs.insert("temperature".to_string(), Value::F32(cfg.temperature));
+    inputs.insert("top_k".to_string(), Value::U32(cfg.top_k as u32));
+    inputs.insert("top_p".to_string(), Value::F32(cfg.top_p));
 
     let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-    inputs.insert("eos_token".to_string(), crate::workflow::Value::U32(eos));
-    inputs.insert(
-        "seed".to_string(),
-        crate::workflow::Value::U32(cfg.seed.unwrap_or_else(rand::random)),
-    );
+    inputs.insert("eos_token".to_string(), Value::U32(eos));
+    inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
 
     let _outputs = runner.run_streaming(&wf_cfg.workflow, inputs, &mut callback)?;
 

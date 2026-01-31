@@ -1,5 +1,5 @@
 use std::{
-    any::Any, io::{Write, stdout}, panic::{self, AssertUnwindSafe}, sync::mpsc, thread, time::Duration
+    any::Any, io::{Write, stdout}, panic::{self, AssertUnwindSafe}, sync::{Arc, mpsc}, thread, time::Duration
 };
 
 use anyhow::Result;
@@ -7,6 +7,7 @@ use metallic_cli_helpers::prelude::*;
 use metallic_context::{
     Context, F16Element, TensorElement, Tokenizer, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
+use metallic_foundry::model::CompiledModel;
 use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
 use rustc_hash::FxHashMap;
 
@@ -288,8 +289,7 @@ fn main() -> AppResult<()> {
 
                         worker_tx.send(AppEvent::StatusUpdate("Building compiled model(s)...".to_string()))?;
 
-                        let mut models_owned: rustc_hash::FxHashMap<String, Box<metallic_foundry::model::CompiledModel>> =
-                            rustc_hash::FxHashMap::default();
+                        let mut models_owned: rustc_hash::FxHashMap<String, Arc<CompiledModel>> = rustc_hash::FxHashMap::default();
 
                         if has_workflow_model_resources {
                             let resources = workflow_override
@@ -301,7 +301,7 @@ fn main() -> AppResult<()> {
                                     .with_spec_file(std::path::PathBuf::from(&m.spec_path))?
                                     .with_gguf(&m.gguf_path)?
                                     .build(&mut foundry)?;
-                                models_owned.insert(m.id.clone(), Box::new(model));
+                                models_owned.insert(m.id.clone(), Arc::new(model));
                             }
                         } else {
                             let spec_path = spec_path.expect("spec_path required for single-model Foundry");
@@ -313,7 +313,7 @@ fn main() -> AppResult<()> {
                                 .as_ref()
                                 .and_then(|w| w.default_model.clone())
                                 .unwrap_or_else(|| "llm".to_string());
-                            models_owned.insert(model_id, Box::new(model));
+                            models_owned.insert(model_id, Arc::new(model));
                         }
 
                         // Report memory metrics for Foundry model
@@ -356,11 +356,10 @@ fn main() -> AppResult<()> {
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
-                        let mut models: rustc_hash::FxHashMap<String, &metallic_foundry::model::CompiledModel> =
-                            rustc_hash::FxHashMap::default();
-                        for (id, model) in &models_owned {
-                            models.insert(id.clone(), model.as_ref());
-                        }
+                        // `models_owned` is already FxHashMap<String, Arc<CompiledModel>>.
+                        // We used to create a map of references, but now `generate_streaming_from_tokens_with_workflow`
+                        // takes `&FxHashMap<String, Arc<CompiledModel>>`.
+                        let models = models_owned; // Ownership transfer / move for clarity, though we could just use models_owned.
 
                         if !interactive {
                             for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
@@ -395,8 +394,8 @@ fn main() -> AppResult<()> {
                                     let model_id = "llm";
                                     let model = models
                                         .get(model_id)
-                                        .copied()
-                                        .or_else(|| models.values().next().copied())
+                                        .cloned()
+                                        .or_else(|| models.values().next().cloned())
                                         .expect("at least one model");
                                     metallic_foundry::generation::generate_streaming_from_tokens(
                                         &mut foundry,
@@ -427,8 +426,8 @@ fn main() -> AppResult<()> {
                                     let model_id = "llm";
                                     let model = models
                                         .get(model_id)
-                                        .copied()
-                                        .or_else(|| models.values().next().copied())
+                                        .cloned()
+                                        .or_else(|| models.values().next().cloned())
                                         .expect("at least one model");
                                     metallic_foundry::generation::generate_streaming_from_tokens(
                                         &mut foundry,
