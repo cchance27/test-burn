@@ -29,7 +29,8 @@ fn test_sample_topk_foundry_argmax() {
     let logits_arg = TensorArg::from_tensor(&logits_foundry);
     let output_arg = TensorArg::from_tensor(&output_foundry);
 
-    let kernel = SampleTopK::new(&logits_arg, &output_arg, vocab_size as u32, k, top_p, temperature, seed);
+    let min_p = 0.0;
+    let kernel = SampleTopK::new(&logits_arg, &output_arg, vocab_size as u32, k, top_p, min_p, temperature, seed);
 
     foundry.run(&kernel).unwrap();
 
@@ -46,6 +47,7 @@ fn test_sample_topk_fused_determinism() {
     let vocab_size = 10000;
     let k = 40;
     let top_p = 0.95;
+    let min_p = 0.0;
     let temperature = 1.0;
     let seed = 12345;
 
@@ -63,6 +65,7 @@ fn test_sample_topk_fused_determinism() {
         vocab_size as u32,
         k,
         top_p,
+        min_p,
         temperature,
         seed,
     );
@@ -74,6 +77,7 @@ fn test_sample_topk_fused_determinism() {
         vocab_size as u32,
         k,
         top_p,
+        min_p,
         temperature,
         seed,
     );

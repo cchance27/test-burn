@@ -70,6 +70,12 @@ fn build_repetition_pairs(mut recent: Vec<u32>) -> Vec<u32> {
 }
 
 impl WorkflowOp for SampleOp {
+    fn begin_run(&mut self, _ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        // Seed offset should restart per workflow invocation (per user turn).
+        self.step = 0;
+        Ok(())
+    }
+
     fn execute(
         &mut self,
         ctx: &mut WorkflowExecutionContext<'_>,

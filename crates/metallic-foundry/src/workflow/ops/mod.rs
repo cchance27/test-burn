@@ -41,7 +41,34 @@ pub(crate) enum WorkflowOpOutcome {
     LoopContinue,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct MemoizeSpec {
+    /// Workflow variable names read by this op.
+    pub(crate) inputs: Vec<String>,
+    /// Workflow variable names written by this op.
+    pub(crate) outputs: Vec<String>,
+    /// If true, memoization is disabled in interactive TUI mode.
+    pub(crate) disable_in_tui: bool,
+}
+
 pub(crate) trait WorkflowOp {
+    /// Called once before each workflow run starts.
+    ///
+    /// This allows ops to reset per-run counters while keeping allocated buffers/caches.
+    /// Control-flow ops should forward this call to nested ops.
+    fn begin_run(&mut self, _ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        Ok(())
+    }
+
+    /// Optional memoization spec for this op.
+    ///
+    /// When set, the workflow engine may cache this op's outputs keyed by the hash of its declared inputs.
+    /// This is intended for deterministic / CPU-bound ops (e.g. chat formatting, tokenization, encoders),
+    /// not GPU-bound forward passes.
+    fn memoize_spec(&self) -> Option<MemoizeSpec> {
+        None
+    }
+
     fn execute(
         &mut self,
         ctx: &mut WorkflowExecutionContext<'_>,

@@ -133,18 +133,18 @@ pub enum Engine {
 }
 
 impl CliConfig {
-    /// Get the first prompt, using default if not provided.
-    pub fn get_prompt(&self) -> String {
-        self.prompts.first().cloned().unwrap_or_else(|| DEFAULT_PROMPT.to_string())
-    }
-
     /// Get all prompts, using a single default prompt if none were provided.
     pub fn get_prompts(&self) -> Vec<String> {
-        if self.prompts.is_empty() {
-            vec![self.get_prompt()]
-        } else {
-            self.prompts.clone()
+        if !self.prompts.is_empty() {
+            return self.prompts.clone();
         }
+
+        // In TUI mode, an omitted prompt means "start empty and wait for user input".
+        if matches!(self.output_format, OutputFormat::Tui) {
+            return Vec::new();
+        }
+
+        vec![DEFAULT_PROMPT.to_string()]
     }
 }
 
@@ -183,8 +183,7 @@ mod tests {
             workflow: None,
         };
 
-        assert_eq!(config.get_prompt(), DEFAULT_PROMPT);
-        assert_eq!(config.get_prompts(), vec![DEFAULT_PROMPT.to_string()]);
+        assert_eq!(config.get_prompts(), Vec::<String>::new());
     }
 
     #[test]
@@ -201,7 +200,6 @@ mod tests {
             workflow: None,
         };
 
-        assert_eq!(config.get_prompt(), "Hello, world!");
         assert_eq!(config.get_prompts(), vec!["Hello, world!".to_string()]);
     }
 }

@@ -2566,7 +2566,11 @@ mod tests {
         let weights = super::WeightBundle::new_empty();
         let model = CompiledModel::new(spec, weights)?;
 
-        let mut foundry = Foundry::new()?;
+        let mut foundry = match Foundry::new() {
+            Ok(foundry) => foundry,
+            Err(crate::error::MetalError::DeviceNotFound) => return Ok(()),
+            Err(e) => return Err(e),
+        };
         model.initialize_session(&mut foundry)?;
 
         {

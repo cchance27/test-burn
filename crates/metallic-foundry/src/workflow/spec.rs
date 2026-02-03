@@ -166,6 +166,19 @@ pub struct PrefillSpec {
     #[serde(default)]
     pub model_id: Option<String>,
     pub input: String,
+    /// Optional workflow variable to receive the session's end position after prefill.
+    ///
+    /// This is preferred over `{prompt_tokens.len}` for multi-turn flows, because `prompt_tokens`
+    /// may be either a delta slice (continuation tokens) or the full transcript tokens.
+    #[serde(default)]
+    pub output_pos: Option<String>,
+    /// Prefill input interpretation mode.
+    ///
+    /// - `"delta"` (default): `input` is a token slice to be appended at `session.current_pos`.
+    /// - `"full_append_only"`: `input` is the full prompt tokenization starting at position 0 and
+    ///   monotonically growing; prefill will consume only the suffix `[session.current_pos..]`.
+    #[serde(default)]
+    pub mode: Option<String>,
     /// Name of the model binding used for token ids (defaults to "input_ids").
     #[serde(default)]
     pub input_ids_binding: Option<String>,
@@ -236,11 +249,15 @@ pub struct TokenizeSpec {
     pub input: String,
     /// Output tokens variable (TokensU32).
     pub output: String,
+    /// Optional base tokens variable (TokensU32) used when `mode="delta"` to append.
+    #[serde(default)]
+    pub base_tokens: Option<String>,
     /// Tokenization mode.
     ///
     /// Supported values:
     /// - `"raw"` (default): `tokenizer.encode(text)`
     /// - `"chat_single_turn"`: `tokenizer.encode_single_turn_chat_prompt(text)`
+    /// - `"delta"`: `tokenizer.encode(text)` and append to `base_tokens` into `output`
     #[serde(default)]
     pub mode: Option<String>,
 }
@@ -255,6 +272,12 @@ pub struct FormatChatSpec {
     pub output: String,
     #[serde(default)]
     pub add_generation_prompt: bool,
+    /// Formatting mode.
+    ///
+    /// - `"full"` (default): render all messages
+    /// - `"delta"`: render only newly appended messages since the last run of this op instance
+    #[serde(default)]
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

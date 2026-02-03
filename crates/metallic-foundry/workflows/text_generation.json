@@ -69,13 +69,9 @@
       "op": "prefill",
       "model_id": "llm",
       "input": "prompt_tokens",
+      "output_pos": "current_pos",
       "logits_binding": "logits",
       "description": "Process prompt tokens through forward pass, populating KV cache"
-    },
-    {
-      "op": "compute_int",
-      "output": "current_pos",
-      "expr": "{prompt_tokens.len}"
     },
     {
       "op": "while",

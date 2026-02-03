@@ -143,6 +143,22 @@ Execution is implemented as Rust op trait objects (one per workflow op) so runti
 
 Note: The workflow JSON accepts both `steps` and `phases` as equivalent keys (alias), since “steps” is also used to refer to model DSL/kernel steps.
 
+### Runner caching + op memoization (DX + perf)
+
+- The `WorkflowRunner` caches compiled workflows + op instances and invalidates/recompiles when the workflow spec changes (fingerprint-based).
+- Ops can optionally declare a memoization spec: the engine can cache op outputs keyed by input value fingerprints.
+  - This is currently used for small/pure-ish ops like `tokenize`.
+  - Memoization is disabled in TUI for large values (e.g. formatted prompt strings) to avoid unbounded retention.
+
+### Multi-turn chat delta semantics (important)
+
+For message-driven multi-turn chat (`multiturn_chat*.json`):
+
+- `format_chat` supports `mode="delta"` and accepts either:
+  1) full-history message arrays that monotonically grow (it renders only the suffix), or
+  2) delta-only message arrays (it renders all provided messages each turn).
+- `prefill` supports `mode="delta"` and updates `current_pos` via `output_pos`, allowing KV-cache reuse across turns without replaying the full prompt.
+
 ### Sampling parameters (current state)
 
 Sampling is still executed as a single GPU kernel (`SampleTopK`) that implements:
@@ -227,8 +243,10 @@ These are the “next sprint” items we still need to remove or generalize to s
 3. Sampling is still hardcoded to `SampleTopK`.
    - No sampler trait/object pluggability yet (greedy/top-k/top-p/min-p are folded into one kernel call).
    - Repetition/presence/frequency penalties exist but are not yet a fully general “sampler stack”.
-4. Tokenization/prompt formatting are still outside the workflow.
-   - Workflows currently begin at `prompt_tokens`; tokenization/chat templating is still driven by Rust-side generation.
+4. Transcript state is still caller-owned.
+   - Workflows can be either token-driven or message-driven, and message-driven workflows can tokenize inside the graph.
+   - However, workflows do not yet “own” a durable multi-turn transcript/history by themselves; the caller still decides whether to pass full history or deltas.
+   - This is intentional for future non-LLM workflows (e.g. encoders, DiT) where different stages may be cacheable or need invalidation on seed/options changes.
 5. CLI Foundry spec selection is still architecture-hardcoded by default.
    - Without `--workflow` resources, the CLI still routes `general.architecture` containing `"qwen2"` to `models/qwen25.json`.
 6. Metadata fallback key sets are still family-shaped.

@@ -8,6 +8,7 @@ pub(crate) struct TokenizeOp {
     model_id: Option<String>,
     input_var: String,
     output_var: String,
+    base_tokens_var: Option<String>,
     mode: Option<String>,
 }
 
@@ -17,12 +18,21 @@ impl TokenizeOp {
             model_id: spec.model_id,
             input_var: spec.input,
             output_var: spec.output,
+            base_tokens_var: spec.base_tokens,
             mode: spec.mode,
         }
     }
 }
 
 impl WorkflowOp for TokenizeOp {
+    fn memoize_spec(&self) -> Option<crate::workflow::ops::MemoizeSpec> {
+        Some(crate::workflow::ops::MemoizeSpec {
+            inputs: vec![self.input_var.clone()],
+            outputs: vec![self.output_var.clone()],
+            disable_in_tui: false,
+        })
+    }
+
     fn execute(
         &mut self,
         ctx: &mut WorkflowExecutionContext<'_>,
@@ -46,14 +56,34 @@ impl WorkflowOp for TokenizeOp {
         };
 
         let mode = self.mode.as_deref().unwrap_or("raw");
-        let tokens = match mode {
+        let tokens_delta = match mode {
             "raw" => tokenizer.encode(text)?,
             "chat_single_turn" => tokenizer.encode_single_turn_chat_prompt(text)?,
+            "delta" => tokenizer.encode(text)?,
             other => {
                 return Err(MetalError::InvalidOperation(format!(
-                    "TokenizeOp unsupported mode '{other}' (expected 'raw' or 'chat_single_turn')"
+                    "TokenizeOp unsupported mode '{other}' (expected 'raw', 'chat_single_turn', or 'delta')"
                 )));
             }
+        };
+
+        let tokens = if mode == "delta" {
+            let base_name = self
+                .base_tokens_var
+                .as_deref()
+                .ok_or_else(|| MetalError::InvalidOperation("TokenizeOp(mode=delta) requires 'base_tokens'".into()))?;
+            let base = ctx
+                .values
+                .get(base_name)
+                .and_then(|v| v.as_tokens_u32())
+                .ok_or_else(|| MetalError::InvalidOperation(format!("TokenizeOp missing base_tokens '{base_name}' (u32[])")))?;
+            // Build full prompt tokens by appending delta.
+            let mut full: Vec<u32> = Vec::with_capacity(base.len().saturating_add(tokens_delta.len()));
+            full.extend_from_slice(base);
+            full.extend_from_slice(&tokens_delta);
+            full
+        } else {
+            tokens_delta
         };
 
         if std::env::var("METALLIC_DEBUG_TOKENIZE").is_ok() || std::env::var("METALLIC_DEBUG_CHAT_TEMPLATE").is_ok() {

@@ -21,6 +21,16 @@ impl IfOp {
 }
 
 impl WorkflowOp for IfOp {
+    fn begin_run(&mut self, ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        for op in &mut self.then_ops {
+            op.begin_run(ctx)?;
+        }
+        for op in &mut self.else_ops {
+            op.begin_run(ctx)?;
+        }
+        Ok(())
+    }
+
     fn execute(
         &mut self,
         ctx: &mut WorkflowExecutionContext<'_>,
@@ -73,6 +83,13 @@ impl WhileOp {
 }
 
 impl WorkflowOp for WhileOp {
+    fn begin_run(&mut self, ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        for op in &mut self.body_ops {
+            op.begin_run(ctx)?;
+        }
+        Ok(())
+    }
+
     fn execute(
         &mut self,
         ctx: &mut WorkflowExecutionContext<'_>,

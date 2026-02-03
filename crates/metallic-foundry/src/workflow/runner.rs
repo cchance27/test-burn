@@ -146,11 +146,16 @@ impl<'a> WorkflowExecutionContext<'a> {
 pub struct WorkflowRunner<'a> {
     foundry: &'a mut Foundry,
     models: FxHashMap<String, Arc<CompiledModel>>,
+    compiled: Option<(u64, CompiledWorkflow)>,
 }
 
 impl<'a> WorkflowRunner<'a> {
     pub fn new(foundry: &'a mut Foundry, models: FxHashMap<String, Arc<CompiledModel>>) -> Self {
-        Self { foundry, models }
+        Self {
+            foundry,
+            models,
+            compiled: None,
+        }
     }
 
     pub fn load_resources(&mut self, spec: &WorkflowSpec) -> Result<(), MetalError> {
@@ -200,6 +205,73 @@ impl<'a> WorkflowRunner<'a> {
         mut inputs: FxHashMap<String, Value>,
         mut on_token: impl FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<FxHashMap<String, Value>, MetalError> {
+        fn hash_json_value(h: &mut rustc_hash::FxHasher, v: &serde_json::Value) {
+            use std::hash::Hash;
+            match v {
+                serde_json::Value::Null => 0u8.hash(h),
+                serde_json::Value::Bool(b) => {
+                    1u8.hash(h);
+                    b.hash(h);
+                }
+                serde_json::Value::Number(n) => {
+                    2u8.hash(h);
+                    // Stable representation across int/float types.
+                    n.to_string().hash(h);
+                }
+                serde_json::Value::String(s) => {
+                    3u8.hash(h);
+                    s.hash(h);
+                }
+                serde_json::Value::Array(arr) => {
+                    4u8.hash(h);
+                    arr.len().hash(h);
+                    for item in arr {
+                        hash_json_value(h, item);
+                    }
+                }
+                serde_json::Value::Object(map) => {
+                    5u8.hash(h);
+                    map.len().hash(h);
+                    // Deterministic order: JSON object key order is not guaranteed.
+                    let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+                    keys.sort_unstable();
+                    for k in keys {
+                        k.hash(h);
+                        if let Some(val) = map.get(k) {
+                            hash_json_value(h, val);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn workflow_fingerprint(workflow: &WorkflowSpec) -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut h = rustc_hash::FxHasher::default();
+            workflow.name.hash(&mut h);
+            workflow.default_model.hash(&mut h);
+            workflow.return_value.hash(&mut h);
+
+            workflow.inputs.len().hash(&mut h);
+            for inp in &workflow.inputs {
+                inp.name.hash(&mut h);
+                inp.ty.hash(&mut h);
+                if let Some(d) = &inp.default {
+                    hash_json_value(&mut h, d);
+                } else {
+                    0u8.hash(&mut h);
+                }
+            }
+
+            workflow.steps.len().hash(&mut h);
+            for step in &workflow.steps {
+                step.op.hash(&mut h);
+                hash_json_value(&mut h, &step.params);
+            }
+
+            h.finish()
+        }
+
         // Ensure any resources defined in the workflow are loaded.
         self.load_resources(workflow)?;
 
@@ -229,7 +301,12 @@ impl<'a> WorkflowRunner<'a> {
             }
         }
 
-        let compiled = CompiledWorkflow::compile(workflow)?;
+        let fp = workflow_fingerprint(workflow);
+        let needs_compile = self.compiled.as_ref().map(|(old, _)| *old != fp).unwrap_or(true);
+        if needs_compile {
+            self.compiled = Some((fp, CompiledWorkflow::compile(workflow)?));
+        }
+        let compiled = self.compiled.as_mut().expect("compiled set").1.ops.as_mut_slice();
 
         let mut ctx = WorkflowExecutionContext {
             workflow,
@@ -239,7 +316,11 @@ impl<'a> WorkflowRunner<'a> {
             return_key: None,
         };
 
-        for mut op in compiled.ops {
+        for op in compiled.iter_mut() {
+            op.begin_run(&mut ctx)?;
+        }
+
+        for op in compiled.iter_mut() {
             match op.execute(&mut ctx, &mut on_token)? {
                 WorkflowOpOutcome::Continue => {}
                 WorkflowOpOutcome::Return => break,

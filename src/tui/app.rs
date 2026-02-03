@@ -99,7 +99,7 @@ impl App {
             text_selection_end: None,
             is_selecting: false,
             input_buffer: String::new(),
-            is_processing: true, // Start as true since we auto-start generation
+            is_processing: false,
             tensor_preparation_stats: Vec::new(),
             resource_cache_stats: FxHashMap::default(),
             status_bar: StatusBar::new(StatusBarState::Normal),

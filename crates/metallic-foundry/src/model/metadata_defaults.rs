@@ -64,6 +64,43 @@ pub fn infer_from_gguf_with_keys(metadata: &GGUFMetadata, keys_spec: &MetadataKe
     Ok(ArchitectureDefaults { values })
 }
 
+/// Infers baseline architecture defaults from GGUF metadata using built-in key mappings.
+///
+/// This is used as a fallback when a model spec does not provide `architecture.metadata_keys`.
+/// Keep this small and focused: prefer explicit key mappings in the DSL for non-standard models.
+pub fn infer_architecture_defaults_from_gguf_metadata(metadata: &GGUFMetadata) -> Result<ArchitectureDefaults, MetalError> {
+    let arch = metadata
+        .entries
+        .get("general.architecture")
+        .and_then(|v| match v {
+            GGUFValue::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .unwrap_or("");
+
+    let mut keys: rustc_hash::FxHashMap<String, Vec<String>> = rustc_hash::FxHashMap::default();
+
+    // Common keys (many GGUFs expose these).
+    keys.insert("vocab_size".into(), vec!["model.vocab_size".into()]);
+
+    if arch.contains("qwen2") {
+        keys.insert("d_model".into(), vec!["qwen2.embedding_length".into()]);
+        keys.insert("n_heads".into(), vec!["qwen2.attention.head_count".into()]);
+        keys.insert("n_kv_heads".into(), vec!["qwen2.attention.head_count_kv".into()]);
+        keys.insert("n_layers".into(), vec!["qwen2.block_count".into()]);
+        keys.insert("ff_dim".into(), vec!["qwen2.feed_forward_length".into()]);
+        keys.insert("max_seq_len".into(), vec!["qwen2.context_length".into()]);
+        keys.insert("rope_base".into(), vec!["qwen2.rope.freq_base".into()]);
+        keys.insert("rms_eps".into(), vec!["qwen2.attention.layer_norm_rms_epsilon".into()]);
+    } else if !arch.is_empty() {
+        return Err(MetalError::InvalidOperation(format!(
+            "No built-in metadata key mapping for architecture '{arch}'. Provide `architecture.metadata_keys` in the model spec."
+        )));
+    }
+
+    infer_from_gguf_with_keys(metadata, &MetadataKeysSpec { keys })
+}
+
 #[cfg(test)]
 mod tests {
     use rustc_hash::FxHashMap;

@@ -243,7 +243,7 @@ impl ContextConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::{Architecture, MetadataValue};
+    use crate::spec::Architecture;
 
     fn mock_arch(max_seq_len: usize) -> Architecture {
         use crate::spec::MetadataValue;

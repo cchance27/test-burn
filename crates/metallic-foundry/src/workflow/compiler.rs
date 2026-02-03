@@ -5,13 +5,81 @@ use serde::de::DeserializeOwned;
 
 use super::{
     WorkflowSpec, WorkflowStepSpec, ops::{
-        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileOp, WorkflowOp
+        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, MemoizeSpec, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileOp, WorkflowOp
     }
 };
 use crate::error::MetalError;
 
 pub(crate) struct CompiledWorkflow {
     pub(crate) ops: Vec<Box<dyn WorkflowOp>>,
+}
+
+struct MemoizedOp {
+    op_name: String,
+    inner: Box<dyn WorkflowOp>,
+    spec: MemoizeSpec,
+    cached: Option<(u64, rustc_hash::FxHashMap<String, super::Value>)>,
+}
+
+impl MemoizedOp {
+    fn key_for(&self, ctx: &super::runner::WorkflowExecutionContext<'_>) -> Option<u64> {
+        use std::hash::{Hash, Hasher};
+        let mut h = rustc_hash::FxHasher::default();
+        self.op_name.hash(&mut h);
+
+        // Include declared input values.
+        for name in &self.spec.inputs {
+            let v = ctx.values.get(name)?;
+            v.fingerprint64().hash(&mut h);
+        }
+        Some(h.finish())
+    }
+}
+
+impl WorkflowOp for MemoizedOp {
+    fn begin_run(&mut self, ctx: &mut super::runner::WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        self.inner.begin_run(ctx)
+    }
+
+    fn memoize_spec(&self) -> Option<MemoizeSpec> {
+        // Wrapper handles memoization; don't nest.
+        None
+    }
+
+    fn execute(
+        &mut self,
+        ctx: &mut super::runner::WorkflowExecutionContext<'_>,
+        on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
+    ) -> Result<super::ops::WorkflowOpOutcome, MetalError> {
+        if self.spec.disable_in_tui && std::env::var("METALLIC_TUI_MODE").is_ok() {
+            return self.inner.execute(ctx, on_token);
+        }
+
+        let Some(key) = self.key_for(ctx) else {
+            return self.inner.execute(ctx, on_token);
+        };
+
+        if let Some((cached_key, cached_vals)) = &self.cached
+            && *cached_key == key
+        {
+            for (k, v) in cached_vals {
+                ctx.values.insert(k.clone(), v.clone());
+            }
+            return Ok(super::ops::WorkflowOpOutcome::Continue);
+        }
+
+        let out = self.inner.execute(ctx, on_token)?;
+        if matches!(out, super::ops::WorkflowOpOutcome::Continue) {
+            let mut captured: rustc_hash::FxHashMap<String, super::Value> = rustc_hash::FxHashMap::default();
+            for name in &self.spec.outputs {
+                if let Some(v) = ctx.values.get(name) {
+                    captured.insert(name.clone(), v.clone());
+                }
+            }
+            self.cached = Some((key, captured));
+        }
+        Ok(out)
+    }
 }
 
 /// A builder function for creating a `WorkflowOp` from a JSON value.
@@ -65,7 +133,21 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
     m.insert("compute_int".to_string(), make_std_builder(ComputeIntOp::new));
     m.insert("check_eos".to_string(), make_std_builder(CheckEosOp::new));
     m.insert("append_token".to_string(), make_std_builder(AppendTokenOp::new));
-    m.insert("graph_forward".to_string(), make_std_builder(GraphForwardOp::new));
+    m.insert(
+        "graph_forward".to_string(),
+        Box::new(|v| {
+            let spec: super::spec::GraphForwardSpec =
+                serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid spec for op: {}", e)))?;
+            // DX guardrail: `logits_binding` is both the model binding name and the workflow variable name.
+            // Most model specs expose this as "logits"; mismatches fail at runtime with confusing "missing binding".
+            if spec.logits_binding != "logits" {
+                return Err(MetalError::InvalidOperation(
+                    "graph_forward.logits_binding must be 'logits' (model binding name)".into(),
+                ));
+            }
+            Ok(Box::new(GraphForwardOp::new(spec)))
+        }),
+    );
 
     // Unit operations
     m.insert("synchronize".to_string(), Box::new(|_| Ok(Box::new(SyncOp))));
@@ -106,7 +188,17 @@ fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<Box<dyn WorkflowOp>>,
 
     for step in steps {
         if let Some(builder) = registry.get(step.op.as_str()) {
-            ops.push(builder(step.params.clone())?);
+            let op = builder(step.params.clone())?;
+            if let Some(spec) = op.memoize_spec() {
+                ops.push(Box::new(MemoizedOp {
+                    op_name: step.op.clone(),
+                    inner: op,
+                    spec,
+                    cached: None,
+                }));
+            } else {
+                ops.push(op);
+            }
         } else {
             return Err(MetalError::InvalidOperation(format!("Unknown workflow op: {}", step.op)));
         }

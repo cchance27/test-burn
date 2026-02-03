@@ -1,4 +1,6 @@
-use std::sync::Arc;
+use std::{
+    hash::{Hash, Hasher}, sync::Arc
+};
 
 use rustc_hash::FxHashMap;
 
@@ -17,6 +19,68 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn fingerprint64(&self) -> u64 {
+        let mut h = rustc_hash::FxHasher::default();
+        self.hash_into(&mut h);
+        h.finish()
+    }
+
+    fn hash_into(&self, h: &mut rustc_hash::FxHasher) {
+        match self {
+            Value::U32(v) => {
+                0u8.hash(h);
+                v.hash(h);
+            }
+            Value::Usize(v) => {
+                1u8.hash(h);
+                (*v as u64).hash(h);
+            }
+            Value::F32(v) => {
+                2u8.hash(h);
+                v.to_bits().hash(h);
+            }
+            Value::Bool(v) => {
+                3u8.hash(h);
+                v.hash(h);
+            }
+            Value::Text(s) => {
+                4u8.hash(h);
+                s.as_ref().hash(h);
+            }
+            Value::Array(arr) => {
+                5u8.hash(h);
+                arr.len().hash(h);
+                for v in arr {
+                    v.hash_into(h);
+                }
+            }
+            Value::Map(map) => {
+                6u8.hash(h);
+                map.len().hash(h);
+                // Deterministic ordering.
+                let mut keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+                keys.sort_unstable();
+                for k in keys {
+                    k.hash(h);
+                    if let Some(v) = map.get(k) {
+                        v.hash_into(h);
+                    }
+                }
+            }
+            Value::TokensU32(tokens) => {
+                7u8.hash(h);
+                tokens.len().hash(h);
+                for t in tokens {
+                    t.hash(h);
+                }
+            }
+            // Tensors are not fingerprinted for memoization (expensive/unclear semantics).
+            Value::Tensor(_) => {
+                8u8.hash(h);
+            }
+        }
+    }
+
     pub fn as_u32(&self) -> Option<u32> {
         match self {
             Value::U32(v) => Some(*v),

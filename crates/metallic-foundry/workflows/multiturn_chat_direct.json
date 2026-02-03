@@ -17,10 +17,9 @@
     { "name": "eos_token", "type": "u32", "default": 151645 }
   ],
   "steps": [
-    { "op": "format_chat", "model_id": "llm", "input": "messages", "output": "formatted_prompt", "add_generation_prompt": true },
-    { "op": "tokenize", "model_id": "llm", "input": "formatted_prompt", "output": "prompt_tokens" },
-    { "op": "prefill", "model_id": "llm", "input": "prompt_tokens", "logits_binding": "logits" },
-    { "op": "compute_int", "output": "current_pos", "expr": "{prompt_tokens.len}" },
+    { "op": "format_chat", "model_id": "llm", "input": "messages", "output": "formatted_delta", "mode": "delta", "add_generation_prompt": true },
+    { "op": "tokenize", "model_id": "llm", "input": "formatted_delta", "output": "prompt_tokens_delta", "mode": "raw" },
+    { "op": "prefill", "model_id": "llm", "input": "prompt_tokens_delta", "output_pos": "current_pos", "mode": "delta", "logits_binding": "logits" },
     {
       "op": "while",
       "condition": "max_tokens",

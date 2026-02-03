@@ -155,8 +155,15 @@ impl ModelBuilder<WithWeights> {
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: weights not loaded".to_string()))?;
 
         // Baseline architecture comes from GGUF metadata; DSL can override, runtime can override later.
-        let defaults =
-            super::metadata_defaults::infer_from_gguf_with_keys(weights.gguf_model().get_metadata(), &spec.architecture.metadata_keys)?;
+        //
+        // If the spec does not provide `architecture.metadata_keys`, fall back to built-in mappings
+        // for common architectures (DEBT: keep this limited; prefer explicit keys in the spec).
+        let metadata = weights.gguf_model().get_metadata();
+        let defaults = if spec.architecture.metadata_keys.keys.is_empty() {
+            super::metadata_defaults::infer_architecture_defaults_from_gguf_metadata(metadata)?
+        } else {
+            super::metadata_defaults::infer_from_gguf_with_keys(metadata, &spec.architecture.metadata_keys)?
+        };
         spec.architecture.apply_metadata_baseline(&defaults)?;
 
         let model = CompiledModel::new(spec, weights)?;

@@ -1,6 +1,6 @@
 use std::{path::PathBuf, sync::Once};
 
-use metallic_foundry::{Foundry, MetalError, model::ModelBuilder};
+use metallic_foundry::{BPETokenizer, Foundry, MetalError, model::ModelBuilder};
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
 const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -18,10 +18,10 @@ fn get_model_paths() -> (PathBuf, PathBuf) {
     (root.join(MODEL_SPEC_PATH), root.join(GGUF_PATH))
 }
 
-fn load_tokenizer(path: &PathBuf) -> Result<metallic_foundry::Tokenizer, MetalError> {
+fn load_tokenizer(path: &PathBuf) -> Result<BPETokenizer, MetalError> {
     let file = metallic_foundry::gguf::file::GGUFFile::load_mmap_and_get_metadata(path)
         .map_err(|e| MetalError::OperationFailed(format!("{:?}", e)))?;
-    metallic_foundry::Tokenizer::from_gguf_metadata(&file.metadata)
+    BPETokenizer::from_gguf_metadata(&file.metadata)
 }
 
 #[test]

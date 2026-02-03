@@ -7,6 +7,8 @@ use crate::{
 pub(crate) struct PrefillOp {
     model_id: Option<String>,
     input: String,
+    output_pos: Option<String>,
+    mode: Option<String>,
     input_ids_binding: String,
     logits_binding: String,
     position_offset_key: String,
@@ -22,6 +24,8 @@ impl PrefillOp {
         Self {
             model_id: spec.model_id,
             input: spec.input,
+            output_pos: spec.output_pos,
+            mode: spec.mode,
             input_ids_binding: spec.input_ids_binding.unwrap_or_else(|| "input_ids".to_string()),
             logits_binding: spec.logits_binding.unwrap_or_else(|| "logits".to_string()),
             position_offset_key: spec.position_offset_key.unwrap_or_else(|| "position_offset".to_string()),
@@ -59,21 +63,44 @@ impl WorkflowOp for PrefillOp {
         _on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError> {
         let model = ctx.resolve_model(self.model_id.as_deref())?;
-        let prompt_tokens = ctx
+        let prompt_tokens_full = ctx
             .values
             .get(&self.input)
             .and_then(|v| v.as_tokens_u32())
             .ok_or_else(|| MetalError::InvalidOperation(format!("Workflow prefill missing input '{}' (u32[])", self.input)))?;
 
-        if prompt_tokens.is_empty() {
+        if prompt_tokens_full.is_empty() {
             return Err(MetalError::InvalidShape("prefill requires non-empty prompt_tokens".into()));
         }
 
         let setup_start = std::time::Instant::now();
 
-        let (start_pos, prompt_len, last_prefill_m, prefill_us, setup_us, logits_arg) =
+        let (start_pos, prompt_len, end_pos, last_prefill_m, prefill_us, setup_us, logits_arg) =
             model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
                 let start_pos = session.current_pos;
+
+                let mode = self.mode.as_deref().unwrap_or("delta");
+                let prompt_tokens: &[u32] = match mode {
+                    "delta" => prompt_tokens_full,
+                    "full_append_only" => {
+                        if start_pos == 0 {
+                            prompt_tokens_full
+                        } else if prompt_tokens_full.len() >= start_pos {
+                            &prompt_tokens_full[start_pos..]
+                        } else {
+                            return Err(MetalError::InvalidOperation(format!(
+                                "prefill(mode=full_append_only) requires {}.len ({}) >= session.current_pos ({start_pos})",
+                                self.input,
+                                prompt_tokens_full.len()
+                            )));
+                        }
+                    }
+                    other => {
+                        return Err(MetalError::InvalidOperation(format!(
+                            "prefill unsupported mode '{other}' (expected 'delta' or 'full_append_only')"
+                        )));
+                    }
+                };
                 let prompt_len = prompt_tokens.len();
                 let max_new_tokens = ctx.values.get("max_tokens").and_then(|v| v.as_usize()).unwrap_or(0);
                 let required_len = start_pos.saturating_add(prompt_len).saturating_add(max_new_tokens);
@@ -215,6 +242,7 @@ impl WorkflowOp for PrefillOp {
 
                 // Keep session state consistent for future KV growth/preservation and debugging.
                 session.current_pos = start_pos + prompt_len;
+                let end_pos = session.current_pos;
 
                 // Reset to decode mode for autoregressive decode (M=1).
                 model.set_int_global(&mut session.bindings, &self.m_key, 1);
@@ -256,6 +284,7 @@ impl WorkflowOp for PrefillOp {
                 Ok((
                     start_pos,
                     prompt_len,
+                    end_pos,
                     last_prefill_m,
                     prefill_duration.as_micros() as usize,
                     setup_duration.as_micros() as usize,
@@ -265,11 +294,16 @@ impl WorkflowOp for PrefillOp {
 
         ctx.values.insert("_internal.start_pos".to_string(), Value::Usize(start_pos));
         ctx.values.insert("_internal.prompt_len".to_string(), Value::Usize(prompt_len));
+        ctx.values.insert("_internal.end_pos".to_string(), Value::Usize(end_pos));
         ctx.values
             .insert("_internal.last_prefill_m".to_string(), Value::Usize(last_prefill_m));
         ctx.values.insert("_internal.prefill_us".to_string(), Value::Usize(prefill_us));
         ctx.values.insert("_internal.setup_us".to_string(), Value::Usize(setup_us));
         ctx.values.insert(self.logits_binding.clone(), Value::Tensor(logits_arg));
+
+        if let Some(out) = &self.output_pos {
+            ctx.values.insert(out.clone(), Value::Usize(end_pos));
+        }
 
         Ok(WorkflowOpOutcome::Continue)
     }

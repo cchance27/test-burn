@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use metallic_foundry::{
     Foundry, model::ModelBuilder, workflow::{WorkflowRunner, WorkflowSpec}
 };
@@ -18,6 +20,7 @@ fn test_generic_workflow_orchestration() -> Result<(), Box<dyn std::error::Error
         .with_spec_file(&spec_path)?
         .with_gguf(GGUF_PATH)?
         .build(&mut foundry)?;
+    let model = Arc::new(model);
 
     // Define a generic workflow in JSON
     let workflow_json = r#"{
@@ -75,7 +78,7 @@ fn test_generic_workflow_orchestration() -> Result<(), Box<dyn std::error::Error
     let spec: WorkflowSpec = serde_json::from_str(workflow_json)?;
 
     let mut models = FxHashMap::default();
-    models.insert("main".to_string(), &model);
+    models.insert("main".to_string(), model);
 
     let mut runner = WorkflowRunner::new(&mut foundry, models);
 

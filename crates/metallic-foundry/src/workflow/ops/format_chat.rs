@@ -11,6 +11,11 @@ pub(crate) struct FormatChatOp {
     input_var: String,
     output_var: String,
     add_generation_prompt: bool,
+    mode: Option<String>,
+    // Count of messages seen across turns for this op instance. Used to support both:
+    // - full-history inputs (render only the suffix), and
+    // - delta-only inputs (render all provided messages).
+    total_message_count_seen: usize,
 }
 
 impl FormatChatOp {
@@ -20,7 +25,48 @@ impl FormatChatOp {
             input_var: spec.input,
             output_var: spec.output,
             add_generation_prompt: spec.add_generation_prompt,
+            mode: spec.mode,
+            total_message_count_seen: 0,
         }
+    }
+}
+
+fn select_messages_to_render<'a>(
+    mode: &str,
+    messages: &'a [Message],
+    total_message_count_seen: &mut usize,
+) -> Result<&'a [Message], MetalError> {
+    match mode {
+        "full" => {
+            *total_message_count_seen = messages.len();
+            Ok(messages)
+        }
+        "delta" => {
+            // "delta" must support two usage patterns:
+            // 1) Full-history input that grows over time (render only the suffix).
+            // 2) Delta-only input (caller supplies only new messages each turn).
+            //
+            // We distinguish them defensively by looking at whether the input length is <= the
+            // number of messages we've already seen. Full-history should monotonically increase.
+            if *total_message_count_seen == 0 {
+                *total_message_count_seen = messages.len();
+                return Ok(messages);
+            }
+
+            if messages.len() <= *total_message_count_seen {
+                // Treat as delta-only input: render all provided messages and advance the total.
+                *total_message_count_seen = total_message_count_seen.saturating_add(messages.len());
+                return Ok(messages);
+            }
+
+            // Full-history input grew: render only the new suffix.
+            let start = *total_message_count_seen;
+            *total_message_count_seen = messages.len();
+            Ok(&messages[start..])
+        }
+        other => Err(MetalError::InvalidOperation(format!(
+            "format_chat unsupported mode '{other}' (expected 'full' or 'delta')"
+        ))),
     }
 }
 
@@ -60,6 +106,21 @@ fn format_qwen_messages(messages: &[Message], add_generation_prompt: bool) -> St
 }
 
 impl WorkflowOp for FormatChatOp {
+    fn memoize_spec(&self) -> Option<crate::workflow::ops::MemoizeSpec> {
+        Some(crate::workflow::ops::MemoizeSpec {
+            inputs: vec![self.input_var.clone()],
+            outputs: vec![self.output_var.clone()],
+            // In TUI, message history changes every turn; this cache is unlikely to hit and would
+            // retain large strings. Keep it off for now.
+            disable_in_tui: true,
+        })
+    }
+
+    fn begin_run(&mut self, _ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        // Keep total_message_count_seen across turns; it is the basis for delta formatting.
+        Ok(())
+    }
+
     fn execute(
         &mut self,
         ctx: &mut WorkflowExecutionContext<'_>,
@@ -88,6 +149,9 @@ impl WorkflowOp for FormatChatOp {
             }
         }
 
+        let mode = self.mode.as_deref().unwrap_or("full");
+        let messages_to_render = select_messages_to_render(mode, &messages, &mut self.total_message_count_seen)?;
+
         // If the tokenizer provides a chat template, use it. Otherwise fall back to Qwen formatting
         // when Qwen chat tokens are present, else concatenate contents.
         let formatted = if let Some(template) = tokenizer.chat_template() {
@@ -99,11 +163,16 @@ impl WorkflowOp for FormatChatOp {
                 .special_tokens()
                 .eos_token_id
                 .and_then(|id| tokenizer.decode_lossless(&[id]).ok());
-            template.render(&messages, bos_token.as_deref(), eos_token.as_deref(), self.add_generation_prompt)?
+            template.render(
+                messages_to_render,
+                bos_token.as_deref(),
+                eos_token.as_deref(),
+                self.add_generation_prompt,
+            )?
         } else if tokenizer.has_token("<|im_start|>") && tokenizer.has_token("<|im_end|>") {
-            format_qwen_messages(&messages, self.add_generation_prompt)
+            format_qwen_messages(messages_to_render, self.add_generation_prompt)
         } else {
-            messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n")
+            messages_to_render.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n")
         };
 
         if std::env::var("METALLIC_DEBUG_CHAT_TEMPLATE").is_ok() {
@@ -115,5 +184,57 @@ impl WorkflowOp for FormatChatOp {
 
         ctx.values.insert(self.output_var.clone(), Value::Text(formatted.into()));
         Ok(WorkflowOpOutcome::Continue)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn msg(role: &str) -> Message {
+        Message {
+            role: role.to_string(),
+            content: "x".to_string(),
+        }
+    }
+
+    #[test]
+    fn format_chat_delta_supports_delta_only_inputs_across_turns() {
+        let mut seen = 0usize;
+
+        // First turn: full history (system + user)
+        let m1 = vec![msg("system"), msg("user")];
+        let r1 = select_messages_to_render("delta", &m1, &mut seen).unwrap();
+        assert_eq!(r1.len(), 2);
+        assert_eq!(seen, 2);
+
+        // Second turn: delta-only input (user only)
+        let m2 = vec![msg("user")];
+        let r2 = select_messages_to_render("delta", &m2, &mut seen).unwrap();
+        assert_eq!(r2.len(), 1);
+        assert_eq!(seen, 3);
+
+        // Third turn: delta-only input again (user only) should still render 1 message (not empty).
+        let m3 = vec![msg("user")];
+        let r3 = select_messages_to_render("delta", &m3, &mut seen).unwrap();
+        assert_eq!(r3.len(), 1);
+        assert_eq!(seen, 4);
+    }
+
+    #[test]
+    fn format_chat_delta_supports_full_history_inputs_by_rendering_suffix() {
+        let mut seen = 0usize;
+
+        // First call: full history.
+        let m1 = vec![msg("system"), msg("user")];
+        let r1 = select_messages_to_render("delta", &m1, &mut seen).unwrap();
+        assert_eq!(r1.len(), 2);
+        assert_eq!(seen, 2);
+
+        // Next call: full history grew by one.
+        let m2 = vec![msg("system"), msg("user"), msg("user")];
+        let r2 = select_messages_to_render("delta", &m2, &mut seen).unwrap();
+        assert_eq!(r2.len(), 1);
+        assert_eq!(seen, 3);
     }
 }

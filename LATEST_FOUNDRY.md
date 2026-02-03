@@ -319,3 +319,5 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Message-Driven Workflows:** Restored `multiturn_chat*.json` workflows with `format_chat` + `tokenize` inside the workflow graph.
 - **Schema Alias:** Workflows accept both `steps` and `phases` keys (to avoid confusion with model DSL “steps”).
 - **Debug Knobs:** `METALLIC_DEBUG_TOKENIZE` and `METALLIC_DEBUG_CHAT_TEMPLATE` print formatted prompts + token heads for parity debugging.
+- **Multi-Turn Delta Mode:** `format_chat(mode="delta")` + `prefill(mode="delta")` enable KV reuse across turns without replaying the full prompt. Delta mode supports both full-history and delta-only message inputs (TUI uses deltas after the first turn).
+- **Runner Cache + Memoization:** `WorkflowRunner` caches compiled workflows/ops and invalidates on workflow spec changes; ops can declare memoization specs for caching pure outputs (e.g. tokenization).
