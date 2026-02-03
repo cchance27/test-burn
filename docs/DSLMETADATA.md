@@ -158,6 +158,9 @@ For message-driven multi-turn chat (`multiturn_chat*.json`):
   1) full-history message arrays that monotonically grow (it renders only the suffix), or
   2) delta-only message arrays (it renders all provided messages each turn).
 - `prefill` supports `mode="delta"` and updates `current_pos` via `output_pos`, allowing KV-cache reuse across turns without replaying the full prompt.
+- The CLI supports both:
+  - **TUI multi-turn:** interactive chat input; after the first turn, the CLI passes delta-only user messages.
+  - **Non-interactive multi-turn:** passing multiple `--prompts` arguments; each becomes a new user turn in the same Foundry session.
 
 ### Sampling parameters (current state)
 

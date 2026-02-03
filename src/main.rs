@@ -489,28 +489,108 @@ fn main() -> AppResult<()> {
                             worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
                             if workflow_wants_messages {
-                                if prompts.len() > 1 {
-                                    return Err(anyhow::anyhow!(
-                                        "Workflow declares 'messages' input (prompt-driven workflow). Multi-turn CLI (--prompts ...) is not yet supported for prompt-driven workflows."
-                                    ));
-                                }
                                 if prompts.first().map(|s| s.trim()).unwrap_or("").is_empty() {
                                     return Err(anyhow::anyhow!(
                                         "Workflow declares 'messages' input (prompt-driven workflow) but no prompt was provided. Pass a prompt argument, or use `--output-format tui` for interactive chat."
                                     ));
                                 }
 
-                                worker_tx.send(AppEvent::TokenCount(tokens0.len()))?;
+                                use metallic_foundry::workflow::Value as WfValue;
+
+                                fn sys_prompt() -> String {
+                                    std::env::var("METALLIC_SYSTEM_PROMPT")
+                                        .ok()
+                                        .map(|s| s.trim().to_string())
+                                        .filter(|s| !s.is_empty())
+                                        .unwrap_or_else(|| "You are a helpful assistant.".to_string())
+                                }
+
+                                fn msg(role: &str, content: &str) -> WfValue {
+                                    let mut map = rustc_hash::FxHashMap::default();
+                                    map.insert("role".to_string(), WfValue::Text(role.into()));
+                                    map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
+                                    WfValue::Map(map)
+                                }
+
                                 let workflow = workflow_override.as_ref().expect("workflow_override present");
-                                metallic_foundry::generation::generate_streaming_with_workflow_from_prompt(
-                                    &mut foundry,
-                                    &models,
-                                    &tokenizer,
-                                    &prompts[0],
-                                    &cfg,
-                                    &worker_tx,
-                                    workflow.clone(),
-                                )?;
+                                let mut runner = metallic_foundry::workflow::WorkflowRunner::new(&mut foundry, models);
+                                let system = sys_prompt();
+
+                                for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
+                                    if turn_idx > 0 {
+                                        worker_tx.send(AppEvent::UserPrompt(turn_prompt.to_string()))?;
+                                    }
+
+                                    let messages_input: Vec<WfValue> = if turn_idx == 0 {
+                                        vec![msg("system", &system), msg("user", turn_prompt)]
+                                    } else {
+                                        vec![msg("user", turn_prompt)]
+                                    };
+
+                                    // Best-effort token metrics for throughput/UI (actual tokenization is done inside the workflow).
+                                    let mut metrics_tokens: Vec<u32> = if turn_idx == 0 {
+                                        tokens0.clone()
+                                    } else if disable_chat_template {
+                                        tokenizer.encode(turn_prompt)?
+                                    } else {
+                                        tokenizer.encode_chat_continuation_prompt(turn_prompt)?
+                                    };
+
+                                    // Remove BOS if present to avoid polluting the context in the middle of a chat.
+                                    if turn_idx > 0
+                                        && let Some(bos) = tokenizer.special_tokens().bos_token_id
+                                        && !metrics_tokens.is_empty()
+                                        && metrics_tokens[0] == bos
+                                    {
+                                        metrics_tokens.remove(0);
+                                    }
+
+                                    worker_tx.send(AppEvent::TokenCount(metrics_tokens.len()))?;
+                                    worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
+
+                                    let mut inputs: rustc_hash::FxHashMap<String, WfValue> = rustc_hash::FxHashMap::default();
+                                    inputs.insert("messages".to_string(), WfValue::Array(messages_input));
+                                    inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
+                                    inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
+                                    inputs.insert("top_k".to_string(), WfValue::U32(cfg.top_k as u32));
+                                    inputs.insert("top_p".to_string(), WfValue::F32(cfg.top_p));
+                                    inputs.insert("min_p".to_string(), WfValue::F32(cfg.min_p));
+                                    inputs.insert("repeat_penalty".to_string(), WfValue::F32(cfg.repeat_penalty));
+                                    inputs.insert("repeat_last_n".to_string(), WfValue::Usize(cfg.repeat_last_n));
+                                    inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
+                                    inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
+                                    inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
+                                    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+                                    inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+
+                                    let mut decode_scratch = Vec::new();
+                                    let mut decoded_chunk = String::new();
+                                    let mut on_token = |token_id: u32,
+                                                        prefill: std::time::Duration,
+                                                        setup: std::time::Duration,
+                                                        iter: Option<std::time::Duration>|
+                                     -> Result<bool, metallic_foundry::MetalError> {
+                                        if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
+                                            && worker_tx
+                                                .send(AppEvent::Token {
+                                                    text,
+                                                    setup_duration: Some(setup),
+                                                    prompt_processing: prefill,
+                                                    iteration: iter,
+                                                })
+                                                .is_err()
+                                        {
+                                            return Ok(false);
+                                        }
+                                        Ok(true)
+                                    };
+
+                                    let gen_start = std::time::Instant::now();
+                                    let _outputs = runner.run_streaming(workflow, inputs, &mut on_token)?;
+                                    let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                        total_generation_time: gen_start.elapsed(),
+                                    });
+                                }
                                 return Ok(());
                             }
 

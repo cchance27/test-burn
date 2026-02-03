@@ -6,7 +6,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 
 ### 1. Interactive Multi-Turn Chat
 - **TUI Integration:** Full-featured input box and event loop support for real-time chat.
-- **CLI Multi-Turn:** Support for multiple `--prompts` arguments and continuous session state.
+- **CLI Multi-Turn:** Support for multiple `--prompts` arguments and continuous session state (including message-driven workflows).
 - **Session Persistence:** `ModelSession` now correctly tracks `current_pos` and updates global position indices across forward passes.
 - **Log Management:** TUI now captures and redirects `tracing` logs to a dedicated pane, preventing terminal corruption.
 
