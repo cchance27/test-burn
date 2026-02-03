@@ -41,7 +41,7 @@ impl ApplyRepetitionPenalty {
         logits: &TensorArg,
         recent_pairs: &TensorArg,
         vocab_size: u32,
-        pair_len: u32,
+        max_pairs: u32,
         repeat_penalty: f32,
         presence_penalty: f32,
         frequency_penalty: f32,
@@ -52,7 +52,7 @@ impl ApplyRepetitionPenalty {
             recent_pairs: recent_pairs.clone(),
             params: RepetitionPenaltyParams {
                 vocab_size,
-                recent_len: pair_len,
+                recent_len: max_pairs,
                 repeat_penalty,
                 presence_penalty,
                 frequency_penalty,

@@ -109,15 +109,6 @@ fn main() -> AppResult<()> {
         !matches!(lowered.as_str(), "0" | "false" | "no" | "off")
     }
 
-    fn env_usize(name: &str) -> Option<usize> {
-        let value = std::env::var(name).ok()?;
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        trimmed.parse::<usize>().ok()
-    }
-
     fn env_is_set(name: &str) -> bool {
         std::env::var(name).is_ok()
     }
@@ -403,7 +394,7 @@ fn main() -> AppResult<()> {
                         let disable_chat_template = env_is_set("METALLIC_DISABLE_CHAT_TEMPLATE");
                         let first_prompt = prompts.first().map(|s| s.trim()).unwrap_or("");
 
-                        let mut cfg = metallic_foundry::generation::GenerationConfig {
+                        let cfg = metallic_foundry::generation::GenerationConfig {
                             max_tokens: worker_generation.max_tokens,
                             temperature: worker_generation.temperature as f32,
                             top_p: worker_generation.top_p as f32,
@@ -417,28 +408,7 @@ fn main() -> AppResult<()> {
                             seed: worker_generation.seed,
                         };
 
-                        // NOTE: repetition penalties are currently only correct for single-token decode.
-                        // If the user enables any form of batching, we force-disable repetition penalties to
-                        // avoid incorrect behavior (e.g., unstable repetition / quality regressions).
-                        let workflow_batch = env_usize("METALLIC_WORKFLOW_BATCH_SIZE");
-                        let decode_batch = env_usize("METALLIC_FOUNDRY_DECODE_BATCH_SIZE");
-                        let max_batch = workflow_batch.into_iter().chain(decode_batch).max().unwrap_or(1);
-                        if max_batch > 1
-                            && (cfg.repeat_last_n > 0
-                                || cfg.repeat_penalty != 1.0
-                                || cfg.presence_penalty != 0.0
-                                || cfg.frequency_penalty != 0.0)
-                        {
-                            tracing::warn!(
-                                "Batch size > 1 detected (METALLIC_WORKFLOW_BATCH_SIZE={:?}, METALLIC_FOUNDRY_DECODE_BATCH_SIZE={:?}); disabling repetition/presence/frequency penalties for correctness.",
-                                env_usize("METALLIC_WORKFLOW_BATCH_SIZE"),
-                                env_usize("METALLIC_FOUNDRY_DECODE_BATCH_SIZE"),
-                            );
-                            cfg.repeat_penalty = 1.0;
-                            cfg.repeat_last_n = 0;
-                            cfg.presence_penalty = 0.0;
-                            cfg.frequency_penalty = 0.0;
-                        }
+                        // Penalties are applied on-GPU in the workflow sampler and are compatible with batching.
 
                         // `models_owned` is already FxHashMap<String, Arc<CompiledModel>>.
                         // We used to create a map of references, but now `generate_streaming_from_tokens_with_workflow`

@@ -85,10 +85,14 @@ use crate::tensor::Dtype;
 
 impl From<Dtype> for GGUFDataType {
     fn from(dtype: Dtype) -> Self {
+        #[allow(unreachable_patterns)]
         match dtype {
             Dtype::F16 => GGUFDataType::F16,
             Dtype::F32 => GGUFDataType::F32,
             Dtype::U8 => GGUFDataType::Q8_0,
+            // NOTE: U32 is not a GGUF weight dtype. We still allow U32-typed utility kernels
+            // (token buffers, control-flow helpers) to compile by mapping to a benign policy.
+            Dtype::U32 => GGUFDataType::F32,
             _ => GGUFDataType::Unknown(0),
         }
     }

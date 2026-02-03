@@ -1,5 +1,5 @@
 use crate::{
-    error::MetalError, metals::sampling::{ApplyRepetitionPenalty, SampleTopK}, types::{MetalBuffer, MetalResourceOptions, TensorArg}, workflow::{
+    error::MetalError, metals::sampling::{ApplyRepetitionPenalty, RepetitionStateIngest, RepetitionStateInit, RepetitionStateUpdateFromToken, SampleTopK}, types::{MetalBuffer, MetalResourceOptions, TensorArg}, workflow::{
         Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext, spec::Param
     }
 };
@@ -19,7 +19,18 @@ pub(crate) struct SampleOp {
     step: u32,
     out_buffer: Option<MetalBuffer>,
     out_arg: Option<TensorArg>,
-    recent_pairs_buf: Option<MetalBuffer>,
+    // GPU-side repetition state (so penalties work without per-token CPU sorting/copy).
+    rep_window_len: usize,
+    rep_ring_buf: Option<MetalBuffer>,
+    rep_ring_arg: Option<TensorArg>,
+    rep_pairs_buf: Option<MetalBuffer>,
+    rep_pairs_arg: Option<TensorArg>,
+    rep_meta_buf: Option<MetalBuffer>,
+    rep_meta_arg: Option<TensorArg>,
+    rep_tokens_buf: Option<MetalBuffer>,
+    rep_tokens_arg: Option<TensorArg>,
+    rep_initialized: bool,
+    rep_needs_prompt_ingest: bool,
 }
 
 impl SampleOp {
@@ -39,40 +50,26 @@ impl SampleOp {
             step: 0,
             out_buffer: None,
             out_arg: None,
-            recent_pairs_buf: None,
+            rep_window_len: 0,
+            rep_ring_buf: None,
+            rep_ring_arg: None,
+            rep_pairs_buf: None,
+            rep_pairs_arg: None,
+            rep_meta_buf: None,
+            rep_meta_arg: None,
+            rep_tokens_buf: None,
+            rep_tokens_arg: None,
+            rep_initialized: false,
+            rep_needs_prompt_ingest: true,
         }
     }
-}
-
-fn build_repetition_pairs(mut recent: Vec<u32>) -> Vec<u32> {
-    if recent.is_empty() {
-        return Vec::new();
-    }
-
-    recent.sort_unstable();
-
-    // Packed (token_id, count) pairs.
-    let mut pairs: Vec<u32> = Vec::with_capacity(recent.len().saturating_mul(2));
-    let mut i = 0usize;
-    while i < recent.len() {
-        let tok = recent[i];
-        i += 1;
-        let mut count = 1u32;
-        while i < recent.len() && recent[i] == tok {
-            count = count.saturating_add(1);
-            i += 1;
-        }
-        pairs.push(tok);
-        pairs.push(count);
-    }
-
-    pairs
 }
 
 impl WorkflowOp for SampleOp {
     fn begin_run(&mut self, _ctx: &mut WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
         // Seed offset should restart per workflow invocation (per user turn).
         self.step = 0;
+        self.rep_needs_prompt_ingest = true;
         Ok(())
     }
 
@@ -115,60 +112,137 @@ impl WorkflowOp for SampleOp {
 
         let vocab_size = logits_arg.dims()[logits_arg.dims().len() - 1] as u32;
 
-        // Apply token penalties in-place to logits before sampling.
+        // Apply token penalties in-place to logits before sampling (GPU-side state).
         let use_token_penalties = (repeat_penalty > 1.0 && repeat_penalty.is_finite())
             || (presence_penalty > 0.0 && presence_penalty.is_finite())
             || (frequency_penalty > 0.0 && frequency_penalty.is_finite());
 
         if use_token_penalties && repeat_last_n > 0 {
-            let mut recent: Vec<u32> = Vec::with_capacity(repeat_last_n.min(256));
+            let window_len = repeat_last_n.min(256);
 
-            if let Some(generated) = ctx.values.get("generated_tokens").and_then(|v| v.as_tokens_u32()) {
-                let take = repeat_last_n.min(generated.len());
-                let start = generated.len().saturating_sub(take);
-                recent.extend_from_slice(&generated[start..]);
+            // (Re)allocate state buffers if needed.
+            if self.rep_ring_buf.is_none() || self.rep_window_len != window_len {
+                self.rep_window_len = window_len;
+                self.rep_needs_prompt_ingest = true;
+                self.rep_initialized = false;
+
+                let ring_bytes = window_len * std::mem::size_of::<u32>();
+                let pairs_bytes = window_len * 2 * std::mem::size_of::<u32>();
+                let meta_bytes = 4 * std::mem::size_of::<u32>();
+
+                let ring_buf = ctx
+                    .foundry
+                    .device
+                    .new_buffer(ring_bytes.max(4), MetalResourceOptions::StorageModeShared)
+                    .expect("Failed to allocate repetition ring buffer");
+                let ring_arg = TensorArg::from_buffer(ring_buf.clone(), crate::tensor::Dtype::U32, vec![window_len], vec![1]);
+
+                let pairs_buf = ctx
+                    .foundry
+                    .device
+                    .new_buffer(pairs_bytes.max(8), MetalResourceOptions::StorageModeShared)
+                    .expect("Failed to allocate repetition pairs buffer");
+                let pairs_arg = TensorArg::from_buffer(pairs_buf.clone(), crate::tensor::Dtype::U32, vec![window_len * 2], vec![1]);
+
+                let meta_buf = ctx
+                    .foundry
+                    .device
+                    .new_buffer(meta_bytes, MetalResourceOptions::StorageModeShared)
+                    .expect("Failed to allocate repetition meta buffer");
+                let meta_arg = TensorArg::from_buffer(meta_buf.clone(), crate::tensor::Dtype::U32, vec![4], vec![1]);
+
+                self.rep_ring_buf = Some(ring_buf);
+                self.rep_ring_arg = Some(ring_arg);
+                self.rep_pairs_buf = Some(pairs_buf);
+                self.rep_pairs_arg = Some(pairs_arg);
+                self.rep_meta_buf = Some(meta_buf);
+                self.rep_meta_arg = Some(meta_arg);
             }
 
-            if recent.len() < repeat_last_n {
-                if let Some(prompt_tokens) = ctx.values.get("prompt_tokens").and_then(|v| v.as_tokens_u32()) {
-                    let need = repeat_last_n - recent.len();
-                    let start = prompt_tokens.len().saturating_sub(need);
-                    recent.extend_from_slice(&prompt_tokens[start..]);
-                }
-            }
+            // Ensure state is initialized/extended with the prompt tokens for this run.
+            if self.rep_needs_prompt_ingest {
+                let has_delta_prompt_tokens = ctx.values.contains_key("prompt_tokens_delta");
+                let prompt_tokens = if has_delta_prompt_tokens {
+                    ctx.values.get("prompt_tokens_delta").and_then(|v| v.as_tokens_u32())
+                } else {
+                    ctx.values.get("prompt_tokens").and_then(|v| v.as_tokens_u32())
+                };
 
-            let pairs = build_repetition_pairs(recent);
-            if !pairs.is_empty() {
-                let needed_bytes = pairs.len() * std::mem::size_of::<u32>();
-                let needs_alloc = self.recent_pairs_buf.as_ref().map(|b| b.length() < needed_bytes).unwrap_or(true);
-                if needs_alloc {
-                    let new_buf = ctx
+                let ring_arg = self.rep_ring_arg.as_ref().expect("rep_ring_arg set");
+                let pairs_arg = self.rep_pairs_arg.as_ref().expect("rep_pairs_arg set");
+                let meta_arg = self.rep_meta_arg.as_ref().expect("rep_meta_arg set");
+
+                // Reset state for token-driven workflows (full prompt per run), but keep state for
+                // message-driven workflows that provide delta prompt tokens across turns.
+                if !self.rep_initialized || !has_delta_prompt_tokens {
+                    let empty = ctx
                         .foundry
                         .device
-                        .new_buffer(needed_bytes.max(4), MetalResourceOptions::StorageModeShared)
-                        .expect("Failed to allocate recent_pairs buffer");
-                    self.recent_pairs_buf = Some(new_buf);
+                        .new_buffer(4, MetalResourceOptions::StorageModeShared)
+                        .expect("Failed to allocate empty tokens buffer");
+                    let empty_arg = TensorArg::from_buffer(empty, crate::tensor::Dtype::U32, vec![1], vec![1]);
+                    let init = RepetitionStateInit::new(ring_arg, pairs_arg, meta_arg, &empty_arg, 0, window_len as u32);
+                    ctx.foundry.run(&init)?;
+                    self.rep_initialized = true;
                 }
-                let buf = self.recent_pairs_buf.as_ref().expect("recent_pairs_buf set");
-                buf.copy_from_slice(&pairs);
-                let recent_pairs_arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![pairs.len()], vec![1]);
-                let pair_len = (pairs.len() / 2) as u32;
-                let penalty_kernel = ApplyRepetitionPenalty::new(
-                    logits_arg,
-                    &recent_pairs_arg,
-                    vocab_size,
-                    pair_len,
-                    repeat_penalty,
-                    presence_penalty,
-                    frequency_penalty,
-                );
-                ctx.foundry.run(&penalty_kernel)?;
+
+                if let Some(prompt_tokens) = prompt_tokens {
+                    if !prompt_tokens.is_empty() {
+                        let needed_bytes = prompt_tokens.len() * std::mem::size_of::<u32>();
+                        let needs_alloc = self.rep_tokens_buf.as_ref().map(|b| b.length() < needed_bytes).unwrap_or(true);
+                        if needs_alloc {
+                            let new_buf = ctx
+                                .foundry
+                                .device
+                                .new_buffer(needed_bytes.max(4), MetalResourceOptions::StorageModeShared)
+                                .expect("Failed to allocate repetition tokens buffer");
+                            self.rep_tokens_buf = Some(new_buf);
+                        }
+                        let buf = self.rep_tokens_buf.as_ref().expect("rep_tokens_buf set");
+                        buf.copy_from_slice(prompt_tokens);
+                        let tokens_arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![prompt_tokens.len()], vec![1]);
+                        self.rep_tokens_arg = Some(tokens_arg.clone());
+
+                        let ingest = RepetitionStateIngest::new(
+                            ring_arg,
+                            pairs_arg,
+                            meta_arg,
+                            &tokens_arg,
+                            prompt_tokens.len() as u32,
+                            window_len as u32,
+                        );
+                        ctx.foundry.run(&ingest)?;
+                    }
+                }
+
+                self.rep_needs_prompt_ingest = false;
             }
+
+            let pairs_arg = self.rep_pairs_arg.as_ref().expect("rep_pairs_arg set");
+            let penalty_kernel = ApplyRepetitionPenalty::new(
+                logits_arg,
+                pairs_arg,
+                vocab_size,
+                window_len as u32,
+                repeat_penalty,
+                presence_penalty,
+                frequency_penalty,
+            );
+            ctx.foundry.run(&penalty_kernel)?;
         }
 
         let kernel = SampleTopK::new(logits_arg, out_arg, vocab_size, top_k, top_p, min_p, temp, seed);
 
         ctx.foundry.run(&kernel)?;
+
+        // Update repetition state with the newly sampled token so the next step sees it.
+        if use_token_penalties && repeat_last_n > 0 && self.rep_window_len > 0 {
+            let ring_arg = self.rep_ring_arg.as_ref().expect("rep_ring_arg set");
+            let pairs_arg = self.rep_pairs_arg.as_ref().expect("rep_pairs_arg set");
+            let meta_arg = self.rep_meta_arg.as_ref().expect("rep_meta_arg set");
+            let upd = RepetitionStateUpdateFromToken::new(ring_arg, pairs_arg, meta_arg, out_arg, self.rep_window_len as u32);
+            ctx.foundry.run(&upd)?;
+        }
 
         // Synchronize and read back
         let token = out_buffer.read_scalar::<u32>();

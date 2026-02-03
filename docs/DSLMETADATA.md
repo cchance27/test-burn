@@ -175,6 +175,7 @@ Important implementation notes:
 
 - Sampling seed is now **advanced per generated token** (instead of reusing a constant seed each iteration). This avoids “repeat the same sampled token forever” failure modes.
 - Repetition penalty is supported via a dedicated GPU kernel and defaults to `repeat_penalty=1.1`, `repeat_last_n=64` for single-token decode. Presence/frequency penalties remain opt-in (default 0.0). When batching is enabled, penalties are force-disabled for correctness (see CLI warning) until we have correct multi-token batching semantics.
+- Repetition/presence/frequency penalties are maintained and applied on GPU (no per-token CPU sorting/copy), and are compatible with batching. Defaults: `repeat_penalty=1.1`, `repeat_last_n=64`, presence/frequency default 0.0.
 
 ### Prompt formatting + tokenization (workflow vs host)
 
