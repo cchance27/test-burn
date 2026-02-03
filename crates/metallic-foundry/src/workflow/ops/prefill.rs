@@ -75,6 +75,8 @@ impl WorkflowOp for PrefillOp {
             model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
                 let start_pos = session.current_pos;
                 let prompt_len = prompt_tokens.len();
+                let max_new_tokens = ctx.values.get("max_tokens").and_then(|v| v.as_usize()).unwrap_or(0);
+                let required_len = start_pos.saturating_add(prompt_len).saturating_add(max_new_tokens);
 
                 model.ensure_kv_capacity(
                     foundry,
@@ -82,7 +84,7 @@ impl WorkflowOp for PrefillOp {
                     &mut session.fast_bindings,
                     &mut session.context_config,
                     start_pos,
-                    start_pos + prompt_len,
+                    required_len,
                 )?;
 
                 if prompt_len + start_pos > session.context_config.max_context_len {
@@ -211,6 +213,9 @@ impl WorkflowOp for PrefillOp {
 
                 let prefill_duration = prefill_start.elapsed();
 
+                // Keep session state consistent for future KV growth/preservation and debugging.
+                session.current_pos = start_pos + prompt_len;
+
                 // Reset to decode mode for autoregressive decode (M=1).
                 model.set_int_global(&mut session.bindings, &self.m_key, 1);
                 model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
@@ -229,7 +234,24 @@ impl WorkflowOp for PrefillOp {
                 }
 
                 // Extract logits for use in subsequent ops.
-                let logits_arg = session.bindings.get(&self.logits_binding)?.clone();
+                let mut logits_arg = session.bindings.get(&self.logits_binding)?.clone();
+                // The model spec allocates logits as [max_prefill_chunk, vocab_size]. After a batched prefill,
+                // we must sample from the *last* token's logits (row = last_prefill_m - 1).
+                //
+                // If we sample from row 0, generation quality can collapse into highly repetitive loops.
+                if logits_arg.dtype == crate::tensor::Dtype::F16 && logits_arg.dims.len() == 2 {
+                    let rows = logits_arg.dims[0];
+                    let vocab = logits_arg.dims[1];
+                    if rows > 0 && vocab > 0 {
+                        let last_row = last_prefill_m.saturating_sub(1).min(rows - 1);
+                        let row_bytes = last_row.saturating_mul(vocab).saturating_mul(logits_arg.dtype.size_bytes());
+                        logits_arg.offset = logits_arg.offset.saturating_add(row_bytes);
+                        logits_arg.dims.clear();
+                        logits_arg.dims.push(vocab);
+                        logits_arg.strides.clear();
+                        logits_arg.strides.push(1);
+                    }
+                }
 
                 Ok((
                     start_pos,

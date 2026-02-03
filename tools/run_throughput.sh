@@ -9,6 +9,9 @@ MAX_TOKENS=50
 ITERATIONS=5
 ENABLE_PROFILING=0
 ENGINE="context"
+WORKFLOW=""
+IGNORE_EOS_STOP=1
+WORKFLOW_BATCH_SIZE=1
 
 RUN_FP16=0
 RUN_Q8=0
@@ -26,6 +29,8 @@ show_help() {
     echo "  --iterations <n>   Number of iterations per model (default: $ITERATIONS)"
     echo "  --profiles         Enable profiling (METALLIC_ENABLE_PROFILING=1)"
     echo "  --engine <name>    Engine to use (context, foundry) (default: $ENGINE)"
+    echo "  --workflow <path>  Workflow JSON to use (foundry only; default: text_generation.json)"
+    echo "  --batch-size <n>   Foundry workflow batch size (default: $WORKFLOW_BATCH_SIZE)"
     echo "  --help             Show this help"
     echo ""
     echo "Note: If neither --fp16 nor --q8 is specified, both will run."
@@ -43,6 +48,8 @@ while [[ $# -gt 0 ]]; do
         --iterations) ITERATIONS="$2"; shift 2 ;;
         --profiles) ENABLE_PROFILING=1; shift ;;
         --engine) ENGINE="$2"; shift 2 ;;
+        --workflow) WORKFLOW="$2"; shift 2 ;;
+        --batch-size) WORKFLOW_BATCH_SIZE="$2"; shift 2 ;;
         --help) show_help; exit 0 ;;
         *) echo "Unknown option: $1"; show_help; exit 1 ;;
     esac
@@ -59,6 +66,14 @@ echo "[metallic] prompt=${PROMPT}"
 echo "[metallic] iterations=${ITERATIONS}"
 echo "[metallic] engine=${ENGINE}"
 echo "[metallic] profiling=${ENABLE_PROFILING}"
+echo "[metallic] ignore_eos_stop=${IGNORE_EOS_STOP}"
+echo "[metallic] workflow_batch_size=${WORKFLOW_BATCH_SIZE}"
+if [[ "${ENGINE}" == "foundry" ]]; then
+    if [[ -z "${WORKFLOW}" ]]; then
+        WORKFLOW="crates/metallic-foundry/workflows/text_generation.json"
+    fi
+    echo "[metallic] workflow=${WORKFLOW}"
+fi
 echo
 
 calculate_stats() {
@@ -101,12 +116,8 @@ calculate_stats() {
 run_benchmark() {
     local name="$1"
     local model="$2"
-    local jsonl_path="metrics-throughput-${name}.jsonl"
     local bin_path="target/release/metallic_cli"
-    local foundry_per_kernel_profiling=0
-    if [[ "${ENABLE_PROFILING}" -eq 1 && "${ENGINE}" == "foundry" ]]; then
-        foundry_per_kernel_profiling=1
-    fi
+    local jsonl_path="metrics-throughput-${name}.jsonl"
     
     echo "== ${name} =="
 
@@ -128,17 +139,48 @@ run_benchmark() {
     
     for ((i=1; i<=ITERATIONS; i++)); do
         echo "  Run $i/$ITERATIONS..."
-        rm -f "${jsonl_path}"
+        rm -f "${jsonl_path}" || true
+
+        # Performance measurements should not be affected by debug/profiling env leakage from the shell.
+        # (Empty vars still count as "set", so we must explicitly unset them.)
+        local -a env_cmd=(
+          env
+          -u METALLIC_DEBUG_STEP_LOG
+          -u METALLIC_DEBUG_COMPILED_STEP_SYNC
+          -u METALLIC_DEBUG_FORWARD_SYNC
+          -u METALLIC_DEBUG_TOKENIZE
+          -u METALLIC_DEBUG_CHAT_TEMPLATE
+          -u METALLIC_TUI_MODE
+          -u METALLIC_ENABLE_PROFILING
+          -u METALLIC_FOUNDRY_PER_KERNEL_PROFILING
+          -u METALLIC_RECORD_CB_GPU_TIMING
+          -u METALLIC_METRICS_JSONL_PATH
+          -u METALLIC_PERF_OUTPUT
+        )
+        env_cmd+=(
+          METALLIC_ENABLE_PROFILING=${ENABLE_PROFILING}
+          METALLIC_IGNORE_EOS_STOP=${IGNORE_EOS_STOP}
+          METALLIC_WORKFLOW_BATCH_SIZE=${WORKFLOW_BATCH_SIZE}
+          METALLIC_PERF_OUTPUT=1
+        )
+
+        if [[ "${ENABLE_PROFILING}" -eq 1 ]]; then
+          env_cmd+=(
+            METALLIC_METRICS_JSONL_PATH="${jsonl_path}"
+            METALLIC_RECORD_CB_GPU_TIMING=1
+          )
+          if [[ "${ENGINE}" == "foundry" ]]; then
+            env_cmd+=(METALLIC_FOUNDRY_PER_KERNEL_PROFILING=1)
+          fi
+        fi
         
         # Run and capture stderr (where metrics are printed)
         local output
-        output=$(METALLIC_ENABLE_PROFILING=${ENABLE_PROFILING} \
-          METALLIC_FOUNDRY_PER_KERNEL_PROFILING=${foundry_per_kernel_profiling} \
-          METALLIC_PERF_OUTPUT=1 \
-          METALLIC_RECORD_CB_GPU_TIMING=1 \
-          METALLIC_METRICS_JSONL_PATH="${jsonl_path}" \
+        output=$("${env_cmd[@]}" \
           "${bin_path}" "${model}" "${PROMPT}" \
-          --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" --engine="${ENGINE}" 2>&1)
+          --seed 42 --output-format=none --max-tokens="${MAX_TOKENS}" --engine="${ENGINE}" \
+          --repeat-penalty 1.0 --repeat-last-n 0 --presence-penalty 0.0 --frequency-penalty 0.0 \
+          ${WORKFLOW:+--workflow "${WORKFLOW}"} 2>&1)
         
         # Extraction logic
         # Anchor on the perf breakdown lines to avoid accidental matches in unrelated logs.

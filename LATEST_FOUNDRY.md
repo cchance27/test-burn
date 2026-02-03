@@ -14,8 +14,16 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **SDPA Reliability:** Removed the incorrect `M=1` GEMV fast-path that was misusing quantized kernels for attention activations. Now defaults to the robust batched GEMM path.
 - **Canonical Layout Support:** Optimized kernels (`ParallelProjectStage`, `FusedGemv`) now natively handle GGUF-standard blocked/canonical layouts.
 - **Tokenizer Streaming:** Fixed multi-byte UTF-8 decoding across token boundaries and added support for GGUF byte tokens (`<0xXX>`).
+- **Chat Template Parity:** Foundry now prefers the GGUF-provided `tokenizer.chat_template` for prompt formatting (avoids hardcoded system prompts that can change model behavior).
 
-### 3. Kernel Optimizations
+### 3. Sampling (Quality + Determinism)
+- **Min‑P Support:** Added `min_p` to the Foundry sampler (relative cutoff: `min_p * max_prob`) to better match common sampler stacks.
+- **Seed Stepping:** Sampling seed is advanced per generated token to avoid constant-seed repetition failure modes.
+- **Penalties (Enabled for Single‑Token Decode):** Repetition penalty is supported via a dedicated GPU kernel and defaults to `repeat_penalty=1.1`, `repeat_last_n=64` for `batch_size=1`. Presence/frequency penalties remain opt-in (default 0.0).
+- **Guardrails:** If batching is enabled (via env), the CLI logs a warning and force-disables repetition/presence/frequency penalties for correctness.
+- **Correct Logits Row:** After batched prefill, sampling uses the last token’s logits row (fixes “stuck/repetitive” generations caused by sampling row 0).
+
+### 4. Kernel Optimizations
 - **Fused RMSNorm/Project:** Specialized `WarpWriteOutputNoResidualStage` to reduce register pressure in fused paths.
 - **Quantized Embeddings:** Dedicated F16 and Q8_0 lookup kernels.
 - **Unified Activations:** Activations are now a first-class `Activation` enum option (compiled into kernel variants) across GEMV/GEMM/SwiGLU paths, reducing the need for one-off Metal edits and improving composability.
@@ -25,31 +33,31 @@ This document tracks the state of the Foundry backend transition, highlighting i
   - Tuning knobs: `METALLIC_FA_PREFILL_WARPS`, `METALLIC_FA_PREFILL_SPLIT_K`, `METALLIC_DISABLE_FA_PREFILL_SPLITK`, plus decode variant knobs.
   - Parity tests/sweeps exist to validate correctness and support tuning without editing kernels.
 
-### 4. Quantization Policy Architecture (Refactor)
+### 5. Quantization Policy Architecture (Refactor)
 - **Unified Policy System:** Replaced fragmented `Quantization` enum logic with a unified `Arc<dyn MetalPolicy>` trait object system across all kernel stages (`VectorizedDotStage`, `TileLoad`, etc.).
 - **Runtime-Driven Selection:** Kernel policies are now strictly derived from runtime `TensorArg` dtypes, eliminating incorrect fallbacks caused by missing model hints.
 - **Extensible Design:** New quantization schemes (Q4, INT8) can be added by implementing `MetalPolicy` without modifying core kernel generation logic.
 - **Zero-Leakage Enforcement**: Successfully removed all explicit `short_name() == "f16"` or `is_q8` branching from kernel stages and execution steps.
 
-### 5. Backend Reliability & Correctness
+### 6. Backend Reliability & Correctness
 - **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
 - **F16 Inference Fixed:** Resolved "Unsupported vector width" panic and added guardrails for scale argument binding in non-quantized policies.
 
-### 6. Grow-on-Demand Infrastructure
+### 7. Grow-on-Demand Infrastructure
 Foundry no longer reserves the full model context memory at startup. Instead, it uses a **Geometric Doubling** strategy:
 - **Initial Allocation:** Defaults to 2048 tokens (aligned to 128 for AMX performance).
 - **On-Demand Growth:** When the sequence (prefill or decode) exceeds current capacity, all context-dependent buffers (KV caches, expanded K/V, scratch) are reallocated and doubled.
 - **Max Bound:** Growth respects the `max_context_len` defined in model metadata or overridden by `METALLIC_MAX_CONTEXT_LEN`.
 
-### 7. History Preservation & Stride Alignment
+### 8. History Preservation & Stride Alignment
 Growth is seamless and "live" during generation:
 - **Head-by-Head Blit Copy:** Since KV layout is `[heads, capacity, dim]`, a change in `capacity` shifts the memory offset of every head. The system performs a high-speed GPU `blit_copy` to move existing tokens to their new head-relative offsets.
 - **Dynamic Stride Synchronization:** Attention kernels pull the physical `capacity` from `FastBindings` for every dispatch. This ensures that head indexing remains perfectly aligned even if the buffer grew in the previous step.
 
-### 8. Pluggable Eviction
+### 9. Pluggable Eviction
 The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEviction` (fail-fast at max context), the architecture is ready for sliding-window or sparse attention policies by implementing the `evict()` method.
 
-### 9. Post-Review Fixes (Implemented)
+### 10. Post-Review Fixes (Implemented)
 - **Fixed: capacity-dependent intermediates resize correctly:** context-dependent intermediates (`k_expanded`/`v_expanded`, `k_slice`/`v_slice`) are now explicitly reallocated during context growth (no “already bound” short-circuit).
 - **Fixed: max-context override semantics:** `METALLIC_MAX_CONTEXT_LEN` / DSL caps now *cap* runtime max context and are clamped to the model max (never exceed model).
 - **Fixed: RoPE scaling + growth:** RoPE cos/sin tables are sized to the *allocated capacity* and grow incrementally on demand, preserving history via GPU blit copies.
@@ -57,7 +65,7 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Fixed: test hygiene:** env-mutating context-config tests are now guarded with `serial_test`.
 - **Fixed: avoid panic paths:** growth paths now return typed `MetalError` instead of panicking on missing bindings/buffers.
 
-### 10. Safety & Encapsulation
+### 11. Safety & Encapsulation
 - **Safety & Encapsulation:** We centralize all `objc2` interaction and `unsafe` code within the `types` module system. This ensures that the rest of the Foundry codebase (`model`, `executor`, etc.) remains clean, safe Rust.
 
 ---
@@ -306,3 +314,8 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
     - Enforce "runtime dtype is the source of truth" across **all** kernel routing (ignore/verify any DSL quant hints).
     - Add a regression test that loads a spec without `b_quant` and asserts Foundry still selects Q8 kernels when the bound tensor is Q8.
 - **Verification:** Added `test_gemm_v2_step_runtime_policy_selection_q8` in `gemm_v2_parity.rs` which successfully verifies that Foundry selects Q8 kernels for Q8-bound tensors even without DSL hints.
+
+### 19. Workflow DX (Foundry)
+- **Message-Driven Workflows:** Restored `multiturn_chat*.json` workflows with `format_chat` + `tokenize` inside the workflow graph.
+- **Schema Alias:** Workflows accept both `steps` and `phases` keys (to avoid confusion with model DSL “steps”).
+- **Debug Knobs:** `METALLIC_DEBUG_TOKENIZE` and `METALLIC_DEBUG_CHAT_TEMPLATE` print formatted prompts + token heads for parity debugging.

@@ -8,6 +8,7 @@ pub(crate) struct TokenizeOp {
     model_id: Option<String>,
     input_var: String,
     output_var: String,
+    mode: Option<String>,
 }
 
 impl TokenizeOp {
@@ -16,6 +17,7 @@ impl TokenizeOp {
             model_id: spec.model_id,
             input_var: spec.input,
             output_var: spec.output,
+            mode: spec.mode,
         }
     }
 }
@@ -43,7 +45,43 @@ impl WorkflowOp for TokenizeOp {
             )));
         };
 
-        let tokens = tokenizer.encode(text)?;
+        let mode = self.mode.as_deref().unwrap_or("raw");
+        let tokens = match mode {
+            "raw" => tokenizer.encode(text)?,
+            "chat_single_turn" => tokenizer.encode_single_turn_chat_prompt(text)?,
+            other => {
+                return Err(MetalError::InvalidOperation(format!(
+                    "TokenizeOp unsupported mode '{other}' (expected 'raw' or 'chat_single_turn')"
+                )));
+            }
+        };
+
+        if std::env::var("METALLIC_DEBUG_TOKENIZE").is_ok() || std::env::var("METALLIC_DEBUG_CHAT_TEMPLATE").is_ok() {
+            let max_chars = 800usize;
+            let shown = text.chars().take(max_chars).collect::<String>();
+            let suffix = if text.chars().count() > max_chars { "…(truncated)" } else { "" };
+
+            let head_n = 64usize.min(tokens.len());
+            let token_head = &tokens[..head_n];
+            let decoded_head = tokenizer
+                .decode_lossless(token_head)
+                .unwrap_or_else(|_| "<decode_error>".to_string());
+
+            eprintln!(
+                "[metallic][debug] TokenizeOp mode={mode} input='{}' chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}{}",
+                self.input_var,
+                text.chars().count(),
+                tokens.len(),
+                token_head,
+                decoded_head,
+                if tokens.len() > head_n {
+                    "\n[metallic][debug] (decoded_head truncated to first 64 tokens)"
+                } else {
+                    ""
+                }
+            );
+            eprintln!("[metallic][debug] input_text_head:\n{}{}", shown, suffix);
+        }
         ctx.values.insert(self.output_var.clone(), Value::TokensU32(tokens));
 
         Ok(WorkflowOpOutcome::Continue)

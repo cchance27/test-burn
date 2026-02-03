@@ -5,6 +5,7 @@ mod check_eos;
 mod compute_int;
 mod control_flow;
 mod detokenize;
+mod format_chat;
 mod forward;
 mod graph_forward;
 
@@ -20,6 +21,7 @@ pub(crate) use check_eos::CheckEosOp;
 pub(crate) use compute_int::ComputeIntOp;
 pub(crate) use control_flow::{BreakOp, ContinueOp, IfOp, WhileOp};
 pub(crate) use detokenize::DetokenizeOp;
+pub(crate) use format_chat::FormatChatOp;
 pub(crate) use forward::ForwardOp;
 pub(crate) use graph_forward::GraphForwardOp;
 pub(crate) use prefill::PrefillOp;

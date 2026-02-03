@@ -1,5 +1,5 @@
 use crate::{
-    Foundry, error::MetalError, types::TensorArg, workflow::{
+    Foundry, error::MetalError, types::{MetalBuffer, MetalResourceOptions, TensorArg}, workflow::{
         Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext, spec::Param
     }
 };
@@ -14,6 +14,8 @@ pub(crate) struct GraphForwardOp {
     apply_derived_globals: bool,
     #[allow(dead_code)]
     description: Option<String>,
+    input_token_buffer: Option<MetalBuffer>,
+    input_token_arg: Option<TensorArg>,
 }
 
 impl GraphForwardOp {
@@ -27,6 +29,8 @@ impl GraphForwardOp {
             position: spec.position,
             apply_derived_globals: spec.apply_derived_globals,
             description: spec.description,
+            input_token_buffer: None,
+            input_token_arg: None,
         }
     }
 }
@@ -60,15 +64,32 @@ impl WorkflowOp for GraphForwardOp {
             let bindings = &mut session.bindings;
             let fast_bindings = &mut session.fast_bindings;
 
+            // Ensure KV capacity for this step. Without this, decode can write past the KV buffers or
+            // trigger growth without preserving history, which manifests as severe repetition.
+            model.ensure_kv_capacity(
+                foundry,
+                bindings,
+                fast_bindings,
+                &mut session.context_config,
+                session.current_pos,
+                pos_val.saturating_add(1),
+            )?;
+
             {
-                // Create a temporary buffer for the input token.
-
-                let input_buffer = foundry
-                    .device
-                    .new_buffer_from_slice(&[token], crate::types::MetalResourceOptions::StorageModeManaged)
-                    .unwrap();
-                let input_tensor = TensorArg::from_buffer(input_buffer, crate::tensor::Dtype::U32, vec![1], vec![1]);
-
+                // Reuse a persistent 1-token buffer to avoid per-token allocations and ensure
+                // correct CPU->GPU visibility on all storage modes.
+                if self.input_token_buffer.is_none() {
+                    let buf = foundry
+                        .device
+                        .new_buffer(4, MetalResourceOptions::StorageModeShared)
+                        .expect("Failed to allocate graph_forward input token buffer");
+                    let arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                    self.input_token_buffer = Some(buf);
+                    self.input_token_arg = Some(arg);
+                }
+                let buf = self.input_token_buffer.as_ref().expect("input_token_buffer set");
+                buf.copy_from_slice(&[token]);
+                let input_tensor = self.input_token_arg.as_ref().expect("input_token_arg set").clone();
                 model.set_binding(bindings, fast_bindings, &self.input_ids_binding, input_tensor);
             }
 
@@ -78,6 +99,10 @@ impl WorkflowOp for GraphForwardOp {
             }
 
             model.forward(foundry, bindings, fast_bindings)?;
+
+            // Keep session position consistent with the workflow's position variable so KV growth
+            // can preserve the correct number of tokens.
+            session.current_pos = pos_val.saturating_add(1);
 
             let logits = bindings.get(&self.logits_binding)?.clone();
             Ok(logits)

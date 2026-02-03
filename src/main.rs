@@ -96,6 +96,43 @@ fn main() -> AppResult<()> {
     let worker_output_format = cli_config.output_format.clone();
     let workflow_path = cli_config.workflow.clone();
 
+    fn env_bool(name: &str) -> bool {
+        let Ok(value) = std::env::var(name) else {
+            return false;
+        };
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+        let lowered = trimmed.to_ascii_lowercase();
+        !matches!(lowered.as_str(), "0" | "false" | "no" | "off")
+    }
+
+    fn env_usize(name: &str) -> Option<usize> {
+        let value = std::env::var(name).ok()?;
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        trimmed.parse::<usize>().ok()
+    }
+
+    fn env_is_set(name: &str) -> bool {
+        std::env::var(name).is_ok()
+    }
+
+    // Defensive: it's easy to accidentally leave `METALLIC_IGNORE_EOS_STOP=1` in the environment from
+    // benchmarking scripts. When enabled, generation can look "stuck" because workflows ignore EOS.
+    if env_bool("METALLIC_IGNORE_EOS_STOP") && !matches!(worker_output_format, cli::config::OutputFormat::None) {
+        tracing::warn!(
+            "METALLIC_IGNORE_EOS_STOP is enabled; EOS stopping is disabled (benchmark-only setting). Unset it for normal generation."
+        );
+    }
+
+    if env_bool("METALLIC_DISABLE_CHAT_TEMPLATE") {
+        tracing::warn!("METALLIC_DISABLE_CHAT_TEMPLATE is enabled; prompts will be tokenized as raw text (no chat formatting).");
+    }
+
     let (tx, rx) = mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel();
 
@@ -339,20 +376,94 @@ fn main() -> AppResult<()> {
 
                         let interactive = matches!(worker_output_format, cli::config::OutputFormat::Tui);
 
+                        let workflow_wants_messages = workflow_override
+                            .as_ref()
+                            .is_some_and(|wf| wf.inputs.iter().any(|i| i.name == "messages"));
+
+                        if interactive && workflow_wants_messages {
+                            return Err(anyhow::anyhow!(
+                                "Workflow declares 'messages' input (prompt-driven workflow). TUI mode currently requires token-based workflows (prompt_tokens)."
+                            ));
+                        }
+
                         worker_tx.send(AppEvent::StatusUpdate("Encoding prompt...".to_string()))?;
-                        let tokens0 = tokenizer.encode_single_turn_chat_prompt(&prompts[0])?;
+                        let debug_tokenize = env_is_set("METALLIC_DEBUG_TOKENIZE");
+                        let disable_chat_template = env_is_set("METALLIC_DISABLE_CHAT_TEMPLATE");
+                        if debug_tokenize {
+                            let formatted = if disable_chat_template {
+                                prompts[0].clone()
+                            } else {
+                                tokenizer.format_single_turn_chat_prompt(&prompts[0])?
+                            };
+                            let toks = tokenizer.encode(&formatted)?;
+                            let head_n = 64usize.min(toks.len());
+                            let decoded_head = tokenizer
+                                .decode_lossless(&toks[..head_n])
+                                .unwrap_or_else(|_| "<decode_error>".to_string());
+                            let max_chars = 800usize;
+                            let shown = formatted.chars().take(max_chars).collect::<String>();
+                            let suffix = if formatted.chars().count() > max_chars {
+                                "…(truncated)"
+                            } else {
+                                ""
+                            };
+                            eprintln!(
+                                "[metallic][debug] main: disable_chat_template={} chars={} tokens={} head_ids={:?}\n[metallic][debug] decoded_head:\n{}\n[metallic][debug] formatted_prompt_head:\n{}{}",
+                                disable_chat_template,
+                                formatted.chars().count(),
+                                toks.len(),
+                                &toks[..head_n],
+                                decoded_head,
+                                shown,
+                                suffix
+                            );
+                        }
+
+                        let tokens0 = if disable_chat_template {
+                            tokenizer.encode(&prompts[0])?
+                        } else {
+                            tokenizer.encode_single_turn_chat_prompt(&prompts[0])?
+                        };
 
                         let tokenization_duration = tokenization_start.elapsed();
                         worker_tx.send(AppEvent::TokenizationComplete(tokenization_duration))?;
 
-                        let cfg = metallic_foundry::generation::GenerationConfig {
+                        let mut cfg = metallic_foundry::generation::GenerationConfig {
                             max_tokens: worker_generation.max_tokens,
                             temperature: worker_generation.temperature as f32,
                             top_p: worker_generation.top_p as f32,
+                            min_p: worker_generation.min_p as f32,
                             top_k: worker_generation.top_k,
+                            repeat_penalty: worker_generation.repeat_penalty as f32,
+                            repeat_last_n: worker_generation.repeat_last_n,
+                            presence_penalty: worker_generation.presence_penalty as f32,
+                            frequency_penalty: worker_generation.frequency_penalty as f32,
                             kv_initial_headroom_tokens: 0,
                             seed: worker_generation.seed,
                         };
+
+                        // NOTE: repetition penalties are currently only correct for single-token decode.
+                        // If the user enables any form of batching, we force-disable repetition penalties to
+                        // avoid incorrect behavior (e.g., unstable repetition / quality regressions).
+                        let workflow_batch = env_usize("METALLIC_WORKFLOW_BATCH_SIZE");
+                        let decode_batch = env_usize("METALLIC_FOUNDRY_DECODE_BATCH_SIZE");
+                        let max_batch = workflow_batch.into_iter().chain(decode_batch).max().unwrap_or(1);
+                        if max_batch > 1
+                            && (cfg.repeat_last_n > 0
+                                || cfg.repeat_penalty != 1.0
+                                || cfg.presence_penalty != 0.0
+                                || cfg.frequency_penalty != 0.0)
+                        {
+                            tracing::warn!(
+                                "Batch size > 1 detected (METALLIC_WORKFLOW_BATCH_SIZE={:?}, METALLIC_FOUNDRY_DECODE_BATCH_SIZE={:?}); disabling repetition/presence/frequency penalties for correctness.",
+                                env_usize("METALLIC_WORKFLOW_BATCH_SIZE"),
+                                env_usize("METALLIC_FOUNDRY_DECODE_BATCH_SIZE"),
+                            );
+                            cfg.repeat_penalty = 1.0;
+                            cfg.repeat_last_n = 0;
+                            cfg.presence_penalty = 0.0;
+                            cfg.frequency_penalty = 0.0;
+                        }
 
                         worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
@@ -362,9 +473,32 @@ fn main() -> AppResult<()> {
                         let models = models_owned; // Ownership transfer / move for clarity, though we could just use models_owned.
 
                         if !interactive {
+                            if workflow_wants_messages {
+                                if prompts.len() > 1 {
+                                    return Err(anyhow::anyhow!(
+                                        "Workflow declares 'messages' input (prompt-driven workflow). Multi-turn CLI (--prompts ...) is not yet supported for prompt-driven workflows."
+                                    ));
+                                }
+
+                                worker_tx.send(AppEvent::TokenCount(tokens0.len()))?;
+                                let workflow = workflow_override.as_ref().expect("workflow_override present");
+                                metallic_foundry::generation::generate_streaming_with_workflow_from_prompt(
+                                    &mut foundry,
+                                    &models,
+                                    &tokenizer,
+                                    &prompts[0],
+                                    &cfg,
+                                    &worker_tx,
+                                    workflow.clone(),
+                                )?;
+                                return Ok(());
+                            }
+
                             for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
                                 let mut current_tokens = if turn_idx == 0 {
                                     tokens0.clone()
+                                } else if disable_chat_template {
+                                    tokenizer.encode(turn_prompt)?
                                 } else {
                                     tokenizer.encode_chat_continuation_prompt(turn_prompt)?
                                 };
@@ -1008,6 +1142,11 @@ fn process_text_mode_event(
             total_generation_time: total,
         } => {
             *total_generation_time = Some(total);
+            if !matches!(cli_config.output_format, cli::config::OutputFormat::None) {
+                // Ensure output ends with a newline so shells don't render a trailing `%`.
+                println!();
+                let _ = std::io::stdout().flush();
+            }
             if total_turns > 1 {
                 *turns_completed = turns_completed.saturating_add(1);
                 if *turns_completed < total_turns && !matches!(cli_config.output_format, cli::config::OutputFormat::None) {

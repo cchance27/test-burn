@@ -8,11 +8,29 @@ struct LogitPair { float value; uint index; };
 
 struct RNG {
     uint state;
-    inline void seed(uint s) { state = s ? s : 1u; }
+    inline uint mix(uint x) {
+        // 32-bit mix (avalanche) to decorrelate sequential seeds.
+        x ^= x >> 16;
+        x *= 0x7feb352du;
+        x ^= x >> 15;
+        x *= 0x846ca68bu;
+        x ^= x >> 16;
+        return x;
+    }
+    inline void seed(uint s) {
+        uint v = s ? s : 1u;
+        state = mix(v);
+        if (state == 0u) state = 1u;
+    }
     inline float next() {
-        state = state * 1664525u + 1013904223u;
+        // Fast xorshift RNG (hot path). We already mix once in `seed()` to decorrelate nearby seeds.
+        uint x = state;
+        x ^= x << 13;
+        x ^= x >> 17;
+        x ^= x << 5;
+        state = x;
         union { uint u; float f; } temp;
-        temp.u = (state >> 9) | 0x3f800000u;
+        temp.u = (x >> 9) | 0x3f800000u;
         return temp.f - 1.0f;
     }
 };
@@ -177,6 +195,8 @@ kernel void sample_topk_fused_f16(
     const float invT = static_cast<float>(1.0f / denom);
     const uint M     = params.per_thread_m;
 
+    // Per-thread candidate capacity. This must be >= typical `per_thread_m` to avoid
+    // systematically dropping viable top-k candidates (quality regression / repetition).
     constexpr uint MAX_LANE_HEAP = 4;
     constexpr uint SIMDGROUP_SHORTLIST = 64;
     constexpr uint SIMDGROUP_SHORTLIST_CAP = MAX_SIMDGROUPS * SIMDGROUP_SHORTLIST;
@@ -340,22 +360,34 @@ kernel void sample_topk_fused_f16(
             out_token[0] = final_heap[0].index < V ? final_heap[0].index : 0u;
             return;
         }
+        const float top_p = clamp(params.top_p, 0.0f, 1.0f);
+        const float min_p = clamp(params.min_p, 0.0f, 1.0f);
+        const float max_prob = final_heap[0].value / sum;
+        const float min_p_cut = (min_p > 0.0f) ? (min_p * max_prob) : 0.0f;
+
+        uint kept = 0;
         float cumulative = 0.0f;
-        uint cutoff = final_heap_size - 1;
-        float cutoff_sum = 0.0f;
         for (uint i = 0; i < final_heap_size; ++i) {
             float prob = final_heap[i].value / sum;
+            if (min_p_cut > 0.0f && prob < min_p_cut) {
+                continue;
+            }
+            final_heap[kept].index = final_heap[i].index;
+            final_heap[kept].value = prob;
             cumulative += prob;
-            final_heap[i].value = prob;
-            if (cumulative >= static_cast<float>(params.top_p)) {
-                cutoff = i;
-                cutoff_sum = cumulative;
+            kept += 1;
+            if (cumulative >= top_p) {
                 break;
             }
         }
-        if (cutoff == final_heap_size - 1 && cutoff_sum == 0.0f) {
-            cutoff_sum = cumulative;
+
+        if (kept == 0) {
+            out_token[0] = final_heap[0].index < V ? final_heap[0].index : 0u;
+            return;
         }
+
+        const float cutoff_sum = cumulative;
+        const uint cutoff = kept - 1;
         const float renorm = (cutoff_sum > 0.0f && isfinite(cutoff_sum)) ? (1.0f / cutoff_sum) : 1.0f;
         for (uint i = 0; i <= cutoff; ++i) {
             final_heap[i].value *= renorm;

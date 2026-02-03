@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     WorkflowSpec, WorkflowStepSpec, ops::{
-        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, ForwardOp, GraphForwardOp, IfOp, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileOp, WorkflowOp
+        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileOp, WorkflowOp
     }
 };
 use crate::error::MetalError;
@@ -59,6 +59,7 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
     m.insert("sample".to_string(), make_std_builder(SampleOp::new));
     m.insert("tokenize".to_string(), make_std_builder(TokenizeOp::new));
     m.insert("detokenize".to_string(), make_std_builder(DetokenizeOp::new));
+    m.insert("format_chat".to_string(), make_std_builder(FormatChatOp::new));
     m.insert("set_globals".to_string(), make_std_builder(SetGlobalsOp::new));
     m.insert("return".to_string(), make_std_builder(ReturnOp::new));
     m.insert("compute_int".to_string(), make_std_builder(ComputeIntOp::new));

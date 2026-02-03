@@ -1,0 +1,52 @@
+{
+  "name": "MultiturnChatDirect",
+  "description": "Alias of multiturn_chat.json for backwards compatibility.",
+  "default_model": "llm",
+  "inputs": [
+    { "name": "messages", "type": "array", "description": "List of {role, content} messages" },
+    { "name": "max_tokens", "type": "u32", "default": 256 },
+    { "name": "temperature", "type": "f32", "default": 0.8 },
+    { "name": "top_k", "type": "u32", "default": 40 },
+    { "name": "top_p", "type": "f32", "default": 0.95 },
+    { "name": "min_p", "type": "f32", "default": 0.05 },
+    { "name": "repeat_penalty", "type": "f32", "default": 1.1 },
+    { "name": "repeat_last_n", "type": "usize", "default": 64 },
+    { "name": "presence_penalty", "type": "f32", "default": 0.0 },
+    { "name": "frequency_penalty", "type": "f32", "default": 0.0 },
+    { "name": "seed", "type": "u32", "default": 42 },
+    { "name": "eos_token", "type": "u32", "default": 151645 }
+  ],
+  "steps": [
+    { "op": "format_chat", "model_id": "llm", "input": "messages", "output": "formatted_prompt", "add_generation_prompt": true },
+    { "op": "tokenize", "model_id": "llm", "input": "formatted_prompt", "output": "prompt_tokens" },
+    { "op": "prefill", "model_id": "llm", "input": "prompt_tokens", "logits_binding": "logits" },
+    { "op": "compute_int", "output": "current_pos", "expr": "{prompt_tokens.len}" },
+    {
+      "op": "while",
+      "condition": "max_tokens",
+      "max_iterations": "{max_tokens}",
+      "body": [
+        {
+          "op": "sample",
+          "logits": "logits",
+          "output": "next_token",
+          "temperature": "{temperature}",
+          "top_k": "{top_k}",
+          "top_p": "{top_p}",
+          "min_p": "{min_p}",
+          "repeat_penalty": "{repeat_penalty}",
+          "repeat_last_n": "{repeat_last_n}",
+          "presence_penalty": "{presence_penalty}",
+          "frequency_penalty": "{frequency_penalty}",
+          "seed": "{seed}"
+        },
+        { "op": "check_eos", "input": "next_token", "output": "is_eos", "eos_token": "{eos_token}" },
+        { "op": "if", "condition": "is_eos", "then": [ { "op": "break" } ] },
+        { "op": "append_token", "input": "next_token", "output": "generated_tokens" },
+        { "op": "graph_forward", "model_id": "llm", "token_var": "next_token", "logits_binding": "logits", "position": "{current_pos}" },
+        { "op": "compute_int", "output": "current_pos", "expr": "{current_pos} + 1" }
+      ]
+    },
+    { "op": "return", "output": "generated_tokens" }
+  ]
+}

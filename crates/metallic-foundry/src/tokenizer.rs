@@ -736,6 +736,12 @@ impl BPETokenizer {
         self.chat_template.as_ref()
     }
 
+    /// Returns true if the tokenizer vocabulary contains the exact token string.
+    #[inline]
+    pub fn has_token(&self, token: &str) -> bool {
+        self.vocab_r.contains_key(token)
+    }
+
     pub fn set_chat_template(&mut self, template: String) {
         self.chat_template = Some(ChatTemplate::new(&template));
     }
@@ -749,51 +755,33 @@ impl BPETokenizer {
             return Ok(prompt.to_string());
         }
 
-        // Qwen2/Qwen2.5 models typically use the <|im_start|> chat format.
-        // Metallic Context uses a specific system prompt string; keep Foundry aligned for parity.
-        const QWEN_SYSTEM_PROMPT: &str = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant.";
-        let has_qwen_chat_tokens = self.vocab_r.contains_key("<|im_start|>") && self.vocab_r.contains_key("<|im_end|>");
+        // Prefer GGUF-provided chat template when available (most correct, matches LM Studio / llama.cpp).
+        if let Some(template) = &self.chat_template {
+            let bos_token = self
+                .special_tokens
+                .bos_token_id
+                .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
+            let eos_token = self
+                .special_tokens
+                .eos_token_id
+                .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
 
-        if has_qwen_chat_tokens {
-            // Match the canonical Qwen chat formatting expected by many instruct fine-tunes.
-            // We intentionally do not consult tokenizer.chat_template here because some GGUFs omit it.
-            let mut s = String::with_capacity(prompt.len() + 128);
-            s.push_str("<|im_start|>system\n");
-            s.push_str(QWEN_SYSTEM_PROMPT);
-            s.push_str("<|im_end|>\n");
-            s.push_str("<|im_start|>user\n");
-            s.push_str(prompt);
-            s.push_str("<|im_end|>\n");
-            s.push_str("<|im_start|>assistant\n");
-            return Ok(s);
+            let messages = vec![
+                Message {
+                    role: "system".to_string(),
+                    content: "You are a helpful assistant.".to_string(),
+                },
+                Message {
+                    role: "user".to_string(),
+                    content: prompt.to_string(),
+                },
+            ];
+
+            return template.render(&messages, bos_token, eos_token, true);
         }
 
-        let Some(template) = &self.chat_template else {
-            return Ok(prompt.to_string());
-        };
-
-        let bos_token = self
-            .special_tokens
-            .bos_token_id
-            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
-        let eos_token = self
-            .special_tokens
-            .eos_token_id
-            .and_then(|id| self.vocab.get(&id).map(|s| s.as_ref()));
-
-        // Default system prompt for generic chat templates (non-Qwen).
-        let messages = vec![
-            Message {
-                role: "system".to_string(),
-                content: "You are a helpful assistant.".to_string(),
-            },
-            Message {
-                role: "user".to_string(),
-                content: prompt.to_string(),
-            },
-        ];
-
-        template.render(&messages, bos_token, eos_token, true)
+        // Fallback: if the tokenizer doesn't provide a template, pass raw prompt through.
+        Ok(prompt.to_string())
     }
 
     pub fn encode_single_turn_chat_prompt(&self, prompt: &str) -> Result<Vec<u32>, MetalError> {

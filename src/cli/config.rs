@@ -52,16 +52,36 @@ pub struct GenerationConfig {
     pub max_tokens: usize,
 
     /// Temperature for sampling (0.0-2.0)
-    #[arg(long, default_value_t = 0.7)]
+    #[arg(long, default_value_t = 0.8)]
     pub temperature: f64,
 
     /// Top-p sampling parameter (0.0-1.0)
     #[arg(long, default_value_t = 0.95)]
     pub top_p: f64,
 
+    /// Min-p sampling parameter (0.0-1.0). 0.0 disables min-p.
+    #[arg(long, default_value_t = 0.05)]
+    pub min_p: f64,
+
     /// Top-k sampling parameter (0-100)
     #[arg(long, default_value_t = 40)]
     pub top_k: usize,
+
+    /// Repeat penalty (>= 1.0). 1.0 disables repeat penalty.
+    #[arg(long, default_value_t = 1.1)]
+    pub repeat_penalty: f64,
+
+    /// Number of recent tokens to consider for repeat penalty.
+    #[arg(long, default_value_t = 64)]
+    pub repeat_last_n: usize,
+
+    /// Presence penalty (>= 0.0). 0.0 disables presence penalty.
+    #[arg(long, default_value_t = 0.0)]
+    pub presence_penalty: f64,
+
+    /// Frequency penalty (>= 0.0). 0.0 disables frequency penalty.
+    #[arg(long, default_value_t = 0.0)]
+    pub frequency_penalty: f64,
 
     /// Random seed for sampling (optional)
     #[arg(long)]
@@ -132,9 +152,14 @@ impl Default for GenerationConfig {
     fn default() -> Self {
         Self {
             max_tokens: 4096,
-            temperature: 0.7,
+            temperature: 0.8,
             top_p: 0.95,
+            min_p: 0.05,
             top_k: 40,
+            repeat_penalty: 1.1,
+            repeat_last_n: 64,
+            presence_penalty: 0.0,
+            frequency_penalty: 0.0,
             seed: None,
         }
     }

@@ -16,7 +16,7 @@
     {
       "name": "temperature",
       "type": "f32",
-      "default": 0.7
+      "default": 0.8
     },
     {
       "name": "top_k",
@@ -27,6 +27,31 @@
       "name": "top_p",
       "type": "f32",
       "default": 0.95
+    },
+    {
+      "name": "min_p",
+      "type": "f32",
+      "default": 0.05
+    },
+    {
+      "name": "repeat_penalty",
+      "type": "f32",
+      "default": 1.1
+    },
+    {
+      "name": "repeat_last_n",
+      "type": "usize",
+      "default": 64
+    },
+    {
+      "name": "presence_penalty",
+      "type": "f32",
+      "default": 0.0
+    },
+    {
+      "name": "frequency_penalty",
+      "type": "f32",
+      "default": 0.0
     },
     {
       "name": "seed",
@@ -64,6 +89,11 @@
           "temperature": "{temperature}",
           "top_k": "{top_k}",
           "top_p": "{top_p}",
+          "min_p": "{min_p}",
+          "repeat_penalty": "{repeat_penalty}",
+          "repeat_last_n": "{repeat_last_n}",
+          "presence_penalty": "{presence_penalty}",
+          "frequency_penalty": "{frequency_penalty}",
           "seed": "{seed}"
         },
         {

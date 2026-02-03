@@ -132,6 +132,8 @@ pub struct WorkflowSpec {
     pub resources: Option<WorkflowResourcesSpec>,
     #[serde(default)]
     pub inputs: Vec<WorkflowInputSpec>,
+    // DX/back-compat: accept `phases` as an alias for `steps` to avoid confusion with model DSL "steps".
+    #[serde(alias = "phases")]
     pub steps: Vec<WorkflowStepSpec>,
 }
 
@@ -213,6 +215,16 @@ pub struct SampleSpec {
     #[serde(default)]
     pub top_p: Param<f32>,
     #[serde(default)]
+    pub min_p: Param<f32>,
+    #[serde(default)]
+    pub repeat_penalty: Param<f32>,
+    #[serde(default)]
+    pub repeat_last_n: Param<usize>,
+    #[serde(default)]
+    pub presence_penalty: Param<f32>,
+    #[serde(default)]
+    pub frequency_penalty: Param<f32>,
+    #[serde(default)]
     pub seed: Param<u32>,
 }
 
@@ -224,6 +236,25 @@ pub struct TokenizeSpec {
     pub input: String,
     /// Output tokens variable (TokensU32).
     pub output: String,
+    /// Tokenization mode.
+    ///
+    /// Supported values:
+    /// - `"raw"` (default): `tokenizer.encode(text)`
+    /// - `"chat_single_turn"`: `tokenizer.encode_single_turn_chat_prompt(text)`
+    #[serde(default)]
+    pub mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FormatChatSpec {
+    #[serde(default)]
+    pub model_id: Option<String>,
+    /// Input messages variable (Value::Array of message maps).
+    pub input: String,
+    /// Output formatted prompt text variable.
+    pub output: String,
+    #[serde(default)]
+    pub add_generation_prompt: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -263,7 +294,8 @@ pub struct ComputeIntSpec {
 pub struct IfSpec {
     pub condition: String,
     pub then: Vec<WorkflowStepSpec>,
-    #[serde(default)]
+    // Use `else` in JSON (Rust keyword).
+    #[serde(rename = "else", default)]
     pub else_: Vec<WorkflowStepSpec>,
 }
 
@@ -272,6 +304,8 @@ pub struct WhileSpec {
     pub condition: String,
     #[serde(default)]
     pub max_iterations: Option<Param<usize>>,
+    // Back-compat: accept `phases` as an alias for `body`.
+    #[serde(alias = "phases")]
     pub body: Vec<WorkflowStepSpec>,
 }
 

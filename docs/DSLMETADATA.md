@@ -139,7 +139,34 @@ The workflow spec is intentionally op-based:
 - `loop` with stages like `sample`, `check_eos`, `append_token`, `graph_forward`
 - `return`
 
-Execution is implemented as Rust op trait objects (one per step) so runtime state lives with the ops, while the workflow JSON remains data-only.
+Execution is implemented as Rust op trait objects (one per workflow op) so runtime state lives with the ops, while the workflow JSON remains data-only.
+
+Note: The workflow JSON accepts both `steps` and `phases` as equivalent keys (alias), since “steps” is also used to refer to model DSL/kernel steps.
+
+### Sampling parameters (current state)
+
+Sampling is still executed as a single GPU kernel (`SampleTopK`) that implements:
+
+- `temperature`
+- `top_k`
+- `top_p`
+- `min_p` (relative cutoff: `min_p * max_prob`)
+
+Important implementation notes:
+
+- Sampling seed is now **advanced per generated token** (instead of reusing a constant seed each iteration). This avoids “repeat the same sampled token forever” failure modes.
+- Repetition penalty is supported via a dedicated GPU kernel and defaults to `repeat_penalty=1.1`, `repeat_last_n=64` for single-token decode. Presence/frequency penalties remain opt-in (default 0.0). When batching is enabled, penalties are force-disabled for correctness (see CLI warning) until we have correct multi-token batching semantics.
+
+### Prompt formatting + tokenization (workflow vs host)
+
+Foundry supports two prompt ingestion patterns:
+
+1. **Token-driven** (host tokenizes): workflows like `text_generation.json` accept `prompt_tokens` and operate purely on token ids.
+2. **Message-driven** (workflow tokenizes): workflows like `multiturn_chat.json` accept `messages`, run `format_chat` + `tokenize` inside the workflow, then prefill/decode.
+
+Debug helpers:
+- `METALLIC_DEBUG_TOKENIZE=1` prints the formatted prompt head + token id head (first 64 tokens) and a lossless decode of that head.
+- `METALLIC_DEBUG_CHAT_TEMPLATE=1` prints the rendered chat template output from `format_chat`.
 
 ### Multi-Model Support
 
@@ -154,17 +181,17 @@ Ops such as `prefill`, `forward`, and `set_globals` targets specific models via 
 
 ## Qwen chat prompt parity (important)
 
-Qwen2/Qwen2.5 instruct GGUFs often require the canonical `<|im_start|>` chat format and the Qwen system prompt to behave correctly.
+Qwen2/Qwen2.5 instruct GGUFs often ship a `tokenizer.chat_template` that defines the canonical `<|im_start|>` chat format.
 
-Foundry now aligns its single-turn chat formatting with the legacy Context engine by default when Qwen chat tokens are present:
+Foundry prefers the GGUF-provided chat template when present (this matches typical llama.cpp / LM Studio behavior).
+Avoid hardcoding model-family-specific system prompts in code; it can materially change behavior (including refusals).
 
-- System prompt: `You are Qwen, created by Alibaba Cloud. You are a helpful assistant.`
-- Format:
-  - `<|im_start|>system\n...<|im_end|>\n`
-  - `<|im_start|>user\n...<|im_end|>\n`
-  - `<|im_start|>assistant\n`
+Debugging / overrides:
+- `METALLIC_DEBUG_TOKENIZE=1` shows the final formatted prompt text and token ids used for prefill.
+- `METALLIC_DISABLE_CHAT_TEMPLATE=1` forces raw prompt tokenization in the CLI path.
+- `METALLIC_SYSTEM_PROMPT="..."` overrides the system prompt used when constructing `messages` for message-driven workflows.
 
-This eliminates “token-count mismatch” style parity issues and improves reliability when swapping engines.
+This helps avoid “token-count mismatch” parity issues and improves reliability when swapping engines.
 
 ### Regression test (ignored; requires local GGUF)
 
@@ -198,7 +225,8 @@ These are the “next sprint” items we still need to remove or generalize to s
 2. Loop semantics are still specialized.
    - `condition` is not interpreted yet and the current loop defaults to “repeat until `max_tokens` or EOS”.
 3. Sampling is still hardcoded to `SampleTopK`.
-   - No sampler trait/object pluggability yet (greedy/top-k/top-p are folded into one kernel call).
+   - No sampler trait/object pluggability yet (greedy/top-k/top-p/min-p are folded into one kernel call).
+   - Repetition/presence/frequency penalties exist but are not yet a fully general “sampler stack”.
 4. Tokenization/prompt formatting are still outside the workflow.
    - Workflows currently begin at `prompt_tokens`; tokenization/chat templating is still driven by Rust-side generation.
 5. CLI Foundry spec selection is still architecture-hardcoded by default.

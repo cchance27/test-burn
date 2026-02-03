@@ -14,6 +14,7 @@ pub struct SampleParams {
     pub vocab_size: u32,
     pub k: u32,
     pub top_p: f32,
+    pub min_p: f32,
     pub temperature: f32,
     pub seed: u32,
     pub per_thread_m: u32,
@@ -47,7 +48,16 @@ pub struct SampleTopK {
 
 impl SampleTopK {
     /// Create a new SampleTopK kernel.
-    pub fn new(logits: &TensorArg, output: &TensorArg, vocab_size: u32, k: u32, top_p: f32, temperature: f32, seed: u32) -> Self {
+    pub fn new(
+        logits: &TensorArg,
+        output: &TensorArg,
+        vocab_size: u32,
+        k: u32,
+        top_p: f32,
+        min_p: f32,
+        temperature: f32,
+        seed: u32,
+    ) -> Self {
         const THREADS_PER_GROUP_DEFAULT: u32 = 1024;
         const PER_THREAD_M_CLAMP_DEFAULT: u32 = 40;
 
@@ -86,6 +96,7 @@ impl SampleTopK {
                 vocab_size,
                 k,
                 top_p,
+                min_p,
                 temperature,
                 seed,
                 per_thread_m,

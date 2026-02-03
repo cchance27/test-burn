@@ -134,8 +134,11 @@ impl CaptureMetrics {
 
     pub(crate) fn record_kernel(&mut self, name: &str) {
         self.dispatches = self.dispatches.saturating_add(1);
-        let slot = self.kernel_counts.entry(name.to_string()).or_insert(0);
-        *slot = slot.saturating_add(1);
+        if let Some(slot) = self.kernel_counts.get_mut(name) {
+            *slot = slot.saturating_add(1);
+            return;
+        }
+        self.kernel_counts.insert(name.to_string(), 1);
     }
 }
 

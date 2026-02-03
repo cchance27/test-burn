@@ -2160,6 +2160,7 @@ impl CompiledModel {
                 vocab_size,
                 effective_top_k,
                 top_p,
+                0.0,
                 temperature,
                 seed.wrapping_add(step as u32),
             );

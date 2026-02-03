@@ -215,6 +215,11 @@ impl<'a> WorkflowRunner<'a> {
                         inputs.insert(inp.name.clone(), Value::U32(v as u32));
                     }
                 }
+                "usize" => {
+                    if let Some(v) = default.as_u64() {
+                        inputs.insert(inp.name.clone(), Value::Usize(v as usize));
+                    }
+                }
                 "f32" => {
                     if let Some(v) = default.as_f64() {
                         inputs.insert(inp.name.clone(), Value::F32(v as f32));
