@@ -19,7 +19,8 @@ Design priorities:
   - workflow ops `stream_init` + `stream_write_u32`
   - a sample workflow `text_generation_stream_u32.json`
   - a focused integration test validating channel emission matches `generated_tokens`
-  - runner async polling is not yet implemented (stream drain is manual via `ChannelU32Reader`)
+  - `while_batched.stream_channel` can emit tokens via `ChannelU32` instead of per-token scalar readback
+  - `while_batched.stream_async_poll` provides safe overlap via *pipelined* command buffers (drain batch N while GPU runs batch N+1)
 
 ---
 
@@ -117,16 +118,19 @@ Goal: use channels to stream token ids without per-token waits in throughput mod
 
 ### 2) Runner/TUI integration
 
-- Throughput: commit large decode windows and CPU polls channel while GPU executes. ⏳
+- Throughput: commit large decode windows and overlap CPU work with GPU decode. ✅ (pipelined, batch-granularity)
 - Interactive/TUI: small windows or hybrid (completion handler + chunked polling) to keep latency low. ⏳
 
 Notes:
 
-- Today, `WhileBatchedOp` drives token callbacks directly (via the `on_token` callback) and `stream_write_u32`
-  writes into the channel for later inspection. This avoids forcing any additional synchronization while
-  we validate correctness and refine the async polling design.
-- When we add async polling, we should expose it behind an explicit runner option/workflow opt-in so we
-  don’t risk double-emitting tokens (both `on_token` and channel drain).
+- With `stream_channel` enabled, `while_batched` sources token emission from the channel instead of `token_var`.
+- With `stream_async_poll` enabled, overlap is achieved by pipelining command buffers, not by reading the ring
+  buffer mid-command-buffer (which would require stronger device→CPU ordering guarantees than Metal provides today).
+
+Debug helpers:
+
+- `METALLIC_DEBUG_WORKFLOW_OPS=1`: logs workflow op execution and `while_batched` stream config.
+- `METALLIC_DEBUG_STREAM_POLL=1`: logs one summary line per pipelined drain (tokens drained + inflight count).
 
 ### 3) EOS + KV safety
 
@@ -134,6 +138,15 @@ Maintain the existing guardrails:
 
 - multi-turn workflows must not use “overshoot” batching unless explicitly opting in.
 - streaming windows must not leak tokens that were computed past EOS into the visible transcript.
+
+Current limitation (important):
+
+- `while_batched.stream_async_poll` is only enabled when EOS stopping is disabled (`METALLIC_IGNORE_EOS_STOP=1`).
+  If EOS stopping is enabled, Foundry disables async polling for that run (warns) and falls back to synchronous
+  draining. This mode is intended for throughput/single-turn. Multi-turn EOS-safe pipelining needs explicit
+  windowing logic.
+- For async polling, channel capacity must be at least `2 * batch_size` so draining can lag by one batch without
+  overwriting unread tokens.
 
 ---
 

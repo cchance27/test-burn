@@ -6,7 +6,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 
 ### 1. Interactive Multi-Turn Chat
 - **TUI Integration:** Full-featured input box and event loop support for real-time chat.
-- **CLI Multi-Turn:** Support for multiple `--prompts` arguments and continuous session state (including message-driven workflows).
+- **CLI Multi-Turn:** Supports multiple `--prompts` arguments for prompt-driven workflows (`inputs: ["messages", ...]`), reusing the same Foundry session between turns.
 - **Session Persistence:** `ModelSession` now correctly tracks `current_pos` and updates global position indices across forward passes.
 - **Log Management:** TUI now captures and redirects `tracing` logs to a dedicated pane, preventing terminal corruption.
 
@@ -19,13 +19,20 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 3. Sampling (Quality + Determinism)
 - **Min‑P Support:** Added `min_p` to the Foundry sampler (relative cutoff: `min_p * max_prob`) to better match common sampler stacks.
 - **Seed Stepping:** Sampling seed is advanced per generated token to avoid constant-seed repetition failure modes.
-- **Penalties (Enabled by Default):** Repetition/presence/frequency penalties are supported via dedicated GPU kernels and default to `repeat_penalty=1.1`, `repeat_last_n=64`, `presence_penalty=0.0`, `frequency_penalty=0.0` in the default text-generation workflow.
-- **Penalties (Batch-Compatible):** Penalties are maintained and applied on GPU (no per-token CPU sorting/copy), so repetition/presence/frequency can remain enabled under batching.
+- **Penalties:** Repetition/presence/frequency penalties are supported (GPU-side) and default to `repeat_penalty=1.1`, `repeat_last_n=64`, `presence_penalty=0.0`, `frequency_penalty=0.0` in the default workflows/CLI. Throughput benchmarking disables these via the throughput script flags.
 - **Correct Logits Row:** After batched prefill, sampling uses the last token’s logits row (fixes “stuck/repetitive” generations caused by sampling row 0).
 
 ### 3.5 Workflow Decode Batching (Throughput)
 - **Batched Decode in Workflows:** Added `while_batched` to execute decode loops in chunks inside a single Metal capture and emit tokens at the batch boundary.
 - **EOS Overshoot Trimming:** When EOS stop is enabled, output stops at EOS at the batch boundary without emitting EOS (overshoot tokens may still be computed but are not emitted).
+
+### 3.6 Workflow Streaming + Async Windows (Latency/Throughput)
+- **Channel Framework (v1):** Introduced `ChannelU32` (shared-memory ring buffer) to stream token ids without per-token scalar readback.
+- **Streaming Ops:** Added `stream_init` + `stream_write_u32` and a sample workflow `crates/metallic-foundry/workflows/text_generation_stream_u32.json`.
+- **Batched Streaming:** `while_batched.stream_channel` can emit tokens via `ChannelU32` instead of reading `token_var` each iteration.
+- **Safe Overlap (Pipelined):** `while_batched.stream_async_poll` overlaps CPU token draining for batch *N* while GPU executes batch *N+1* (batch-granularity; not mid-command-buffer polling). Only enabled when EOS stopping is disabled (`METALLIC_IGNORE_EOS_STOP=1`); otherwise Foundry falls back to synchronous draining (warns).
+- **Capture Ops:** Added `capture_begin`, `capture_end`, `capture_wait` plus `Value::CommandBuffer` for explicit async windows / command-buffer pipelining.
+- **Debugging:** `METALLIC_DEBUG_WORKFLOW_OPS=1` logs workflow op execution; `METALLIC_DEBUG_STREAM_POLL=1` logs per-batch pipelined drain summaries.
 
 ### 4. Kernel Optimizations
 - **Fused RMSNorm/Project:** Specialized `WarpWriteOutputNoResidualStage` to reduce register pressure in fused paths.
@@ -46,6 +53,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 6. Backend Reliability & Correctness
 - **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
 - **F16 Inference Fixed:** Resolved "Unsupported vector width" panic and added guardrails for scale argument binding in non-quantized policies.
+- **EOS Token Source:** `eos_token` is inferred from the tokenizer/model metadata (workflow/CLI no longer needs to hardcode it).
 
 ### 7. Grow-on-Demand Infrastructure
 Foundry no longer reserves the full model context memory at startup. Instead, it uses a **Geometric Doubling** strategy:

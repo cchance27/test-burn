@@ -138,6 +138,12 @@ The workflow spec is intentionally op-based:
 - `prefill`
 - `while` with stages like `sample`, `check_eos`, `append_token`, `graph_forward`
 - `while_batched` (decode batching): executes the loop body in batches inside a single Metal capture, then emits tokens at the batch boundary.
+- Streaming primitives:
+  - `stream_init`, `stream_write_u32` (ChannelU32 token stream)
+  - `while_batched.stream_channel` (emit tokens from the channel instead of per-token scalar readback)
+  - `while_batched.stream_async_poll` (safe overlap via pipelined command buffers; throughput/single-turn)
+- Capture primitives:
+  - `capture_begin`, `capture_end`, `capture_wait` (explicit async windows / command-buffer pipelining)
 - `return`
 
 Execution is implemented as Rust op trait objects (one per workflow op) so runtime state lives with the ops, while the workflow JSON remains data-only.
@@ -155,17 +161,30 @@ Note: The workflow JSON accepts both `steps` and `phases` as equivalent keys (al
 
 Decode batching (`while_batched`) improves throughput by amortizing command-buffer submission and host sync overhead, but it increases user-visible latency because tokens are emitted at the batch boundary.
 
-The intended long-term solution on Apple Silicon (UMA) is **zero-copy polling**:
+The long-term solution on Apple Silicon (UMA) is **zero-copy streaming**:
 
 - Allocate a small **shared-memory ring buffer** for token output (and optionally per-token timing).
 - During a large capture window, the GPU writes token ids (or pre-decoded bytes) into the ring buffer as it generates them.
-- The CPU can poll/stream tokens while the GPU is still executing, avoiding a `wait_until_completed` per token.
+- The CPU can stream tokens without a `wait_until_completed` per token.
 
-This will require adding a workflow-level mechanism to configure the output buffer(s) and a streaming contract that is compatible with:
+Current state:
 
-- multi-turn KV reuse (no “KV overshoot” surprises),
-- throughput mode (`METALLIC_IGNORE_EOS_STOP=1`),
-- interactive mode (low latency, potentially smaller windows).
+- Foundry has `ChannelU32` plus workflow ops (`stream_init`, `stream_write_u32`) and `while_batched.stream_channel`.
+- “Async poll” overlap is implemented safely via **pipelined command buffers**: while the GPU executes batch `N+1`,
+  the CPU drains/emits tokens from batch `N` after its command buffer completes.
+  - This improves end-to-end overlap but is still *batch-granularity*, not true “mid-command-buffer” streaming.
+
+Important limitation:
+
+- `while_batched.stream_async_poll` is only enabled when EOS stopping is disabled (`METALLIC_IGNORE_EOS_STOP=1`).
+  If EOS stopping is enabled, Foundry disables async polling for that run (warns) and falls back to synchronous
+  draining. This mode is intended for throughput/single-turn. EOS-safe multi-turn pipelining needs explicit
+  windowing semantics that don't exist.
+
+Debug helpers:
+
+- `METALLIC_DEBUG_WORKFLOW_OPS=1`: logs workflow op execution order and `while_batched` stream configuration.
+- `METALLIC_DEBUG_STREAM_POLL=1`: logs per-batch pipelined drain summaries.
 
 ### Multi-turn chat delta semantics (important)
 
