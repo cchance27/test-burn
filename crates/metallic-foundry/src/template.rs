@@ -41,6 +41,11 @@ impl ChatTemplate {
         eos_token: Option<&str>,
         add_generation_prompt: bool,
     ) -> Result<String, MetalError> {
+        // Defensive: many GGUF chat templates expect `bos_token`/`eos_token` to be defined
+        // (as a string) even if empty. Passing `Option::None` through minijinja can surface as
+        // "undefined value" errors depending on template operations.
+        let bos_token = bos_token.unwrap_or("");
+        let eos_token = eos_token.unwrap_or("");
         let ctx = minijinja::context! {
             messages => messages,
             bos_token => bos_token,

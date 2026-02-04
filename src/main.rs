@@ -559,10 +559,20 @@ fn main() -> AppResult<()> {
                                     };
 
                                     let gen_start = std::time::Instant::now();
-                                    let _outputs = runner.run_streaming(workflow, inputs, &mut on_token)?;
-                                    let _ = worker_tx.send(AppEvent::GenerationComplete {
-                                        total_generation_time: gen_start.elapsed(),
-                                    });
+                                    match runner.run_streaming(workflow, inputs, &mut on_token) {
+                                        Ok(_outputs) => {
+                                            let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                                total_generation_time: gen_start.elapsed(),
+                                            });
+                                        }
+                                        Err(err) => {
+                                            alert::emit_error(&worker_tx, format!("Generation failed: {err:#}"));
+                                            let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                                total_generation_time: gen_start.elapsed(),
+                                            });
+                                            worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
+                                        }
+                                    }
                                 }
                                 return Ok(());
                             }
@@ -756,10 +766,20 @@ fn main() -> AppResult<()> {
                                 };
 
                                 let gen_start = std::time::Instant::now();
-                                let _outputs = runner.run_streaming(workflow, inputs, &mut on_token)?;
-                                let _ = worker_tx.send(AppEvent::GenerationComplete {
-                                    total_generation_time: gen_start.elapsed(),
-                                });
+                                match runner.run_streaming(workflow, inputs, &mut on_token) {
+                                    Ok(_outputs) => {
+                                        let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                            total_generation_time: gen_start.elapsed(),
+                                        });
+                                    }
+                                    Err(err) => {
+                                        alert::emit_error(&worker_tx, format!("Generation failed: {err:#}"));
+                                        let _ = worker_tx.send(AppEvent::GenerationComplete {
+                                            total_generation_time: gen_start.elapsed(),
+                                        });
+                                        worker_tx.send(AppEvent::StatusUpdate("Waiting for input...".to_string()))?;
+                                    }
+                                }
                             }
                         } else {
                             let mut is_first_turn = true;
