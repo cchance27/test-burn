@@ -106,7 +106,6 @@ impl Stage for FfnDualProjectStage {
         let norm_var = self.norm_shared_name.as_deref().unwrap_or("inv_rms");
 
         let scale_stride = "(ulong)row_idx * blocks_per_k * 2";
-        let byte_scale = self.policy.element_size();
 
         let norm_logic = if self.norm_shared_name.is_some() {
             format!(
@@ -167,15 +166,13 @@ impl Stage for FfnDualProjectStage {
 
         {{
             float w[{vec_width}];
-            const device uchar* w_ptr = w_gate + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
-            {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+            {policy}::template load_weights<{vec_width}>(w_gate, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
             acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
         }}
 
         {{
             float w[{vec_width}];
-            const device uchar* w_ptr = w_up + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
-            {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+            {policy}::template load_weights<{vec_width}>(w_up, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
             acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
         }}
 
@@ -210,15 +207,13 @@ impl Stage for FfnDualProjectStage {
 
         {{
             float w[{vec_width}];
-            const device uchar* w_ptr = w_gate + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
-            {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+            {policy}::template load_weights<{vec_width}>(w_gate, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
             acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
         }}
 
         {{
             float w[{vec_width}];
-            const device uchar* w_ptr = w_up + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
-            {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+            {policy}::template load_weights<{vec_width}>(w_up, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
             acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
         }}
 
@@ -230,7 +225,6 @@ impl Stage for FfnDualProjectStage {
             policy = policy,
             vec_width = vec_width,
             norm_logic = norm_logic,
-            byte_scale = byte_scale,
             scale_stride = scale_stride,
             scales_logic = scales_logic
         );

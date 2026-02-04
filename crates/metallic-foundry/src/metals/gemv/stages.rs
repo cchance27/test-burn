@@ -160,7 +160,7 @@ impl Stage for VectorizedDotStage {
         let policy = self.policy.struct_name();
         let vec_width = self.vector_width.elements();
         // Use F16-optimized path if requested and policy is consistent with F16 (2 bytes per element)
-        let use_f16_cols8 = self.f16_cols8 && self.policy.element_size() == 2 && matches!(self.vector_width, VectorWidth::Vec8);
+        let use_f16_cols8 = self.f16_cols8 && self.policy.meta().address_unit_bytes == 2 && matches!(self.vector_width, VectorWidth::Vec8);
 
         let (fast_norm_logic, tail_norm_logic) = if self.gamma_buffer.is_some() {
             match self.vector_width {

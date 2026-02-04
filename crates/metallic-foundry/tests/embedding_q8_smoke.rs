@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_foundry::{
-    Foundry, metals::embedding::EmbeddingStep, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8, U32}, types::TensorArg
+    Foundry, metals::embedding::EmbeddingStep, spec::{DynamicValue, Step, TensorBindings}, storage::Pooled, tensor::{F16, Q8_0, Tensor as FoundryTensor, TensorInit, U32}, types::TensorArg
 };
 
 #[test]
@@ -30,8 +30,8 @@ fn test_embedding_q8_smoke() -> Result<(), Box<dyn std::error::Error>> {
 
     let ids: Vec<u32> = vec![0, 1, 1];
 
-    let table_t = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![vocab, d_model], TensorInit::CopyFrom(&table))?;
-    let scales_t = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![scales.len()], TensorInit::CopyFrom(&scales))?;
+    let table_t = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![vocab, d_model], TensorInit::CopyFrom(&table))?;
+    let scales_t = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![scales.len()], TensorInit::CopyFrom(&scales))?;
     let ids_t = FoundryTensor::<U32, Pooled>::new(&mut foundry, vec![tokens], TensorInit::CopyFrom(&ids))?;
     let out_t = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![tokens * d_model], TensorInit::Uninitialized)?;
 

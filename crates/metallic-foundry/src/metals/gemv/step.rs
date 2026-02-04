@@ -105,7 +105,7 @@ pub fn get_gemv_v2_kernel(
             activation.struct_name()
         )
         .to_lowercase();
-        let use_f16_cols8 = policy_clone.element_size() == 2 && use_f16_cols8();
+        let use_f16_cols8 = policy_clone.meta().address_unit_bytes == 2 && use_f16_cols8();
 
         match (layout, strategy) {
             (Layout::RowMajor, GemvStrategy::Vectorized) | (Layout::RowMajor, GemvStrategy::Auto) => {

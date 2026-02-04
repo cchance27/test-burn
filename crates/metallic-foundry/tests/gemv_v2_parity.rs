@@ -449,9 +449,9 @@ fn run_gemv_v2_q8_parity_test(cfg: V2TestConfig) {
     let bias_data: Vec<f16> = (0..cfg.n).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
 
     // Create tensors
-    // Use U8 for weights to simulate raw bytes
-    use metallic_foundry::tensor::U8;
-    let weights = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![cfg.k * cfg.n], TensorInit::CopyFrom(&weights_data)).unwrap();
+    // Use Q8_0 for weights to represent packed byte weights.
+    use metallic_foundry::tensor::Q8_0;
+    let weights = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![cfg.k * cfg.n], TensorInit::CopyFrom(&weights_data)).unwrap();
     let scales = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_blocks], TensorInit::CopyFrom(&scales_data)).unwrap();
     let input = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.k], TensorInit::CopyFrom(&input_data)).unwrap();
     let _output_legacy = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.n], TensorInit::Uninitialized).unwrap();

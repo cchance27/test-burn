@@ -77,8 +77,10 @@ pub trait MetalPolicyRuntime: crate::fusion::MetalPolicy + Send + Sync + Debug {
 }
 
 pub mod activation;
+pub(crate) mod block_quant;
 pub mod f16;
 pub mod f32;
+pub mod q4_0;
 pub mod q8;
 
 use crate::tensor::Dtype;
@@ -89,7 +91,8 @@ impl From<Dtype> for GGUFDataType {
         match dtype {
             Dtype::F16 => GGUFDataType::F16,
             Dtype::F32 => GGUFDataType::F32,
-            Dtype::U8 => GGUFDataType::Q8_0,
+            Dtype::Q4_0 => GGUFDataType::Q4_0,
+            Dtype::Q8_0 => GGUFDataType::Q8_0,
             // NOTE: U32 is not a GGUF weight dtype. We still allow U32-typed utility kernels
             // (token buffers, control-flow helpers) to compile by mapping to a benign policy.
             Dtype::U32 => GGUFDataType::F32,
@@ -101,6 +104,7 @@ impl From<Dtype> for GGUFDataType {
 /// Registry to retrieve policies by GGUF type or name.
 pub fn resolve_policy(dtype: GGUFDataType) -> Arc<dyn MetalPolicyRuntime> {
     match dtype {
+        GGUFDataType::Q4_0 => Arc::new(q4_0::PolicyQ4_0),
         GGUFDataType::Q8_0 => Arc::new(q8::PolicyQ8),
         GGUFDataType::Q8_1 => {
             panic!("GGUF tensor dtype Q8_1 is not supported by Foundry yet (add a policy or convert the model).")
@@ -120,6 +124,7 @@ pub fn resolve_policy(dtype: GGUFDataType) -> Arc<dyn MetalPolicyRuntime> {
 pub fn resolve_policy_by_name(name: &str) -> Option<Arc<dyn MetalPolicyRuntime>> {
     match name {
         "f16" => Some(Arc::new(f16::PolicyF16)),
+        "q4_0" => Some(Arc::new(q4_0::PolicyQ4_0)),
         "q8" => Some(Arc::new(q8::PolicyQ8)),
         _ => None,
     }

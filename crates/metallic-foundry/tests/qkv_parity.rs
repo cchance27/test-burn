@@ -6,7 +6,7 @@ use metallic_foundry::{
         gemv::{
             qkv_stages::{MultiWarpReduceStage, MultiWriteOutputStage, ParallelProjectStage}, qkv_step::FusedQkvArgs
         }, rmsnorm::stages::RmsNormComputeStage
-    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Tensor, TensorInit, U8}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
+    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Q8_0, Tensor, TensorInit}, types::{DispatchConfig, GridSize, TensorArg, ThreadgroupSize}
 };
 use objc2_metal::MTLCommandBuffer as _;
 use rand::Rng;
@@ -283,13 +283,13 @@ fn test_qkv_parity() {
     let wk_swizzled = swizzle_q8_weights_nk(n_kv, k_dim, &wk_bytes);
     let wv_swizzled = swizzle_q8_weights_nk(n_kv, k_dim, &wv_bytes);
 
-    // Q8_0 weights + scales are packed bytes on GPU (`device uchar*`), so upload as raw U8 tensors.
-    let wq_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![wq_swizzled.len()], TensorInit::CopyFrom(&wq_swizzled)).unwrap();
-    let sq_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![sq_bytes.len()], TensorInit::CopyFrom(&sq_bytes)).unwrap();
-    let wk_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![wk_swizzled.len()], TensorInit::CopyFrom(&wk_swizzled)).unwrap();
-    let sk_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![sk_bytes.len()], TensorInit::CopyFrom(&sk_bytes)).unwrap();
-    let wv_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![wv_swizzled.len()], TensorInit::CopyFrom(&wv_swizzled)).unwrap();
-    let sv_tensor = Tensor::<U8, Pooled>::new(&mut foundry, vec![sv_bytes.len()], TensorInit::CopyFrom(&sv_bytes)).unwrap();
+    // Q8_0 weights + scales are packed bytes on GPU (`device uchar*`), so upload as raw Q8_0 tensors.
+    let wq_tensor = Tensor::<Q8_0, Pooled>::new(&mut foundry, vec![wq_swizzled.len()], TensorInit::CopyFrom(&wq_swizzled)).unwrap();
+    let sq_tensor = Tensor::<Q8_0, Pooled>::new(&mut foundry, vec![sq_bytes.len()], TensorInit::CopyFrom(&sq_bytes)).unwrap();
+    let wk_tensor = Tensor::<Q8_0, Pooled>::new(&mut foundry, vec![wk_swizzled.len()], TensorInit::CopyFrom(&wk_swizzled)).unwrap();
+    let sk_tensor = Tensor::<Q8_0, Pooled>::new(&mut foundry, vec![sk_bytes.len()], TensorInit::CopyFrom(&sk_bytes)).unwrap();
+    let wv_tensor = Tensor::<Q8_0, Pooled>::new(&mut foundry, vec![wv_swizzled.len()], TensorInit::CopyFrom(&wv_swizzled)).unwrap();
+    let sv_tensor = Tensor::<Q8_0, Pooled>::new(&mut foundry, vec![sv_bytes.len()], TensorInit::CopyFrom(&sv_bytes)).unwrap();
 
     let b_q_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_q_data)).unwrap();
     let b_k_tensor = Tensor::<F16, Pooled>::new(&mut foundry, vec![n_kv], TensorInit::CopyFrom(&b_k_data)).unwrap();

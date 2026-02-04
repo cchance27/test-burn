@@ -1,9 +1,32 @@
 use crate::policy::OptimizationMetadata;
 
+/// Static metadata describing a Metal policy.
+///
+/// This is intentionally a plain-data structure so policy capabilities are visible
+/// without relying on method semantics that may be ambiguous for packed formats.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyMeta {
+    pub header: &'static str,
+    pub struct_name: &'static str,
+    pub short_name: &'static str,
+
+    /// Bytes per address unit for *typed* buffers (e.g. half=2, q8=1).
+    ///
+    /// Important: for packed formats (e.g. Q4_0), this is not meaningful as “bytes per
+    /// logical weight” and may be 0 to prevent accidental byte-stride math in stages.
+    pub address_unit_bytes: usize,
+
+    pub has_scale: bool,
+    pub block_size_bytes: usize,
+    pub weights_per_block: usize,
+
+    pub optimization: OptimizationMetadata,
+}
+
 /// Defines a Metal kernel policy (e.g., input loading strategy).
 /// This corresponds to a C++ template class or struct in Metal.
 pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
-    /// The name of the header file to include (e.g., "policy_q8.metal").
+    /// The name of the header file to include (e.g., "policies/policy_q8.metal").
     fn header(&self) -> &'static str;
 
     /// The name of the Metal struct implementing the policy (e.g., "PolicyQ8").
@@ -14,7 +37,10 @@ pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
         "unknown"
     }
 
-    /// Size of a single element in bytes (e.g., 2 for F16, 1 for Q8).
+    /// Size of an address unit in bytes (e.g., 2 for F16, 1 for Q8).
+    ///
+    /// Do not use this for packed quant weights. Prefer passing logical element indices
+    /// into `Policy::load_weights/dot` and letting the policy handle packing.
     fn element_size(&self) -> usize {
         2 // Default to F16
     }
@@ -30,10 +56,32 @@ pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
         1
     }
 
+    /// Return policy metadata as plain data.
+    ///
+    /// Default implementation composes values from the individual trait methods.
+    /// Policies should override this (ideally returning a constant) to centralize
+    /// their metadata in one place.
+    fn meta(&self) -> PolicyMeta {
+        PolicyMeta {
+            header: self.header(),
+            struct_name: self.struct_name(),
+            short_name: self.short_name(),
+            address_unit_bytes: self.element_size(),
+            has_scale: self.has_scale(),
+            block_size_bytes: self.block_size_bytes(),
+            weights_per_block: self.weights_per_block(),
+            optimization: self.optimization_hints(),
+        }
+    }
+
     /// Convert an elements expression to a bytes expression for Metal code.
-    /// Uses element_size() to compute the multiplication factor.
+    /// Uses `meta().address_unit_bytes` to compute the multiplication factor.
+    ///
+    /// Warning: this is only correct when the underlying buffer is addressable at a fixed
+    /// byte stride per logical element (e.g., half / int8). Packed formats (like Q4_0)
+    /// must not rely on this for weight addressing.
     fn bytes(&self, elements: &str) -> String {
-        match self.element_size() {
+        match self.meta().address_unit_bytes {
             1 => format!("(ulong)({})", elements),
             2 => format!("(ulong)({}) * 2", elements),
             4 => format!("(ulong)({}) * 4", elements),
@@ -90,7 +138,7 @@ pub trait MetalPolicy: Send + Sync + std::fmt::Debug {
         // Optional size sanity-check (some tests validate shape without an attached buffer).
         if bytes != 0 {
             let expected_elems = dims.iter().copied().fold(1usize, |acc, v| acc.saturating_mul(v));
-            let expected_min = expected_elems.saturating_mul(self.element_size());
+            let expected_min = expected_elems.saturating_mul(self.meta().address_unit_bytes);
             if bytes < expected_min {
                 return Err(MetalError::InvalidShape(format!(
                     "quantized weight buffer too small: bytes={bytes} expected_at_least={expected_min} dims={dims:?}"

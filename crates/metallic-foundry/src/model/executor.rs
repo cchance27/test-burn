@@ -16,23 +16,21 @@ use crate::{
 
 #[inline(never)]
 fn validate_quantized_bindings(symbols: &SymbolTable, fast: &FastBindings) -> Result<(), MetalError> {
-    use crate::tensor::Dtype;
-
     for (name, &idx) in symbols.iter() {
         let Some(arg) = fast.get(idx) else { continue };
-        if arg.dtype != Dtype::U8 {
+        if !arg.dtype.is_quantized() {
             continue;
         }
 
-        // Quantization scale tensors are stored as raw bytes (`Dtype::U8`) and interpreted by the
-        // active quantization policy (e.g. Q8 block scales). We skip validating those as weights.
+        // Quantization scale tensors are stored as raw bytes (`Dtype::Q8_0` or `Dtype::Q4_0`) and interpreted by the
+        // active quantization policy (e.g. Q8 block scales, Q4_0 block scales). We skip validating those as weights.
         if name.ends_with("_scales") {
             continue;
         }
 
-        // Any U8 tensor is treated as a quantized weight.
+        // Any Q8_0 or Q4_0 tensor is treated as a quantized weight.
         // Resolve policy and validate layout.
-        let policy = crate::policy::resolve_policy(Dtype::U8.into());
+        let policy = crate::policy::resolve_policy(arg.dtype.into());
         let buf_size = arg.buffer.as_ref().map(|b| b.length()).unwrap_or(0);
         policy.validate_weight_layout(&arg.dims, buf_size)?;
     }
@@ -51,7 +49,7 @@ mod quant_binding_validation_tests {
         crate::types::TensorArg {
             buffer: None,
             offset: 0,
-            dtype: Dtype::U8,
+            dtype: Dtype::Q8_0,
             dims: smallvec![n, k],
             strides: smallvec![k, 1],
         }
@@ -61,7 +59,7 @@ mod quant_binding_validation_tests {
         crate::types::TensorArg {
             buffer: None,
             offset: 0,
-            dtype: Dtype::U8,
+            dtype: Dtype::Q8_0,
             dims: smallvec![len],
             strides: smallvec![1],
         }

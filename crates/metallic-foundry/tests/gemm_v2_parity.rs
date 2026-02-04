@@ -30,6 +30,7 @@ use serial_test::serial;
 enum TestQuantization {
     F16,
     Q8,
+    Q4,
 }
 
 #[derive(Clone)]
@@ -143,7 +144,6 @@ fn quantize_q8(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>,
             let mut max_abs = 0.0f32;
             let k_start = ki_block * 32;
 
-            // First pass: find max_abs
             for j in 0..32 {
                 let ki = k_start + j;
                 if ki < k {
@@ -161,7 +161,6 @@ fn quantize_q8(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>,
             let s_idx = (ni * blocks_per_k + ki_block) * 2;
             scales[s_idx..s_idx + 2].copy_from_slice(&scale_f16.to_le_bytes());
 
-            // Second pass: quantize
             for j in 0..32 {
                 let ki = k_start + j;
                 let q = if ki < k {
@@ -179,6 +178,95 @@ fn quantize_q8(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>,
                     0
                 };
                 weights[ni * blocks_per_k * 32 + ki_block * 32 + j] = q as u8;
+            }
+        }
+    }
+    (weights, scales)
+}
+
+fn quantize_q4_0(data: &[f16], n: usize, k: usize, transpose_b: bool) -> (Vec<u8>, Vec<u8>) {
+    let blocks_per_k = k.div_ceil(32);
+    // Weight buffer (16 bytes per 32 weights) in Foundry's internal packed order:
+    // out[j] = (w[2j+1] << 4) | w[2j]
+    let mut weights = vec![0u8; n * blocks_per_k * 16];
+    // Scale buffer (2 bytes per block)
+    let mut scales = vec![0u8; n * blocks_per_k * 2];
+
+    for ni in 0..n {
+        for ki_block in 0..blocks_per_k {
+            let mut max_abs = 0.0f32;
+            let k_start = ki_block * 32;
+
+            for j in 0..32 {
+                let ki = k_start + j;
+                if ki < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki].to_f32()
+                    } else {
+                        data[ki * n + ni].to_f32()
+                    };
+                    max_abs = max_abs.max(val.abs());
+                }
+            }
+
+            let scale = max_abs / 7.0;
+            let scale_f16 = f16::from_f32(scale);
+            let s_idx = (ni * blocks_per_k + ki_block) * 2;
+            scales[s_idx..s_idx + 2].copy_from_slice(&scale_f16.to_le_bytes());
+
+            // GGML Q4_0 stores qs[0..15] where:
+            // - low nibble encodes weight j
+            // - high nibble encodes weight j+16
+            //
+            // Foundry internally wants adjacent-pair packing; perform the same transform as the loader.
+            let mut qs = [0u8; 16];
+            for j in 0..16 {
+                let ki0 = k_start + j;
+                let ki1 = k_start + 16 + j;
+
+                let q0 = if ki0 < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki0].to_f32()
+                    } else {
+                        data[ki0 * n + ni].to_f32()
+                    };
+                    if scale > 0.0 {
+                        (val / scale).round().clamp(-8.0, 7.0) as i8
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                let q1 = if ki1 < k {
+                    let val = if transpose_b {
+                        data[ni * k + ki1].to_f32()
+                    } else {
+                        data[ki1 * n + ni].to_f32()
+                    };
+                    if scale > 0.0 {
+                        (val / scale).round().clamp(-8.0, 7.0) as i8
+                    } else {
+                        0
+                    }
+                } else {
+                    0
+                };
+
+                let uq0 = (q0 + 8) as u8; // 0..15
+                let uq1 = (q1 + 8) as u8; // 0..15
+
+                qs[j] = (uq1 << 4) | uq0;
+            }
+
+            // De-interleave GGML layout into adjacent pairs for the Metal policy.
+            let w_block = &mut weights[ni * blocks_per_k * 16 + ki_block * 16..ni * blocks_per_k * 16 + ki_block * 16 + 16];
+            for i in 0..8 {
+                let b0 = qs[2 * i];
+                let b1 = qs[2 * i + 1];
+                w_block[i] = ((b1 & 0x0F) << 4) | (b0 & 0x0F);
+                w_block[i + 8] = (b1 & 0xF0) | (b0 >> 4);
             }
         }
     }
@@ -261,51 +349,97 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     // We need a Context<F16> to create the quantized tensor
     let ctx_f16 = Context::<metallic_context::F16Element>::new().unwrap();
 
-    let (b_quantized, b_f16): (Option<QuantizedQ8_0Tensor>, Option<FoundryTensor<metallic_foundry::F16, Pooled>>) =
-        if cfg.quant_b == TestQuantization::Q8 {
+    let (b_quantized, b_f16): (Option<QuantizedQ8_0Tensor>, Option<FoundryTensor<metallic_foundry::F16, Pooled>>) = match cfg.quant_b {
+        TestQuantization::Q8 => {
             let (w, s) = quantize_q8(&b_data, cfg.n, cfg.k, cfg.transpose_b);
             let q8 = QuantizedQ8_0Tensor::from_split_bytes_in_context(b_dims.clone(), &w, &s, &ctx_f16).unwrap();
             (Some(q8), None)
-        } else {
-            let b = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, b_dims, TensorInit::CopyFrom(&b_data)).unwrap();
+        }
+        TestQuantization::Q4 => (None, None),
+        TestQuantization::F16 => {
+            let b =
+                FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, b_dims.clone(), TensorInit::CopyFrom(&b_data)).unwrap();
             (None, Some(b))
-        };
+        }
+    };
 
     let output = FoundryTensor::<metallic_foundry::F16, Pooled>::new(&mut foundry, vec![cfg.m, cfg.n], TensorInit::Uninitialized).unwrap();
 
     // ========== Run CPU Reference ==========
-    // For CPU ref with Q8, we use the original b_data which is F16.
-    // However, to be extra fair, we should dequantize the Q8 back to F16.
-    let cpu_b_data = if let Some(q8) = &b_quantized {
-        let weights = q8.data.to_vec();
-        let scales_raw = q8.scales.to_vec();
-        let mut dequant = vec![f16::ZERO; cfg.n * cfg.k];
-        let blocks_per_k = q8.blocks_per_k;
+    let cpu_b_data = match cfg.quant_b {
+        TestQuantization::Q8 => {
+            let q8 = b_quantized.as_ref().unwrap();
+            let weights = q8.data.to_vec();
+            let scales_raw = q8.scales.to_vec();
+            let mut dequant = vec![f16::ZERO; cfg.n * cfg.k];
+            let blocks_per_k = q8.blocks_per_k;
 
-        for ni in 0..cfg.n {
-            for ki_block in 0..blocks_per_k {
-                let s_idx = (ni * blocks_per_k + ki_block) * 2;
-                let scale_bits = (scales_raw[s_idx] as u16) | ((scales_raw[s_idx + 1] as u16) << 8);
-                let scale = f16::from_bits(scale_bits).to_f32();
+            for ni in 0..cfg.n {
+                for ki_block in 0..blocks_per_k {
+                    let s_idx = (ni * blocks_per_k + ki_block) * 2;
+                    let scale_bits = (scales_raw[s_idx] as u16) | ((scales_raw[s_idx + 1] as u16) << 8);
+                    let scale = f16::from_bits(scale_bits).to_f32();
 
-                for j in 0..32 {
-                    let ki = ki_block * 32 + j;
-                    if ki < cfg.k {
-                        let w_val = weights[ni * blocks_per_k * 32 + ki_block * 32 + j] as i8;
-                        let val = f16::from_f32(w_val as f32 * scale);
-                        // Store in row-major [K, N] or [N, K] for the CPU matmul
-                        if cfg.transpose_b {
-                            dequant[ni * cfg.k + ki] = val;
-                        } else {
-                            dequant[ki * cfg.n + ni] = val;
+                    for j in 0..32 {
+                        let ki = ki_block * 32 + j;
+                        if ki < cfg.k {
+                            let w_val = weights[ni * blocks_per_k * 32 + ki_block * 32 + j] as i8;
+                            let val = f16::from_f32(w_val as f32 * scale);
+                            if cfg.transpose_b {
+                                dequant[ni * cfg.k + ki] = val;
+                            } else {
+                                dequant[ki * cfg.n + ni] = val;
+                            }
                         }
                     }
                 }
             }
+            dequant
         }
-        dequant
-    } else {
-        b_data.clone()
+        TestQuantization::Q4 => {
+            let (weights, scales) = quantize_q4_0(&b_data, cfg.n, cfg.k, cfg.transpose_b);
+            let mut dequant = vec![f16::ZERO; cfg.n * cfg.k];
+            let blocks_per_k = cfg.k.div_ceil(32);
+
+            for ni in 0..cfg.n {
+                for ki_block in 0..blocks_per_k {
+                    let s_idx = (ni * blocks_per_k + ki_block) * 2;
+                    let scale_bits = (scales[s_idx] as u16) | ((scales[s_idx + 1] as u16) << 8);
+                    let scale = f16::from_bits(scale_bits).to_f32();
+
+                    for j in 0..16 {
+                        let b = weights[ni * blocks_per_k * 16 + ki_block * 16 + j];
+                        let uq0 = b & 0x0F;
+                        let uq1 = b >> 4;
+
+                        let q0 = (uq0 as i8) - 8;
+                        let q1 = (uq1 as i8) - 8;
+
+                        let ki0 = ki_block * 32 + 2 * j;
+                        let ki1 = ki_block * 32 + 2 * j + 1;
+
+                        if ki0 < cfg.k {
+                            let val = f16::from_f32(q0 as f32 * scale);
+                            if cfg.transpose_b {
+                                dequant[ni * cfg.k + ki0] = val;
+                            } else {
+                                dequant[ki0 * cfg.n + ni] = val;
+                            }
+                        }
+                        if ki1 < cfg.k {
+                            let val = f16::from_f32(q1 as f32 * scale);
+                            if cfg.transpose_b {
+                                dequant[ni * cfg.k + ki1] = val;
+                            } else {
+                                dequant[ki1 * cfg.n + ni] = val;
+                            }
+                        }
+                    }
+                }
+            }
+            dequant
+        }
+        TestQuantization::F16 => b_data.clone(),
     };
     let cpu_output = run_cpu_gemm_f16(cfg.m, cfg.n, cfg.k, &a_data, &cpu_b_data, cfg.transpose_a, cfg.transpose_b);
 
@@ -327,6 +461,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         match cfg.quant_b {
             TestQuantization::F16 => std::sync::Arc::new(PolicyF16),
             TestQuantization::Q8 => std::sync::Arc::new(PolicyQ8),
+            TestQuantization::Q4 => std::sync::Arc::new(metallic_foundry::policy::q4_0::PolicyQ4_0),
         },
         cfg.transpose_a,
         cfg.transpose_b,
@@ -337,27 +472,64 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     );
 
     // DEBUG: Dump source
-    println!("=== Generated Metal Source ===");
-    println!("{}", kernel.source());
-    println!("=== End Metal Source ===");
+    // println!("=== Generated Metal Source ===");
+    // println!("{}", kernel.source());
+    // println!("=== End Metal Source ===");
 
-    let (b_arg, b_scales_arg) = if let Some(q8) = &b_quantized {
-        let b_data_arg = TensorArg::from_buffer(
-            metallic_foundry::MetalBuffer(q8.data.buf.clone()),
-            metallic_foundry::Dtype::U8,
-            q8.data.dims.clone(),
-            q8.data.strides.clone(),
-        );
-        let b_scales_arg = TensorArg::from_buffer(
-            metallic_foundry::MetalBuffer(q8.scales.buf.clone()),
-            metallic_foundry::Dtype::F16, // Scales are F16
-            q8.scales.dims.clone(),
-            q8.scales.strides.clone(),
-        );
-        (b_data_arg, b_scales_arg)
-    } else {
-        let b = b_f16.as_ref().unwrap();
-        (TensorArg::from_tensor(b), TensorArg::from_tensor(b))
+    let (b_arg, b_scales_arg) = match cfg.quant_b {
+        TestQuantization::Q8 => {
+            let q8 = b_quantized.as_ref().unwrap();
+            let b_data_arg = TensorArg::from_buffer(
+                metallic_foundry::MetalBuffer(q8.data.buf.clone()),
+                metallic_foundry::Dtype::Q8_0,
+                q8.data.dims.clone(),
+                q8.data.strides.clone(),
+            );
+            let b_scales_arg = TensorArg::from_buffer(
+                metallic_foundry::MetalBuffer(q8.scales.buf.clone()),
+                metallic_foundry::Dtype::F16,
+                q8.scales.dims.clone(),
+                q8.scales.strides.clone(),
+            );
+            (b_data_arg, b_scales_arg)
+        }
+        TestQuantization::Q4 => {
+            let (w, s) = quantize_q4_0(&b_data, cfg.n, cfg.k, cfg.transpose_b);
+            let w_buf = foundry
+                .device
+                .new_buffer_with_bytes(
+                    metallic_foundry::types::nonnull_void_ptr_from_slice(&w, "Q4_W").unwrap(),
+                    w.len(),
+                    metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+                )
+                .unwrap();
+            let s_buf = foundry
+                .device
+                .new_buffer_with_bytes(
+                    metallic_foundry::types::nonnull_void_ptr_from_slice(&s, "Q4_S").unwrap(),
+                    s.len(),
+                    metallic_foundry::types::MetalResourceOptions::StorageModeShared,
+                )
+                .unwrap();
+
+            let b_data_arg = TensorArg::from_buffer(
+                w_buf,
+                metallic_foundry::Dtype::Q4_0,
+                b_dims.clone(),
+                metallic_foundry::tensor::compute_strides(&b_dims),
+            );
+            let b_scales_arg = TensorArg::from_buffer(
+                s_buf,
+                metallic_foundry::Dtype::F16,
+                vec![cfg.n, cfg.k.div_ceil(32)],
+                vec![cfg.k.div_ceil(32), 1],
+            );
+            (b_data_arg, b_scales_arg)
+        }
+        TestQuantization::F16 => {
+            let b = b_f16.as_ref().unwrap();
+            (TensorArg::from_tensor(b), TensorArg::from_tensor(b))
+        }
     };
 
     let args = GemmV2Args {
@@ -395,7 +567,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
     // ========== Run MLX Reference ==========
     let mlx_output = if let Some(q8) = &b_quantized {
         run_mlx_gemm_q8(&a_data, q8, cfg.m, cfg.n, cfg.k, cfg.transpose_a, cfg.transpose_b)
-    } else {
+    } else if let Some(_b) = &b_f16 {
         Some(run_mlx_gemm_f16(
             &a_data,
             &b_data,
@@ -406,6 +578,8 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
             cfg.transpose_b,
             &foundry,
         ))
+    } else {
+        None // For Q4, skip MLX parity for now
     };
 
     let mlx_f32: Option<Vec<f32>> = mlx_output.map(|v| v.iter().map(|x| x.to_f32()).collect());
@@ -1054,7 +1228,7 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
     // Convert Q8 tensor parts to Foundry TensorArgs
     let b_weights_arg = TensorArg::from_buffer(
         metallic_foundry::MetalBuffer(q8_tensor.data.buf.clone()),
-        metallic_foundry::Dtype::U8,
+        metallic_foundry::Dtype::Q8_0,
         q8_tensor.data.dims.clone(),
         q8_tensor.data.strides.clone(),
     );
@@ -1133,4 +1307,43 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
         "Difference too high ({}), likely wrong kernel selected or Q8 corruption",
         max_diff
     );
+}
+#[test]
+#[serial]
+fn test_gemm_v2_q4_0_32x32x32() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 32,
+        n: 32,
+        k: 32,
+        transpose_b: true, // Quantized GGUF weights are typically stored [N, K]
+        quant_b: TestQuantization::Q4,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_q4_0_64x64x64_nt() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 64,
+        n: 64,
+        k: 64,
+        transpose_b: true,
+        quant_b: TestQuantization::Q4,
+        ..Default::default()
+    });
+}
+
+#[test]
+#[serial]
+fn test_gemm_v2_q4_0_gemv() {
+    run_gemm_v2_parity_test(GemmTestConfig {
+        m: 1,
+        n: 128,
+        k: 64,
+        transpose_a: false,
+        transpose_b: true,
+        quant_b: TestQuantization::Q4,
+        ..Default::default()
+    });
 }

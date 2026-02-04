@@ -36,9 +36,9 @@ pub trait TensorElement: Clone + Copy + Default + 'static {
 pub enum Dtype {
     F32,
     F16,
-    U8,
     U32,
-    // Add more as needed
+    Q4_0,
+    Q8_0,
 }
 
 impl Dtype {
@@ -46,16 +46,26 @@ impl Dtype {
         match self {
             Dtype::F32 => std::mem::size_of::<f32>(),
             Dtype::F16 => std::mem::size_of::<half::f16>(),
-            Dtype::U8 => std::mem::size_of::<u8>(),
             Dtype::U32 => std::mem::size_of::<u32>(),
+            Dtype::Q4_0 | Dtype::Q8_0 => 1, // Store as bytes
         }
     }
     pub fn metal_format(&self) -> &'static str {
         match self {
             Dtype::F32 => "float",
             Dtype::F16 => "half",
-            Dtype::U8 => "uchar",
             Dtype::U32 => "uint",
+            Dtype::Q4_0 | Dtype::Q8_0 => "uchar",
+        }
+    }
+    pub fn is_quantized(&self) -> bool {
+        matches!(self, Dtype::Q4_0 | Dtype::Q8_0)
+    }
+    pub fn layout_size(&self, dims: &[usize]) -> usize {
+        let elements: usize = dims.iter().product();
+        match self {
+            Dtype::Q4_0 => (elements + 1) / 2,
+            _ => elements * self.size_bytes(),
         }
     }
 }
@@ -140,13 +150,55 @@ impl TensorElement for U32 {
     }
 }
 
+// Q4_0 implementation
+#[derive(Clone, Copy, Default)]
+pub struct Q4_0;
+
+impl TensorElement for Q4_0 {
+    type Scalar = u8;
+    const DTYPE: Dtype = Dtype::Q4_0;
+    type Policy = crate::policy::q4_0::PolicyQ4_0;
+
+    fn from_f32(v: f32) -> Self::Scalar {
+        // Saturate to [0, 255]
+        v.clamp(0.0, 255.0) as u8
+    }
+
+    fn to_f32(v: Self::Scalar) -> f32 {
+        v as f32
+    }
+
+    fn to_f32_vec(slice: &[Self::Scalar]) -> Vec<f32> {
+        slice.iter().map(|&x| x as f32).collect()
+    }
+
+    fn from_f32_slice(slice: &[f32]) -> Vec<Self::Scalar> {
+        slice.iter().map(|&x| x.clamp(0.0, 255.0) as u8).collect()
+    }
+
+    fn copy_from_f32_slice(src: &[f32], dest: &mut [Self::Scalar]) {
+        debug_assert_eq!(src.len(), dest.len());
+        for (dst, value) in dest.iter_mut().zip(src.iter().copied()) {
+            *dst = value.clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    fn abs(v: Self::Scalar) -> Self::Scalar {
+        v
+    }
+
+    fn is_finite(_v: Self::Scalar) -> bool {
+        true
+    }
+}
+
 // U8 implementation — enables raw/packed byte tensors (e.g., GGUF Q8_0 blocks)
 #[derive(Clone, Copy, Default)]
-pub struct U8;
+pub struct Q8_0;
 
-impl TensorElement for U8 {
+impl TensorElement for Q8_0 {
     type Scalar = u8;
-    const DTYPE: Dtype = Dtype::U8;
+    const DTYPE: Dtype = Dtype::Q8_0;
     type Policy = PolicyQ8;
 
     fn from_f32(v: f32) -> Self::Scalar {

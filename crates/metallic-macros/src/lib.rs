@@ -873,79 +873,48 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
 
     let init_code = init_statements.join(" ");
 
-    // Generate optional method overrides
-    let short_name_impl = if let Some(sn) = short_name {
-        quote! {
-            fn short_name(&self) -> &'static str {
-                #sn
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let element_size_impl = if let Some(es) = element_size {
-        quote! {
-            fn element_size(&self) -> usize {
-                #es
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    // Generate optimization_hints() if any hint attribute was provided
+    // Generate optimization metadata (stored in PolicyMeta).
     let has_any_hint = block_size.is_some() || vector_load_size.is_some() || unroll_factor.is_some() || active_thread_count.is_some();
-    let optimization_hints_impl = if has_any_hint {
+
+    let meta_header = header.clone();
+    let meta_struct_name = struct_name.clone();
+    let meta_short = short_name.clone().unwrap_or_else(|| "unknown".to_string());
+    let meta_address_unit_bytes = element_size.unwrap_or(2);
+    let meta_has_scale = has_scale.unwrap_or(true);
+    let meta_block_size_bytes = block_size_bytes.unwrap_or(meta_address_unit_bytes);
+    let meta_weights_per_block = weights_per_block.unwrap_or(1);
+    let meta_opt = if has_any_hint {
         let bs = block_size.unwrap_or(1);
         let vls = vector_load_size.unwrap_or(2);
         let uf = unroll_factor.unwrap_or(1);
         let atc = active_thread_count.unwrap_or(32);
         quote! {
-            fn optimization_hints(&self) -> #root::policy::OptimizationMetadata {
-                #root::policy::OptimizationMetadata {
-                    block_size: #bs,
-                    vector_load_size: #vls,
-                    unroll_factor: #uf,
-                    active_thread_count: #atc,
-                }
+            #root::policy::OptimizationMetadata {
+                block_size: #bs,
+                vector_load_size: #vls,
+                unroll_factor: #uf,
+                active_thread_count: #atc,
             }
         }
     } else {
-        quote! {}
+        quote! { #root::policy::OptimizationMetadata::default() }
     };
 
-    let has_scale_impl = if let Some(hs) = has_scale {
-        quote! {
-            fn has_scale(&self) -> bool {
-                #hs
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let block_size_bytes_impl = if let Some(bsb) = block_size_bytes {
-        quote! {
-            fn block_size_bytes(&self) -> usize {
-                #bsb
-            }
-        }
-    } else {
-        quote! {}
-    };
-
-    let weights_per_block_impl = if let Some(wpb) = weights_per_block {
-        quote! {
-            fn weights_per_block(&self) -> usize {
-                #wpb
-            }
-        }
-    } else {
-        quote! {}
-    };
+    let meta_ident = quote::format_ident!("__METALLIC_POLICY_META_{}", name);
 
     let expanded = quote! {
+        #[allow(non_upper_case_globals)]
+        const #meta_ident: #root::fusion::PolicyMeta = #root::fusion::PolicyMeta {
+            header: #meta_header,
+            struct_name: #meta_struct_name,
+            short_name: #meta_short,
+            address_unit_bytes: #meta_address_unit_bytes,
+            has_scale: #meta_has_scale,
+            block_size_bytes: #meta_block_size_bytes,
+            weights_per_block: #meta_weights_per_block,
+            optimization: #meta_opt,
+        };
+
         impl #root::fusion::MetalPolicy for #name {
             fn header(&self) -> &'static str {
                 #header
@@ -955,12 +924,33 @@ pub fn derive_metal_policy(input: TokenStream) -> TokenStream {
                 #struct_name
             }
 
-            #short_name_impl
-            #element_size_impl
-            #optimization_hints_impl
-            #has_scale_impl
-            #block_size_bytes_impl
-            #weights_per_block_impl
+            fn short_name(&self) -> &'static str {
+                #meta_short
+            }
+
+            fn element_size(&self) -> usize {
+                #meta_address_unit_bytes
+            }
+
+            fn optimization_hints(&self) -> #root::policy::OptimizationMetadata {
+                #meta_opt
+            }
+
+            fn has_scale(&self) -> bool {
+                #meta_has_scale
+            }
+
+            fn block_size_bytes(&self) -> usize {
+                #meta_block_size_bytes
+            }
+
+            fn weights_per_block(&self) -> usize {
+                #meta_weights_per_block
+            }
+
+            fn meta(&self) -> #root::fusion::PolicyMeta {
+                #meta_ident
+            }
 
             fn init_params_code(&self) -> &'static str {
                 #init_code

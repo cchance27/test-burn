@@ -10,7 +10,7 @@ use crate::{
 pub mod dtypes;
 pub mod enums;
 
-pub use dtypes::{Dtype, F16, F32, TensorElement, U8, U32};
+pub use dtypes::{Dtype, F16, F32, Q4_0, Q8_0, TensorElement, U32};
 pub use enums::TensorInit;
 
 /// A strongly-typed Tensor tied to the Foundry system.

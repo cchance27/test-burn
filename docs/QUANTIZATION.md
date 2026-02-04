@@ -5,7 +5,7 @@
 
 Foundry uses a centralized **Policy-Based Architecture** to handle mixed-precision inference. The goal is to separate **Kernel Logic** (math) from **Quantization Logic** (data access).
 
-To achieve this, we use a Unified Policy model where a single Rust struct (e.g., `PolicyQ8`) implements two key traits: one for **Code Generation** (`MetalPolicy`) and one for **Runtime Loading** (`QuantizationPolicy`).
+To achieve this, we use a Unified Policy model where a single Rust struct (e.g., `PolicyQ8`) implements two key traits: one for **Code Generation** (`MetalPolicy`) and one for **Runtime Loading / Binding** (`MetalPolicyRuntime`).
 
 ## Core Concepts
 
@@ -22,8 +22,8 @@ We use `#[derive(MetalPolicy)]` to minimize boilerplate for the kernel generatio
 #[policy(header = "policies/policy_q8.metal", struct_name = "PolicyQ8")]
 pub struct PolicyQ8;
 
-impl QuantizationPolicy for PolicyQ8 {
-    // ... Runtime loading logic (load_weights, optimization hints) ...
+impl MetalPolicyRuntime for PolicyQ8 {
+    // ... Runtime loading logic (load_weights) + loader_stage binding ...
 }
 ```
 
@@ -33,6 +33,7 @@ This trait (often auto-implemented via macro) provides the metadata needed to co
 
 *   **`header()`**: Path to the Metal implementation (e.g., `policies/policy_q8.metal`).
 *   **`struct_name()`**: The C++ struct name to template the kernel with (e.g., `PolicyQ8`).
+*   **`meta()`**: Returns a plain-data `PolicyMeta` snapshot (header/name/bytes-per-address-unit/blocks/etc.).
 
 **Kernel Stages should consume this trait, not an enum.** This ensures kernels remain decoupled from the list of available quantizations.
 
@@ -49,12 +50,24 @@ impl Stage for VectorizedDotStage {
 }
 ```
 
-### 3. `QuantizationPolicy` Trait (Runtime Loading)
+### 3. `MetalPolicyRuntime` Trait (Runtime Loading)
 
 This trait handles the runtime aspects: reading GGUF files, reshuffling bytes, and binding buffers.
 
 *   **`load_weights(...)`**: Reads generic GGUF data and converts it to the format expected by the Metal policy (e.g., splitting Q8 into data + scale planes).
 *   **`loader_stage()`**: Returns a `LoaderStage` that binds these processed buffers to the GPU.
+
+#### Shared Helpers (Block Quants)
+
+For GGUF/GGML block-quant formats (e.g. Q8_0, Q4_0) there is shared loader/splitting infrastructure to avoid repeating:
+
+- GGUF tensor dtype validation
+- dims/layout validation (2D / canonical / Nk)
+- block count math
+- `{raw blocks} -> {weights plane, scales plane}` splitting
+- optional canonical reorder
+
+See `crates/metallic-foundry/src/policy/block_quant.rs`.
 
 ### 4. `Quantization` Enum (Configuration)
 
@@ -74,17 +87,49 @@ pub enum Quantization { F16, Q8, Q4 }
     *   The `PolicyQ8` (as `dyn MetalPolicy`) is passed to `VectorizedDotStage`.
     *   The stage generates Metal code referencing `#include "policy_q8.metal"`.
 4.  **Loading**:
-    *   The `PolicyQ8` (as `dyn QuantizationPolicy`) loads weights from disk.
+    *   The `PolicyQ8` (as `dyn MetalPolicyRuntime`) loads weights from disk.
     *   It binds the weights to the pipeline.
+
+## Critical Policy Contract (Packed Formats)
+
+Some quant formats (e.g. GGUF/GGML `Q4_0`) are **packed**, meaning “logical element index” is **not** a constant number of bytes.
+
+This has two consequences:
+
+1. **Kernels must not do byte addressing with `policy.element_size()` for packed weights.**
+   * `element_size()` is **not** “bytes per logical weight” for packed types.
+   * For packed formats, `PolicyMeta.address_unit_bytes` (and `element_size()`) may be `0` to make misuse fail loudly.
+2. **Kernel stages must treat weight offsets as *logical element indices*, and let the policy translate them.**
+   * The Metal policy functions take `offset` as a **logical element index** into the conceptual `[row, k]` view (after `WEIGHT_INDEX(...)`), not a byte offset and not a pre-scaled pointer.
+
+In other words, this pattern is correct for *all* policies (F16/Q8/Q4/etc.):
+
+```cpp
+ulong idx = WEIGHT_INDEX(row_idx, k, K, N);      // logical element index
+Policy::template load_weights<8>(weights, idx);  // policy maps idx -> packed bytes
+```
+
+And this pattern is **not** safe for packed policies:
+
+```cpp
+// WRONG for packed formats like Q4_0:
+const device uchar* w_ptr = weights + idx * policy.meta().address_unit_bytes;
+Policy::template load_weights<8>(w_ptr, 0);
+```
+
+## Scales Are Opaque Bytes
+
+For block-quant formats, “scales” buffers are treated as **opaque bytes** (`device uchar*`) and interpreted by the policy (e.g., `load_scale(scales, block_idx)` reading fp16 bits). Stages should not assume a typed element layout for scales beyond the policy’s contract.
 
 ## How to Add a New Quantization Type
 
-To add `Q4`:
+To add a new quantization type (e.g. `Q4_0`):
 
 1.  **Rust**: Create `src/policy/q4.rs`.
     *   Define `pub struct PolicyQ4;`
     *   Add `#[derive(MetalPolicy)]` pointing to your metal file.
-    *   Implement `QuantizationPolicy` to handle Q4 specific loading (packing/unpacking).
+    *   Implement `MetalPolicyRuntime` to handle Q4-specific loading (packing/unpacking).
+    *   If it is a block-quant format, prefer using the shared loader in `policy/block_quant.rs` with a small `write_block(...)` adapter.
 2.  **Metal**: Create `src/metals/policies/policy_q4.metal`.
     *   Implement the C++ struct `PolicyQ4` with `load_weights` and `load_scale`.
 3.  **Registry**: Add `Q4` to the `Quantization` enum and `resolve_policy` match statement.

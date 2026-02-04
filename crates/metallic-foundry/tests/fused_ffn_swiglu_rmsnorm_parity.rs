@@ -1,6 +1,6 @@
 use half::f16;
 use metallic_foundry::{
-    Foundry, metals::swiglu::step::FusedFfnSwiGluRmsNormStep, spec::{Step, TensorBindings}, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}
+    Foundry, metals::swiglu::step::FusedFfnSwiGluRmsNormStep, spec::{Step, TensorBindings}, storage::Pooled, tensor::{F16, Q8_0, Tensor as FoundryTensor, TensorInit}
 };
 use ndarray::Array2;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -194,10 +194,10 @@ fn test_fused_ffn_swiglu_rmsnorm_q8_parity_m2() -> Result<(), Box<dyn std::error
     let input = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![m, k_dim], TensorInit::CopyFrom(&input_f16))?;
     let gamma = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![k_dim], TensorInit::CopyFrom(&gamma_f16))?;
 
-    let w_gate = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_gate_q))?;
-    let w_up = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_up_q))?;
-    let s_gate = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![scales_len], TensorInit::CopyFrom(&s_gate_bytes))?;
-    let s_up = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![scales_len], TensorInit::CopyFrom(&s_up_bytes))?;
+    let w_gate = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_gate_q))?;
+    let w_up = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![n_dim, k_dim], TensorInit::CopyFrom(&w_up_q))?;
+    let s_gate = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![scales_len], TensorInit::CopyFrom(&s_gate_bytes))?;
+    let s_up = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![scales_len], TensorInit::CopyFrom(&s_up_bytes))?;
 
     let b_gate = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_gate_f16))?;
     let b_up = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_dim], TensorInit::CopyFrom(&b_up_f16))?;

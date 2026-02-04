@@ -468,47 +468,19 @@ impl GGUFFile {
         offset.div_ceil(alignment) * alignment
     }
 
-    fn get_element_size(&self, data_type: GGUFDataType) -> usize {
+    fn get_nonblock_element_size(&self, data_type: GGUFDataType) -> usize {
         match data_type {
             GGUFDataType::F32 => 4,
             GGUFDataType::F16 => 2,
-            //GGUFDataType::Q4_0 => 2 + block_size / 2,
-            //GGUFDataType::Q4_1 => 2 + 2 + block_size / 2,
-            GGUFDataType::Q4_2 => 0,
-            GGUFDataType::Q4_3 => 0,
-            //GGUFDataType::Q5_0 => 2 + 4 + block_size / 2,
-            //GGUFDataType::Q5_1 => 2 + 2 + 4 + block_size / 2,
-            //GGUFDataType::Q8_0 => 2 + block_size,
-            //GGUFDataType::Q8_1 => 4 + 4 + block_size,
-            //GGUFDataType::Q2K => block_size / 16 + block_size / 4 + 2 + 2,
-            //GGUFDataType::Q3K => block_size / 8 + block_size / 4 + 12 + 2,
-            //GGUFDataType::Q4K => 2 + 2 + 12 + block_size / 2,
-            //GGUFDataType::Q5K => 2 + 2 + 12 + block_size / 8 + block_size / 2,
-            //GGUFDataType::Q6K => block_size / 2 + block_size / 4 + block_size / 16 + 2,
-            //GGUFDataType::Q8K => 4 + block_size + block_size / 16 * 2,
-            //GGUFDataType::IQ2XXS => 2 + block_size / 8 * 2,
-            //GGUFDataType::IQ2XS => 2 + block_size / 8 * 2 + block_size / 32,
-            //GGUFDataType::IQ3XXS => 2 + 3 * (block_size / 8),
-            //GGUFDataType::IQ1S => 2 + block_size / 8 + block_size / 16,
-            //GGUFDataType::IQ4NL => 2 + 16,
-            //GGUFDataType::IQ3S => 2 + 13 * (block_size / 32) + block_size / 64,
-            //GGUFDataType::IQ2S => 2 + block_size / 4 + block_size / 16,
-            //GGUFDataType::IQ4XS => 2 + 2 + block_size / 64 + block_size / 2,
             GGUFDataType::I8 => 1,
             GGUFDataType::I16 => 2,
             GGUFDataType::I32 => 4,
             GGUFDataType::I64 => 8,
             GGUFDataType::F64 => 8,
-            //GGUFDataType::IQ1M => block_size / 8 + block_size / 16 + block_size / 32,
             GGUFDataType::BF16 => 2,
-            GGUFDataType::IQ4NL44 => 0,
-            GGUFDataType::IQ4NL48 => 0,
-            GGUFDataType::IQ4NL88 => 0,
-            //GGUFDataType::TQ10 => 2 + block_size / 64 + (block_size - 4 * block_size / 64) / 5,
-            //GGUFDataType::TQ20 => 2 + block_size / 4,
-            GGUFDataType::Q4044 => 0,
-            GGUFDataType::Q4048 => 0,
-            GGUFDataType::Q4088 => 0,
+            // NOTE: Block-based quantized types (Q4_0, Q8_0, etc.) are handled
+            // explicitly in calculate_actual_tensor_size because their size
+            // depends on block structure, not a simple multiplier.
             _ => unreachable!("Unsupported data type size"),
         }
     }
@@ -516,13 +488,14 @@ impl GGUFFile {
     /// Calculate the actual size of tensor data in bytes
     fn calculate_actual_tensor_size(&self, tensor: &GGUTensorInfo) -> usize {
         match tensor.data_type {
-            GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
-                // For Q8 types, calculate based on blocks
+            GGUFDataType::Q4_0 | GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
+                // For quantized types, calculate based on blocks
                 let element_count: usize = tensor.dimensions.iter().map(|&d| d as usize).product();
                 let weights_per_block = 32;
                 let blocks = element_count.div_ceil(weights_per_block);
 
                 let block_size = match tensor.data_type {
+                    GGUFDataType::Q4_0 => 18, // 2 (scale) + 16 (4-bit weights)
                     GGUFDataType::Q8_0 => 34, // 2 (scale) + 32 (weights)
                     GGUFDataType::Q8_1 => 36, // 2 (scale) + 2 (delta) + 32 (weights)
                     _ => 36,                  // Should not happen
@@ -536,7 +509,7 @@ impl GGUFFile {
                 for &dim in &tensor.dimensions {
                     size *= dim as usize;
                 }
-                size * self.get_element_size(tensor.data_type)
+                size * self.get_nonblock_element_size(tensor.data_type)
             }
         }
     }
@@ -555,9 +528,10 @@ impl GGUFFile {
             )));
         }
 
-        // For Q8 types, validate block structure
-        if tensor.data_type == GGUFDataType::Q8_0 || tensor.data_type == GGUFDataType::Q8_1 {
+        // For quantized types, validate block structure
+        if tensor.data_type == GGUFDataType::Q4_0 || tensor.data_type == GGUFDataType::Q8_0 || tensor.data_type == GGUFDataType::Q8_1 {
             let block_size = match tensor.data_type {
+                GGUFDataType::Q4_0 => 18,
                 GGUFDataType::Q8_0 => 34,
                 GGUFDataType::Q8_1 => 36,
                 _ => 36,

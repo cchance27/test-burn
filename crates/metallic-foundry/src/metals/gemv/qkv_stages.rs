@@ -143,10 +143,6 @@ impl Stage for ParallelProjectStage {
         // F16 ignores scales but we still calculate offset (Policy ignores it)
         let scale_stride = "(ulong)row_idx * blocks_per_k * 2";
 
-        // Byte scale: WEIGHT_INDEX returns element offsets, uchar* uses byte arithmetic
-        // F16 = 2 bytes per element (half), Q8 = 1 byte per weight
-        let byte_scale = self.policy.element_size();
-
         let load_input = match self.vector_width {
             VectorWidth::Vec4 => {
                 r#"
@@ -304,8 +300,7 @@ impl Stage for ParallelProjectStage {
         // Q Dot
         {{
             {calc_idx}
-            const device uchar* w_ptr = w_q + w_idx * {byte_scale};
-            acc_q += {policy}::template dot<{vec_width}>(w_ptr, 0, s_q_val, xv_f32_lo, xv_f32_hi);
+            acc_q += {policy}::template dot<{vec_width}>(w_q, w_idx, s_q_val, xv_f32_lo, xv_f32_hi);
         }}
         
         // K & V Dot
@@ -313,12 +308,10 @@ impl Stage for ParallelProjectStage {
             {calc_idx_kv}
             
             {{
-                const device uchar* w_ptr = w_k + w_idx_kv * {byte_scale};
-                acc_k += {policy}::template dot<{vec_width}>(w_ptr, 0, s_k_val, xv_f32_lo, xv_f32_hi);
+                acc_k += {policy}::template dot<{vec_width}>(w_k, w_idx_kv, s_k_val, xv_f32_lo, xv_f32_hi);
             }}
             {{
-                const device uchar* w_ptr = w_v + w_idx_kv * {byte_scale};
-                acc_v += {policy}::template dot<{vec_width}>(w_ptr, 0, s_v_val, xv_f32_lo, xv_f32_hi);
+                acc_v += {policy}::template dot<{vec_width}>(w_v, w_idx_kv, s_v_val, xv_f32_lo, xv_f32_hi);
             }}
         }}
 
@@ -357,8 +350,7 @@ impl Stage for ParallelProjectStage {
         // Q Dot
         if (k < k_dim) {{
             float w[{vec_width}] = {{{zero_init}}};
-            const device uchar* w_ptr = w_q + WEIGHT_INDEX(row_idx, k, k_dim, n_dim) * {byte_scale};
-            {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+            {policy}::template load_weights<{vec_width}>(w_q, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
             for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
             {dot_logic}
         }}
@@ -367,15 +359,13 @@ impl Stage for ParallelProjectStage {
         if (row_idx < n_kv && k < k_dim) {{
             {{
                 float w[{vec_width}] = {{{zero_init}}};
-                const device uchar* w_ptr = w_k + WEIGHT_INDEX(row_idx, k, k_dim, n_kv) * {byte_scale};
-                {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+                {policy}::template load_weights<{vec_width}>(w_k, WEIGHT_INDEX(row_idx, k, k_dim, n_kv), w);
                 for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
                 {dot_logic_k}
             }}
             {{
                 float w[{vec_width}] = {{{zero_init}}};
-                const device uchar* w_ptr = w_v + WEIGHT_INDEX(row_idx, k, k_dim, n_kv) * {byte_scale};
-                {policy}::template load_weights<{vec_width}>(w_ptr, 0, w);
+                {policy}::template load_weights<{vec_width}>(w_v, WEIGHT_INDEX(row_idx, k, k_dim, n_kv), w);
                 for (uint i = valid_count; i < {vec_width}u; ++i) w[i] = 0.0f;
                 {dot_logic_v}
             }}
@@ -388,7 +378,6 @@ impl Stage for ParallelProjectStage {
             vec_width = vec_width,
             load_input = load_input,
             norm_logic = norm_logic,
-            byte_scale = byte_scale,
             scale_stride = scale_stride,
             scales_logic = scales_logic,
             tail_scales_logic = tail_scales_logic,

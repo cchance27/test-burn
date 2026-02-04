@@ -221,7 +221,8 @@ impl GGUFModel {
         match gguf_type {
             GGUFDataType::F32 => crate::tensor::Dtype::F32,
             GGUFDataType::F16 => crate::tensor::Dtype::F16,
-            GGUFDataType::Q8_0 => crate::tensor::Dtype::U8,
+            GGUFDataType::Q4_0 => crate::tensor::Dtype::Q4_0,
+            GGUFDataType::Q8_0 => crate::tensor::Dtype::Q8_0,
             GGUFDataType::Q8_1 => {
                 panic!("GGUF tensor dtype Q8_1 is not supported by Foundry yet (add support or convert the model).")
             }

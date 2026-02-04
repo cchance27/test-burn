@@ -2,40 +2,19 @@ use metallic_macros::MetalPolicy;
 
 use super::{LoaderStage, MetalPolicyRuntime};
 use crate::{
-    Foundry, compound::Layout, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalResourceOptions, TensorArg}
+    Foundry, compound::Layout, gguf::model_loader::GGUFModel, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::TensorArg
 };
 
 const Q8_0_WPB: usize = 32;
 const Q8_0_BLOCK_BYTES: usize = 34;
 const Q8_0_SCALE_BYTES: usize = 2;
+const Q8_0_DATA_BYTES: usize = 32;
 
 #[inline]
-fn q8_0_canonical_dst_block_idx(src_block_idx: usize, blocks_per_k: usize, target_n: usize) -> usize {
-    let row = src_block_idx / blocks_per_k;
-    let block = src_block_idx - row * blocks_per_k;
-    block * target_n + row
-}
-
-#[inline]
-fn split_q8_0_blocks(raw: &[u8], blocks_per_k: usize, target_n: usize, is_canonical: bool, data_out: &mut [u8], scales_out: &mut [u8]) {
-    debug_assert_eq!(raw.len() % Q8_0_BLOCK_BYTES, 0);
-    debug_assert_eq!(data_out.len() % Q8_0_WPB, 0);
-    debug_assert_eq!(scales_out.len() % Q8_0_SCALE_BYTES, 0);
-
-    for (src_block_idx, chunk) in raw.chunks_exact(Q8_0_BLOCK_BYTES).enumerate() {
-        let scale_dst_block_idx = src_block_idx;
-        let weight_dst_block_idx = if is_canonical {
-            q8_0_canonical_dst_block_idx(src_block_idx, blocks_per_k, target_n)
-        } else {
-            src_block_idx
-        };
-
-        let dst_scale = scale_dst_block_idx * Q8_0_SCALE_BYTES;
-        scales_out[dst_scale..dst_scale + Q8_0_SCALE_BYTES].copy_from_slice(&chunk[..Q8_0_SCALE_BYTES]);
-
-        let dst_data = weight_dst_block_idx * Q8_0_WPB;
-        data_out[dst_data..dst_data + Q8_0_WPB].copy_from_slice(&chunk[Q8_0_SCALE_BYTES..Q8_0_SCALE_BYTES + Q8_0_WPB]);
-    }
+fn q8_0_write_block(qs: &[u8], out: &mut [u8]) {
+    debug_assert_eq!(qs.len(), Q8_0_DATA_BYTES);
+    debug_assert_eq!(out.len(), Q8_0_DATA_BYTES);
+    out.copy_from_slice(qs);
 }
 
 #[derive(Debug, Clone, Default, MetalPolicy)]
@@ -94,117 +73,19 @@ impl MetalPolicyRuntime for PolicyQ8 {
         logical_name: &str,
         layout: Layout,
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
-        let tensor_info = gguf
-            .get_tensor(gguf_tensor_name)
-            .ok_or_else(|| anyhow::anyhow!("Tensor {} not found in GGUF", gguf_tensor_name))?;
-
-        let dims: Vec<usize> = tensor_info.dims().to_vec();
-        if dims.len() != 2 {
-            return Err(anyhow::anyhow!("Q8_0 tensor '{}' must be 2D (got {:?})", gguf_tensor_name, dims));
-        }
-
-        let (target_k, target_n, is_canonical) = match layout {
-            Layout::RowMajor => (dims[1], dims[0], false),
-            Layout::ColMajor => (dims[0], dims[1], false),
-            Layout::Canonical { expected_k, expected_n } => (expected_k, expected_n, true),
-        };
-
-        let view = tensor_info.raw_view(&gguf.gguf_file)?;
-        let raw = match view {
-            GGUFRawTensor::Bytes(b, GGUFDataType::Q8_0) => b,
-            _ => {
-                return Err(anyhow::anyhow!(
-                    "Tensor '{}' is not Q8_0 bytes. Got {:?}",
-                    gguf_tensor_name,
-                    tensor_info.data_type()
-                ));
-            }
-        };
-
-        let contiguous_dim_len = if is_canonical {
-            if !((dims[0] == target_k && dims[1] == target_n) || (dims[0] == target_n && dims[1] == target_k)) {
-                return Err(anyhow::anyhow!(
-                    "Q8 canonical tensor '{}' dims {:?} mismatch (K,N)=({},{})",
-                    gguf_tensor_name,
-                    dims,
-                    target_k,
-                    target_n
-                ));
-            }
-            target_k
-        } else {
-            dims[1]
-        };
-
-        if contiguous_dim_len % Q8_0_WPB != 0 {
-            return Err(anyhow::anyhow!(
-                "Q8_0 tensor '{}' contig dim {} not divisible by 32",
-                gguf_tensor_name,
-                contiguous_dim_len
-            ));
-        }
-
-        // Block count for contiguous dim
-        let blocks_per_k = contiguous_dim_len / Q8_0_WPB;
-        let n_dim_len = if is_canonical { target_n } else { dims[0] };
-
-        let total_blocks = n_dim_len * blocks_per_k;
-        let expected_bytes = total_blocks * Q8_0_BLOCK_BYTES;
-
-        if raw.len() != expected_bytes {
-            return Err(anyhow::anyhow!(
-                "Q8 tensor size mismatch for '{}': got {}, exp {}",
-                gguf_tensor_name,
-                raw.len(),
-                expected_bytes
-            ));
-        }
-
-        // Allocate separate Metal buffers
-        let data_len = total_blocks * Q8_0_WPB;
-        let scales_len = total_blocks * Q8_0_SCALE_BYTES;
-
-        let data_buffer = foundry
-            .device
-            .new_buffer(data_len, MetalResourceOptions::StorageModeShared)
-            .ok_or_else(|| anyhow::anyhow!("Failed to allocate Q8 data"))?;
-
-        let scales_buffer = foundry
-            .device
-            .new_buffer(scales_len, MetalResourceOptions::StorageModeShared)
-            .ok_or_else(|| anyhow::anyhow!("Failed to allocate Q8 scales"))?;
-
-        if is_canonical {
-            if gguf.layout_hint() != crate::gguf::model_loader::GGUFLayoutHint::Nk {
-                return Err(anyhow::anyhow!("Q8 canonical requires Nk layout"));
-            }
-        } else {
-            // Standard split keeps the row-major block order.
-        }
-
-        // Split blocks into separate {data, scales} buffers (and reorder if canonical).
-        data_buffer.write_via_slice(data_len, |data_out| {
-            scales_buffer.write_via_slice(scales_len, |scales_out| {
-                split_q8_0_blocks(raw, blocks_per_k, target_n, is_canonical, data_out, scales_out);
-            });
-        });
-
-        let data_arg = TensorArg::from_buffer(
-            data_buffer,
-            Dtype::U8,
-            if is_canonical { vec![data_len] } else { dims.clone() },
-            if is_canonical {
-                vec![1]
-            } else {
-                crate::tensor::compute_strides(&dims)
-            },
-        );
-
-        let scales_arg = TensorArg::from_buffer(scales_buffer, Dtype::U8, vec![scales_len], vec![1]);
+        let loaded = crate::policy::block_quant::load_block_quant_2d::<Q8_0_WPB, Q8_0_BLOCK_BYTES, Q8_0_SCALE_BYTES, Q8_0_DATA_BYTES>(
+            foundry,
+            gguf,
+            gguf_tensor_name,
+            Dtype::Q8_0,
+            Dtype::Q8_0,
+            layout,
+            q8_0_write_block,
+        )?;
 
         Ok(vec![
-            (logical_name.to_string(), data_arg),
-            (format!("{}_scales", logical_name), scales_arg),
+            (logical_name.to_string(), loaded.weights),
+            (format!("{}_scales", logical_name), loaded.scales),
         ])
     }
 }
@@ -230,14 +111,22 @@ mod tests {
         let mut data_out = vec![0u8; total_blocks * Q8_0_WPB];
         let mut scales_out = vec![0u8; total_blocks * Q8_0_SCALE_BYTES];
 
-        split_q8_0_blocks(&raw, blocks_per_k, target_n, true, &mut data_out, &mut scales_out);
+        crate::policy::block_quant::split_blocks::<Q8_0_BLOCK_BYTES, Q8_0_SCALE_BYTES, Q8_0_DATA_BYTES>(
+            &raw,
+            blocks_per_k,
+            target_n,
+            true,
+            &mut data_out,
+            &mut scales_out,
+            q8_0_write_block,
+        );
 
         for src_block_idx in 0..total_blocks {
             let scale_start = src_block_idx * Q8_0_SCALE_BYTES;
             assert_eq!(scales_out[scale_start], src_block_idx as u8);
             assert_eq!(scales_out[scale_start + 1], 0xEE);
 
-            let dst = q8_0_canonical_dst_block_idx(src_block_idx, blocks_per_k, target_n);
+            let dst = crate::policy::block_quant::canonical_dst_block_idx(src_block_idx, blocks_per_k, target_n);
             let data_start = dst * Q8_0_WPB;
             assert_eq!(data_out[data_start], (0x10 + src_block_idx) as u8);
             assert_eq!(data_out[data_start + Q8_0_WPB - 1], (0x10 + src_block_idx) as u8);

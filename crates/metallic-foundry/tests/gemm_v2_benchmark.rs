@@ -55,12 +55,12 @@ fn run_gemm_benchmark_case(foundry: &mut Foundry, ctx: &mut Context<LegacyF16>, 
 
     // Optional quantized B and its scales
     let _b_f16: Option<FoundryTensor<F16, Pooled>>;
-    let _b_weights: Option<FoundryTensor<metallic_foundry::tensor::dtypes::U8, Pooled>>;
+    let _b_weights: Option<FoundryTensor<metallic_foundry::tensor::Q8_0, Pooled>>;
     let _b_scales: Option<FoundryTensor<F16, Pooled>>;
 
     let (b_ref, b_scales_ref) = if cfg.quant_b == TestQuantization::Q8 {
         let blocks_per_k = cfg.k.div_ceil(32);
-        let bw = FoundryTensor::<metallic_foundry::tensor::dtypes::U8, Pooled>::new(
+        let bw = FoundryTensor::<metallic_foundry::tensor::Q8_0, Pooled>::new(
             foundry,
             vec![cfg.n, blocks_per_k * 32],
             TensorInit::Uninitialized,

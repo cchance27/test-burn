@@ -8,7 +8,7 @@ use metallic_foundry::{
         gemv::{
             fused_step::FusedGemvArgs, stages::{VectorizedDotStage, WarpWriteOutputNoResidualStage}
         }, rmsnorm::stages::RmsNormComputeStage
-    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Tensor as FoundryTensor, TensorInit, U8}, types::{DispatchConfig, TensorArg}
+    }, policy::q8::PolicyQ8, storage::Pooled, tensor::{F16, Q8_0, Tensor as FoundryTensor, TensorInit}, types::{DispatchConfig, TensorArg}
 };
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use serial_test::serial;
@@ -128,7 +128,7 @@ fn run_fused_gemv_test(cfg: FusedTestConfig) {
     let bias_data: Vec<f16> = (0..cfg.n).map(|_| f16::from_f32(rng.random_range(-0.5..0.5))).collect();
 
     // Create Foundry Tensors
-    let weights = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![cfg.k * cfg.n], TensorInit::CopyFrom(&weights_data)).unwrap();
+    let weights = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![cfg.k * cfg.n], TensorInit::CopyFrom(&weights_data)).unwrap();
     let scales = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![n_blocks], TensorInit::CopyFrom(&scales_data)).unwrap();
     let input = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.k], TensorInit::CopyFrom(&input_data)).unwrap();
     let output = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![cfg.n], TensorInit::Uninitialized).unwrap();

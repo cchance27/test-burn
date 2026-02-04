@@ -7,7 +7,7 @@ use metallic_context::{
     Context, F16Element, kernels::rmsnorm::RMSNormOp, tensor::{F16 as LegacyF16, Tensor as LegacyTensor, TensorInit as LegacyInit, TensorStorage as LegacyStorage}
 };
 use metallic_foundry::{
-    Foundry, metals::rmsnorm::{RmsNorm, RmsNormParamsResolved}, storage::Pooled, tensor::{F16 as FoundryF16, Tensor as FoundryTensor, TensorInit, U8}, types::TensorArg
+    Foundry, metals::rmsnorm::{RmsNorm, RmsNormParamsResolved}, storage::Pooled, tensor::{F16 as FoundryF16, Q8_0, Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
 use serial_test::serial;
@@ -413,8 +413,8 @@ fn run_q8_policy_test(cfg: TestConfig) {
     let (data_bytes, scale_bytes) = quantize_rmsnorm_q8(&input_half, cfg.feature_dim);
 
     // Create tensors
-    let input_q8 = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![data_bytes.len()], TensorInit::CopyFrom(&data_bytes)).unwrap();
-    let scales = FoundryTensor::<U8, Pooled>::new(&mut foundry, vec![scale_bytes.len()], TensorInit::CopyFrom(&scale_bytes)).unwrap();
+    let input_q8 = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![data_bytes.len()], TensorInit::CopyFrom(&data_bytes)).unwrap();
+    let scales = FoundryTensor::<Q8_0, Pooled>::new(&mut foundry, vec![scale_bytes.len()], TensorInit::CopyFrom(&scale_bytes)).unwrap();
     let output = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![total_elements], TensorInit::Uninitialized).unwrap();
     let gamma = FoundryTensor::<FoundryF16, Pooled>::new(&mut foundry, vec![cfg.feature_dim], TensorInit::CopyFrom(&gamma_half)).unwrap();
 
