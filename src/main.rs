@@ -530,8 +530,11 @@ fn main() -> AppResult<()> {
                                     inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
                                     inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
                                     inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
-                                    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-                                    inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+                                    // Prefer runner auto-injection of `eos_token` when the workflow declares it.
+                                    if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
+                                        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+                                        inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+                                    }
 
                                     let mut decode_scratch = Vec::new();
                                     let mut decoded_chunk = String::new();
@@ -724,8 +727,11 @@ fn main() -> AppResult<()> {
                                 inputs.insert("presence_penalty".to_string(), WfValue::F32(cfg.presence_penalty));
                                 inputs.insert("frequency_penalty".to_string(), WfValue::F32(cfg.frequency_penalty));
                                 inputs.insert("seed".to_string(), WfValue::U32(cfg.seed.unwrap_or(42)));
-                                let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-                                inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+                                // Prefer runner auto-injection of `eos_token` when the workflow declares it.
+                                if !workflow.inputs.iter().any(|i| i.name == "eos_token") {
+                                    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+                                    inputs.insert("eos_token".to_string(), WfValue::U32(eos));
+                                }
 
                                 let mut decode_scratch = Vec::new();
                                 let mut decoded_chunk = String::new();

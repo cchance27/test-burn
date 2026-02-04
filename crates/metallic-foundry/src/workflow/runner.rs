@@ -301,6 +301,30 @@ impl<'a> WorkflowRunner<'a> {
             }
         }
 
+        // Convenience: infer `eos_token` from the default model's tokenizer if not explicitly provided.
+        //
+        // Rationale:
+        // - Workflows are model-agnostic, but token IDs (EOS/BOS/etc.) are tokenizer-defined.
+        // - The CLI already knows the model/tokenizer, so passing `eos_token` is redundant most of the time.
+        // - If multiple models are loaded and `workflow.default_model` is missing, we cannot infer safely.
+        if !inputs.contains_key("eos_token") && workflow.inputs.iter().any(|i| i.name == "eos_token") {
+            let model_id = if let Some(id) = workflow.default_model.as_deref() {
+                Some(id)
+            } else if self.models.len() == 1 {
+                self.models.keys().next().map(|s| s.as_str())
+            } else {
+                None
+            };
+
+            if let Some(model_id) = model_id
+                && let Some(model) = self.models.get(model_id)
+                && let Ok(tok) = model.tokenizer()
+                && let Some(eos) = tok.special_tokens().eos_token_id
+            {
+                inputs.insert("eos_token".to_string(), Value::U32(eos));
+            }
+        }
+
         let fp = workflow_fingerprint(workflow);
         let needs_compile = self.compiled.as_ref().map(|(old, _)| *old != fp).unwrap_or(true);
         if needs_compile {

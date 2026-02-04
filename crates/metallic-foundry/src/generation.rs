@@ -200,8 +200,12 @@ pub fn generate_streaming_from_tokens_with_workflow(
     inputs.insert("presence_penalty".to_string(), Value::F32(cfg.presence_penalty));
     inputs.insert("frequency_penalty".to_string(), Value::F32(cfg.frequency_penalty));
 
-    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-    inputs.insert("eos_token".to_string(), Value::U32(eos));
+    // Prefer runner auto-injection of `eos_token` (from the default model's tokenizer) when the workflow declares it.
+    // Keep a fallback for workflows that rely on EOS but do not declare an input (legacy/custom graphs).
+    if !wf_cfg.workflow.inputs.iter().any(|i| i.name == "eos_token") {
+        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+        inputs.insert("eos_token".to_string(), Value::U32(eos));
+    }
     inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
 
     let _outputs = runner.run_streaming(&wf_cfg.workflow, inputs, &mut callback)?;
@@ -271,8 +275,12 @@ pub fn generate_streaming_with_workflow_from_prompt(
     inputs.insert("presence_penalty".to_string(), Value::F32(cfg.presence_penalty));
     inputs.insert("frequency_penalty".to_string(), Value::F32(cfg.frequency_penalty));
 
-    let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
-    inputs.insert("eos_token".to_string(), Value::U32(eos));
+    // Prefer runner auto-injection of `eos_token` (from the default model's tokenizer) when the workflow declares it.
+    // Keep a fallback for workflows that rely on EOS but do not declare an input (legacy/custom graphs).
+    if !wf_cfg.workflow.inputs.iter().any(|i| i.name == "eos_token") {
+        let eos = tokenizer.special_tokens().eos_token_id.unwrap_or(151645);
+        inputs.insert("eos_token".to_string(), Value::U32(eos));
+    }
     inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
 
     let _outputs = runner.run_streaming(&wf_cfg.workflow, inputs, &mut callback)?;
