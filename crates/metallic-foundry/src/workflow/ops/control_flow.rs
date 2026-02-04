@@ -163,6 +163,11 @@ fn ignore_eos_stop() -> bool {
     *IGNORE.get_or_init(|| std::env::var("METALLIC_IGNORE_EOS_STOP").is_ok_and(|v| v != "0"))
 }
 
+fn debug_stream_poll_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("METALLIC_DEBUG_STREAM_POLL").is_ok_and(|v| v != "0"))
+}
+
 fn default_decode_batch_size() -> usize {
     static DEFAULT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *DEFAULT.get_or_init(|| {
@@ -376,10 +381,15 @@ impl WorkflowOp for WhileBatchedOp {
             if self.stream_async_poll {
                 if let Some(r) = stream_reader.as_mut() {
                     // Overlap CPU work with GPU execution by polling the channel while the command buffer runs.
+                    let debug_poll = debug_stream_poll_enabled();
+                    let mut poll_iters: u32 = 0;
+                    let mut drained_during: usize = 0;
                     loop {
                         drained_tokens.clear();
                         r.drain_into(&mut drained_tokens)?;
+                        poll_iters = poll_iters.saturating_add(1);
                         if !drained_tokens.is_empty() {
+                            drained_during = drained_during.saturating_add(drained_tokens.len());
                             for token in drained_tokens.iter().copied() {
                                 if stop_on_eos && token == eos {
                                     // We must wait for the in-flight command buffer before returning to ensure
@@ -419,6 +429,15 @@ impl WorkflowOp for WhileBatchedOp {
                         }
 
                         if stop_requested || cmd.is_completed()? {
+                            if debug_poll {
+                                tracing::info!(
+                                    target: "metallic_foundry::workflow::ops",
+                                    "WhileBatchedOp async_poll: drained_during={} polls={} stop_requested={}",
+                                    drained_during,
+                                    poll_iters,
+                                    stop_requested,
+                                );
+                            }
                             break;
                         }
                         std::thread::sleep(std::time::Duration::from_micros(poll_us));
@@ -442,6 +461,13 @@ impl WorkflowOp for WhileBatchedOp {
                     }
                 }
                 r.drain_into(&mut drained_tokens)?;
+                if self.stream_async_poll && debug_stream_poll_enabled() {
+                    tracing::info!(
+                        target: "metallic_foundry::workflow::ops",
+                        "WhileBatchedOp async_poll: drained_tail={}",
+                        drained_tokens.len()
+                    );
+                }
                 for token in drained_tokens.iter().copied() {
                     if stop_on_eos && token == eos {
                         break 'outer;
