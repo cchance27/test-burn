@@ -181,6 +181,7 @@ pub(crate) struct WhileBatchedOp {
     batch_size: Option<Param<usize>>,
     unsafe_allow_overshoot: bool,
     token_var: String,
+    stream_channel: Option<String>,
     output_tokens: String,
     eos_token: Param<u32>,
     body_ops: Vec<Box<dyn WorkflowOp>>,
@@ -194,6 +195,7 @@ impl WhileBatchedOp {
         batch_size: Option<Param<usize>>,
         unsafe_allow_overshoot: bool,
         token_var: String,
+        stream_channel: Option<String>,
         output_tokens: String,
         eos_token: Param<u32>,
         body_ops: Vec<Box<dyn WorkflowOp>>,
@@ -204,6 +206,7 @@ impl WhileBatchedOp {
             batch_size,
             unsafe_allow_overshoot,
             token_var,
+            stream_channel,
             output_tokens,
             eos_token,
             body_ops,
@@ -243,6 +246,23 @@ impl WorkflowOp for WhileBatchedOp {
 
         let eos = ctx.resolve_param_u32(&self.eos_token)?;
         let stop_on_eos = !ignore_eos_stop();
+
+        let mut stream_reader = if let Some(name) = self.stream_channel.as_deref() {
+            let chan =
+                ctx.values.get(name).and_then(|v| v.as_channel_u32()).cloned().ok_or_else(|| {
+                    MetalError::InvalidOperation(format!("WhileBatchedOp stream_channel '{}' missing (channel_u32)", name))
+                })?;
+            if (chan.capacity as usize) < batch_size {
+                return Err(MetalError::InvalidOperation(format!(
+                    "WhileBatchedOp stream_channel '{}' capacity {} < batch_size {}",
+                    name, chan.capacity, batch_size
+                )));
+            }
+            Some(crate::workflow::ChannelU32Reader::new(chan))
+        } else {
+            None
+        };
+        let mut drained_tokens: Vec<u32> = Vec::with_capacity(batch_size);
 
         // Guardrail: `batch_size > 1` with EOS stopping enabled can compute "overshoot" tokens into KV.
         // This is fine for throughput runs (`METALLIC_IGNORE_EOS_STOP=1`) but unsafe for multi-turn reuse.
@@ -293,7 +313,11 @@ impl WorkflowOp for WhileBatchedOp {
                 Host(u32),
                 Tensor(TensorArg),
             }
-            let mut tokens: Vec<TokenRef> = Vec::with_capacity(chunk);
+            let mut tokens: Vec<TokenRef> = if stream_reader.is_some() {
+                Vec::new()
+            } else {
+                Vec::with_capacity(chunk)
+            };
 
             for batch_idx in 0..chunk {
                 ctx.values
@@ -308,16 +332,18 @@ impl WorkflowOp for WhileBatchedOp {
                     }
                 }
 
-                // Capture the per-iteration token TensorArg without synchronizing.
-                if let Some(tok) = ctx.values.get(&self.token_var).and_then(|v| v.as_u32()) {
-                    tokens.push(TokenRef::Host(tok));
-                } else if let Some(t) = ctx.values.get(&self.token_var).and_then(|v| v.as_tensor()) {
-                    tokens.push(TokenRef::Tensor(t.clone()));
-                } else {
-                    return Err(MetalError::InvalidOperation(format!(
-                        "WhileBatchedOp missing token variable '{}' (u32 or Tensor u32[1])",
-                        self.token_var
-                    )));
+                // In non-stream mode, capture the per-iteration token TensorArg without synchronizing.
+                if stream_reader.is_none() {
+                    if let Some(tok) = ctx.values.get(&self.token_var).and_then(|v| v.as_u32()) {
+                        tokens.push(TokenRef::Host(tok));
+                    } else if let Some(t) = ctx.values.get(&self.token_var).and_then(|v| v.as_tensor()) {
+                        tokens.push(TokenRef::Tensor(t.clone()));
+                    } else {
+                        return Err(MetalError::InvalidOperation(format!(
+                            "WhileBatchedOp missing token variable '{}' (u32 or Tensor u32[1])",
+                            self.token_var
+                        )));
+                    }
                 }
 
                 iter = iter.saturating_add(1);
@@ -333,47 +359,84 @@ impl WorkflowOp for WhileBatchedOp {
 
             // Emit tokens in-order, trimming at EOS (if enabled). Note that any overshoot tokens
             // are still computed into the model KV cache; this is intended for single-turn flows.
-            for t in tokens {
-                let token: u32 = match t {
-                    TokenRef::Host(v) => v,
-                    TokenRef::Tensor(t) => {
-                        let buf = t
-                            .buffer
-                            .as_ref()
-                            .ok_or_else(|| MetalError::InvalidOperation("WhileBatchedOp token tensor missing buffer".into()))?;
-                        buf.read_scalar::<u32>()
+            drained_tokens.clear();
+            if let Some(r) = stream_reader.as_mut() {
+                r.drain_into(&mut drained_tokens)?;
+                for token in drained_tokens.iter().copied() {
+                    if stop_on_eos && token == eos {
+                        break 'outer;
                     }
-                };
 
-                if stop_on_eos && token == eos {
-                    break 'outer;
-                }
-
-                // Append to output list
-                if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
-                    if let crate::workflow::Value::TokensU32(vec) = val {
-                        vec.push(token);
+                    // Append to output list
+                    if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
+                        if let crate::workflow::Value::TokensU32(vec) = val {
+                            vec.push(token);
+                        } else {
+                            return Err(MetalError::InvalidOperation(format!(
+                                "WhileBatchedOp output '{}' is not a TokensU32 list",
+                                self.output_tokens
+                            )));
+                        }
                     } else {
-                        return Err(MetalError::InvalidOperation(format!(
-                            "WhileBatchedOp output '{}' is not a TokensU32 list",
-                            self.output_tokens
-                        )));
+                        ctx.values
+                            .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
                     }
-                } else {
-                    ctx.values
-                        .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
-                }
 
-                let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
-                let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-                let should_continue = on_token(
-                    token,
-                    std::time::Duration::from_micros(prefill_us as u64),
-                    std::time::Duration::from_micros(setup_us as u64),
-                    None,
-                )?;
-                if !should_continue {
-                    break 'outer;
+                    let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
+                    let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
+                    let should_continue = on_token(
+                        token,
+                        std::time::Duration::from_micros(prefill_us as u64),
+                        std::time::Duration::from_micros(setup_us as u64),
+                        None,
+                    )?;
+                    if !should_continue {
+                        break 'outer;
+                    }
+                }
+            } else {
+                for t in tokens {
+                    let token: u32 = match t {
+                        TokenRef::Host(v) => v,
+                        TokenRef::Tensor(t) => {
+                            let buf = t
+                                .buffer
+                                .as_ref()
+                                .ok_or_else(|| MetalError::InvalidOperation("WhileBatchedOp token tensor missing buffer".into()))?;
+                            buf.read_scalar::<u32>()
+                        }
+                    };
+
+                    if stop_on_eos && token == eos {
+                        break 'outer;
+                    }
+
+                    // Append to output list
+                    if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
+                        if let crate::workflow::Value::TokensU32(vec) = val {
+                            vec.push(token);
+                        } else {
+                            return Err(MetalError::InvalidOperation(format!(
+                                "WhileBatchedOp output '{}' is not a TokensU32 list",
+                                self.output_tokens
+                            )));
+                        }
+                    } else {
+                        ctx.values
+                            .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
+                    }
+
+                    let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
+                    let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
+                    let should_continue = on_token(
+                        token,
+                        std::time::Duration::from_micros(prefill_us as u64),
+                        std::time::Duration::from_micros(setup_us as u64),
+                        None,
+                    )?;
+                    if !should_continue {
+                        break 'outer;
+                    }
                 }
             }
         }

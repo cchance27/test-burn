@@ -36,6 +36,7 @@
       "max_iterations": "{max_tokens}",
       "unsafe_allow_overshoot": true,
       "token_var": "next_token",
+      "stream_channel": "token_stream",
       "output_tokens": "generated_tokens",
       "eos_token": "{eos_token}",
       "body": [
@@ -78,4 +79,3 @@
     }
   ]
 }
-

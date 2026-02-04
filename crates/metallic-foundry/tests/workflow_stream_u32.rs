@@ -55,6 +55,7 @@ fn workflow_stream_u32_emits_tokens_via_channel() {
       "max_iterations":"{max_tokens}",
       "unsafe_allow_overshoot": true,
       "token_var":"next_token",
+      "stream_channel":"token_stream",
       "output_tokens":"generated_tokens",
       "body":[
         {"op":"test_set_token_u32"},

@@ -348,6 +348,12 @@ pub struct WhileBatchedSpec {
     pub unsafe_allow_overshoot: bool,
     /// Name of the per-iteration token variable produced by the loop body (u32 or u32[1] Tensor).
     pub token_var: String,
+    /// Optional channel variable name (`Value::ChannelU32`) to use for token emission.
+    ///
+    /// When set, `while_batched` drains tokens from the channel after the captured batch completes,
+    /// instead of synchronously reading `token_var` per iteration.
+    #[serde(default)]
+    pub stream_channel: Option<String>,
     /// Output workflow variable to append generated tokens into.
     pub output_tokens: String,
     /// EOS token id (used when `METALLIC_IGNORE_EOS_STOP` is not set).
