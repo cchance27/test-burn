@@ -209,6 +209,15 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
      - Store winning configs in JSON lookup table keyed by `(M_bucket, N_bucket, K_bucket, op_type, gpu_family)`
      - At runtime, look up best config from table
 
+### 6. Zero-Copy Polling (Latency Optimization) (Planned)
+- **Problem:** Decode batching improves throughput but hurts streaming latency (tokens appear in chunks). Synchronous GPU execution blocks the CPU from reporting progress mid-batch.
+- **Solution:** Implement **zero-copy polling** on Apple Silicon (UMA):
+  - Allocate a `StorageModeShared` ring buffer for token output (and optionally timing/metadata).
+  - Dispatch large decode windows asynchronously (e.g. 64–512 steps) via workflow batching/capture.
+  - CPU polls the ring buffer for new tokens *while the GPU is still executing* (or reacts via command-buffer completion handlers for chunked flush).
+  - Because memory is coherent, the CPU can observe tokens as soon as the GPU writes them, enabling **high throughput (batching) AND low latency (streaming)**.
+  - Requires a workflow-visible output buffer contract (so non-LLM workflows can stream intermediate artifacts too).
+
 ---
 
 ## Historical Items that we've completed, for posterity.

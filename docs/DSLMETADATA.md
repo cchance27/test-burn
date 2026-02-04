@@ -151,6 +151,22 @@ Note: The workflow JSON accepts both `steps` and `phases` as equivalent keys (al
   - This is currently used for small/pure-ish ops like `tokenize`.
   - Memoization is disabled in TUI for large values (e.g. formatted prompt strings) to avoid unbounded retention.
 
+### Future goal: async output (zero-copy polling)
+
+Decode batching (`while_batched`) improves throughput by amortizing command-buffer submission and host sync overhead, but it increases user-visible latency because tokens are emitted at the batch boundary.
+
+The intended long-term solution on Apple Silicon (UMA) is **zero-copy polling**:
+
+- Allocate a small **shared-memory ring buffer** for token output (and optionally per-token timing).
+- During a large capture window, the GPU writes token ids (or pre-decoded bytes) into the ring buffer as it generates them.
+- The CPU can poll/stream tokens while the GPU is still executing, avoiding a `wait_until_completed` per token.
+
+This will require adding a workflow-level mechanism to configure the output buffer(s) and a streaming contract that is compatible with:
+
+- multi-turn KV reuse (no “KV overshoot” surprises),
+- throughput mode (`METALLIC_IGNORE_EOS_STOP=1`),
+- interactive mode (low latency, potentially smaller windows).
+
 ### Multi-turn chat delta semantics (important)
 
 For message-driven multi-turn chat (`multiturn_chat*.json`):
