@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     WorkflowSpec, WorkflowStepSpec, ops::{
-        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, MemoizeSpec, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, StreamInitOp, StreamWriteU32Op, SyncOp, TokenizeOp, WhileBatchedOp, WhileOp, WorkflowOp
+        AppendTokenOp, BreakOp, CaptureBeginOp, CaptureEndOp, CaptureWaitOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, MemoizeSpec, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, StreamInitOp, StreamWriteU32Op, SyncOp, TokenizeOp, WhileBatchedOp, WhileOp, WorkflowOp
     }
 };
 use crate::error::MetalError;
@@ -133,6 +133,9 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
     m.insert("compute_int".to_string(), make_std_builder(ComputeIntOp::new));
     m.insert("check_eos".to_string(), make_std_builder(CheckEosOp::new));
     m.insert("append_token".to_string(), make_std_builder(AppendTokenOp::new));
+    m.insert("capture_begin".to_string(), make_std_builder(CaptureBeginOp::new));
+    m.insert("capture_end".to_string(), make_std_builder(CaptureEndOp::new));
+    m.insert("capture_wait".to_string(), make_std_builder(CaptureWaitOp::new));
     m.insert("stream_init".to_string(), make_std_builder(StreamInitOp::new));
     m.insert("stream_write_u32".to_string(), make_std_builder(StreamWriteU32Op::new));
     m.insert(

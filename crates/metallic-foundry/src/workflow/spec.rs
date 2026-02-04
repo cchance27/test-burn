@@ -395,6 +395,25 @@ pub struct StreamWriteU32Spec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct CaptureBeginSpec {}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptureEndSpec {
+    /// If true, waits for completion before continuing.
+    #[serde(default = "default_true")]
+    pub wait: bool,
+    /// Optional output variable name to store the command buffer in (Value::CommandBuffer).
+    #[serde(default)]
+    pub output: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CaptureWaitSpec {
+    /// Command buffer workflow variable (Value::CommandBuffer).
+    pub input: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GraphForwardSpec {
     #[serde(default)]
     pub model_id: Option<String>,

@@ -5,6 +5,7 @@ use std::{
 use rustc_hash::FxHashMap;
 
 use super::channel::ChannelU32;
+use crate::types::MetalCommandBuffer;
 
 /// Runtime value passed between workflow steps.
 #[derive(Debug, Clone)]
@@ -19,6 +20,7 @@ pub enum Value {
     TokensU32(Vec<u32>),
     Tensor(crate::types::TensorArg),
     ChannelU32(ChannelU32),
+    CommandBuffer(MetalCommandBuffer),
 }
 
 impl Value {
@@ -84,6 +86,10 @@ impl Value {
             // Channels are not fingerprinted for memoization (live state / expensive semantics).
             Value::ChannelU32(_) => {
                 9u8.hash(h);
+            }
+            // Command buffers are not fingerprinted for memoization (live state).
+            Value::CommandBuffer(_) => {
+                10u8.hash(h);
             }
         }
     }
@@ -157,12 +163,20 @@ impl Value {
             Value::TokensU32(_) => "tokens_u32",
             Value::Tensor(_) => "tensor",
             Value::ChannelU32(_) => "channel_u32",
+            Value::CommandBuffer(_) => "command_buffer",
         }
     }
 
     pub fn as_channel_u32(&self) -> Option<&ChannelU32> {
         match self {
             Value::ChannelU32(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn as_command_buffer(&self) -> Option<&MetalCommandBuffer> {
+        match self {
+            Value::CommandBuffer(c) => Some(c),
             _ => None,
         }
     }

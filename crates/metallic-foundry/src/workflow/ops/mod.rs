@@ -9,6 +9,7 @@ mod format_chat;
 mod forward;
 mod graph_forward;
 
+mod capture;
 mod prefill;
 mod ret;
 mod sample;
@@ -18,6 +19,7 @@ mod sync;
 mod tokenize;
 
 pub(crate) use append_token::AppendTokenOp;
+pub(crate) use capture::{CaptureBeginOp, CaptureEndOp, CaptureWaitOp};
 pub(crate) use check_eos::CheckEosOp;
 pub(crate) use compute_int::ComputeIntOp;
 pub(crate) use control_flow::{BreakOp, ContinueOp, IfOp, WhileBatchedOp, WhileOp};
