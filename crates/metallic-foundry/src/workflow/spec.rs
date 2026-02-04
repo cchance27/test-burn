@@ -340,6 +340,12 @@ pub struct WhileBatchedSpec {
     /// Optional decode batch size. If omitted, defaults to `METALLIC_FOUNDRY_DECODE_BATCH_SIZE` or 1.
     #[serde(default)]
     pub batch_size: Option<Param<usize>>,
+    /// Safety valve: allow `batch_size > 1` while EOS stopping is enabled.
+    ///
+    /// This can cause "KV overshoot" (tokens after EOS are still computed within the batch).
+    /// Default is false to prevent accidental misuse in multi-turn workflows.
+    #[serde(default)]
+    pub unsafe_allow_overshoot: bool,
     /// Name of the per-iteration token variable produced by the loop body (u32 or u32[1] Tensor).
     pub token_var: String,
     /// Output workflow variable to append generated tokens into.

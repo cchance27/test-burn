@@ -65,6 +65,7 @@ fn while_batched_trims_after_eos_at_batch_boundary() {
       "op": "while_batched",
       "condition": "max_tokens",
       "max_iterations": "{max_tokens}",
+      "unsafe_allow_overshoot": true,
       "token_var": "next_token",
       "output_tokens": "generated_tokens",
       "eos_token": "{eos_token}",

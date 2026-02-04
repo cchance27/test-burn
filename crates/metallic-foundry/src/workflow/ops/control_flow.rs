@@ -179,6 +179,7 @@ pub(crate) struct WhileBatchedOp {
     condition: String,
     max_iterations: Option<Param<usize>>,
     batch_size: Option<Param<usize>>,
+    unsafe_allow_overshoot: bool,
     token_var: String,
     output_tokens: String,
     eos_token: Param<u32>,
@@ -191,6 +192,7 @@ impl WhileBatchedOp {
         condition: String,
         max_iterations: Option<Param<usize>>,
         batch_size: Option<Param<usize>>,
+        unsafe_allow_overshoot: bool,
         token_var: String,
         output_tokens: String,
         eos_token: Param<u32>,
@@ -200,6 +202,7 @@ impl WhileBatchedOp {
             condition,
             max_iterations,
             batch_size,
+            unsafe_allow_overshoot,
             token_var,
             output_tokens,
             eos_token,
@@ -240,6 +243,15 @@ impl WorkflowOp for WhileBatchedOp {
 
         let eos = ctx.resolve_param_u32(&self.eos_token)?;
         let stop_on_eos = !ignore_eos_stop();
+
+        // Guardrail: `batch_size > 1` with EOS stopping enabled can compute "overshoot" tokens into KV.
+        // This is fine for throughput runs (`METALLIC_IGNORE_EOS_STOP=1`) but unsafe for multi-turn reuse.
+        if stop_on_eos && batch_size > 1 && !self.unsafe_allow_overshoot {
+            return Err(MetalError::InvalidOperation(
+                "Invalid workflow: while_batched with batch_size>1 while EOS stopping is enabled can cause KV overshoot. Set METALLIC_IGNORE_EOS_STOP=1, use batch_size=1, or set while_batched.unsafe_allow_overshoot=true if you accept this behavior."
+                    .into(),
+            ));
+        }
 
         let mut iter = 0usize;
         'outer: loop {

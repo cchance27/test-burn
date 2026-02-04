@@ -190,6 +190,7 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
                 spec.condition,
                 spec.max_iterations,
                 spec.batch_size,
+                spec.unsafe_allow_overshoot,
                 spec.token_var,
                 spec.output_tokens,
                 spec.eos_token,
