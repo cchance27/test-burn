@@ -4,6 +4,8 @@ use std::{
 
 use rustc_hash::FxHashMap;
 
+use super::channel::ChannelU32;
+
 /// Runtime value passed between workflow steps.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -16,6 +18,7 @@ pub enum Value {
     Map(FxHashMap<String, Value>),
     TokensU32(Vec<u32>),
     Tensor(crate::types::TensorArg),
+    ChannelU32(ChannelU32),
 }
 
 impl Value {
@@ -77,6 +80,10 @@ impl Value {
             // Tensors are not fingerprinted for memoization (expensive/unclear semantics).
             Value::Tensor(_) => {
                 8u8.hash(h);
+            }
+            // Channels are not fingerprinted for memoization (live state / expensive semantics).
+            Value::ChannelU32(_) => {
+                9u8.hash(h);
             }
         }
     }
@@ -149,6 +156,14 @@ impl Value {
             Value::Map(_) => "map",
             Value::TokensU32(_) => "tokens_u32",
             Value::Tensor(_) => "tensor",
+            Value::ChannelU32(_) => "channel_u32",
+        }
+    }
+
+    pub fn as_channel_u32(&self) -> Option<&ChannelU32> {
+        match self {
+            Value::ChannelU32(c) => Some(c),
+            _ => None,
         }
     }
 }

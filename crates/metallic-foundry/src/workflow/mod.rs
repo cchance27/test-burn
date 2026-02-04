@@ -2,12 +2,14 @@
 //!
 //! Workflows are loaded from JSON and executed against a set of named models.
 
+mod channel;
 mod compiler;
 pub mod ops;
 mod runner;
 mod spec;
 mod value;
 
+pub use channel::{ChannelU32, ChannelU32Reader};
 pub use compiler::register_op;
 pub use runner::{WorkflowExecutionContext, WorkflowRunner, WorkflowRunnerConfig};
 pub use spec::{Param, WorkflowModelResourceSpec, WorkflowResourcesSpec, WorkflowSpec, WorkflowStepSpec};

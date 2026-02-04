@@ -1,4 +1,5 @@
 pub mod attention;
+pub mod channel;
 pub mod elemwise;
 pub mod embedding;
 pub mod flashattention;
