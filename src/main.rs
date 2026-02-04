@@ -89,7 +89,8 @@ fn main() -> AppResult<()> {
     alert::init_error_logging();
     let gguf_path = cli_config.gguf_path.clone();
     let prompts = cli_config.get_prompts();
-    let tui_start_processing = matches!(cli_config.output_format, cli::config::OutputFormat::Tui) && !prompts.is_empty();
+    let tui_start_processing =
+        matches!(cli_config.output_format, cli::config::OutputFormat::Tui) && prompts.first().is_some_and(|p| !p.trim().is_empty());
     let worker_generation = cli_config.generation;
     let worker_backend = cli_config.backend;
     let worker_sdpa_backend = cli_config.sdpa_backend;

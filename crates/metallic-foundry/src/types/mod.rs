@@ -721,6 +721,15 @@ impl MetalCommandBuffer {
             self.0.addCompletedHandler(raw_block.cast());
         }
     }
+
+    pub fn is_completed(&self) -> Result<bool, MetalError> {
+        use objc2_metal::{MTLCommandBuffer as _, MTLCommandBufferStatus};
+        match self.0.status() {
+            MTLCommandBufferStatus::Completed => Ok(true),
+            MTLCommandBufferStatus::Error => Err(MetalError::OperationFailed("Command buffer failed".into())),
+            _ => Ok(false),
+        }
+    }
 }
 
 pub type CommandBuffer = MetalCommandBuffer;

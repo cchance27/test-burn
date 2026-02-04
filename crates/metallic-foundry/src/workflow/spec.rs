@@ -354,6 +354,15 @@ pub struct WhileBatchedSpec {
     /// instead of synchronously reading `token_var` per iteration.
     #[serde(default)]
     pub stream_channel: Option<String>,
+    /// When `stream_channel` is set, optionally poll/drain the channel while the GPU command buffer
+    /// is executing, overlapping CPU work (e.g. detokenize/UI) with GPU decode.
+    #[serde(default)]
+    pub stream_async_poll: bool,
+    /// Poll interval in microseconds when `stream_async_poll` is enabled.
+    ///
+    /// Lower values reduce latency but can increase CPU overhead.
+    #[serde(default = "default_stream_poll_us")]
+    pub stream_poll_interval_us: u32,
     /// Output workflow variable to append generated tokens into.
     pub output_tokens: String,
     /// EOS token id (used when `METALLIC_IGNORE_EOS_STOP` is not set).
@@ -362,6 +371,10 @@ pub struct WhileBatchedSpec {
     // Back-compat: accept `phases` as an alias for `body`.
     #[serde(alias = "phases")]
     pub body: Vec<WorkflowStepSpec>,
+}
+
+fn default_stream_poll_us() -> u32 {
+    200
 }
 
 #[derive(Debug, Clone, Deserialize)]

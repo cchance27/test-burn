@@ -182,6 +182,8 @@ pub(crate) struct WhileBatchedOp {
     unsafe_allow_overshoot: bool,
     token_var: String,
     stream_channel: Option<String>,
+    stream_async_poll: bool,
+    stream_poll_interval_us: u32,
     output_tokens: String,
     eos_token: Param<u32>,
     body_ops: Vec<Box<dyn WorkflowOp>>,
@@ -196,6 +198,8 @@ impl WhileBatchedOp {
         unsafe_allow_overshoot: bool,
         token_var: String,
         stream_channel: Option<String>,
+        stream_async_poll: bool,
+        stream_poll_interval_us: u32,
         output_tokens: String,
         eos_token: Param<u32>,
         body_ops: Vec<Box<dyn WorkflowOp>>,
@@ -207,6 +211,8 @@ impl WhileBatchedOp {
             unsafe_allow_overshoot,
             token_var,
             stream_channel,
+            stream_async_poll,
+            stream_poll_interval_us,
             output_tokens,
             eos_token,
             body_ops,
@@ -263,6 +269,7 @@ impl WorkflowOp for WhileBatchedOp {
             None
         };
         let mut drained_tokens: Vec<u32> = Vec::with_capacity(batch_size);
+        let poll_us = self.stream_poll_interval_us.max(1) as u64;
 
         // Guardrail: `batch_size > 1` with EOS stopping enabled can compute "overshoot" tokens into KV.
         // This is fine for throughput runs (`METALLIC_IGNORE_EOS_STOP=1`) but unsafe for multi-turn reuse.
@@ -355,12 +362,75 @@ impl WorkflowOp for WhileBatchedOp {
             }
 
             let cmd = ctx.foundry.end_capture()?;
-            cmd.wait_until_completed();
+            let mut stop_requested = false;
+            if self.stream_async_poll {
+                if let Some(r) = stream_reader.as_mut() {
+                    // Overlap CPU work with GPU execution by polling the channel while the command buffer runs.
+                    loop {
+                        drained_tokens.clear();
+                        r.drain_into(&mut drained_tokens)?;
+                        if !drained_tokens.is_empty() {
+                            for token in drained_tokens.iter().copied() {
+                                if stop_on_eos && token == eos {
+                                    // We must wait for the in-flight command buffer before returning to ensure
+                                    // downstream ops observe a consistent KV state.
+                                    cmd.wait_until_completed();
+                                    break 'outer;
+                                }
+
+                                // Append to output list
+                                if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
+                                    if let crate::workflow::Value::TokensU32(vec) = val {
+                                        vec.push(token);
+                                    } else {
+                                        return Err(MetalError::InvalidOperation(format!(
+                                            "WhileBatchedOp output '{}' is not a TokensU32 list",
+                                            self.output_tokens
+                                        )));
+                                    }
+                                } else {
+                                    ctx.values
+                                        .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
+                                }
+
+                                let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
+                                let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
+                                let should_continue = on_token(
+                                    token,
+                                    std::time::Duration::from_micros(prefill_us as u64),
+                                    std::time::Duration::from_micros(setup_us as u64),
+                                    None,
+                                )?;
+                                if !should_continue {
+                                    stop_requested = true;
+                                    break;
+                                }
+                            }
+                        }
+
+                        if stop_requested || cmd.is_completed()? {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_micros(poll_us));
+                    }
+                } else {
+                    cmd.wait_until_completed();
+                }
+            } else {
+                cmd.wait_until_completed();
+            }
 
             // Emit tokens in-order, trimming at EOS (if enabled). Note that any overshoot tokens
             // are still computed into the model KV cache; this is intended for single-turn flows.
             drained_tokens.clear();
             if let Some(r) = stream_reader.as_mut() {
+                if self.stream_async_poll {
+                    // Ensure completion, then drain any tail values.
+                    cmd.wait_until_completed();
+                    if stop_requested {
+                        break 'outer;
+                    }
+                }
                 r.drain_into(&mut drained_tokens)?;
                 for token in drained_tokens.iter().copied() {
                     if stop_on_eos && token == eos {

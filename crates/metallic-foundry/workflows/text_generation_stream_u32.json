@@ -37,6 +37,8 @@
       "unsafe_allow_overshoot": true,
       "token_var": "next_token",
       "stream_channel": "token_stream",
+      "stream_async_poll": true,
+      "stream_poll_interval_us": 200,
       "output_tokens": "generated_tokens",
       "eos_token": "{eos_token}",
       "body": [

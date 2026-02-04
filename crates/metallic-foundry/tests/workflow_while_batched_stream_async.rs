@@ -1,0 +1,90 @@
+use std::sync::{Arc, Once};
+
+use metallic_foundry::{
+    Foundry, workflow::{Value, WorkflowRunner, WorkflowSpec, register_op}
+};
+use rustc_hash::FxHashMap;
+
+static INIT_ENV: Once = Once::new();
+
+#[test]
+fn while_batched_stream_async_poll_emits_all_tokens() {
+    register_op("test_set_token_u32", |_| {
+        struct Op {
+            i: u32,
+        }
+        impl metallic_foundry::workflow::ops::WorkflowOp for Op {
+            fn execute(
+                &mut self,
+                ctx: &mut metallic_foundry::workflow::WorkflowExecutionContext<'_>,
+                _on_token: &mut dyn FnMut(
+                    u32,
+                    std::time::Duration,
+                    std::time::Duration,
+                    Option<std::time::Duration>,
+                ) -> Result<bool, metallic_foundry::MetalError>,
+            ) -> Result<metallic_foundry::workflow::ops::WorkflowOpOutcome, metallic_foundry::MetalError> {
+                self.i = self.i.wrapping_add(1);
+                ctx.values.insert("next_token".to_string(), Value::U32(self.i));
+                Ok(metallic_foundry::workflow::ops::WorkflowOpOutcome::Continue)
+            }
+        }
+        Ok(Box::new(Op { i: 0 }))
+    });
+
+    INIT_ENV.call_once(|| unsafe {
+        std::env::set_var("METALLIC_IGNORE_EOS_STOP", "1");
+        std::env::set_var("METALLIC_FOUNDRY_DECODE_BATCH_SIZE", "16");
+    });
+
+    let mut foundry = Foundry::new().expect("foundry init");
+    let models: FxHashMap<String, Arc<metallic_foundry::model::CompiledModel>> = FxHashMap::default();
+    let mut runner = WorkflowRunner::new(&mut foundry, models);
+
+    let workflow_json = r#"
+{
+  "name": "WhileBatchedAsyncPoll",
+  "inputs": [{"name":"max_tokens","type":"u32","default":32},{"name":"stream_capacity","type":"u32","default":64}],
+  "steps": [
+    {"op":"stream_init","output":"token_stream","capacity":"{stream_capacity}"},
+    {
+      "op":"while_batched",
+      "condition":"max_tokens",
+      "max_iterations":"{max_tokens}",
+      "unsafe_allow_overshoot": true,
+      "token_var":"next_token",
+      "stream_channel":"token_stream",
+      "stream_async_poll": true,
+      "stream_poll_interval_us": 10,
+      "output_tokens":"generated_tokens",
+      "body":[
+        {"op":"test_set_token_u32"},
+        {"op":"stream_write_u32","channel":"token_stream","input":"next_token"}
+      ]
+    },
+    {"op":"return","output":"generated_tokens"}
+  ]
+}
+"#;
+    let spec: WorkflowSpec = serde_json::from_str(workflow_json).expect("parse workflow json");
+
+    let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
+    inputs.insert("max_tokens".to_string(), Value::U32(32));
+    inputs.insert("stream_capacity".to_string(), Value::U32(64));
+
+    let mut streamed: Vec<u32> = Vec::new();
+    let out = runner
+        .run_streaming(&spec, inputs, |tok, _prefill, _setup, _iter| {
+            streamed.push(tok);
+            Ok(true)
+        })
+        .expect("run");
+
+    let generated = out
+        .get("generated_tokens")
+        .and_then(|v| v.as_tokens_u32())
+        .expect("generated_tokens present");
+
+    assert_eq!(generated, (1u32..=32u32).collect::<Vec<_>>());
+    assert_eq!(streamed, (1u32..=32u32).collect::<Vec<_>>());
+}

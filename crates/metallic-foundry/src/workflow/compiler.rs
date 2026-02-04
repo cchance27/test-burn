@@ -198,6 +198,8 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
                 spec.unsafe_allow_overshoot,
                 spec.token_var,
                 spec.stream_channel,
+                spec.stream_async_poll,
+                spec.stream_poll_interval_us,
                 spec.output_tokens,
                 spec.eos_token,
                 compile_steps(&spec.body)?,
