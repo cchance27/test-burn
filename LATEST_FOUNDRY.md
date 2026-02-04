@@ -23,6 +23,10 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Penalties (Batch-Compatible):** Penalties are maintained and applied on GPU (no per-token CPU sorting/copy), so repetition/presence/frequency can remain enabled under batching.
 - **Correct Logits Row:** After batched prefill, sampling uses the last token’s logits row (fixes “stuck/repetitive” generations caused by sampling row 0).
 
+### 3.5 Workflow Decode Batching (Throughput)
+- **Batched Decode in Workflows:** Added `while_batched` to execute decode loops in chunks inside a single Metal capture and emit tokens at the batch boundary.
+- **EOS Overshoot Trimming:** When EOS stop is enabled, output stops at EOS at the batch boundary without emitting EOS (overshoot tokens may still be computed but are not emitted).
+
 ### 4. Kernel Optimizations
 - **Fused RMSNorm/Project:** Specialized `WarpWriteOutputNoResidualStage` to reduce register pressure in fused paths.
 - **Quantized Embeddings:** Dedicated F16 and Q8_0 lookup kernels.

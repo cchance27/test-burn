@@ -19,7 +19,7 @@ mod tokenize;
 pub(crate) use append_token::AppendTokenOp;
 pub(crate) use check_eos::CheckEosOp;
 pub(crate) use compute_int::ComputeIntOp;
-pub(crate) use control_flow::{BreakOp, ContinueOp, IfOp, WhileOp};
+pub(crate) use control_flow::{BreakOp, ContinueOp, IfOp, WhileBatchedOp, WhileOp};
 pub(crate) use detokenize::DetokenizeOp;
 pub(crate) use format_chat::FormatChatOp;
 pub(crate) use forward::ForwardOp;
@@ -34,7 +34,8 @@ pub(crate) use tokenize::TokenizeOp;
 use super::runner::WorkflowExecutionContext;
 use crate::error::MetalError;
 
-pub(crate) enum WorkflowOpOutcome {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkflowOpOutcome {
     Continue,
     Return,
     Break,
@@ -42,16 +43,16 @@ pub(crate) enum WorkflowOpOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct MemoizeSpec {
+pub struct MemoizeSpec {
     /// Workflow variable names read by this op.
-    pub(crate) inputs: Vec<String>,
+    pub inputs: Vec<String>,
     /// Workflow variable names written by this op.
-    pub(crate) outputs: Vec<String>,
+    pub outputs: Vec<String>,
     /// If true, memoization is disabled in interactive TUI mode.
-    pub(crate) disable_in_tui: bool,
+    pub disable_in_tui: bool,
 }
 
-pub(crate) trait WorkflowOp {
+pub trait WorkflowOp {
     /// Called once before each workflow run starts.
     ///
     /// This allows ops to reset per-run counters while keeping allocated buffers/caches.

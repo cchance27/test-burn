@@ -137,6 +137,7 @@ The workflow spec is intentionally op-based:
 
 - `prefill`
 - `while` with stages like `sample`, `check_eos`, `append_token`, `graph_forward`
+- `while_batched` (decode batching): executes the loop body in batches inside a single Metal capture, then emits tokens at the batch boundary.
 - `return`
 
 Execution is implemented as Rust op trait objects (one per workflow op) so runtime state lives with the ops, while the workflow JSON remains data-only.
@@ -243,6 +244,7 @@ These are the “next sprint” items we still need to remove or generalize to s
    - `prefill` + `while` implicitly mean “KV-cache autoregressive text generation”, and pass state via `_internal.*` keys.
 2. Loop semantics are still specialized.
    - `while` conditions are currently variable lookups (bool/int) rather than full expression evaluation; most loops rely on `max_iterations` plus explicit `break`/`continue`.
+   - `while_batched` can optionally stop at EOS at the batch boundary without emitting EOS (overshoot tokens are still computed, but are not emitted), which is acceptable for throughput runs and “ignore EOS” benchmarking.
 3. Sampling is still hardcoded to `SampleTopK`.
    - No sampler trait/object pluggability yet (greedy/top-k/top-p/min-p are folded into one kernel call).
    - Repetition/presence/frequency penalties exist but are not yet a fully general “sampler stack”.

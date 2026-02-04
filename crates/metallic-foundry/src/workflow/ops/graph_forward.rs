@@ -44,11 +44,14 @@ impl WorkflowOp for GraphForwardOp {
         let model = ctx.resolve_model(self.model_id.as_deref())?;
 
         // Resolve generic inputs
-        let token = ctx
-            .values
-            .get(&self.token_var)
-            .and_then(|v| v.as_u32())
-            .ok_or_else(|| MetalError::InvalidOperation(format!("GraphForwardOp missing token variable '{}' (u32)", self.token_var)))?;
+        let token_u32 = ctx.values.get(&self.token_var).and_then(|v| v.as_u32());
+        let token_tensor = ctx.values.get(&self.token_var).and_then(|v| v.as_tensor());
+        if token_u32.is_none() && token_tensor.is_none() {
+            return Err(MetalError::InvalidOperation(format!(
+                "GraphForwardOp missing token variable '{}' (u32 or Tensor u32[1])",
+                self.token_var
+            )));
+        }
 
         let pos_val = if let Some(p) = &self.position {
             ctx.resolve_param_usize(p)?
@@ -76,21 +79,26 @@ impl WorkflowOp for GraphForwardOp {
             )?;
 
             {
-                // Reuse a persistent 1-token buffer to avoid per-token allocations and ensure
-                // correct CPU->GPU visibility on all storage modes.
-                if self.input_token_buffer.is_none() {
-                    let buf = foundry
-                        .device
-                        .new_buffer(4, MetalResourceOptions::StorageModeShared)
-                        .expect("Failed to allocate graph_forward input token buffer");
-                    let arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
-                    self.input_token_buffer = Some(buf);
-                    self.input_token_arg = Some(arg);
+                if let Some(token_arg) = token_tensor {
+                    // Fast path: token already lives in a GPU-visible buffer (e.g. SampleOp output).
+                    // Bind it directly to avoid a CPU copy + scalar readback.
+                    model.set_binding(bindings, fast_bindings, &self.input_ids_binding, token_arg.clone());
+                } else if let Some(token) = token_u32 {
+                    // Fallback: write a scalar token into a persistent 1-token buffer.
+                    if self.input_token_buffer.is_none() {
+                        let buf = foundry
+                            .device
+                            .new_buffer(4, MetalResourceOptions::StorageModeShared)
+                            .expect("Failed to allocate graph_forward input token buffer");
+                        let arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                        self.input_token_buffer = Some(buf);
+                        self.input_token_arg = Some(arg);
+                    }
+                    let buf = self.input_token_buffer.as_ref().expect("input_token_buffer set");
+                    buf.copy_from_slice(&[token]);
+                    let input_tensor = self.input_token_arg.as_ref().expect("input_token_arg set").clone();
+                    model.set_binding(bindings, fast_bindings, &self.input_ids_binding, input_tensor);
                 }
-                let buf = self.input_token_buffer.as_ref().expect("input_token_buffer set");
-                buf.copy_from_slice(&[token]);
-                let input_tensor = self.input_token_arg.as_ref().expect("input_token_arg set").clone();
-                model.set_binding(bindings, fast_bindings, &self.input_ids_binding, input_tensor);
             }
 
             model.set_int_global(bindings, &self.position_offset_key, pos_val);

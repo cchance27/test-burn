@@ -13,16 +13,16 @@ pub struct WorkflowRunnerConfig {
     pub workflow: WorkflowSpec,
 }
 
-pub(crate) struct WorkflowExecutionContext<'a> {
-    pub(crate) workflow: &'a WorkflowSpec,
-    pub(crate) foundry: &'a mut Foundry,
-    pub(crate) models: &'a FxHashMap<String, Arc<CompiledModel>>,
-    pub(crate) values: FxHashMap<String, Value>,
-    pub(crate) return_key: Option<String>,
+pub struct WorkflowExecutionContext<'a> {
+    pub workflow: &'a WorkflowSpec,
+    pub foundry: &'a mut Foundry,
+    pub models: &'a FxHashMap<String, Arc<CompiledModel>>,
+    pub values: FxHashMap<String, Value>,
+    pub return_key: Option<String>,
 }
 
 impl<'a> WorkflowExecutionContext<'a> {
-    pub(crate) fn resolve_model(&self, model_id: Option<&str>) -> Result<Arc<CompiledModel>, MetalError> {
+    pub fn resolve_model(&self, model_id: Option<&str>) -> Result<Arc<CompiledModel>, MetalError> {
         let id = if let Some(id) = model_id {
             id
         } else if let Some(default) = self.workflow.default_model.as_deref() {
@@ -41,7 +41,7 @@ impl<'a> WorkflowExecutionContext<'a> {
             .ok_or_else(|| MetalError::InvalidOperation(format!("Workflow references unknown model_id '{id}'")))
     }
 
-    pub(crate) fn resolve_param_u32(&self, p: &Param<u32>) -> Result<u32, MetalError> {
+    pub fn resolve_param_u32(&self, p: &Param<u32>) -> Result<u32, MetalError> {
         match p {
             Param::Literal(v) => Ok(*v),
             Param::Input(name) => {
@@ -73,7 +73,7 @@ impl<'a> WorkflowExecutionContext<'a> {
         }
     }
 
-    pub(crate) fn resolve_param_usize(&self, p: &Param<usize>) -> Result<usize, MetalError> {
+    pub fn resolve_param_usize(&self, p: &Param<usize>) -> Result<usize, MetalError> {
         match p {
             Param::Literal(v) => Ok(*v),
             Param::Input(name) => {
@@ -101,7 +101,7 @@ impl<'a> WorkflowExecutionContext<'a> {
         }
     }
 
-    pub(crate) fn resolve_param_f32(&self, p: &Param<f32>) -> Result<f32, MetalError> {
+    pub fn resolve_param_f32(&self, p: &Param<f32>) -> Result<f32, MetalError> {
         match p {
             Param::Literal(v) => Ok(*v),
             Param::Input(name) => self
@@ -115,7 +115,7 @@ impl<'a> WorkflowExecutionContext<'a> {
         }
     }
 
-    pub(crate) fn read_usize(&self, name: &str) -> Result<usize, MetalError> {
+    pub fn read_usize(&self, name: &str) -> Result<usize, MetalError> {
         if let Some((var_name, "len")) = name.split_once('.') {
             let val = self
                 .values

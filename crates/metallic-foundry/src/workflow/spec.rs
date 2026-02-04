@@ -333,6 +333,26 @@ pub struct WhileSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct WhileBatchedSpec {
+    pub condition: String,
+    #[serde(default)]
+    pub max_iterations: Option<Param<usize>>,
+    /// Optional decode batch size. If omitted, defaults to `METALLIC_FOUNDRY_DECODE_BATCH_SIZE` or 1.
+    #[serde(default)]
+    pub batch_size: Option<Param<usize>>,
+    /// Name of the per-iteration token variable produced by the loop body (u32 or u32[1] Tensor).
+    pub token_var: String,
+    /// Output workflow variable to append generated tokens into.
+    pub output_tokens: String,
+    /// EOS token id (used when `METALLIC_IGNORE_EOS_STOP` is not set).
+    #[serde(default)]
+    pub eos_token: Param<u32>,
+    // Back-compat: accept `phases` as an alias for `body`.
+    #[serde(alias = "phases")]
+    pub body: Vec<WorkflowStepSpec>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct CheckEosSpec {
     pub input: String,
     pub output: String,

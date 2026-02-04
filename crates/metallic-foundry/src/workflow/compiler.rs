@@ -5,7 +5,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     WorkflowSpec, WorkflowStepSpec, ops::{
-        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, MemoizeSpec, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileOp, WorkflowOp
+        AppendTokenOp, BreakOp, CheckEosOp, ComputeIntOp, ContinueOp, DetokenizeOp, FormatChatOp, ForwardOp, GraphForwardOp, IfOp, MemoizeSpec, PrefillOp, ReturnOp, SampleOp, SetGlobalsOp, SyncOp, TokenizeOp, WhileBatchedOp, WhileOp, WorkflowOp
     }
 };
 use crate::error::MetalError;
@@ -176,6 +176,23 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
             Ok(Box::new(WhileOp::new(
                 spec.condition,
                 spec.max_iterations,
+                compile_steps(&spec.body)?,
+            )))
+        }),
+    );
+
+    m.insert(
+        "while_batched".to_string(),
+        Box::new(|v| {
+            let spec: super::spec::WhileBatchedSpec =
+                serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid while_batched spec: {}", e)))?;
+            Ok(Box::new(WhileBatchedOp::new(
+                spec.condition,
+                spec.max_iterations,
+                spec.batch_size,
+                spec.token_var,
+                spec.output_tokens,
+                spec.eos_token,
                 compile_steps(&spec.body)?,
             )))
         }),

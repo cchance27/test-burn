@@ -19,6 +19,8 @@ pub(crate) struct SampleOp {
     step: u32,
     out_buffer: Option<MetalBuffer>,
     out_arg: Option<TensorArg>,
+    // Optional decode-batch ring of per-step outputs (used by WhileBatchedOp).
+    out_ring: Vec<(MetalBuffer, TensorArg)>,
     // GPU-side repetition state (so penalties work without per-token CPU sorting/copy).
     rep_window_len: usize,
     rep_ring_buf: Option<MetalBuffer>,
@@ -50,6 +52,7 @@ impl SampleOp {
             step: 0,
             out_buffer: None,
             out_arg: None,
+            out_ring: Vec::new(),
             rep_window_len: 0,
             rep_ring_buf: None,
             rep_ring_arg: None,
@@ -96,19 +99,50 @@ impl WorkflowOp for SampleOp {
 
         self.step = self.step.wrapping_add(1);
 
-        // Allocate and reuse a 1-token output buffer for the sampled token.
-        if self.out_buffer.is_none() {
-            let out_buffer = ctx
-                .foundry
-                .device
-                .new_buffer(4, MetalResourceOptions::StorageModeShared)
-                .expect("Failed to allocate sample output buffer");
-            let out_arg = TensorArg::from_buffer(out_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
-            self.out_buffer = Some(out_buffer);
-            self.out_arg = Some(out_arg);
-        }
-        let out_buffer = self.out_buffer.as_ref().expect("out_buffer set");
-        let out_arg = self.out_arg.as_ref().expect("out_arg set");
+        let in_batched_decode_loop = ctx.values.get("_internal.decode_batch_size").is_some();
+        let decode_batch_size = ctx
+            .values
+            .get("_internal.decode_batch_size")
+            .and_then(|v| v.as_usize())
+            .unwrap_or(1)
+            .max(1);
+        let decode_batch_idx = ctx.values.get("_internal.decode_batch_idx").and_then(|v| v.as_usize()).unwrap_or(0);
+
+        // Allocate and reuse output buffers. In batched decode, we need one buffer per iteration
+        // so the loop can read back all tokens after the capture completes.
+        let (out_buffer, out_arg) = if in_batched_decode_loop {
+            if self.out_ring.len() != decode_batch_size {
+                self.out_ring.clear();
+                self.out_ring.reserve(decode_batch_size);
+                for _ in 0..decode_batch_size {
+                    let buf = ctx
+                        .foundry
+                        .device
+                        .new_buffer(4, MetalResourceOptions::StorageModeShared)
+                        .expect("Failed to allocate sample output buffer");
+                    let arg = TensorArg::from_buffer(buf.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                    self.out_ring.push((buf, arg));
+                }
+            }
+            let idx = decode_batch_idx.min(decode_batch_size.saturating_sub(1));
+            let (buf, arg) = &self.out_ring[idx];
+            (buf, arg)
+        } else {
+            if self.out_buffer.is_none() {
+                let out_buffer = ctx
+                    .foundry
+                    .device
+                    .new_buffer(4, MetalResourceOptions::StorageModeShared)
+                    .expect("Failed to allocate sample output buffer");
+                let out_arg = TensorArg::from_buffer(out_buffer.clone(), crate::tensor::Dtype::U32, vec![1], vec![1]);
+                self.out_buffer = Some(out_buffer);
+                self.out_arg = Some(out_arg);
+            }
+            (
+                self.out_buffer.as_ref().expect("out_buffer set"),
+                self.out_arg.as_ref().expect("out_arg set"),
+            )
+        };
 
         let vocab_size = logits_arg.dims()[logits_arg.dims().len() - 1] as u32;
 
@@ -244,9 +278,14 @@ impl WorkflowOp for SampleOp {
             ctx.foundry.run(&upd)?;
         }
 
-        // Synchronize and read back
-        let token = out_buffer.read_scalar::<u32>();
-        ctx.values.insert(self.output_var.clone(), Value::U32(token));
+        // In batched decode, avoid scalar readback here; WhileBatchedOp reads the tensor buffers after
+        // the capture completes. In non-batched mode, keep compatibility with existing workflows.
+        if in_batched_decode_loop {
+            ctx.values.insert(self.output_var.clone(), Value::Tensor(out_arg.clone()));
+        } else {
+            let token = out_buffer.read_scalar::<u32>();
+            ctx.values.insert(self.output_var.clone(), Value::U32(token));
+        }
 
         Ok(WorkflowOpOutcome::Continue)
     }

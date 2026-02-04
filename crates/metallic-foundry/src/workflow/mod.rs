@@ -8,7 +8,8 @@ mod runner;
 mod spec;
 mod value;
 
-pub use runner::{WorkflowRunner, WorkflowRunnerConfig};
+pub use compiler::register_op;
+pub use runner::{WorkflowExecutionContext, WorkflowRunner, WorkflowRunnerConfig};
 pub use spec::{Param, WorkflowModelResourceSpec, WorkflowResourcesSpec, WorkflowSpec, WorkflowStepSpec};
 pub use value::Value;
 
