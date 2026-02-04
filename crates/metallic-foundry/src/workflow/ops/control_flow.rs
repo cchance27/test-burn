@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::{
     error::MetalError, types::TensorArg, workflow::{
         ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext, spec::Param
@@ -269,6 +271,14 @@ impl WorkflowOp for WhileBatchedOp {
                     name, chan.capacity, batch_size
                 )));
             }
+            if self.stream_async_poll && (chan.capacity as usize) < batch_size.saturating_mul(2) {
+                return Err(MetalError::InvalidOperation(format!(
+                    "WhileBatchedOp stream_channel '{}' capacity {} < 2*batch_size {} (required for async polling)",
+                    name,
+                    chan.capacity,
+                    batch_size.saturating_mul(2)
+                )));
+            }
             Some(crate::workflow::ChannelU32Reader::new(chan))
         } else {
             None
@@ -286,6 +296,12 @@ impl WorkflowOp for WhileBatchedOp {
             );
         }
 
+        if self.stream_async_poll && stop_on_eos {
+            return Err(MetalError::InvalidOperation(
+                "while_batched.stream_async_poll requires METALLIC_IGNORE_EOS_STOP=1 (EOS stopping disabled)".into(),
+            ));
+        }
+
         // Guardrail: `batch_size > 1` with EOS stopping enabled can compute "overshoot" tokens into KV.
         // This is fine for throughput runs (`METALLIC_IGNORE_EOS_STOP=1`) but unsafe for multi-turn reuse.
         if stop_on_eos && batch_size > 1 && !self.unsafe_allow_overshoot {
@@ -293,6 +309,54 @@ impl WorkflowOp for WhileBatchedOp {
                 "Invalid workflow: while_batched with batch_size>1 while EOS stopping is enabled can cause KV overshoot. Set METALLIC_IGNORE_EOS_STOP=1, use batch_size=1, or set while_batched.unsafe_allow_overshoot=true if you accept this behavior."
                     .into(),
             ));
+        }
+
+        struct PendingBatch {
+            cmd: crate::types::MetalCommandBuffer,
+            expected: usize,
+        }
+
+        let mut pending: VecDeque<PendingBatch> = VecDeque::new();
+        const MAX_INFLIGHT: usize = 2;
+        fn append_and_emit(
+            ctx: &mut WorkflowExecutionContext<'_>,
+            output_tokens: &str,
+            token: u32,
+            stop_on_eos: bool,
+            eos: u32,
+            on_token: &mut dyn FnMut(
+                u32,
+                std::time::Duration,
+                std::time::Duration,
+                Option<std::time::Duration>,
+            ) -> Result<bool, MetalError>,
+        ) -> Result<bool, MetalError> {
+            if stop_on_eos && token == eos {
+                return Ok(false);
+            }
+
+            if let Some(val) = ctx.values.get_mut(output_tokens) {
+                if let crate::workflow::Value::TokensU32(vec) = val {
+                    vec.push(token);
+                } else {
+                    return Err(MetalError::InvalidOperation(format!(
+                        "WhileBatchedOp output '{}' is not a TokensU32 list",
+                        output_tokens
+                    )));
+                }
+            } else {
+                ctx.values
+                    .insert(output_tokens.to_string(), crate::workflow::Value::TokensU32(vec![token]));
+            }
+
+            let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
+            let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
+            on_token(
+                token,
+                std::time::Duration::from_micros(prefill_us as u64),
+                std::time::Duration::from_micros(setup_us as u64),
+                None,
+            )
         }
 
         let mut iter = 0usize;
@@ -377,171 +441,110 @@ impl WorkflowOp for WhileBatchedOp {
             }
 
             let cmd = ctx.foundry.end_capture()?;
-            let mut stop_requested = false;
-            if self.stream_async_poll {
-                if let Some(r) = stream_reader.as_mut() {
-                    // Overlap CPU work with GPU execution by polling the channel while the command buffer runs.
-                    let debug_poll = debug_stream_poll_enabled();
-                    let mut poll_iters: u32 = 0;
-                    let mut drained_during: usize = 0;
-                    loop {
-                        drained_tokens.clear();
-                        r.drain_into(&mut drained_tokens)?;
-                        poll_iters = poll_iters.saturating_add(1);
-                        if !drained_tokens.is_empty() {
-                            drained_during = drained_during.saturating_add(drained_tokens.len());
-                            for token in drained_tokens.iter().copied() {
-                                if stop_on_eos && token == eos {
-                                    // We must wait for the in-flight command buffer before returning to ensure
-                                    // downstream ops observe a consistent KV state.
-                                    cmd.wait_until_completed();
+            let debug_poll = debug_stream_poll_enabled();
+
+            if let Some(r) = stream_reader.as_mut().filter(|_| self.stream_async_poll) {
+                // Pipelined async mode:
+                // - enqueue this command buffer
+                // - emit tokens only after buffers complete, but do so while GPU may be executing the next buffer
+                pending.push_back(PendingBatch {
+                    cmd: cmd.clone(),
+                    expected: chunk,
+                });
+
+                // Ensure we don't build an unbounded queue.
+                if pending.len() >= MAX_INFLIGHT {
+                    if let Some(front) = pending.front() {
+                        front.cmd.wait_until_completed();
+                    }
+                }
+
+                // Drain any completed buffers in order.
+                while let Some(front) = pending.front() {
+                    if !front.cmd.is_completed()? {
+                        break;
+                    }
+                    let expected = front.expected;
+                    pending.pop_front();
+
+                    let mut drained = 0usize;
+                    for _ in 0..expected {
+                        match r.try_next()? {
+                            Some(tok) => {
+                                drained += 1;
+                                if !append_and_emit(ctx, &self.output_tokens, tok, stop_on_eos, eos, on_token)? {
+                                    pending.clear();
                                     break 'outer;
                                 }
-
-                                // Append to output list
-                                if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
-                                    if let crate::workflow::Value::TokensU32(vec) = val {
-                                        vec.push(token);
-                                    } else {
-                                        return Err(MetalError::InvalidOperation(format!(
-                                            "WhileBatchedOp output '{}' is not a TokensU32 list",
-                                            self.output_tokens
-                                        )));
-                                    }
-                                } else {
-                                    ctx.values
-                                        .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
-                                }
-
-                                let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
-                                let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-                                let should_continue = on_token(
-                                    token,
-                                    std::time::Duration::from_micros(prefill_us as u64),
-                                    std::time::Duration::from_micros(setup_us as u64),
-                                    None,
-                                )?;
-                                if !should_continue {
-                                    stop_requested = true;
-                                    break;
-                                }
+                            }
+                            None => {
+                                return Err(MetalError::InvalidOperation(
+                                    "WhileBatchedOp stream_channel missing expected tokens after command completion".into(),
+                                ));
                             }
                         }
+                    }
+                    if debug_poll {
+                        tracing::info!(
+                            target: "metallic_foundry::workflow::ops",
+                            "WhileBatchedOp async_poll(pipelined): drained_after_completion={} inflight_pending={}",
+                            drained,
+                            pending.len()
+                        );
+                    }
+                }
+            } else {
+                // Synchronous mode: wait and emit for this chunk.
+                cmd.wait_until_completed();
 
-                        if stop_requested || cmd.is_completed()? {
-                            if debug_poll {
-                                tracing::info!(
-                                    target: "metallic_foundry::workflow::ops",
-                                    "WhileBatchedOp async_poll: drained_during={} polls={} stop_requested={}",
-                                    drained_during,
-                                    poll_iters,
-                                    stop_requested,
-                                );
-                            }
-                            break;
+                if let Some(r) = stream_reader.as_mut() {
+                    drained_tokens.clear();
+                    r.drain_into(&mut drained_tokens)?;
+                    if self.stream_async_poll && debug_poll {
+                        tracing::info!(
+                            target: "metallic_foundry::workflow::ops",
+                            "WhileBatchedOp async_poll: drained_tail={}",
+                            drained_tokens.len()
+                        );
+                    }
+                    for token in drained_tokens.iter().copied() {
+                        if !append_and_emit(ctx, &self.output_tokens, token, stop_on_eos, eos, on_token)? {
+                            break 'outer;
                         }
-                        std::thread::sleep(std::time::Duration::from_micros(poll_us));
                     }
                 } else {
-                    cmd.wait_until_completed();
+                    for t in tokens {
+                        let token: u32 = match t {
+                            TokenRef::Host(v) => v,
+                            TokenRef::Tensor(t) => {
+                                let buf = t
+                                    .buffer
+                                    .as_ref()
+                                    .ok_or_else(|| MetalError::InvalidOperation("WhileBatchedOp token tensor missing buffer".into()))?;
+                                buf.read_scalar::<u32>()
+                            }
+                        };
+                        if !append_and_emit(ctx, &self.output_tokens, token, stop_on_eos, eos, on_token)? {
+                            break 'outer;
+                        }
+                    }
                 }
-            } else {
-                cmd.wait_until_completed();
             }
+        }
 
-            // Emit tokens in-order, trimming at EOS (if enabled). Note that any overshoot tokens
-            // are still computed into the model KV cache; this is intended for single-turn flows.
-            drained_tokens.clear();
-            if let Some(r) = stream_reader.as_mut() {
-                if self.stream_async_poll {
-                    // Ensure completion, then drain any tail values.
-                    cmd.wait_until_completed();
-                    if stop_requested {
-                        break 'outer;
-                    }
-                }
-                r.drain_into(&mut drained_tokens)?;
-                if self.stream_async_poll && debug_stream_poll_enabled() {
-                    tracing::info!(
-                        target: "metallic_foundry::workflow::ops",
-                        "WhileBatchedOp async_poll: drained_tail={}",
-                        drained_tokens.len()
-                    );
-                }
-                for token in drained_tokens.iter().copied() {
-                    if stop_on_eos && token == eos {
-                        break 'outer;
-                    }
-
-                    // Append to output list
-                    if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
-                        if let crate::workflow::Value::TokensU32(vec) = val {
-                            vec.push(token);
-                        } else {
-                            return Err(MetalError::InvalidOperation(format!(
-                                "WhileBatchedOp output '{}' is not a TokensU32 list",
-                                self.output_tokens
-                            )));
-                        }
-                    } else {
-                        ctx.values
-                            .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
-                    }
-
-                    let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
-                    let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-                    let should_continue = on_token(
-                        token,
-                        std::time::Duration::from_micros(prefill_us as u64),
-                        std::time::Duration::from_micros(setup_us as u64),
-                        None,
-                    )?;
-                    if !should_continue {
-                        break 'outer;
-                    }
-                }
-            } else {
-                for t in tokens {
-                    let token: u32 = match t {
-                        TokenRef::Host(v) => v,
-                        TokenRef::Tensor(t) => {
-                            let buf = t
-                                .buffer
-                                .as_ref()
-                                .ok_or_else(|| MetalError::InvalidOperation("WhileBatchedOp token tensor missing buffer".into()))?;
-                            buf.read_scalar::<u32>()
-                        }
+        // Flush any remaining pending command buffers (async poll mode).
+        if let Some(r) = stream_reader.as_mut().filter(|_| self.stream_async_poll) {
+            while let Some(front) = pending.pop_front() {
+                front.cmd.wait_until_completed();
+                for _ in 0..front.expected {
+                    let Some(tok) = r.try_next()? else {
+                        return Err(MetalError::InvalidOperation(
+                            "WhileBatchedOp stream_channel missing expected tokens after final completion".into(),
+                        ));
                     };
-
-                    if stop_on_eos && token == eos {
-                        break 'outer;
-                    }
-
-                    // Append to output list
-                    if let Some(val) = ctx.values.get_mut(&self.output_tokens) {
-                        if let crate::workflow::Value::TokensU32(vec) = val {
-                            vec.push(token);
-                        } else {
-                            return Err(MetalError::InvalidOperation(format!(
-                                "WhileBatchedOp output '{}' is not a TokensU32 list",
-                                self.output_tokens
-                            )));
-                        }
-                    } else {
-                        ctx.values
-                            .insert(self.output_tokens.clone(), crate::workflow::Value::TokensU32(vec![token]));
-                    }
-
-                    let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
-                    let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-                    let should_continue = on_token(
-                        token,
-                        std::time::Duration::from_micros(prefill_us as u64),
-                        std::time::Duration::from_micros(setup_us as u64),
-                        None,
-                    )?;
-                    if !should_continue {
-                        break 'outer;
+                    // No EOS stopping in async mode (guarded above).
+                    if !append_and_emit(ctx, &self.output_tokens, tok, stop_on_eos, eos, on_token)? {
+                        break;
                     }
                 }
             }
