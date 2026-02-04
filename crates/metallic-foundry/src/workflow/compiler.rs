@@ -11,7 +11,12 @@ use super::{
 use crate::error::MetalError;
 
 pub(crate) struct CompiledWorkflow {
-    pub(crate) ops: Vec<Box<dyn WorkflowOp>>,
+    pub(crate) ops: Vec<CompiledOp>,
+}
+
+pub(crate) struct CompiledOp {
+    pub name: String,
+    pub op: Box<dyn WorkflowOp>,
 }
 
 struct MemoizedOp {
@@ -165,11 +170,9 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
         Box::new(|v| {
             let spec: super::spec::IfSpec =
                 serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid if spec: {}", e)))?;
-            Ok(Box::new(IfOp::new(
-                spec.condition,
-                compile_steps(&spec.then)?,
-                compile_steps(&spec.else_)?,
-            )))
+            let then_ops = compile_steps(&spec.then)?.into_iter().map(|c| c.op).collect();
+            let else_ops = compile_steps(&spec.else_)?.into_iter().map(|c| c.op).collect();
+            Ok(Box::new(IfOp::new(spec.condition, then_ops, else_ops)))
         }),
     );
 
@@ -178,11 +181,8 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
         Box::new(|v| {
             let spec: super::spec::WhileSpec =
                 serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid while spec: {}", e)))?;
-            Ok(Box::new(WhileOp::new(
-                spec.condition,
-                spec.max_iterations,
-                compile_steps(&spec.body)?,
-            )))
+            let body_ops = compile_steps(&spec.body)?.into_iter().map(|c| c.op).collect();
+            Ok(Box::new(WhileOp::new(spec.condition, spec.max_iterations, body_ops)))
         }),
     );
 
@@ -191,6 +191,7 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
         Box::new(|v| {
             let spec: super::spec::WhileBatchedSpec =
                 serde_json::from_value(v).map_err(|e| MetalError::InvalidOperation(format!("Invalid while_batched spec: {}", e)))?;
+            let body_ops = compile_steps(&spec.body)?.into_iter().map(|c| c.op).collect();
             Ok(Box::new(WhileBatchedOp::new(
                 spec.condition,
                 spec.max_iterations,
@@ -202,28 +203,31 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
                 spec.stream_poll_interval_us,
                 spec.output_tokens,
                 spec.eos_token,
-                compile_steps(&spec.body)?,
+                body_ops,
             )))
         }),
     );
 }
 
-fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<Box<dyn WorkflowOp>>, MetalError> {
-    let mut ops: Vec<Box<dyn WorkflowOp>> = Vec::with_capacity(steps.len());
+fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<CompiledOp>, MetalError> {
+    let mut ops: Vec<CompiledOp> = Vec::with_capacity(steps.len());
     let registry = get_registry().read().unwrap();
 
     for step in steps {
         if let Some(builder) = registry.get(step.op.as_str()) {
             let op = builder(step.params.clone())?;
             if let Some(spec) = op.memoize_spec() {
-                ops.push(Box::new(MemoizedOp {
-                    op_name: step.op.clone(),
-                    inner: op,
-                    spec,
-                    cached: None,
-                }));
+                ops.push(CompiledOp {
+                    name: step.op.clone(),
+                    op: Box::new(MemoizedOp {
+                        op_name: step.op.clone(),
+                        inner: op,
+                        spec,
+                        cached: None,
+                    }),
+                });
             } else {
-                ops.push(op);
+                ops.push(CompiledOp { name: step.op.clone(), op });
             }
         } else {
             return Err(MetalError::InvalidOperation(format!("Unknown workflow op: {}", step.op)));

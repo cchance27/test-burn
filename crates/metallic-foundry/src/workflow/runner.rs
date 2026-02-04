@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
+use tracing;
 
 use super::{
     Value, compiler::CompiledWorkflow, ops::WorkflowOpOutcome, spec::{Param, WorkflowSpec}
@@ -340,12 +341,19 @@ impl<'a> WorkflowRunner<'a> {
             return_key: None,
         };
 
-        for op in compiled.iter_mut() {
-            op.begin_run(&mut ctx)?;
+        let debug_ops = std::env::var("METALLIC_DEBUG_WORKFLOW_OPS").is_ok();
+        for cop in compiled.iter_mut() {
+            if debug_ops {
+                tracing::info!(target: "metallic_foundry::workflow::runner", "Workflow begin_run op={}", cop.name);
+            }
+            cop.op.begin_run(&mut ctx)?;
         }
 
-        for op in compiled.iter_mut() {
-            match op.execute(&mut ctx, &mut on_token)? {
+        for cop in compiled.iter_mut() {
+            if debug_ops {
+                tracing::info!(target: "metallic_foundry::workflow::runner", "Workflow execute op={}", cop.name);
+            }
+            match cop.op.execute(&mut ctx, &mut on_token)? {
                 WorkflowOpOutcome::Continue => {}
                 WorkflowOpOutcome::Return => break,
                 WorkflowOpOutcome::Break => return Err(MetalError::InvalidOperation("Unexpected 'break' outside of loop".into())),

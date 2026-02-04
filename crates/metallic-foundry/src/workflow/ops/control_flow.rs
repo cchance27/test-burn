@@ -270,6 +270,16 @@ impl WorkflowOp for WhileBatchedOp {
         };
         let mut drained_tokens: Vec<u32> = Vec::with_capacity(batch_size);
         let poll_us = self.stream_poll_interval_us.max(1) as u64;
+        if std::env::var("METALLIC_DEBUG_WORKFLOW_OPS").is_ok() && self.stream_channel.is_some() {
+            tracing::info!(
+                target: "metallic_foundry::workflow::ops",
+                "WhileBatchedOp stream_channel={:?} async_poll={} poll_us={} batch_size={}",
+                self.stream_channel,
+                self.stream_async_poll,
+                poll_us,
+                batch_size
+            );
+        }
 
         // Guardrail: `batch_size > 1` with EOS stopping enabled can compute "overshoot" tokens into KV.
         // This is fine for throughput runs (`METALLIC_IGNORE_EOS_STOP=1`) but unsafe for multi-turn reuse.

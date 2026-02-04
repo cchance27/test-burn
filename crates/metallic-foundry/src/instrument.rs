@@ -42,13 +42,19 @@ fn parse_env_bool(value: &str) -> bool {
 pub(crate) fn record_cb_gpu_timing_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
-        // Keep this env var as an override, but default to enabled when profiling+metrics are enabled.
-        // This matches Context's behavior where `METALLIC_ENABLE_PROFILING=1` is sufficient to emit
-        // per-command-buffer timing metrics (and disable batching when requested by the executor).
+        // Keep this env var as an override.
+        //
+        // Default behavior must be conservative for performance:
+        // - Attaching completion handlers for every command buffer can materially impact throughput
+        //   in tight decode loops (especially when decode-batching is disabled / batch_size=1).
+        // - Enable explicitly via env var or when profiling is enabled.
         std::env::var(METALLIC_RECORD_CB_GPU_TIMING_ENV)
             .ok()
             .map(|value| parse_env_bool(&value))
-            .unwrap_or(true)
+            .unwrap_or_else(|| {
+                use metallic_instrumentation::config::AppConfig;
+                AppConfig::try_global().map(|c| c.enable_profiling).unwrap_or(false)
+            })
     })
 }
 
