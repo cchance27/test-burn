@@ -373,6 +373,22 @@ pub struct AppendTokenSpec {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+pub struct StreamInitSpec {
+    /// Output workflow variable name to store the channel in.
+    pub output: String,
+    /// Ring capacity (items).
+    pub capacity: Param<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StreamWriteU32Spec {
+    /// Channel workflow variable (Value::ChannelU32).
+    pub channel: String,
+    /// Input token variable (u32 or Tensor u32[1]).
+    pub input: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 pub struct GraphForwardSpec {
     #[serde(default)]
     pub model_id: Option<String>,

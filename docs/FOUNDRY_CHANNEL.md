@@ -12,6 +12,15 @@ Design priorities:
 2. **Clean DX**: keep workflows compositional; avoid requiring workflow authors to hand-roll sync logic.
 3. **Safety**: make “dangerous” semantics (KV overshoot, blocking reads) explicit and guarded.
 
+## Status
+
+- Phase 1 is implemented (channel substrate + kernels + tests).
+- Phase 2 is partially implemented:
+  - workflow ops `stream_init` + `stream_write_u32`
+  - a sample workflow `text_generation_stream_u32.json`
+  - a focused integration test validating channel emission matches `generated_tokens`
+  - runner async polling is not yet implemented (stream drain is manual via `ChannelU32Reader`)
+
 ---
 
 ## Non-goals (initially)
@@ -102,14 +111,22 @@ Goal: use channels to stream token ids without per-token waits in throughput mod
 
 ### 1) Ops
 
-- `stream_init` (alloc/register channel)
-- `stream_write_u32` (writes a token id to the channel; accepts `u32` or `TensorArg(u32[1])`)
-- `stream_flush` (commit capture window; optional wait vs async)
+- `stream_init` (alloc/register channel) ✅
+- `stream_write_u32` (writes a token id to the channel; accepts `u32` or `TensorArg(u32[1])`) ✅
+- `stream_flush` (commit capture window; optional wait vs async) ⏳
 
 ### 2) Runner/TUI integration
 
-- Throughput: commit large decode windows and CPU polls channel while GPU executes.
-- Interactive/TUI: small windows or hybrid (completion handler + chunked polling) to keep latency low.
+- Throughput: commit large decode windows and CPU polls channel while GPU executes. ⏳
+- Interactive/TUI: small windows or hybrid (completion handler + chunked polling) to keep latency low. ⏳
+
+Notes:
+
+- Today, `WhileBatchedOp` drives token callbacks directly (via the `on_token` callback) and `stream_write_u32`
+  writes into the channel for later inspection. This avoids forcing any additional synchronization while
+  we validate correctness and refine the async polling design.
+- When we add async polling, we should expose it behind an explicit runner option/workflow opt-in so we
+  don’t risk double-emitting tokens (both `on_token` and channel drain).
 
 ### 3) EOS + KV safety
 
@@ -124,5 +141,7 @@ Maintain the existing guardrails:
 
 - H2D channels (CPU sampling / external control)
 - channels for bytes/structured payloads (detokenized bytes, latents)
-- optional `futures_core::Stream` impl behind a feature flag (no core deps)
-
+- optional `futures_core::Stream` impl behind a feature flag (no core deps). Note: stable `std` does not
+  currently expose a `Stream` trait; if we want “async iteration” ergonomics we should either:
+  - provide our own small `PollNext` trait (no deps), or
+  - gate a `futures_core::Stream` adapter behind a Cargo feature.

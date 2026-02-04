@@ -13,6 +13,7 @@ mod prefill;
 mod ret;
 mod sample;
 mod set_globals;
+mod stream;
 mod sync;
 mod tokenize;
 
@@ -28,6 +29,7 @@ pub(crate) use prefill::PrefillOp;
 pub(crate) use ret::ReturnOp;
 pub(crate) use sample::SampleOp;
 pub(crate) use set_globals::SetGlobalsOp;
+pub(crate) use stream::{StreamInitOp, StreamWriteU32Op};
 pub(crate) use sync::SyncOp;
 pub(crate) use tokenize::TokenizeOp;
 

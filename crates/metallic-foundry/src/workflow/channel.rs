@@ -69,6 +69,10 @@ impl ChannelU32Reader {
         Self { chan, next_read_idx: 0 }
     }
 
+    pub fn channel(&self) -> &ChannelU32 {
+        &self.chan
+    }
+
     pub fn try_next(&mut self) -> Result<Option<u32>, MetalError> {
         let header = self.chan.header_buffer()?;
         // Header layout: [write_idx, read_idx, capacity, flags]
