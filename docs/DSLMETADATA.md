@@ -136,7 +136,7 @@ Text generation is now executed through a **workflow JSON** (`crates/metallic-fo
 The workflow spec is intentionally op-based:
 
 - `prefill`
-- `loop` with stages like `sample`, `check_eos`, `append_token`, `graph_forward`
+- `while` with stages like `sample`, `check_eos`, `append_token`, `graph_forward`
 - `return`
 
 Execution is implemented as Rust op trait objects (one per workflow op) so runtime state lives with the ops, while the workflow JSON remains data-only.
@@ -174,7 +174,6 @@ Sampling is still executed as a single GPU kernel (`SampleTopK`) that implements
 Important implementation notes:
 
 - Sampling seed is now **advanced per generated token** (instead of reusing a constant seed each iteration). This avoids “repeat the same sampled token forever” failure modes.
-- Repetition penalty is supported via a dedicated GPU kernel and defaults to `repeat_penalty=1.1`, `repeat_last_n=64` for single-token decode. Presence/frequency penalties remain opt-in (default 0.0). When batching is enabled, penalties are force-disabled for correctness (see CLI warning) until we have correct multi-token batching semantics.
 - Repetition/presence/frequency penalties are maintained and applied on GPU (no per-token CPU sorting/copy), and are compatible with batching. Defaults: `repeat_penalty=1.1`, `repeat_last_n=64`, presence/frequency default 0.0.
 
 ### Prompt formatting + tokenization (workflow vs host)
@@ -241,9 +240,9 @@ These remain intentionally for now and are expected to be addressed as we expand
 These are the “next sprint” items we still need to remove or generalize to support new workflow types (image/video/upscaling) and new LLM architectures safely:
 
 1. Workflow ops still implement an LLM-specific autoregressive decode model.
-   - `prefill` + `loop` implicitly mean “KV-cache autoregressive text generation”, and pass state via `_internal.*` keys.
+   - `prefill` + `while` implicitly mean “KV-cache autoregressive text generation”, and pass state via `_internal.*` keys.
 2. Loop semantics are still specialized.
-   - `condition` is not interpreted yet and the current loop defaults to “repeat until `max_tokens` or EOS”.
+   - `while` conditions are currently variable lookups (bool/int) rather than full expression evaluation; most loops rely on `max_iterations` plus explicit `break`/`continue`.
 3. Sampling is still hardcoded to `SampleTopK`.
    - No sampler trait/object pluggability yet (greedy/top-k/top-p/min-p are folded into one kernel call).
    - Repetition/presence/frequency penalties exist but are not yet a fully general “sampler stack”.

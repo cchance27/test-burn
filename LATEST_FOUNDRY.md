@@ -1,6 +1,6 @@
 # Foundry Backend & CLI Frontend: Sprint Readiness Report
 
-This document tracks the state of the Foundry backend transition, highlighting improvements made in the current uncommitted changes, regressions to fix, and architectural debt to address before 100% migration.
+This document tracks the state of the Foundry backend transition, highlighting improvements made in the current sprint, regressions to fix, and architectural debt to address before 100% migration.
 
 ## ✅ Improvements & Completed Features
 
@@ -19,7 +19,7 @@ This document tracks the state of the Foundry backend transition, highlighting i
 ### 3. Sampling (Quality + Determinism)
 - **Min‑P Support:** Added `min_p` to the Foundry sampler (relative cutoff: `min_p * max_prob`) to better match common sampler stacks.
 - **Seed Stepping:** Sampling seed is advanced per generated token to avoid constant-seed repetition failure modes.
-- **Penalties (Enabled for Single‑Token Decode):** Repetition penalty is supported via a dedicated GPU kernel and defaults to `repeat_penalty=1.1`, `repeat_last_n=64` for `batch_size=1`. Presence/frequency penalties remain opt-in (default 0.0).
+- **Penalties (Enabled by Default):** Repetition/presence/frequency penalties are supported via dedicated GPU kernels and default to `repeat_penalty=1.1`, `repeat_last_n=64`, `presence_penalty=0.0`, `frequency_penalty=0.0` in the default text-generation workflow.
 - **Penalties (Batch-Compatible):** Penalties are maintained and applied on GPU (no per-token CPU sorting/copy), so repetition/presence/frequency can remain enabled under batching.
 - **Correct Logits Row:** After batched prefill, sampling uses the last token’s logits row (fixes “stuck/repetitive” generations caused by sampling row 0).
 
