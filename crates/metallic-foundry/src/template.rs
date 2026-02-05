@@ -41,7 +41,7 @@ impl ChatTemplate {
         eos_token: Option<&str>,
         add_generation_prompt: bool,
     ) -> Result<String, MetalError> {
-        // Defensive: many GGUF chat templates expect `bos_token`/`eos_token` to be defined
+        // Defensive: many Model chat templates expect `bos_token`/`eos_token` to be defined
         // (as a string) even if empty. Passing `Option::None` through minijinja can surface as
         // "undefined value" errors depending on template operations.
         let bos_token = bos_token.unwrap_or("");
@@ -53,7 +53,7 @@ impl ChatTemplate {
             add_generation_prompt => add_generation_prompt,
         };
 
-        // We use render_str for now as templates are dynamic from GGUF.
+        // We use render_str for now as templates are dynamic from Model metadata.
         // If we want to optimize, we could compile and cache it.
         self.env
             .render_str(&self.template_str, ctx)

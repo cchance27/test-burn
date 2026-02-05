@@ -1,8 +1,10 @@
-use metallic_macros::{KernelArgs, MetalStruct, Stage};
+use std::sync::Arc;
+
+use metallic_macros::{KernelArgs, MetalStruct};
 
 use super::variants::{FlashDecodeScalar, FlashDecodeTgOut, FlashDecodeVariant};
 use crate::{
-    compound::{BufferArg, Stage}, types::TensorArg
+    compound::{BufferArg, Stage}, fusion::MetalPolicy, types::TensorArg
 };
 
 /// Handles layout and indexing for Multi-Head Attention (Decode).
@@ -10,34 +12,7 @@ use crate::{
 /// Computes base pointers for Q, K, V, Out for a specific Batch and Head.
 /// Assumes Dispatch Grid: (1, Heads, Batch) or similar where gid.y/z map to Head/Batch.
 /// Intended for Single-Token Decode (Seq=1).
-#[derive(Stage, KernelArgs, Clone, Debug)]
-#[stage(emit = r#"
-    // Grid: x=dim (implicit), y=head, z=batch
-    // Metal gid usually is (x, y, z) in ELEMENTS (global threads).
-    // If we dispatch (1, Heads, Batch) groups with (HeadDim, 1, 1) threads:
-    // gid.x range 0..HeadDim-1.
-    // gid.y range 0..Heads-1.
-    // gid.z range 0..Batch-1.
-    
-    // We do NOT use gid.x for sequence index. 
-    // It corresponds to `tid` (intra-head dimension).
-    
-    uint head_idx = gid.y;
-    uint batch_idx = gid.z;
-    uint tid = lid.x;
-
-    ulong q_offset = batch_idx * q_stride_b + head_idx * q_stride_h;
-    const device half* q_ptr = q + q_offset;
-    
-    ulong k_offset = batch_idx * k_stride_b + head_idx * k_stride_h;
-    const device half* k_ptr = k + k_offset;
-    
-    ulong v_offset = batch_idx * v_stride_b + head_idx * v_stride_h;
-    const device half* v_ptr = v + v_offset;
-    
-    ulong out_offset = batch_idx * out_stride_b + head_idx * out_stride_h;
-    device half* output_ptr = output + out_offset;
-"#)]
+#[derive(KernelArgs, Clone, Debug)]
 pub struct HeadLayoutStage {
     pub q: TensorArg,
     pub k: TensorArg,
@@ -53,6 +28,123 @@ pub struct HeadLayoutStage {
     pub v_stride_h: u32,
     pub out_stride_b: u32,
     pub out_stride_h: u32,
+
+    #[arg(skip)]
+    pub policy: Arc<dyn MetalPolicy>,
+}
+
+impl Stage for HeadLayoutStage {
+    fn includes(&self) -> Vec<&'static str> {
+        vec![self.policy.header()]
+    }
+
+    fn buffer_args(&self) -> Vec<BufferArg> {
+        let buffers = vec![
+            ("q", 0, "const device half*"),
+            ("k", 1, "const device half*"),
+            ("v", 2, "const device half*"),
+            ("output", 3, "device half*"),
+        ];
+
+        let mut args = Vec::new();
+        // Resolve types from policy
+        let policy_types = self.policy.buffer_types();
+
+        for (name, idx, default_type) in buffers {
+            let type_str = policy_types
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, t)| *t)
+                .unwrap_or(default_type);
+
+            args.push(BufferArg {
+                name: name,
+                metal_type: type_str,
+                buffer_index: idx,
+            });
+        }
+
+        // Add scalar strides
+        let scalars = [
+            ("q_stride_b", 4),
+            ("q_stride_h", 5),
+            ("k_stride_b", 6),
+            ("k_stride_h", 7),
+            ("v_stride_b", 8),
+            ("v_stride_h", 9),
+            ("out_stride_b", 10),
+            ("out_stride_h", 11),
+        ];
+
+        for (name, idx) in scalars {
+            args.push(BufferArg {
+                name: name,
+                metal_type: "constant uint&",
+                buffer_index: idx,
+            });
+        }
+
+        args
+    }
+
+    fn emit(&self, _input_var: &str) -> (String, String) {
+        // Resolve pointer types for emission
+        let policy_types = self.policy.buffer_types();
+        // Helper to get type for a name, defaulting to "half"
+        let get_type = |name: &str, def_ptr: &str| -> String {
+            policy_types
+                .iter()
+                .find(|(n, _)| *n == name)
+                .map(|(_, t)| *t)
+                .unwrap_or(def_ptr)
+                .trim_end_matches('*')
+                .trim()
+                .to_string()
+        };
+
+        // If types are "uchar", we might need to handle pointer arithmetic carefully?
+        // But "k + offset" where offset is Elements works if k is ElementType*.
+        // So we just need to declare the pointers with the correct type.
+
+        let q_t = get_type("q", "const device half");
+        let k_t = get_type("k", "const device half");
+        let v_t = get_type("v", "const device half");
+        let out_t = get_type("output", "device half"); // Output usually device half*
+
+        let code = format!(
+            r#"
+    // HeadLayoutStage (Policy: {policy_name})
+    // Grid: x=dim (implicit), y=head, z=batch
+    
+    uint head_idx = gid.y;
+    uint batch_idx = gid.z;
+    uint tid = lid.x;
+
+    ulong q_offset = batch_idx * q_stride_b + head_idx * q_stride_h;
+    {q_t}* q_ptr = ({q_t}*)q + q_offset;
+    
+    ulong k_offset = batch_idx * k_stride_b + head_idx * k_stride_h;
+    {k_t}* k_ptr = ({k_t}*)k + k_offset;
+    
+    ulong v_offset = batch_idx * v_stride_b + head_idx * v_stride_h;
+    {v_t}* v_ptr = ({v_t}*)v + v_offset;
+    
+    ulong out_offset = batch_idx * out_stride_b + head_idx * out_stride_h;
+    {out_t}* output_ptr = ({out_t}*)output + out_offset;
+"#,
+            policy_name = self.policy.short_name(),
+            q_t = q_t,
+            k_t = k_t,
+            v_t = v_t,
+            out_t = out_t
+        );
+
+        ("output_ptr".to_string(), code)
+    }
+
+    fn struct_defs(&self) -> String {
+        String::new()
+    }
 }
 
 impl HeadLayoutStage {
@@ -66,6 +158,7 @@ impl HeadLayoutStage {
         k_strides: (u32, u32),
         v_strides: (u32, u32),
         out_strides: (u32, u32),
+        policy: Arc<dyn MetalPolicy>,
     ) -> Self {
         Self {
             q,
@@ -80,6 +173,7 @@ impl HeadLayoutStage {
             v_stride_h: v_strides.1,
             out_stride_b: out_strides.0,
             out_stride_h: out_strides.1,
+            policy,
         }
     }
 }
@@ -93,19 +187,21 @@ impl HeadLayoutStage {
 /// - D=64 uses the half2 kernel + float2 accumulator (lower TG memory, larger KV block)
 /// - D=128 uses the half4 kernel + float4 accumulator (needed for D=128)
 ///
-/// DEBT: This stage currently hardcodes F16 loading instead of using the policy abstraction.
-/// This violates the SLP architecture. It should be refactored to take a policy object
-/// and use policy-driven loads instead of raw pointer arithmetic.
+/// - D=128 uses the half4 kernel + float4 accumulator (needed for D=128)
 #[derive(KernelArgs, Clone, Debug)]
 pub struct FlashDecodeFusedStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
     #[arg(skip)]
     pub variant: FlashDecodeVariant,
+    #[arg(skip)]
+    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl<const HEAD_DIM: usize> Stage for FlashDecodeFusedStage<HEAD_DIM> {
     fn includes(&self) -> Vec<&'static str> {
-        vec!["simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"]
+        let mut inc = vec!["simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"];
+        inc.push(self.policy.header());
+        inc
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -183,26 +279,32 @@ impl<const HEAD_DIM: usize> Stage for FlashDecodeFusedStage<HEAD_DIM> {
 }
 
 impl<const HEAD_DIM: usize> FlashDecodeFusedStage<HEAD_DIM> {
-    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant) -> Self {
-        Self { sdpa_params, variant }
+    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant, policy: Arc<dyn MetalPolicy>) -> Self {
+        Self {
+            sdpa_params,
+            variant,
+            policy,
+        }
     }
 }
 
 /// Standalone FlashDecode Stage - loads Q directly from buffer (no RoPE fusion).
 ///
-/// // DEBT: This stage currently hardcodes F16 loading instead of using the policy abstraction.
-/// // This violates the SLP architecture. It should be refactored to take a policy object
-/// // and use policy-driven loads instead of raw pointer arithmetic.
+/// Standalone FlashDecode Stage - loads Q directly from buffer (no RoPE fusion).
 #[derive(KernelArgs, Clone, Debug)]
 pub struct FlashDecodeStage<const HEAD_DIM: usize> {
     pub sdpa_params: SdpaParams,
     #[arg(skip)]
     pub variant: FlashDecodeVariant,
+    #[arg(skip)]
+    pub policy: Arc<dyn MetalPolicy>,
 }
 
 impl<const HEAD_DIM: usize> Stage for FlashDecodeStage<HEAD_DIM> {
     fn includes(&self) -> Vec<&'static str> {
-        vec!["simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"]
+        let mut inc = vec!["simd.metal", "flashattention/flash_decode.metal", "softmax/streaming.metal"];
+        inc.push(self.policy.header());
+        inc
     }
 
     fn buffer_args(&self) -> Vec<BufferArg> {
@@ -295,8 +397,12 @@ impl<const HEAD_DIM: usize> Stage for FlashDecodeStage<HEAD_DIM> {
 }
 
 impl<const HEAD_DIM: usize> FlashDecodeStage<HEAD_DIM> {
-    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant) -> Self {
-        Self { sdpa_params, variant }
+    pub fn new(sdpa_params: SdpaParams, variant: FlashDecodeVariant, policy: Arc<dyn MetalPolicy>) -> Self {
+        Self {
+            sdpa_params,
+            variant,
+            policy,
+        }
     }
 }
 

@@ -15,7 +15,6 @@ pub mod constants;
 mod error;
 pub mod fusion;
 pub mod generation;
-pub mod gguf;
 pub mod instrument;
 pub mod kernel_registry;
 pub mod metals;
@@ -477,7 +476,7 @@ pub fn compile_pipeline<K: Kernel>(device: &MetalDevice, kernel: &K) -> Result<M
     }
 
     if let Some(dtype) = kernel.dtype() {
-        let policy = crate::policy::resolve_policy(dtype.into());
+        let policy = crate::policy::resolve_policy(dtype);
         let policy_h = policy.header();
         if !includes.contains(&policy_h) {
             includes.push(policy_h);

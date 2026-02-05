@@ -14,17 +14,15 @@ The kernel system is built around three primary abstractions:
 
 ## Foundry Executor Preparation (DSL-driven)
 
-Foundry’s executor no longer hardcodes model-specific intermediates (e.g. Qwen2.5). Instead, the model’s DSL (plus GGUF metadata) declares what the executor must prepare before inference.
+Foundry’s executor no longer hardcodes model-specific intermediates. Instead, the model’s DSL (plus source metadata extracted via `ModelLoader`) declares what the executor must prepare before inference.
 
 ### Precedence (baseline → overrides)
 
-1. **GGUF metadata baseline** (inferred at load time)
+1. **Source metadata baseline** (inferred at load time via `LoadedModel`)
 2. **DSL overrides** (values specified in the model JSON)
 3. **Runtime overrides** (values set in `TensorBindings` / ContextConfig)
 
-### `architecture.metadata_keys` contract
-
-If a model family uses different GGUF metadata key names, the DSL can declare `architecture.metadata_keys.keys` to map each baseline field to an ordered list of GGUF keys (first match wins). This reduces hardcoded “Qwen vs Llama” metadata logic in the loader.
+If a model family uses different metadata key names, the DSL can declare `architecture.metadata_keys.keys` to map each baseline field to an ordered list of keys (first match wins). This reduces hardcoded format-specific metadata logic in the loader.
 
 ### `architecture.prepare` contract
 
@@ -37,14 +35,14 @@ The DSL `architecture.prepare` section can declare:
 
 ### `architecture.weight_bindings` contract
 
-The DSL `architecture.weight_bindings` section declares which GGUF tensors must be materialized and bound before inference.
+The DSL `architecture.weight_bindings` section declares which source tensors must be materialized and bound before inference.
 
 - Each entry specifies a `key` resolved via `architecture.tensor_names` and a `logical_name` inserted into bindings.
 - Per-layer weights are expressed via `repeat` (`count: "n_layers", var: "i"`), and can use `{i}` interpolation in `logical_name`.
 - Layout-sensitive weights must specify a layout:
   - `row_major` (default)
   - `canonical` with `expected_k` / `expected_n` integer expressions (fail-fast validation)
-- Optional bias tensors should use `fallback_zero_len` to bind a shared zero vector when missing in GGUF.
+- Optional bias tensors should use `fallback_zero_len` to bind a shared zero vector when missing in the source file.
 
 ### Expressions and missing values
 

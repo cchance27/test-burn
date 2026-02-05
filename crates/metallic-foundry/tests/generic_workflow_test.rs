@@ -3,6 +3,7 @@ use std::sync::Arc;
 use metallic_foundry::{
     Foundry, model::ModelBuilder, workflow::{WorkflowRunner, WorkflowSpec}
 };
+use metallic_loader::ModelLoader;
 use rustc_hash::FxHashMap;
 use serial_test::serial;
 
@@ -16,9 +17,10 @@ fn test_generic_workflow_orchestration() -> Result<(), Box<dyn std::error::Error
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new()?;
 
+    let loaded_model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let model = ModelBuilder::new()
         .with_spec_file(&spec_path)?
-        .with_gguf(GGUF_PATH)?
+        .with_model(loaded_model)
         .build(&mut foundry)?;
     let model = Arc::new(model);
 

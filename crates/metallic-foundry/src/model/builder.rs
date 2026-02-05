@@ -5,12 +5,10 @@
 
 use std::{marker::PhantomData, path::Path};
 
+use metallic_loader::LoadedModel;
+
 use super::executor::CompiledModel;
-use crate::{
-    Foundry, error::MetalError, gguf::{
-        GGUFFile, model_loader::{GGUFModel, GGUFModelLoader}
-    }, spec::ModelSpec
-};
+use crate::{Foundry, error::MetalError, spec::ModelSpec};
 
 // =============================================================================
 // Typestate Markers
@@ -29,40 +27,36 @@ pub struct WithWeights;
 // Weight Bundle
 // =============================================================================
 
-/// Contains loaded weights from a GGUF file.
-///
-/// Tensor types (F16, Q8, etc.) are determined per-tensor at materialization time,
-/// and policy selection uses `T::Policy` from the layer's `TensorElement` type.
 pub struct WeightBundle {
-    /// The loaded GGUF model with tensors and metadata
-    model: GGUFModel,
+    /// The loaded model with tensors and metadata
+    model: Box<dyn LoadedModel>,
 }
 
 impl WeightBundle {
-    /// Get a reference to the underlying GGUFModel
-    pub fn gguf_model(&self) -> &GGUFModel {
-        &self.model
+    /// Get a reference to the underlying LoadedModel
+    pub fn model(&self) -> &dyn LoadedModel {
+        self.model.as_ref()
     }
 
     /// Get the architecture string (e.g., "qwen2", "llama")
     pub fn architecture(&self) -> Option<&str> {
-        self.model.get_architecture()
+        self.model.architecture()
     }
 
-    /// Get a specific tensor by name
-    pub fn get_tensor(&self, name: &str) -> Option<&crate::gguf::model_loader::GGUFTensor> {
-        self.model.get_tensor(name)
+    /// Get a specific tensor info by name
+    pub fn get_tensor_info(&self, name: &str) -> Option<metallic_loader::TensorInfo> {
+        self.model.tensor_info(name)
     }
 
     /// List all tensor names
-    pub fn tensor_names(&self) -> impl Iterator<Item = &String> {
-        self.model.tensors.keys()
+    pub fn tensor_names(&self) -> Vec<String> {
+        self.model.tensor_names()
     }
 
     #[cfg(test)]
     pub(crate) fn new_empty() -> Self {
         Self {
-            model: crate::gguf::model_loader::GGUFModel::new_empty(),
+            model: Box::new(metallic_loader::DummyModel),
         }
     }
 }
@@ -119,23 +113,13 @@ impl Default for ModelBuilder<Empty> {
 }
 
 impl ModelBuilder<WithSpec> {
-    /// Load weights from a GGUF file.
-    pub fn with_gguf(self, path: impl AsRef<Path>) -> Result<ModelBuilder<WithWeights>, MetalError> {
-        let path = path.as_ref();
-
-        let gguf_file =
-            GGUFFile::load_mmap_and_get_metadata(path).map_err(|e| MetalError::InvalidShape(format!("Failed to load GGUF: {}", e)))?;
-
-        let loader = GGUFModelLoader::new(gguf_file);
-        let model = loader
-            .load_model()
-            .map_err(|e| MetalError::InvalidShape(format!("Failed to parse GGUF model: {}", e)))?;
-
-        Ok(ModelBuilder {
+    /// Load weights from an abstract LoadedModel.
+    pub fn with_model(self, model: Box<dyn LoadedModel>) -> ModelBuilder<WithWeights> {
+        ModelBuilder {
             spec: self.spec,
             weights: Some(WeightBundle { model }),
             _state: PhantomData,
-        })
+        }
     }
 }
 
@@ -154,15 +138,15 @@ impl ModelBuilder<WithWeights> {
             .weights
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: weights not loaded".to_string()))?;
 
-        // Baseline architecture comes from GGUF metadata; DSL can override, runtime can override later.
+        // Baseline architecture comes from model metadata; DSL can override, runtime can override later.
         //
         // If the spec does not provide `architecture.metadata_keys`, fall back to built-in mappings
         // for common architectures (DEBT: keep this limited; prefer explicit keys in the spec).
-        let metadata = weights.gguf_model().get_metadata();
+        let metadata = weights.model().metadata();
         let defaults = if spec.architecture.metadata_keys.keys.is_empty() {
-            super::metadata_defaults::infer_architecture_defaults_from_gguf_metadata(metadata)?
+            super::metadata_defaults::infer_architecture_defaults(weights.model())?
         } else {
-            super::metadata_defaults::infer_from_gguf_with_keys(metadata, &spec.architecture.metadata_keys)?
+            super::metadata_defaults::infer_from_metadata_with_keys(metadata, &spec.architecture.metadata_keys)?
         };
         spec.architecture.apply_metadata_baseline(&defaults)?;
 

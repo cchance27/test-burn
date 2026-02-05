@@ -202,7 +202,7 @@ impl CompiledStep for CompiledFusedQkvStep {
         let w_q_tensor = get(self.w_q_resolved.weights)?;
 
         // Centralized Quantization Binding
-        let policy = crate::policy::resolve_policy(w_q_tensor.dtype.into());
+        let policy = crate::policy::resolve_policy(w_q_tensor.dtype);
         let loader = policy.loader_stage();
 
         let q_args = loader.bind(fast_bindings, &self.w_q_resolved);

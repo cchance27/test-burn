@@ -113,7 +113,7 @@ impl CompiledStep for CompiledFusedGemvStep {
             .ok_or(MetalError::InputNotFound("weights".into()))?;
 
         // Centralized Quantization Binding
-        let policy = crate::policy::resolve_policy(weights_tensor.dtype.into());
+        let policy = crate::policy::resolve_policy(weights_tensor.dtype);
         let loader = policy.loader_stage();
 
         let weights_args = loader.bind(fast_bindings, &self.weights_resolved);

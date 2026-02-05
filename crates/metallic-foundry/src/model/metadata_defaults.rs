@@ -1,28 +1,22 @@
+use metallic_loader::{LoadedModel, ModelMetadata};
+
 use crate::{
-    error::MetalError, gguf::file::{GGUFMetadata, GGUFValue}, spec::{ArchitectureDefaults, MetadataKeysSpec, MetadataValue}
+    error::MetalError, spec::{ArchValue, ArchitectureDefaults, MetadataKeysSpec}
 };
 
-fn metadata_usize(metadata: &GGUFMetadata, keys: &[&str]) -> Option<usize> {
+fn metadata_usize(metadata: &dyn ModelMetadata, keys: &[&str]) -> Option<usize> {
     for key in keys {
-        let Some(value) = metadata.entries.get(*key) else { continue };
-        match value {
-            GGUFValue::U32(v) => return Some(*v as usize),
-            GGUFValue::U64(v) => return Some(*v as usize),
-            GGUFValue::I32(v) if *v >= 0 => return Some(*v as usize),
-            GGUFValue::I64(v) if *v >= 0 => return Some(*v as usize),
-            _ => {}
+        if let Some(val) = metadata.get_u32(key) {
+            return Some(val as usize);
         }
     }
     None
 }
 
-fn metadata_f32(metadata: &GGUFMetadata, keys: &[&str]) -> Option<f32> {
+fn metadata_f32(metadata: &dyn ModelMetadata, keys: &[&str]) -> Option<f32> {
     for key in keys {
-        let Some(value) = metadata.entries.get(*key) else { continue };
-        match value {
-            GGUFValue::F32(v) => return Some(*v),
-            GGUFValue::F64(v) => return Some(*v as f32),
-            _ => {}
+        if let Some(val) = metadata.get_f32(key) {
+            return Some(val);
         }
     }
     None
@@ -33,7 +27,10 @@ fn metadata_f32(metadata: &GGUFMetadata, keys: &[&str]) -> Option<f32> {
 /// This function is entirely driven by the `MetadataKeysSpec`, which maps
 /// generic architecture field names (e.g. "d_model") to an ordered list of
 /// GGUF metadata keys to search.
-pub fn infer_from_gguf_with_keys(metadata: &GGUFMetadata, keys_spec: &MetadataKeysSpec) -> Result<ArchitectureDefaults, MetalError> {
+pub fn infer_from_metadata_with_keys(
+    metadata: &dyn ModelMetadata,
+    keys_spec: &MetadataKeysSpec,
+) -> Result<ArchitectureDefaults, MetalError> {
     let mut values = rustc_hash::FxHashMap::default();
 
     for (field, keys) in &keys_spec.keys {
@@ -42,8 +39,8 @@ pub fn infer_from_gguf_with_keys(metadata: &GGUFMetadata, keys_spec: &MetadataKe
         // Check for special "array length" key pattern (e.g. "@len:tokenizer.ggml.tokens")
         for key in &keys_strs {
             if let Some(path) = key.strip_prefix("@len:") {
-                if let Some(GGUFValue::Array(arr)) = metadata.entries.get(path) {
-                    values.insert(field.clone(), MetadataValue::USize(arr.len()));
+                if let Some(arr) = metadata.get_array(path) {
+                    values.insert(field.clone(), ArchValue::USize(arr.len()));
                     break;
                 }
             }
@@ -55,76 +52,101 @@ pub fn infer_from_gguf_with_keys(metadata: &GGUFMetadata, keys_spec: &MetadataKe
 
         // Standard value lookup
         if let Some(val) = metadata_usize(metadata, &keys_strs) {
-            values.insert(field.clone(), MetadataValue::USize(val));
+            values.insert(field.clone(), ArchValue::USize(val));
         } else if let Some(val) = metadata_f32(metadata, &keys_strs) {
-            values.insert(field.clone(), MetadataValue::F32(val));
+            values.insert(field.clone(), ArchValue::F32(val));
         }
     }
 
     Ok(ArchitectureDefaults { values })
 }
 
-/// Infers baseline architecture defaults from GGUF metadata using built-in key mappings.
+/// Infers baseline architecture defaults from model using its internal knowledge.
 ///
 /// This is used as a fallback when a model spec does not provide `architecture.metadata_keys`.
-/// Keep this small and focused: prefer explicit key mappings in the DSL for non-standard models.
-pub fn infer_architecture_defaults_from_gguf_metadata(metadata: &GGUFMetadata) -> Result<ArchitectureDefaults, MetalError> {
-    let arch = metadata
-        .entries
-        .get("general.architecture")
-        .and_then(|v| match v {
-            GGUFValue::String(s) => Some(s.as_str()),
-            _ => None,
-        })
-        .unwrap_or("");
+pub fn infer_architecture_defaults(model: &dyn LoadedModel) -> Result<ArchitectureDefaults, MetalError> {
+    let mut values = rustc_hash::FxHashMap::default();
 
-    let mut keys: rustc_hash::FxHashMap<String, Vec<String>> = rustc_hash::FxHashMap::default();
-
-    // Common keys (many GGUFs expose these).
-    keys.insert("vocab_size".into(), vec!["model.vocab_size".into()]);
-
-    if arch.contains("qwen2") {
-        keys.insert("d_model".into(), vec!["qwen2.embedding_length".into()]);
-        keys.insert("n_heads".into(), vec!["qwen2.attention.head_count".into()]);
-        keys.insert("n_kv_heads".into(), vec!["qwen2.attention.head_count_kv".into()]);
-        keys.insert("n_layers".into(), vec!["qwen2.block_count".into()]);
-        keys.insert("ff_dim".into(), vec!["qwen2.feed_forward_length".into()]);
-        keys.insert("max_seq_len".into(), vec!["qwen2.context_length".into()]);
-        keys.insert("rope_base".into(), vec!["qwen2.rope.freq_base".into()]);
-        keys.insert("rms_eps".into(), vec!["qwen2.attention.layer_norm_rms_epsilon".into()]);
-    } else if !arch.is_empty() {
-        return Err(MetalError::InvalidOperation(format!(
-            "No built-in metadata key mapping for architecture '{arch}'. Provide `architecture.metadata_keys` in the model spec."
-        )));
+    for (field, val) in model.inferred_architecture_params() {
+        match val {
+            metallic_loader::MetadataValue::Int(i) => {
+                values.insert(field, ArchValue::USize(i as usize));
+            }
+            metallic_loader::MetadataValue::Float(f) => {
+                values.insert(field, ArchValue::F32(f as f32));
+            }
+            _ => {
+                // Ignore non-numeric defaults for now
+            }
+        }
     }
 
-    infer_from_gguf_with_keys(metadata, &MetadataKeysSpec { keys })
+    Ok(ArchitectureDefaults { values })
 }
 
 #[cfg(test)]
 mod tests {
-    use rustc_hash::FxHashMap;
+    use metallic_loader::{DummyMetadata, MetadataValue};
 
     use super::*;
 
+    struct MockModel {
+        arch: String,
+        params: Vec<(String, MetadataValue<'static>)>,
+    }
+
+    impl LoadedModel for MockModel {
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+        fn architecture(&self) -> Option<&str> {
+            Some(&self.arch)
+        }
+        fn metadata(&self) -> &dyn ModelMetadata {
+            &DummyMetadata
+        }
+        fn tensor_info(&self, _name: &str) -> Option<metallic_loader::TensorInfo> {
+            None
+        }
+        fn tensor_data(&self, _name: &str) -> Result<metallic_loader::TensorData<'_>, metallic_loader::LoaderError> {
+            Err(metallic_loader::LoaderError::TensorNotFound(_name.to_string()))
+        }
+        fn tensor_names(&self) -> Vec<String> {
+            Vec::new()
+        }
+        fn estimated_memory_usage(&self) -> usize {
+            0
+        }
+        fn offload_tensor(&self, _name: &str) -> Result<(), metallic_loader::LoaderError> {
+            Ok(())
+        }
+        fn load_tensor(&self, _name: &str) -> Result<(), metallic_loader::LoaderError> {
+            Ok(())
+        }
+        fn available_fallbacks(&self) -> &[String] {
+            &[]
+        }
+        fn get_fallback(&self, _key: &str) -> Result<Option<metallic_loader::TensorData<'_>>, metallic_loader::LoaderError> {
+            Ok(None)
+        }
+        fn inferred_architecture_params(&self) -> Vec<(String, MetadataValue<'_>)> {
+            self.params.clone()
+        }
+    }
+
     #[test]
     fn test_generic_inference() {
-        let mut metadata = GGUFMetadata {
-            entries: FxHashMap::default(),
+        let model = MockModel {
+            arch: "test".to_string(),
+            params: vec![
+                ("d_model".to_string(), MetadataValue::Int(512)),
+                ("vocab_size".to_string(), MetadataValue::Int(32000)),
+            ],
         };
-        metadata.entries.insert("test.dim".into(), GGUFValue::U32(512));
-        metadata
-            .entries
-            .insert("test.array".into(), GGUFValue::Array(vec![GGUFValue::U32(1), GGUFValue::U32(2)]));
 
-        let mut keys = FxHashMap::default();
-        keys.insert("d_model".into(), vec!["test.dim".into()]);
-        keys.insert("vocab_size".into(), vec!["@len:test.array".into()]);
-
-        let spec = MetadataKeysSpec { keys };
-        let defaults = infer_from_gguf_with_keys(&metadata, &spec).unwrap();
+        let defaults = infer_architecture_defaults(&model).unwrap();
 
         assert_eq!(defaults.get_usize("d_model"), Some(512));
-        assert_eq!(defaults.get_usize("vocab_size"), Some(2));
+        assert_eq!(defaults.get_usize("vocab_size"), Some(32000));
     }
 }

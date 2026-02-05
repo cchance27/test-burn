@@ -106,7 +106,7 @@ fn system_prompt_from_env() -> Option<Arc<str>> {
 fn build_single_turn_messages_value(_tokenizer: &BPETokenizer, prompt: &str) -> Value {
     let mut sys = FxHashMap::default();
     sys.insert("role".to_string(), Value::Text("system".into()));
-    // IMPORTANT: keep the default system prompt generic; if the GGUF provides a chat template,
+    // IMPORTANT: keep the default system prompt generic; if the model provides a chat template,
     // it is the source of truth for formatting. Model-specific hardcoded system prompts can
     // cause dramatic behavioral shifts (e.g., refusals).
     let system = system_prompt_from_env().unwrap_or_else(|| Arc::<str>::from("You are a helpful assistant."));

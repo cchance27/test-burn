@@ -2,8 +2,6 @@ use std::{
     fmt::Debug, ops::{Add, Div, Mul, Sub}
 };
 
-use serde::{Deserialize, Serialize};
-
 use crate::policy::{f16::PolicyF16, q8::PolicyQ8};
 
 /// Defines the element type for a tensor
@@ -31,45 +29,37 @@ pub trait TensorElement: Clone + Copy + Default + 'static {
     fn is_finite(v: Self::Scalar) -> bool;
 }
 
-/// Represents the data type of tensor elements
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
-pub enum Dtype {
-    F32,
-    F16,
-    U32,
-    Q4_0,
-    Q8_0,
+// Re-export Dtype from SDK
+pub use metallic_sdk::Dtype;
+
+pub trait DtypeExt {
+    fn metal_format(&self) -> &'static str;
+    fn layout_size(&self, dims: &[usize]) -> usize;
 }
 
-impl Dtype {
-    pub fn size_bytes(&self) -> usize {
-        match self {
-            Dtype::F32 => std::mem::size_of::<f32>(),
-            Dtype::F16 => std::mem::size_of::<half::f16>(),
-            Dtype::U32 => std::mem::size_of::<u32>(),
-            Dtype::Q4_0 | Dtype::Q8_0 => 1, // Store as bytes
-        }
-    }
-    pub fn metal_format(&self) -> &'static str {
+impl DtypeExt for Dtype {
+    fn metal_format(&self) -> &'static str {
         match self {
             Dtype::F32 => "float",
             Dtype::F16 => "half",
             Dtype::U32 => "uint",
             Dtype::Q4_0 | Dtype::Q8_0 => "uchar",
+            _ => panic!("Unsupported dtype for metal_format: {}", self),
         }
     }
-    pub fn is_quantized(&self) -> bool {
-        matches!(self, Dtype::Q4_0 | Dtype::Q8_0)
-    }
-    pub fn layout_size(&self, dims: &[usize]) -> usize {
+
+    fn layout_size(&self, dims: &[usize]) -> usize {
         let elements: usize = dims.iter().product();
         match self {
             Dtype::Q4_0 => (elements + 1) / 2,
+            // DEBT: Add other quantized layouts
             _ => elements * self.size_bytes(),
         }
     }
 }
 
+// DEBT: Should we consider combining TensorElements and the Policy, instead of having a F32 that implements tensorelement and a F32Policy that implements Policy? Maybe just have F32 implement policy and on the dtype to collapse and improve DX.
+// DEBT: It feels like we could easily derive TensorElement on a Dtype or on the policy or something like that to clean up DX since some patterns seem very repeated.
 // F32 implementation
 #[derive(Clone, Copy, Default)]
 pub struct F32;
@@ -116,7 +106,7 @@ pub struct U32;
 impl TensorElement for U32 {
     type Scalar = u32;
     const DTYPE: Dtype = Dtype::U32;
-    type Policy = PolicyF16; // TODO: Implement specific PolicyU32. Currently falls back to F16.
+    type Policy = crate::policy::raw::PolicyU32;
 
     fn from_f32(v: f32) -> Self::Scalar {
         v as u32

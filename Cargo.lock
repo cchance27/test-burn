@@ -1328,7 +1328,9 @@ dependencies = [
  "mach2",
  "memmap2",
  "metallic-context",
+ "metallic-loader",
  "metallic-macros",
+ "metallic-sdk",
  "metallic_cli_helpers",
  "metallic_env",
  "metallic_instrumentation",
@@ -1364,6 +1366,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "metallic-loader"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytemuck",
+ "byteorder",
+ "half",
+ "memmap2",
+ "metallic-sdk",
+ "rustc-hash",
+ "serde",
+ "serde_json",
+ "sysinfo",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
 name = "metallic-macros"
 version = "0.1.0"
 dependencies = [
@@ -1371,6 +1391,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "metallic-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "smallvec",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1394,6 +1424,7 @@ dependencies = [
  "memmap2",
  "metallic-context",
  "metallic-foundry",
+ "metallic-loader",
  "metallic_cli_helpers",
  "metallic_env",
  "metallic_instrumentation",

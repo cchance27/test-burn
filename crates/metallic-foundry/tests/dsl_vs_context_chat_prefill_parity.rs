@@ -1,5 +1,6 @@
 use metallic_context::{Context, F16Element, generation::generate_autoregressive_with_kv_cache, models::Qwen25};
 use metallic_foundry::{Foundry, MetalError, model::ModelBuilder};
+use metallic_loader::ModelLoader;
 use serial_test::serial;
 
 const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -18,9 +19,10 @@ fn test_dsl_vs_context_chat_prefill_greedy_next_token_parity() -> Result<(), Met
 
     // Load Foundry model.
     let mut foundry = Foundry::new()?;
+    let loaded_model = ModelLoader::from_file(&gguf_path).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)?
-        .with_gguf(&gguf_path)?
+        .with_model(loaded_model)
         .build(&mut foundry)?;
     let dsl_tokenizer = dsl_model.tokenizer()?;
 

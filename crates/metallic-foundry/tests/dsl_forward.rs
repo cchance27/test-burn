@@ -5,6 +5,7 @@
 use metallic_foundry::{
     Foundry, model::ModelBuilder, spec::{ModelSpec, TensorBindings}
 };
+use metallic_loader::ModelLoader;
 
 /// Test that ModelSpec can parse a minimal JSON spec.
 #[test]
@@ -136,10 +137,10 @@ fn test_e2e_forward_pass() {
     eprintln!("Created Foundry with device: {:?}", foundry.device);
 
     // Load model via builder
+    let loaded_model = ModelLoader::from_file(model_path).expect("Failed to load GGUF");
     let model = ModelBuilder::new()
         .with_spec(spec)
-        .with_gguf(model_path)
-        .expect("Failed to load GGUF")
+        .with_model(loaded_model)
         .build(&mut foundry)
         .expect("Failed to build model");
 

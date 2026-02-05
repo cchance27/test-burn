@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use super::variants::{FlashDecodeVariant, flash_decode_variant_from_env, select_flash_decode_variant_m2m3};
 use crate::{
     Foundry, MetalError, compound::{CompiledCompoundKernel, CompoundKernel}, metals::{
-        flashattention::stages::{FlashDecodeFusedStage, HeadLayoutStage, SdpaParams, SdpaParamsResolved, SdpaPrefillSplitKParams}, rope::{RopeParams, RopeParamsResolved, stage::RopeStage}
+        flashattention::stages::{
+            FlashDecodeFusedStage, FlashDecodeStage, HeadLayoutStage, SdpaParams, SdpaParamsResolved, SdpaPrefillSplitKParams
+        }, rope::{RopeParams, RopeParamsResolved, stage::RopeStage}
     }, spec::{CompiledStep, DynamicValue, FastBindings, Ref, Step, SymbolTable, TensorBindings}, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit, dtypes::F32}, types::{
         TensorArg, dispatch::{DispatchConfig, GridSize, ThreadgroupSize}
     }
@@ -21,6 +23,7 @@ fn get_rope_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant) -> A
     kernel_registry().get_or_build(key, || {
         let name = "rope_flash_decode_v2";
         let dummy_tensor = TensorArg::default();
+        let policy = crate::policy::resolve_policy(crate::tensor::Dtype::F16);
         let dummy_layout = HeadLayoutStage::new(
             dummy_tensor.clone(),
             dummy_tensor.clone(),
@@ -30,11 +33,12 @@ fn get_rope_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant) -> A
             (0, 0),
             (0, 0),
             (0, 0),
+            policy.clone(),
         );
         let dummy_rope = RopeStage::new(dummy_tensor.clone(), dummy_tensor.clone(), RopeParams::default());
         let dummy_core: Box<dyn crate::compound::Stage> = match head_dim {
-            128 => Box::new(FlashDecodeFusedStage::<128>::new(SdpaParams::default(), variant)),
-            64 => Box::new(FlashDecodeFusedStage::<64>::new(SdpaParams::default(), variant)),
+            128 => Box::new(FlashDecodeFusedStage::<128>::new(SdpaParams::default(), variant, policy)),
+            64 => Box::new(FlashDecodeFusedStage::<64>::new(SdpaParams::default(), variant, policy)),
             _ => panic!("Unsupported head_dim for dummy core: {}", head_dim),
         };
 
@@ -368,29 +372,16 @@ fn get_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant) -> Arc<Co
     use crate::kernel_registry::{KernelCacheKey, kernel_registry};
 
     let suffix = variant.cache_key_suffix();
-    let (name_suffix, stage_box): (String, Box<dyn crate::compound::Stage>) = match head_dim {
-        128 => {
-            use crate::metals::flashattention::stages::FlashDecodeStage;
-            (
-                format!("d128_{suffix}"),
-                Box::new(FlashDecodeStage::<128>::new(SdpaParams::default(), variant)),
-            )
-        }
-        64 => {
-            use crate::metals::flashattention::stages::FlashDecodeStage;
-            (
-                format!("d64_{suffix}"),
-                Box::new(FlashDecodeStage::<64>::new(SdpaParams::default(), variant)),
-            )
-        }
-        _ => {
-            panic!("Unsupported head_dim for Flash Decode: {}", head_dim);
-        }
+    let name_suffix = match head_dim {
+        128 => format!("d128_{suffix}"),
+        64 => format!("d64_{suffix}"),
+        _ => panic!("Unsupported head_dim for Flash Decode: {}", head_dim),
     };
 
     let key = KernelCacheKey::new("flash_decode_standalone", &name_suffix);
 
     kernel_registry().get_or_build(key, || {
+        let policy = crate::policy::resolve_policy(crate::tensor::Dtype::F16);
         let dummy_tensor = TensorArg::default();
         let dummy_layout = HeadLayoutStage::new(
             dummy_tensor.clone(),
@@ -401,7 +392,14 @@ fn get_flash_decode_kernel(head_dim: u32, variant: FlashDecodeVariant) -> Arc<Co
             (0, 0),
             (0, 0),
             (0, 0),
+            policy.clone(),
         );
+
+        let stage_box: Box<dyn crate::compound::Stage> = match head_dim {
+            128 => Box::new(FlashDecodeStage::<128>::new(SdpaParams::default(), variant, policy)),
+            64 => Box::new(FlashDecodeStage::<64>::new(SdpaParams::default(), variant, policy)),
+            _ => panic!("Unsupported head_dim for Flash Decode: {}", head_dim),
+        };
 
         CompoundKernel::new(&format!("flash_decode_standalone_{}", name_suffix))
             .prologue(dummy_layout)

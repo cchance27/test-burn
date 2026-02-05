@@ -3,6 +3,7 @@
 use std::path::Path;
 
 use metallic_foundry::{Foundry, MetalError, model::ModelBuilder};
+use metallic_loader::ModelLoader;
 use serial_test::serial;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
@@ -14,9 +15,10 @@ const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
 fn test_layer_weight_bindings_have_indices() -> Result<(), MetalError> {
     let spec_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new()?;
+    let loaded_model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let model = ModelBuilder::new()
         .with_spec_file(&spec_path)?
-        .with_gguf(GGUF_PATH)?
+        .with_model(loaded_model)
         .build(&mut foundry)?;
     let (bindings, _fast_bindings) = model.prepare_bindings(&mut foundry).expect("Bindings failed");
 

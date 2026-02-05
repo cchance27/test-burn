@@ -1,5 +1,5 @@
 use std::{
-    any::Any, io::{Write, stdout}, panic::{self, AssertUnwindSafe}, sync::{Arc, mpsc}, thread, time::Duration
+    any::Any, io::{Write, stdout}, panic::{self, AssertUnwindSafe}, path::PathBuf, sync::{Arc, mpsc}, thread, time::{Duration, Instant}
 };
 
 use anyhow::Result;
@@ -7,8 +7,11 @@ use metallic_cli_helpers::prelude::*;
 use metallic_context::{
     Context, F16Element, TensorElement, Tokenizer, gguf::{GGUFFile, model_loader::GGUFModelLoader}, kernels::{KernelBackendKind, KernelBackendOverride, KernelBackendOverrides}, profiling_state
 };
-use metallic_foundry::model::CompiledModel;
+use metallic_foundry::{
+    model::{CompiledModel, ModelBuilder}, workflow::WorkflowRunner
+};
 use metallic_instrumentation::{MetricEvent, config::AppConfig, prelude::*, record_metric_async};
+use metallic_loader::ModelLoader;
 use rustc_hash::FxHashMap;
 
 mod cli;
@@ -155,7 +158,7 @@ fn main() -> AppResult<()> {
                 emit_startup_memory_update(&worker_tx)?;
 
                 worker_tx.send(AppEvent::StatusUpdate("Loading GGUF Metadata...".to_string()))?;
-                let load_start = std::time::Instant::now();
+                let load_start = Instant::now();
                 let gguf = GGUFFile::load_mmap_and_get_metadata(&gguf_path)?;
 
                 // Report GGUF file MMAP usage
@@ -213,7 +216,7 @@ fn main() -> AppResult<()> {
                         worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-                        let tokenization_start = std::time::Instant::now();
+                        let tokenization_start = Instant::now();
                         let tokenizer = Tokenizer::from_gguf_metadata(&gguf_model.metadata)?;
                         emit_startup_memory_update(&worker_tx)?;
 
@@ -333,7 +336,7 @@ fn main() -> AppResult<()> {
 
                         worker_tx.send(AppEvent::StatusUpdate("Building compiled model(s)...".to_string()))?;
 
-                        let mut models_owned: rustc_hash::FxHashMap<String, Arc<CompiledModel>> = rustc_hash::FxHashMap::default();
+                        let mut models_owned: FxHashMap<String, Arc<CompiledModel>> = FxHashMap::default();
 
                         if has_workflow_model_resources {
                             let resources = workflow_override
@@ -341,17 +344,19 @@ fn main() -> AppResult<()> {
                                 .and_then(|w| w.resources.as_ref())
                                 .expect("has_workflow_model_resources implies resources");
                             for m in &resources.models {
-                                let model = metallic_foundry::model::ModelBuilder::new()
-                                    .with_spec_file(std::path::PathBuf::from(&m.spec_path))?
-                                    .with_gguf(&m.gguf_path)?
+                                let model_loaded = ModelLoader::from_file(&m.gguf_path)?;
+                                let model = ModelBuilder::new()
+                                    .with_spec_file(PathBuf::from(&m.spec_path))?
+                                    .with_model(model_loaded)
                                     .build(&mut foundry)?;
                                 models_owned.insert(m.id.clone(), Arc::new(model));
                             }
                         } else {
                             let spec_path = spec_path.expect("spec_path required for single-model Foundry");
-                            let model = metallic_foundry::model::ModelBuilder::new()
-                                .with_spec_file(std::path::PathBuf::from(spec_path))?
-                                .with_gguf(&gguf_path)?
+                            let model_loaded = ModelLoader::from_file(&gguf_path)?;
+                            let model = ModelBuilder::new()
+                                .with_spec_file(PathBuf::from(spec_path))?
+                                .with_model(model_loaded)
                                 .build(&mut foundry)?;
                             let model_id = workflow_override
                                 .as_ref()
@@ -370,7 +375,7 @@ fn main() -> AppResult<()> {
                         worker_tx.send(AppEvent::ModelLoadComplete(load_duration))?;
 
                         worker_tx.send(AppEvent::StatusUpdate("Initializing tokenizer...".to_string()))?;
-                        let tokenization_start = std::time::Instant::now();
+                        let tokenization_start = Instant::now();
                         let tokenizer_model_id = workflow_override
                             .as_ref()
                             .and_then(|w| w.default_model.as_deref())
@@ -477,14 +482,14 @@ fn main() -> AppResult<()> {
                                 }
 
                                 fn msg(role: &str, content: &str) -> WfValue {
-                                    let mut map = rustc_hash::FxHashMap::default();
+                                    let mut map = FxHashMap::default();
                                     map.insert("role".to_string(), WfValue::Text(role.into()));
                                     map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
                                     WfValue::Map(map)
                                 }
 
                                 let workflow = workflow_override.as_ref().expect("workflow_override present");
-                                let mut runner = metallic_foundry::workflow::WorkflowRunner::new(&mut foundry, models);
+                                let mut runner = WorkflowRunner::new(&mut foundry, models);
                                 let system = sys_prompt();
 
                                 for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
@@ -519,7 +524,7 @@ fn main() -> AppResult<()> {
                                     worker_tx.send(AppEvent::TokenCount(metrics_tokens.len()))?;
                                     worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
-                                    let mut inputs: rustc_hash::FxHashMap<String, WfValue> = rustc_hash::FxHashMap::default();
+                                    let mut inputs: FxHashMap<String, WfValue> = FxHashMap::default();
                                     inputs.insert("messages".to_string(), WfValue::Array(messages_input));
                                     inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
                                     inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
@@ -540,9 +545,9 @@ fn main() -> AppResult<()> {
                                     let mut decode_scratch = Vec::new();
                                     let mut decoded_chunk = String::new();
                                     let mut on_token = |token_id: u32,
-                                                        prefill: std::time::Duration,
-                                                        setup: std::time::Duration,
-                                                        iter: Option<std::time::Duration>|
+                                                        prefill: Duration,
+                                                        setup: Duration,
+                                                        iter: Option<Duration>|
                                      -> Result<bool, metallic_foundry::MetalError> {
                                         if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
                                             && worker_tx
@@ -559,7 +564,7 @@ fn main() -> AppResult<()> {
                                         Ok(true)
                                     };
 
-                                    let gen_start = std::time::Instant::now();
+                                    let gen_start = Instant::now();
                                     match runner.run_streaming(workflow, inputs, &mut on_token) {
                                         Ok(_outputs) => {
                                             let _ = worker_tx.send(AppEvent::GenerationComplete {
@@ -640,14 +645,14 @@ fn main() -> AppResult<()> {
                             }
 
                             fn msg(role: &str, content: &str) -> WfValue {
-                                let mut map = rustc_hash::FxHashMap::default();
+                                let mut map = FxHashMap::default();
                                 map.insert("role".to_string(), WfValue::Text(role.into()));
                                 map.insert("content".to_string(), WfValue::Text(content.to_string().into()));
                                 WfValue::Map(map)
                             }
 
                             let workflow = workflow_override.as_ref().expect("workflow_override present");
-                            let mut runner = metallic_foundry::workflow::WorkflowRunner::new(&mut foundry, models);
+                            let mut runner = WorkflowRunner::new(&mut foundry, models);
 
                             let system = sys_prompt();
                             let mut is_first_turn = true;
@@ -726,7 +731,7 @@ fn main() -> AppResult<()> {
 
                                 worker_tx.send(AppEvent::StatusUpdate("Generating...".to_string()))?;
 
-                                let mut inputs: rustc_hash::FxHashMap<String, WfValue> = rustc_hash::FxHashMap::default();
+                                let mut inputs: FxHashMap<String, WfValue> = FxHashMap::default();
                                 inputs.insert("messages".to_string(), WfValue::Array(messages_input));
                                 inputs.insert("max_tokens".to_string(), WfValue::U32(cfg.max_tokens as u32));
                                 inputs.insert("temperature".to_string(), WfValue::F32(cfg.temperature));
@@ -747,9 +752,9 @@ fn main() -> AppResult<()> {
                                 let mut decode_scratch = Vec::new();
                                 let mut decoded_chunk = String::new();
                                 let mut on_token = |token_id: u32,
-                                                    prefill: std::time::Duration,
-                                                    setup: std::time::Duration,
-                                                    iter: Option<std::time::Duration>|
+                                                    prefill: Duration,
+                                                    setup: Duration,
+                                                    iter: Option<Duration>|
                                  -> Result<bool, metallic_foundry::MetalError> {
                                     if let Some(text) = tokenizer.decode_token_arc(token_id, &mut decoded_chunk, &mut decode_scratch)?
                                         && worker_tx
@@ -766,7 +771,7 @@ fn main() -> AppResult<()> {
                                     Ok(true)
                                 };
 
-                                let gen_start = std::time::Instant::now();
+                                let gen_start = Instant::now();
                                 match runner.run_streaming(workflow, inputs, &mut on_token) {
                                     Ok(_outputs) => {
                                         let _ = worker_tx.send(AppEvent::GenerationComplete {
@@ -1093,7 +1098,7 @@ fn run_tui_mode(
 
     while !app.should_quit {
         // Handle crossterm events
-        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
+        if crossterm::event::poll(Duration::from_millis(50))? {
             match crossterm::event::read()? {
                 CrosstermEvent::Key(key) => {
                     if key.code == crossterm::event::KeyCode::Char('p') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {

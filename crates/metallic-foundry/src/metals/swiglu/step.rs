@@ -200,11 +200,11 @@ impl CompiledStep for CompiledFusedSwigluStep {
         let weights_per_block = self.step.weights_per_block;
         let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
 
-        let policy_gate = crate::policy::resolve_policy(w_gate.dtype.into());
+        let policy_gate = crate::policy::resolve_policy(w_gate.dtype);
         let loader_gate = policy_gate.loader_stage();
         let args_gate = loader_gate.bind(_fast_bindings, &self.wg_resolved);
 
-        let policy_up = crate::policy::resolve_policy(w_up.dtype.into());
+        let policy_up = crate::policy::resolve_policy(w_up.dtype);
         let loader_up = policy_up.loader_stage();
         let args_up = loader_up.bind(_fast_bindings, &self.wu_resolved);
 
@@ -394,11 +394,11 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
         let w_up = get(self.w_up_resolved.weights)?;
         let output = get(self.output_idx)?;
 
-        let policy_gate = crate::policy::resolve_policy(w_gate.dtype.into());
+        let policy_gate = crate::policy::resolve_policy(w_gate.dtype);
         let loader_gate = policy_gate.loader_stage();
         let args_gate = loader_gate.bind(fast_bindings, &self.w_gate_resolved);
 
-        let policy_up = crate::policy::resolve_policy(w_up.dtype.into());
+        let policy_up = crate::policy::resolve_policy(w_up.dtype);
         let loader_up = policy_up.loader_stage();
         let args_up = loader_up.bind(fast_bindings, &self.w_up_resolved);
 

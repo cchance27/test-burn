@@ -54,14 +54,14 @@ impl Stage for VectorizedDotStage {
 
 This trait handles the runtime aspects: reading GGUF files, reshuffling bytes, and binding buffers.
 
-*   **`load_weights(...)`**: Reads generic GGUF data and converts it to the format expected by the Metal policy (e.g., splitting Q8 into data + scale planes).
+*   **`load_weights(...)`**: Reads generic source model data and converts it to the format expected by the Metal policy (e.g., splitting Q8 into data + scale planes).
 *   **`loader_stage()`**: Returns a `LoaderStage` that binds these processed buffers to the GPU.
 
 #### Shared Helpers (Block Quants)
 
-For GGUF/GGML block-quant formats (e.g. Q8_0, Q4_0) there is shared loader/splitting infrastructure to avoid repeating:
+For block-quant formats (e.g. Q8_0, Q4_0 found in GGUF) there is shared loader/splitting infrastructure to avoid repeating:
 
-- GGUF tensor dtype validation
+- Source tensor dtype validation
 - dims/layout validation (2D / canonical / Nk)
 - block count math
 - `{raw blocks} -> {weights plane, scales plane}` splitting
@@ -87,12 +87,12 @@ pub enum Quantization { F16, Q8, Q4 }
     *   The `PolicyQ8` (as `dyn MetalPolicy`) is passed to `VectorizedDotStage`.
     *   The stage generates Metal code referencing `#include "policy_q8.metal"`.
 4.  **Loading**:
-    *   The `PolicyQ8` (as `dyn MetalPolicyRuntime`) loads weights from disk.
+    *   The `PolicyQ8` (as `dyn MetalPolicyRuntime`) loads weights from the model file (via `LoadedModel`).
     *   It binds the weights to the pipeline.
 
 ## Critical Policy Contract (Packed Formats)
 
-Some quant formats (e.g. GGUF/GGML `Q4_0`) are **packed**, meaning “logical element index” is **not** a constant number of bytes.
+Some quant formats (e.g. `Q4_0`) are **packed**, meaning “logical element index” is **not** a constant number of bytes.
 
 This has two consequences:
 

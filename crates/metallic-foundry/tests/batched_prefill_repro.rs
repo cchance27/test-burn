@@ -1,6 +1,7 @@
 use std::{path::PathBuf, sync::Once};
 
 use metallic_foundry::{BPETokenizer, Foundry, MetalError, model::ModelBuilder};
+use metallic_loader::ModelLoader;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
 const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -18,10 +19,9 @@ fn get_model_paths() -> (PathBuf, PathBuf) {
     (root.join(MODEL_SPEC_PATH), root.join(GGUF_PATH))
 }
 
-fn load_tokenizer(path: &PathBuf) -> Result<BPETokenizer, MetalError> {
-    let file = metallic_foundry::gguf::file::GGUFFile::load_mmap_and_get_metadata(path)
-        .map_err(|e| MetalError::OperationFailed(format!("{:?}", e)))?;
-    BPETokenizer::from_gguf_metadata(&file.metadata)
+fn load_tokenizer(path: &std::path::PathBuf) -> Result<BPETokenizer, MetalError> {
+    let model = ModelLoader::from_file(path).map_err(|e| MetalError::OperationFailed(format!("{:?}", e)))?;
+    BPETokenizer::from_metadata(model.metadata())
 }
 
 #[test]
@@ -70,9 +70,10 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
     let mut baseline_tokens = Vec::new();
     {
         // Reset session for fresh start
+        let loaded_1 = ModelLoader::from_file(&gguf_path).unwrap();
         let model_baseline = ModelBuilder::new()
             .with_spec_file(&spec_path)?
-            .with_gguf(&gguf_path)?
+            .with_model(loaded_1)
             .build(&mut foundry)?;
 
         unsafe {
@@ -93,9 +94,10 @@ fn test_batched_prefill_multiturn_consistency() -> Result<(), Box<dyn std::error
     println!("Running Test (Batched)...");
     let mut test_tokens = Vec::new();
     {
+        let loaded_2 = ModelLoader::from_file(&gguf_path).unwrap();
         let model_test = ModelBuilder::new()
             .with_spec_file(&spec_path)?
-            .with_gguf(&gguf_path)?
+            .with_model(loaded_2)
             .build(&mut foundry)?;
 
         unsafe {

@@ -1,8 +1,9 @@
+use metallic_loader::LoadedModel;
 use metallic_macros::MetalPolicy;
 
 use super::{LoaderStage, MetalPolicyRuntime};
 use crate::{
-    Foundry, compound::Layout, gguf::model_loader::GGUFModel, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::TensorArg
+    Foundry, compound::Layout, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::TensorArg
 };
 
 const Q4_0_WPB: usize = 32;
@@ -70,15 +71,15 @@ impl MetalPolicyRuntime for PolicyQ4_0 {
     fn load_weights(
         &self,
         foundry: &mut Foundry,
-        gguf: &GGUFModel,
-        gguf_tensor_name: &str,
+        model: &dyn LoadedModel,
+        source_tensor_name: &str,
         logical_name: &str,
         layout: Layout,
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
         let loaded = crate::policy::block_quant::load_block_quant_2d::<Q4_0_WPB, Q4_0_BLOCK_BYTES, Q4_0_SCALE_BYTES, Q4_0_DATA_BYTES>(
             foundry,
-            gguf,
-            gguf_tensor_name,
+            model,
+            source_tensor_name,
             Dtype::Q4_0,
             Dtype::Q8_0,
             layout,

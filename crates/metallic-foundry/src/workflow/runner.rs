@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use metallic_loader::ModelLoader;
 use rustc_hash::FxHashMap;
 use tracing;
 
@@ -166,9 +167,11 @@ impl<'a> WorkflowRunner<'a> {
                     continue; // Already loaded or injected
                 }
 
+                let model_loaded = ModelLoader::from_file(&model_spec.gguf_path)
+                    .map_err(|e| MetalError::OperationFailed(format!("Model load failed: {}", e)))?;
                 let model = ModelBuilder::new()
                     .with_spec_file(std::path::PathBuf::from(&model_spec.spec_path))?
-                    .with_gguf(&model_spec.gguf_path)?
+                    .with_model(model_loaded)
                     .build(self.foundry)?;
 
                 self.models.insert(model_spec.id.clone(), Arc::new(model));

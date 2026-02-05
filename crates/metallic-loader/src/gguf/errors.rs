@@ -20,4 +20,6 @@ pub enum GGUFError {
     DequantizationError(String),
     #[error("Dimension mismatch: expected {expected}, actual {actual}")]
     DimensionMismatch { expected: usize, actual: usize },
+    #[error("Unsupported data type: {0}")]
+    UnsupportedDataType(String),
 }

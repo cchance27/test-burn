@@ -1,12 +1,12 @@
 # DSL + Metadata (Foundry) — Sprint Notes
 
-This document captures the changes made in the “DSL/Metadata” sprint to remove Qwen2.5-specific hardcoding from the Foundry executor and move model preparation details into the **DSL** (model JSON) and **GGUF metadata**.
+This document captures the changes made in the “DSL/Metadata” sprint to remove architecture-specific hardcoding from the Foundry executor and move model preparation details into the **DSL** (model JSON) and **Model Metadata** (extracted from source formats like GGUF).
 
 The top-level goal is:
 
 - Make the executor prepare **exactly what the loaded model requires**, driven by DSL + metadata.
 - Make missing requirements **fail fast and loudly** (panic) instead of silently producing wrong shapes/layouts.
-- Establish precedence: **GGUF baseline < DSL overrides < runtime overrides**.
+- Establish precedence: **Source Metadata baseline < DSL overrides < runtime overrides**.
 
 ---
 
@@ -14,13 +14,13 @@ The top-level goal is:
 
 For architecture numbers and runtime variables:
 
-1. **GGUF metadata baseline** is inferred at load time.
+1. **Source Metadata baseline** is inferred at load time from the model file (via `ModelLoader`).
 2. **DSL overrides** (values explicitly present in the model JSON) win over baseline.
 3. **Runtime overrides** (values set in `TensorBindings` / config) win over both.
 
 Important note:
 - `max_seq_len` in `TensorBindings` is treated as the **physical KV/rope capacity** (what kernels use for strides).
-  The GGUF-reported max context length is carried separately via `ContextConfig.max_context_len`.
+  The source-reported max context length is carried separately via `ContextConfig.max_context_len`.
 
 ---
 
@@ -58,7 +58,7 @@ Missing variables in expressions **panic** with guidance to add them to:
 
 Weight binding is now driven by the DSL instead of executor-coded “families”:
 
-- Each entry binds a GGUF tensor resolved via `architecture.tensor_names`.
+- Each entry binds a source tensor resolved via `architecture.tensor_names` (using `source_tensor_name` in policies).
 - Supports per-layer binding via `repeat` (`count: "n_layers", var: "i"`) and `{i}` interpolation.
 - Optional biases can be declared with `fallback_zero_len` to bind a zero vector if missing.
 
@@ -73,16 +73,16 @@ To avoid NK/KN/canonical regressions, the DSL can declare layout explicitly:
 
 ## What moved into metadata (and how it’s configured)
 
-### 1) GGUF-derived baseline architecture defaults
+### 1) Format-derived baseline architecture defaults
 
-Model specs can omit architecture numerics and rely on GGUF metadata inference for:
+Model specs can omit architecture numerics and rely on metadata inference (via `LoadedModel::inferred_architecture_params`) for:
 
 - `d_model`, `n_heads`, `n_kv_heads`, `n_layers`, `ff_dim`, `vocab_size`, `max_seq_len`
 - `rope_base`, `rms_eps` (optional; have defaults if missing)
 
 ### 2) `architecture.metadata_keys`: DSL-configurable metadata key mapping
 
-GGUF metadata key names vary across model families. The DSL can now provide:
+Metadata key names vary across model formats and families. The DSL can now provide:
 
 ```json
 {
@@ -98,7 +98,7 @@ GGUF metadata key names vary across model families. The DSL can now provide:
 }
 ```
 
-This removes hardcoded “Qwen vs Llama” assumptions from the loader for models that supply `metadata_keys`.
+This removes hardcoded format assumptions from the loader for models that supply `metadata_keys`.
 
 ---
 
@@ -228,17 +228,13 @@ Debug helpers:
 The system supports two patterns for multi-model workflows:
 
 1. **Dependency Injection (Runtime/CLI)**: The host application (CLI) loads models and injects them into the runner. Ops reference them by ID (e.g., "llm"), allowing generic workflows like `text_generation.json` to work with any provided model.
-2. **Self-Contained (Workflow-Defined)**: The workflow JSON defines `resources.models` with explicit paths (`gguf_path`, `spec_path`). The `WorkflowRunner` automatically loads these models at startup. This enables fully defined, executable workflows for specific applications (e.g., specific agentic pipelines).
+2. **Self-Contained (Workflow-Defined)**: The workflow JSON defines `resources.models` with explicit paths (`model_path`, `spec_path`). The `WorkflowRunner` automatically loads these models at startup using `ModelLoader`. This enables fully defined, executable workflows for specific applications (e.g., specific agentic pipelines).
 
 Ops such as `prefill`, `forward`, and `set_globals` targets specific models via `model_id`. Cross-model value passing is supported via the shared `WorkflowExecutionContext.values`.
 
 ---
 
-## Qwen chat prompt parity (important)
-
-Qwen2/Qwen2.5 instruct GGUFs often ship a `tokenizer.chat_template` that defines the canonical `<|im_start|>` chat format.
-
-Foundry prefers the GGUF-provided chat template when present (this matches typical llama.cpp / LM Studio behavior).
+## Foundry prefers the source-provided chat template when present (e.g. `tokenizer.chat_template` in GGUF).
 Avoid hardcoding model-family-specific system prompts in code; it can materially change behavior (including refusals).
 
 Debugging / overrides:
@@ -248,10 +244,8 @@ Debugging / overrides:
 
 This helps avoid “token-count mismatch” parity issues and improves reliability when swapping engines.
 
-### Regression test (ignored; requires local GGUF)
-
 - `crates/metallic-foundry/tests/dsl_vs_context_chat_prefill_parity.rs`
-  - Ensures Foundry and Context produce identical **chat prompt tokens**
+  - Ensures Foundry and the reference implementation produce identical **chat prompt tokens**
   - Ensures the greedy next token after chat prefill matches (KV/attention correctness smoke)
 
 ---
@@ -264,8 +258,8 @@ These remain intentionally for now and are expected to be addressed as we expand
    - Even though GGUF fills architecture numerics, some globals are still explicitly set in the executor rather than purely derived from DSL expressions.
 2. The runtime key set is still text-generation oriented.
    - `m`, `seq_len`, `position_offset`, `max_seq_len`, `max_prefill_chunk`, etc. are assumed by the current workflow ops.
-3. GGUF metadata inference is still hardcoded to specific key sets in defaults.
-   - `crates/metallic-foundry/src/model/metadata_defaults.rs` still primarily knows Qwen2/Llama-style GGUF keys unless overridden by DSL `metadata_keys`.
+3. Metadata inference is driven by `LoadedModel` implementation.
+   - `metallic-loader` handles format-specific keys (e.g. Qwen2/Llama-style GGUF keys) and exposes them via generic SDK traits.
 4. Multi-model workflows are not yet supported end-to-end.
    - The schema carries `model_id`, but cross-model value passing and per-op model routing needs more work (e.g. LLM → image in one workflow).
 
@@ -287,8 +281,8 @@ These are the “next sprint” items we still need to remove or generalize to s
    - Workflows can be either token-driven or message-driven, and message-driven workflows can tokenize inside the graph.
    - However, workflows do not yet “own” a durable multi-turn transcript/history by themselves; the caller still decides whether to pass full history or deltas.
    - This is intentional for future non-LLM workflows (e.g. encoders, DiT) where different stages may be cacheable or need invalidation on seed/options changes.
-5. CLI Foundry spec selection is still architecture-hardcoded by default.
-   - Without `--workflow` resources, the CLI still routes `general.architecture` containing `"qwen2"` to `models/qwen25.json`.
+6. CLI spec selection is still architecture-hardcoded by default.
+   - Without --workflow resources, the CLI still routes architectures containing "qwen2" to models/qwen25.json.
 6. Metadata fallback key sets are still family-shaped.
    - Even with DSL overrides, the built-in default metadata key list is primarily Qwen2/Llama oriented.
 7. Executor still seeds compile-time baseline globals for DSL compilation.

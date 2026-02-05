@@ -1,18 +1,18 @@
 // Tokenizer implementation for the Metallic framework.
 //!
 //! This module provides BPE (Byte Pair Encoding) tokenization capabilities
-//! that can work with GGUF metadata or other sources of vocabulary and merges.
 
 use std::sync::{Arc, RwLock};
 
 use fancy_regex::Regex;
+use metallic_loader::ModelMetadata;
 use rayon::prelude::*;
 use rustc_hash::FxHashMap;
 use thiserror::Error;
 use unicode_normalization::UnicodeNormalization;
 
 use crate::{
-    MetalError, gguf::file::GGUFMetadata, template::{ChatTemplate, Message}
+    MetalError, template::{ChatTemplate, Message}
 };
 
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
@@ -195,92 +195,49 @@ impl BPETokenizer {
         Self::new(vocab, merges, FxHashMap::default(), special_tokens, add_bos_token, None)
     }
 
-    /// Create a tokenizer from GGUF metadata
-    pub fn from_gguf_metadata(metadata: &GGUFMetadata) -> Result<Self, MetalError> {
+    /// Create a tokenizer from model metadata
+    pub fn from_metadata(metadata: &dyn ModelMetadata) -> Result<Self, MetalError> {
         // Extract vocabulary
-        let tokens_value = metadata
-            .entries
-            .get("tokenizer.ggml.tokens")
-            .ok_or(BPETokenizerError::MissingData)?;
+        let tokens = metadata.tokenizer_tokens().ok_or(BPETokenizerError::MissingData)?;
 
-        let merges_value = metadata
-            .entries
-            .get("tokenizer.ggml.merges")
-            .ok_or(BPETokenizerError::MissingData)?;
+        let merges_str = metadata.tokenizer_merges().ok_or(BPETokenizerError::MissingData)?;
 
-        let token_types_value = metadata.entries.get("tokenizer.ggml.token_type");
+        // Fallback for token types if not provided
+        let token_types_value = metadata.get_array("tokenizer.ggml.token_type");
 
-        // Extract special tokens
-        let bos_token_id = metadata.entries.get("tokenizer.ggml.bos_token_id").and_then(|v| match v {
-            crate::gguf::GGUFValue::U32(id) => Some(*id),
-            _ => None,
-        });
-
-        let eos_token_id = metadata.entries.get("tokenizer.ggml.eos_token_id").and_then(|v| match v {
-            crate::gguf::GGUFValue::U32(id) => Some(*id),
-            _ => None,
-        });
-
-        let pad_token_id = metadata.entries.get("tokenizer.ggml.padding_token_id").and_then(|v| match v {
-            crate::gguf::GGUFValue::U32(id) => Some(*id),
-            _ => None,
-        });
+        // Extract special tokens (standardize these too if possible, but GGUF keys are common in our current use cases)
+        let bos_token_id = metadata
+            .get_u32("tokenizer.ggml.bos_token_id")
+            .or_else(|| metadata.get_u32("standard.bos_token_id"));
+        let eos_token_id = metadata
+            .get_u32("tokenizer.ggml.eos_token_id")
+            .or_else(|| metadata.get_u32("standard.eos_token_id"));
+        let pad_token_id = metadata
+            .get_u32("tokenizer.ggml.padding_token_id")
+            .or_else(|| metadata.get_u32("standard.padding_token_id"));
 
         let add_bos_token = metadata
-            .entries
             .get("tokenizer.ggml.add_bos_token")
+            .or_else(|| metadata.get("standard.add_bos_token"))
             .and_then(|v| match v {
-                crate::gguf::GGUFValue::Bool(b) => Some(*b),
+                metallic_loader::MetadataValue::Bool(b) => Some(b),
                 _ => None,
             })
             .unwrap_or(false);
 
-        let chat_template = metadata.entries.get("tokenizer.chat_template").and_then(|v| match v {
-            crate::gguf::GGUFValue::String(value) => Some(value.clone()),
-            _ => None,
-        });
-
-        // Parse tokens array
-        let tokens = match tokens_value {
-            crate::gguf::GGUFValue::Array(arr) => arr
-                .iter()
-                .map(|v| match v {
-                    crate::gguf::GGUFValue::String(s) => Ok(s.clone()),
-                    _ => Err(BPETokenizerError::InitializationFailed(
-                        "Invalid token type in vocabulary".to_string(),
-                    )),
-                })
-                .collect::<Result<Vec<String>, BPETokenizerError>>()?,
-            _ => {
-                return Err(BPETokenizerError::InitializationFailed("Invalid tokens format".to_string()).into());
-            }
-        };
+        let chat_template = metadata
+            .get_string("tokenizer.chat_template")
+            .or_else(|| metadata.get_string("standard.chat_template"))
+            .map(|s| s.to_string());
 
         // Parse token types array
-        let token_types_map = if let Some(crate::gguf::GGUFValue::Array(arr)) = token_types_value {
-            arr.iter()
+        let token_types_map = if let Some(arr) = token_types_value {
+            arr.into_iter()
                 .enumerate()
-                .filter_map(|(i, v)| match v {
-                    crate::gguf::GGUFValue::I32(t) => Some((i as u32, *t)),
-                    _ => None,
-                })
+                .filter_map(|(i, v)| v.as_i64().map(|t| (i as u32, t as i32)))
                 .collect::<FxHashMap<u32, i32>>()
         } else {
             FxHashMap::default()
-        };
-
-        // Parse merges array
-        let merges_str = match merges_value {
-            crate::gguf::GGUFValue::Array(arr) => arr
-                .iter()
-                .map(|v| match v {
-                    crate::gguf::GGUFValue::String(s) => Ok(s.clone()),
-                    _ => Err(BPETokenizerError::InitializationFailed("Invalid merge type".to_string())),
-                })
-                .collect::<Result<Vec<String>, BPETokenizerError>>()?,
-            _ => {
-                return Err(BPETokenizerError::InitializationFailed("Invalid merges format".to_string()).into());
-            }
         };
 
         // Convert merges to pairs
@@ -755,7 +712,7 @@ impl BPETokenizer {
             return Ok(prompt.to_string());
         }
 
-        // Prefer GGUF-provided chat template when available (most correct, matches LM Studio / llama.cpp).
+        // Prefer Model-provided chat template when available (most correct, matches LM Studio / llama.cpp).
         if let Some(template) = &self.chat_template {
             let bos_token = self
                 .special_tokens

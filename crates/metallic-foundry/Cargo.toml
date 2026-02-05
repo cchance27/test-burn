@@ -13,6 +13,10 @@ src_kernels = []
 # Use prebuilt .metallib (default in release)
 built_kernels = []
 
+default = ["gguf"]
+
+gguf = ["metallic-loader/gguf"]
+
 [build-dependencies]
 walkdir = "2.5.0"
 syn = { version = "2.0", features = ["full", "extra-traits", "visit"] }
@@ -74,6 +78,8 @@ metallic-macros = { path = "../metallic-macros" }
 smallvec = "1.15.1"
 moka = { version = "0.12", features = ["sync"] }
 minijinja = { version = "2.5.0", features = ["loader"] }
+metallic-loader = { version = "0.1.0", path = "../metallic-loader" }
+metallic-sdk = { path = "../metallic-sdk" }
 
 [dev-dependencies]
 serial_test = "3.2.0"

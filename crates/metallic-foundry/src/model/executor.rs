@@ -5,12 +5,13 @@
 use std::{cell::RefCell, sync::OnceLock};
 
 use half::f16;
+use metallic_loader::ModelMetadata;
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::builder::WeightBundle;
 use crate::{
-    Foundry, error::MetalError, metals::sampling::SampleTopK, policy::{WeightLayout, resolve_policy}, spec::{
-        MetadataValue, ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
+    Foundry, MetalError, metals::sampling::SampleTopK, policy::{WeightLayout, resolve_policy}, spec::{
+        ArchValue, IntExpr, ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
     }, types::{MetalResourceOptions, TensorArg}
 };
 
@@ -30,7 +31,7 @@ fn validate_quantized_bindings(symbols: &SymbolTable, fast: &FastBindings) -> Re
 
         // Any Q8_0 or Q4_0 tensor is treated as a quantized weight.
         // Resolve policy and validate layout.
-        let policy = crate::policy::resolve_policy(arg.dtype.into());
+        let policy = resolve_policy(arg.dtype);
         let buf_size = arg.buffer.as_ref().map(|b| b.length()).unwrap_or(0);
         policy.validate_weight_layout(&arg.dims, buf_size)?;
     }
@@ -208,26 +209,30 @@ impl CompiledModel {
         // prepare.globals expressions
         for expr in arch.prepare.globals.values() {
             for v in expr.vars() {
-                vars.insert(v.as_ref());
+                let v_str: &str = v.as_ref();
+                vars.insert(v_str);
             }
         }
         // derived globals expressions
         for g in &arch.prepare.derived_globals {
             for v in g.expr.vars() {
-                vars.insert(v.as_ref());
+                let v_str: &str = v.as_ref();
+                vars.insert(v_str);
             }
         }
         // tensor dims/strides expressions
         for t in &arch.prepare.tensors {
             for e in &t.dims {
                 for v in e.vars() {
-                    vars.insert(v.as_ref());
+                    let v_str: &str = v.as_ref();
+                    vars.insert(v_str);
                 }
             }
             if let Some(strides) = &t.strides {
                 for e in strides {
                     for v in e.vars() {
-                        vars.insert(v.as_ref());
+                        let v_str: &str = v.as_ref();
+                        vars.insert(v_str);
                     }
                 }
             }
@@ -245,7 +250,7 @@ impl CompiledModel {
                 vars.insert(rep.count.as_str());
             }
             if let Some(z) = &w.fallback_zero_len {
-                for v in z.vars() {
+                for v in (z as &IntExpr).vars() {
                     vars.insert(v.as_ref());
                 }
             }
@@ -360,24 +365,24 @@ impl CompiledModel {
             // Runtime overrides (e.g. memory-budget-clamped `max_seq_len`) must win over GGUF baseline.
             // `prepare_bindings_with_config` may seed some globals (like max_seq_len/max_prefill_chunk)
             // before calling this function.
-            if bindings.get_int_global(name.as_str()).is_some() {
+            if bindings.get_int_global(name).is_some() {
                 continue;
             }
             match val {
-                MetadataValue::USize(v) => self.set_global_usize(bindings, name, *v),
-                MetadataValue::F32(v) => self.set_global_f32(bindings, name, *v),
+                ArchValue::USize(v) => self.set_global_usize(bindings, name, *v),
+                ArchValue::F32(v) => self.set_global_f32(bindings, name, *v),
             }
         }
 
         // Derived globals often depend on d_model/n_heads (e.g. head_dim).
         // Ensure these are available as int globals for IntExpr evaluation.
-        if let Some(v) = arch.params.get("d_model").and_then(|v| v.as_usize()) {
+        if let Some(v) = arch.params.get("d_model").and_then(|v: &ArchValue| v.as_usize()) {
             self.set_int_global(bindings, "d_model", v);
         }
-        if let Some(v) = arch.params.get("n_heads").and_then(|v| v.as_usize()) {
+        if let Some(v) = arch.params.get("n_heads").and_then(|v: &ArchValue| v.as_usize()) {
             self.set_int_global(bindings, "n_heads", v);
         }
-        if let Some(v) = arch.params.get("n_kv_heads").and_then(|v| v.as_usize()) {
+        if let Some(v) = arch.params.get("n_kv_heads").and_then(|v: &ArchValue| v.as_usize()) {
             self.set_int_global(bindings, "n_kv_heads", v);
         }
 
@@ -392,9 +397,8 @@ impl CompiledModel {
             self.set_int_global(bindings, "position_offset", 0);
         }
 
-        // Apply one-time prepare.globals.
         for (key, expr) in &arch.prepare.globals {
-            let value = expr.eval(bindings);
+            let value: usize = expr.eval(bindings);
             self.set_global_usize(bindings, key, value);
         }
 
@@ -443,9 +447,9 @@ impl CompiledModel {
                     let resolved_name = bindings.interpolate(tensor.name.clone());
 
                     // Compute dims/strides under this scope.
-                    let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect();
+                    let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect::<Vec<usize>>();
                     let strides: Vec<usize> = if let Some(strides) = &tensor.strides {
-                        strides.iter().map(|e| e.eval(bindings)).collect()
+                        strides.iter().map(|e| e.eval(bindings)).collect::<Vec<usize>>()
                     } else {
                         crate::tensor::compute_strides(&dims)
                     };
@@ -465,9 +469,9 @@ impl CompiledModel {
                 bindings.pop_scope();
             } else {
                 let resolved_name = bindings.interpolate(tensor.name.clone());
-                let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect();
+                let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect::<Vec<usize>>();
                 let strides: Vec<usize> = if let Some(strides) = &tensor.strides {
-                    strides.iter().map(|e| e.eval(bindings)).collect()
+                    strides.iter().map(|e| e.eval(bindings)).collect::<Vec<usize>>()
                 } else {
                     crate::tensor::compute_strides(&dims)
                 };
@@ -611,7 +615,7 @@ impl CompiledModel {
 
     /// Create a new CompiledModel from spec and weights.
     pub(crate) fn new(spec: ModelSpec, weights: WeightBundle) -> Result<Self, MetalError> {
-        if let Some(gguf_arch) = weights.architecture() {
+        if let Some(gguf_arch) = weights.model().architecture() {
             tracing::debug!("Loading model: spec='{}' gguf_arch='{}'", spec.name, gguf_arch);
         }
 
@@ -625,8 +629,8 @@ impl CompiledModel {
         // Set config globals for DSL variable interpolation (needed for Repeat unrolling, etc.)
         for (name, val) in &arch.params {
             match val {
-                MetadataValue::USize(v) => resolver.set_global(name.clone(), v.to_string()),
-                MetadataValue::F32(v) => resolver.set_global(name.clone(), v.to_string()),
+                ArchValue::USize(v) => resolver.set_global(name.clone(), v.to_string()),
+                ArchValue::F32(v) => resolver.set_global(name.clone(), v.to_string()),
             }
         }
 
@@ -739,13 +743,13 @@ impl CompiledModel {
     }
 
     /// Get access to the underlying GGUF model for tensor materialization.
-    pub fn gguf_model(&self) -> &crate::gguf::model_loader::GGUFModel {
-        self.weights.gguf_model()
+    pub fn metadata(&self) -> &dyn ModelMetadata {
+        self.weights.model().metadata()
     }
 
     /// Create a tokenizer from the model's GGUF metadata, with optional override from ModelSpec.
     pub fn tokenizer(&self) -> Result<crate::BPETokenizer, MetalError> {
-        let mut tokenizer = crate::BPETokenizer::from_gguf_metadata(self.weights.gguf_model().get_metadata())?;
+        let mut tokenizer = crate::BPETokenizer::from_metadata(self.weights.model().metadata())?;
 
         // Prioritize template from ModelSpec (DSL override)
         if let Some(template_override) = &self.spec.chat_template {
@@ -843,9 +847,9 @@ impl CompiledModel {
         let mut bindings = TensorBindings::new();
         let mut fast_bindings = FastBindings::new(self.symbol_table.len());
 
-        let _gguf = self.weights.gguf_model();
+        let _model = self.weights.model();
         let arch = &self.spec.architecture;
-        let tensor_names = &arch.tensor_names;
+        let _tensor_names = &arch.tensor_names;
         let allocated_capacity = context_config.allocated_capacity;
 
         if tracing::enabled!(tracing::Level::DEBUG) {
@@ -870,103 +874,11 @@ impl CompiledModel {
         self.seed_prepare_globals(&mut bindings);
 
         // Build a set of available GGUF tensor names for resolution
-        let available: FxHashMap<String, ()> = self.weights.tensor_names().map(|name| (name.clone(), ())).collect();
+        let available: FxHashMap<String, ()> = self.weights.tensor_names().into_iter().map(|name| (name, ())).collect();
 
         // 2. Bind weights either via DSL-declared weight_bindings (preferred) or legacy hardcoded maps.
-        if arch.weight_bindings.is_empty() {
-            // DEBT: legacy path; remove once all shipped DSL specs declare weight_bindings.
-            let head_dim = arch.d_model() / arch.n_heads();
-            let kv_dim = head_dim * arch.n_kv_heads();
-
-            // Resolve and bind global weight tensors (legacy).
-            let global_keys = ["embedding", "final_norm", "rope_cos", "rope_sin"];
-            for key in global_keys {
-                if let Some(gguf_name) = tensor_names.resolve(key, None, &available) {
-                    self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, key)?;
-                }
-            }
-
-            // Bind output_weight (LM Head) as NK row-major ([Vocab, DModel]) to enable GEMM prefill.
-            if let Some(gguf_name) = tensor_names.resolve("output_weight", None, &available) {
-                self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, "output_weight")?;
-            }
-
-            // Resolve and bind per-layer weight tensors (legacy).
-            let regular_layer_keys = ["layer.attn_norm", "layer.ffn_norm"];
-            let canonical_layer_keys = ["layer.attn_q", "layer.attn_k", "layer.attn_v"];
-            let nk_layer_keys = ["layer.attn_output", "layer.ffn_gate", "layer.ffn_up", "layer.ffn_down"];
-            for i in 0..arch.n_layers() {
-                for key in regular_layer_keys {
-                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                        let logical_name = format!("{key}_{i}");
-                        self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
-                    }
-                }
-                for key in canonical_layer_keys {
-                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                        let logical_name = format!("{key}_{i}");
-                        let (expected_k, expected_n) = match key {
-                            "layer.attn_q" => (arch.d_model(), arch.d_model()),
-                            "layer.attn_k" => (arch.d_model(), kv_dim),
-                            "layer.attn_v" => (arch.d_model(), kv_dim),
-                            _ => {
-                                return Err(MetalError::InvalidShape(format!(
-                                    "Unhandled canonical weight key '{}'; update executor canonical binding map",
-                                    key
-                                )));
-                            }
-                        };
-                        self.bind_gguf_tensor_canonical(
-                            &mut bindings,
-                            &mut fast_bindings,
-                            foundry,
-                            &gguf_name,
-                            &logical_name,
-                            expected_k,
-                            expected_n,
-                        )?;
-                    }
-                }
-                for key in nk_layer_keys {
-                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                        let logical_name = format!("{key}_{i}");
-                        self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
-                    }
-                }
-            }
-
-            // Resolve and bind per-layer bias tensors (fallback to zero if missing) (legacy).
-            let kv_dim = arch.d_model() / arch.n_heads() * arch.n_kv_heads();
-            let mut zero_cache: FxHashMap<usize, TensorArg> = FxHashMap::default();
-            let bias_specs = [
-                ("layer.attn_q_bias", arch.d_model()),
-                ("layer.attn_k_bias", kv_dim),
-                ("layer.attn_v_bias", kv_dim),
-                ("layer.ffn_gate_bias", arch.ff_dim()),
-                ("layer.ffn_up_bias", arch.ff_dim()),
-                ("layer.ffn_down_bias", arch.d_model()),
-            ];
-
-            for i in 0..arch.n_layers() {
-                for (key, size) in bias_specs {
-                    let logical_name = format!("{key}_{i}");
-                    if let Some(gguf_name) = tensor_names.resolve(key, Some(i), &available) {
-                        self.bind_gguf_tensor(&mut bindings, &mut fast_bindings, foundry, &gguf_name, &logical_name)?;
-                    } else {
-                        let zero = if let Some(tensor) = zero_cache.get(&size) {
-                            tensor.clone()
-                        } else {
-                            let tensor = self.zero_tensor_arg(foundry, size)?;
-                            zero_cache.insert(size, tensor.clone());
-                            tensor
-                        };
-                        self.insert_binding(&mut bindings, &mut fast_bindings, logical_name, zero);
-                    }
-                }
-            }
-        } else {
-            self.bind_weights_from_spec(foundry, &mut bindings, &mut fast_bindings, &available)?;
-        }
+        // 2. Bind weights via DSL-declared weight_bindings.
+        self.bind_weights_from_spec(foundry, &mut bindings, &mut fast_bindings, &available)?;
 
         // 3. Allocate intermediates/KV caches as declared by the DSL prepare plan.
         self.allocate_prepare_tensors(foundry, &mut bindings, &mut fast_bindings)?;
@@ -1263,16 +1175,16 @@ impl CompiledModel {
         logical_name: &str,
         layout: WeightLayout,
     ) -> Result<(), MetalError> {
-        let gguf = self.weights.gguf_model();
-        let tensor_info = gguf
-            .get_tensor(gguf_name)
-            .ok_or_else(|| MetalError::InputNotFound(format!("Tensor '{}' not found in GGUF", gguf_name)))?;
+        let model = self.weights.model();
+        let tensor_info = model
+            .tensor_info(gguf_name)
+            .ok_or_else(|| MetalError::InputNotFound(format!("Tensor '{}' not found in model", gguf_name)))?;
 
-        let policy = resolve_policy(tensor_info.data_type());
+        let policy = resolve_policy(tensor_info.data_type);
 
         // Load weights using the policy (handles Q8 splitting, F32 downcast, canonical, etc.)
         let loaded_tensors = policy
-            .load_weights(foundry, gguf, gguf_name, logical_name, layout)
+            .load_weights(foundry, model, gguf_name, logical_name, layout)
             .map_err(|e| MetalError::OperationFailed(format!("Policy load failed for '{}': {}", gguf_name, e)))?;
 
         for (name, tensor_arg) in loaded_tensors {
@@ -1647,9 +1559,9 @@ impl CompiledModel {
                 let old = bindings.get(&name).ok();
                 bindings.remove(&name);
 
-                let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect();
+                let dims: Vec<usize> = tensor.dims.iter().map(|e| e.eval(bindings)).collect::<Vec<usize>>();
                 let strides: Vec<usize> = if let Some(strides) = &tensor.strides {
-                    strides.iter().map(|e| e.eval(bindings)).collect()
+                    strides.iter().map(|e| e.eval(bindings)).collect::<Vec<usize>>()
                 } else {
                     crate::tensor::compute_strides(&dims)
                 };
@@ -2342,18 +2254,18 @@ impl CompiledModel {
 
         use rustc_hash::FxHashMap;
 
-        use crate::gguf::model_loader::GGUFModel;
-
         // 1. Report Model Weights
         let mut weight_breakdown = FxHashMap::default();
         let mut total_weights = 0u64;
 
         // Iterate via tensor_names to be safe and robust
         for name in self.weights.tensor_names() {
-            if let Some(tensor) = self.weights.get_tensor(name) {
-                let dtype = GGUFModel::map_dtype(tensor.data_type());
-                let size = tensor.len() as u64 * dtype.size_bytes() as u64;
-                weight_breakdown.insert(name.clone(), size);
+            if let Some(tensor_info) = self.weights.get_tensor_info(&name) {
+                let dtype = tensor_info.data_type;
+                // We don't have len() on TensorInfo, but we can compute it from dims
+                let elements: usize = tensor_info.dimensions.iter().product();
+                let size = elements as u64 * dtype.size_bytes() as u64;
+                weight_breakdown.insert(name, size);
                 total_weights += size;
             }
         }
@@ -2390,7 +2302,7 @@ impl CompiledModel {
                     }
 
                     // Skip weights (heuristic: name in GGUF or starts with "rope")
-                    if self.weights.get_tensor(name).is_some() || name.starts_with("rope") {
+                    if self.weights.get_tensor_info(name).is_some() || name.starts_with("rope") {
                         continue;
                     }
 

@@ -80,6 +80,14 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 ### 11. Safety & Encapsulation
 - **Safety & Encapsulation:** We centralize all `objc2` interaction and `unsafe` code within the `types` module system. This ensures that the rest of the Foundry codebase (`model`, `executor`, etc.) remains clean, safe Rust.
 
+### 12. Format-Agnostic Loading & SDK Refactor (COMPLETED)
+- **Crate Decoupling:** Created `metallic-sdk` to house generic `ModelLoader`, `LoadedModel`, and `ModelMetadata` traits, isolating file-format specifics from the core engine.
+- **Source-Agnostic Foundry:** `metallic-foundry` now depends only on `metallic-sdk` for model ingestion. Direct `GGUFFile` and `GGUFMetadata` dependencies have been removed from the executor, policies, and tests.
+- **Generic Tokenizer:** `BPETokenizer` now initializes from generic `ModelMetadata` using trait-based vocabulary and merge extraction (`tokenizer_tokens`, `tokenizer_merges`), supporting any source format that implements these traits.
+- **Unified Policy Naming:** Renamed `gguf_tensor_name` to `source_tensor_name` across all policies and `MetalPolicyRuntime`, reflecting the engine's ability to map tensors from any backend format.
+- **Agnostic Testing:** Refactored diagnostic and parity tests to use generic `MockModel` and `MapMetadata` implementations, allowing verification without concrete GGUF files.
+- **Zero-Warning Workspace:** Performed a project-wide cleanup of unused imports and dead code resulting from the refactor, achieving a 100% clean build.
+
 ---
 
 ## ⚠️ Risks & Regressions (Immediate Priority)

@@ -89,7 +89,7 @@ pub struct LayerTensorNames {
 pub struct Architecture {
     /// Generic parameters inferred from GGUF metadata or provided in the DSL.
     #[serde(flatten)]
-    pub params: FxHashMap<String, MetadataValue>,
+    pub params: FxHashMap<String, ArchValue>,
     /// Tensor naming conventions for GGUF loading
     #[serde(default)]
     pub tensor_names: TensorNames,
@@ -124,28 +124,28 @@ pub struct MetadataKeysSpec {
 
 /// A value inferred from GGUF metadata or provided in the DSL.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum MetadataValue {
+pub enum ArchValue {
     USize(usize),
     F32(f32),
 }
 
-impl MetadataValue {
+impl ArchValue {
     pub fn as_usize(&self) -> Option<usize> {
         match self {
-            MetadataValue::USize(v) => Some(*v),
-            MetadataValue::F32(v) => Some(*v as usize),
+            ArchValue::USize(v) => Some(*v),
+            ArchValue::F32(v) => Some(*v as usize),
         }
     }
 
     pub fn as_f32(&self) -> Option<f32> {
         match self {
-            MetadataValue::USize(v) => Some(*v as f32),
-            MetadataValue::F32(v) => Some(*v),
+            ArchValue::USize(v) => Some(*v as f32),
+            ArchValue::F32(v) => Some(*v),
         }
     }
 }
 
-impl<'de> serde::Deserialize<'de> for MetadataValue {
+impl<'de> serde::Deserialize<'de> for ArchValue {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -153,7 +153,7 @@ impl<'de> serde::Deserialize<'de> for MetadataValue {
         use serde::de::{Error, Visitor};
         struct V;
         impl<'de> Visitor<'de> for V {
-            type Value = MetadataValue;
+            type Value = ArchValue;
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a number (usize or f32)")
             }
@@ -161,22 +161,22 @@ impl<'de> serde::Deserialize<'de> for MetadataValue {
             where
                 E: Error,
             {
-                Ok(MetadataValue::USize(v as usize))
+                Ok(ArchValue::USize(v as usize))
             }
             fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E>
             where
                 E: Error,
             {
                 if v < 0 {
-                    return Err(E::custom("negative integer not allowed for MetadataValue"));
+                    return Err(E::custom("negative integer not allowed for ArchValue"));
                 }
-                Ok(MetadataValue::USize(v as usize))
+                Ok(ArchValue::USize(v as usize))
             }
             fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E>
             where
                 E: Error,
             {
-                Ok(MetadataValue::F32(v as f32))
+                Ok(ArchValue::F32(v as f32))
             }
         }
         deserializer.deserialize_any(V)
@@ -189,14 +189,14 @@ impl<'de> serde::Deserialize<'de> for MetadataValue {
 /// GGUF baseline < DSL overrides < runtime overrides.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct ArchitectureDefaults {
-    pub values: FxHashMap<String, MetadataValue>,
+    pub values: FxHashMap<String, ArchValue>,
 }
 
 impl ArchitectureDefaults {
     #[inline]
     pub fn get_usize(&self, key: &str) -> Option<usize> {
         self.values.get(key).and_then(|v| match v {
-            MetadataValue::USize(v) => Some(*v),
+            ArchValue::USize(v) => Some(*v),
             _ => None,
         })
     }
@@ -204,14 +204,14 @@ impl ArchitectureDefaults {
     #[inline]
     pub fn get_f32(&self, key: &str) -> Option<f32> {
         self.values.get(key).and_then(|v| match v {
-            MetadataValue::F32(v) => Some(*v),
+            ArchValue::F32(v) => Some(*v),
             _ => None,
         })
     }
 
     /// Merges these defaults into the provided architecture params if not already set.
     #[inline]
-    pub fn apply_to(&self, params: &mut FxHashMap<String, MetadataValue>) {
+    pub fn apply_to(&self, params: &mut FxHashMap<String, ArchValue>) {
         for (k, v) in &self.values {
             params.entry(k.clone()).or_insert(*v);
         }

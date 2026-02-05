@@ -10,6 +10,7 @@ use metallic_context::{
     }, models::Qwen25, tensor::{QuantizedTensor, TensorType}
 };
 use metallic_foundry::{Foundry, model::ModelBuilder, policy::activation::Activation, spec::TensorBindings};
+use metallic_loader::ModelLoader;
 use objc2_metal::MTLResourceOptions;
 use serial_test::serial;
 
@@ -1093,11 +1094,11 @@ fn test_dsl_vs_context_embedding_parity() -> Result<(), MetalError> {
     // =========================================================================
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();
@@ -1212,11 +1213,11 @@ fn test_dsl_vs_context_generation_greedy_parity() -> Result<(), MetalError> {
 
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, mut fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();
@@ -1576,11 +1577,11 @@ fn test_dsl_vs_context_pre_norm_parity() -> Result<(), MetalError> {
 
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();
@@ -1681,11 +1682,11 @@ fn test_dsl_vs_context_sdpa_layer0_parity() -> Result<(), MetalError> {
 
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();
@@ -1797,11 +1798,11 @@ fn test_dsl_vs_context_layer0_block_parity() -> Result<(), MetalError> {
 
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();
@@ -2466,11 +2467,11 @@ fn test_dsl_vs_context_full_forward_parity() -> Result<(), MetalError> {
 
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();
@@ -2700,11 +2701,11 @@ fn test_full_block_step_parity() -> Result<(), MetalError> {
     eprintln!("[2/4] Loading DSL model...");
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new().unwrap();
+    let model = ModelLoader::from_file(GGUF_PATH).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)
         .unwrap()
-        .with_gguf(GGUF_PATH)
-        .unwrap()
+        .with_model(model)
         .build(&mut foundry)
         .unwrap();
     let (mut bindings, mut fast_bindings) = dsl_model.prepare_bindings(&mut foundry).unwrap();

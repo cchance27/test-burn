@@ -1,7 +1,7 @@
+use metallic_loader::LoadedModel;
+
 use crate::{
-    Foundry, compound::Layout, gguf::{
-        file::GGUFDataType, model_loader::{GGUFLayoutHint, GGUFModel}, tensor_info::GGUFRawTensor
-    }, tensor::Dtype, types::{MetalResourceOptions, TensorArg}
+    Foundry, compound::Layout, tensor::Dtype, types::{MetalResourceOptions, TensorArg}
 };
 
 #[inline]
@@ -52,20 +52,20 @@ pub(crate) struct LoadedBlockQuant2D {
 #[inline]
 pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, const SCALE_BYTES: usize, const DATA_BYTES: usize>(
     foundry: &mut Foundry,
-    gguf: &GGUFModel,
-    gguf_tensor_name: &str,
+    model: &dyn LoadedModel,
+    source_tensor_name: &str,
     weight_dtype: Dtype,
     scales_dtype: Dtype,
     layout: Layout,
     write_block: impl FnMut(&[u8], &mut [u8]),
 ) -> anyhow::Result<LoadedBlockQuant2D> {
-    let tensor_info = gguf
-        .get_tensor(gguf_tensor_name)
-        .ok_or_else(|| anyhow::anyhow!("Tensor {} not found in GGUF", gguf_tensor_name))?;
+    let tensor_info = model
+        .tensor_info(source_tensor_name)
+        .ok_or_else(|| anyhow::anyhow!("Tensor {} not found in model", source_tensor_name))?;
 
-    let dims: Vec<usize> = tensor_info.dims().to_vec();
+    let dims: Vec<usize> = tensor_info.dimensions.clone();
     if dims.len() != 2 {
-        return Err(anyhow::anyhow!("Quant tensor '{}' must be 2D (got {:?})", gguf_tensor_name, dims));
+        return Err(anyhow::anyhow!("Quant tensor '{}' must be 2D (got {:?})", source_tensor_name, dims));
     }
 
     let (target_k, target_n, is_canonical) = match layout {
@@ -74,24 +74,23 @@ pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, co
         Layout::Canonical { expected_k, expected_n } => (expected_k, expected_n, true),
     };
 
-    let view = tensor_info.raw_view(&gguf.gguf_file)?;
-    let raw = match view {
-        GGUFRawTensor::Bytes(b, GGUFDataType::Q4_0) if weight_dtype == Dtype::Q4_0 => b,
-        GGUFRawTensor::Bytes(b, GGUFDataType::Q8_0) if weight_dtype == Dtype::Q8_0 => b,
-        _ => {
-            return Err(anyhow::anyhow!(
-                "Tensor '{}' dtype mismatch for policy. Got {:?}",
-                gguf_tensor_name,
-                tensor_info.data_type()
-            ));
-        }
-    };
+    let tensor_data_guard = model.tensor_data(source_tensor_name)?;
+    let raw = tensor_data_guard.as_slice();
+
+    if tensor_info.data_type != weight_dtype {
+        return Err(anyhow::anyhow!(
+            "Tensor '{}' dtype mismatch: expected {:?}, got {:?}",
+            source_tensor_name,
+            weight_dtype,
+            tensor_info.data_type
+        ));
+    }
 
     let contiguous_dim_len = if is_canonical {
         if !((dims[0] == target_k && dims[1] == target_n) || (dims[0] == target_n && dims[1] == target_k)) {
             return Err(anyhow::anyhow!(
                 "Canonical tensor '{}' dims {:?} mismatch (K,N)=({},{})",
-                gguf_tensor_name,
+                source_tensor_name,
                 dims,
                 target_k,
                 target_n
@@ -105,7 +104,7 @@ pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, co
     if contiguous_dim_len % WPB != 0 {
         return Err(anyhow::anyhow!(
             "Quant tensor '{}' contig dim {} not divisible by {}",
-            gguf_tensor_name,
+            source_tensor_name,
             contiguous_dim_len,
             WPB
         ));
@@ -119,7 +118,7 @@ pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, co
     if raw.len() != expected_bytes {
         return Err(anyhow::anyhow!(
             "Quant tensor size mismatch for '{}': got {}, exp {}",
-            gguf_tensor_name,
+            source_tensor_name,
             raw.len(),
             expected_bytes
         ));
@@ -138,7 +137,12 @@ pub(crate) fn load_block_quant_2d<const WPB: usize, const BLOCK_BYTES: usize, co
         .new_buffer(scales_len, MetalResourceOptions::StorageModeShared)
         .ok_or_else(|| anyhow::anyhow!("Failed to allocate quant scales"))?;
 
-    if is_canonical && gguf.layout_hint() != GGUFLayoutHint::Nk {
+    let layout_hint = model
+        .metadata()
+        .get_string("metallic.gguf.layout_hint")
+        .unwrap_or(std::borrow::Cow::Borrowed("nk"));
+
+    if is_canonical && layout_hint != "nk" {
         return Err(anyhow::anyhow!("Canonical quant load requires Nk layout"));
     }
 

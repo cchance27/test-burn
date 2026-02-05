@@ -1,6 +1,7 @@
 use half::f16;
 use metallic_context::{Context, F16Element, generation::generate_autoregressive_with_kv_cache, models::Qwen25};
 use metallic_foundry::{Dtype, Foundry, MetalError, TensorArg, model::ModelBuilder, types::MetalResourceOptions};
+use metallic_loader::ModelLoader;
 use serial_test::serial;
 
 const GGUF_PATH_DEFAULT: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -45,9 +46,10 @@ fn run_seed_parity() -> Result<(), MetalError> {
 
     // --- DSL / Foundry model ---
     let mut foundry = Foundry::new()?;
+    let model = ModelLoader::from_file(&gguf_path).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)?
-        .with_gguf(&gguf_path)?
+        .with_model(model)
         .build(&mut foundry)?;
 
     let foundry_tokenizer = dsl_model.tokenizer()?;

@@ -4,44 +4,48 @@
 
 use half::f16;
 use metallic_foundry::{
-    Foundry, MetalError, gguf::{GGUFDataType, GGUFFile, model_loader::GGUFModelLoader, tensor_info::GGUFRawTensor}, model::ModelBuilder, spec::ModelSpec, types::{KernelArg as _, MetalResourceOptions}
+    Foundry, MetalError, model::ModelBuilder, spec::ModelSpec, types::{KernelArg as _, MetalResourceOptions}
 };
+use metallic_loader::{LoadedModel, ModelLoader};
 use rustc_hash::FxHashMap;
 use serial_test::serial;
 
 const MODEL_SPEC_PATH: &str = "../../models/qwen25.json";
 const GGUF_PATH: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
 
-fn gguf_available(model: &metallic_foundry::gguf::model_loader::GGUFModel) -> FxHashMap<String, ()> {
-    model.tensors.keys().map(|name| (name.clone(), ())).collect()
+fn gguf_available(model: &dyn LoadedModel) -> FxHashMap<String, ()> {
+    model.tensor_names().into_iter().map(|name| (name, ())).collect()
 }
 
-fn gguf_tensor_f32(
-    model: &metallic_foundry::gguf::model_loader::GGUFModel,
-    name: &str,
-) -> Result<(Vec<f32>, Vec<usize>, GGUFDataType), MetalError> {
-    let tensor = model
-        .get_tensor(name)
-        .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", name)))?;
-    let dims = tensor.dims().to_vec();
+fn gguf_tensor_f32(model: &dyn LoadedModel, name: &str) -> Result<(Vec<f32>, Vec<usize>, metallic_foundry::tensor::Dtype), MetalError> {
+    let info = model
+        .tensor_info(name)
+        .ok_or_else(|| MetalError::InvalidShape(format!("Tensor '{}' not found", name)))?;
+    let dims = info.dimensions.clone();
     if dims.len() != 2 {
         return Err(MetalError::InvalidShape(format!(
-            "GGUF tensor '{}' expected 2D, got dims {:?}",
+            "Tensor '{}' expected 2D, got dims {:?}",
             name, dims
         )));
     }
-    let data_type = tensor.data_type();
-    let view = tensor
-        .raw_view(&model.gguf_file)
-        .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error for '{}': {:?}", name, e)))?;
+    let data_type = info.data_type;
+    let data_raw = model
+        .tensor_data(name)
+        .map_err(|e| MetalError::InvalidShape(format!("Tensor data error for '{}': {:?}", name, e)))?;
 
-    let data: Vec<f32> = match view {
-        GGUFRawTensor::F16(values) => values.iter().map(|v| v.to_f32()).collect(),
-        GGUFRawTensor::F32(values) => values.iter().map(|v| f16::from_f32(*v).to_f32()).collect(),
-        GGUFRawTensor::Bytes(_, dtype) => {
+    let data: Vec<f32> = match data_type {
+        metallic_foundry::tensor::Dtype::F16 => {
+            let slice = unsafe { std::slice::from_raw_parts(data_raw.as_slice().as_ptr() as *const f16, data_raw.as_slice().len() / 2) };
+            slice.iter().map(|v| v.to_f32()).collect()
+        }
+        metallic_foundry::tensor::Dtype::F32 => {
+            let slice = unsafe { std::slice::from_raw_parts(data_raw.as_slice().as_ptr() as *const f32, data_raw.as_slice().len() / 4) };
+            slice.iter().map(|v| *v).collect()
+        }
+        _ => {
             return Err(MetalError::InvalidShape(format!(
-                "Unsupported GGUF dtype {:?} for '{}'",
-                dtype, name
+                "Unsupported dtype {:?} for '{}' comparison",
+                data_type, name
             )));
         }
     };
@@ -49,7 +53,7 @@ fn gguf_tensor_f32(
     let expected = dims.iter().product::<usize>();
     if data.len() != expected {
         return Err(MetalError::InvalidShape(format!(
-            "GGUF tensor '{}' has {} elements but dims {:?} imply {}",
+            "Tensor '{}' has {} elements but dims {:?} imply {}",
             name,
             data.len(),
             dims,
@@ -60,43 +64,7 @@ fn gguf_tensor_f32(
     Ok((data, dims, data_type))
 }
 
-fn gguf_tensor_f32_any(
-    model: &metallic_foundry::gguf::model_loader::GGUFModel,
-    name: &str,
-) -> Result<(Vec<f32>, Vec<usize>, GGUFDataType), MetalError> {
-    let tensor = model
-        .get_tensor(name)
-        .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", name)))?;
-    let dims = tensor.dims().to_vec();
-    let data_type = tensor.data_type();
-    let view = tensor
-        .raw_view(&model.gguf_file)
-        .map_err(|e| MetalError::InvalidShape(format!("GGUF raw view error for '{}': {:?}", name, e)))?;
-
-    let data: Vec<f32> = match view {
-        GGUFRawTensor::F16(values) => values.iter().map(|v| v.to_f32()).collect(),
-        GGUFRawTensor::F32(values) => values.iter().map(|v| f16::from_f32(*v).to_f32()).collect(),
-        GGUFRawTensor::Bytes(_, dtype) => {
-            return Err(MetalError::InvalidShape(format!(
-                "Unsupported GGUF dtype {:?} for '{}'",
-                dtype, name
-            )));
-        }
-    };
-
-    let expected = dims.iter().product::<usize>();
-    if data.len() != expected {
-        return Err(MetalError::InvalidShape(format!(
-            "GGUF tensor '{}' has {} elements but dims {:?} imply {}",
-            name,
-            data.len(),
-            dims,
-            expected
-        )));
-    }
-
-    Ok((data, dims, data_type))
-}
+// No longer using GGUF-specific helpers here.
 
 fn cpu_gemv_nk(matrix: &[f32], vector: &[f32], n: usize, k: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; n];
@@ -194,19 +162,14 @@ fn max_abs(values: &[f32]) -> f32 {
 #[serial]
 #[ignore = "requires qwen2.5 gguf file"]
 fn test_gguf_bias_summary_qwen25() -> Result<(), MetalError> {
-    let gguf_file =
-        GGUFFile::load_mmap_and_get_metadata(GGUF_PATH).map_err(|e| MetalError::InvalidShape(format!("GGUF load failed: {e}")))?;
-    let gguf_model = GGUFModelLoader::new(gguf_file)
-        .load_model()
-        .map_err(|e| MetalError::InvalidShape(format!("GGUF model failed: {e}")))?;
+    let model = ModelLoader::from_file(GGUF_PATH).map_err(|e| MetalError::InvalidShape(format!("Load failed: {e}")))?;
 
     let layer = 0usize;
     let layer_prefix = format!("blk.{layer}.");
-    let mut bias_names: Vec<String> = gguf_model
-        .tensors
-        .keys()
+    let mut bias_names: Vec<String> = model
+        .tensor_names()
+        .into_iter()
         .filter(|name| name.contains("bias") && name.starts_with(&layer_prefix))
-        .cloned()
         .collect();
     bias_names.sort();
 
@@ -217,7 +180,7 @@ fn test_gguf_bias_summary_qwen25() -> Result<(), MetalError> {
 
     eprintln!("Bias summary for layer {layer}:");
     for name in bias_names {
-        let (values, dims, dtype) = gguf_tensor_f32_any(&gguf_model, &name)?;
+        let (values, dims, dtype) = gguf_tensor_f32(model.as_ref(), &name)?;
         let max = max_abs(&values);
         eprintln!("  {} dtype={:?} dims={:?} max_abs={:.6}", name, dtype, dims, max);
     }
@@ -232,13 +195,9 @@ fn test_gguf_weight_layouts_qwen25() -> Result<(), MetalError> {
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let spec = ModelSpec::from_file(&spec_path).map_err(|e| MetalError::InvalidShape(format!("Spec load failed: {e}")))?;
 
-    let gguf_file =
-        GGUFFile::load_mmap_and_get_metadata(GGUF_PATH).map_err(|e| MetalError::InvalidShape(format!("GGUF load failed: {e}")))?;
-    let gguf_model = GGUFModelLoader::new(gguf_file)
-        .load_model()
-        .map_err(|e| MetalError::InvalidShape(format!("GGUF model failed: {e}")))?;
+    let model = ModelLoader::from_file(GGUF_PATH).map_err(|e| MetalError::InvalidShape(format!("Load failed: {e}")))?;
 
-    let available = gguf_available(&gguf_model);
+    let available = gguf_available(model.as_ref());
     let arch = &spec.architecture;
     let kv_dim = arch.d_model() * arch.n_kv_heads() / arch.n_heads();
 
@@ -255,20 +214,20 @@ fn test_gguf_weight_layouts_qwen25() -> Result<(), MetalError> {
 
     for (key, expected_n, expected_k) in weights {
         if let Some(name) = arch.tensor_names.resolve(key, Some(layer), &available) {
-            let tensor = gguf_model
-                .get_tensor(&name)
-                .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", name)))?;
-            log_layout(&name, tensor.dims(), expected_n, expected_k);
+            let info = model
+                .tensor_info(&name)
+                .ok_or_else(|| MetalError::InvalidShape(format!("Tensor '{}' not found", name)))?;
+            log_layout(&name, &info.dimensions, expected_n, expected_k);
         } else {
             eprintln!("Missing GGUF name for key '{key}'");
         }
     }
 
     if let Some(name) = arch.tensor_names.resolve("output_weight", None, &available) {
-        let tensor = gguf_model
-            .get_tensor(&name)
-            .ok_or_else(|| MetalError::InvalidShape(format!("GGUF tensor '{}' not found", name)))?;
-        log_layout(&name, tensor.dims(), arch.vocab_size(), arch.d_model());
+        let info = model
+            .tensor_info(&name)
+            .ok_or_else(|| MetalError::InvalidShape(format!("Tensor '{}' not found", name)))?;
+        log_layout(&name, &info.dimensions, arch.vocab_size(), arch.d_model());
     }
 
     Ok(())
@@ -280,9 +239,11 @@ fn test_gguf_weight_layouts_qwen25() -> Result<(), MetalError> {
 fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
     let spec_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL_SPEC_PATH);
     let mut foundry = Foundry::new()?;
+    let model_loaded = ModelLoader::from_file(GGUF_PATH).map_err(|e| MetalError::InvalidShape(format!("GGUF load failed: {e}")))?;
+
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)?
-        .with_gguf(GGUF_PATH)?
+        .with_model(model_loaded)
         .build(&mut foundry)?;
     let (mut bindings, _fast_bindings) = dsl_model.prepare_bindings(&mut foundry)?;
 
@@ -359,7 +320,8 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
     let up_f32: Vec<f32> = read_f16_buffer(&up_out).into_iter().map(|v| v.to_f32()).collect();
     let ffn_out_f32: Vec<f32> = read_f16_buffer(&ffn_out).into_iter().map(|v| v.to_f32()).collect();
 
-    let available = gguf_available(dsl_model.gguf_model());
+    let model_ref = dsl_model.weights().model();
+    let available = gguf_available(model_ref);
     let layer = 0usize;
 
     let qkv_probes = [
@@ -373,7 +335,7 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
             .tensor_names
             .resolve(key, Some(layer), &available)
             .ok_or_else(|| MetalError::InvalidShape(format!("Missing GGUF name for {}", key)))?;
-        let (weights, dims, dtype) = gguf_tensor_f32(dsl_model.gguf_model(), &gguf_name)?;
+        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &gguf_name)?;
 
         let n = dsl_out.len();
         let k = vector_x.len();
@@ -388,7 +350,7 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
     // Attention output projection (attn_out -> proj_out)
     let attn_out_key = "layer.attn_output";
     if let Some(attn_out_name) = arch.tensor_names.resolve(attn_out_key, Some(layer), &available) {
-        let (weights, dims, dtype) = gguf_tensor_f32(dsl_model.gguf_model(), &attn_out_name)?;
+        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &attn_out_name)?;
         let n = proj_out_f32.len();
         let k = arch.d_model();
         let vector_x = slice_prefix(&attn_in_f32, k)?;
@@ -416,7 +378,7 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
             .tensor_names
             .resolve(key, Some(layer), &available)
             .ok_or_else(|| MetalError::InvalidShape(format!("Missing GGUF name for {}", key)))?;
-        let (weights, dims, dtype) = gguf_tensor_f32(dsl_model.gguf_model(), &gguf_name)?;
+        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &gguf_name)?;
 
         let n = dsl_out.len();
         let k = vector_x.len();
@@ -431,7 +393,7 @@ fn test_dsl_gemv_probe_layer0() -> Result<(), MetalError> {
     // FFN down projection (swiglu output -> ffn_out)
     let ffn_down_key = "layer.ffn_down";
     if let Some(ffn_down_name) = arch.tensor_names.resolve(ffn_down_key, Some(layer), &available) {
-        let (weights, dims, dtype) = gguf_tensor_f32(dsl_model.gguf_model(), &ffn_down_name)?;
+        let (weights, dims, dtype) = gguf_tensor_f32(model_ref, &ffn_down_name)?;
         let n = ffn_out_f32.len();
         let k = up_f32.len();
 

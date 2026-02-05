@@ -3,42 +3,25 @@ use metallic_macros::MetalPolicy;
 
 use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
 use crate::{
-    F16, Foundry, spec::{FastBindings, ResolvedSymbols}, tensor::{Tensor, TensorInit}, types::TensorArg
+    Foundry, dtypes::F16, tensor::{Tensor, TensorInit}, types::TensorArg
 };
 
-#[derive(Debug, Clone, Default, MetalPolicy)]
+#[derive(Debug, MetalPolicy, Clone)]
 #[policy(
-    header = "policies/policy_f16.metal",
+    header = "policies/policy_f16.metal",  // F64 downcasts to F16
     struct_name = "PolicyF16",
-    short_name = "f16",
-    element_size = 2,
+    short_name = "f64",
+    element_size = 8,                      // F64 source
     block_size = 1,
-    vector_load_size = 4,
+    vector_load_size = 2,
     unroll_factor = 4,
-    active_thread_count = 32,
-    has_scale = false
+    active_thread_count = 32
 )]
-pub struct PolicyF16;
+pub struct PolicyF64;
 
-impl LoaderStage for PolicyF16 {
-    fn params_struct(&self) -> String {
-        // F16 doesn't need extra params in the loader struct
-        "".to_string()
-    }
-
-    fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]> {
-        use smallvec::smallvec;
-        let tensor = fast_bindings.get(resolved.weights).expect("F16 weight bound");
-        smallvec![tensor.clone()]
-    }
-    fn quantization_type(&self) -> std::sync::Arc<dyn super::MetalPolicyRuntime> {
-        std::sync::Arc::new(PolicyF16)
-    }
-}
-
-impl MetalPolicyRuntime for PolicyF16 {
+impl MetalPolicyRuntime for PolicyF64 {
     fn loader_stage(&self) -> Box<dyn LoaderStage> {
-        Box::new(self.clone())
+        Box::new(super::f16::PolicyF16)
     }
 
     fn load_weights(
@@ -51,16 +34,17 @@ impl MetalPolicyRuntime for PolicyF16 {
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
         let tensor_info = model
             .tensor_info(source_tensor_name)
-            .ok_or_else(|| anyhow::anyhow!("Tensor {} not found in model", source_tensor_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Tensor {} not found", source_tensor_name))?;
+        let dims = &tensor_info.dimensions;
+        let data = model.tensor_data(source_tensor_name)?;
+        let data_bytes = data.as_slice();
 
-        let dims: Vec<usize> = tensor_info.dimensions.clone();
-        let tensor_data = model.tensor_data(source_tensor_name)?;
-        let data_bytes = tensor_data.as_slice();
+        // F64 Downcast to F16 logic
+        let f64_slice: &[f64] =
+            bytemuck::try_cast_slice(data_bytes).map_err(|_| anyhow::anyhow!("Invalid F64 bytes for {}", source_tensor_name))?;
 
-        // Read raw as F16
-        let data_f16: Vec<half::f16> = bytemuck::try_cast_slice(data_bytes)
-            .map_err(|e| anyhow::anyhow!("Invalid F16 bytes for {}: {}", source_tensor_name, e))?
-            .to_vec();
+        // Collect into Vec<f16>
+        let data_f16: Vec<half::f16> = f64_slice.iter().map(|&v| half::f16::from_f64(v)).collect();
 
         let layout_hint = model
             .metadata()
@@ -70,15 +54,8 @@ impl MetalPolicyRuntime for PolicyF16 {
 
         if let WeightLayout::Canonical { expected_k, expected_n } = layout {
             const WEIGHTS_PER_BLOCK: usize = 32;
-
             if !((dims[0] == expected_k && dims[1] == expected_n) || (dims[0] == expected_n && dims[1] == expected_k)) {
-                return Err(anyhow::anyhow!(
-                    "Canonical dims mismatch for '{}': got {:?}, exp ({}, {})",
-                    source_tensor_name,
-                    dims,
-                    expected_k,
-                    expected_n
-                ));
+                return Err(anyhow::anyhow!("Canonical dims mismatch for '{}'", source_tensor_name));
             }
 
             let blocks_per_k = expected_k.div_ceil(WEIGHTS_PER_BLOCK);
@@ -119,12 +96,10 @@ impl MetalPolicyRuntime for PolicyF16 {
                 .map_err(|e| anyhow::anyhow!("Metal error: {:?}", e))?;
             Ok(vec![(logical_name.to_string(), TensorArg::from_tensor(&tensor))])
         } else {
-            // RowMajor: ensure data is in [N, K] format for 2D, or preserve 1D
+            // RowMajor
             if dims.len() == 2 {
                 let (n, k) = if !is_kn { (dims[0], dims[1]) } else { (dims[1], dims[0]) };
-
                 let data_to_upload = if is_kn {
-                    // Transpose Kn [K, n] -> Nk [n, k]
                     let mut transposed = vec![half::f16::from_f32(0.0); n * k];
                     for row_k in 0..k {
                         for col_n in 0..n {
@@ -140,7 +115,6 @@ impl MetalPolicyRuntime for PolicyF16 {
                     .map_err(|e| anyhow::anyhow!("Metal error: {:?}", e))?;
                 Ok(vec![(logical_name.to_string(), TensorArg::from_tensor(&tensor))])
             } else {
-                // 1D or higher dimensionality: just upload as-is
                 let tensor = Tensor::<F16>::new(foundry, dims.clone(), TensorInit::CopyFrom(&data_f16[..]))
                     .map_err(|e| anyhow::anyhow!("Metal error: {:?}", e))?;
                 Ok(vec![(logical_name.to_string(), TensorArg::from_tensor(&tensor))])

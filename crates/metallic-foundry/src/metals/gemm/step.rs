@@ -256,7 +256,7 @@ impl CompiledStep for super::CompiledGemmV2Step {
         let has_alpha_beta = self.alpha != 1.0 || self.beta != 0.0 || self.c.is_some();
 
         // Resolve Policy and LoaderStage from the bound weights dtype (do not rely on DSL hints).
-        let policy = crate::policy::resolve_policy(b.dtype.into());
+        let policy = crate::policy::resolve_policy(b.dtype);
         let loader = policy.loader_stage();
 
         // Bind Weights and Scales using LoaderStage

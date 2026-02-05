@@ -110,7 +110,7 @@ impl CompiledStep for CompiledRmsNormStep {
             .or(self.step.epsilon)
             .unwrap_or(1e-6);
 
-        let policy = crate::policy::resolve_policy(input.dtype.into());
+        let policy = crate::policy::resolve_policy(input.dtype);
         let loader = policy.loader_stage();
 
         let input_args = loader.bind(fast_bindings, &self.input_resolved);

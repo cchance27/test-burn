@@ -43,7 +43,7 @@ impl CompiledStep for super::CompiledEmbeddingStep {
             vocab_size: self.params.vocab_size.resolve(bindings),
         };
 
-        let policy = crate::policy::resolve_policy(table.dtype.into());
+        let policy = crate::policy::resolve_policy(table.dtype);
         // Note: we don't use policy.loader() here, we bind directly.
         // But execute logic is consistent with creating a CompoundKernel.
 

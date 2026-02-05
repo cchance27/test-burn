@@ -246,17 +246,17 @@ mod tests {
     use crate::spec::Architecture;
 
     fn mock_arch(max_seq_len: usize) -> Architecture {
-        use crate::spec::MetadataValue;
+        use crate::spec::ArchValue;
         let mut params = rustc_hash::FxHashMap::default();
-        params.insert("d_model".to_string(), MetadataValue::USize(512));
-        params.insert("n_heads".to_string(), MetadataValue::USize(8));
-        params.insert("n_kv_heads".to_string(), MetadataValue::USize(2));
-        params.insert("n_layers".to_string(), MetadataValue::USize(4));
-        params.insert("ff_dim".to_string(), MetadataValue::USize(2048));
-        params.insert("vocab_size".to_string(), MetadataValue::USize(1000));
-        params.insert("max_seq_len".to_string(), MetadataValue::USize(max_seq_len));
-        params.insert("rope_base".to_string(), MetadataValue::F32(10000.0));
-        params.insert("rms_eps".to_string(), MetadataValue::F32(1e-6));
+        params.insert("d_model".to_string(), ArchValue::USize(512));
+        params.insert("n_heads".to_string(), ArchValue::USize(8));
+        params.insert("n_kv_heads".to_string(), ArchValue::USize(2));
+        params.insert("n_layers".to_string(), ArchValue::USize(4));
+        params.insert("ff_dim".to_string(), ArchValue::USize(2048));
+        params.insert("vocab_size".to_string(), ArchValue::USize(1000));
+        params.insert("max_seq_len".to_string(), ArchValue::USize(max_seq_len));
+        params.insert("rope_base".to_string(), ArchValue::F32(10000.0));
+        params.insert("rms_eps".to_string(), ArchValue::F32(1e-6));
 
         Architecture {
             params,

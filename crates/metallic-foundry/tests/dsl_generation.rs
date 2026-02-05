@@ -1,4 +1,5 @@
 use metallic_foundry::{Foundry, MetalError, model::ModelBuilder};
+use metallic_loader::ModelLoader;
 use serial_test::serial;
 
 const GGUF_PATH_DEFAULT: &str = "../../models/qwen2.5-coder-0.5b-instruct-fp16.gguf";
@@ -18,9 +19,10 @@ fn test_dsl_qwen25_generation() -> Result<(), MetalError> {
 
     // Build DSL model
     eprintln!("Building model from spec: {:?}", spec_path);
+    let loaded_model = ModelLoader::from_file(get_gguf_path()).unwrap();
     let dsl_model = ModelBuilder::new()
         .with_spec_file(&spec_path)?
-        .with_gguf(get_gguf_path())?
+        .with_model(loaded_model)
         .build(&mut foundry)?;
 
     let tokenizer = dsl_model.tokenizer()?;

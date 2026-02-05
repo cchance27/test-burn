@@ -182,7 +182,7 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
 
         // Resolve policy purely from the bound weight dtype.
         // Quantization is intentionally "invisible" to the DSL/spec layer; bindings decide runtime policy.
-        let policy = crate::policy::resolve_policy(weights.dtype.into());
+        let policy = crate::policy::resolve_policy(weights.dtype);
 
         let kernel = get_gemv_v2_kernel(
             policy.clone() as std::sync::Arc<dyn crate::fusion::MetalPolicy>,

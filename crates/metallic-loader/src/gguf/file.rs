@@ -4,8 +4,7 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 
-use super::GGUFError;
-use crate::gguf::tensor_info::GGUTensorInfo;
+use super::{GGUFError, tensor_info::GGUTensorInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GGUFDataType {
@@ -101,6 +100,7 @@ impl GGUFDataType {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GGUFHeader {
     pub magic: [u8; 4],
     pub version: u32,
@@ -131,6 +131,7 @@ pub enum GGUFValue {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct GGUFFile {
     pub header: GGUFHeader,
     pub metadata: GGUFMetadata,
@@ -141,29 +142,6 @@ pub struct GGUFFile {
 }
 
 impl GGUFFile {
-    #[cfg(test)]
-    pub(crate) fn new_empty() -> Self {
-        let mmap = memmap2::MmapMut::map_anon(1).unwrap().make_read_only().unwrap();
-        Self {
-            header: GGUFHeader {
-                magic: *b"GGUF",
-                version: 3,
-                tensor_count: 0,
-                metadata_count: 0,
-            },
-            metadata: GGUFMetadata {
-                entries: FxHashMap::default(),
-            },
-            tensor_metadata: Vec::new(),
-            mmap,
-            file_path: "mock".to_string(),
-        }
-    }
-
-    pub fn metadata(&self) -> &GGUFMetadata {
-        &self.metadata
-    }
-
     pub fn load_mmap_and_get_metadata<P: AsRef<Path>>(path: P) -> Result<Self, GGUFError> {
         let file_path = path.as_ref().to_string_lossy().to_string();
         let file = File::open(&path).map_err(GGUFError::Io)?;
@@ -512,42 +490,6 @@ impl GGUFFile {
                 size * self.get_nonblock_element_size(tensor.data_type)
             }
         }
-    }
-
-    /// Validate tensor data for common issues
-    pub fn validate_tensor_data(&self, tensor: &GGUTensorInfo) -> Result<(), GGUFError> {
-        let data = self.get_tensor_data(tensor)?;
-        let expected_size = self.calculate_actual_tensor_size(tensor);
-
-        if data.len() != expected_size {
-            return Err(GGUFError::InvalidTensorData(format!(
-                "Tensor {} has incorrect size: expected {}, got {}",
-                tensor.name,
-                expected_size,
-                data.len()
-            )));
-        }
-
-        // For quantized types, validate block structure
-        if tensor.data_type == GGUFDataType::Q4_0 || tensor.data_type == GGUFDataType::Q8_0 || tensor.data_type == GGUFDataType::Q8_1 {
-            let block_size = match tensor.data_type {
-                GGUFDataType::Q4_0 => 18,
-                GGUFDataType::Q8_0 => 34,
-                GGUFDataType::Q8_1 => 36,
-                _ => 36,
-            };
-
-            if data.len() % block_size != 0 {
-                return Err(GGUFError::InvalidTensorData(format!(
-                    "Tensor {} has invalid block alignment: data size {} is not divisible by block size {}",
-                    tensor.name,
-                    data.len(),
-                    block_size
-                )));
-            }
-        }
-
-        Ok(())
     }
 
     /// Offload tensor data to disk to free up memory

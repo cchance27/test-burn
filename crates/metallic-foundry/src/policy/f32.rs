@@ -1,11 +1,12 @@
+use metallic_loader::LoadedModel;
 use metallic_macros::MetalPolicy;
 
 use super::{LoaderStage, MetalPolicyRuntime, WeightLayout};
 use crate::{
-    Foundry, dtypes::F16, gguf::{file::GGUFDataType, model_loader::GGUFModel, tensor_info::GGUFRawTensor}, tensor::{Tensor, TensorInit}, types::TensorArg
+    Foundry, dtypes::F16, tensor::{Tensor, TensorInit}, types::TensorArg
 };
 
-#[derive(Debug, MetalPolicy)]
+#[derive(Debug, MetalPolicy, Clone)]
 #[policy(
     header = "policies/policy_f16.metal",  // F32 downcasts to F16
     struct_name = "PolicyF16",             // Uses F16 policy
@@ -26,41 +27,41 @@ impl MetalPolicyRuntime for PolicyF32 {
     fn load_weights(
         &self,
         foundry: &mut Foundry,
-        gguf: &GGUFModel,
-        gguf_tensor_name: &str,
+        model: &dyn LoadedModel,
+        source_tensor_name: &str,
         logical_name: &str,
         layout: WeightLayout,
     ) -> anyhow::Result<Vec<(String, TensorArg)>> {
-        let tensor_info = gguf
-            .get_tensor(gguf_tensor_name)
-            .ok_or_else(|| anyhow::anyhow!("Tensor {} not found in GGUF", gguf_tensor_name))?;
+        let tensor_info = model
+            .tensor_info(source_tensor_name)
+            .ok_or_else(|| anyhow::anyhow!("Tensor {} not found in model", source_tensor_name))?;
 
-        let dims: Vec<usize> = tensor_info.dims().to_vec();
+        let dims: Vec<usize> = tensor_info.dimensions.clone();
+        let tensor_data = model.tensor_data(source_tensor_name)?;
+        let data_bytes = tensor_data.as_slice();
 
         // F32 Downcast to F16 logic
-        let view = tensor_info.raw_view(&gguf.gguf_file)?;
+        let f32_slice: &[f32] =
+            bytemuck::try_cast_slice(data_bytes).map_err(|_| anyhow::anyhow!("Invalid F32 bytes for {}", source_tensor_name))?;
 
-        let data_f16: Vec<half::f16> = match view {
-            GGUFRawTensor::F32(values) => values.iter().map(|&v| half::f16::from_f32(v)).collect(),
-            GGUFRawTensor::Bytes(bytes, GGUFDataType::F32) => {
-                let f32_slice: &[f32] =
-                    bytemuck::try_cast_slice(bytes).map_err(|_| anyhow::anyhow!("Invalid F32 bytes for {}", gguf_tensor_name))?;
-                f32_slice.iter().map(|&v| half::f16::from_f32(v)).collect()
-            }
-            _ => return Err(anyhow::anyhow!("PolicyF32 expects F32 data. Got {:?}", tensor_info.data_type())),
-        };
+        // Collect into Vec<f16>
+        let data_f16: Vec<half::f16> = f32_slice.iter().map(|&v| half::f16::from_f32(v)).collect();
+
+        let layout_hint = model
+            .metadata()
+            .get_string("metallic.gguf.layout_hint")
+            .unwrap_or(std::borrow::Cow::Borrowed("nk"));
+        let is_kn = layout_hint == "kn";
 
         if let WeightLayout::Canonical { expected_k, expected_n } = layout {
             const WEIGHTS_PER_BLOCK: usize = 32;
             if !((dims[0] == expected_k && dims[1] == expected_n) || (dims[0] == expected_n && dims[1] == expected_k)) {
-                return Err(anyhow::anyhow!("Canonical dims mismatch for '{}'", gguf_tensor_name));
+                return Err(anyhow::anyhow!("Canonical dims mismatch for '{}'", source_tensor_name));
             }
 
             let blocks_per_k = expected_k.div_ceil(WEIGHTS_PER_BLOCK);
             let canonical_len = blocks_per_k * expected_n * WEIGHTS_PER_BLOCK;
             let mut canonical_data = vec![half::f16::from_f32(0.0); canonical_len];
-
-            let layout_hint = gguf.layout_hint();
 
             for out_idx in 0..expected_n {
                 for block in 0..blocks_per_k {
@@ -71,18 +72,20 @@ impl MetalPolicyRuntime for PolicyF32 {
                     if remaining >= WEIGHTS_PER_BLOCK {
                         for i in 0..WEIGHTS_PER_BLOCK {
                             let k_idx = k_base + i;
-                            let src_idx = match layout_hint {
-                                crate::gguf::model_loader::GGUFLayoutHint::Nk => out_idx * expected_k + k_idx,
-                                crate::gguf::model_loader::GGUFLayoutHint::Kn => k_idx * expected_n + out_idx,
+                            let src_idx = if !is_kn {
+                                out_idx * expected_k + k_idx
+                            } else {
+                                k_idx * expected_n + out_idx
                             };
                             canonical_data[dst_base + i] = data_f16[src_idx];
                         }
                     } else if remaining > 0 {
                         for i in 0..remaining {
                             let k_idx = k_base + i;
-                            let src_idx = match layout_hint {
-                                crate::gguf::model_loader::GGUFLayoutHint::Nk => out_idx * expected_k + k_idx,
-                                crate::gguf::model_loader::GGUFLayoutHint::Kn => k_idx * expected_n + out_idx,
+                            let src_idx = if !is_kn {
+                                out_idx * expected_k + k_idx
+                            } else {
+                                k_idx * expected_n + out_idx
                             };
                             canonical_data[dst_base + i] = data_f16[src_idx];
                         }
@@ -95,15 +98,10 @@ impl MetalPolicyRuntime for PolicyF32 {
             Ok(vec![(logical_name.to_string(), TensorArg::from_tensor(&tensor))])
         } else {
             // RowMajor: ensure data is in [N, K] format for 2D, or preserve 1D
-            let layout_hint = gguf.layout_hint();
-
             if dims.len() == 2 {
-                let (n, k) = match layout_hint {
-                    crate::gguf::model_loader::GGUFLayoutHint::Nk => (dims[1], dims[0]),
-                    crate::gguf::model_loader::GGUFLayoutHint::Kn => (dims[0], dims[1]),
-                };
+                let (n, k) = if !is_kn { (dims[0], dims[1]) } else { (dims[1], dims[0]) };
 
-                let data_to_upload = if matches!(layout_hint, crate::gguf::model_loader::GGUFLayoutHint::Kn) {
+                let data_to_upload = if is_kn {
                     // Transpose Kn [K, N] -> Nk [N, K]
                     let mut transposed = vec![half::f16::from_f32(0.0); n * k];
                     for row_k in 0..k {

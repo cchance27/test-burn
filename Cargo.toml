@@ -11,6 +11,7 @@ members = [
     "crates/metallic-context",
     "crates/metallic_cli_helpers",
     "crates/metallic-macros",
+    "crates/metallic-loader",
 ]
 
 [features]
@@ -68,6 +69,7 @@ metallic_instrumentation = { path = "crates/metallic_instrumentation" }
 metallic-context = { path = "crates/metallic-context", default-features = false }
 metallic-foundry = { path = "crates/metallic-foundry" }
 metallic_cli_helpers = { path = "crates/metallic_cli_helpers" }
+metallic-loader = { path = "crates/metallic-loader" }
 clap = { version = "4.5.49", features = ["derive"] }
 
 [dev-dependencies]

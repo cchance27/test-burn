@@ -4,7 +4,7 @@ set -euo pipefail
 # Default values
 MODEL_FP16="./models/qwen2.5-coder-0.5b-instruct-fp16.gguf"
 MODEL_Q8="./models/qwen2.5-coder-0.5b-instruct-q8_0.gguf"
-MODEL_Q4_0="./models/qwen2.5-0.5B.Q4_0.gguf"
+MODEL_Q4_0="./models/qwen2.5-coder-0.5b-instruct-q4_0.gguf"
 PROMPT="create a short js fibonacci function"
 MAX_TOKENS=50
 ITERATIONS=5
