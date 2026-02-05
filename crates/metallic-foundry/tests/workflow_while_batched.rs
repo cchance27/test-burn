@@ -50,7 +50,7 @@ fn while_batched_trims_after_eos_at_batch_boundary() {
 
     let mut foundry = Foundry::new().expect("foundry init");
     let models: FxHashMap<String, Arc<metallic_foundry::model::CompiledModel>> = FxHashMap::default();
-    let mut runner = WorkflowRunner::new(&mut foundry, models);
+    let mut runner = WorkflowRunner::new(models);
 
     // Workflow: run while_batched for up to 8 iterations, producing tokens via test op.
     let workflow_json = r#"
@@ -85,7 +85,7 @@ fn while_batched_trims_after_eos_at_batch_boundary() {
 
     let mut seen: Vec<u32> = Vec::new();
     let out = runner
-        .run_streaming(&spec, inputs, |tok, _prefill, _setup, _iter| {
+        .run_streaming(&mut foundry, &spec, inputs, |tok, _prefill, _setup, _iter| {
             seen.push(tok);
             Ok(true)
         })

@@ -12,6 +12,7 @@ members = [
     "crates/metallic_cli_helpers",
     "crates/metallic-macros",
     "crates/metallic-loader",
+    "crates/metallic-gui",
 ]
 
 [features]

@@ -47,6 +47,12 @@ pub struct SampleTopK {
 }
 
 impl SampleTopK {
+    #[inline]
+    fn normalize_top_k(k: u32, vocab_size: u32) -> u32 {
+        let clamped_vocab = vocab_size.max(1);
+        if k == 0 { 1 } else { k.min(clamped_vocab) }
+    }
+
     /// Create a new SampleTopK kernel.
     pub fn new(
         logits: &TensorArg,
@@ -60,6 +66,7 @@ impl SampleTopK {
     ) -> Self {
         const THREADS_PER_GROUP_DEFAULT: u32 = 1024;
         const PER_THREAD_M_CLAMP_DEFAULT: u32 = 40;
+        let effective_k = Self::normalize_top_k(k, vocab_size);
 
         let threads_per_group = std::env::var("METALLIC_SAMPLE_TPTG")
             .ok()
@@ -67,34 +74,22 @@ impl SampleTopK {
             .filter(|&v| v > 0 && v <= THREADS_PER_GROUP_DEFAULT as usize)
             .unwrap_or(THREADS_PER_GROUP_DEFAULT as usize);
 
-        // Logic from legacy select_default_per_thread_m
-        let default_m = if threads_per_group >= 1024 {
-            6
-        } else if threads_per_group >= 896 {
-            4
-        } else if threads_per_group >= 320 {
-            6
-        } else if threads_per_group >= 256 {
-            5
-        } else if threads_per_group >= 192 {
-            4
-        } else {
-            3
-        };
-
         let per_thread_m_clamp = PER_THREAD_M_CLAMP_DEFAULT;
+        // Preserve the full requested Top-K depth (up to clamp) through lane-local heaps.
+        // This avoids dropping valid candidates when logits are concentrated in a subset of lanes.
+        let default_m = effective_k.min(per_thread_m_clamp).max(1);
         let override_m = std::env::var("METALLIC_SAMPLE_PER_THREAD_M")
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok())
             .filter(|&v| v >= 1);
-        let per_thread_m = override_m.unwrap_or(default_m).min(k).min(per_thread_m_clamp).max(1);
+        let per_thread_m = override_m.unwrap_or(default_m).min(effective_k).min(per_thread_m_clamp).max(1);
 
         Self {
             logits: logits.clone(),
             output: output.clone(),
             params: SampleParams {
                 vocab_size,
-                k,
+                k: effective_k,
                 top_p,
                 min_p,
                 temperature,
@@ -124,5 +119,15 @@ mod tests {
         assert!(def.contains("struct SampleParams"));
         assert!(def.contains("vocab_size"));
         assert!(def.contains("per_thread_m"));
+    }
+
+    #[test]
+    fn top_k_zero_is_treated_as_greedy() {
+        assert_eq!(SampleTopK::normalize_top_k(0, 1024), 1);
+    }
+
+    #[test]
+    fn top_k_is_clamped_to_vocab_size() {
+        assert_eq!(SampleTopK::normalize_top_k(4096, 1024), 1024);
     }
 }

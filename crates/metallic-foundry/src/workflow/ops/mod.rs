@@ -56,7 +56,7 @@ pub struct MemoizeSpec {
     pub disable_in_tui: bool,
 }
 
-pub trait WorkflowOp {
+pub trait WorkflowOp: Send {
     /// Called once before each workflow run starts.
     ///
     /// This allows ops to reset per-run counters while keeping allocated buffers/caches.
@@ -79,4 +79,8 @@ pub trait WorkflowOp {
         ctx: &mut WorkflowExecutionContext<'_>,
         on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError>;
+
+    /// Resets any internal state of the op (e.g. counters, history).
+    /// Called when the workflow context/session is reset (e.g. switching conversations).
+    fn reset(&mut self) {}
 }

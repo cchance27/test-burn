@@ -159,6 +159,18 @@ pub struct WorkflowInputSpec {
     pub description: Option<String>,
     #[serde(default)]
     pub default: Option<serde_json::Value>,
+    #[serde(default)]
+    pub min: Option<f64>,
+    #[serde(default)]
+    pub max: Option<f64>,
+    #[serde(default)]
+    pub step: Option<f64>,
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -270,8 +282,10 @@ pub struct FormatChatSpec {
     pub input: String,
     /// Output formatted prompt text variable.
     pub output: String,
-    #[serde(default)]
     pub add_generation_prompt: bool,
+    /// Optional system prompt variable name to prepend to the first turn.
+    #[serde(default)]
+    pub system_prompt: Option<String>,
     /// Formatting mode.
     ///
     /// - `"full"` (default): render all messages

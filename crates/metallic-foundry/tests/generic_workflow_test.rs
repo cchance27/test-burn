@@ -82,12 +82,12 @@ fn test_generic_workflow_orchestration() -> Result<(), Box<dyn std::error::Error
     let mut models = FxHashMap::default();
     models.insert("main".to_string(), model);
 
-    let mut runner = WorkflowRunner::new(&mut foundry, models);
+    let mut runner = WorkflowRunner::new(models);
 
     let mut inputs = std::collections::HashMap::new();
     inputs.insert("prompt".to_string(), "Hello".to_string());
 
-    let result = runner.run(&spec, inputs, &mut |_, _, _, _| Ok(true))?;
+    let result = runner.run(&mut foundry, &spec, inputs, &mut |_, _, _, _| Ok(true))?;
 
     println!("Workflow result: {:?}", result);
     // Should return text

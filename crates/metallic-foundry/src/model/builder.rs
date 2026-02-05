@@ -129,8 +129,7 @@ impl ModelBuilder<WithWeights> {
         self.weights.as_ref()
     }
 
-    /// Compile the model into an executable form.
-    pub fn build(self, foundry: &mut Foundry) -> Result<CompiledModel, MetalError> {
+    fn compile_model(self) -> Result<CompiledModel, MetalError> {
         let mut spec = self
             .spec
             .ok_or_else(|| MetalError::InvalidShape("ModelBuilder: spec not loaded".to_string()))?;
@@ -150,13 +149,23 @@ impl ModelBuilder<WithWeights> {
         };
         spec.architecture.apply_metadata_baseline(&defaults)?;
 
-        let model = CompiledModel::new(spec, weights)?;
+        CompiledModel::new(spec, weights)
+    }
 
+    /// Compile the model and eagerly initialize a reusable execution session.
+    pub fn build(self, foundry: &mut Foundry) -> Result<CompiledModel, MetalError> {
+        let model = self.compile_model()?;
         // Prepare a reusable execution session during model load so generation doesn't pay the one-time
         // weight materialization / buffer allocation cost. This aligns Foundry's "cold start" behavior
         // with Context (heavy work in model load, cheap per-generation setup).
         model.initialize_session(foundry)?;
-
         Ok(model)
+    }
+
+    /// Compile the model without eager session initialization.
+    ///
+    /// Use this when model load latency is more important than first-inference latency.
+    pub fn build_lazy(self) -> Result<CompiledModel, MetalError> {
+        self.compile_model()
     }
 }

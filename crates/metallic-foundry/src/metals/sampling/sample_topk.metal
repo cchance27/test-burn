@@ -6,6 +6,10 @@ using namespace metal;
 
 struct LogitPair { float value; uint index; };
 
+inline bool pair_worse(const thread LogitPair& a, const thread LogitPair& b) {
+    return (a.value < b.value) || ((a.value == b.value) && (a.index > b.index));
+}
+
 struct RNG {
     uint state;
     inline uint mix(uint x) {
@@ -48,8 +52,8 @@ inline void heap_sift_down(thread LogitPair* heap, uint size, uint pos) {
         uint left = 2 * pos + 1;
         uint right = 2 * pos + 2;
         uint smallest = pos;
-        if (left < size && heap[left].value < heap[smallest].value) smallest = left;
-        if (right < size && heap[right].value < heap[smallest].value) smallest = right;
+        if (left < size && pair_worse(heap[left], heap[smallest])) smallest = left;
+        if (right < size && pair_worse(heap[right], heap[smallest])) smallest = right;
         if (smallest == pos) break;
         LogitPair temp = heap[pos];
         heap[pos] = heap[smallest];
@@ -65,15 +69,18 @@ inline void heap_insert(thread LogitPair* heap, thread uint* heap_size, uint max
         heap[pos].index = idx;
         while (pos > 0) {
             uint parent = (pos - 1) / 2;
-            if (heap[parent].value <= heap[pos].value) break;
+            if (!pair_worse(heap[pos], heap[parent])) break;
             LogitPair temp = heap[pos];
             heap[pos] = heap[parent];
             heap[parent] = temp;
             pos = parent;
         }
-    } else if (val > heap[0].value) {
-        heap[0].value = val;
-        heap[0].index = idx;
+    } else {
+        const LogitPair candidate = LogitPair{val, idx};
+        if (!pair_worse(heap[0], candidate)) {
+            return;
+        }
+        heap[0] = candidate;
         heap_sift_down(heap, max_size, 0);
     }
 }
@@ -90,6 +97,7 @@ inline void heap_to_sorted(thread LogitPair* heap, uint size) {
 
 inline uint simd_reduce_sum_u32(uint v, uint simd_width) {
     // Unrolled reduction tree to minimize loop overhead.
+    if (simd_width >= 64u) v += simd_shuffle_down(v, 32u);
     if (simd_width >= 32u) v += simd_shuffle_down(v, 16u);
     if (simd_width >= 16u) v += simd_shuffle_down(v, 8u);
     if (simd_width >= 8u)  v += simd_shuffle_down(v, 4u);
@@ -114,6 +122,9 @@ inline uint quadlane_reduce_sum_u32(uint v, uint lane, uint simd_width) {
     }
     if (simd_width >= 32u) {
         if ((lane & 16u) == 0u) v += simd_shuffle_down(v, 16u);
+    }
+    if (simd_width >= 64u) {
+        if ((lane & 32u) == 0u) v += simd_shuffle_down(v, 32u);
     }
     return v;
 }
@@ -171,6 +182,15 @@ inline void quadlane_reduce_argmax_pair(thread float &best_val, thread uint &bes
             if (take_other) { best_val = other_val; best_idx = other_idx; best_lane = other_ln; }
         }
     }
+    if (simd_width >= 64u) {
+        if ((lane & 32u) == 0u) {
+            float other_val = simd_shuffle_down(best_val, 32u);
+            uint  other_idx = simd_shuffle_down(best_idx, 32u);
+            uint  other_ln  = simd_shuffle_down(best_lane, 32u);
+            bool take_other = (other_val > best_val) || ((other_val == best_val) && (other_idx < best_idx));
+            if (take_other) { best_val = other_val; best_idx = other_idx; best_lane = other_ln; }
+        }
+    }
 }
 
 // Redirect the existing reducers to quad-lane versions within kernels
@@ -195,9 +215,9 @@ kernel void sample_topk_fused_f16(
     const float invT = static_cast<float>(1.0f / denom);
     const uint M     = params.per_thread_m;
 
-    // Per-thread candidate capacity. This must be >= typical `per_thread_m` to avoid
-    // systematically dropping viable top-k candidates (quality regression / repetition).
-    constexpr uint MAX_LANE_HEAP = 4;
+    // Per-thread candidate capacity. Keep this >= the runtime `per_thread_m` default
+    // (now min(top_k, 40)) so concentrated-lane distributions retain full Top-K fidelity.
+    constexpr uint MAX_LANE_HEAP = 40;
     constexpr uint SIMDGROUP_SHORTLIST = 64;
     constexpr uint SIMDGROUP_SHORTLIST_CAP = MAX_SIMDGROUPS * SIMDGROUP_SHORTLIST;
 

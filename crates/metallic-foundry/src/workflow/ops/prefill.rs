@@ -73,23 +73,126 @@ impl WorkflowOp for PrefillOp {
             return Err(MetalError::InvalidShape("prefill requires non-empty prompt_tokens".into()));
         }
 
+        let conversation_id = conversation_id_from_ctx(ctx);
+        let prefill_mode = self.mode.clone().unwrap_or_else(|| "delta".to_string());
+        let kv_prefix_key = ctx
+            .values
+            .get("_internal.kv_prefix_key")
+            .and_then(|v| v.as_text())
+            .map(|v| v.to_string());
+        let kv_prefix_base_key = ctx
+            .values
+            .get("_internal.kv_prefix_base_key")
+            .and_then(|v| v.as_text())
+            .map(|v| v.to_string());
         let setup_start = std::time::Instant::now();
 
-        let (start_pos, prompt_len, end_pos, last_prefill_m, prefill_us, setup_us, logits_arg) =
+        let (
+            start_pos,
+            prompt_len,
+            end_pos,
+            last_prefill_m,
+            prefill_us,
+            setup_us,
+            logits_arg,
+            token_source,
+            execution_mode,
+            effective_chunk_size,
+            chunk_count,
+            cache_hit_prefix_tokens,
+            cache_lookup_path,
+        ) =
             model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
-                let start_pos = session.current_pos;
+                let mode = prefill_mode.as_str();
+                let original_start_pos = session.current_pos;
+                let (prompt_tokens, token_source, cache_hit_prefix_tokens, cache_lookup_path): (
+                    &[u32],
+                    &'static str,
+                    usize,
+                    &'static str,
+                ) = match mode {
+                    "delta" => {
+                        let mut start_pos = original_start_pos;
+                        let mut prompt_tokens = prompt_tokens_full;
+                        let mut token_source = "delta_input";
+                        let mut cache_hit_prefix_tokens = 0usize;
+                        let mut cache_lookup_path = "not_attempted";
 
-                let mode = self.mode.as_deref().unwrap_or("delta");
-                let prompt_tokens: &[u32] = match mode {
-                    "delta" => prompt_tokens_full,
+                        if original_start_pos == 0 {
+                            cache_lookup_path = "miss";
+
+                            if let Some(key) = kv_prefix_key.as_deref()
+                                && let Some(hit_prefix) =
+                                    model.try_restore_kv_prefix_from_cache_key(foundry, session, key, prompt_tokens_full)?
+                            {
+                                apply_delta_cache_hit(
+                                    prompt_tokens_full,
+                                    &mut start_pos,
+                                    &mut prompt_tokens,
+                                    &mut token_source,
+                                    &mut cache_hit_prefix_tokens,
+                                    &mut cache_lookup_path,
+                                    hit_prefix,
+                                    "key_primary",
+                                    "delta_cache_key_primary_suffix",
+                                    "delta_cache_key_primary_full_replay_last",
+                                );
+                            }
+
+                            if cache_hit_prefix_tokens == 0
+                                && kv_prefix_base_key.as_deref() != kv_prefix_key.as_deref()
+                                && let Some(key) = kv_prefix_base_key.as_deref()
+                                && let Some(hit_prefix) =
+                                    model.try_restore_kv_prefix_from_cache_key(foundry, session, key, prompt_tokens_full)?
+                            {
+                                apply_delta_cache_hit(
+                                    prompt_tokens_full,
+                                    &mut start_pos,
+                                    &mut prompt_tokens,
+                                    &mut token_source,
+                                    &mut cache_hit_prefix_tokens,
+                                    &mut cache_lookup_path,
+                                    hit_prefix,
+                                    "key_base",
+                                    "delta_cache_key_base_suffix",
+                                    "delta_cache_key_base_full_replay_last",
+                                );
+                            }
+
+                            if cache_hit_prefix_tokens == 0
+                                && let Some(hit_prefix) = model.try_restore_kv_prefix_from_cache(foundry, session, prompt_tokens_full)?
+                            {
+                                apply_delta_cache_hit(
+                                    prompt_tokens_full,
+                                    &mut start_pos,
+                                    &mut prompt_tokens,
+                                    &mut token_source,
+                                    &mut cache_hit_prefix_tokens,
+                                    &mut cache_lookup_path,
+                                    hit_prefix,
+                                    "token_prefix",
+                                    "delta_cache_token_prefix_suffix",
+                                    "delta_cache_token_prefix_full_replay_last",
+                                );
+                            }
+                        }
+
+                        session.current_pos = start_pos;
+                        (prompt_tokens, token_source, cache_hit_prefix_tokens, cache_lookup_path)
+                    }
                     "full_append_only" => {
-                        if start_pos == 0 {
-                            prompt_tokens_full
-                        } else if prompt_tokens_full.len() >= start_pos {
-                            &prompt_tokens_full[start_pos..]
+                        if original_start_pos == 0 {
+                            (prompt_tokens_full, "full_append_only_full", 0, "not_applicable")
+                        } else if prompt_tokens_full.len() >= original_start_pos {
+                            (
+                                &prompt_tokens_full[original_start_pos..],
+                                "full_append_only_suffix",
+                                0,
+                                "not_applicable",
+                            )
                         } else {
                             return Err(MetalError::InvalidOperation(format!(
-                                "prefill(mode=full_append_only) requires {}.len ({}) >= session.current_pos ({start_pos})",
+                                "prefill(mode=full_append_only) requires {}.len ({}) >= session.current_pos ({original_start_pos})",
                                 self.input,
                                 prompt_tokens_full.len()
                             )));
@@ -101,9 +204,26 @@ impl WorkflowOp for PrefillOp {
                         )));
                     }
                 };
+                let start_pos = session.current_pos;
                 let prompt_len = prompt_tokens.len();
                 let max_new_tokens = ctx.values.get("max_tokens").and_then(|v| v.as_usize()).unwrap_or(0);
                 let required_len = start_pos.saturating_add(prompt_len).saturating_add(max_new_tokens);
+                tracing::debug!(
+                    target: "metallic_foundry::workflow::ops::prefill",
+                    conversation_id = conversation_id.as_str(),
+                    mode,
+                    token_source,
+                    cache_hit_prefix_tokens,
+                    cache_lookup_path,
+                    kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
+                    kv_prefix_base_key = kv_prefix_base_key.as_deref().unwrap_or("<none>"),
+                    prompt_tokens_full = prompt_tokens_full.len(),
+                    prompt_tokens_selected = prompt_len,
+                    start_pos,
+                    max_new_tokens,
+                    required_len,
+                    "prefill prompt selection"
+                );
 
                 model.ensure_kv_capacity(
                     foundry,
@@ -141,29 +261,53 @@ impl WorkflowOp for PrefillOp {
                 let max_prefill_chunk = session.bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
                 let (_, mut prefill_chunk_size) = Self::prefill_config();
                 prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk).max(1);
+                tracing::debug!(
+                    target: "metallic_foundry::workflow::ops::prefill",
+                    conversation_id = conversation_id.as_str(),
+                    mode,
+                    disable_batched_prefill,
+                    profiling_per_kernel,
+                    debug_sync,
+                    max_prefill_chunk,
+                    configured_prefill_chunk_size = prefill_chunk_size,
+                    "prefill execution config"
+                );
 
                 let prefill_start = std::time::Instant::now();
                 let setup_duration = prefill_start.duration_since(setup_start);
                 let mut last_prefill_m = 1usize;
 
                 let input_ids_key = self.input_ids_binding.as_str();
+                let (execution_mode, effective_chunk_size, chunk_count) = if !disable_batched_prefill {
+                    let execution_mode = "batched";
+                    let chunk_size = {
+                        let rebalance_chunk_size = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
+                            let requested = requested.max(1).min(max_allowed.max(1));
+                            if prompt_len <= 1 {
+                                return 1;
+                            }
+                            let chunks = prompt_len.div_ceil(requested);
+                            let balanced = prompt_len.div_ceil(chunks);
+                            balanced.max(1).min(max_allowed)
+                        };
+                        rebalance_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk)
+                    };
+                    let chunk_count = if prompt_len == 0 { 0 } else { prompt_len.div_ceil(chunk_size.max(1)) };
 
-                if !disable_batched_prefill {
                     if !debug_sync && !profiling_per_kernel {
                         foundry.start_capture()?;
                     }
 
-                    let rebalance_chunk_size = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
-                        let requested = requested.max(1).min(max_allowed.max(1));
-                        if prompt_len <= 1 {
-                            return 1;
-                        }
-                        let chunks = prompt_len.div_ceil(requested);
-                        let balanced = prompt_len.div_ceil(chunks);
-                        balanced.max(1).min(max_allowed)
-                    };
-
-                    let chunk_size = rebalance_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk);
+                    tracing::debug!(
+                        target: "metallic_foundry::workflow::ops::prefill",
+                        conversation_id = conversation_id.as_str(),
+                        mode,
+                        token_source,
+                        execution_mode,
+                        chunk_size,
+                        chunk_count,
+                        "prefill running batched chunk schedule"
+                    );
 
                     for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(chunk_size).enumerate() {
                         let m = chunk_tokens.len();
@@ -199,7 +343,24 @@ impl WorkflowOp for PrefillOp {
                         let cmd = foundry.end_capture()?;
                         cmd.wait_until_completed();
                     }
+                    (execution_mode, chunk_size, chunk_count)
                 } else {
+                    let execution_mode = "tokenwise";
+                    let chunk_count = if prompt_len == 0 {
+                        0
+                    } else {
+                        prompt_len.div_ceil(prefill_chunk_size.max(1))
+                    };
+                    tracing::debug!(
+                        target: "metallic_foundry::workflow::ops::prefill",
+                        conversation_id = conversation_id.as_str(),
+                        mode,
+                        token_source,
+                        execution_mode,
+                        chunk_size = prefill_chunk_size,
+                        chunk_count,
+                        "prefill running tokenwise chunk schedule"
+                    );
                     model.set_int_global(&mut session.bindings, &self.m_key, 1);
                     model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
 
@@ -236,13 +397,29 @@ impl WorkflowOp for PrefillOp {
                         let cmd = foundry.end_capture()?;
                         cmd.wait_until_completed();
                     }
-                }
+                    (execution_mode, prefill_chunk_size, chunk_count)
+                };
 
                 let prefill_duration = prefill_start.elapsed();
 
                 // Keep session state consistent for future KV growth/preservation and debugging.
                 session.current_pos = start_pos + prompt_len;
                 let end_pos = session.current_pos;
+
+                if mode == "delta" && original_start_pos == 0 {
+                    if let Err(err) =
+                        model.store_kv_prefix_in_cache(foundry, session, prompt_tokens_full, kv_prefix_key.as_deref())
+                    {
+                        tracing::warn!(
+                            target: "metallic_foundry::workflow::ops::prefill",
+                            conversation_id = conversation_id.as_str(),
+                            mode,
+                            kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
+                            error = %err,
+                            "prefill failed to store KV prefix snapshot"
+                        );
+                    }
+                }
 
                 // Reset to decode mode for autoregressive decode (M=1).
                 model.set_int_global(&mut session.bindings, &self.m_key, 1);
@@ -289,8 +466,36 @@ impl WorkflowOp for PrefillOp {
                     prefill_duration.as_micros() as usize,
                     setup_duration.as_micros() as usize,
                     logits_arg,
+                    token_source,
+                    execution_mode,
+                    effective_chunk_size,
+                    chunk_count,
+                    cache_hit_prefix_tokens,
+                    cache_lookup_path,
                 ))
             })?;
+
+        tracing::debug!(
+            target: "metallic_foundry::workflow::ops::prefill",
+            conversation_id = conversation_id.as_str(),
+            mode = prefill_mode.as_str(),
+            token_source,
+            execution_mode,
+            cache_hit_prefix_tokens,
+            cache_lookup_path,
+            kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
+            kv_prefix_base_key = kv_prefix_base_key.as_deref().unwrap_or("<none>"),
+            prompt_tokens_full = prompt_tokens_full.len(),
+            prompt_len,
+            start_pos,
+            end_pos,
+            last_prefill_m,
+            chunk_size = effective_chunk_size,
+            chunk_count,
+            setup_us,
+            prefill_us,
+            "prefill completed"
+        );
 
         ctx.values.insert("_internal.start_pos".to_string(), Value::Usize(start_pos));
         ctx.values.insert("_internal.prompt_len".to_string(), Value::Usize(prompt_len));
@@ -306,5 +511,87 @@ impl WorkflowOp for PrefillOp {
         }
 
         Ok(WorkflowOpOutcome::Continue)
+    }
+}
+
+fn conversation_id_from_ctx(ctx: &WorkflowExecutionContext<'_>) -> String {
+    let Some(value) = ctx.values.get("conversation_id") else {
+        return "<default>".to_string();
+    };
+    if let Some(v) = value.as_text() {
+        return v.to_string();
+    }
+    if let Some(v) = value.as_u32() {
+        return v.to_string();
+    }
+    if let Some(v) = value.as_usize() {
+        return v.to_string();
+    }
+    "<default>".to_string()
+}
+
+fn apply_delta_cache_hit<'a>(
+    prompt_tokens_full: &'a [u32],
+    start_pos: &mut usize,
+    prompt_tokens: &mut &'a [u32],
+    token_source: &mut &'static str,
+    cache_hit_prefix_tokens: &mut usize,
+    cache_lookup_path: &mut &'static str,
+    hit_prefix: usize,
+    lookup_path: &'static str,
+    source_suffix: &'static str,
+    source_full: &'static str,
+) {
+    *cache_hit_prefix_tokens = hit_prefix;
+    *cache_lookup_path = lookup_path;
+
+    if hit_prefix >= prompt_tokens_full.len() {
+        if prompt_tokens_full.len() > 1 {
+            *start_pos = prompt_tokens_full.len() - 1;
+            *prompt_tokens = &prompt_tokens_full[*start_pos..];
+            *token_source = source_full;
+        } else {
+            *start_pos = 0;
+            *prompt_tokens = prompt_tokens_full;
+            *token_source = "delta_cache_hit_single_fallback";
+        }
+    } else {
+        *start_pos = hit_prefix;
+        *prompt_tokens = &prompt_tokens_full[hit_prefix..];
+        *token_source = source_suffix;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_delta_cache_hit;
+
+    #[test]
+    fn partial_base_hit_uses_suffix_prefill() {
+        let prompt_tokens_full = [10_u32, 11, 12, 13, 14, 15, 16, 17];
+        let mut start_pos = 0usize;
+        let mut prompt_tokens = &prompt_tokens_full[..];
+        let mut token_source = "delta_input";
+        let mut cache_hit_prefix_tokens = 0usize;
+        let mut cache_lookup_path = "miss";
+
+        apply_delta_cache_hit(
+            &prompt_tokens_full,
+            &mut start_pos,
+            &mut prompt_tokens,
+            &mut token_source,
+            &mut cache_hit_prefix_tokens,
+            &mut cache_lookup_path,
+            5,
+            "key_base",
+            "delta_cache_key_base_suffix",
+            "delta_cache_key_base_full_replay_last",
+        );
+
+        assert_eq!(start_pos, 5);
+        assert_eq!(prompt_tokens, &prompt_tokens_full[5..]);
+        assert_eq!(token_source, "delta_cache_key_base_suffix");
+        assert_eq!(cache_hit_prefix_tokens, 5);
+        assert_eq!(cache_lookup_path, "key_base");
     }
 }

@@ -24,6 +24,31 @@ pub enum Value {
 }
 
 impl Value {
+    pub fn from_json(v: serde_json::Value) -> Self {
+        match v {
+            serde_json::Value::Number(n) => {
+                if let Some(i) = n.as_u64() {
+                    Value::Usize(i as usize)
+                } else if let Some(f) = n.as_f64() {
+                    Value::F32(f as f32)
+                } else {
+                    Value::F32(0.0)
+                }
+            }
+            serde_json::Value::Bool(b) => Value::Bool(b),
+            serde_json::Value::String(s) => Value::Text(Arc::from(s.as_str())),
+            serde_json::Value::Array(arr) => Value::Array(arr.into_iter().map(Value::from_json).collect()),
+            serde_json::Value::Object(obj) => {
+                let mut map = FxHashMap::default();
+                for (k, v) in obj {
+                    map.insert(k, Value::from_json(v));
+                }
+                Value::Map(map)
+            }
+            _ => Value::Bool(false), // Fallback
+        }
+    }
+
     pub fn fingerprint64(&self) -> u64 {
         let mut h = rustc_hash::FxHasher::default();
         self.hash_into(&mut h);
@@ -178,6 +203,26 @@ impl Value {
         match self {
             Value::CommandBuffer(c) => Some(c),
             _ => None,
+        }
+    }
+
+    pub fn to_json(&self) -> serde_json::Value {
+        match self {
+            Value::U32(v) => serde_json::Value::from(*v),
+            Value::Usize(v) => serde_json::Value::from(*v),
+            Value::F32(v) => serde_json::Value::from(*v),
+            Value::Bool(v) => serde_json::Value::from(*v),
+            Value::Text(s) => serde_json::Value::from(s.to_string()),
+            Value::Array(arr) => serde_json::Value::Array(arr.iter().map(|v| v.to_json()).collect()),
+            Value::Map(map) => {
+                let mut obj = serde_json::Map::new();
+                for (k, v) in map {
+                    obj.insert(k.clone(), v.to_json());
+                }
+                serde_json::Value::Object(obj)
+            }
+            Value::TokensU32(tokens) => serde_json::Value::Array(tokens.iter().map(|&t| serde_json::Value::from(t)).collect()),
+            _ => serde_json::Value::Null,
         }
     }
 }

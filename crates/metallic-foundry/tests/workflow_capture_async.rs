@@ -9,7 +9,7 @@ use rustc_hash::FxHashMap;
 fn workflow_capture_end_wait_false_then_wait_executes_kernels() {
     let mut foundry = Foundry::new().expect("foundry init");
     let models: FxHashMap<String, Arc<metallic_foundry::model::CompiledModel>> = FxHashMap::default();
-    let mut runner = WorkflowRunner::new(&mut foundry, models);
+    let mut runner = WorkflowRunner::new(models);
 
     let workflow_json = r#"
 {
@@ -30,7 +30,7 @@ fn workflow_capture_end_wait_false_then_wait_executes_kernels() {
     inputs.insert("next_token".to_string(), Value::U32(123));
 
     let out = runner
-        .run_streaming(&spec, inputs, |_tok, _prefill, _setup, _iter| Ok(true))
+        .run_streaming(&mut foundry, &spec, inputs, |_tok, _prefill, _setup, _iter| Ok(true))
         .expect("run");
 
     let chan = out

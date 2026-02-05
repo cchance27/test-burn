@@ -39,7 +39,7 @@ fn while_batched_stream_async_poll_emits_all_tokens() {
 
     let mut foundry = Foundry::new().expect("foundry init");
     let models: FxHashMap<String, Arc<metallic_foundry::model::CompiledModel>> = FxHashMap::default();
-    let mut runner = WorkflowRunner::new(&mut foundry, models);
+    let mut runner = WorkflowRunner::new(models);
 
     let workflow_json = r#"
 {
@@ -74,7 +74,7 @@ fn while_batched_stream_async_poll_emits_all_tokens() {
 
     let mut streamed: Vec<u32> = Vec::new();
     let out = runner
-        .run_streaming(&spec, inputs, |tok, _prefill, _setup, _iter| {
+        .run_streaming(&mut foundry, &spec, inputs, |tok, _prefill, _setup, _iter| {
             streamed.push(tok);
             Ok(true)
         })

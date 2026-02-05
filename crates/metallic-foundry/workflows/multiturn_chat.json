@@ -3,26 +3,155 @@
   "description": "Chat workflow with message list -> template formatting -> tokenization inside workflow.",
   "default_model": "llm",
   "inputs": [
-    { "name": "messages", "type": "array", "description": "List of {role, content} messages" },
-    { "name": "max_tokens", "type": "u32", "default": 256 },
-    { "name": "temperature", "type": "f32", "default": 0.8 },
-    { "name": "top_k", "type": "u32", "default": 40 },
-    { "name": "top_p", "type": "f32", "default": 0.95 },
-    { "name": "min_p", "type": "f32", "default": 0.05 },
-    { "name": "repeat_penalty", "type": "f32", "default": 1.1 },
-    { "name": "repeat_last_n", "type": "usize", "default": 64 },
-    { "name": "presence_penalty", "type": "f32", "default": 0.0 },
-    { "name": "frequency_penalty", "type": "f32", "default": 0.0 },
-    { "name": "seed", "type": "u32", "default": 42 },
-    { "name": "eos_token", "type": "u32", "default": 151645 }
+    {
+      "name": "messages",
+      "type": "array",
+      "description": "List of {role, content} messages",
+      "hidden": true
+    },
+    {
+      "name": "run_generation",
+      "type": "u32",
+      "default": 1,
+      "hidden": true
+    },
+    {
+      "name": "conversation_id",
+      "type": "text",
+      "default": "",
+      "hidden": true
+    },
+    {
+      "name": "max_tokens",
+      "type": "usize",
+      "default": 0,
+      "min": 0,
+      "max": 4096,
+      "step": 1,
+      "label": "Max Tokens"
+    },
+    {
+      "name": "temperature",
+      "type": "f32",
+      "default": 0.8,
+      "min": 0.0,
+      "max": 2.0,
+      "step": 0.1,
+      "label": "Temperature"
+    },
+    {
+      "name": "top_k",
+      "type": "u32",
+      "default": 40,
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "label": "Top K"
+    },
+    {
+      "name": "top_p",
+      "type": "f32",
+      "default": 0.95,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "label": "Top P"
+    },
+    {
+      "name": "min_p",
+      "type": "f32",
+      "default": 0.05,
+      "min": 0.0,
+      "max": 1.0,
+      "step": 0.01,
+      "label": "Min P"
+    },
+    {
+      "name": "repeat_penalty",
+      "type": "f32",
+      "default": 1.1,
+      "min": 1.0,
+      "max": 2.0,
+      "step": 0.05,
+      "label": "Repeat Penalty"
+    },
+    {
+      "name": "repeat_last_n",
+      "type": "usize",
+      "default": 64,
+      "min": 0,
+      "max": 512,
+      "step": 1,
+      "label": "Repeat Last N"
+    },
+    {
+      "name": "presence_penalty",
+      "type": "f32",
+      "default": 0.0,
+      "min": -2.0,
+      "max": 2.0,
+      "step": 0.1,
+      "label": "Presence Penalty"
+    },
+    {
+      "name": "frequency_penalty",
+      "type": "f32",
+      "default": 0.0,
+      "min": -2.0,
+      "max": 2.0,
+      "step": 0.1,
+      "label": "Frequency Penalty"
+    },
+    {
+      "name": "seed",
+      "type": "u32",
+      "default": 42,
+      "min": 0,
+      "max": 1000000,
+      "step": 1,
+      "label": "Seed"
+    },
+    {
+      "name": "system_prompt",
+      "type": "text",
+      "default": "You are a helpful assistant.",
+      "label": "System Prompt"
+    },
+    {
+      "name": "eos_token",
+      "type": "u32",
+      "default": 151645,
+      "hidden": true
+    }
   ],
   "steps": [
-    { "op": "format_chat", "model_id": "llm", "input": "messages", "output": "formatted_delta", "mode": "delta", "add_generation_prompt": true },
-    { "op": "tokenize", "model_id": "llm", "input": "formatted_delta", "output": "prompt_tokens_delta", "mode": "raw" },
-    { "op": "prefill", "model_id": "llm", "input": "prompt_tokens_delta", "output_pos": "current_pos", "mode": "delta", "logits_binding": "logits" },
+    {
+      "op": "format_chat",
+      "model_id": "llm",
+      "input": "messages",
+      "system_prompt": "system_prompt",
+      "output": "formatted_delta",
+      "mode": "delta",
+      "add_generation_prompt": true
+    },
+    {
+      "op": "tokenize",
+      "model_id": "llm",
+      "input": "formatted_delta",
+      "output": "prompt_tokens_delta",
+      "mode": "raw"
+    },
+    {
+      "op": "prefill",
+      "model_id": "llm",
+      "input": "prompt_tokens_delta",
+      "output_pos": "current_pos",
+      "mode": "delta",
+      "logits_binding": "logits"
+    },
     {
       "op": "while",
-      "condition": "max_tokens",
+      "condition": "run_generation",
       "max_iterations": "{max_tokens}",
       "body": [
         {
@@ -39,13 +168,43 @@
           "frequency_penalty": "{frequency_penalty}",
           "seed": "{seed}"
         },
-        { "op": "check_eos", "input": "next_token", "output": "is_eos", "eos_token": "{eos_token}" },
-        { "op": "if", "condition": "is_eos", "then": [ { "op": "break" } ] },
-        { "op": "append_token", "input": "next_token", "output": "generated_tokens" },
-        { "op": "graph_forward", "model_id": "llm", "token_var": "next_token", "logits_binding": "logits", "position": "{current_pos}" },
-        { "op": "compute_int", "output": "current_pos", "expr": "{current_pos} + 1" }
+        {
+          "op": "check_eos",
+          "input": "next_token",
+          "output": "is_eos",
+          "eos_token": "{eos_token}"
+        },
+        {
+          "op": "if",
+          "condition": "is_eos",
+          "then": [
+            {
+              "op": "break"
+            }
+          ]
+        },
+        {
+          "op": "append_token",
+          "input": "next_token",
+          "output": "generated_tokens"
+        },
+        {
+          "op": "graph_forward",
+          "model_id": "llm",
+          "token_var": "next_token",
+          "logits_binding": "logits",
+          "position": "{current_pos}"
+        },
+        {
+          "op": "compute_int",
+          "output": "current_pos",
+          "expr": "{current_pos} + 1"
+        }
       ]
     },
-    { "op": "return", "output": "generated_tokens" }
+    {
+      "op": "return",
+      "output": "generated_tokens"
+    }
   ]
 }

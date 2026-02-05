@@ -85,6 +85,10 @@ pub struct BPETokenizer {
     byte_decoder_lut: [u16; 512],
     /// Cache for single-character token lookups
     char_vocab: FxHashMap<char, u32>,
+    /// Precompiled regex for special token spans (`<|...|>`).
+    special_token_re: Regex,
+    /// Precompiled regex for normal tokenization pieces.
+    token_piece_re: Regex,
 }
 
 impl BPETokenizer {
@@ -148,6 +152,10 @@ impl BPETokenizer {
             }
         }
 
+        let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e.into()))?;
+        let token_piece_re = Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
+            .map_err(|e| BPETokenizerError::RegexError(e.into()))?;
+
         let chat_template = chat_template.as_deref().filter(|v| !v.trim().is_empty()).map(ChatTemplate::new);
 
         Ok(Self {
@@ -164,6 +172,8 @@ impl BPETokenizer {
             byte_encoder_array,
             byte_decoder_lut,
             char_vocab,
+            special_token_re,
+            token_piece_re,
         })
     }
 
@@ -274,15 +284,12 @@ impl BPETokenizer {
     }
 
     fn process_pieces(&self, text: &str, mut processor: impl FnMut(&str) -> Result<(), MetalError>) -> Result<(), MetalError> {
-        let special_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e.into()))?;
-        let re = Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
-            .map_err(|e| BPETokenizerError::RegexError(e.into()))?;
         let mut last = 0;
-        for mat in special_re.find_iter(text) {
+        for mat in self.special_token_re.find_iter(text) {
             let mat = mat?;
             if mat.start() > last {
                 let subtext = &text[last..mat.start()];
-                for submat in re.find_iter(subtext) {
+                for submat in self.token_piece_re.find_iter(subtext) {
                     processor(submat?.as_str())?;
                 }
             }
@@ -291,7 +298,7 @@ impl BPETokenizer {
         }
         if last < text.len() {
             let subtext = &text[last..];
-            for submat in re.find_iter(subtext) {
+            for submat in self.token_piece_re.find_iter(subtext) {
                 processor(submat?.as_str())?;
             }
         }

@@ -2,10 +2,16 @@
 //!
 //! Interprets the ModelSpec execution plan (DSL) by calling Step::execute().
 
-use std::{cell::RefCell, sync::OnceLock};
+use std::{
+    any::{Any, TypeId},
+    collections::{VecDeque, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+    sync::OnceLock,
+};
 
 use half::f16;
 use metallic_loader::ModelMetadata;
+use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::builder::WeightBundle;
@@ -102,6 +108,7 @@ mod quant_binding_validation_tests {
 pub struct CompiledModel {
     spec: ModelSpec,
     weights: WeightBundle,
+    cache_namespace_fingerprint: std::sync::Arc<str>,
     /// Optimized execution steps (compiled from DSL)
     compiled_steps: Vec<Box<dyn CompiledStep>>,
     /// Symbol table mapping tensor names to integer indices for fast lookup
@@ -110,9 +117,18 @@ pub struct CompiledModel {
     ///
     /// This is intentionally lazy-interning so new workflows/DSL can introduce new global keys
     /// without requiring code changes in the executor.
-    interned_globals: RefCell<FxHashMap<String, &'static str>>,
+    interned_globals: RwLock<FxHashMap<String, &'static str>>,
     /// Reusable execution session (weights/intermediates + small persistent buffers).
-    session: RefCell<Option<ModelSession>>,
+    session: Mutex<Option<ModelSession>>,
+    /// Prefix KV snapshots for cross-conversation reuse (system prompt and short prompt prefixes).
+    kv_prefix_cache: Mutex<KvPrefixCache>,
+    /// Generic per-model cache for reusable runtime instances (tokenizer, adapters, etc.).
+    ///
+    /// Keyed by `(TypeId, logical_key)` so callers can safely cache multiple resource types
+    /// under the same logical key without collisions.
+    // PERF: Keep this cache attached to the compiled model so expensive runtime helpers are
+    // built once per loaded model and reused across workflows/conversations.
+    instance_cache: Mutex<FxHashMap<(TypeId, String), std::sync::Arc<dyn Any + Send + Sync>>>,
 }
 
 pub(crate) struct ModelSession {
@@ -122,8 +138,83 @@ pub(crate) struct ModelSession {
     pub(crate) context_config: crate::model::ContextConfig,
 }
 
+#[derive(Debug)]
+struct KvPrefixTensorSnapshot {
+    name: String,
+    buffer: crate::types::MetalBuffer,
+    dtype: crate::tensor::Dtype,
+    heads: usize,
+    head_dim: usize,
+}
+
+#[derive(Debug)]
+struct KvPrefixSnapshot {
+    key: Option<std::sync::Arc<str>>,
+    tokens: std::sync::Arc<[u32]>,
+    prefix_len: usize,
+    kv_tensors: Vec<KvPrefixTensorSnapshot>,
+    bytes: usize,
+}
+
+#[derive(Debug, Default)]
+struct KvPrefixCache {
+    entries: VecDeque<KvPrefixSnapshot>,
+}
+
 impl CompiledModel {
     const METALLIC_IGNORE_EOS_STOP_ENV: &'static str = "METALLIC_IGNORE_EOS_STOP";
+
+    fn compute_cache_namespace_fingerprint(spec: &ModelSpec, weights: &WeightBundle) -> std::sync::Arc<str> {
+        let model = weights.model();
+        let metadata = model.metadata();
+        let mut hasher = DefaultHasher::new();
+
+        spec.name.hash(&mut hasher);
+        spec.architecture.max_seq_len().hash(&mut hasher);
+        spec.architecture.forward.len().hash(&mut hasher);
+        spec.architecture.prepare.tensors.len().hash(&mut hasher);
+
+        for (k, v) in &spec.architecture.params {
+            k.hash(&mut hasher);
+            match v {
+                ArchValue::USize(n) => n.hash(&mut hasher),
+                ArchValue::F32(f) => f.to_bits().hash(&mut hasher),
+            }
+        }
+
+        for key in [
+            "general.architecture",
+            "general.name",
+            "general.basename",
+            "general.type",
+            "tokenizer.ggml.model",
+        ] {
+            if let Some(v) = metadata.get_string(key) {
+                key.hash(&mut hasher);
+                v.as_ref().hash(&mut hasher);
+            }
+        }
+
+        for key in [
+            "general.file_type",
+            "general.quantization_version",
+            "general.parameter_count",
+        ] {
+            if let Some(v) = metadata.get_i64(key) {
+                key.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+        }
+
+        model.estimated_memory_usage().hash(&mut hasher);
+        model.tensor_names().len().hash(&mut hasher);
+        if let Some(info) = model.tensor_info("output.weight") {
+            info.dimensions.hash(&mut hasher);
+            info.data_type.hash(&mut hasher);
+        }
+
+        std::sync::Arc::<str>::from(format!("{:016x}", hasher.finish()))
+    }
 
     #[inline]
     fn ignore_eos_stop_enabled() -> bool {
@@ -165,14 +256,79 @@ impl CompiledModel {
         (max_prefill_chunk, prefill_chunk_size)
     }
 
+    fn kv_prefix_cache_enabled() -> bool {
+        static ENABLED: OnceLock<bool> = OnceLock::new();
+        *ENABLED.get_or_init(|| {
+            let disabled = std::env::var("METALLIC_KV_PREFIX_CACHE_DISABLE")
+                .ok()
+                .map(|v| {
+                    let lowered = v.trim().to_ascii_lowercase();
+                    !lowered.is_empty() && !matches!(lowered.as_str(), "0" | "false" | "no" | "off")
+                })
+                .unwrap_or(false);
+            !disabled
+        })
+    }
+
+    fn kv_prefix_cache_max_entries() -> usize {
+        const DEFAULT_MAX_ENTRIES: usize = 8;
+        const MAX_ALLOWED: usize = 64;
+        static MAX_ENTRIES: OnceLock<usize> = OnceLock::new();
+        *MAX_ENTRIES.get_or_init(|| {
+            std::env::var("METALLIC_KV_PREFIX_CACHE_ENTRIES")
+                .ok()
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(DEFAULT_MAX_ENTRIES)
+                .clamp(1, MAX_ALLOWED)
+        })
+    }
+
+    #[inline]
+    pub fn clear_session(&self) {
+        let mut session = self.session.lock();
+        *session = None;
+        tracing::debug!(
+            target: "metallic_foundry::model::executor",
+            model = self.name(),
+            cache_fingerprint = self.cache_namespace_fingerprint(),
+            cache_entries = self.kv_prefix_cache.lock().entries.len(),
+            "Session cleared; prefix KV cache retained"
+        );
+    }
+
+    #[inline]
+    pub fn rewind_session(&self) {
+        let mut session = self.session.lock();
+        if let Some(session) = session.as_mut() {
+            session.current_pos = 0;
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                cache_entries = self.kv_prefix_cache.lock().entries.len(),
+                "Session rewound to position 0; bindings retained"
+            );
+        } else {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                "Session rewind requested but no active session was present"
+            );
+        }
+    }
+
     #[inline]
     fn interned_key(&self, key: &str) -> &'static str {
-        if let Some(v) = self.interned_globals.borrow().get(key) {
-            return *v;
+        {
+            let map = self.interned_globals.read();
+            if let Some(v) = map.get(key) {
+                return *v;
+            }
         }
 
         let leaked: &'static str = Box::leak(key.to_string().into_boxed_str());
-        self.interned_globals.borrow_mut().insert(key.to_string(), leaked);
+        self.interned_globals.write().insert(key.to_string(), leaked);
         leaked
     }
 
@@ -714,22 +870,31 @@ impl CompiledModel {
                 map.insert(k.to_string(), leaked);
             }
 
-            RefCell::new(map)
+            RwLock::new(map)
         };
+
+        let cache_namespace_fingerprint = Self::compute_cache_namespace_fingerprint(&spec, &weights);
 
         Ok(Self {
             spec,
             weights,
+            cache_namespace_fingerprint,
             compiled_steps,
             symbol_table: symbols,
             interned_globals,
-            session: RefCell::new(None),
+            session: Mutex::new(None),
+            kv_prefix_cache: Mutex::new(KvPrefixCache::default()),
+            instance_cache: Mutex::new(FxHashMap::default()),
         })
     }
 
     /// Get the model name from the spec.
     pub fn name(&self) -> &str {
         &self.spec.name
+    }
+
+    pub fn cache_namespace_fingerprint(&self) -> &str {
+        &self.cache_namespace_fingerprint
     }
 
     /// Get the architecture configuration.
@@ -747,20 +912,68 @@ impl CompiledModel {
         self.weights.model().metadata()
     }
 
-    /// Create a tokenizer from the model's GGUF metadata, with optional override from ModelSpec.
-    pub fn tokenizer(&self) -> Result<crate::BPETokenizer, MetalError> {
-        let mut tokenizer = crate::BPETokenizer::from_metadata(self.weights.model().metadata())?;
+    pub(crate) fn get_or_init_cached_instance<T, F>(&self, key: &str, build: F) -> Result<std::sync::Arc<T>, MetalError>
+    where
+        T: 'static + Send + Sync,
+        F: FnOnce() -> Result<T, MetalError>,
+    {
+        // PERF: The typed key avoids repeated construction of heavyweight helpers (tokenizers,
+        // parsers, adapters) while keeping the cache generic for non-LLM workflows.
+        let cache_key = (TypeId::of::<T>(), key.to_string());
 
-        // Prioritize template from ModelSpec (DSL override)
-        if let Some(template_override) = &self.spec.chat_template {
-            tokenizer.set_chat_template(template_override.clone());
+        if let Some(existing) = self.instance_cache.lock().get(&cache_key).cloned() {
+            return existing.downcast::<T>().map_err(|_| {
+                MetalError::InvalidOperation(format!(
+                    "CompiledModel instance_cache type mismatch for key '{key}'"
+                ))
+            });
         }
 
-        Ok(tokenizer)
+        // PERF: Build outside the cache lock so expensive constructors do not serialize unrelated
+        // cache users. We re-check on insert to handle a concurrent winner.
+        let built = std::sync::Arc::new(build()?);
+        let mut cache = self.instance_cache.lock();
+        if let Some(existing) = cache.get(&cache_key).cloned() {
+            return existing.downcast::<T>().map_err(|_| {
+                MetalError::InvalidOperation(format!(
+                    "CompiledModel instance_cache type mismatch for key '{key}'"
+                ))
+            });
+        }
+        let built_any: std::sync::Arc<dyn Any + Send + Sync> = built.clone();
+        cache.insert(cache_key, built_any);
+        Ok(built)
+    }
+
+    /// Get the shared tokenizer for this compiled model.
+    ///
+    /// The tokenizer is constructed once from GGUF metadata (plus optional ModelSpec chat-template
+    /// override) and then reused across workflow ops to avoid repeated reconstruction cost.
+    pub fn tokenizer(&self) -> Result<std::sync::Arc<crate::BPETokenizer>, MetalError> {
+        // PERF: Use the generic instance cache instead of rebuilding tokenizer + regex state for
+        // every tokenize op invocation.
+        self.get_or_init_cached_instance("tokenizer.default", || {
+            let mut tokenizer = crate::BPETokenizer::from_metadata(self.weights.model().metadata())?;
+
+            // Prioritize template from ModelSpec (DSL override)
+            if let Some(template_override) = &self.spec.chat_template {
+                tokenizer.set_chat_template(template_override.clone());
+            }
+
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                has_spec_chat_template = self.spec.chat_template.is_some(),
+                "Initialized cached model instance key=tokenizer.default"
+            );
+
+            Ok(tokenizer)
+        })
     }
 
     pub fn initialize_session(&self, foundry: &mut Foundry) -> Result<(), MetalError> {
-        let mut session = self.session.borrow_mut();
+        let mut session = self.session.lock();
         if session.is_some() {
             return Ok(());
         }
@@ -818,17 +1031,646 @@ impl CompiledModel {
         Ok(())
     }
 
+    /// Reset the session, clearing the KV cache and position state.
+    ///
+    /// Call this when switching conversations or when you need a fresh context.
+    /// The next inference will re-initialize the session with `current_pos = 0`.
+    pub fn reset_session(&self) {
+        let mut session = self.session.lock();
+        tracing::debug!(
+            "Session reset requested for model {}, session is_some: {}",
+            self.name(),
+            session.is_some()
+        );
+        if session.is_some() {
+            tracing::info!("Resetting model session (clearing KV cache)");
+            *session = None;
+            let cache_entries = self.kv_prefix_cache.lock().entries.len();
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                cache_entries,
+                "Session reset completed; prefix KV cache retained"
+            );
+        }
+    }
+
     pub(crate) fn with_session_mut<T>(
         &self,
         foundry: &mut Foundry,
         f: impl FnOnce(&mut Foundry, &mut ModelSession) -> Result<T, MetalError>,
     ) -> Result<T, MetalError> {
         self.initialize_session(foundry)?;
-        let mut session_guard = self.session.borrow_mut();
+        let mut session_guard = self.session.lock();
         let session = session_guard
             .as_mut()
             .ok_or_else(|| MetalError::OperationFailed("Foundry session missing after initialization".into()))?;
         f(foundry, session)
+    }
+
+    fn collect_kv_tensor_names(&self, bindings: &mut TensorBindings) -> Result<Vec<String>, MetalError> {
+        let mut names = Vec::new();
+        for tensor in &self.spec.architecture.prepare.tensors {
+            if tensor.storage != StorageClass::KvCache {
+                continue;
+            }
+
+            if let Some(repeat) = &tensor.repeat {
+                let count_val = if let Ok(v) = repeat.count.parse::<usize>() {
+                    v
+                } else {
+                    bindings
+                        .get_var(&repeat.count)
+                        .ok_or_else(|| {
+                            MetalError::InvalidOperation(format!(
+                                "prepare.tensors repeat count variable '{}' not found while collecting KV names",
+                                repeat.count
+                            ))
+                        })?
+                        .parse::<usize>()
+                        .map_err(|e| {
+                            MetalError::InvalidOperation(format!(
+                                "prepare.tensors repeat count variable '{}' is not a valid integer while collecting KV names: {}",
+                                repeat.count, e
+                            ))
+                        })?
+                };
+
+                bindings.push_scope();
+                for i in 0..count_val {
+                    bindings.set_var(&repeat.var, i.to_string());
+                    names.push(bindings.interpolate(tensor.name.clone()));
+                }
+                bindings.pop_scope();
+            } else {
+                names.push(bindings.interpolate(tensor.name.clone()));
+            }
+        }
+
+        Ok(names)
+    }
+
+    fn kv_tensor_copy_shape(arg: &TensorArg, name: &str, prefix_len: usize) -> Result<(usize, usize, usize, usize), MetalError> {
+        if arg.dims.len() != 3 {
+            return Err(MetalError::InvalidShape(format!(
+                "KV tensor '{name}' must be rank-3 for prefix caching, got dims={:?}",
+                arg.dims
+            )));
+        }
+        let heads = arg.dims[0];
+        let capacity = arg.dims[1];
+        let head_dim = arg.dims[2];
+        if prefix_len > capacity {
+            return Err(MetalError::InvalidShape(format!(
+                "KV tensor '{name}' prefix_len {} exceeds capacity {}",
+                prefix_len, capacity
+            )));
+        }
+
+        // Prefix snapshot/restore assumes contiguous [heads, seq, dim] layout.
+        if arg.strides.len() == 3 {
+            let expected = [capacity.saturating_mul(head_dim), head_dim, 1];
+            if arg.strides[0] != expected[0] || arg.strides[1] != expected[1] || arg.strides[2] != expected[2] {
+                return Err(MetalError::InvalidShape(format!(
+                    "KV tensor '{name}' has unsupported strides {:?}, expected {:?}",
+                    arg.strides, expected
+                )));
+            }
+        }
+
+        Ok((heads, capacity, head_dim, arg.dtype.size_bytes()))
+    }
+
+    fn capture_kv_prefix_snapshot(
+        &self,
+        foundry: &mut Foundry,
+        session: &mut ModelSession,
+        prompt_tokens: &[u32],
+        prefix_len: usize,
+        key: Option<&str>,
+    ) -> Result<Option<KvPrefixSnapshot>, MetalError> {
+        if prefix_len == 0 {
+            return Ok(None);
+        }
+
+        let kv_names = self.collect_kv_tensor_names(&mut session.bindings)?;
+        if kv_names.is_empty() {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                prefix_len,
+                "KV prefix snapshot skipped: no kv_cache tensors configured"
+            );
+            return Ok(None);
+        }
+
+        let mut total_bytes = 0usize;
+        let mut kv_tensors = Vec::with_capacity(kv_names.len());
+        let started_capture = !foundry.is_capturing();
+        if started_capture {
+            foundry.start_capture()?;
+        }
+
+        let copy_result = (|| -> Result<(), MetalError> {
+            for name in kv_names {
+                let live = session.bindings.get(&name)?;
+                let (heads, capacity, head_dim, elem_bytes) = Self::kv_tensor_copy_shape(&live, &name, prefix_len)?;
+                let bytes_per_head = prefix_len
+                    .checked_mul(head_dim)
+                    .and_then(|v| v.checked_mul(elem_bytes))
+                    .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' snapshot size overflow")))?;
+                let snapshot_bytes = heads
+                    .checked_mul(bytes_per_head)
+                    .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' snapshot bytes overflow")))?;
+                if snapshot_bytes == 0 {
+                    continue;
+                }
+
+                let snapshot_buffer = foundry
+                    .device
+                    .new_buffer(snapshot_bytes, MetalResourceOptions::StorageModePrivate)
+                    .ok_or_else(|| {
+                        MetalError::OperationFailed(format!(
+                            "Failed to allocate {} bytes for KV prefix snapshot '{}'",
+                            snapshot_bytes, name
+                        ))
+                    })?;
+
+                let live_buffer = live
+                    .buffer
+                    .as_ref()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("KV tensor '{}' has no backing buffer", name)))?;
+
+                for h in 0..heads {
+                    let src_head_offset = h
+                        .checked_mul(capacity)
+                        .and_then(|v| v.checked_mul(head_dim))
+                        .and_then(|v| v.checked_mul(elem_bytes))
+                        .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' source offset overflow")))?;
+                    let dst_head_offset = h
+                        .checked_mul(bytes_per_head)
+                        .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{name}' destination offset overflow")))?;
+                    foundry.blit_copy(
+                        live_buffer,
+                        live.offset.saturating_add(src_head_offset),
+                        &snapshot_buffer,
+                        dst_head_offset,
+                        bytes_per_head,
+                    )?;
+                }
+
+                total_bytes = total_bytes.saturating_add(snapshot_bytes);
+                kv_tensors.push(KvPrefixTensorSnapshot {
+                    name,
+                    buffer: snapshot_buffer,
+                    dtype: live.dtype,
+                    heads,
+                    head_dim,
+                });
+            }
+            Ok(())
+        })();
+
+        if started_capture {
+            match foundry.end_capture() {
+                Ok(cmd) => cmd.wait_until_completed(),
+                Err(end_err) => {
+                    if copy_result.is_ok() {
+                        return Err(end_err);
+                    }
+                    tracing::warn!(
+                        target: "metallic_foundry::model::executor",
+                        model = self.name(),
+                        error = %end_err,
+                        "KV prefix snapshot cleanup failed after copy error"
+                    );
+                }
+            }
+        }
+
+        copy_result?;
+
+        if kv_tensors.is_empty() {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                prefix_len,
+                "KV prefix snapshot skipped: resolved KV tensor set was empty"
+            );
+            return Ok(None);
+        }
+
+        Ok(Some(KvPrefixSnapshot {
+            key: key.map(std::sync::Arc::<str>::from),
+            tokens: prompt_tokens.to_vec().into(),
+            prefix_len,
+            kv_tensors,
+            bytes: total_bytes,
+        }))
+    }
+
+    fn restore_kv_prefix_snapshot(
+        &self,
+        foundry: &mut Foundry,
+        session: &mut ModelSession,
+        snapshot: &KvPrefixSnapshot,
+    ) -> Result<(), MetalError> {
+        let started_capture = !foundry.is_capturing();
+        if started_capture {
+            foundry.start_capture()?;
+        }
+
+        let copy_result = (|| -> Result<(), MetalError> {
+            for saved in &snapshot.kv_tensors {
+                let live = session.bindings.get(&saved.name)?;
+                let (heads, capacity, head_dim, elem_bytes) = Self::kv_tensor_copy_shape(&live, &saved.name, snapshot.prefix_len)?;
+
+                if live.dtype != saved.dtype {
+                    return Err(MetalError::InvalidShape(format!(
+                        "KV tensor '{}' dtype mismatch during snapshot restore: live={:?} snapshot={:?}",
+                        saved.name, live.dtype, saved.dtype
+                    )));
+                }
+                if heads != saved.heads || head_dim != saved.head_dim {
+                    return Err(MetalError::InvalidShape(format!(
+                        "KV tensor '{}' shape mismatch during snapshot restore: live=[{}, {}, {}], snapshot=[{}, {}, {}]",
+                        saved.name, heads, capacity, head_dim, saved.heads, snapshot.prefix_len, saved.head_dim
+                    )));
+                }
+
+                let bytes_per_head = snapshot
+                    .prefix_len
+                    .checked_mul(head_dim)
+                    .and_then(|v| v.checked_mul(elem_bytes))
+                    .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{}' restore size overflow", saved.name)))?;
+                if bytes_per_head == 0 {
+                    continue;
+                }
+
+                let live_buffer = live
+                    .buffer
+                    .as_ref()
+                    .ok_or_else(|| MetalError::InvalidOperation(format!("KV tensor '{}' has no backing buffer", saved.name)))?;
+
+                for h in 0..heads {
+                    let src_head_offset = h
+                        .checked_mul(bytes_per_head)
+                        .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{}' source offset overflow", saved.name)))?;
+                    let dst_head_offset = h
+                        .checked_mul(capacity)
+                        .and_then(|v| v.checked_mul(head_dim))
+                        .and_then(|v| v.checked_mul(elem_bytes))
+                        .ok_or_else(|| MetalError::InvalidShape(format!("KV tensor '{}' destination offset overflow", saved.name)))?;
+
+                    foundry.blit_copy(
+                        &saved.buffer,
+                        src_head_offset,
+                        live_buffer,
+                        live.offset.saturating_add(dst_head_offset),
+                        bytes_per_head,
+                    )?;
+                }
+            }
+            Ok(())
+        })();
+
+        if started_capture {
+            match foundry.end_capture() {
+                Ok(cmd) => cmd.wait_until_completed(),
+                Err(end_err) => {
+                    if copy_result.is_ok() {
+                        return Err(end_err);
+                    }
+                    tracing::warn!(
+                        target: "metallic_foundry::model::executor",
+                        model = self.name(),
+                        error = %end_err,
+                        "KV prefix restore cleanup failed after copy error"
+                    );
+                }
+            }
+        }
+
+        copy_result?;
+
+        session.current_pos = snapshot.prefix_len;
+        Ok(())
+    }
+
+    pub(crate) fn try_restore_kv_prefix_from_cache(
+        &self,
+        foundry: &mut Foundry,
+        session: &mut ModelSession,
+        prompt_tokens: &[u32],
+    ) -> Result<Option<usize>, MetalError> {
+        if !Self::kv_prefix_cache_enabled() || prompt_tokens.is_empty() {
+            return Ok(None);
+        }
+
+        let mut cache = self.kv_prefix_cache.lock();
+        let mut best_idx: Option<usize> = None;
+        let mut best_len: usize = 0;
+        for (idx, entry) in cache.entries.iter().enumerate() {
+            if entry.prefix_len == 0 || entry.prefix_len > prompt_tokens.len() {
+                continue;
+            }
+            let prefix = &prompt_tokens[..entry.prefix_len];
+            if entry.tokens.as_ref() == prefix && entry.prefix_len >= best_len {
+                best_idx = Some(idx);
+                best_len = entry.prefix_len;
+            }
+        }
+
+        let Some(idx) = best_idx else {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                prompt_tokens = prompt_tokens.len(),
+                cache_entries = cache.entries.len(),
+                "KV prefix cache miss (token prefix fallback)"
+            );
+            return Ok(None);
+        };
+
+        let snapshot = cache
+            .entries
+            .remove(idx)
+            .ok_or_else(|| MetalError::OperationFailed("KV prefix cache internal remove failed".into()))?;
+        drop(cache);
+
+        let matched_prefix = snapshot.prefix_len;
+        match self.restore_kv_prefix_snapshot(foundry, session, &snapshot) {
+            Ok(()) => {
+                let mut cache = self.kv_prefix_cache.lock();
+                cache.entries.push_back(snapshot);
+                tracing::debug!(
+                    target: "metallic_foundry::model::executor",
+                    model = self.name(),
+                    cache_fingerprint = self.cache_namespace_fingerprint(),
+                    matched_prefix_tokens = matched_prefix,
+                    prompt_tokens = prompt_tokens.len(),
+                    cache_entries = cache.entries.len(),
+                    "KV prefix cache hit (token prefix fallback)"
+                );
+                Ok(Some(matched_prefix))
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "metallic_foundry::model::executor",
+                    model = self.name(),
+                    cache_fingerprint = self.cache_namespace_fingerprint(),
+                    matched_prefix_tokens = matched_prefix,
+                    prompt_tokens = prompt_tokens.len(),
+                    error = %err,
+                    "KV prefix cache restore failed (token prefix fallback); entry evicted"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) fn try_restore_kv_prefix_from_cache_key(
+        &self,
+        foundry: &mut Foundry,
+        session: &mut ModelSession,
+        key: &str,
+        prompt_tokens: &[u32],
+    ) -> Result<Option<usize>, MetalError> {
+        if !Self::kv_prefix_cache_enabled() || key.is_empty() {
+            return Ok(None);
+        }
+        let prompt_tokens_len = prompt_tokens.len();
+
+        let mut cache = self.kv_prefix_cache.lock();
+        let mut best_idx: Option<usize> = None;
+        let mut best_match_len: usize = 0;
+        let mut best_snapshot_len: usize = 0;
+        let mut best_mismatch_index: Option<usize> = None;
+        let mut best_mismatch_snapshot_token: Option<u32> = None;
+        let mut best_mismatch_prompt_token: Option<u32> = None;
+        let mut key_matches = 0usize;
+        let mut len_rejects = 0usize;
+        let mut zero_prefix_rejects = 0usize;
+        let mut token_mismatch_rejects = 0usize;
+        let mut closest_match_len = 0usize;
+        let mut closest_snapshot_len = 0usize;
+        let mut closest_mismatch_index: Option<usize> = None;
+        let mut closest_mismatch_snapshot_token: Option<u32> = None;
+        let mut closest_mismatch_prompt_token: Option<u32> = None;
+        for (idx, entry) in cache.entries.iter().enumerate() {
+            if entry.key.as_deref() != Some(key) {
+                continue;
+            }
+            key_matches = key_matches.saturating_add(1);
+            if entry.prefix_len == 0 || entry.prefix_len > prompt_tokens_len {
+                if entry.prefix_len == 0 {
+                    zero_prefix_rejects = zero_prefix_rejects.saturating_add(1);
+                } else {
+                    len_rejects = len_rejects.saturating_add(1);
+                }
+                continue;
+            }
+
+            let candidate_len = entry.prefix_len.min(entry.tokens.len());
+            let matched_prefix = entry
+                .tokens
+                .iter()
+                .zip(prompt_tokens.iter())
+                .take(candidate_len)
+                .take_while(|(a, b)| a == b)
+                .count();
+            let mismatch = if matched_prefix < candidate_len && matched_prefix < prompt_tokens_len {
+                Some((matched_prefix, entry.tokens[matched_prefix], prompt_tokens[matched_prefix]))
+            } else {
+                None
+            };
+            if matched_prefix >= closest_match_len {
+                closest_match_len = matched_prefix;
+                closest_snapshot_len = entry.prefix_len;
+                if let Some((idx, snapshot_token, prompt_token)) = mismatch {
+                    closest_mismatch_index = Some(idx);
+                    closest_mismatch_snapshot_token = Some(snapshot_token);
+                    closest_mismatch_prompt_token = Some(prompt_token);
+                } else {
+                    closest_mismatch_index = None;
+                    closest_mismatch_snapshot_token = None;
+                    closest_mismatch_prompt_token = None;
+                }
+            }
+            if matched_prefix == 0 {
+                token_mismatch_rejects = token_mismatch_rejects.saturating_add(1);
+                continue;
+            }
+            if matched_prefix >= best_match_len {
+                best_idx = Some(idx);
+                best_match_len = matched_prefix;
+                best_snapshot_len = entry.prefix_len;
+                if let Some((idx, snapshot_token, prompt_token)) = mismatch {
+                    best_mismatch_index = Some(idx);
+                    best_mismatch_snapshot_token = Some(snapshot_token);
+                    best_mismatch_prompt_token = Some(prompt_token);
+                } else {
+                    best_mismatch_index = None;
+                    best_mismatch_snapshot_token = None;
+                    best_mismatch_prompt_token = None;
+                }
+            }
+        }
+
+        let Some(idx) = best_idx else {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                key,
+                prompt_tokens = prompt_tokens_len,
+                key_matches,
+                len_rejects,
+                zero_prefix_rejects,
+                token_mismatch_rejects,
+                closest_match_len,
+                closest_snapshot_len,
+                closest_mismatch_index = ?closest_mismatch_index,
+                closest_mismatch_snapshot_token = ?closest_mismatch_snapshot_token,
+                closest_mismatch_prompt_token = ?closest_mismatch_prompt_token,
+                cache_entries = cache.entries.len(),
+                "KV prefix cache miss (keyed)"
+            );
+            return Ok(None);
+        };
+
+        let snapshot = cache
+            .entries
+            .remove(idx)
+            .ok_or_else(|| MetalError::OperationFailed("KV prefix cache keyed remove failed".into()))?;
+        drop(cache);
+
+        let matched_prefix = best_match_len;
+        match self.restore_kv_prefix_snapshot(foundry, session, &snapshot) {
+            Ok(()) => {
+                session.current_pos = matched_prefix;
+                let mut cache = self.kv_prefix_cache.lock();
+                cache.entries.push_back(snapshot);
+                tracing::debug!(
+                    target: "metallic_foundry::model::executor",
+                    model = self.name(),
+                    cache_fingerprint = self.cache_namespace_fingerprint(),
+                    key,
+                    matched_prefix_tokens = matched_prefix,
+                    snapshot_prefix_tokens = best_snapshot_len,
+                    prompt_tokens = prompt_tokens_len,
+                    partial = matched_prefix < best_snapshot_len,
+                    first_mismatch_index = ?best_mismatch_index,
+                    first_mismatch_snapshot_token = ?best_mismatch_snapshot_token,
+                    first_mismatch_prompt_token = ?best_mismatch_prompt_token,
+                    cache_entries = cache.entries.len(),
+                    "KV prefix cache hit (keyed)"
+                );
+                Ok(Some(matched_prefix))
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "metallic_foundry::model::executor",
+                    model = self.name(),
+                    cache_fingerprint = self.cache_namespace_fingerprint(),
+                    key,
+                    matched_prefix_tokens = matched_prefix,
+                    snapshot_prefix_tokens = best_snapshot_len,
+                    prompt_tokens = prompt_tokens_len,
+                    first_mismatch_index = ?best_mismatch_index,
+                    first_mismatch_snapshot_token = ?best_mismatch_snapshot_token,
+                    first_mismatch_prompt_token = ?best_mismatch_prompt_token,
+                    error = %err,
+                    "KV prefix cache restore failed (keyed); entry evicted"
+                );
+                Ok(None)
+            }
+        }
+    }
+
+    pub(crate) fn store_kv_prefix_in_cache(
+        &self,
+        foundry: &mut Foundry,
+        session: &mut ModelSession,
+        prompt_tokens: &[u32],
+        key: Option<&str>,
+    ) -> Result<(), MetalError> {
+        if !Self::kv_prefix_cache_enabled() || prompt_tokens.is_empty() {
+            return Ok(());
+        }
+
+        let prefix_len = prompt_tokens.len();
+        if session.current_pos < prefix_len {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                session_pos = session.current_pos,
+                prefix_len,
+                "KV prefix cache store skipped: session shorter than prefix"
+            );
+            return Ok(());
+        }
+
+        let Some(snapshot) = self.capture_kv_prefix_snapshot(foundry, session, prompt_tokens, prefix_len, key)? else {
+            return Ok(());
+        };
+
+        let max_entries = Self::kv_prefix_cache_max_entries();
+        let mut cache = self.kv_prefix_cache.lock();
+
+        let replaced = if let Some(key) = key {
+            if let Some(existing_idx) = cache.entries.iter().position(|e| e.key.as_deref() == Some(key)) {
+                cache.entries.remove(existing_idx);
+                true
+            } else {
+                false
+            }
+        } else if let Some(existing_idx) = cache.entries.iter().position(|e| e.tokens.as_ref() == snapshot.tokens.as_ref()) {
+            cache.entries.remove(existing_idx);
+            true
+        } else {
+            false
+        };
+
+        let evicted = if cache.entries.len() >= max_entries {
+            cache.entries.pop_front()
+        } else {
+            None
+        };
+
+        let stored_prefix = snapshot.prefix_len;
+        let stored_bytes = snapshot.bytes;
+        cache.entries.push_back(snapshot);
+
+        if let Some(evicted) = evicted {
+            tracing::debug!(
+                target: "metallic_foundry::model::executor",
+                model = self.name(),
+                cache_fingerprint = self.cache_namespace_fingerprint(),
+                evicted_prefix_tokens = evicted.prefix_len,
+                evicted_bytes = evicted.bytes,
+                max_entries,
+                "KV prefix cache eviction"
+            );
+        }
+
+        tracing::debug!(
+            target: "metallic_foundry::model::executor",
+            model = self.name(),
+            cache_fingerprint = self.cache_namespace_fingerprint(),
+            stored_prefix_tokens = stored_prefix,
+            stored_bytes,
+            replaced,
+            key = key.unwrap_or("<none>"),
+            cache_entries = cache.entries.len(),
+            max_entries,
+            "KV prefix cache store"
+        );
+
+        Ok(())
     }
 
     /// Prepare tensor bindings by:
@@ -1782,7 +2624,7 @@ impl CompiledModel {
         // Reuse the prepared session (weights + intermediates + persistent buffers) instead of
         // materializing everything per generation.
         self.initialize_session(foundry)?;
-        let mut session_guard = self.session.borrow_mut();
+        let mut session_guard = self.session.lock();
         let session = session_guard
             .as_mut()
             .ok_or_else(|| MetalError::OperationFailed("Foundry session missing after initialization".into()))?;
@@ -2003,7 +2845,10 @@ impl CompiledModel {
         // BATCHING: We batch multiple tokens into a single command buffer to amortize submission overhead.
         // We keep tokens on GPU (copying Sample -> Input) and only sync when the batch is full.
         let batch_size = if profiling_per_kernel { 1 } else { decode_batch_size() };
-        let sample_out_count = bindings.iter().filter(|(k, _)| k.starts_with("sample_out_")).count();
+        let sample_out_count = bindings
+            .iter()
+            .filter(|(k, _): &(&String, &TensorArg)| k.starts_with("sample_out_"))
+            .count();
         if batch_size > sample_out_count {
             return Err(MetalError::InvalidShape(format!(
                 "Decode batch_size {batch_size} exceeds session capacity {sample_out_count}. This typically means METALLIC_FOUNDRY_DECODE_BATCH_SIZE changed after model load."
@@ -2276,7 +3121,7 @@ impl CompiledModel {
         });
 
         // 2. Report Host Memory (Activations + KV Cache)
-        if let Some(session) = &*self.session.borrow() {
+        if let Some(session) = &*self.session.lock() {
             let mut tensor_pool_used = 0u64;
             let mut kv_pool_used = 0u64;
 
@@ -2294,7 +3139,7 @@ impl CompiledModel {
                 // TensorArg buffer is Option<MetalBuffer>
                 if let Some(buf) = &arg.buffer {
                     // Use Retained::as_ptr to get the raw pointer
-                    let ptr = buf.as_ptr_addr();
+                    let ptr = crate::types::Buffer::as_ptr_addr(buf);
 
                     // Skip if already counted (aliased bindings)
                     if !visited_ptrs.insert(ptr) {
@@ -2484,7 +3329,7 @@ mod tests {
         model.initialize_session(&mut foundry)?;
 
         {
-            let mut session_guard = model.session.borrow_mut();
+            let mut session_guard = model.session.lock();
             let session = session_guard.as_mut().unwrap();
 
             // Initial capacity should be 2048 (default) aligned to 128

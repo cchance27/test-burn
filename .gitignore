@@ -26,3 +26,4 @@ tools/metal_probes/.cache
 *.cpython*
 __pycache__
 .trae
+metallic.db

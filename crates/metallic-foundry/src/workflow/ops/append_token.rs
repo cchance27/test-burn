@@ -48,14 +48,17 @@ impl WorkflowOp for AppendTokenOp {
         // We attempt to read metrics from internal variables if they exist, otherwise 0
         let prefill_us = ctx.read_usize("_internal.prefill_us").unwrap_or(0);
         let setup_us = ctx.read_usize("_internal.setup_us").unwrap_or(0);
-        // Iteration duration is harder to track generically without a specific timer op context.
-        // Passing None for now.
+        let decode_us = ctx.read_usize("_internal.last_decode_us").unwrap_or(0);
 
         let should_continue = on_token(
             token,
             std::time::Duration::from_micros(prefill_us as u64),
             std::time::Duration::from_micros(setup_us as u64),
-            None,
+            if decode_us > 0 {
+                Some(std::time::Duration::from_micros(decode_us as u64))
+            } else {
+                None
+            },
         )?;
 
         if !should_continue {

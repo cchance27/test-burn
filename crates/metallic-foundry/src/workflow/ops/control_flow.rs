@@ -98,7 +98,8 @@ impl WorkflowOp for WhileOp {
         on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
     ) -> Result<WorkflowOpOutcome, MetalError> {
         let max_iters = if let Some(p) = &self.max_iterations {
-            Some(ctx.resolve_param_usize(p)?)
+            let resolved = ctx.resolve_param_usize(p)?;
+            if resolved == 0 { None } else { Some(resolved) }
         } else {
             None
         };
@@ -324,6 +325,7 @@ impl WorkflowOp for WhileBatchedOp {
             token: u32,
             stop_on_eos: bool,
             eos: u32,
+            decode_duration: Option<std::time::Duration>,
             on_token: &mut dyn FnMut(
                 u32,
                 std::time::Duration,
@@ -355,7 +357,7 @@ impl WorkflowOp for WhileBatchedOp {
                 token,
                 std::time::Duration::from_micros(prefill_us as u64),
                 std::time::Duration::from_micros(setup_us as u64),
-                None,
+                decode_duration,
             )
         }
 
@@ -455,24 +457,48 @@ impl WorkflowOp for WhileBatchedOp {
                 // Ensure we don't build an unbounded queue.
                 if pending.len() >= MAX_INFLIGHT {
                     if let Some(front) = pending.front() {
+                        let wait_start = std::time::Instant::now();
                         front.cmd.wait_until_completed();
+                        let waited = wait_start.elapsed();
+                        // Record time spent waiting on this decode batch; token callbacks below
+                        // receive an evenly distributed per-token decode duration estimate.
+                        let _ = waited;
                     }
                 }
 
                 // Drain any completed buffers in order.
-                while let Some(front) = pending.front() {
-                    if !front.cmd.is_completed()? {
+                while let Some(front_peek) = pending.front() {
+                    if !front_peek.cmd.is_completed()? {
                         break;
                     }
+                    let front = pending
+                        .pop_front()
+                        .ok_or_else(|| MetalError::InvalidOperation("WhileBatchedOp pending queue underflow".into()))?;
                     let expected = front.expected;
-                    pending.pop_front();
+                    let wait_start = std::time::Instant::now();
+                    front.cmd.wait_until_completed();
+                    let wait_duration = wait_start.elapsed();
+                    let per_token_decode = if expected > 0 {
+                        let denom = u32::try_from(expected).unwrap_or(u32::MAX).max(1);
+                        Some(wait_duration / denom)
+                    } else {
+                        None
+                    };
 
                     let mut drained = 0usize;
                     for _ in 0..expected {
                         match r.try_next()? {
                             Some(tok) => {
                                 drained += 1;
-                                if !append_and_emit(ctx, &self.output_tokens, tok, stop_on_eos, eos, on_token)? {
+                                if !append_and_emit(
+                                    ctx,
+                                    &self.output_tokens,
+                                    tok,
+                                    stop_on_eos,
+                                    eos,
+                                    per_token_decode,
+                                    on_token,
+                                )? {
                                     pending.clear();
                                     break 'outer;
                                 }
@@ -495,11 +521,19 @@ impl WorkflowOp for WhileBatchedOp {
                 }
             } else {
                 // Synchronous mode: wait and emit for this chunk.
+                let wait_start = std::time::Instant::now();
                 cmd.wait_until_completed();
+                let wait_duration = wait_start.elapsed();
 
                 if let Some(r) = stream_reader.as_mut() {
                     drained_tokens.clear();
                     r.drain_into(&mut drained_tokens)?;
+                    let per_token_decode = if drained_tokens.is_empty() {
+                        None
+                    } else {
+                        let denom = u32::try_from(drained_tokens.len()).unwrap_or(u32::MAX).max(1);
+                        Some(wait_duration / denom)
+                    };
                     if self.stream_async_poll && debug_poll {
                         tracing::info!(
                             target: "metallic_foundry::workflow::ops",
@@ -508,11 +542,25 @@ impl WorkflowOp for WhileBatchedOp {
                         );
                     }
                     for token in drained_tokens.iter().copied() {
-                        if !append_and_emit(ctx, &self.output_tokens, token, stop_on_eos, eos, on_token)? {
+                        if !append_and_emit(
+                            ctx,
+                            &self.output_tokens,
+                            token,
+                            stop_on_eos,
+                            eos,
+                            per_token_decode,
+                            on_token,
+                        )? {
                             break 'outer;
                         }
                     }
                 } else {
+                    let per_token_decode = if tokens.is_empty() {
+                        None
+                    } else {
+                        let denom = u32::try_from(tokens.len()).unwrap_or(u32::MAX).max(1);
+                        Some(wait_duration / denom)
+                    };
                     for t in tokens {
                         let token: u32 = match t {
                             TokenRef::Host(v) => v,
@@ -524,7 +572,15 @@ impl WorkflowOp for WhileBatchedOp {
                                 buf.read_scalar::<u32>()
                             }
                         };
-                        if !append_and_emit(ctx, &self.output_tokens, token, stop_on_eos, eos, on_token)? {
+                        if !append_and_emit(
+                            ctx,
+                            &self.output_tokens,
+                            token,
+                            stop_on_eos,
+                            eos,
+                            per_token_decode,
+                            on_token,
+                        )? {
                             break 'outer;
                         }
                     }
@@ -535,7 +591,15 @@ impl WorkflowOp for WhileBatchedOp {
         // Flush any remaining pending command buffers (async poll mode).
         if let Some(r) = stream_reader.as_mut().filter(|_| self.stream_async_poll) {
             while let Some(front) = pending.pop_front() {
+                let wait_start = std::time::Instant::now();
                 front.cmd.wait_until_completed();
+                let wait_duration = wait_start.elapsed();
+                let per_token_decode = if front.expected > 0 {
+                    let denom = u32::try_from(front.expected).unwrap_or(u32::MAX).max(1);
+                    Some(wait_duration / denom)
+                } else {
+                    None
+                };
                 for _ in 0..front.expected {
                     let Some(tok) = r.try_next()? else {
                         return Err(MetalError::InvalidOperation(
@@ -543,7 +607,15 @@ impl WorkflowOp for WhileBatchedOp {
                         ));
                     };
                     // No EOS stopping in async mode (guarded above).
-                    if !append_and_emit(ctx, &self.output_tokens, tok, stop_on_eos, eos, on_token)? {
+                    if !append_and_emit(
+                        ctx,
+                        &self.output_tokens,
+                        tok,
+                        stop_on_eos,
+                        eos,
+                        per_token_decode,
+                        on_token,
+                    )? {
                         break;
                     }
                 }

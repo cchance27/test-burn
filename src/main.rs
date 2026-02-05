@@ -489,7 +489,7 @@ fn main() -> AppResult<()> {
                                 }
 
                                 let workflow = workflow_override.as_ref().expect("workflow_override present");
-                                let mut runner = WorkflowRunner::new(&mut foundry, models);
+                                let mut runner = WorkflowRunner::new(models);
                                 let system = sys_prompt();
 
                                 for (turn_idx, turn_prompt) in prompts.iter().enumerate() {
@@ -565,7 +565,7 @@ fn main() -> AppResult<()> {
                                     };
 
                                     let gen_start = Instant::now();
-                                    match runner.run_streaming(workflow, inputs, &mut on_token) {
+                                    match runner.run_streaming(&mut foundry, workflow, inputs, &mut on_token) {
                                         Ok(_outputs) => {
                                             let _ = worker_tx.send(AppEvent::GenerationComplete {
                                                 total_generation_time: gen_start.elapsed(),
@@ -652,7 +652,7 @@ fn main() -> AppResult<()> {
                             }
 
                             let workflow = workflow_override.as_ref().expect("workflow_override present");
-                            let mut runner = WorkflowRunner::new(&mut foundry, models);
+                            let mut runner = WorkflowRunner::new(models);
 
                             let system = sys_prompt();
                             let mut is_first_turn = true;
@@ -772,7 +772,7 @@ fn main() -> AppResult<()> {
                                 };
 
                                 let gen_start = Instant::now();
-                                match runner.run_streaming(workflow, inputs, &mut on_token) {
+                                match runner.run_streaming(&mut foundry, workflow, inputs, &mut on_token) {
                                     Ok(_outputs) => {
                                         let _ = worker_tx.send(AppEvent::GenerationComplete {
                                             total_generation_time: gen_start.elapsed(),

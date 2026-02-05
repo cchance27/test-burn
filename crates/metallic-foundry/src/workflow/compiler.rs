@@ -1,5 +1,6 @@
 use std::sync::{OnceLock, RwLock};
 
+use metallic_sdk::debug::op_metrics_enabled;
 use rustc_hash::FxHashMap;
 use serde::de::DeserializeOwned;
 
@@ -24,6 +25,62 @@ struct MemoizedOp {
     inner: Box<dyn WorkflowOp>,
     spec: MemoizeSpec,
     cached: Option<(u64, rustc_hash::FxHashMap<String, super::Value>)>,
+}
+
+struct TimedOp {
+    op_name: String,
+    inner: Box<dyn WorkflowOp>,
+}
+
+impl TimedOp {
+    fn record_latency(
+        &self,
+        ctx: &mut super::runner::WorkflowExecutionContext<'_>,
+        elapsed_us: usize,
+    ) {
+        let metrics_val = ctx
+            .values
+            .entry("_internal.op_metrics".to_string())
+            .or_insert_with(|| super::Value::Map(rustc_hash::FxHashMap::default()));
+
+        let metrics_map = match metrics_val {
+            super::Value::Map(map) => map,
+            other => {
+                *other = super::Value::Map(rustc_hash::FxHashMap::default());
+                match other {
+                    super::Value::Map(map) => map,
+                    _ => return,
+                }
+            }
+        };
+
+        let op_val = metrics_map
+            .entry(self.op_name.clone())
+            .or_insert_with(|| super::Value::Map(rustc_hash::FxHashMap::default()));
+        let op_map = match op_val {
+            super::Value::Map(map) => map,
+            other => {
+                *other = super::Value::Map(rustc_hash::FxHashMap::default());
+                match other {
+                    super::Value::Map(map) => map,
+                    _ => return,
+                }
+            }
+        };
+
+        let count = op_map.get("count").and_then(super::Value::as_usize).unwrap_or(0).saturating_add(1);
+        let total_us = op_map
+            .get("total_us")
+            .and_then(super::Value::as_usize)
+            .unwrap_or(0)
+            .saturating_add(elapsed_us);
+        let max_us = op_map.get("max_us").and_then(super::Value::as_usize).unwrap_or(0).max(elapsed_us);
+
+        op_map.insert("count".to_string(), super::Value::Usize(count));
+        op_map.insert("total_us".to_string(), super::Value::Usize(total_us));
+        op_map.insert("max_us".to_string(), super::Value::Usize(max_us));
+        op_map.insert("last_us".to_string(), super::Value::Usize(elapsed_us));
+    }
 }
 
 impl MemoizedOp {
@@ -84,6 +141,32 @@ impl WorkflowOp for MemoizedOp {
             self.cached = Some((key, captured));
         }
         Ok(out)
+    }
+}
+
+impl WorkflowOp for TimedOp {
+    fn begin_run(&mut self, ctx: &mut super::runner::WorkflowExecutionContext<'_>) -> Result<(), MetalError> {
+        self.inner.begin_run(ctx)
+    }
+
+    fn memoize_spec(&self) -> Option<MemoizeSpec> {
+        // Preserve memoization behavior of the wrapped op.
+        self.inner.memoize_spec()
+    }
+
+    fn execute(
+        &mut self,
+        ctx: &mut super::runner::WorkflowExecutionContext<'_>,
+        on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
+    ) -> Result<super::ops::WorkflowOpOutcome, MetalError> {
+        let start = std::time::Instant::now();
+        let out = self.inner.execute(ctx, on_token);
+        self.record_latency(ctx, start.elapsed().as_micros() as usize);
+        out
+    }
+
+    fn reset(&mut self) {
+        self.inner.reset();
     }
 }
 
@@ -212,23 +295,34 @@ fn initialize_standard_ops(m: &mut FxHashMap<String, OpBuilder>) {
 fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<CompiledOp>, MetalError> {
     let mut ops: Vec<CompiledOp> = Vec::with_capacity(steps.len());
     let registry = get_registry().read().unwrap();
+    let enable_timing = op_metrics_enabled();
 
     for step in steps {
         if let Some(builder) = registry.get(step.op.as_str()) {
             let op = builder(step.params.clone())?;
-            if let Some(spec) = op.memoize_spec() {
-                ops.push(CompiledOp {
-                    name: step.op.clone(),
-                    op: Box::new(MemoizedOp {
-                        op_name: step.op.clone(),
-                        inner: op,
-                        spec,
-                        cached: None,
-                    }),
-                });
+            let op: Box<dyn WorkflowOp> = if let Some(spec) = op.memoize_spec() {
+                Box::new(MemoizedOp {
+                    op_name: step.op.clone(),
+                    inner: op,
+                    spec,
+                    cached: None,
+                })
             } else {
-                ops.push(CompiledOp { name: step.op.clone(), op });
-            }
+                op
+            };
+            // Wrap every op uniformly so latency accounting is centralized and consistent.
+            let op: Box<dyn WorkflowOp> = if enable_timing {
+                Box::new(TimedOp {
+                    op_name: step.op.clone(),
+                    inner: op,
+                })
+            } else {
+                op
+            };
+            ops.push(CompiledOp {
+                name: step.op.clone(),
+                op,
+            });
         } else {
             return Err(MetalError::InvalidOperation(format!("Unknown workflow op: {}", step.op)));
         }
@@ -241,5 +335,11 @@ impl CompiledWorkflow {
     pub(crate) fn compile(workflow: &WorkflowSpec) -> Result<Self, MetalError> {
         let ops = compile_steps(&workflow.steps)?;
         Ok(Self { ops })
+    }
+
+    pub(crate) fn reset(&mut self) {
+        for op in &mut self.ops {
+            op.op.reset();
+        }
     }
 }

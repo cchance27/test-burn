@@ -145,22 +145,46 @@ impl<'a> WorkflowExecutionContext<'a> {
     }
 }
 
-pub struct WorkflowRunner<'a> {
-    foundry: &'a mut Foundry,
+pub struct WorkflowRunner {
     models: FxHashMap<String, Arc<CompiledModel>>,
     compiled: Option<(u64, CompiledWorkflow)>,
 }
 
-impl<'a> WorkflowRunner<'a> {
-    pub fn new(foundry: &'a mut Foundry, models: FxHashMap<String, Arc<CompiledModel>>) -> Self {
-        Self {
-            foundry,
-            models,
-            compiled: None,
-        }
+fn value_u32_like(v: &Value) -> Option<u32> {
+    match v {
+        Value::U32(n) => Some(*n),
+        Value::Usize(n) => (*n).try_into().ok(),
+        _ => None,
+    }
+}
+
+fn workflow_input_default_u32(workflow: &WorkflowSpec, name: &str) -> Option<u32> {
+    workflow
+        .inputs
+        .iter()
+        .find(|i| i.name == name)
+        .and_then(|i| i.default.as_ref())
+        .and_then(|d| d.as_u64())
+        .and_then(|n| u32::try_from(n).ok())
+}
+
+fn should_override_with_inferred_eos(
+    eos_was_explicitly_supplied: bool,
+    current_eos: Option<u32>,
+    workflow_default_eos: Option<u32>,
+) -> bool {
+    if !eos_was_explicitly_supplied {
+        return true;
+    }
+    matches!((current_eos, workflow_default_eos), (Some(current), Some(default)) if current == default)
+}
+
+impl WorkflowRunner {
+    pub fn new(models: FxHashMap<String, Arc<CompiledModel>>) -> Self {
+        Self { models, compiled: None }
     }
 
-    pub fn load_resources(&mut self, spec: &WorkflowSpec) -> Result<(), MetalError> {
+    pub fn load_resources(&mut self, foundry: &mut Foundry, spec: &WorkflowSpec) -> Result<(), MetalError> {
         if let Some(resources) = &spec.resources {
             for model_spec in &resources.models {
                 if self.models.contains_key(&model_spec.id) {
@@ -172,7 +196,7 @@ impl<'a> WorkflowRunner<'a> {
                 let model = ModelBuilder::new()
                     .with_spec_file(std::path::PathBuf::from(&model_spec.spec_path))?
                     .with_model(model_loaded)
-                    .build(self.foundry)?;
+                    .build(foundry)?;
 
                 self.models.insert(model_spec.id.clone(), Arc::new(model));
             }
@@ -182,6 +206,7 @@ impl<'a> WorkflowRunner<'a> {
 
     pub fn run(
         &mut self,
+        foundry: &mut Foundry,
         spec: &WorkflowSpec,
         mut inputs_raw: std::collections::HashMap<String, String>,
         on_token: &mut dyn FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
@@ -191,7 +216,7 @@ impl<'a> WorkflowRunner<'a> {
             inputs.insert(k, Value::Text(v.into()));
         }
 
-        let values = self.run_streaming(spec, inputs, on_token)?;
+        let values = self.run_streaming(foundry, spec, inputs, on_token)?;
 
         if let Some(return_key) = &spec.return_value {
             values
@@ -203,8 +228,16 @@ impl<'a> WorkflowRunner<'a> {
         }
     }
 
+    /// Resets the internal state of the compiled workflow's operations (e.g. chat history counters).
+    pub fn reset(&mut self) {
+        if let Some((_, compiled)) = &mut self.compiled {
+            compiled.reset();
+        }
+    }
+
     pub fn run_streaming(
         &mut self,
+        foundry: &mut Foundry,
         workflow: &WorkflowSpec,
         mut inputs: FxHashMap<String, Value>,
         mut on_token: impl FnMut(u32, std::time::Duration, std::time::Duration, Option<std::time::Duration>) -> Result<bool, MetalError>,
@@ -277,7 +310,9 @@ impl<'a> WorkflowRunner<'a> {
         }
 
         // Ensure any resources defined in the workflow are loaded.
-        self.load_resources(workflow)?;
+        self.load_resources(foundry, workflow)?;
+
+        let eos_was_explicitly_supplied = inputs.contains_key("eos_token");
 
         // Apply defaults from workflow inputs.
         for inp in &workflow.inputs {
@@ -305,13 +340,14 @@ impl<'a> WorkflowRunner<'a> {
             }
         }
 
-        // Convenience: infer `eos_token` from the default model's tokenizer if not explicitly provided.
+        // Convenience: infer `eos_token` from the default model's tokenizer.
         //
         // Rationale:
         // - Workflows are model-agnostic, but token IDs (EOS/BOS/etc.) are tokenizer-defined.
-        // - The CLI already knows the model/tokenizer, so passing `eos_token` is redundant most of the time.
+        // - Callers often persist workflow defaults as "inputs", which should not pin an incorrect
+        //   model-specific EOS value (e.g. 151645 for non-Qwen models).
         // - If multiple models are loaded and `workflow.default_model` is missing, we cannot infer safely.
-        if !inputs.contains_key("eos_token") && workflow.inputs.iter().any(|i| i.name == "eos_token") {
+        if workflow.inputs.iter().any(|i| i.name == "eos_token") {
             let model_id = if let Some(id) = workflow.default_model.as_deref() {
                 Some(id)
             } else if self.models.len() == 1 {
@@ -325,7 +361,21 @@ impl<'a> WorkflowRunner<'a> {
                 && let Ok(tok) = model.tokenizer()
                 && let Some(eos) = tok.special_tokens().eos_token_id
             {
-                inputs.insert("eos_token".to_string(), Value::U32(eos));
+                let workflow_default_eos = workflow_input_default_u32(workflow, "eos_token");
+                let current_eos = inputs.get("eos_token").and_then(value_u32_like);
+                if should_override_with_inferred_eos(eos_was_explicitly_supplied, current_eos, workflow_default_eos) {
+                    if let Some(existing) = current_eos
+                        && existing != eos
+                    {
+                        tracing::debug!(
+                            "Overriding eos_token {} -> {} using tokenizer metadata for model '{}'",
+                            existing,
+                            eos,
+                            model_id
+                        );
+                    }
+                    inputs.insert("eos_token".to_string(), Value::U32(eos));
+                }
             }
         }
 
@@ -338,7 +388,7 @@ impl<'a> WorkflowRunner<'a> {
 
         let mut ctx = WorkflowExecutionContext {
             workflow,
-            foundry: self.foundry,
+            foundry,
             models: &self.models,
             values: inputs,
             return_key: None,
@@ -367,5 +417,26 @@ impl<'a> WorkflowRunner<'a> {
         }
 
         Ok(ctx.values)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_override_with_inferred_eos;
+
+    #[test]
+    fn inferred_eos_used_when_not_explicitly_supplied() {
+        assert!(should_override_with_inferred_eos(false, Some(151645), Some(151645)));
+        assert!(should_override_with_inferred_eos(false, None, Some(151645)));
+    }
+
+    #[test]
+    fn inferred_eos_used_when_supplied_value_matches_workflow_default() {
+        assert!(should_override_with_inferred_eos(true, Some(151645), Some(151645)));
+    }
+
+    #[test]
+    fn explicit_non_default_eos_is_preserved() {
+        assert!(!should_override_with_inferred_eos(true, Some(2), Some(151645)));
     }
 }

@@ -178,7 +178,7 @@ pub fn generate_streaming_from_tokens_with_workflow(
             Ok(true)
         };
 
-    let mut runner = WorkflowRunner::new(foundry, models.clone());
+    let mut runner = WorkflowRunner::new(models.clone());
     let wf_cfg = WorkflowRunnerConfig { workflow };
 
     let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
@@ -208,7 +208,7 @@ pub fn generate_streaming_from_tokens_with_workflow(
     }
     inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
 
-    let _outputs = runner.run_streaming(&wf_cfg.workflow, inputs, &mut callback)?;
+    let _outputs = runner.run_streaming(foundry, &wf_cfg.workflow, inputs, &mut callback)?;
 
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
@@ -251,7 +251,7 @@ pub fn generate_streaming_with_workflow_from_prompt(
             Ok(true)
         };
 
-    let mut runner = WorkflowRunner::new(foundry, models.clone());
+    let mut runner = WorkflowRunner::new(models.clone());
     let wf_cfg = WorkflowRunnerConfig { workflow };
 
     let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
@@ -283,7 +283,7 @@ pub fn generate_streaming_with_workflow_from_prompt(
     }
     inputs.insert("seed".to_string(), Value::U32(cfg.seed.unwrap_or_else(rand::random)));
 
-    let _outputs = runner.run_streaming(&wf_cfg.workflow, inputs, &mut callback)?;
+    let _outputs = runner.run_streaming(foundry, &wf_cfg.workflow, inputs, &mut callback)?;
 
     let total_generation_time = generation_start.elapsed();
     let _ = tx.send(AppEvent::GenerationComplete { total_generation_time });
