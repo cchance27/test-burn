@@ -19,6 +19,7 @@ pub mod instrument;
 pub mod kernel_registry;
 pub mod metals;
 pub mod model;
+pub mod model_routing;
 pub mod policy;
 pub mod pool;
 pub mod spec;

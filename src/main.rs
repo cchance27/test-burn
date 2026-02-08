@@ -303,32 +303,20 @@ fn main() -> AppResult<()> {
                             .and_then(|w| w.resources.as_ref())
                             .is_some_and(|r| !r.models.is_empty());
 
-                        let spec_path: Option<&'static str> = if has_workflow_model_resources {
+                        let mut single_model_loaded: Option<Box<dyn metallic_loader::LoadedModel>> = None;
+                        let routed_spec_path: Option<PathBuf> = if has_workflow_model_resources {
                             None
                         } else {
                             worker_tx.send(AppEvent::StatusUpdate("Detecting architecture...".to_string()))?;
-                            let arch_name = gguf
-                                .metadata()
-                                .entries
-                                .get("general.architecture")
-                                .expect("Architecture not found in GGUF metadata")
-                                .clone();
-
-                            worker_tx.send(AppEvent::StatusUpdate(format!("Detected architecture: {:?}", arch_name)))?;
-
-                            // Determine spec file path
-                            if let metallic_context::gguf::GGUFValue::String(arch) = arch_name.clone() {
-                                if arch.contains("qwen2") {
-                                    Some("models/qwen25.json")
-                                } else {
-                                    return Err(anyhow::anyhow!("Unsupported architecture for Foundry: {:?}", arch_name));
-                                }
-                            } else {
-                                return Err(anyhow::anyhow!(
-                                    "Architecture not listed in GGUF metadata for Foundry: {:?}",
-                                    arch_name
-                                ));
-                            }
+                            let model_loaded = ModelLoader::from_file(&gguf_path)?;
+                            let routing = metallic_foundry::model_routing::resolve_model_routing_from_loaded_model(model_loaded.as_ref())
+                                .map_err(anyhow::Error::msg)?;
+                            worker_tx.send(AppEvent::StatusUpdate(format!(
+                                "Detected architecture: {} (rule: {})",
+                                routing.architecture, routing.matched_rule
+                            )))?;
+                            single_model_loaded = Some(model_loaded);
+                            Some(routing.spec_path)
                         };
 
                         worker_tx.send(AppEvent::StatusUpdate("Initializing Foundry...".to_string()))?;
@@ -352,10 +340,12 @@ fn main() -> AppResult<()> {
                                 models_owned.insert(m.id.clone(), Arc::new(model));
                             }
                         } else {
-                            let spec_path = spec_path.expect("spec_path required for single-model Foundry");
-                            let model_loaded = ModelLoader::from_file(&gguf_path)?;
+                            let spec_path = routed_spec_path.expect("routed_spec_path required for single-model Foundry");
+                            let model_loaded = single_model_loaded
+                                .take()
+                                .ok_or_else(|| anyhow::anyhow!("single-model Foundry expected a preloaded model"))?;
                             let model = ModelBuilder::new()
-                                .with_spec_file(PathBuf::from(spec_path))?
+                                .with_spec_file(spec_path)?
                                 .with_model(model_loaded)
                                 .build(&mut foundry)?;
                             let model_id = workflow_override

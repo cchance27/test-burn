@@ -10,7 +10,7 @@ use std::{
 
 use anyhow::Result;
 use metallic_foundry::{
-    Foundry, model::{CompiledModel, ModelBuilder}, workflow::{Value, WorkflowRunner, WorkflowSpec}
+    Foundry, model::{CompiledModel, ModelBuilder}, model_routing::resolve_model_routing_from_loaded_model, workflow::{Value, WorkflowRunner, WorkflowSpec}
 };
 use metallic_loader::ModelLoader;
 use metallic_sdk::debug::op_metrics_enabled;
@@ -138,39 +138,10 @@ pub struct LoadedModelState {
 /// Result of model loading operation.
 pub type LoadModelResult = Result<LoadedModelState, String>;
 
-/// Find the spec file path for a given architecture string.
-fn find_spec_path_for_architecture(arch_str: &str) -> Result<PathBuf, String> {
-    tracing::info!("Detected architecture: {}", arch_str);
-
-    // Map architecture to spec file
-    let spec_filename = if arch_str.contains("qwen2") {
-        "qwen25.json"
-    } else if arch_str.contains("llama") {
-        "llama.json"
-    } else {
-        return Err(format!("Unsupported architecture: {}", arch_str));
-    };
-
-    let spec_path = std::env::current_dir()
-        .map(|cwd| cwd.join("models").join(spec_filename))
-        .unwrap_or_else(|_| PathBuf::from("models").join(spec_filename));
-
-    if !spec_path.exists() {
-        return Err(format!("Spec file not found: {:?}", spec_path));
-    }
-
-    Ok(spec_path)
-}
-
-/// Load the multi-turn chat workflow.
-fn load_multiturn_workflow() -> Result<WorkflowSpec, String> {
-    let workflow_path = std::env::current_dir()
-        .map(|cwd| cwd.join("crates/metallic-foundry/workflows/multiturn_chat.json"))
-        .unwrap_or_else(|_| PathBuf::from("crates/metallic-foundry/workflows/multiturn_chat.json"));
-
+fn load_workflow(workflow_path: &Path) -> Result<WorkflowSpec, String> {
     tracing::debug!("Loading workflow from {:?}", workflow_path);
 
-    let file = std::fs::File::open(&workflow_path).map_err(|e| format!("Failed to open workflow file {:?}: {}", workflow_path, e))?;
+    let file = std::fs::File::open(workflow_path).map_err(|e| format!("Failed to open workflow file {:?}: {}", workflow_path, e))?;
     serde_json::from_reader(file).map_err(|e| format!("Failed to parse workflow: {}", e))
 }
 
@@ -185,14 +156,11 @@ pub fn load_model(gguf_path: &Path, system_prompt: Option<String>) -> LoadModelR
     tracing::info!("Loading GGUF model...");
     let model_loaded = ModelLoader::from_file(gguf_path).map_err(|e| format!("Failed to load model: {}", e))?;
 
-    // 2. Get architecture from the loaded model
-    let arch_str = model_loaded
-        .architecture()
-        .ok_or_else(|| "Architecture not found in model metadata".to_string())?;
-
-    // 3. Find spec file for the model architecture
-    let spec_path = find_spec_path_for_architecture(arch_str)?;
-    tracing::debug!("Using spec file: {:?}", spec_path);
+    // 2. Resolve architecture routing (spec + workflow) from shared registry.
+    let routing = resolve_model_routing_from_loaded_model(model_loaded.as_ref())?;
+    tracing::info!("Detected architecture: {} (rule={})", routing.architecture, routing.matched_rule);
+    tracing::debug!("Using spec file: {:?}", routing.spec_path);
+    tracing::debug!("Using workflow file: {:?}", routing.workflow_path);
 
     // 4. Initialize Foundry
     tracing::info!("Initializing Foundry...");
@@ -201,7 +169,7 @@ pub fn load_model(gguf_path: &Path, system_prompt: Option<String>) -> LoadModelR
     // 5. Build the compiled model
     tracing::info!("Building compiled model...");
     let model = ModelBuilder::new()
-        .with_spec_file(spec_path)
+        .with_spec_file(routing.spec_path.clone())
         .map_err(|e| format!("Failed to load spec file: {}", e))?
         .with_model(model_loaded)
         .build_lazy()
@@ -213,8 +181,8 @@ pub fn load_model(gguf_path: &Path, system_prompt: Option<String>) -> LoadModelR
     let mut models = FxHashMap::default();
     models.insert("llm".to_string(), Arc::clone(&model));
 
-    // 7. Load the multi-turn chat workflow
-    let workflow = load_multiturn_workflow()?;
+    // 7. Load the routed workflow.
+    let workflow = load_workflow(&routing.workflow_path)?;
 
     tracing::info!("Model loaded successfully");
 

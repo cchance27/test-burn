@@ -1,14 +1,11 @@
-use rustc_hash::FxHashMap;
 use std::hash::{Hash, Hasher};
 
+use rustc_hash::FxHashMap;
+
 use crate::{
-    error::MetalError,
-    template::Message,
-    workflow::{
-        Value,
-        ops::{WorkflowOp, WorkflowOpOutcome},
-        runner::WorkflowExecutionContext,
-    },
+    error::MetalError, template::Message, workflow::{
+        Value, ops::{WorkflowOp, WorkflowOpOutcome}, runner::WorkflowExecutionContext
+    }
 };
 
 pub(crate) struct FormatChatOp {
@@ -195,10 +192,7 @@ fn conversation_key_from_ctx(ctx: &WorkflowExecutionContext<'_>) -> Option<Strin
 fn format_qwen_messages(messages: &[Message], add_generation_prompt: bool) -> String {
     let mut cap = 0usize;
     for m in messages {
-        cap = cap
-            .saturating_add(m.role.len())
-            .saturating_add(m.content.len())
-            .saturating_add(32);
+        cap = cap.saturating_add(m.role.len()).saturating_add(m.content.len()).saturating_add(32);
     }
     let mut s = String::with_capacity(cap.saturating_add(32));
     for m in messages {
@@ -244,24 +238,14 @@ fn compute_kv_prefix_keys(
         .iter()
         .find(|m| m.role == "system")
         .map(|m| m.content.as_str())
-        .or_else(|| {
-            full_messages
-                .iter()
-                .find(|m| m.role == "system")
-                .map(|m| m.content.as_str())
-        })
+        .or_else(|| full_messages.iter().find(|m| m.role == "system").map(|m| m.content.as_str()))
         .or(workflow_system_prompt);
     let Some(system_content) = system_content else {
         let user_content = messages_to_render
             .iter()
             .find(|m| m.role == "user")
             .map(|m| m.content.as_str())
-            .or_else(|| {
-                full_messages
-                    .iter()
-                    .find(|m| m.role == "user")
-                    .map(|m| m.content.as_str())
-            });
+            .or_else(|| full_messages.iter().find(|m| m.role == "user").map(|m| m.content.as_str()));
         if let Some(user_content) = user_content {
             let primary = hash_message_key("user", add_generation_prompt, &[("user", user_content)]);
             return (Some(primary), None);
@@ -273,12 +257,7 @@ fn compute_kv_prefix_keys(
         .iter()
         .find(|m| m.role == "user")
         .map(|m| m.content.as_str())
-        .or_else(|| {
-            full_messages
-                .iter()
-                .find(|m| m.role == "user")
-                .map(|m| m.content.as_str())
-        });
+        .or_else(|| full_messages.iter().find(|m| m.role == "user").map(|m| m.content.as_str()));
     let (primary, base) = if let Some(user_content) = user_content {
         let primary = hash_message_key(
             "system_user",
@@ -287,11 +266,7 @@ fn compute_kv_prefix_keys(
         );
         // Base key intentionally uses an empty user-content scaffold so warmup and first-turn
         // requests share a stable prefix cache key without depending on user text.
-        let base = hash_message_key(
-            "system_user",
-            add_generation_prompt,
-            &[("system", system_content), ("user", "")],
-        );
+        let base = hash_message_key("system_user", add_generation_prompt, &[("system", system_content), ("user", "")]);
         (primary, base)
     } else {
         let base = hash_message_key("system", false, &[("system", system_content)]);
@@ -305,12 +280,8 @@ fn render_messages_with_tokenizer(
     tokenizer: &crate::BPETokenizer,
     messages: &[Message],
     add_generation_prompt: bool,
-    prefer_qwen_delta_canonical: bool,
 ) -> Result<(String, &'static str), MetalError> {
     let has_qwen_markers = tokenizer.has_token("<|im_start|>") && tokenizer.has_token("<|im_end|>");
-    if prefer_qwen_delta_canonical {
-        return Ok((format_qwen_messages(messages, add_generation_prompt), "qwen_delta_canonical"));
-    }
 
     if let Some(template) = tokenizer.chat_template() {
         let bos_token = tokenizer
@@ -332,13 +303,55 @@ fn render_messages_with_tokenizer(
     }
 
     Ok((
-        messages
-            .iter()
-            .map(|m| m.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n"),
+        messages.iter().map(|m| m.content.as_str()).collect::<Vec<_>>().join("\n"),
         "plain_join",
     ))
+}
+
+fn longest_common_prefix_len(lhs: &[u32], rhs: &[u32]) -> usize {
+    lhs.iter().zip(rhs.iter()).take_while(|(a, b)| a == b).count()
+}
+
+fn compute_template_lcp_delta(
+    tokenizer: &crate::BPETokenizer,
+    full_messages: &[Message],
+    already_rendered_messages: usize,
+    add_generation_prompt: bool,
+    conversation_id: Option<&str>,
+) -> Result<Option<String>, MetalError> {
+    if already_rendered_messages == 0 || already_rendered_messages > full_messages.len() {
+        return Ok(None);
+    }
+    if tokenizer.chat_template().is_none() {
+        return Ok(None);
+    }
+
+    let prev_messages = &full_messages[..already_rendered_messages];
+    // If the prior state did not end with an assistant turn, include a generation prompt
+    // so the "already rendered" side more closely matches the in-session state.
+    let prev_add_generation_prompt = prev_messages.last().is_some_and(|m| m.role != "assistant");
+
+    let (prev_rendered, prev_path) = render_messages_with_tokenizer(tokenizer, prev_messages, prev_add_generation_prompt)?;
+    let (curr_rendered, curr_path) = render_messages_with_tokenizer(tokenizer, full_messages, add_generation_prompt)?;
+    if prev_path != "chat_template" || curr_path != "chat_template" {
+        return Ok(None);
+    }
+
+    let prev_tokens = tokenizer.encode(&prev_rendered)?;
+    let curr_tokens = tokenizer.encode(&curr_rendered)?;
+    let lcp_len = longest_common_prefix_len(&prev_tokens, &curr_tokens);
+    let delta_tokens = &curr_tokens[lcp_len..];
+    tracing::debug!(
+        target: "metallic_foundry::workflow::ops::format_chat",
+        conversation_id = conversation_id.unwrap_or("<default>"),
+        prev_tokens = prev_tokens.len(),
+        curr_tokens = curr_tokens.len(),
+        lcp_tokens = lcp_len,
+        delta_tokens = delta_tokens.len(),
+        "format_chat template LCP delta"
+    );
+    let delta = tokenizer.decode_lossless(delta_tokens)?;
+    Ok(Some(delta))
 }
 
 impl WorkflowOp for FormatChatOp {
@@ -434,17 +447,28 @@ impl WorkflowOp for FormatChatOp {
         let model = ctx.resolve_model(model_id.as_deref())?;
         let tokenizer = model.tokenizer()?;
         let add_generation_prompt = self.add_generation_prompt && !messages_slice.is_empty();
-        let has_qwen_markers = tokenizer.has_token("<|im_start|>") && tokenizer.has_token("<|im_end|>");
-        let use_qwen_delta_canonical = mode == "delta"
+        let already_rendered_messages = seen_before.saturating_add(selection.skipped_assistant_prefix);
+        let lcp_delta = if mode == "delta"
+            && matches!(selection.kind, RenderSelectionKind::DeltaFullGrowthSuffix)
             && system_prompt_rendered
-            && !messages_to_render.is_empty()
-            && messages_to_render.first().map(|m| m.role.as_str()) != Some("system")
-            && has_qwen_markers;
+            && messages.len() > already_rendered_messages
+        {
+            compute_template_lcp_delta(
+                &tokenizer,
+                &messages,
+                already_rendered_messages,
+                add_generation_prompt,
+                conversation_key.as_deref(),
+            )?
+        } else {
+            None
+        };
 
-        // For Qwen-like tokenizers in delta mode, render suffix with canonical format to avoid
-        // template-side default system insertion when suffix starts with a user turn.
-        let (formatted, render_path) =
-            render_messages_with_tokenizer(&tokenizer, &messages_to_render, add_generation_prompt, use_qwen_delta_canonical)?;
+        let (formatted, render_path) = if let Some(delta) = lcp_delta {
+            (delta, "chat_template_lcp_delta")
+        } else {
+            render_messages_with_tokenizer(&tokenizer, &messages_to_render, add_generation_prompt)?
+        };
 
         let (kv_prefix_key, kv_prefix_base_key) = compute_kv_prefix_keys(
             mode.as_str(),
@@ -459,7 +483,8 @@ impl WorkflowOp for FormatChatOp {
             ctx.values.insert(KV_PREFIX_KEY_VAR.to_string(), Value::Text(key.as_str().into()));
         }
         if let Some(key) = kv_prefix_base_key.as_ref() {
-            ctx.values.insert(KV_PREFIX_BASE_KEY_VAR.to_string(), Value::Text(key.as_str().into()));
+            ctx.values
+                .insert(KV_PREFIX_BASE_KEY_VAR.to_string(), Value::Text(key.as_str().into()));
         }
 
         {
@@ -513,6 +538,10 @@ impl WorkflowOp for FormatChatOp {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeSet, path::PathBuf};
+
+    use metallic_loader::ModelLoader;
+
     use super::*;
 
     fn msg_with(role: &str, content: &str) -> Message {
@@ -520,6 +549,36 @@ mod tests {
             role: role.to_string(),
             content: content.to_string(),
         }
+    }
+
+    fn char_level_tokenizer_with_template(template: &str, samples: &[&str]) -> crate::BPETokenizer {
+        let mut chars = BTreeSet::new();
+        for sample in samples {
+            for ch in sample.chars() {
+                chars.insert(ch);
+            }
+        }
+        for ch in template.chars() {
+            chars.insert(ch);
+        }
+
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0_u32, "?".to_string());
+        let mut next_id = 1_u32;
+        for ch in chars {
+            vocab.insert(next_id, ch.to_string());
+            next_id = next_id.saturating_add(1);
+        }
+
+        crate::BPETokenizer::new(
+            vocab,
+            Vec::new(),
+            FxHashMap::default(),
+            crate::tokenizer::SpecialTokens::default(),
+            false,
+            Some(template.to_string()),
+        )
+        .expect("tokenizer should build")
     }
 
     #[test]
@@ -633,11 +692,81 @@ mod tests {
             Some("Alloy system"),
             true,
         );
-        let expected_primary =
-            hash_message_key("system_user", true, &[("system", "Alloy system"), ("user", "hello")]);
-        let expected_base =
-            hash_message_key("system_user", true, &[("system", "Alloy system"), ("user", "")]);
+        let expected_primary = hash_message_key("system_user", true, &[("system", "Alloy system"), ("user", "hello")]);
+        let expected_base = hash_message_key("system_user", true, &[("system", "Alloy system"), ("user", "")]);
         assert_eq!(primary.as_deref(), Some(expected_primary.as_str()));
         assert_eq!(base.as_deref(), Some(expected_base.as_str()));
+    }
+
+    #[test]
+    fn longest_common_prefix_len_tokenwise() {
+        let lhs = vec![1_u32, 2, 3, 9];
+        let rhs = vec![1_u32, 2, 4];
+        assert_eq!(longest_common_prefix_len(&lhs, &rhs), 2);
+    }
+
+    #[test]
+    fn template_lcp_delta_matches_qwen_suffix_for_user_turn() {
+        // Canonical Qwen-style chat template shape.
+        let template = "{% for message in messages %}<|im_start|>{{ message.role }}\n{{ message.content }}<|im_end|>\n{% endfor %}{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}";
+        let full = vec![
+            msg_with("system", "s"),
+            msg_with("user", "u1"),
+            msg_with("assistant", "a1"),
+            msg_with("user", "u2"),
+        ];
+        let prev_render = format_qwen_messages(&full[..3], false);
+        let curr_render = format_qwen_messages(&full, true);
+        let expected_delta = format_qwen_messages(&full[3..], true);
+        let tokenizer = char_level_tokenizer_with_template(template, &[&prev_render, &curr_render, &expected_delta]);
+
+        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-1"))
+            .expect("lcp delta should compute")
+            .expect("lcp delta should exist");
+        let expected_tokens = tokenizer.encode(&expected_delta).expect("expected tokens");
+        let delta_tokens = tokenizer.encode(&delta).expect("delta tokens");
+        assert_eq!(delta_tokens, expected_tokens);
+    }
+
+    #[test]
+    fn template_lcp_delta_matches_qwen_real_template_when_available() {
+        let gguf_path = std::env::var("METALLIC_QWEN_GGUF_TEST_PATH").ok().map(PathBuf::from).or_else(|| {
+            std::env::current_dir()
+                .ok()
+                .map(|cwd| cwd.join("models/qwen2.5-coder-0.5b-instruct-q4_0.gguf"))
+        });
+        let Some(gguf_path) = gguf_path else {
+            return;
+        };
+        if !gguf_path.exists() {
+            return;
+        }
+
+        let model_loaded = match ModelLoader::from_file(&gguf_path) {
+            Ok(model) => model,
+            Err(_) => return,
+        };
+        let tokenizer = match crate::BPETokenizer::from_metadata(model_loaded.metadata()) {
+            Ok(tok) => tok,
+            Err(_) => return,
+        };
+        if tokenizer.chat_template().is_none() {
+            return;
+        }
+
+        let full = vec![
+            msg_with("system", "Alloy system"),
+            msg_with("user", "create a js hello world"),
+            msg_with("assistant", "console.log('Hello World');"),
+            msg_with("user", "now in rustlang"),
+        ];
+        let expected_delta = format_qwen_messages(&full[3..], true);
+        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-1"))
+            .expect("lcp delta should compute")
+            .expect("lcp delta should exist");
+
+        let expected_tokens = tokenizer.encode(&expected_delta).expect("expected tokens");
+        let delta_tokens = tokenizer.encode(&delta).expect("delta tokens");
+        assert_eq!(delta_tokens, expected_tokens);
     }
 }

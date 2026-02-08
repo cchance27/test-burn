@@ -101,16 +101,11 @@ impl WorkflowOp for PrefillOp {
             chunk_count,
             cache_hit_prefix_tokens,
             cache_lookup_path,
-        ) =
-            model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
-                let mode = prefill_mode.as_str();
-                let original_start_pos = session.current_pos;
-                let (prompt_tokens, token_source, cache_hit_prefix_tokens, cache_lookup_path): (
-                    &[u32],
-                    &'static str,
-                    usize,
-                    &'static str,
-                ) = match mode {
+        ) = model.with_session_mut(ctx.foundry, |foundry: &mut Foundry, session| {
+            let mode = prefill_mode.as_str();
+            let original_start_pos = session.current_pos;
+            let (prompt_tokens, token_source, cache_hit_prefix_tokens, cache_lookup_path): (&[u32], &'static str, usize, &'static str) =
+                match mode {
                     "delta" => {
                         let mut start_pos = original_start_pos;
                         let mut prompt_tokens = prompt_tokens_full;
@@ -204,276 +199,278 @@ impl WorkflowOp for PrefillOp {
                         )));
                     }
                 };
-                let start_pos = session.current_pos;
-                let prompt_len = prompt_tokens.len();
-                let max_new_tokens = ctx.values.get("max_tokens").and_then(|v| v.as_usize()).unwrap_or(0);
-                let required_len = start_pos.saturating_add(prompt_len).saturating_add(max_new_tokens);
+            let start_pos = session.current_pos;
+            let prompt_len = prompt_tokens.len();
+            let max_new_tokens = ctx.values.get("max_tokens").and_then(|v| v.as_usize()).unwrap_or(0);
+            let required_len = start_pos.saturating_add(prompt_len).saturating_add(max_new_tokens);
+            tracing::debug!(
+                target: "metallic_foundry::workflow::ops::prefill",
+                conversation_id = conversation_id.as_str(),
+                mode,
+                token_source,
+                cache_hit_prefix_tokens,
+                cache_lookup_path,
+                kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
+                kv_prefix_base_key = kv_prefix_base_key.as_deref().unwrap_or("<none>"),
+                prompt_tokens_full = prompt_tokens_full.len(),
+                prompt_tokens_selected = prompt_len,
+                start_pos,
+                max_new_tokens,
+                required_len,
+                "prefill prompt selection"
+            );
+
+            model.ensure_kv_capacity(
+                foundry,
+                &mut session.bindings,
+                &mut session.fast_bindings,
+                &mut session.context_config,
+                start_pos,
+                required_len,
+            )?;
+
+            if prompt_len + start_pos > session.context_config.max_context_len {
+                return Err(MetalError::InvalidShape(format!(
+                    "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_context_len {}",
+                    session.context_config.max_context_len
+                )));
+            }
+
+            let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+            let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap();
+            input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
+
+            // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
+            model.set_int_global(&mut session.bindings, &self.m_key, 1);
+            model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
+            model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos);
+            if self.apply_derived_globals {
+                model.apply_derived_globals(&mut session.bindings);
+            }
+
+            let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
+            let disable_batched_prefill_env = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
+            let disable_batched_prefill = profiling_per_kernel || disable_batched_prefill_env;
+            let debug_sync = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
+
+            let max_prefill_chunk = session.bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
+            let (_, mut prefill_chunk_size) = Self::prefill_config();
+            prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk).max(1);
+            tracing::debug!(
+                target: "metallic_foundry::workflow::ops::prefill",
+                conversation_id = conversation_id.as_str(),
+                mode,
+                disable_batched_prefill,
+                profiling_per_kernel,
+                debug_sync,
+                max_prefill_chunk,
+                configured_prefill_chunk_size = prefill_chunk_size,
+                "prefill execution config"
+            );
+
+            let prefill_start = std::time::Instant::now();
+            let setup_duration = prefill_start.duration_since(setup_start);
+            let mut last_prefill_m = 1usize;
+
+            let input_ids_key = self.input_ids_binding.as_str();
+            let (execution_mode, effective_chunk_size, chunk_count) = if !disable_batched_prefill {
+                let execution_mode = "batched";
+                let chunk_size = {
+                    let rebalance_chunk_size = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
+                        let requested = requested.max(1).min(max_allowed.max(1));
+                        if prompt_len <= 1 {
+                            return 1;
+                        }
+                        let chunks = prompt_len.div_ceil(requested);
+                        let balanced = prompt_len.div_ceil(chunks);
+                        balanced.max(1).min(max_allowed)
+                    };
+                    rebalance_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk)
+                };
+                let chunk_count = if prompt_len == 0 {
+                    0
+                } else {
+                    prompt_len.div_ceil(chunk_size.max(1))
+                };
+
+                if !debug_sync && !profiling_per_kernel {
+                    foundry.start_capture()?;
+                }
+
                 tracing::debug!(
                     target: "metallic_foundry::workflow::ops::prefill",
                     conversation_id = conversation_id.as_str(),
                     mode,
                     token_source,
-                    cache_hit_prefix_tokens,
-                    cache_lookup_path,
-                    kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
-                    kv_prefix_base_key = kv_prefix_base_key.as_deref().unwrap_or("<none>"),
-                    prompt_tokens_full = prompt_tokens_full.len(),
-                    prompt_tokens_selected = prompt_len,
-                    start_pos,
-                    max_new_tokens,
-                    required_len,
-                    "prefill prompt selection"
+                    execution_mode,
+                    chunk_size,
+                    chunk_count,
+                    "prefill running batched chunk schedule"
                 );
 
-                model.ensure_kv_capacity(
-                    foundry,
-                    &mut session.bindings,
-                    &mut session.fast_bindings,
-                    &mut session.context_config,
-                    start_pos,
-                    required_len,
-                )?;
+                for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(chunk_size).enumerate() {
+                    let m = chunk_tokens.len();
+                    last_prefill_m = m;
+                    let base_pos = start_pos + chunk_idx * chunk_size;
 
-                if prompt_len + start_pos > session.context_config.max_context_len {
-                    return Err(MetalError::InvalidShape(format!(
-                        "Prompt length {prompt_len} + start_pos {start_pos} exceeds max_context_len {}",
-                        session.context_config.max_context_len
-                    )));
+                    if debug_sync && !profiling_per_kernel {
+                        foundry.start_capture()?;
+                    }
+
+                    model.set_int_global(&mut session.bindings, &self.m_key, m);
+                    model.set_int_global(&mut session.bindings, &self.seq_len_key, m);
+                    model.set_int_global(&mut session.bindings, &self.position_offset_key, base_pos);
+                    if self.apply_derived_globals {
+                        model.apply_derived_globals(&mut session.bindings);
+                    }
+
+                    let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+                    let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
+                    let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![m], vec![1]);
+                    tensor_input.offset = base_pos * 4;
+                    model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
+
+                    model.forward(foundry, &mut session.bindings, &session.fast_bindings)?;
+
+                    if debug_sync && !profiling_per_kernel {
+                        let cmd = foundry.end_capture()?;
+                        cmd.wait_until_completed();
+                    }
                 }
 
-                let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-                let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap();
-                input_ids_full.copy_from_slice_offset(prompt_tokens, start_pos);
-
-                // Defaults for decode (m=1, seq_len=1). Prefill overrides these per chunk.
-                model.set_int_global(&mut session.bindings, &self.m_key, 1);
-                model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
-                model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos);
-                if self.apply_derived_globals {
-                    model.apply_derived_globals(&mut session.bindings);
+                if !debug_sync && !profiling_per_kernel {
+                    let cmd = foundry.end_capture()?;
+                    cmd.wait_until_completed();
                 }
-
-                let profiling_per_kernel = crate::instrument::foundry_per_kernel_profiling_enabled();
-                let disable_batched_prefill_env = std::env::var("METALLIC_DISABLE_BATCHED_PREFILL").is_ok();
-                let disable_batched_prefill = profiling_per_kernel || disable_batched_prefill_env;
-                let debug_sync = std::env::var("METALLIC_DEBUG_FORWARD_SYNC").is_ok();
-
-                let max_prefill_chunk = session.bindings.get_int_global("max_prefill_chunk").unwrap_or(32).max(1);
-                let (_, mut prefill_chunk_size) = Self::prefill_config();
-                prefill_chunk_size = prefill_chunk_size.min(max_prefill_chunk).max(1);
+                (execution_mode, chunk_size, chunk_count)
+            } else {
+                let execution_mode = "tokenwise";
+                let chunk_count = if prompt_len == 0 {
+                    0
+                } else {
+                    prompt_len.div_ceil(prefill_chunk_size.max(1))
+                };
                 tracing::debug!(
                     target: "metallic_foundry::workflow::ops::prefill",
                     conversation_id = conversation_id.as_str(),
                     mode,
-                    disable_batched_prefill,
-                    profiling_per_kernel,
-                    debug_sync,
-                    max_prefill_chunk,
-                    configured_prefill_chunk_size = prefill_chunk_size,
-                    "prefill execution config"
+                    token_source,
+                    execution_mode,
+                    chunk_size = prefill_chunk_size,
+                    chunk_count,
+                    "prefill running tokenwise chunk schedule"
                 );
+                model.set_int_global(&mut session.bindings, &self.m_key, 1);
+                model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
 
-                let prefill_start = std::time::Instant::now();
-                let setup_duration = prefill_start.duration_since(setup_start);
-                let mut last_prefill_m = 1usize;
+                for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
+                    let base_pos = start_pos + chunk_idx * prefill_chunk_size;
 
-                let input_ids_key = self.input_ids_binding.as_str();
-                let (execution_mode, effective_chunk_size, chunk_count) = if !disable_batched_prefill {
-                    let execution_mode = "batched";
-                    let chunk_size = {
-                        let rebalance_chunk_size = |prompt_len: usize, requested: usize, max_allowed: usize| -> usize {
-                            let requested = requested.max(1).min(max_allowed.max(1));
-                            if prompt_len <= 1 {
-                                return 1;
-                            }
-                            let chunks = prompt_len.div_ceil(requested);
-                            let balanced = prompt_len.div_ceil(chunks);
-                            balanced.max(1).min(max_allowed)
-                        };
-                        rebalance_chunk_size(prompt_len, prefill_chunk_size, max_prefill_chunk)
-                    };
-                    let chunk_count = if prompt_len == 0 { 0 } else { prompt_len.div_ceil(chunk_size.max(1)) };
-
-                    if !debug_sync && !profiling_per_kernel {
+                    if !profiling_per_kernel && (debug_sync || chunk_idx == 0) {
                         foundry.start_capture()?;
                     }
 
-                    tracing::debug!(
-                        target: "metallic_foundry::workflow::ops::prefill",
-                        conversation_id = conversation_id.as_str(),
-                        mode,
-                        token_source,
-                        execution_mode,
-                        chunk_size,
-                        chunk_count,
-                        "prefill running batched chunk schedule"
-                    );
-
-                    for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(chunk_size).enumerate() {
-                        let m = chunk_tokens.len();
-                        last_prefill_m = m;
-                        let base_pos = start_pos + chunk_idx * chunk_size;
-
-                        if debug_sync && !profiling_per_kernel {
-                            foundry.start_capture()?;
-                        }
-
-                        model.set_int_global(&mut session.bindings, &self.m_key, m);
-                        model.set_int_global(&mut session.bindings, &self.seq_len_key, m);
-                        model.set_int_global(&mut session.bindings, &self.position_offset_key, base_pos);
+                    for i in 0..chunk_tokens.len() {
+                        let pos = base_pos + i;
+                        model.set_int_global(&mut session.bindings, &self.position_offset_key, pos);
                         if self.apply_derived_globals {
                             model.apply_derived_globals(&mut session.bindings);
                         }
 
                         let input_ids_full_arg = session.bindings.get("input_ids_full")?;
                         let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
-                        let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![m], vec![1]);
-                        tensor_input.offset = base_pos * 4;
+                        let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
+                        tensor_input.offset = pos * 4;
                         model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
 
                         model.forward(foundry, &mut session.bindings, &session.fast_bindings)?;
-
-                        if debug_sync && !profiling_per_kernel {
-                            let cmd = foundry.end_capture()?;
-                            cmd.wait_until_completed();
-                        }
                     }
 
-                    if !debug_sync && !profiling_per_kernel {
+                    if debug_sync && !profiling_per_kernel {
                         let cmd = foundry.end_capture()?;
                         cmd.wait_until_completed();
                     }
-                    (execution_mode, chunk_size, chunk_count)
-                } else {
-                    let execution_mode = "tokenwise";
-                    let chunk_count = if prompt_len == 0 {
-                        0
-                    } else {
-                        prompt_len.div_ceil(prefill_chunk_size.max(1))
-                    };
-                    tracing::debug!(
+                }
+
+                if !debug_sync && !profiling_per_kernel {
+                    let cmd = foundry.end_capture()?;
+                    cmd.wait_until_completed();
+                }
+                (execution_mode, prefill_chunk_size, chunk_count)
+            };
+
+            let prefill_duration = prefill_start.elapsed();
+
+            // Keep session state consistent for future KV growth/preservation and debugging.
+            session.current_pos = start_pos + prompt_len;
+            let end_pos = session.current_pos;
+
+            if mode == "delta" && original_start_pos == 0 {
+                if let Err(err) = model.store_kv_prefix_in_cache(foundry, session, prompt_tokens_full, kv_prefix_key.as_deref()) {
+                    tracing::warn!(
                         target: "metallic_foundry::workflow::ops::prefill",
                         conversation_id = conversation_id.as_str(),
                         mode,
-                        token_source,
-                        execution_mode,
-                        chunk_size = prefill_chunk_size,
-                        chunk_count,
-                        "prefill running tokenwise chunk schedule"
+                        kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
+                        error = %err,
+                        "prefill failed to store KV prefix snapshot"
                     );
-                    model.set_int_global(&mut session.bindings, &self.m_key, 1);
-                    model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
-
-                    for (chunk_idx, chunk_tokens) in prompt_tokens.chunks(prefill_chunk_size).enumerate() {
-                        let base_pos = start_pos + chunk_idx * prefill_chunk_size;
-
-                        if !profiling_per_kernel && (debug_sync || chunk_idx == 0) {
-                            foundry.start_capture()?;
-                        }
-
-                        for i in 0..chunk_tokens.len() {
-                            let pos = base_pos + i;
-                            model.set_int_global(&mut session.bindings, &self.position_offset_key, pos);
-                            if self.apply_derived_globals {
-                                model.apply_derived_globals(&mut session.bindings);
-                            }
-
-                            let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-                            let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
-                            let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
-                            tensor_input.offset = pos * 4;
-                            model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
-
-                            model.forward(foundry, &mut session.bindings, &session.fast_bindings)?;
-                        }
-
-                        if debug_sync && !profiling_per_kernel {
-                            let cmd = foundry.end_capture()?;
-                            cmd.wait_until_completed();
-                        }
-                    }
-
-                    if !debug_sync && !profiling_per_kernel {
-                        let cmd = foundry.end_capture()?;
-                        cmd.wait_until_completed();
-                    }
-                    (execution_mode, prefill_chunk_size, chunk_count)
-                };
-
-                let prefill_duration = prefill_start.elapsed();
-
-                // Keep session state consistent for future KV growth/preservation and debugging.
-                session.current_pos = start_pos + prompt_len;
-                let end_pos = session.current_pos;
-
-                if mode == "delta" && original_start_pos == 0 {
-                    if let Err(err) =
-                        model.store_kv_prefix_in_cache(foundry, session, prompt_tokens_full, kv_prefix_key.as_deref())
-                    {
-                        tracing::warn!(
-                            target: "metallic_foundry::workflow::ops::prefill",
-                            conversation_id = conversation_id.as_str(),
-                            mode,
-                            kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
-                            error = %err,
-                            "prefill failed to store KV prefix snapshot"
-                        );
-                    }
                 }
+            }
 
-                // Reset to decode mode for autoregressive decode (M=1).
-                model.set_int_global(&mut session.bindings, &self.m_key, 1);
-                model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
-                model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos + prompt_len);
-                if self.apply_derived_globals {
-                    model.apply_derived_globals(&mut session.bindings);
+            // Reset to decode mode for autoregressive decode (M=1).
+            model.set_int_global(&mut session.bindings, &self.m_key, 1);
+            model.set_int_global(&mut session.bindings, &self.seq_len_key, 1);
+            model.set_int_global(&mut session.bindings, &self.position_offset_key, start_pos + prompt_len);
+            if self.apply_derived_globals {
+                model.apply_derived_globals(&mut session.bindings);
+            }
+
+            // Ensure input_ids is bound to any valid U32 buffer; decode stage overwrites it to sampled-token buffers.
+            {
+                let input_ids_full_arg = session.bindings.get("input_ids_full")?;
+                let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
+                let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
+                tensor_input.offset = 0;
+                model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
+            }
+
+            // Extract logits for use in subsequent ops.
+            let mut logits_arg = session.bindings.get(&self.logits_binding)?.clone();
+            // The model spec allocates logits as [max_prefill_chunk, vocab_size]. After a batched prefill,
+            // we must sample from the *last* token's logits (row = last_prefill_m - 1).
+            //
+            // If we sample from row 0, generation quality can collapse into highly repetitive loops.
+            if logits_arg.dtype == crate::tensor::Dtype::F16 && logits_arg.dims.len() == 2 {
+                let rows = logits_arg.dims[0];
+                let vocab = logits_arg.dims[1];
+                if rows > 0 && vocab > 0 {
+                    let last_row = last_prefill_m.saturating_sub(1).min(rows - 1);
+                    let row_bytes = last_row.saturating_mul(vocab).saturating_mul(logits_arg.dtype.size_bytes());
+                    logits_arg.offset = logits_arg.offset.saturating_add(row_bytes);
+                    logits_arg.dims.clear();
+                    logits_arg.dims.push(vocab);
+                    logits_arg.strides.clear();
+                    logits_arg.strides.push(1);
                 }
+            }
 
-                // Ensure input_ids is bound to any valid U32 buffer; decode stage overwrites it to sampled-token buffers.
-                {
-                    let input_ids_full_arg = session.bindings.get("input_ids_full")?;
-                    let input_ids_full = input_ids_full_arg.buffer.as_ref().unwrap().clone();
-                    let mut tensor_input = TensorArg::from_buffer(input_ids_full, crate::tensor::Dtype::U32, vec![1], vec![1]);
-                    tensor_input.offset = 0;
-                    model.set_binding(&mut session.bindings, &mut session.fast_bindings, input_ids_key, tensor_input);
-                }
-
-                // Extract logits for use in subsequent ops.
-                let mut logits_arg = session.bindings.get(&self.logits_binding)?.clone();
-                // The model spec allocates logits as [max_prefill_chunk, vocab_size]. After a batched prefill,
-                // we must sample from the *last* token's logits (row = last_prefill_m - 1).
-                //
-                // If we sample from row 0, generation quality can collapse into highly repetitive loops.
-                if logits_arg.dtype == crate::tensor::Dtype::F16 && logits_arg.dims.len() == 2 {
-                    let rows = logits_arg.dims[0];
-                    let vocab = logits_arg.dims[1];
-                    if rows > 0 && vocab > 0 {
-                        let last_row = last_prefill_m.saturating_sub(1).min(rows - 1);
-                        let row_bytes = last_row.saturating_mul(vocab).saturating_mul(logits_arg.dtype.size_bytes());
-                        logits_arg.offset = logits_arg.offset.saturating_add(row_bytes);
-                        logits_arg.dims.clear();
-                        logits_arg.dims.push(vocab);
-                        logits_arg.strides.clear();
-                        logits_arg.strides.push(1);
-                    }
-                }
-
-                Ok((
-                    start_pos,
-                    prompt_len,
-                    end_pos,
-                    last_prefill_m,
-                    prefill_duration.as_micros() as usize,
-                    setup_duration.as_micros() as usize,
-                    logits_arg,
-                    token_source,
-                    execution_mode,
-                    effective_chunk_size,
-                    chunk_count,
-                    cache_hit_prefix_tokens,
-                    cache_lookup_path,
-                ))
-            })?;
+            Ok((
+                start_pos,
+                prompt_len,
+                end_pos,
+                last_prefill_m,
+                prefill_duration.as_micros() as usize,
+                setup_duration.as_micros() as usize,
+                logits_arg,
+                token_source,
+                execution_mode,
+                effective_chunk_size,
+                chunk_count,
+                cache_hit_prefix_tokens,
+                cache_lookup_path,
+            ))
+        })?;
 
         tracing::debug!(
             target: "metallic_foundry::workflow::ops::prefill",

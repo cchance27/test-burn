@@ -33,11 +33,7 @@ struct TimedOp {
 }
 
 impl TimedOp {
-    fn record_latency(
-        &self,
-        ctx: &mut super::runner::WorkflowExecutionContext<'_>,
-        elapsed_us: usize,
-    ) {
+    fn record_latency(&self, ctx: &mut super::runner::WorkflowExecutionContext<'_>, elapsed_us: usize) {
         let metrics_val = ctx
             .values
             .entry("_internal.op_metrics".to_string())
@@ -319,10 +315,7 @@ fn compile_steps(steps: &[WorkflowStepSpec]) -> Result<Vec<CompiledOp>, MetalErr
             } else {
                 op
             };
-            ops.push(CompiledOp {
-                name: step.op.clone(),
-                op,
-            });
+            ops.push(CompiledOp { name: step.op.clone(), op });
         } else {
             return Err(MetalError::InvalidOperation(format!("Unknown workflow op: {}", step.op)));
         }

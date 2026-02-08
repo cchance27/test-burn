@@ -199,13 +199,7 @@ impl IntoElement for MessageBubble {
                                                 .flex()
                                                 .flex_col()
                                                 .child(div().text_color(colors::text_muted()).child(k.clone()))
-                                                .child(
-                                                    div()
-                                                        .w_full()
-                                                        .overflow_hidden()
-                                                        .text_color(colors::text_primary())
-                                                        .child(val_str),
-                                                )
+                                                .child(div().w_full().overflow_hidden().text_color(colors::text_primary()).child(val_str))
                                         }))
                                         .child(div().h_px().bg(colors::border()))
                                         .child(

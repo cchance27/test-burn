@@ -490,15 +490,7 @@ impl WorkflowOp for WhileBatchedOp {
                         match r.try_next()? {
                             Some(tok) => {
                                 drained += 1;
-                                if !append_and_emit(
-                                    ctx,
-                                    &self.output_tokens,
-                                    tok,
-                                    stop_on_eos,
-                                    eos,
-                                    per_token_decode,
-                                    on_token,
-                                )? {
+                                if !append_and_emit(ctx, &self.output_tokens, tok, stop_on_eos, eos, per_token_decode, on_token)? {
                                     pending.clear();
                                     break 'outer;
                                 }
@@ -542,15 +534,7 @@ impl WorkflowOp for WhileBatchedOp {
                         );
                     }
                     for token in drained_tokens.iter().copied() {
-                        if !append_and_emit(
-                            ctx,
-                            &self.output_tokens,
-                            token,
-                            stop_on_eos,
-                            eos,
-                            per_token_decode,
-                            on_token,
-                        )? {
+                        if !append_and_emit(ctx, &self.output_tokens, token, stop_on_eos, eos, per_token_decode, on_token)? {
                             break 'outer;
                         }
                     }
@@ -572,15 +556,7 @@ impl WorkflowOp for WhileBatchedOp {
                                 buf.read_scalar::<u32>()
                             }
                         };
-                        if !append_and_emit(
-                            ctx,
-                            &self.output_tokens,
-                            token,
-                            stop_on_eos,
-                            eos,
-                            per_token_decode,
-                            on_token,
-                        )? {
+                        if !append_and_emit(ctx, &self.output_tokens, token, stop_on_eos, eos, per_token_decode, on_token)? {
                             break 'outer;
                         }
                     }
@@ -607,15 +583,7 @@ impl WorkflowOp for WhileBatchedOp {
                         ));
                     };
                     // No EOS stopping in async mode (guarded above).
-                    if !append_and_emit(
-                        ctx,
-                        &self.output_tokens,
-                        tok,
-                        stop_on_eos,
-                        eos,
-                        per_token_decode,
-                        on_token,
-                    )? {
+                    if !append_and_emit(ctx, &self.output_tokens, tok, stop_on_eos, eos, per_token_decode, on_token)? {
                         break;
                     }
                 }

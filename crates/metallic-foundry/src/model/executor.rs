@@ -3,10 +3,7 @@
 //! Interprets the ModelSpec execution plan (DSL) by calling Step::execute().
 
 use std::{
-    any::{Any, TypeId},
-    collections::{VecDeque, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-    sync::OnceLock,
+    any::{Any, TypeId}, collections::{VecDeque, hash_map::DefaultHasher}, hash::{Hash, Hasher}, sync::OnceLock
 };
 
 use half::f16;
@@ -195,11 +192,7 @@ impl CompiledModel {
             }
         }
 
-        for key in [
-            "general.file_type",
-            "general.quantization_version",
-            "general.parameter_count",
-        ] {
+        for key in ["general.file_type", "general.quantization_version", "general.parameter_count"] {
             if let Some(v) = metadata.get_i64(key) {
                 key.hash(&mut hasher);
                 v.hash(&mut hasher);
@@ -922,11 +915,9 @@ impl CompiledModel {
         let cache_key = (TypeId::of::<T>(), key.to_string());
 
         if let Some(existing) = self.instance_cache.lock().get(&cache_key).cloned() {
-            return existing.downcast::<T>().map_err(|_| {
-                MetalError::InvalidOperation(format!(
-                    "CompiledModel instance_cache type mismatch for key '{key}'"
-                ))
-            });
+            return existing
+                .downcast::<T>()
+                .map_err(|_| MetalError::InvalidOperation(format!("CompiledModel instance_cache type mismatch for key '{key}'")));
         }
 
         // PERF: Build outside the cache lock so expensive constructors do not serialize unrelated
@@ -934,11 +925,9 @@ impl CompiledModel {
         let built = std::sync::Arc::new(build()?);
         let mut cache = self.instance_cache.lock();
         if let Some(existing) = cache.get(&cache_key).cloned() {
-            return existing.downcast::<T>().map_err(|_| {
-                MetalError::InvalidOperation(format!(
-                    "CompiledModel instance_cache type mismatch for key '{key}'"
-                ))
-            });
+            return existing
+                .downcast::<T>()
+                .map_err(|_| MetalError::InvalidOperation(format!("CompiledModel instance_cache type mismatch for key '{key}'")));
         }
         let built_any: std::sync::Arc<dyn Any + Send + Sync> = built.clone();
         cache.insert(cache_key, built_any);

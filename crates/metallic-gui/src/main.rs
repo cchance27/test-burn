@@ -2,10 +2,7 @@
 //!
 //! A modern, GPU-accelerated chat interface built with GPUI.
 
-use gpui::{
-    App, Application, Bounds, KeyBinding, Menu, MenuItem, WindowBounds, WindowOptions, prelude::*,
-    px, size,
-};
+use gpui::{App, Application, Bounds, KeyBinding, Menu, MenuItem, WindowBounds, WindowOptions, prelude::*, px, size};
 use gpui_component::{Root, Theme, ThemeMode};
 use metallic_gui::{ChatApp, Quit, theme::colors};
 
@@ -40,12 +37,10 @@ fn main() {
 
         // Define a native app menu so macOS treats this as a foreground app with
         // a standard menubar (app menu + File menu).
-        cx.set_menus(vec![
-            Menu {
-                name: "Metallic".into(),
-                items: vec![MenuItem::action("Quit", Quit)],
-            },
-        ]);
+        cx.set_menus(vec![Menu {
+            name: "Metallic".into(),
+            items: vec![MenuItem::action("Quit", Quit)],
+        }]);
 
         // Handle global actions
         cx.on_action(|_: &Quit, cx| cx.quit());
