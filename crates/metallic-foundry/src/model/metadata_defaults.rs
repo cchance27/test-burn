@@ -86,7 +86,8 @@ pub fn infer_architecture_defaults(model: &dyn LoadedModel) -> Result<Architectu
 
 #[cfg(test)]
 mod tests {
-    use metallic_loader::{DummyMetadata, MetadataValue};
+    use metallic_loader::{DummyMetadata, MapMetadata, MetadataValue};
+    use rustc_hash::FxHashMap;
 
     use super::*;
 
@@ -148,5 +149,43 @@ mod tests {
 
         assert_eq!(defaults.get_usize("d_model"), Some(512));
         assert_eq!(defaults.get_usize("vocab_size"), Some(32000));
+    }
+
+    #[test]
+    fn test_infer_from_metadata_with_llama_keys() {
+        let mut entries = FxHashMap::default();
+        entries.insert("llama.embedding_length".to_string(), MetadataValue::Int(3072));
+        entries.insert("llama.attention.head_count".to_string(), MetadataValue::Int(24));
+        entries.insert("llama.attention.head_count_kv".to_string(), MetadataValue::Int(8));
+        entries.insert("llama.block_count".to_string(), MetadataValue::Int(28));
+        entries.insert("llama.feed_forward_length".to_string(), MetadataValue::Int(8192));
+        entries.insert("llama.context_length".to_string(), MetadataValue::Int(131072));
+        entries.insert("llama.vocab_size".to_string(), MetadataValue::Int(128256));
+        entries.insert("llama.rope.freq_base".to_string(), MetadataValue::Float(500000.0));
+        entries.insert("llama.attention.layer_norm_rms_epsilon".to_string(), MetadataValue::Float(1e-5));
+        let metadata = MapMetadata { entries };
+
+        let mut keys = FxHashMap::default();
+        keys.insert("d_model".to_string(), vec!["llama.embedding_length".to_string()]);
+        keys.insert("n_heads".to_string(), vec!["llama.attention.head_count".to_string()]);
+        keys.insert("n_kv_heads".to_string(), vec!["llama.attention.head_count_kv".to_string()]);
+        keys.insert("n_layers".to_string(), vec!["llama.block_count".to_string()]);
+        keys.insert("ff_dim".to_string(), vec!["llama.feed_forward_length".to_string()]);
+        keys.insert("max_seq_len".to_string(), vec!["llama.context_length".to_string()]);
+        keys.insert("vocab_size".to_string(), vec!["llama.vocab_size".to_string()]);
+        keys.insert("rope_base".to_string(), vec!["llama.rope.freq_base".to_string()]);
+        keys.insert("rms_eps".to_string(), vec!["llama.attention.layer_norm_rms_epsilon".to_string()]);
+        let keys_spec = MetadataKeysSpec { keys };
+
+        let defaults = infer_from_metadata_with_keys(&metadata, &keys_spec).unwrap();
+        assert_eq!(defaults.get_usize("d_model"), Some(3072));
+        assert_eq!(defaults.get_usize("n_heads"), Some(24));
+        assert_eq!(defaults.get_usize("n_kv_heads"), Some(8));
+        assert_eq!(defaults.get_usize("n_layers"), Some(28));
+        assert_eq!(defaults.get_usize("ff_dim"), Some(8192));
+        assert_eq!(defaults.get_usize("max_seq_len"), Some(131072));
+        assert_eq!(defaults.get_usize("vocab_size"), Some(128256));
+        assert_eq!(defaults.get_f32("rope_base"), Some(500000.0));
+        assert_eq!(defaults.get_f32("rms_eps"), Some(1e-5));
     }
 }

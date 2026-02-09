@@ -1,0 +1,148 @@
+The current qwen25.json pipeline is a standard dense decoder block:
+
+RMSNorm → (Q,K,V projections) → RoPE → KV write → (FlashAttn over full KV cache) → O-proj residual
+
+RMSNorm → dense MLP (SwiGLU gate+up, then down) residual
+
+repeat over layers
+
+GLM-4.7-Flash differs in two architectural places that change the inference graph materially:
+
+MoE instead of dense FFN
+
+MLA (Multi-Head Latent Attention) instead of “plain” multi-head attention KV (similar to DeepSeek-style compressed attention)
+
+Below is what that means for your pipeline.
+
+1) FFN path: Dense SwiGLU → Routed MoE experts
+What you have (dense)
+
+Per layer you do:
+
+FusedFfnSwiGluRmsNorm producing up (shape [m, ff_dim])
+
+MatMul(up, W_down) back to [m, d_model]
+
+What GLM-4.7-Flash needs (MoE)
+
+GLM-4.7-Flash is a Mixture-of-Experts model (30B-A3B).
+Commonly described as 64 routed experts + 1 shared expert, with top-k experts active per token (the exact “k” varies by implementation/quant pack; you’ll see “4 experts active” in some tooling writeups).
+
+So your dense FFN block becomes:
+
+Router / gate logits
+
+router_logits = hidden_normed @ W_router (+ b_router) → shape [m, n_experts]
+
+Top-k selection per token
+
+topk_idx, topk_w = TopK(softmax(router_logits), k)
+
+Dispatch tokens to experts
+
+Gather/scatter tokens into per-expert mini-batches (variable sizes)
+
+Run expert MLPs
+
+Each expert has its own (gate, up, down) weights (often SwiGLU)
+
+Combine
+
+Weighted sum of expert outputs back into [m, d_model]
+
+(Optional) shared expert
+
+A dense/shared expert output is added for every token.
+
+Pipeline implications
+
+You need dynamic control flow (token→expert routing) during prefill and decode.
+
+Kernel set expands: RouterLinear, Softmax, TopK, Dispatch/Gather, ExpertMLP, Combine/ScatterAdd.
+
+Weight binding changes from:
+
+layer.ffn_gate_{i}, layer.ffn_up_{i}, layer.ffn_down_{i}
+to something like:
+
+layer.router_{i}
+
+layer.expert.{e}.ffn_gate_{i,e}, ffn_up_{i,e}, ffn_down_{i,e}
+
+plus optional layer.shared_expert_{i}.
+
+If you keep your “fused” philosophy, the closest analogue is a FusedMoE block: RmsNorm + Router + (TopK+Dispatch) + ExpertSwiGLU + Combine.
+
+2) Attention path: Plain KV cache → MLA (compressed KV / latent attention)
+What you have (plain attention)
+
+Explicit K and V tensors written to cache:
+
+k_cache_{i} dims like [n_heads (or n_kv_heads), max_seq_len, head_dim]
+
+same for v_cache_{i}
+
+FlashAttention reads full K/V cache each step.
+
+What GLM-4.7-Flash changes (MLA)
+
+GLM-4.7-Flash is described as using MLA (Multi-Head Latent Attention), i.e., attention with compressed/low-rank latent projections rather than storing full per-head K/V in cache.
+
+Concretely for an inference engine, that usually means:
+
+You still produce Q per head (and apply RoPE-like transforms), but
+
+K/V are represented via a latent bottleneck, so the KV cache stores latent states (smaller dimension) and/or some per-layer projection products, not full kv_dim = head_dim * n_kv_heads.
+
+Pipeline implications
+
+Your KvPrepFused + k_cache/v_cache layout assumptions are wrong for MLA.
+
+FlashAttention kernel may need:
+
+either an MLA-aware attention kernel, or
+
+a two-stage path: reconstruct K/V blocks from latent cache on the fly (costly), or
+
+attend directly in latent space (preferred, but requires dedicated kernels).
+
+The KV cache tensor shapes change from [heads, seq, head_dim] to something like [seq, latent_dim] (plus small per-head/per-layer projection matrices).
+
+This is the main reason GLM-4.7-Flash support was “special” in quant tooling and required explicit backend work: it’s not just MoE; it’s MoE + MLA combined.
+
+3) Metadata / tensor naming: you’ll need a new “architecture adaptor”
+
+Your Qwen2.5 adaptor maps classic dense names (q_proj/k_proj/v_proj, o_proj, mlp.gate/up/down).
+
+For GLM-4.7-Flash you’ll need to additionally map:
+
+router weights (router, gate, moe_gate, etc.)
+
+expert weight sets (often indexed or stacked tensors)
+
+MLA projection tensors (latent projection in/out, plus whatever replaces k/v proj)
+
+The exact GGUF keys vary by exporter; treat this as “new architecture family” rather than trying to shoehorn it into your Qwen2 schema.
+
+4) Practical “what to implement” checklist in your pipeline
+Minimal viable path (works, not optimal)
+
+Implement MoE FFN as described (router → top-k → expert MLPs → combine).
+
+Implement MLA attention by reconstructing K/V blocks from latent cache per step (prefill) and per token (decode).
+
+This is simpler to bring up, but can be slower.
+
+Proper path (performance)
+
+Implement MLA-native kernels:
+
+MLA_KV_Write storing latent cache
+
+MLA_Attn kernel that attends using latent cache directly
+
+Implement MoE using:
+
+token bucketing by expert to maximize GEMM sizes
+
+preallocated “dispatch buffers” sized to worst-case tokens per expert per chunk

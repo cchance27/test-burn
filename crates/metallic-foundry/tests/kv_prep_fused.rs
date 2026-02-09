@@ -219,6 +219,7 @@ fn run_fused_parity(
             position_offset: position_offset as u32,
             max_seq_len: max_seq_len as u32,
             total_elements: total_q as u32,
+            rope_mode: 0,
         },
     };
     foundry.run(&fused)?;

@@ -1763,6 +1763,7 @@ impl CompiledModel {
         let head_dim = arch.d_model() / arch.n_heads();
         let dim_half = head_dim / 2;
         let rope_base = arch.rope_base();
+        let rope_freq_factors = self.load_rope_freq_factors(dim_half)?;
 
         self.ensure_rope_capacity_named(
             bindings,
@@ -1771,13 +1772,66 @@ impl CompiledModel {
             rope_base,
             head_dim,
             dim_half,
+            rope_freq_factors.as_deref(),
             rope_cos_name,
             rope_sin_name,
             0,
             rope_len,
         )?;
-        tracing::debug!("Prepared RoPE caches: [{}, {}] (rope_base={})", rope_len, dim_half, rope_base);
+        if let Some(freqs) = rope_freq_factors.as_ref() {
+            let (mut min_v, mut max_v) = (f32::INFINITY, f32::NEG_INFINITY);
+            for &v in freqs {
+                min_v = min_v.min(v);
+                max_v = max_v.max(v);
+            }
+            tracing::debug!(
+                "Prepared RoPE caches: [{}, {}] (rope_base={}, rope_freq_factors=len:{} min:{} max:{})",
+                rope_len,
+                dim_half,
+                rope_base,
+                freqs.len(),
+                min_v,
+                max_v
+            );
+        } else {
+            tracing::debug!("Prepared RoPE caches: [{}, {}] (rope_base={})", rope_len, dim_half, rope_base);
+        }
         Ok(())
+    }
+
+    fn load_rope_freq_factors(&self, dim_half: usize) -> Result<Option<Vec<f32>>, MetalError> {
+        let model = self.weights.model();
+        let Some(tensor_info) = model.tensor_info("rope_freqs.weight") else {
+            return Ok(None);
+        };
+
+        if tensor_info.dimensions.len() != 1 {
+            return Err(MetalError::InvalidShape(format!(
+                "rope_freqs.weight must be 1D, got dims {:?}",
+                tensor_info.dimensions
+            )));
+        }
+
+        let data = model
+            .tensor_data("rope_freqs.weight")
+            .map_err(|e| MetalError::OperationFailed(format!("Failed to read rope_freqs.weight: {e}")))?;
+        let factors: &[f32] = bytemuck::try_cast_slice(data.as_slice())
+            .map_err(|_| MetalError::OperationFailed("Invalid F32 payload for rope_freqs.weight".to_string()))?;
+
+        if factors.len() != dim_half {
+            return Err(MetalError::InvalidShape(format!(
+                "rope_freqs.weight length {} does not match dim_half {}",
+                factors.len(),
+                dim_half
+            )));
+        }
+        if factors.iter().any(|v| !v.is_finite() || *v <= 0.0) {
+            return Err(MetalError::InvalidShape(
+                "rope_freqs.weight contains non-finite or non-positive factors".to_string(),
+            ));
+        }
+
+        Ok(Some(factors.to_vec()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1789,6 +1843,7 @@ impl CompiledModel {
         rope_base: f32,
         head_dim: usize,
         dim_half: usize,
+        rope_freq_factors: Option<&[f32]>,
         rope_cos_name: &str,
         rope_sin_name: &str,
         old_len: usize,
@@ -1804,6 +1859,15 @@ impl CompiledModel {
         if old_len > new_len {
             return Err(MetalError::InvalidShape(format!(
                 "RoPE cache cannot shrink: {old_len} -> {new_len}"
+            )));
+        }
+        if let Some(factors) = rope_freq_factors
+            && factors.len() != dim_half
+        {
+            return Err(MetalError::InvalidShape(format!(
+                "RoPE factor length {} does not match dim_half {}",
+                factors.len(),
+                dim_half
             )));
         }
 
@@ -1910,6 +1974,16 @@ impl CompiledModel {
         // Upload the missing suffix [old_len, new_len).
         if new_len > old_len {
             const POS_CHUNK: usize = 1024;
+            let mut inv_freqs = Vec::with_capacity(dim_half);
+            for i in 0..dim_half {
+                let exponent = (2 * i) as f32 / head_dim as f32;
+                let mut inv_freq = 1.0f32 / rope_base.powf(exponent);
+                if let Some(factors) = rope_freq_factors {
+                    inv_freq /= factors[i];
+                }
+                inv_freqs.push(inv_freq);
+            }
+
             let mut pos = old_len;
             while pos < new_len {
                 let end = (pos + POS_CHUNK).min(new_len);
@@ -1923,8 +1997,7 @@ impl CompiledModel {
                     let local_p = p - pos;
                     for i in 0..dim_half {
                         let idx = local_p * dim_half + i;
-                        let exponent = (2 * i) as f32 / head_dim as f32;
-                        let inv_freq = 1.0f32 / rope_base.powf(exponent);
+                        let inv_freq = inv_freqs[i];
                         let angle = p as f32 * inv_freq;
                         cos_data[idx] = f16::from_f32(angle.cos());
                         sin_data[idx] = f16::from_f32(angle.sin());
@@ -2454,6 +2527,7 @@ impl CompiledModel {
         // 3. Grow RoPE tables to match the new physical capacity.
         let dim_half = head_dim / 2;
         if let Some(rope) = arch.prepare.rope.as_ref() {
+            let rope_freq_factors = self.load_rope_freq_factors(dim_half)?;
             self.ensure_rope_capacity_named(
                 bindings,
                 fast_bindings,
@@ -2461,6 +2535,7 @@ impl CompiledModel {
                 arch.rope_base(),
                 head_dim,
                 dim_half,
+                rope_freq_factors.as_deref(),
                 &rope.cos,
                 &rope.sin,
                 old_capacity,

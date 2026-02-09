@@ -284,14 +284,17 @@ fn render_messages_with_tokenizer(
     let has_qwen_markers = tokenizer.has_token("<|im_start|>") && tokenizer.has_token("<|im_end|>");
 
     if let Some(template) = tokenizer.chat_template() {
+        // Use raw vocab token text for template vars.
+        // decode_lossless intentionally suppresses control/eos tokens, which breaks templates
+        // that explicitly interpolate `bos_token` / `eos_token` (e.g. Llama).
         let bos_token = tokenizer
             .special_tokens()
             .bos_token_id
-            .and_then(|id| tokenizer.decode_lossless(&[id]).ok());
+            .and_then(|id| tokenizer.get_token_debug(id).map(|s| s.to_string()));
         let eos_token = tokenizer
             .special_tokens()
             .eos_token_id
-            .and_then(|id| tokenizer.decode_lossless(&[id]).ok());
+            .and_then(|id| tokenizer.get_token_debug(id).map(|s| s.to_string()));
         return Ok((
             template.render(messages, bos_token.as_deref(), eos_token.as_deref(), add_generation_prompt)?,
             "chat_template",
@@ -705,6 +708,21 @@ mod tests {
         assert_eq!(longest_common_prefix_len(&lhs, &rhs), 2);
     }
 
+    fn format_llama_messages(messages: &[Message], add_generation_prompt: bool) -> String {
+        let mut s = String::new();
+        for m in messages {
+            s.push_str("<|start_header_id|>");
+            s.push_str(m.role.as_str());
+            s.push_str("<|end_header_id|>\n\n");
+            s.push_str(m.content.as_str());
+            s.push_str("<|eot_id|>");
+        }
+        if add_generation_prompt {
+            s.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
+        }
+        s
+    }
+
     #[test]
     fn template_lcp_delta_matches_qwen_suffix_for_user_turn() {
         // Canonical Qwen-style chat template shape.
@@ -726,6 +744,58 @@ mod tests {
         let expected_tokens = tokenizer.encode(&expected_delta).expect("expected tokens");
         let delta_tokens = tokenizer.encode(&delta).expect("delta tokens");
         assert_eq!(delta_tokens, expected_tokens);
+    }
+
+    #[test]
+    fn template_lcp_delta_matches_llama_suffix_for_user_turn() {
+        // Canonical Llama-3-style chat template shape.
+        let template = "{% for message in messages %}{% if message['role'] == 'system' %}{{ '<|start_header_id|>system<|end_header_id|>\\n\\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'user' %}{{ '<|start_header_id|>user<|end_header_id|>\\n\\n' + message['content'] + '<|eot_id|>' }}{% elif message['role'] == 'assistant' %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' + message['content'] + '<|eot_id|>' }}{% endif %}{% endfor %}{% if add_generation_prompt %}{{ '<|start_header_id|>assistant<|end_header_id|>\\n\\n' }}{% endif %}";
+        let full = vec![
+            msg_with("system", "s"),
+            msg_with("user", "u1"),
+            msg_with("assistant", "a1"),
+            msg_with("user", "u2"),
+        ];
+        let prev_render = format_llama_messages(&full[..3], false);
+        let curr_render = format_llama_messages(&full, true);
+        let expected_delta = format_llama_messages(&full[3..], true);
+        let tokenizer = char_level_tokenizer_with_template(template, &[&prev_render, &curr_render, &expected_delta]);
+
+        let delta = compute_template_lcp_delta(&tokenizer, &full, 3, true, Some("conversation-llama"))
+            .expect("lcp delta should compute")
+            .expect("lcp delta should exist");
+        let expected_tokens = tokenizer.encode(&expected_delta).expect("expected tokens");
+        let delta_tokens = tokenizer.encode(&delta).expect("delta tokens");
+        assert_eq!(delta_tokens, expected_tokens);
+    }
+
+    #[test]
+    fn render_messages_with_template_preserves_control_bos_token_text() {
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0_u32, "?".to_string());
+        vocab.insert(1_u32, "<|begin_of_text|>".to_string());
+
+        let mut token_types = FxHashMap::default();
+        token_types.insert(1_u32, 3); // control token
+
+        let tokenizer = crate::BPETokenizer::new(
+            vocab,
+            Vec::new(),
+            token_types,
+            crate::tokenizer::SpecialTokens {
+                bos_token_id: Some(1),
+                eos_token_id: None,
+                pad_token_id: None,
+            },
+            false,
+            Some("{{ bos_token }}{{ messages[0].content }}".to_string()),
+        )
+        .expect("tokenizer should build");
+
+        let messages = vec![msg_with("user", "hello")];
+        let (rendered, path) = render_messages_with_tokenizer(&tokenizer, &messages, true).expect("render should work");
+        assert_eq!(path, "chat_template");
+        assert_eq!(rendered, "<|begin_of_text|>hello");
     }
 
     #[test]

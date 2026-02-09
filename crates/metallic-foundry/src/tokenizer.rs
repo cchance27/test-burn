@@ -15,6 +15,73 @@ use crate::{
     MetalError, template::{ChatTemplate, Message}
 };
 
+// NOTE FOR MODEL BRING-UP:
+// `tokenizer.ggml.pre` selects which regex family to use for initial piece splitting.
+// If a new model emits nonsense despite correct weights/spec, confirm token-id parity first.
+// Most bring-ups only need:
+// 1) adding metadata alias mapping in `from_metadata_name`, and
+// 2) adding/changing the regex pattern below.
+// If parity still fails, the variant likely also needs merge or normalization behavior changes.
+const TOKEN_PIECE_RE_GPT2: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
+const TOKEN_PIECE_RE_LLAMA3: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+const TOKEN_PIECE_RE_QWEN2: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PreTokenizerKind {
+    Gpt2Like,
+    Llama3Like,
+    Qwen2Like,
+}
+
+impl PreTokenizerKind {
+    // GGUF metadata values are not standardized; keep aliases here.
+    // Defaulting to GPT2-like maintains backward compatibility for older dumps
+    // that omit `tokenizer.ggml.pre`.
+    fn from_metadata_name(name: Option<&str>) -> Self {
+        let Some(name) = name.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Self::Gpt2Like;
+        };
+
+        if [
+            "llama3",
+            "llama-v3",
+            "llama-bpe",
+            "falcon3",
+            "falcon-h1",
+            "pixtral",
+            "midm-2.0",
+            "lfm2",
+        ]
+        .iter()
+        .any(|v| name.eq_ignore_ascii_case(v))
+        {
+            return Self::Llama3Like;
+        }
+
+        if ["qwen2", "deepseek-r1-qwen", "kormo"].iter().any(|v| name.eq_ignore_ascii_case(v)) {
+            return Self::Qwen2Like;
+        }
+
+        Self::Gpt2Like
+    }
+
+    fn token_piece_pattern(self) -> &'static str {
+        match self {
+            Self::Gpt2Like => TOKEN_PIECE_RE_GPT2,
+            Self::Llama3Like => TOKEN_PIECE_RE_LLAMA3,
+            Self::Qwen2Like => TOKEN_PIECE_RE_QWEN2,
+        }
+    }
+
+    fn ignore_merges(self) -> bool {
+        // Keep merge bypass plumbing available for future GGUF variants, but do not
+        // enable it for current pre-tokenizers (including `llama-bpe`).
+        // Only flip this if tokenizer-oracle parity demonstrates that merge ranks
+        // must be bypassed for a specific `tokenizer.ggml.pre` family.
+        false
+    }
+}
+
 fn bytes_to_unicode() -> FxHashMap<u8, char> {
     let mut bs = (b'!'..=b'~').chain(b'\xa1'..=b'\xac').chain(b'\xae'..=b'\xff').collect::<Vec<_>>();
     let mut cs = bs.iter().map(|b| *b as u32).collect::<Vec<_>>();
@@ -89,6 +156,9 @@ pub struct BPETokenizer {
     special_token_re: Regex,
     /// Precompiled regex for normal tokenization pieces.
     token_piece_re: Regex,
+    /// Some GGUF pre-tokenizer variants may require bypassing merge ranks.
+    /// Currently disabled for all known variants.
+    ignore_merges: bool,
 }
 
 impl BPETokenizer {
@@ -100,6 +170,18 @@ impl BPETokenizer {
         special_tokens: SpecialTokens,
         add_bos_token: bool,
         chat_template: Option<String>,
+    ) -> Result<Self, MetalError> {
+        Self::new_with_pretokenizer(vocab, merges, token_types, special_tokens, add_bos_token, chat_template, None)
+    }
+
+    fn new_with_pretokenizer(
+        vocab: FxHashMap<u32, String>,
+        merges: Vec<(String, String)>,
+        token_types: FxHashMap<u32, i32>,
+        special_tokens: SpecialTokens,
+        add_bos_token: bool,
+        chat_template: Option<String>,
+        pre_tokenizer_name: Option<&str>,
     ) -> Result<Self, MetalError> {
         // Convert vocabulary into shared strings and build reverse map
         let mut vocab_arc = FxHashMap::default();
@@ -153,8 +235,8 @@ impl BPETokenizer {
         }
 
         let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e.into()))?;
-        let token_piece_re = Regex::new(r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+")
-            .map_err(|e| BPETokenizerError::RegexError(e.into()))?;
+        let pre_kind = PreTokenizerKind::from_metadata_name(pre_tokenizer_name);
+        let token_piece_re = Regex::new(pre_kind.token_piece_pattern()).map_err(|e| BPETokenizerError::RegexError(e.into()))?;
 
         let chat_template = chat_template.as_deref().filter(|v| !v.trim().is_empty()).map(ChatTemplate::new);
 
@@ -174,6 +256,7 @@ impl BPETokenizer {
             char_vocab,
             special_token_re,
             token_piece_re,
+            ignore_merges: pre_kind.ignore_merges(),
         })
     }
 
@@ -239,6 +322,11 @@ impl BPETokenizer {
             .get_string("tokenizer.chat_template")
             .or_else(|| metadata.get_string("standard.chat_template"))
             .map(|s| s.to_string());
+        // Primary selector for tokenizer piece-splitting behavior.
+        // Keep `standard.pre` fallback for non-GGUF metadata adapters.
+        let pre_tokenizer_name = metadata
+            .get_string("tokenizer.ggml.pre")
+            .or_else(|| metadata.get_string("standard.pre"));
 
         // Parse token types array
         let token_types_map = if let Some(arr) = token_types_value {
@@ -275,7 +363,15 @@ impl BPETokenizer {
             pad_token_id,
         };
 
-        Self::new(vocab, merges, token_types_map, special_tokens, add_bos_token, chat_template)
+        Self::new_with_pretokenizer(
+            vocab,
+            merges,
+            token_types_map,
+            special_tokens,
+            add_bos_token,
+            chat_template,
+            pre_tokenizer_name.as_deref(),
+        )
     }
 
     /// Encode text into tokens (defaults to encode_simd now that we've benchmarked it as fastest in all lengths)
@@ -422,6 +518,23 @@ impl BPETokenizer {
             token_unicode.push(self.byte_encoder_array[b as usize]);
         }
 
+        if self.ignore_merges {
+            if let Some(&id) = self.vocab_r.get(&token_unicode) {
+                token_ids.push(id);
+                return;
+            }
+            for ch in token_unicode.chars() {
+                let mut utf8 = [0_u8; 4];
+                let encoded = ch.encode_utf8(&mut utf8);
+                if let Some(&id) = self.vocab_r.get(encoded) {
+                    token_ids.push(id);
+                } else {
+                    token_ids.push(0);
+                }
+            }
+            return;
+        }
+
         let mut pieces: Vec<String> = token_unicode.chars().map(|c| c.to_string()).collect();
         if pieces.is_empty() {
             return;
@@ -465,6 +578,15 @@ impl BPETokenizer {
         let mut token_unicode = String::with_capacity(text.len());
         for &b in text.as_bytes() {
             token_unicode.push(self.byte_encoder_array[b as usize]);
+        }
+
+        if self.ignore_merges {
+            if let Some(&id) = self.vocab_r.get(&token_unicode) {
+                token_ids.push(id);
+                return;
+            }
+            token_ids.extend(token_unicode.chars().map(|c| *self.char_vocab.get(&c).unwrap_or(&0)));
+            return;
         }
 
         let mut piece_ids: Vec<u32> = Vec::with_capacity(token_unicode.len());
@@ -876,5 +998,101 @@ mod tests {
 
         let decoded = tokenizer.decode_lossless(&[0, 1]).unwrap();
         assert_eq!(decoded, "é");
+    }
+
+    #[test]
+    fn llama_bpe_pretokenizer_splits_long_digit_runs() {
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0u32, "?".to_string());
+        vocab.insert(1u32, "1234".to_string());
+        vocab.insert(2u32, "123".to_string());
+        vocab.insert(3u32, "4".to_string());
+
+        let gpt2 = BPETokenizer::new_with_pretokenizer(
+            vocab.clone(),
+            Vec::new(),
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            None,
+            Some("gpt-2"),
+        )
+        .unwrap();
+        let llama = BPETokenizer::new_with_pretokenizer(
+            vocab,
+            Vec::new(),
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            None,
+            Some("llama-bpe"),
+        )
+        .unwrap();
+
+        assert_eq!(gpt2.encode("1234").unwrap(), vec![1]);
+        assert_eq!(llama.encode("1234").unwrap(), vec![2, 3]);
+    }
+
+    #[test]
+    fn llama_bpe_pretokenizer_prefers_direct_piece_lookup_before_char_fallback() {
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0u32, "?".to_string());
+        vocab.insert(1u32, "Ġ".to_string());
+        vocab.insert(2u32, "a".to_string());
+        vocab.insert(3u32, "b".to_string());
+        vocab.insert(4u32, "Ġa".to_string());
+        vocab.insert(5u32, "Ġab".to_string());
+
+        let merges = vec![("Ġ".to_string(), "a".to_string()), ("Ġa".to_string(), "b".to_string())];
+
+        let gpt2 = BPETokenizer::new_with_pretokenizer(
+            vocab.clone(),
+            merges.clone(),
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            None,
+            Some("gpt-2"),
+        )
+        .unwrap();
+        let llama = BPETokenizer::new_with_pretokenizer(
+            vocab,
+            merges,
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            None,
+            Some("llama-bpe"),
+        )
+        .unwrap();
+
+        assert_eq!(gpt2.encode(" ab").unwrap(), vec![5]);
+        assert_eq!(llama.encode(" ab").unwrap(), vec![5]);
+    }
+
+    #[test]
+    fn llama_bpe_pretokenizer_partially_merges_when_final_piece_missing() {
+        let mut vocab = FxHashMap::default();
+        vocab.insert(0u32, "?".to_string());
+        vocab.insert(1u32, "Ġ".to_string());
+        vocab.insert(2u32, "a".to_string());
+        vocab.insert(3u32, "b".to_string());
+        vocab.insert(4u32, "Ġa".to_string());
+        // Intentionally no "Ġab" token.
+
+        let merges = vec![("Ġ".to_string(), "a".to_string()), ("Ġa".to_string(), "b".to_string())];
+
+        let llama = BPETokenizer::new_with_pretokenizer(
+            vocab,
+            merges,
+            FxHashMap::default(),
+            SpecialTokens::default(),
+            false,
+            None,
+            Some("llama-bpe"),
+        )
+        .unwrap();
+
+        assert_eq!(llama.encode(" ab").unwrap(), vec![4, 3]);
     }
 }
