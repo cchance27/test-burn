@@ -53,23 +53,24 @@ kernel void kv_prep_fused_kernel_f16(
 
     const uint half_dim = head_dim >> 1;
     const uint pos = params->position_offset + s;
-    const uint pair = (hd < half_dim) ? hd : (hd - half_dim);
+    const uint rope_mode = params->rope_mode;
+    const bool rope_norm = rope_mode == 1;
+    const uint pair = rope_norm ? (hd >> 1) : ((hd < half_dim) ? hd : (hd - half_dim));
     const float cosv = (float)cos_buf[pos * half_dim + pair];
     const float sinv = (float)sin_buf[pos * half_dim + pair];
 
+    const bool first_in_pair = rope_norm ? ((hd & 1u) == 0u) : (hd < half_dim);
+    const uint mate_hd = rope_norm ? (first_in_pair ? (hd + 1) : (hd - 1)) : (first_in_pair ? (hd + half_dim) : (hd - half_dim));
+
     float q_out;
-    if (hd < half_dim) {
+    if (first_in_pair) {
         const float x_i = (float)q_in[q_src];
-        const float x_j = (float)q_in[q_src + half_dim];
-        float out_i, out_j;
-        rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
-        q_out = out_i;
+        const float x_j = (float)q_in[s * d_model + (h * head_dim + mate_hd)];
+        q_out = x_i * cosv - x_j * sinv;
     } else {
         const float x_j = (float)q_in[q_src];
-        const float x_i = (float)q_in[q_src - half_dim];
-        float out_i, out_j;
-        rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
-        q_out = out_j;
+        const float x_i = (float)q_in[s * d_model + (h * head_dim + mate_hd)];
+        q_out = x_j * cosv + x_i * sinv;
     }
     q_rot[gid] = (half)q_out;
 
@@ -90,18 +91,14 @@ kernel void kv_prep_fused_kernel_f16(
 
     // K: apply RoPE
     float k_out;
-    if (hd < half_dim) {
+    if (first_in_pair) {
         const float x_i = (float)k_in[kv_src_base];
-        const float x_j = (float)k_in[kv_src_base + half_dim];
-        float out_i, out_j;
-        rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
-        k_out = out_i;
+        const float x_j = (float)k_in[s * kv_dim + (kv_h * head_dim + mate_hd)];
+        k_out = x_i * cosv - x_j * sinv;
     } else {
         const float x_j = (float)k_in[kv_src_base];
-        const float x_i = (float)k_in[kv_src_base - half_dim];
-        float out_i, out_j;
-        rope_rotate_half(out_i, out_j, x_i, x_j, cosv, sinv);
-        k_out = out_j;
+        const float x_i = (float)k_in[s * kv_dim + (kv_h * head_dim + mate_hd)];
+        k_out = x_j * cosv + x_i * sinv;
     }
     const half k_half = (half)k_out;
 

@@ -8,12 +8,54 @@
 //! The target is to reduce per-token dispatch fanout during decode.
 
 use metallic_macros::{Kernel, KernelArgs, MetalStruct};
+use serde::Deserialize;
 
 use crate::{
     spec::{DynamicValue, TensorBindings}, types::TensorArg
 };
 
 pub mod step;
+
+const ROPE_MODE_NEOX: u32 = 0;
+const ROPE_MODE_NORMAL: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, serde::Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum RopeMode {
+    Neox,
+    #[default]
+    Normal,
+}
+
+impl RopeMode {
+    const fn as_u32(self) -> u32 {
+        match self {
+            Self::Neox => ROPE_MODE_NEOX,
+            Self::Normal => ROPE_MODE_NORMAL,
+        }
+    }
+}
+
+fn default_rope_mode() -> DynamicValue<u32> {
+    DynamicValue::Literal(RopeMode::Normal.as_u32())
+}
+
+fn deserialize_rope_mode<'de, D>(deserializer: D) -> Result<DynamicValue<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RopeModeInput {
+        Mode(RopeMode),
+        Dynamic(DynamicValue<u32>),
+    }
+
+    match RopeModeInput::deserialize(deserializer)? {
+        RopeModeInput::Mode(mode) => Ok(DynamicValue::Literal(mode.as_u32())),
+        RopeModeInput::Dynamic(value) => Ok(value),
+    }
+}
 
 #[derive(MetalStruct, Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 #[repr(C)]
@@ -37,6 +79,11 @@ pub struct KvPrepFusedParams {
     /// Total Q elements (n_heads * seq_len * head_dim).
     /// Per-element dispatch expects this name.
     pub total_elements: DynamicValue<u32>,
+    /// RoPE pair layout selector:
+    /// - "neox": pair hd with hd+half_dim
+    /// - "normal": pair adjacent dims: 0<->1, 2<->3, ...
+    #[serde(default = "default_rope_mode", deserialize_with = "deserialize_rope_mode")]
+    pub rope_mode: DynamicValue<u32>,
 }
 
 impl KvPrepFusedParams {
@@ -53,6 +100,7 @@ impl KvPrepFusedParams {
             position_offset: self.position_offset.resolve(bindings),
             max_seq_len: self.max_seq_len.resolve(bindings),
             total_elements: self.total_elements.resolve(bindings),
+            rope_mode: self.rope_mode.resolve(bindings),
         }
     }
 }
@@ -90,4 +138,29 @@ pub struct KvPrepFused {
     pub sin: TensorArg,
 
     pub params: KvPrepFusedParamsResolved,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(serde::Deserialize)]
+    struct RopeOnly {
+        #[serde(default = "default_rope_mode", deserialize_with = "deserialize_rope_mode")]
+        rope_mode: DynamicValue<u32>,
+    }
+
+    #[test]
+    fn rope_mode_defaults_to_normal() {
+        let parsed: RopeOnly = serde_json::from_str("{}").unwrap();
+        assert_eq!(parsed.rope_mode, DynamicValue::Literal(ROPE_MODE_NORMAL));
+    }
+
+    #[test]
+    fn rope_mode_accepts_named_literals() {
+        let parsed: RopeOnly = serde_json::from_str(r#"{"rope_mode":"neox"}"#).unwrap();
+        assert_eq!(parsed.rope_mode, DynamicValue::Literal(ROPE_MODE_NEOX));
+        let parsed: RopeOnly = serde_json::from_str(r#"{"rope_mode":"normal"}"#).unwrap();
+        assert_eq!(parsed.rope_mode, DynamicValue::Literal(ROPE_MODE_NORMAL));
+    }
 }
