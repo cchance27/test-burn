@@ -26,13 +26,13 @@ fn validate_quantized_bindings(symbols: &SymbolTable, fast: &FastBindings) -> Re
             continue;
         }
 
-        // Quantization scale tensors are stored as raw bytes (`Dtype::Q8_0` or `Dtype::Q4_0`) and interpreted by the
-        // active quantization policy (e.g. Q8 block scales, Q4_0 block scales). We skip validating those as weights.
+        // Quantization scale tensors are stored as raw bytes (`Dtype::Q8_0` or packed quant dtypes) and interpreted by
+        // the active quantization policy (e.g. Q8 scales, Q4_0/Q4_1 block params). We skip validating those as weights.
         if name.ends_with("_scales") {
             continue;
         }
 
-        // Any Q8_0 or Q4_0 tensor is treated as a quantized weight.
+        // Any quantized tensor is treated as a quantized weight.
         // Resolve policy and validate layout.
         let policy = resolve_policy(arg.dtype);
         let buf_size = arg.buffer.as_ref().map(|b| b.length()).unwrap_or(0);

@@ -50,9 +50,14 @@ ALWAYS_INLINE float rmsnorm_compute_inv_rms(
             float vals[8];
             Policy::template load_weights<8>(input, (ulong)(row_start + k), vals);
             half scale = Policy::load_scale(scale_bytes, (ulong)(row_idx * num_blocks + block));
+#if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
+            half affine = Policy::load_affine(scale_bytes, (ulong)(row_idx * num_blocks + block));
+#else
+            half affine = 0.0h;
+#endif
             
             for (uint i = 0; i < valid_count; ++i) {
-                float v = vals[i] * (float)scale;
+                float v = vals[i] * (float)scale + (float)affine;
                 sum_sq += v * v;
             }
             block += 32; // Stride by warp size
@@ -96,9 +101,14 @@ void rmsnorm_apply(
         float vals[8];
         Policy::template load_weights<8>(input, (ulong)(row_start + k), vals);
         half scale = Policy::load_scale(scale_bytes, (ulong)(row_idx * num_blocks + block));
+#if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
+        half affine = Policy::load_affine(scale_bytes, (ulong)(row_idx * num_blocks + block));
+#else
+        half affine = 0.0h;
+#endif
         
         for (uint i = 0; i < valid_count; ++i) {
-            float v = vals[i] * (float)scale;
+            float v = vals[i] * (float)scale + (float)affine;
             float gamma_val = (float)gamma[k + i];
             output[row_start + k + i] = (half)(v * inv_rms * gamma_val);
         }
@@ -173,6 +183,10 @@ kernel void rmsnorm_kernel_f16(
 
     // Phase 1: Compute inv_rms using warp 0.
     threadgroup float tg_inv_rms_storage;
+    if (thread_id == 0u) {
+        tg_inv_rms_storage = 0.0f;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     float sum_sq = 0.0f;
     const uint lane_id = thread_id & 31u;
     const uint warp_id = thread_id / 32u;

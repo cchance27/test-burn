@@ -1,5 +1,5 @@
 use half::f16;
-use metallic_loader::LoadedModel;
+use metallic_loader::{LoadedModel, quant_spec::Q6_K_SPEC};
 use metallic_macros::MetalPolicy;
 
 use super::{LoaderStage, MetalPolicyRuntime};
@@ -7,8 +7,8 @@ use crate::{
     Foundry, compound::Layout, policy::block_quant::canonical_dst_block_idx, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::{MetalResourceOptions, TensorArg}
 };
 
-const Q6_K_SOURCE_WPB: usize = 256;
-const Q6_K_SOURCE_BLOCK_BYTES: usize = 210; // ql[128] + qh[64] + scales[i8;16] + d(f16)
+const Q6_K_SOURCE_WPB: usize = Q6_K_SPEC.weights_per_block;
+const Q6_K_SOURCE_BLOCK_BYTES: usize = Q6_K_SPEC.block_bytes; // ql[128] + qh[64] + scales[i8;16] + d(f16)
 const Q6_K_DECODED_WPB: usize = 16;
 const Q6_K_DECODED_DATA_BYTES: usize = 16; // i8[16]
 const Q6_K_DECODED_SCALE_BYTES: usize = 2; // f16(d * scale)

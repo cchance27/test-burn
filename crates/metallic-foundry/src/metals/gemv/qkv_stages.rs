@@ -139,9 +139,8 @@ impl Stage for ParallelProjectStage {
         let policy = self.policy.struct_name();
         let vec_width = self.vector_width.elements();
 
-        // Scale stride: Q8 uses 2 bytes per block for scale lookup
-        // F16 ignores scales but we still calculate offset (Policy ignores it)
-        let scale_stride = "(ulong)row_idx * blocks_per_k * 2";
+        // Scale stride is policy-owned so affine formats can widen block metadata.
+        let scale_stride = format!("(ulong)row_idx * blocks_per_k * {}::SCALE_BYTES", policy);
 
         let load_input = match self.vector_width {
             VectorWidth::Vec4 => {
@@ -190,6 +189,9 @@ impl Stage for ParallelProjectStage {
         float s_q_val = (float){policy}::load_scale(row_s_q, block_off);
         float s_k_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
         float s_v_val = (row_idx < n_kv) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
+        float a_q_val = ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_q, block_off) : 0.0f);
+        float a_k_val = (row_idx < n_kv) ? ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_k, block_off) : 0.0f) : 0.0f;
+        float a_v_val = (row_idx < n_kv) ? ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_v, block_off) : 0.0f) : 0.0f;
                 "#,
             policy = policy
         );
@@ -200,6 +202,9 @@ impl Stage for ParallelProjectStage {
         float s_q_val = (k < k_dim) ? (float){policy}::load_scale(row_s_q, block_off) : 0.0f;
         float s_k_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_k, block_off) : 0.0f;
         float s_v_val = (row_idx < n_kv && k < k_dim) ? (float){policy}::load_scale(row_s_v, block_off) : 0.0f;
+        float a_q_val = (k < k_dim) ? ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_q, block_off) : 0.0f) : 0.0f;
+        float a_k_val = (row_idx < n_kv && k < k_dim) ? ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_k, block_off) : 0.0f) : 0.0f;
+        float a_v_val = (row_idx < n_kv && k < k_dim) ? ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_v, block_off) : 0.0f) : 0.0f;
                 "#,
             policy = policy
         );
@@ -251,22 +256,34 @@ impl Stage for ParallelProjectStage {
         let zero_init = (0..self.vector_width as usize).map(|_| "0.0f").collect::<Vec<_>>().join(", ");
 
         let dot_logic = match self.vector_width {
-            VectorWidth::Vec4 => "acc_q += s_q_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3]));",
-            VectorWidth::Vec8 => {
-                "acc_q += s_q_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));"
-            }
+            VectorWidth::Vec4 => format!(
+                "acc_q += s_q_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + ({policy}::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);",
+                policy = policy
+            ),
+            VectorWidth::Vec8 => format!(
+                "acc_q += s_q_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7]))) + ({policy}::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);",
+                policy = policy
+            ),
         };
         let dot_logic_k = match self.vector_width {
-            VectorWidth::Vec4 => "acc_k += s_k_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3]));",
-            VectorWidth::Vec8 => {
-                "acc_k += s_k_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));"
-            }
+            VectorWidth::Vec4 => format!(
+                "acc_k += s_k_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + ({policy}::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);",
+                policy = policy
+            ),
+            VectorWidth::Vec8 => format!(
+                "acc_k += s_k_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7]))) + ({policy}::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);",
+                policy = policy
+            ),
         };
         let dot_logic_v = match self.vector_width {
-            VectorWidth::Vec4 => "acc_v += s_v_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3]));",
-            VectorWidth::Vec8 => {
-                "acc_v += s_v_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));"
-            }
+            VectorWidth::Vec4 => format!(
+                "acc_v += s_v_val * dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + ({policy}::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);",
+                policy = policy
+            ),
+            VectorWidth::Vec8 => format!(
+                "acc_v += s_v_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7]))) + ({policy}::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);",
+                policy = policy
+            ),
         };
 
         let code = format!(
@@ -298,20 +315,23 @@ impl Stage for ParallelProjectStage {
         {scales_logic}
 
         // Q Dot
-        {{
-            {calc_idx}
-            acc_q += {policy}::template dot<{vec_width}>(w_q, w_idx, s_q_val, xv_f32_lo, xv_f32_hi);
-        }}
+            {{
+                {calc_idx}
+            acc_q += {policy}::template dot<{vec_width}>(w_q, w_idx, s_q_val, xv_f32_lo, xv_f32_hi)
+                + ({policy}::HAS_AFFINE ? (a_q_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
+            }}
         
         // K & V Dot
         if (row_idx < n_kv) {{
             {calc_idx_kv}
             
             {{
-                acc_k += {policy}::template dot<{vec_width}>(w_k, w_idx_kv, s_k_val, xv_f32_lo, xv_f32_hi);
+                acc_k += {policy}::template dot<{vec_width}>(w_k, w_idx_kv, s_k_val, xv_f32_lo, xv_f32_hi)
+                    + ({policy}::HAS_AFFINE ? (a_k_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }}
             {{
-                acc_v += {policy}::template dot<{vec_width}>(w_v, w_idx_kv, s_v_val, xv_f32_lo, xv_f32_hi);
+                acc_v += {policy}::template dot<{vec_width}>(w_v, w_idx_kv, s_v_val, xv_f32_lo, xv_f32_hi)
+                    + ({policy}::HAS_AFFINE ? (a_v_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }}
         }}
 

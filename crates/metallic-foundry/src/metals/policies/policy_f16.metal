@@ -1,6 +1,8 @@
 
 #undef METALLIC_POLICY_HAS_SCALE
 #define METALLIC_POLICY_HAS_SCALE 0
+#undef METALLIC_POLICY_HAS_AFFINE
+#define METALLIC_POLICY_HAS_AFFINE 0
 #undef METALLIC_POLICY_WEIGHTS_FP16
 #define METALLIC_POLICY_WEIGHTS_FP16 1
 
@@ -15,11 +17,19 @@
  */
 struct PolicyF16 {
     static constant bool HAS_SCALE = false;
+    static constant bool HAS_AFFINE = false;
     static constant uint WEIGHTS_PER_BLOCK = 1u;
+    static constant uint SCALE_BYTES = 0u;
 
     // F16 does not use block scales. Always returns unity.
     static ALWAYS_INLINE half load_scale(const device uchar *scales, ulong block_idx) {
         return 1.0h;
+    }
+
+    static ALWAYS_INLINE half load_affine(const device uchar *scales, ulong block_idx) {
+        (void)scales;
+        (void)block_idx;
+        return 0.0h;
     }
 
     // Optimized specialized dot product for F16.

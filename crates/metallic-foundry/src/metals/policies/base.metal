@@ -20,10 +20,18 @@ using namespace metal;
  * Interface Requirements:
  * 
  * struct Policy {
+ *     // Whether the quant format includes an additive affine term per block.
+ *     static constant bool HAS_AFFINE;
+ *     // Bytes per block in the scales plane.
+ *     static constant uint SCALE_BYTES;
+ *
  *     // Load a singular scale factor for a given block.
  *     // - scales: Pointer to the scales buffer.
  *     // - block_idx: Logical block index within the weight matrix.
  *     static half load_scale(const device uchar *scales, ulong block_idx);
+ *
+ *     // Load additive affine term (0 for non-affine formats).
+ *     static half load_affine(const device uchar *scales, ulong block_idx);
  *
  *     // Load and dequantize N weights at once into thread-local results.
  *     // - ptr: Pointer to the quantized data buffer.

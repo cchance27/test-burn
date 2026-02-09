@@ -69,6 +69,32 @@ For block-quant formats (e.g. Q8_0, Q4_0 found in GGUF) there is shared loader/s
 
 See `crates/metallic-foundry/src/policy/block_quant.rs`.
 
+#### Centralized GGUF Quant Specs (Loader Crate)
+
+GGUF block geometry constants are centralized in the loader crate:
+
+- `crates/metallic-loader/src/quant_spec.rs`
+- `crates/metallic-loader/src/gguf/quant_spec.rs`
+
+This keeps source-of-truth `(weights_per_block, block_bytes)` definitions in one place and avoids policy-local duplication.
+Foundry policies should import these constants instead of re-defining static byte math.
+
+#### Centralized Dtype Parsing (No Per-Loader `contains(...)` Chains)
+
+String-to-dtype parsing for model metadata now routes through `Dtype::parse_fuzzy(...)` in `crates/metallic-sdk/src/tensor.rs`.
+
+This keeps alias handling (`q6k`, `Q6_K`, model-label strings, etc.) in one place and avoids adding new ad-hoc
+`if s.contains("QX_Y")` branches in each loader.
+
+#### Derive Macro For GGUF Runtime Wiring
+
+For GGUF block quant policies, prefer deriving runtime plumbing with:
+
+- `#[derive(GgufBlockQuantRuntime)]`
+- `#[gguf_runtime(...)]`
+
+This generates the repetitive `BlockQuantCodec + LoaderStage + MetalPolicyRuntime` boilerplate with typed `Dtype`/spec arguments (no stringly-typed dtype names).
+
 ### 4. `Quantization` Enum (Configuration)
 
 The enum exists **only** as a serializable configuration key. It is used in Steps (e.g., `GemvStep`) to request a specific policy.
@@ -116,6 +142,22 @@ And this pattern is **not** safe for packed policies:
 const device uchar* w_ptr = weights + idx * policy.meta().address_unit_bytes;
 Policy::template load_weights<8>(w_ptr, 0);
 ```
+
+## Affine Quant Contract (e.g. Q4_1)
+
+Some block quants are affine, with per-block decode:
+
+`w = scale * q + affine`
+
+To keep kernels generic and policy-owned:
+
+- policy headers expose `HAS_AFFINE`, `SCALE_BYTES`, `load_affine(...)`
+- callsites must not hardcode scale stride (e.g. `* 2`) and should use `Policy::SCALE_BYTES`
+- kernels that previously used only `scale` must add the affine contribution through the policy hooks
+- non-affine policies compile affine logic out via `METALLIC_POLICY_HAS_AFFINE` preprocessor gating
+  (no extra affine loads/dot-sum work on Q4_0/Q8_0/Q6_K/F16 paths)
+
+This keeps Q4_0/Q8_0/Q6_K and Q4_1 on the same kernel paths without per-model special-casing.
 
 ## Weights-Per-Block Is Policy-Owned
 

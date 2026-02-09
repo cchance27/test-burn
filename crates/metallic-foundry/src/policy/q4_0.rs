@@ -1,14 +1,8 @@
-use metallic_loader::LoadedModel;
-use metallic_macros::MetalPolicy;
+use metallic_loader::quant_spec::Q4_0_SPEC;
+use metallic_macros::{GgufBlockQuantRuntime, MetalPolicy};
 
-use super::{LoaderStage, MetalPolicyRuntime};
-use crate::{
-    Foundry, compound::Layout, spec::{FastBindings, ResolvedSymbols}, tensor::Dtype, types::TensorArg
-};
+use crate::tensor::Dtype;
 
-const Q4_0_WPB: usize = 32;
-const Q4_0_BLOCK_BYTES: usize = 18;
-const Q4_0_SCALE_BYTES: usize = 2;
 const Q4_0_DATA_BYTES: usize = 16;
 
 #[inline]
@@ -26,7 +20,7 @@ fn q4_0_write_block(qs: &[u8], out: &mut [u8]) {
     }
 }
 
-#[derive(Debug, Clone, Default, MetalPolicy)]
+#[derive(Debug, Clone, Default, MetalPolicy, GgufBlockQuantRuntime)]
 #[policy(
     header = "policies/policy_q4_0.metal",
     struct_name = "PolicyQ4_0",
@@ -41,57 +35,15 @@ fn q4_0_write_block(qs: &[u8], out: &mut [u8]) {
     block_size_bytes = 18,
     weights_per_block = 32
 )]
+#[gguf_runtime(
+    source_dtype = Dtype::Q4_0,
+    scales_dtype = Dtype::Q8_0,
+    spec = Q4_0_SPEC,
+    scale_bytes = 2,
+    data_bytes = 16,
+    write_block = q4_0_write_block
+)]
 pub struct PolicyQ4_0;
-
-impl LoaderStage for PolicyQ4_0 {
-    fn params_struct(&self) -> String {
-        "".to_string()
-    }
-
-    fn bind(&self, fast_bindings: &FastBindings, resolved: &ResolvedSymbols) -> smallvec::SmallVec<[TensorArg; 4]> {
-        use smallvec::smallvec;
-        let weight = fast_bindings.get(resolved.weights).expect("Q4_0 weight bound");
-
-        let scales_idx = resolved.scales.expect("Q4_0 requires scales index");
-        let scales = fast_bindings.get(scales_idx).expect("Q4_0 scales bound");
-
-        smallvec![weight.clone(), scales.clone()]
-    }
-
-    fn quantization_type(&self) -> std::sync::Arc<dyn MetalPolicyRuntime> {
-        std::sync::Arc::new(PolicyQ4_0)
-    }
-}
-
-impl MetalPolicyRuntime for PolicyQ4_0 {
-    fn loader_stage(&self) -> Box<dyn LoaderStage> {
-        Box::new(self.clone())
-    }
-
-    fn load_weights(
-        &self,
-        foundry: &mut Foundry,
-        model: &dyn LoadedModel,
-        source_tensor_name: &str,
-        logical_name: &str,
-        layout: Layout,
-    ) -> anyhow::Result<Vec<(String, TensorArg)>> {
-        let loaded = crate::policy::block_quant::load_block_quant_2d::<Q4_0_WPB, Q4_0_BLOCK_BYTES, Q4_0_SCALE_BYTES, Q4_0_DATA_BYTES>(
-            foundry,
-            model,
-            source_tensor_name,
-            Dtype::Q4_0,
-            Dtype::Q8_0,
-            layout,
-            q4_0_write_block,
-        )?;
-
-        Ok(vec![
-            (logical_name.to_string(), loaded.weights),
-            (format!("{}_scales", logical_name), loaded.scales),
-        ])
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -99,6 +51,9 @@ mod tests {
 
     #[test]
     fn q4_0_canonical_reorders_and_deinterleaves_consistently() {
+        const Q4_0_BLOCK_BYTES: usize = Q4_0_SPEC.block_bytes;
+        const Q4_0_SCALE_BYTES: usize = 2;
+
         let _total_blocks = 1;
         let mut raw = vec![0u8; Q4_0_BLOCK_BYTES];
         raw[0] = 0xAA; // scale L

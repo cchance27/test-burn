@@ -1,6 +1,8 @@
 
 #undef METALLIC_POLICY_HAS_SCALE
 #define METALLIC_POLICY_HAS_SCALE 0
+#undef METALLIC_POLICY_HAS_AFFINE
+#define METALLIC_POLICY_HAS_AFFINE 0
 #undef METALLIC_POLICY_WEIGHTS_FP16
 #define METALLIC_POLICY_WEIGHTS_FP16 0
 
@@ -14,11 +16,19 @@
  */
 struct PolicyU32 {
     static constant bool HAS_SCALE = false;
+    static constant bool HAS_AFFINE = false;
     static constant uint WEIGHTS_PER_BLOCK = 1u;
+    static constant uint SCALE_BYTES = 0u;
 
     // U32 does not use scales.
     static ALWAYS_INLINE half load_scale(const device uchar *scales, ulong block_idx) {
         return 1.0h;
+    }
+
+    static ALWAYS_INLINE half load_affine(const device uchar *scales, ulong block_idx) {
+        (void)scales;
+        (void)block_idx;
+        return 0.0h;
     }
 
     /**

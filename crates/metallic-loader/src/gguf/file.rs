@@ -4,7 +4,9 @@ use byteorder::{LittleEndian, ReadBytesExt};
 use memmap2::Mmap;
 use rustc_hash::FxHashMap;
 
-use super::{GGUFError, tensor_info::GGUTensorInfo};
+use super::{
+    GGUFError, quant_spec::{GGUFDtypeClass, classify_gguf_dtype, quantized_tensor_storage_bytes_for_gguf_dtype, scalar_element_size_bytes}, tensor_info::GGUTensorInfo
+};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum GGUFDataType {
@@ -44,6 +46,7 @@ pub enum GGUFDataType {
     Q4088,
     TQ10,
     TQ20,
+    MXFP4,
     IQ4NL44,
     IQ4NL48,
     IQ4NL88,
@@ -93,7 +96,7 @@ impl GGUFDataType {
             36 => Self::IQ4NL44,
             37 => Self::IQ4NL48,
             38 => Self::IQ4NL88,
-            39 => Self::Array,
+            39 => Self::MXFP4,
             _ => Self::Unknown(value),
         }
     }
@@ -446,54 +449,44 @@ impl GGUFFile {
         offset.div_ceil(alignment) * alignment
     }
 
-    fn get_nonblock_element_size(&self, data_type: GGUFDataType) -> usize {
-        match data_type {
-            GGUFDataType::F32 => 4,
-            GGUFDataType::F16 => 2,
-            GGUFDataType::I8 => 1,
-            GGUFDataType::I16 => 2,
-            GGUFDataType::I32 => 4,
-            GGUFDataType::I64 => 8,
-            GGUFDataType::F64 => 8,
-            GGUFDataType::BF16 => 2,
-            // NOTE: Block-based quantized types (Q4_0, Q8_0, etc.) are handled
-            // explicitly in calculate_actual_tensor_size because their size
-            // depends on block structure, not a simple multiplier.
-            _ => unreachable!("Unsupported data type size"),
-        }
-    }
-
     /// Calculate the actual size of tensor data in bytes
     fn calculate_actual_tensor_size(&self, tensor: &GGUTensorInfo) -> usize {
-        match tensor.data_type {
-            GGUFDataType::Q4_0 | GGUFDataType::Q8_0 | GGUFDataType::Q8_1 | GGUFDataType::Q6K => {
-                // For quantized types, calculate based on blocks
-                let element_count: usize = tensor.dimensions.iter().map(|&d| d as usize).product();
-                let weights_per_block = match tensor.data_type {
-                    GGUFDataType::Q6K => 256,
-                    _ => 32,
-                };
-                let blocks = element_count.div_ceil(weights_per_block);
-
-                let block_size = match tensor.data_type {
-                    GGUFDataType::Q4_0 => 18, // 2 (scale) + 16 (4-bit weights)
-                    GGUFDataType::Q8_0 => 34, // 2 (scale) + 32 (weights)
-                    GGUFDataType::Q8_1 => 36, // 2 (scale) + 2 (delta) + 32 (weights)
-                    GGUFDataType::Q6K => 210, // 2 (d) + 16 (sub-scales) + 128 (ql) + 64 (qh)
-                    _ => 36,                  // Should not happen
-                };
-
-                blocks * block_size
+        match classify_gguf_dtype(tensor.data_type) {
+            GGUFDtypeClass::Deprecated { replacement_hint } => {
+                panic!(
+                    "GGUF tensor '{}' uses deprecated dtype {:?}: {}",
+                    tensor.name, tensor.data_type, replacement_hint
+                );
             }
-            _ => {
-                // For other types, use the original calculation
-                let mut size = 1;
-                for &dim in &tensor.dimensions {
-                    size *= dim as usize;
-                }
-                size * self.get_nonblock_element_size(tensor.data_type)
+            GGUFDtypeClass::Unsupported { reason } => {
+                panic!(
+                    "Unsupported GGUF tensor dtype {:?} for '{}': {}",
+                    tensor.data_type, tensor.name, reason
+                );
             }
+            _ => {}
         }
+
+        if let Some(size) = quantized_tensor_storage_bytes_for_gguf_dtype(tensor.data_type, &tensor.dimensions) {
+            return size;
+        }
+
+        let element_count = tensor
+            .dimensions
+            .iter()
+            .try_fold(1usize, |acc, &d| acc.checked_mul(usize::try_from(d).ok()?))
+            .unwrap_or_else(|| panic!("Tensor '{}' element count overflow for dims {:?}", tensor.name, tensor.dimensions));
+
+        let element_size = scalar_element_size_bytes(tensor.data_type).unwrap_or_else(|| {
+            panic!(
+                "Unsupported GGUF tensor dtype {:?} for size calculation on '{}'",
+                tensor.data_type, tensor.name
+            )
+        });
+
+        element_count
+            .checked_mul(element_size)
+            .unwrap_or_else(|| panic!("Tensor '{}' byte size overflow", tensor.name))
     }
 
     /// Offload tensor data to disk to free up memory

@@ -103,8 +103,12 @@ struct TileLoader {
                     // Load scale indexing
                     ulong block_idx = N_idx * blocks_per_k + (K_idx / weights_per_block);
                     half scale = Policy::load_scale(scales, block_idx);
-                    
+#if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
+                    half affine = Policy::load_affine(scales, block_idx);
+                    dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale + (float)affine);
+#else
                     dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale);
+#endif
                 }
             }
         }
@@ -137,8 +141,12 @@ struct TileLoader {
                     
                     ulong block_idx = N_idx * blocks_per_k + (K_idx / weights_per_block);
                     half scale = Policy::load_scale(scales, block_idx);
-                    
+#if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
+                    half affine = Policy::load_affine(scales, block_idx);
+                    dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale + (float)affine);
+#else
                     dst[i * dst_ld + j] = (T)(w_val[0] * (float)scale);
+#endif
                 } else {
                     dst[i * dst_ld + j] = T(0);
                 }

@@ -1,6 +1,8 @@
 
 #undef METALLIC_POLICY_HAS_SCALE
 #define METALLIC_POLICY_HAS_SCALE 1
+#undef METALLIC_POLICY_HAS_AFFINE
+#define METALLIC_POLICY_HAS_AFFINE 0
 #undef METALLIC_POLICY_WEIGHTS_FP16
 #define METALLIC_POLICY_WEIGHTS_FP16 0
 
@@ -18,7 +20,9 @@
  */
 struct PolicyQ8 {
     static constant bool HAS_SCALE = true;
+    static constant bool HAS_AFFINE = false;
     static constant uint WEIGHTS_PER_BLOCK = 32u;
+    static constant uint SCALE_BYTES = 2u;
     /**
      * Load the block scale (FP16).
      * 
@@ -30,6 +34,12 @@ struct PolicyQ8 {
         const device uchar *s_ptr = scales + block_idx * 2;
         ushort bits = (ushort)s_ptr[0] | ((ushort)s_ptr[1] << 8);
         return as_type<half>(bits);
+    }
+
+    static ALWAYS_INLINE half load_affine(const device uchar *scales, ulong block_idx) {
+        (void)scales;
+        (void)block_idx;
+        return 0.0h;
     }
 
     /**

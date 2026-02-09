@@ -367,11 +367,14 @@ impl Stage for VectorizedDotStage {
         float4 xv_f32_hi = float4(xv_hi);
         
         ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
         float scale = 1.0f;
         if ({policy}::HAS_SCALE) {{
-             scale = (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
+             scale = (float){policy}::load_scale(scale_bytes, scale_idx);
         }}
-        acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi);
+        float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
+        acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi)
+            + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         
         k_base += K_CHUNK_SIZE;
     }}
@@ -395,10 +398,13 @@ impl Stage for VectorizedDotStage {
         // Safety: ensure we don't read OOB scales which could be NaNs (0 * NaN = NaN)
         if (k < k_dim) {{
             float scale = 1.0f;
+            ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
             if ({policy}::HAS_SCALE) {{
-                 scale = (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
+                 scale = (float){policy}::load_scale(scale_bytes, scale_idx);
             }}
-            acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi);
+            float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
+            acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi)
+                + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }}
     }}
 #endif
@@ -483,11 +489,14 @@ impl Stage for VectorizedDotStage {
         acc += {policy}::template dot<{vec_width}>(weights_row, (ulong)k, 1.0f, xv_f32_lo, xv_f32_hi);
 #else
         ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+        ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
         float scale = 1.0f;
 #if defined(METALLIC_POLICY_HAS_SCALE) && METALLIC_POLICY_HAS_SCALE
-        scale = (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
+        scale = (float){policy}::load_scale(scale_bytes, scale_idx);
 #endif
-        acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi);
+        float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
+        acc += {policy}::template dot<{vec_width}>(weights, base_idx, scale, xv_f32_lo, xv_f32_hi)
+            + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
 #endif
 #else
         // Strided K: gather weights explicitly.
@@ -501,18 +510,22 @@ impl Stage for VectorizedDotStage {
         }}
 
         // Load scale via Policy
+        ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
         float scale = {policy}::HAS_SCALE
-            ? (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+            ? (float){policy}::load_scale(scale_bytes, scale_idx)
             : 1.0f;
+        float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
         
         // Accumulate with dot product
         if ({vec_width}u == 8u) {{
             float4 w_lo = float4(w[0], w[1], w[2], w[3]);
             float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-            acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+            acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi))
+                + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
 	        }} else {{
             float4 w_lo = float4(w[0], w[1], w[2], w[3]);
-            acc += scale * dot(xv_f32_lo, w_lo);
+            acc += scale * dot(xv_f32_lo, w_lo)
+                + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }}
 	#endif
 
@@ -567,11 +580,14 @@ impl Stage for VectorizedDotStage {
             acc += {policy}::template dot<{vec_width}>(weights_row, (ulong)k, 1.0f, xv_f32_lo, xv_f32_hi);
 #else
             ulong base_idx = WEIGHT_INDEX(row_idx, k, k_dim, n_dim);
+            ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
             float scale = 1.0f;
 #if defined(METALLIC_POLICY_HAS_SCALE) && METALLIC_POLICY_HAS_SCALE
-            scale = (float){policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
+            scale = (float){policy}::load_scale(scale_bytes, scale_idx);
 #endif
-            acc += {policy}::template dot<{vec_width}>(weights, base_idx, (float)scale, xv_f32_lo, xv_f32_hi);
+            float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
+            acc += {policy}::template dot<{vec_width}>(weights, base_idx, (float)scale, xv_f32_lo, xv_f32_hi)
+                + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
 #endif
 #else
             float w[{vec_width}];
@@ -582,19 +598,25 @@ impl Stage for VectorizedDotStage {
                 {policy}::template load_weights<1>(weights, idx, temp_w);
                 w[i] = temp_w[0];
             }}
-            half scale = {policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
+            ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
+            half scale = {policy}::load_scale(scale_bytes, scale_idx);
+            float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
             if ({vec_width}u == 8u) {{
                 float4 w_lo = float4(w[0], w[1], w[2], w[3]);
                 float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-                acc += (float)scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+                acc += (float)scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi))
+                    + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }} else {{
                 float4 w_lo = float4(w[0], w[1], w[2], w[3]);
-                acc += (float)scale * dot(xv_f32_lo, w_lo);
+                acc += (float)scale * dot(xv_f32_lo, w_lo)
+                    + ({policy}::HAS_AFFINE ? (affine * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
             }}
 #endif
         }} else if (k < k_dim) {{
             // Partial tail (non-multiple-of-vec_width K): safe scalar gather.
-            half scale = {policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block));
+            ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
+            half scale = {policy}::load_scale(scale_bytes, scale_idx);
+            float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
             float acc_tail = 0.0f;
             #pragma unroll
             for (uint i = 0; i < {vec_width}u; ++i) {{
@@ -602,7 +624,8 @@ impl Stage for VectorizedDotStage {
                     ulong idx = WEIGHT_INDEX(row_idx, k + i, k_dim, n_dim);
                     float temp_w[1];
                     {policy}::template load_weights<1>(weights, idx, temp_w);
-                    acc_tail += temp_w[0] * scale * (float)input[input_row_base + k + i];
+                    acc_tail += temp_w[0] * scale * (float)input[input_row_base + k + i]
+                        + affine * (float)input[input_row_base + k + i];
                 }}
             }}
             acc += acc_tail;
@@ -1013,9 +1036,11 @@ impl Stage for ScalarDotStage {
             // Load scale
             // Scale logic: one scale per block of K.
             uint blocks_per_k_dim = (k_dim + weights_per_block - 1) / weights_per_block;
-            half scale = {policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k_dim + (curr_k / weights_per_block));
+            ulong scale_idx = (ulong)row_idx * blocks_per_k_dim + (curr_k / weights_per_block);
+            half scale = {policy}::load_scale(scale_bytes, scale_idx);
+            float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
             
-            acc += val_x * w * (float)scale;
+            acc += val_x * (w * (float)scale + affine);
         }}
         k += {unroll};
     }}
@@ -1028,9 +1053,11 @@ impl Stage for ScalarDotStage {
         {policy}::template load_weights<1>(weights, idx, &w);
         
         uint blocks_per_k_dim = (k_dim + weights_per_block - 1) / weights_per_block;
-        half scale = {policy}::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k_dim + (k / weights_per_block));
+        ulong scale_idx = (ulong)row_idx * blocks_per_k_dim + (k / weights_per_block);
+        half scale = {policy}::load_scale(scale_bytes, scale_idx);
+        float affine = {policy}::HAS_AFFINE ? (float){policy}::load_affine(scale_bytes, scale_idx) : 0.0f;
         
-        acc += val_x * w * (float)scale;
+        acc += val_x * (w * (float)scale + affine);
         k++;
     }}
     

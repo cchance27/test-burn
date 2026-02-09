@@ -70,6 +70,10 @@ impl Stage for RmsNormComputeStage {
     // --- RmsNorm Compute Stage ---
     // Compute inv_rms of the input vector for Apply fusion
     threadgroup float tg_inv_rms_storage;
+    if (lane_id == 0u && warp_id == 0u) {{
+        tg_inv_rms_storage = 0.0f;
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     float inv_rms = rmsnorm_compute_inv_rms<{policy}>(
         (const device uchar*)input, 
         (const device uchar*)input, // Dummy scale_bytes (F16 ignores)

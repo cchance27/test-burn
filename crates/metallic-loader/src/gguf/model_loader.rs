@@ -32,6 +32,7 @@ impl TryFrom<GGUFDataType> for Dtype {
             GGUFDataType::I64 => Err(GGUFError::UnsupportedDataType(format!("{:?}", value))), // No direct I64 in SDK Dtype yet? SDK defines F64 but not I64? SDK Dtype has F64.
             GGUFDataType::F64 => Ok(Dtype::F64),
             GGUFDataType::BF16 => Ok(Dtype::BF16),
+            GGUFDataType::MXFP4 => Err(GGUFError::UnsupportedDataType(format!("{:?}", value))),
             _ => Err(GGUFError::UnsupportedDataType(format!("Unsupported GGUF type: {:?}", value))),
         }
     }
@@ -322,21 +323,10 @@ impl ModelMetadata for GGUFMetadata {
     }
 
     fn parse_dtype(&self, s: &str) -> Option<Dtype> {
-        let s = s.to_ascii_uppercase();
-        if s.contains("F16") {
-            Some(Dtype::F16)
-        } else if s.contains("F32") || s.contains("F64") {
-            Some(Dtype::F32) // Foundry uses F32 for F64 source (downcast)
-        } else if s.contains("U32") || s.contains("I32") {
-            Some(Dtype::U32)
-        } else if s.contains("Q4_0") {
-            Some(Dtype::Q4_0)
-        } else if s.contains("Q6_K") || s.contains("Q6K") {
-            Some(Dtype::Q6_K)
-        } else if s.contains("Q8_0") {
-            Some(Dtype::Q8_0)
-        } else {
-            None
+        match Dtype::parse_fuzzy(s) {
+            Some(Dtype::F64) => Some(Dtype::F32), // Foundry downcasts F64 sources to F32.
+            Some(Dtype::I32) => Some(Dtype::U32), // Preserve legacy metadata behavior.
+            parsed => parsed,
         }
     }
 

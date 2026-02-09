@@ -17,6 +17,14 @@ using namespace metal;
 #define ELEMS_PER_THREAD 8
 #endif
 
+#if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
+#define METALLIC_AFFINE_LOAD(scale_bytes, idx) ((float)Policy::load_affine((scale_bytes), (idx)))
+#define METALLIC_AFFINE_XSUM(xv_lo, xv_hi) (dot((xv_lo), float4(1.0f)) + dot((xv_hi), float4(1.0f)))
+#else
+#define METALLIC_AFFINE_LOAD(scale_bytes, idx) (0.0f)
+#define METALLIC_AFFINE_XSUM(xv_lo, xv_hi) (0.0f)
+#endif
+
 /// Optimized dot product using vectorized loads.
 /// Each warp processes one output row, each thread handles ELEMS_PER_THREAD elements per chunk.
 template<typename Policy>
@@ -115,10 +123,13 @@ ALWAYS_INLINE float gemv_dot_vectorized(
         
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
         ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
+        ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
         float scale = Policy::HAS_SCALE
-            ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+            ? (float)Policy::load_scale(scale_bytes, scale_idx)
             : 1.0f;
-        acc += Policy::template dot<8>(data, base_idx, scale, xv_f32_lo, xv_f32_hi);
+        float affine = METALLIC_AFFINE_LOAD(scale_bytes, scale_idx);
+        acc += Policy::template dot<8>(data, base_idx, scale, xv_f32_lo, xv_f32_hi)
+            + affine * METALLIC_AFFINE_XSUM(xv_f32_lo, xv_f32_hi);
 #else
         float w[8];
         #pragma unroll
@@ -130,14 +141,17 @@ ALWAYS_INLINE float gemv_dot_vectorized(
         }
 
         // Load scale for this block
+        ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
         float scale = Policy::HAS_SCALE
-            ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+            ? (float)Policy::load_scale(scale_bytes, scale_idx)
             : 1.0f;
+        float affine = METALLIC_AFFINE_LOAD(scale_bytes, scale_idx);
 
         float4 w_lo = float4(w[0], w[1], w[2], w[3]);
         float4 w_hi = float4(w[4], w[5], w[6], w[7]);
         
-        acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+        acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi))
+            + affine * METALLIC_AFFINE_XSUM(xv_f32_lo, xv_f32_hi);
 #endif
         
         k_base += k_chunk_size;
@@ -169,21 +183,27 @@ ALWAYS_INLINE float gemv_dot_vectorized(
 #if defined(IS_K_CONTIGUOUS) && IS_K_CONTIGUOUS
             if (valid_count == 8) {
                 ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
+                ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
                 float scale = Policy::HAS_SCALE
-                    ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+                    ? (float)Policy::load_scale(scale_bytes, scale_idx)
                     : 1.0f;
-                acc += Policy::template dot<8>(data, base_idx, scale, xv_f32_lo, xv_f32_hi);
+                float affine = METALLIC_AFFINE_LOAD(scale_bytes, scale_idx);
+                acc += Policy::template dot<8>(data, base_idx, scale, xv_f32_lo, xv_f32_hi)
+                    + affine * METALLIC_AFFINE_XSUM(xv_f32_lo, xv_f32_hi);
             } else {
                 float w[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
                 ulong base_idx = WEIGHT_INDEX(row_idx, k, K, N);
                 Policy::template load_weights<8>(data, base_idx, w);
                 for (uint i = valid_count; i < 8; ++i) w[i] = 0.0f;
+                ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
                 float scale = Policy::HAS_SCALE
-                    ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+                    ? (float)Policy::load_scale(scale_bytes, scale_idx)
                     : 1.0f;
+                float affine = METALLIC_AFFINE_LOAD(scale_bytes, scale_idx);
                 float4 w_lo = float4(w[0], w[1], w[2], w[3]);
                 float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-                acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+                acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi))
+                    + affine * METALLIC_AFFINE_XSUM(xv_f32_lo, xv_f32_hi);
             }
 #else
             float w[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
@@ -195,12 +215,15 @@ ALWAYS_INLINE float gemv_dot_vectorized(
                 w[i] = temp_w[0];
             }
             for (uint i = valid_count; i < 8; ++i) w[i] = 0.0f;
+            ulong scale_idx = (ulong)row_idx * blocks_per_k + (k / weights_per_block);
             float scale = Policy::HAS_SCALE
-                ? (float)Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + (k / weights_per_block))
+                ? (float)Policy::load_scale(scale_bytes, scale_idx)
                 : 1.0f;
+            float affine = METALLIC_AFFINE_LOAD(scale_bytes, scale_idx);
             float4 w_lo = float4(w[0], w[1], w[2], w[3]);
             float4 w_hi = float4(w[4], w[5], w[6], w[7]);
-            acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi));
+            acc += scale * (dot(xv_f32_lo, w_lo) + dot(xv_f32_hi, w_hi))
+                + affine * METALLIC_AFFINE_XSUM(xv_f32_lo, xv_f32_hi);
 #endif
         }
     }
@@ -240,6 +263,7 @@ ALWAYS_INLINE float gemv_dot_canonical(
     while (k + 4 <= k_end && k + 4 <= K) {
         uint block_idx = k / weights_per_block;
         half scale = Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + block_idx);
+        float affine = METALLIC_AFFINE_LOAD(scale_bytes, (ulong)row_idx * blocks_per_k + block_idx);
         
         // Load 4 weights
         float w[4];
@@ -263,7 +287,8 @@ ALWAYS_INLINE float gemv_dot_canonical(
         float4 x = float4((float)input[k], (float)input[k+1], (float)input[k+2], (float)input[k+3]);
         
         // Dot product with scale
-        acc += (w[0] * x.x + w[1] * x.y + w[2] * x.z + w[3] * x.w) * (float)scale;
+        acc += (w[0] * x.x + w[1] * x.y + w[2] * x.z + w[3] * x.w) * (float)scale
+            + affine * (x.x + x.y + x.z + x.w);
         
         k += 4;
     }
@@ -272,12 +297,13 @@ ALWAYS_INLINE float gemv_dot_canonical(
     while (k < k_end && k < K) {
         uint block_idx = k / weights_per_block;
         half scale = Policy::load_scale(scale_bytes, (ulong)row_idx * blocks_per_k + block_idx);
+        float affine = METALLIC_AFFINE_LOAD(scale_bytes, (ulong)row_idx * blocks_per_k + block_idx);
         
         float w[1];
         ulong idx = WEIGHT_INDEX(row_idx, k, K, N);
         Policy::template load_weights<1>(data, idx, w);
         
-        acc += w[0] * (float)scale * (float)input[k];
+        acc += w[0] * (float)scale * (float)input[k] + affine * (float)input[k];
         ++k;
     }
     

@@ -43,7 +43,7 @@ impl DtypeExt for Dtype {
             Dtype::F32 => "float",
             Dtype::F16 => "half",
             Dtype::U32 => "uint",
-            Dtype::Q4_0 | Dtype::Q6_K | Dtype::Q8_0 => "uchar",
+            Dtype::Q4_0 | Dtype::Q4_1 | Dtype::Q6_K | Dtype::Q8_0 => "uchar",
             _ => panic!("Unsupported dtype for metal_format: {}", self),
         }
     }
@@ -51,7 +51,7 @@ impl DtypeExt for Dtype {
     fn layout_size(&self, dims: &[usize]) -> usize {
         let elements: usize = dims.iter().product();
         match self {
-            Dtype::Q4_0 => (elements + 1) / 2,
+            Dtype::Q4_0 | Dtype::Q4_1 => (elements + 1) / 2,
             // DEBT: Add other quantized layouts
             _ => elements * self.size_bytes(),
         }
@@ -151,6 +151,47 @@ impl TensorElement for Q4_0 {
 
     fn from_f32(v: f32) -> Self::Scalar {
         // Saturate to [0, 255]
+        v.clamp(0.0, 255.0) as u8
+    }
+
+    fn to_f32(v: Self::Scalar) -> f32 {
+        v as f32
+    }
+
+    fn to_f32_vec(slice: &[Self::Scalar]) -> Vec<f32> {
+        slice.iter().map(|&x| x as f32).collect()
+    }
+
+    fn from_f32_slice(slice: &[f32]) -> Vec<Self::Scalar> {
+        slice.iter().map(|&x| x.clamp(0.0, 255.0) as u8).collect()
+    }
+
+    fn copy_from_f32_slice(src: &[f32], dest: &mut [Self::Scalar]) {
+        debug_assert_eq!(src.len(), dest.len());
+        for (dst, value) in dest.iter_mut().zip(src.iter().copied()) {
+            *dst = value.clamp(0.0, 255.0) as u8;
+        }
+    }
+
+    fn abs(v: Self::Scalar) -> Self::Scalar {
+        v
+    }
+
+    fn is_finite(_v: Self::Scalar) -> bool {
+        true
+    }
+}
+
+// Q4_1 implementation
+#[derive(Clone, Copy, Default)]
+pub struct Q4_1;
+
+impl TensorElement for Q4_1 {
+    type Scalar = u8;
+    const DTYPE: Dtype = Dtype::Q4_1;
+    type Policy = crate::policy::q4_1::PolicyQ4_1;
+
+    fn from_f32(v: f32) -> Self::Scalar {
         v.clamp(0.0, 255.0) as u8
     }
 

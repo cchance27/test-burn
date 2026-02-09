@@ -46,13 +46,17 @@ ALWAYS_INLINE void run_embedding_core(
 
     // Load scale (if applicable) - Q8 uses per-32 block scales, F16 returns 1.0
     float scale = 1.0f;
+    float affine = 0.0f;
     if (Policy::HAS_SCALE) {
         const uint weights_per_block = Policy::WEIGHTS_PER_BLOCK;
         uint blocks_per_row = (d_model + weights_per_block - 1u) / weights_per_block;
         uint block_in_row = feat / weights_per_block;
         ulong scale_idx = (ulong)tok * blocks_per_row + block_in_row;
         scale = (float)Policy::load_scale(scale_bytes, scale_idx);
+#if defined(METALLIC_POLICY_HAS_AFFINE) && METALLIC_POLICY_HAS_AFFINE
+        affine = (float)Policy::load_affine(scale_bytes, scale_idx);
+#endif
     }
 
-    out[gid] = (half)(val[0] * scale);
+    out[gid] = (half)(val[0] * scale + affine);
 }

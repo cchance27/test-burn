@@ -63,6 +63,55 @@ impl Dtype {
                 | Dtype::Q8_K
         )
     }
+
+    /// Parse a dtype from free-form text (metadata strings, model labels, etc).
+    ///
+    /// This is intentionally table-driven so loaders don't duplicate fragile
+    /// `contains("Q4_0")` chains for every new quant.
+    pub fn parse_fuzzy(input: &str) -> Option<Self> {
+        if let Ok(dtype) = Self::from_str(input) {
+            return Some(dtype);
+        }
+
+        let upper = input.to_ascii_uppercase();
+        let compact: String = upper.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+
+        const ALIASES: &[(&str, Dtype)] = &[
+            ("F32", Dtype::F32),
+            ("BF16", Dtype::BF16),
+            ("F16", Dtype::F16),
+            ("F64", Dtype::F64),
+            ("U32", Dtype::U32),
+            ("I32", Dtype::I32),
+            ("I16", Dtype::I16),
+            ("I8", Dtype::I8),
+            ("Q4_0", Dtype::Q4_0),
+            ("Q4_1", Dtype::Q4_1),
+            ("Q5_0", Dtype::Q5_0),
+            ("Q5_1", Dtype::Q5_1),
+            ("Q8_0", Dtype::Q8_0),
+            ("Q8_1", Dtype::Q8_1),
+            ("Q2_K", Dtype::Q2_K),
+            ("Q3_K", Dtype::Q3_K),
+            ("Q4_K", Dtype::Q4_K),
+            ("Q5_K", Dtype::Q5_K),
+            ("Q6_K", Dtype::Q6_K),
+            ("Q8_K", Dtype::Q8_K),
+        ];
+
+        for &(needle, dtype) in ALIASES {
+            if upper.contains(needle) {
+                return Some(dtype);
+            }
+
+            let compact_needle: String = needle.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+            if compact.contains(&compact_needle) {
+                return Some(dtype);
+            }
+        }
+
+        None
+    }
 }
 
 impl Display for Dtype {
@@ -124,5 +173,19 @@ impl FromStr for Dtype {
             "F64" => Ok(Dtype::F64),
             _ => Err(format!("Unknown Dtype: {}", s)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Dtype;
+
+    #[test]
+    fn parse_fuzzy_handles_common_quant_aliases() {
+        assert_eq!(Dtype::parse_fuzzy("Q4_0"), Some(Dtype::Q4_0));
+        assert_eq!(Dtype::parse_fuzzy("q4_1"), Some(Dtype::Q4_1));
+        assert_eq!(Dtype::parse_fuzzy("q6k"), Some(Dtype::Q6_K));
+        assert_eq!(Dtype::parse_fuzzy("model-q8_0-gguf"), Some(Dtype::Q8_0));
+        assert_eq!(Dtype::parse_fuzzy("dtype=bf16"), Some(Dtype::BF16));
     }
 }

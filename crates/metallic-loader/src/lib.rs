@@ -3,6 +3,8 @@ pub use metallic_sdk::{
     model::{LoadedModel, LoaderError, MetadataValue, ModelMetadata, TensorData, TensorInfo}, tensor::Dtype
 };
 
+pub mod quant_spec;
+
 #[cfg(feature = "gguf")]
 pub(crate) mod gguf;
 

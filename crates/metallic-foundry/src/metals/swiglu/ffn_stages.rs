@@ -105,7 +105,7 @@ impl Stage for FfnDualProjectStage {
         let vec_width = self.vector_width.elements();
         let norm_var = self.norm_shared_name.as_deref().unwrap_or("inv_rms");
 
-        let scale_stride = "(ulong)row_idx * blocks_per_k * 2";
+        let scale_stride = format!("(ulong)row_idx * blocks_per_k * {}::SCALE_BYTES", policy);
 
         let norm_logic = if self.norm_shared_name.is_some() {
             format!(
@@ -135,6 +135,8 @@ impl Stage for FfnDualProjectStage {
             r#"
         float s_gate_val = (float){policy}::load_scale(row_s_gate, block_off);
         float s_up_val = (float){policy}::load_scale(row_s_up, block_off);
+        float a_gate_val = ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_gate, block_off) : 0.0f);
+        float a_up_val = ({policy}::HAS_AFFINE ? (float){policy}::load_affine(row_s_up, block_off) : 0.0f);
                 "#,
             policy = policy
         );
@@ -167,13 +169,15 @@ impl Stage for FfnDualProjectStage {
         {{
             float w[{vec_width}];
             {policy}::template load_weights<{vec_width}>(w_gate, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
-            acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+            acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
+                + ({policy}::HAS_AFFINE ? (a_gate_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }}
 
         {{
             float w[{vec_width}];
             {policy}::template load_weights<{vec_width}>(w_up, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
-            acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+            acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
+                + ({policy}::HAS_AFFINE ? (a_up_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }}
 
         k_base += K_CHUNK_SIZE;
@@ -208,13 +212,15 @@ impl Stage for FfnDualProjectStage {
         {{
             float w[{vec_width}];
             {policy}::template load_weights<{vec_width}>(w_gate, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
-            acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+            acc_gate += s_gate_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
+                + ({policy}::HAS_AFFINE ? (a_gate_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }}
 
         {{
             float w[{vec_width}];
             {policy}::template load_weights<{vec_width}>(w_up, WEIGHT_INDEX(row_idx, k, k_dim, n_dim), w);
-            acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])));
+            acc_up += s_up_val * (dot(xv_f32_lo, float4(w[0],w[1],w[2],w[3])) + dot(xv_f32_hi, float4(w[4],w[5],w[6],w[7])))
+                + ({policy}::HAS_AFFINE ? (a_up_val * (dot(xv_f32_lo, float4(1.0f)) + dot(xv_f32_hi, float4(1.0f)))) : 0.0f);
         }}
 
         k_base += K_CHUNK_SIZE;
