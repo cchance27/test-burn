@@ -432,6 +432,25 @@ fn parse_env_u32(key: &'static str) -> Option<u32> {
     std::env::var(key).ok().and_then(|s| s.trim().parse::<u32>().ok())
 }
 
+#[inline]
+fn infer_n_kv_heads(k: &TensorArg, kv_head_major: bool, head_dim: u32) -> u32 {
+    if kv_head_major {
+        // Head-major:
+        // Rank-3: [Heads, Seq, Dim] -> dims[0]
+        // Rank-4: [Batch, Heads, Seq, Dim] -> dims[1]
+        let dims = k.dims();
+        if dims.len() == 3 {
+            dims[0] as u32
+        } else {
+            dims.get(1).copied().unwrap_or(1) as u32
+        }
+    } else {
+        // Token-major: [Batch, Seq, Heads*Dim] (or rank-3 equivalent)
+        let last = k.dims().last().copied().unwrap_or(head_dim as usize) as u32;
+        (last / head_dim).max(1)
+    }
+}
+
 /// Get or create the SDPA prefill kernel (tiled, WARPS in {4,8}).
 fn get_sdpa_prefill_kernel(prefill_warps: u32) -> Arc<CompiledCompoundKernel> {
     use crate::kernel_registry::{KernelCacheKey, kernel_registry};
@@ -587,6 +606,18 @@ fn run_flash_decode_impl(
     kv_head_major: bool,
     variant_override: Option<FlashDecodeVariant>,
 ) -> Result<(), MetalError> {
+    tracing::trace!(
+        n_heads,
+        head_dim,
+        kv_seq_len,
+        q_seq_len,
+        kv_head_major,
+        has_variant_override = variant_override.is_some(),
+        q_dims = ?q.dims(),
+        k_dims = ?k.dims(),
+        v_dims = ?v.dims(),
+        "FlashAttention dispatcher entering"
+    );
     // The online SDPA dispatcher handles:
     // - Decode (M=1): head-major Q and head-major KV cache, FlashAttention-style streaming softmax.
     // - Prefill (M>1): tiled kernel for head_dim=64/128.
@@ -734,27 +765,32 @@ fn run_flash_decode_impl(
             }
         };
 
-        // Infer n_kv_heads from tensor shape
-        let n_kv_heads = if kv_head_major {
-            // Head-Major:
-            // If Rank 4: [Batch, Heads, Seq, Dim] -> dims[1]
-            // If Rank 3: [Heads, Seq, Dim] -> dims[0]
-            let dims = k.dims();
-            if dims.len() == 3 {
-                dims[0] as u32
-            } else {
-                dims.get(1).copied().unwrap_or(1) as u32
-            }
-        } else {
-            // Token-Major: [Batch, Seq, Heads*Dim]
-            let last = k.dims().last().copied().unwrap_or(head_dim as usize) as u32;
-            (last / head_dim).max(1)
-        };
+        let n_kv_heads = infer_n_kv_heads(k, kv_head_major, head_dim);
 
         let mut group_size = n_heads / n_kv_heads;
         if group_size == 0 {
             group_size = 1;
         }
+        let kv_path = if kv_head_major && n_kv_heads < n_heads {
+            "compact_gqa"
+        } else if kv_head_major {
+            "expanded_heads_or_mha"
+        } else {
+            "token_major"
+        };
+        tracing::trace!(
+            kv_path,
+            n_heads,
+            n_kv_heads,
+            group_size,
+            kv_head_major,
+            q_seq_len,
+            kv_seq_len,
+            q_dims = ?q.dims(),
+            k_dims = ?k.dims(),
+            v_dims = ?v.dims(),
+            "FlashAttention prefill KV path resolved"
+        );
 
         if std::env::var("METALLIC_DEBUG_SDPA").is_ok() {
             tracing::info!("SDPA Prefill Debug: Q dims={:?} K dims={:?}", q.dims(), k.dims());
@@ -964,7 +1000,7 @@ fn run_flash_decode_impl(
         )));
     }
 
-    // Compute strides based on head-major layout [n_heads, allocated_capacity, head_dim]
+    // Compute strides based on head-major cache layout [cache_heads, allocated_capacity, head_dim].
     let batch = 1u32;
     let capacity = k.dims().get(1).copied().unwrap_or(kv_seq_len as usize) as u32;
 
@@ -983,9 +1019,34 @@ fn run_flash_decode_impl(
         // Stride H: D
         (q_seq_len_decode * n_heads * head_dim, head_dim)
     };
-    // Use capacity for head stride to prevent head overlap/corruption
-    let (k_stride_b, k_stride_h) = (n_heads * capacity * head_dim, capacity * head_dim);
-    let (v_stride_b, v_stride_h) = (n_heads * capacity * head_dim, capacity * head_dim);
+    let n_kv_heads = infer_n_kv_heads(k, kv_head_major, head_dim).max(1);
+    let cache_heads = if kv_head_major { n_kv_heads } else { n_heads };
+    let group_size = (n_heads / n_kv_heads).max(1);
+    let kv_path = if kv_head_major && n_kv_heads < n_heads {
+        "compact_gqa"
+    } else if kv_head_major {
+        "expanded_heads_or_mha"
+    } else {
+        "token_major"
+    };
+    tracing::trace!(
+        kv_path,
+        n_heads,
+        n_kv_heads,
+        cache_heads,
+        group_size,
+        kv_head_major,
+        capacity,
+        kv_seq_len,
+        q_dims = ?q.dims(),
+        k_dims = ?k.dims(),
+        v_dims = ?v.dims(),
+        "FlashAttention decode KV path resolved"
+    );
+
+    // Use actual cache head count for head stride to support both expanded and compact GQA caches.
+    let (k_stride_b, k_stride_h) = (cache_heads * capacity * head_dim, capacity * head_dim);
+    let (v_stride_b, v_stride_h) = (cache_heads * capacity * head_dim, capacity * head_dim);
     let (out_stride_b, out_stride_h) = (n_heads * head_dim, head_dim);
 
     let scale = 1.0 / (head_dim as f32).sqrt();

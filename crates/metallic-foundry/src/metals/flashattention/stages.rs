@@ -123,10 +123,18 @@ impl Stage for HeadLayoutStage {
     ulong q_offset = batch_idx * q_stride_b + head_idx * q_stride_h;
     {q_t}* q_ptr = ({q_t}*)q + q_offset;
     
-    ulong k_offset = batch_idx * k_stride_b + head_idx * k_stride_h;
+    // Derive KV head mapping from strides so decode supports both:
+    // - expanded cache [n_heads, ...] (group_size=1)
+    // - compact GQA cache [n_kv_heads, ...] (group_size=n_heads/n_kv_heads)
+    uint q_heads = (q_stride_h > 0u) ? max(1u, q_stride_b / q_stride_h) : 1u;
+    uint k_heads = (k_stride_h > 0u) ? max(1u, k_stride_b / k_stride_h) : q_heads;
+    uint group_size = max(1u, q_heads / max(1u, k_heads));
+    uint kv_head_idx = head_idx / group_size;
+
+    ulong k_offset = batch_idx * k_stride_b + kv_head_idx * k_stride_h;
     {k_t}* k_ptr = ({k_t}*)k + k_offset;
     
-    ulong v_offset = batch_idx * v_stride_b + head_idx * v_stride_h;
+    ulong v_offset = batch_idx * v_stride_b + kv_head_idx * v_stride_h;
     {v_t}* v_ptr = ({v_t}*)v + v_offset;
     
     ulong out_offset = batch_idx * out_stride_b + head_idx * out_stride_h;

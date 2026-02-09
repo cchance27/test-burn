@@ -307,7 +307,7 @@
                     "dtype": "F16",
                     "storage": "kv_cache",
                     "dims": [
-                        "n_heads",
+                        "n_kv_heads",
                         "max_seq_len",
                         "head_dim"
                     ],
@@ -322,7 +322,7 @@
                     "dtype": "F16",
                     "storage": "kv_cache",
                     "dims": [
-                        "n_heads",
+                        "n_kv_heads",
                         "max_seq_len",
                         "head_dim"
                     ],

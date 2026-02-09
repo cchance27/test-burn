@@ -11,7 +11,7 @@ use metallic_loader::ModelMetadata;
 use parking_lot::{Mutex, RwLock};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::builder::WeightBundle;
+use super::{builder::WeightBundle, kv_geometry::KvGeometry};
 use crate::{
     Foundry, MetalError, metals::sampling::SampleTopK, policy::{WeightLayout, resolve_policy}, spec::{
         ArchValue, IntExpr, ModelSpec, StorageClass, TensorBindings, WeightBindingSpec, WeightLayoutSpec, compiled::{CompiledStep, FastBindings, SymbolTable}
@@ -2336,7 +2336,25 @@ impl CompiledModel {
         current_pos: usize,
         required_len: usize,
     ) -> Result<(), MetalError> {
+        let kv_geometry = KvGeometry::from_architecture(self.architecture());
+        tracing::trace!(
+            layout = ?kv_geometry.layout,
+            n_heads = kv_geometry.n_heads,
+            n_kv_heads = kv_geometry.n_kv_heads,
+            group_size = kv_geometry.group_size,
+            cache_heads = kv_geometry.cache_heads(),
+            current_pos,
+            required_len,
+            allocated_capacity = context_config.allocated_capacity,
+            max_context_len = context_config.max_context_len,
+            "ensure_kv_capacity: evaluating capacity request"
+        );
         if required_len <= context_config.allocated_capacity {
+            tracing::trace!(
+                required_len,
+                allocated_capacity = context_config.allocated_capacity,
+                "ensure_kv_capacity: capacity already sufficient"
+            );
             return Ok(());
         }
 
@@ -2360,10 +2378,12 @@ impl CompiledModel {
         new_capacity = crate::model::context::ContextConfig::align_capacity(new_capacity);
 
         tracing::info!(
-            "Growing KV cache capacity: {} -> {} (requested {})",
+            "Growing KV cache capacity: {} -> {} (requested {}, layout={:?}, cache_heads={})",
             context_config.allocated_capacity,
             new_capacity,
-            required_len
+            required_len,
+            kv_geometry.layout,
+            kv_geometry.cache_heads()
         );
 
         let old_capacity = context_config.allocated_capacity;
@@ -2385,6 +2405,19 @@ impl CompiledModel {
     ) -> Result<(), MetalError> {
         let arch = self.architecture();
         let head_dim = arch.d_model() / arch.n_heads();
+        let kv_geometry = KvGeometry::from_architecture(arch);
+        tracing::debug!(
+            old_capacity,
+            new_capacity,
+            current_pos,
+            layout = ?kv_geometry.layout,
+            n_heads = kv_geometry.n_heads,
+            n_kv_heads = kv_geometry.n_kv_heads,
+            group_size = kv_geometry.group_size,
+            cache_heads = kv_geometry.cache_heads(),
+            head_dim = kv_geometry.head_dim,
+            "Reallocating KV-aware buffers"
+        );
 
         // Batch all buffer copies into a single command buffer when possible.
         let nested_capture = foundry.is_capturing();
@@ -2408,22 +2441,41 @@ impl CompiledModel {
                     "KV cache '{name}' must be F16 for growth preservation"
                 )));
             }
-            if old.dims.as_slice() != [arch.n_heads(), old_capacity, head_dim].as_slice() {
+
+            let old_geom = KvGeometry::from_cache_tensor(arch, old, old_capacity)?;
+            let new_geom = KvGeometry::from_cache_tensor(arch, new, new_capacity)?;
+            tracing::trace!(
+                tensor = %name,
+                old_dims = ?old.dims,
+                new_dims = ?new.dims,
+                old_layout = ?old_geom.layout,
+                new_layout = ?new_geom.layout,
+                old_cache_heads = old_geom.cache_heads(),
+                new_cache_heads = new_geom.cache_heads(),
+                old_capacity,
+                new_capacity,
+                "Preserving KV cache tensor across growth"
+            );
+            if old_geom.layout != new_geom.layout {
                 return Err(MetalError::InvalidShape(format!(
-                    "KV cache '{name}' old dims mismatch: got {:?}, expected [{}, {}, {}]",
-                    old.dims,
-                    arch.n_heads(),
-                    old_capacity,
-                    head_dim
+                    "KV cache '{name}' layout changed during growth: old={:?}, new={:?}",
+                    old_geom.layout, new_geom.layout
                 )));
             }
-            if new.dims.as_slice() != [arch.n_heads(), new_capacity, head_dim].as_slice() {
+            if old_geom.cache_heads() != old.dims[0] || old_geom.head_dim != old.dims[2] {
                 return Err(MetalError::InvalidShape(format!(
-                    "KV cache '{name}' new dims mismatch: got {:?}, expected [{}, {}, {}]",
+                    "KV cache '{name}' old dims mismatch: got {:?}, inferred heads={} head_dim={}",
+                    old.dims,
+                    old_geom.cache_heads(),
+                    old_geom.head_dim
+                )));
+            }
+            if new_geom.cache_heads() != new.dims[0] || new_geom.head_dim != new.dims[2] {
+                return Err(MetalError::InvalidShape(format!(
+                    "KV cache '{name}' new dims mismatch: got {:?}, inferred heads={} head_dim={}",
                     new.dims,
-                    arch.n_heads(),
-                    new_capacity,
-                    head_dim
+                    new_geom.cache_heads(),
+                    new_geom.head_dim
                 )));
             }
 
@@ -2436,10 +2488,10 @@ impl CompiledModel {
                 .as_ref()
                 .ok_or_else(|| MetalError::InvalidOperation(format!("{name} buffer missing after growth")))?;
 
-            let copy_size = current_pos * head_dim * 2;
-            for h in 0..arch.n_heads() {
-                let old_head_offset = h * old_capacity * head_dim * 2;
-                let new_head_offset = h * new_capacity * head_dim * 2;
+            let copy_size = current_pos * old_geom.head_dim * 2;
+            for h in 0..old_geom.cache_heads() {
+                let old_head_offset = h * old_capacity * old_geom.head_dim * 2;
+                let new_head_offset = h * new_capacity * old_geom.head_dim * 2;
                 foundry.blit_copy(
                     old_buf,
                     old.offset + old_head_offset,
@@ -2448,6 +2500,13 @@ impl CompiledModel {
                     copy_size,
                 )?;
             }
+            tracing::trace!(
+                tensor = %name,
+                copied_heads = old_geom.cache_heads(),
+                copied_tokens = current_pos,
+                copied_bytes_per_head = copy_size,
+                "Preserved KV cache contents for grown tensor"
+            );
             Ok(())
         };
 
@@ -2485,6 +2544,12 @@ impl CompiledModel {
                 if tensor.storage == StorageClass::KvCache {
                     let old = old.ok_or_else(|| MetalError::InvalidOperation(format!("Missing KV cache '{name}' during growth")))?;
                     let new = bindings.get(&name)?;
+                    tracing::trace!(
+                        tensor = %name,
+                        old_dims = ?old.dims,
+                        new_dims = ?new.dims,
+                        "KV cache reallocated; starting preservation copy"
+                    );
                     preserve_kv_cache(foundry, &name, &old, &new)?;
                 }
 

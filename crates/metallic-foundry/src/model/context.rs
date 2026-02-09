@@ -4,7 +4,7 @@
 
 use sysinfo::System;
 
-use crate::{spec::Architecture, types::Device};
+use crate::{model::KvGeometry, spec::Architecture, types::Device};
 
 /// Configuration for context length and buffer management.
 #[derive(Debug)]
@@ -162,14 +162,22 @@ impl ContextConfig {
             }
         };
 
-        // KV cache bytes per token:
-        // K: d_model f16 + V: d_model f16 => 2 * d_model * 2 bytes = 4*d_model bytes per layer.
-        // Total: n_layers * 4*d_model.
-        let per_token_bytes = arch
-            .d_model()
-            .checked_mul(4)
-            .and_then(|v| v.checked_mul(arch.n_layers()))
-            .unwrap_or(usize::MAX);
+        // KV bytes per token are layout-dependent:
+        // Expanded cache: 2(K+V) * n_layers * n_heads * head_dim * 2(F16 bytes)
+        // Compact GQA cache: 2(K+V) * n_layers * n_kv_heads * head_dim * 2(F16 bytes)
+        let kv = KvGeometry::from_architecture(arch);
+        let per_token_bytes = kv.per_token_bytes_f16(arch.n_layers());
+        tracing::debug!(
+            layout = ?kv.layout,
+            n_heads = kv.n_heads,
+            n_kv_heads = kv.n_kv_heads,
+            group_size = kv.group_size,
+            head_dim = kv.head_dim,
+            cache_heads = kv.cache_heads(),
+            budget_mb = budget_bytes / 1024 / 1024,
+            per_token_bytes,
+            "Applying KV memory budget"
+        );
 
         if per_token_bytes == 0 || budget_bytes == 0 {
             return;
@@ -212,10 +220,20 @@ impl ContextConfig {
 
     /// Estimate the memory required for the KV cache.
     pub fn estimate_kv_memory(arch: &Architecture, context_len: usize) -> MemoryEstimate {
-        let head_dim = arch.d_model() / arch.n_heads();
-        // 2 (K+V) * n_layers * n_heads * context_len * head_dim * 2 (F16 bytes)
-        let per_layer_bytes = 2 * arch.n_heads() * context_len * head_dim * 2;
+        let kv = KvGeometry::from_architecture(arch);
+        // 2 (K+V) * cache_heads(layout) * context_len * head_dim * 2 (F16 bytes)
+        let per_layer_bytes = 2 * kv.cache_heads() * context_len * kv.head_dim * 2;
         let total = per_layer_bytes * arch.n_layers();
+        tracing::trace!(
+            layout = ?kv.layout,
+            n_layers = arch.n_layers(),
+            context_len,
+            cache_heads = kv.cache_heads(),
+            head_dim = kv.head_dim,
+            per_layer_bytes,
+            total_bytes = total,
+            "Estimated KV memory"
+        );
         MemoryEstimate {
             kv_cache_bytes: total,
             per_layer_bytes,
@@ -309,8 +327,7 @@ mod tests {
     fn test_memory_estimation() {
         let arch = mock_arch(2048);
         let est = ContextConfig::estimate_kv_memory(&arch, 2048);
-        // layers=4, heads=8, seq=2048, head_dim=64 (512/8), f16=2 bytes, K+V=2
-        // 4 * 2 * 8 * 2048 * 64 * 2 = 16,777,216 bytes (16MB)
-        assert_eq!(est.kv_cache_bytes, 16777216);
+        // Compact GQA (n_kv_heads=2): 4 * 2 * 2 * 2048 * 64 * 2 = 4,194,304 bytes
+        assert_eq!(est.kv_cache_bytes, 4194304);
     }
 }

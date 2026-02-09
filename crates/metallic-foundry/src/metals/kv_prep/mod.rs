@@ -2,8 +2,8 @@
 //!
 //! This fuses the common decode-time KV preparation chain:
 //! - KvRearrange(Q) + Rope(Q) -> q_rot
-//! - KvRearrange(K) + Rope(K) + KvCacheWriteRepeatKvHeads(K) -> k_cache
-//! - KvRearrange(V) + KvCacheWriteRepeatKvHeads(V) -> v_cache
+//! - KvRearrange(K) + Rope(K) + compact KV write -> k_cache
+//! - KvRearrange(V) + compact KV write -> v_cache
 //!
 //! The target is to reduce per-token dispatch fanout during decode.
 
