@@ -17,6 +17,7 @@
  */
 struct PolicyQ4_0 {
     static constant bool HAS_SCALE = true;
+    static constant uint WEIGHTS_PER_BLOCK = 32u;
 
     /**
      * Load the block scale (FP16).

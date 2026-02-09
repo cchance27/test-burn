@@ -14,6 +14,7 @@
  */
 struct PolicyU32 {
     static constant bool HAS_SCALE = false;
+    static constant uint WEIGHTS_PER_BLOCK = 1u;
 
     // U32 does not use scales.
     static ALWAYS_INLINE half load_scale(const device uchar *scales, ulong block_idx) {

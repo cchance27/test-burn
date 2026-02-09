@@ -197,9 +197,6 @@ impl CompiledStep for CompiledFusedSwigluStep {
             });
         }
 
-        let weights_per_block = self.step.weights_per_block;
-        let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
-
         let policy_gate = crate::policy::resolve_policy(w_gate.dtype);
         let loader_gate = policy_gate.loader_stage();
         let args_gate = loader_gate.bind(_fast_bindings, &self.wg_resolved);
@@ -212,6 +209,12 @@ impl CompiledStep for CompiledFusedSwigluStep {
         let s_gate = if args_gate.len() > 1 { Some(args_gate[1].clone()) } else { None };
         let w_up_arg = args_up[0].clone();
         let s_up = if args_up.len() > 1 { Some(args_up[1].clone()) } else { None };
+        let weights_per_block = if policy_gate.has_scale() {
+            policy_gate.meta().weights_per_block as u32
+        } else {
+            self.step.weights_per_block
+        };
+        let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
 
         let args = FusedFfnArgs {
             w_gate: w_gate_arg,
@@ -449,6 +452,11 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             });
         }
 
+        let weights_per_block = if policy_gate.has_scale() {
+            policy_gate.meta().weights_per_block as u32
+        } else {
+            self.weights_per_block
+        };
         let batch = bindings.get_int_global("m").unwrap_or(1).max(1) as u32;
 
         let args = FusedFfnArgs {
@@ -460,7 +468,7 @@ impl CompiledStep for CompiledFusedFfnSwiGluRmsNormStep {
             output: TensorArg::from_tensor(output),
             k_dim,
             n_dim,
-            weights_per_block: self.weights_per_block,
+            weights_per_block,
             gamma: TensorArg::from_tensor(gamma),
             b_gate,
             b_up,

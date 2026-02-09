@@ -466,16 +466,20 @@ impl GGUFFile {
     /// Calculate the actual size of tensor data in bytes
     fn calculate_actual_tensor_size(&self, tensor: &GGUTensorInfo) -> usize {
         match tensor.data_type {
-            GGUFDataType::Q4_0 | GGUFDataType::Q8_0 | GGUFDataType::Q8_1 => {
+            GGUFDataType::Q4_0 | GGUFDataType::Q8_0 | GGUFDataType::Q8_1 | GGUFDataType::Q6K => {
                 // For quantized types, calculate based on blocks
                 let element_count: usize = tensor.dimensions.iter().map(|&d| d as usize).product();
-                let weights_per_block = 32;
+                let weights_per_block = match tensor.data_type {
+                    GGUFDataType::Q6K => 256,
+                    _ => 32,
+                };
                 let blocks = element_count.div_ceil(weights_per_block);
 
                 let block_size = match tensor.data_type {
                     GGUFDataType::Q4_0 => 18, // 2 (scale) + 16 (4-bit weights)
                     GGUFDataType::Q8_0 => 34, // 2 (scale) + 32 (weights)
                     GGUFDataType::Q8_1 => 36, // 2 (scale) + 2 (delta) + 32 (weights)
+                    GGUFDataType::Q6K => 210, // 2 (d) + 16 (sub-scales) + 128 (ql) + 64 (qh)
                     _ => 36,                  // Should not happen
                 };
 

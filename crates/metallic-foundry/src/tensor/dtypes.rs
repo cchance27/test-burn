@@ -43,7 +43,7 @@ impl DtypeExt for Dtype {
             Dtype::F32 => "float",
             Dtype::F16 => "half",
             Dtype::U32 => "uint",
-            Dtype::Q4_0 | Dtype::Q8_0 => "uchar",
+            Dtype::Q4_0 | Dtype::Q6_K | Dtype::Q8_0 => "uchar",
             _ => panic!("Unsupported dtype for metal_format: {}", self),
         }
     }

@@ -15,6 +15,7 @@
  */
 struct PolicyF16 {
     static constant bool HAS_SCALE = false;
+    static constant uint WEIGHTS_PER_BLOCK = 1u;
 
     // F16 does not use block scales. Always returns unity.
     static ALWAYS_INLINE half load_scale(const device uchar *scales, ulong block_idx) {

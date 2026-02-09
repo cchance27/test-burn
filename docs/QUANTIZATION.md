@@ -117,9 +117,52 @@ const device uchar* w_ptr = weights + idx * policy.meta().address_unit_bytes;
 Policy::template load_weights<8>(w_ptr, 0);
 ```
 
+## Weights-Per-Block Is Policy-Owned
+
+`weights_per_block` must come from the active policy metadata (`policy.meta().weights_per_block`) for quantized paths.
+Do **not** hardcode `32` in stage/step execution code.
+
+Practical rules:
+
+- In Rust execution paths (GEMV/GEMM/fused paths), derive `weights_per_block` from policy metadata when `policy.has_scale() == true`.
+- In Metal policy structs, expose `WEIGHTS_PER_BLOCK` and use it in kernels that compute scale/block indexing.
+- Model JSON may still carry a `weights_per_block` field, but policy-derived values are authoritative for quantized weights.
+
+This prevents format-specific regressions (e.g., `Q6_K` using a different logical block size than `Q8_0`/`Q4_0`).
+
 ## Scales Are Opaque Bytes
 
 For block-quant formats, “scales” buffers are treated as **opaque bytes** (`device uchar*`) and interpreted by the policy (e.g., `load_scale(scales, block_idx)` reading fp16 bits). Stages should not assume a typed element layout for scales beyond the policy’s contract.
+
+## Q6_K Bring-Up Notes (Gotchas)
+
+`Q6_K` exposed a few easy-to-miss implementation traps that are relevant for future quant formats:
+
+- **Do not assume block field order.**  
+  GGUF/ggml `block_q6_K` is laid out as `ql[128] + qh[64] + scales[16] + d(f16)` (not `d + scales + q`).
+  If this is decoded with the wrong offsets, inference may run but produce nonsense outputs.
+
+- **Treat GGUF quant packing axis as `ne[0]` (K axis).**  
+  Source block packing is along `ne[0]`, with rows over `ne[1]`.  
+  For many row-major bindings this means source dims look like `[K, N]`, not `[N, K]`.
+
+- **Validate from bytes first, then dims.**  
+  For super-block formats, derive source block count from `raw.len() / BLOCK_BYTES`, then cross-check against expected rows/K.
+  This catches bad axis assumptions early and gives clearer errors than only checking shape divisibility.
+
+- **Preserve logical-index contract in kernels.**  
+  Keep policy access in terms of logical `WEIGHT_INDEX(...)` offsets; policy code handles packed representation details.
+  Avoid introducing byte-stride assumptions in shared GEMV/GEMM paths.
+
+- **Symptom heuristic:** all `!`/gibberish output with no crash usually indicates decode/layout mismatch, not sampling.
+
+### Q6_K Validation Checklist
+
+When adding a new block-quant policy, validate in this order:
+
+1. Decode one block against ggml reference (`dequantize_row_*`) with a focused unit test.
+2. Verify block byte-size math matches GGUF tensor raw byte length.
+3. Verify row/block indexing by running a known-good prompt on a small model and checking output sanity.
 
 ## How to Add a New Quantization Type
 

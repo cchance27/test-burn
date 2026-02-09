@@ -280,6 +280,11 @@ impl CompiledStep for super::CompiledGemmV2Step {
         } else {
             b_arg.clone()
         };
+        let weights_per_block = if policy.has_scale() {
+            policy.meta().weights_per_block as u32
+        } else {
+            self.weights_per_block
+        };
 
         // Get kernel (cached) - uses unified getter for all quant types.
         let kernel = get_gemm_kernel(
@@ -317,7 +322,7 @@ impl CompiledStep for super::CompiledGemmV2Step {
             c: Some(c),
             bias: Some(bias),
             b_scales: Some(b_scales_arg),
-            weights_per_block: self.weights_per_block,
+            weights_per_block,
             alpha: self.alpha,
             beta: self.beta,
             params,

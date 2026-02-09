@@ -138,7 +138,11 @@ impl CompiledStep for CompiledFusedGemvStep {
 
         let k_dim = self.step.k_dim.resolve(bindings);
         let n_dim = self.step.n_dim.resolve(bindings);
-        let weights_per_block = self.step.weights_per_block.resolve(bindings);
+        let weights_per_block = if policy.has_scale() {
+            policy.meta().weights_per_block as u32
+        } else {
+            self.step.weights_per_block.resolve(bindings)
+        };
 
         let args = FusedGemvArgs {
             weights,

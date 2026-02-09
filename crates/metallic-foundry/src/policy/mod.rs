@@ -83,6 +83,7 @@ pub mod f16;
 pub mod f32;
 pub mod f64;
 pub mod q4_0;
+pub mod q6_k;
 pub mod q8;
 pub mod raw;
 
@@ -95,6 +96,7 @@ pub fn resolve_policy(dtype: Dtype) -> Arc<dyn MetalPolicyRuntime> {
         Dtype::F16 => Arc::new(f16::PolicyF16),
         Dtype::F32 => Arc::new(f32::PolicyF32),
         Dtype::Q4_0 => Arc::new(q4_0::PolicyQ4_0),
+        Dtype::Q6_K => Arc::new(q6_k::PolicyQ6K),
         Dtype::Q8_0 => Arc::new(q8::PolicyQ8),
         Dtype::U32 => Arc::new(raw::PolicyU32),
         // Map everything else to F32 or panic?
@@ -116,6 +118,7 @@ pub fn resolve_policy_by_name(name: &str) -> Option<Arc<dyn MetalPolicyRuntime>>
         "f64" => Some(Arc::new(f64::PolicyF64)),
         "u32" => Some(Arc::new(raw::PolicyU32)),
         "q4_0" => Some(Arc::new(q4_0::PolicyQ4_0)),
+        "q6_k" | "q6k" | "q6" => Some(Arc::new(q6_k::PolicyQ6K)),
         "q8" | "q8_0" => Some(Arc::new(q8::PolicyQ8)),
         _ => None,
     }

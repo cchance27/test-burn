@@ -178,11 +178,15 @@ impl CompiledStep for CompiledGemvV2UnifiedExecutionStep {
         let k_dim = self.params.k_dim.resolve(bindings);
         let n_dim = self.params.n_dim.resolve(bindings);
         let batch = self.params.batch.resolve(bindings);
-        let weights_per_block = self.params.weights_per_block;
 
         // Resolve policy purely from the bound weight dtype.
         // Quantization is intentionally "invisible" to the DSL/spec layer; bindings decide runtime policy.
         let policy = crate::policy::resolve_policy(weights.dtype);
+        let weights_per_block = if policy.has_scale() {
+            policy.meta().weights_per_block as u32
+        } else {
+            self.params.weights_per_block
+        };
 
         let kernel = get_gemv_v2_kernel(
             policy.clone() as std::sync::Arc<dyn crate::fusion::MetalPolicy>,
