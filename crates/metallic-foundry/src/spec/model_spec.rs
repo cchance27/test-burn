@@ -317,18 +317,14 @@ pub struct RepeatAllocSpec {
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum StorageClass {
+    #[default]
     Intermediate,
     KvCache,
     RopeCache,
     Shared,
     Private,
-}
-
-impl Default for StorageClass {
-    fn default() -> Self {
-        StorageClass::Intermediate
-    }
 }
 
 fn default_dtype_f16() -> Dtype {
@@ -380,17 +376,13 @@ pub struct WeightBindingSpec {
 
 #[derive(Debug, Deserialize, Clone)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum WeightLayoutSpec {
     /// Bind weights as-is (row-major / GGUF native layout).
+    #[default]
     RowMajor,
     /// Bind weights in canonical k-block-major layout (used by some GEMV/GEMM variants).
     Canonical { expected_k: IntExpr, expected_n: IntExpr },
-}
-
-impl Default for WeightLayoutSpec {
-    fn default() -> Self {
-        WeightLayoutSpec::RowMajor
-    }
 }
 
 impl ModelSpec {

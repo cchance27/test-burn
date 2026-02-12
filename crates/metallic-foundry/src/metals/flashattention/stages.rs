@@ -58,7 +58,7 @@ impl Stage for HeadLayoutStage {
                 .unwrap_or(default_type);
 
             args.push(BufferArg {
-                name: name,
+                name,
                 metal_type: type_str,
                 buffer_index: idx,
             });
@@ -78,7 +78,7 @@ impl Stage for HeadLayoutStage {
 
         for (name, idx) in scalars {
             args.push(BufferArg {
-                name: name,
+                name,
                 metal_type: "constant uint&",
                 buffer_index: idx,
             });

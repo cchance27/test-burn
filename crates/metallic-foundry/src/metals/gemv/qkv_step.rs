@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, Once};
 
 use metallic_macros::KernelArgs;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,8 @@ pub struct FusedQkvArgs {
     #[arg(buffer = 19)]
     pub epsilon: f32,
 }
+
+static MIXED_QKV_FALLBACK_WARN_ONCE: Once = Once::new();
 
 #[typetag::serde(name = "FusedQkv")]
 impl Step for FusedQkvStep {
@@ -200,9 +202,153 @@ impl CompiledStep for CompiledFusedQkvStep {
         let get = |idx| fast_bindings.get(idx).ok_or(MetalError::InputNotFound("".into()));
         let input = get(self.input_idx)?;
         let w_q_tensor = get(self.w_q_resolved.weights)?;
+        let w_k_tensor = get(self.w_k_resolved.weights)?;
+        let w_v_tensor = get(self.w_v_resolved.weights)?;
 
-        // Centralized Quantization Binding
-        let policy = crate::policy::resolve_policy(w_q_tensor.dtype);
+        let out_q = get(self.out_q_idx)?;
+        let out_k = get(self.out_k_idx)?;
+        let out_v = get(self.out_v_idx)?;
+
+        let k_dim = self.step.k_dim.resolve(bindings);
+        let n_dim = self.step.n_dim.resolve(bindings);
+        let n_kv = self.step.n_kv.resolve(bindings);
+        let m = self.step.m.resolve(bindings).max(1);
+
+        let q_policy = crate::policy::resolve_policy(w_q_tensor.dtype);
+        let k_policy = crate::policy::resolve_policy(w_k_tensor.dtype);
+        let v_policy = crate::policy::resolve_policy(w_v_tensor.dtype);
+        let is_mixed_policy = w_q_tensor.dtype != w_k_tensor.dtype || w_q_tensor.dtype != w_v_tensor.dtype;
+
+        // Mixed quantized Q/K/V projections cannot share one policy-specialized fused kernel.
+        // Fall back to per-projection GEMV using each tensor's own runtime policy.
+        if is_mixed_policy {
+            MIXED_QKV_FALLBACK_WARN_ONCE.call_once(|| {
+                tracing::warn!(
+                    q_dtype = ?w_q_tensor.dtype,
+                    k_dtype = ?w_k_tensor.dtype,
+                    v_dtype = ?w_v_tensor.dtype,
+                    m,
+                    k_dim,
+                    n_dim,
+                    n_kv,
+                    "FusedQkv mixed-policy fallback engaged; performance may regress until mixed-policy fused kernel support is added"
+                );
+            });
+            let input_arg = TensorArg::from_tensor(input);
+            let proj_input = if let Some(gamma_idx) = self.gamma_idx {
+                let gamma = get(gamma_idx)?;
+                let input_elems = input.dims().iter().product::<usize>();
+                let normalized_buf = foundry
+                    .device
+                    .new_buffer(
+                        input_elems * std::mem::size_of::<half::f16>(),
+                        crate::types::MetalResourceOptions::StorageModeShared,
+                    )
+                    .ok_or_else(|| MetalError::OperationFailed("Failed to allocate fused_qkv normalized input".into()))?;
+                let normalized = TensorArg::from_buffer(
+                    normalized_buf,
+                    crate::tensor::Dtype::F16,
+                    input.dims().to_vec(),
+                    input.strides().to_vec(),
+                );
+                let rmsnorm = crate::metals::rmsnorm::RmsNorm::new(
+                    &input_arg,
+                    None,
+                    &normalized,
+                    &TensorArg::from_tensor(gamma),
+                    crate::metals::rmsnorm::RmsNormParamsResolved {
+                        feature_dim: k_dim,
+                        total_elements: input_elems as u32,
+                        epsilon: bindings.get_var("rms_eps").and_then(|v| v.parse::<f32>().ok()).unwrap_or(1e-6),
+                    },
+                );
+                foundry.run(&rmsnorm)?;
+                normalized
+            } else {
+                input_arg
+            };
+
+            let run_projection = |foundry: &mut Foundry,
+                                  policy: std::sync::Arc<dyn crate::policy::MetalPolicyRuntime>,
+                                  resolved: &ResolvedSymbols,
+                                  out_arg: TensorArg,
+                                  n_out: u32,
+                                  bias_idx: Option<usize>|
+             -> Result<(), MetalError> {
+                let loader = policy.loader_stage();
+                let args = loader.bind(fast_bindings, resolved);
+                let weights = args[0].clone();
+                let scale_bytes = if args.len() > 1 { args[1].clone() } else { weights.clone() };
+                let weights_per_block = if policy.has_scale() {
+                    policy.meta().weights_per_block as u32
+                } else {
+                    self.step.weights_per_block.resolve(bindings)
+                };
+
+                let bias = if let Some(idx) = bias_idx {
+                    TensorArg::from_tensor(get(idx)?)
+                } else {
+                    out_arg.clone()
+                };
+                let output = out_arg;
+
+                let kernel = super::step::get_gemv_v2_kernel(
+                    policy,
+                    crate::compound::Layout::Canonical {
+                        expected_k: k_dim as usize,
+                        expected_n: n_out as usize,
+                    },
+                    self.step.strategy,
+                    crate::policy::activation::Activation::None,
+                );
+                let gemv_args = super::step::GemvV2Args {
+                    weights,
+                    scale_bytes,
+                    input: proj_input.clone(),
+                    output: output.clone(),
+                    k_dim,
+                    n_dim: n_out,
+                    weights_per_block,
+                    bias,
+                    has_bias: u32::from(bias_idx.is_some()),
+                    alpha: 1.0,
+                    residual: output,
+                    has_residual: 0,
+                    beta: 0.0,
+                };
+                let dispatch = crate::types::DispatchConfig::warp_per_row(n_out, m);
+                foundry.run(&kernel.bind_arc(gemv_args, dispatch))
+            };
+
+            run_projection(
+                foundry,
+                q_policy,
+                &self.w_q_resolved,
+                TensorArg::from_tensor(out_q),
+                n_dim,
+                self.bias_q_idx,
+            )?;
+            run_projection(
+                foundry,
+                k_policy,
+                &self.w_k_resolved,
+                TensorArg::from_tensor(out_k),
+                n_kv,
+                self.bias_k_idx,
+            )?;
+            run_projection(
+                foundry,
+                v_policy,
+                &self.w_v_resolved,
+                TensorArg::from_tensor(out_v),
+                n_kv,
+                self.bias_v_idx,
+            )?;
+            return Ok(());
+        }
+
+        // Centralized Quantization Binding (uniform policy path).
+        let policy = q_policy;
         let loader = policy.loader_stage();
 
         let q_args = loader.bind(fast_bindings, &self.w_q_resolved);
@@ -215,10 +361,8 @@ impl CompiledStep for CompiledFusedQkvStep {
         let s_k = if k_args.len() > 1 { Some(k_args[1].clone()) } else { None };
         let w_v = v_args[0].clone();
         let s_v = if v_args.len() > 1 { Some(v_args[1].clone()) } else { None };
-        let out_q = get(self.out_q_idx)?;
-        let out_k = get(self.out_k_idx)?;
-        let out_v = get(self.out_v_idx)?;
-        // Use input buffer as dummy for missing optional args to avoid panic, this seems like asking for confusion but temporarily.
+
+        // Use input buffer as dummy for missing optional args.
         let dummy_arg = TensorArg::from_tensor(input);
 
         let gamma = if let Some(idx) = self.gamma_idx {
@@ -228,30 +372,25 @@ impl CompiledStep for CompiledFusedQkvStep {
         };
 
         let (b_q, has_bias) = if let Some(idx) = self.bias_q_idx {
-            (TensorArg::from_tensor(fast_bindings.get(idx).unwrap()), 1)
+            (TensorArg::from_tensor(get(idx)?), 1)
         } else {
             (dummy_arg.clone(), 0)
         };
         let b_k = self
             .bias_k_idx
-            .map(|idx| TensorArg::from_tensor(fast_bindings.get(idx).unwrap()))
+            .map(|idx| TensorArg::from_tensor(get(idx).expect("bias_k missing")))
             .unwrap_or_else(|| dummy_arg.clone());
         let b_v = self
             .bias_v_idx
-            .map(|idx| TensorArg::from_tensor(fast_bindings.get(idx).unwrap()))
+            .map(|idx| TensorArg::from_tensor(get(idx).expect("bias_v missing")))
             .unwrap_or_else(|| dummy_arg.clone());
 
         let b_q_saved = b_q.clone();
-
-        let k_dim = self.step.k_dim.resolve(bindings);
-        let n_dim = self.step.n_dim.resolve(bindings);
-        let n_kv = self.step.n_kv.resolve(bindings);
         let weights_per_block = if policy.has_scale() {
             policy.meta().weights_per_block as u32
         } else {
             self.step.weights_per_block.resolve(bindings)
         };
-        let m = self.step.m.resolve(bindings).max(1);
 
         let args = FusedQkvArgs {
             w_q,
@@ -289,19 +428,7 @@ impl CompiledStep for CompiledFusedQkvStep {
             group: crate::types::dispatch::ThreadgroupSize::new(TG_WIDTH, 1, 1),
         };
 
-        if bindings.get_var("i").map(|v| v == "0").unwrap_or(false) {
-            eprintln!("DEBUG FusedQkv Source:\n{}", kernel.source());
-            eprintln!(
-                "DEBUG FusedQkv Layer 0: k_dim={} n_dim={} n_kv={} weights_per_block={} | q_off={} k_off={} v_off={} input_off={}",
-                k_dim, n_dim, n_kv, weights_per_block, out_q.offset, out_k.offset, out_v.offset, input.offset
-            );
-        }
-
         foundry.run(&kernel.clone().bind_arc(args, dispatch))?;
-
-        if bindings.get_var("i").map(|v| v == "0").unwrap_or(false) {
-            foundry.synchronize()?;
-        }
         Ok(())
     }
 

@@ -148,6 +148,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
             c: scores_h.clone(),        // Dummy
             bias: scores_h.clone(),     // Dummy
             b_scales: scores_h.clone(), // Dummy
+            b_is_canonical: 0,
             weights_per_block: 32,
             params: qk_params,
             alpha: scale,
@@ -192,6 +193,7 @@ fn test_sdpa_gemm_batched() -> Result<(), MetalError> {
             bias: out_h.clone(), // Dummy
             b_scales: out_h,     // Dummy
             weights_per_block: 32,
+            b_is_canonical: 0,
             params: av_params,
             alpha: 1.0,
             beta: 0.0,

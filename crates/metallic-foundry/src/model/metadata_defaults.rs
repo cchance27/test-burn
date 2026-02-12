@@ -38,11 +38,11 @@ pub fn infer_from_metadata_with_keys(
 
         // Check for special "array length" key pattern (e.g. "@len:tokenizer.ggml.tokens")
         for key in &keys_strs {
-            if let Some(path) = key.strip_prefix("@len:") {
-                if let Some(arr) = metadata.get_array(path) {
-                    values.insert(field.clone(), ArchValue::USize(arr.len()));
-                    break;
-                }
+            if let Some(path) = key.strip_prefix("@len:")
+                && let Some(arr) = metadata.get_array(path)
+            {
+                values.insert(field.clone(), ArchValue::USize(arr.len()));
+                break;
             }
         }
 

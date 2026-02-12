@@ -66,7 +66,7 @@ impl ParsedIntExpr {
                 b'0'..=b'9' => {
                     let start = i;
                     i += 1;
-                    while i < bytes.len() && matches!(bytes[i], b'0'..=b'9') {
+                    while i < bytes.len() && bytes[i].is_ascii_digit() {
                         i += 1;
                     }
                     let s = &raw_trimmed[start..i];
@@ -189,7 +189,7 @@ impl ParsedIntExpr {
             }
         }
 
-        let mut vars: Vec<Arc<str>> = vars_seen.into_iter().map(|(k, _)| k).collect();
+        let mut vars: Vec<Arc<str>> = vars_seen.into_keys().collect();
         vars.sort_by(|a, b| a.as_ref().cmp(b.as_ref()));
 
         Ok(Self {

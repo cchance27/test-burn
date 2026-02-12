@@ -105,7 +105,7 @@ kernel void kv_prep_fused_kernel_f16(
     // V: no RoPE
     const half v_half = v_in[kv_src_base];
 
-    // Store once per KV head (GQA repeat happens in attention indexing).
+    // Store once per KV head in compact cache layout [n_kv_heads, max_seq_len, head_dim].
     const uint cache_idx = kv_h * cache_head_stride + cache_row_base;
     k_cache[cache_idx] = k_half;
     v_cache[cache_idx] = v_half;

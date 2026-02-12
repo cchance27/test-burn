@@ -106,10 +106,10 @@ impl WorkflowOp for WhileOp {
 
         let mut iter = 0;
         loop {
-            if let Some(max) = max_iters {
-                if iter >= max {
-                    break;
-                }
+            if let Some(max) = max_iters
+                && iter >= max
+            {
+                break;
             }
 
             // If the condition is a variable name, we lookup the variable.
@@ -363,10 +363,10 @@ impl WorkflowOp for WhileBatchedOp {
 
         let mut iter = 0usize;
         'outer: loop {
-            if let Some(max) = max_iters {
-                if iter >= max {
-                    break;
-                }
+            if let Some(max) = max_iters
+                && iter >= max
+            {
+                break;
             }
 
             // Condition is still a variable lookup (bool/int), matching WhileOp semantics.
@@ -435,10 +435,10 @@ impl WorkflowOp for WhileBatchedOp {
                 }
 
                 iter = iter.saturating_add(1);
-                if let Some(max) = max_iters {
-                    if iter >= max {
-                        break;
-                    }
+                if let Some(max) = max_iters
+                    && iter >= max
+                {
+                    break;
                 }
             }
 
@@ -455,15 +455,15 @@ impl WorkflowOp for WhileBatchedOp {
                 });
 
                 // Ensure we don't build an unbounded queue.
-                if pending.len() >= MAX_INFLIGHT {
-                    if let Some(front) = pending.front() {
-                        let wait_start = std::time::Instant::now();
-                        front.cmd.wait_until_completed();
-                        let waited = wait_start.elapsed();
-                        // Record time spent waiting on this decode batch; token callbacks below
-                        // receive an evenly distributed per-token decode duration estimate.
-                        let _ = waited;
-                    }
+                if pending.len() >= MAX_INFLIGHT
+                    && let Some(front) = pending.front()
+                {
+                    let wait_start = std::time::Instant::now();
+                    front.cmd.wait_until_completed();
+                    let waited = wait_start.elapsed();
+                    // Record time spent waiting on this decode batch; token callbacks below
+                    // receive an evenly distributed per-token decode duration estimate.
+                    let _ = waited;
                 }
 
                 // Drain any completed buffers in order.

@@ -82,6 +82,7 @@ fn run_comparison(foundry: &mut Foundry, shape: Shape, iterations: usize) {
         transpose_b: true,
         alpha: 1.0,
         beta: 0.0,
+        b_is_canonical: 0,
         weights_per_block: 32,
         tile_config: None, // Auto
         activation: Activation::None,

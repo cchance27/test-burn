@@ -84,6 +84,7 @@ pub mod f32;
 pub mod f64;
 pub mod q4_0;
 pub mod q4_1;
+pub mod q5_k;
 pub mod q6_k;
 pub mod q8;
 pub mod raw;
@@ -98,6 +99,7 @@ pub fn resolve_policy(dtype: Dtype) -> Arc<dyn MetalPolicyRuntime> {
         Dtype::F32 => Arc::new(f32::PolicyF32),
         Dtype::Q4_0 => Arc::new(q4_0::PolicyQ4_0),
         Dtype::Q4_1 => Arc::new(q4_1::PolicyQ4_1),
+        Dtype::Q5_K => Arc::new(q5_k::PolicyQ5K),
         Dtype::Q6_K => Arc::new(q6_k::PolicyQ6K),
         Dtype::Q8_0 => Arc::new(q8::PolicyQ8),
         Dtype::U32 => Arc::new(raw::PolicyU32),
@@ -121,6 +123,7 @@ pub fn resolve_policy_by_name(name: &str) -> Option<Arc<dyn MetalPolicyRuntime>>
         "u32" => Some(Arc::new(raw::PolicyU32)),
         "q4_0" => Some(Arc::new(q4_0::PolicyQ4_0)),
         "q4_1" => Some(Arc::new(q4_1::PolicyQ4_1)),
+        "q5_k" | "q5k" | "q5" => Some(Arc::new(q5_k::PolicyQ5K)),
         "q6_k" | "q6k" | "q6" => Some(Arc::new(q6_k::PolicyQ6K)),
         "q8" | "q8_0" => Some(Arc::new(q8::PolicyQ8)),
         _ => None,

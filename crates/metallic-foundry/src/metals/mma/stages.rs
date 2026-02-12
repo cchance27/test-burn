@@ -308,6 +308,11 @@ impl Stage for TileLoadBStage {
                 metal_type: "constant uint&",
                 buffer_index: 6,
             },
+            BufferArg {
+                name: "b_is_canonical",
+                metal_type: "constant uint&",
+                buffer_index: 9,
+            },
         ]
     }
 
@@ -337,6 +342,7 @@ impl Stage for TileLoadBStage {
                GEMM_TGP_SIZE> loader_b(
         B_batch, params.ldb, Bs,
         B_scales, weights_per_block,
+        b_is_canonical,
         tile_n * GEMM_BN,  // row_idx_offset
         blocks_per_k,
         params.n,

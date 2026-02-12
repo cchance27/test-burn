@@ -1,7 +1,7 @@
 use half::f16;
 use metallic_foundry::{
     F16, Foundry, metals::{
-        kv_cache_write::{KvCacheWriteRepeatKvHeads, KvCacheWriteRepeatKvHeadsParamsResolved}, kv_prep::{KvPrepFused, KvPrepFusedParamsResolved}, kv_rearrange::{KvRearrange, KvRearrangeParamsResolved}, rope::{Rope, RopeParamsResolved}
+        kv_cache_write::{KvCacheWrite, KvCacheWriteParamsResolved}, kv_prep::{KvPrepFused, KvPrepFusedParamsResolved}, kv_rearrange::{KvRearrange, KvRearrangeParamsResolved}, rope::{Rope, RopeParamsResolved}
     }, storage::Pooled, tensor::{Tensor as FoundryTensor, TensorInit}, types::TensorArg
 };
 use rand::{Rng, rng};
@@ -43,7 +43,7 @@ fn run_fused_parity(
 
     let total_q = n_heads * seq_len * head_dim;
     let total_kv = n_kv_heads * seq_len * head_dim;
-    let cache_elems = n_heads * max_seq_len * head_dim;
+    let cache_elems = n_kv_heads * max_seq_len * head_dim;
 
     let q_data: Vec<f16> = (0..seq_len * d_model).map(|_| f16::from_f32(rng.random_range(-1.0..1.0))).collect();
     let k_data: Vec<f16> = (0..seq_len * kv_dim).map(|_| f16::from_f32(rng.random_range(-1.0..1.0))).collect();
@@ -67,12 +67,12 @@ fn run_fused_parity(
     let cache_zero = vec![f16::from_f32(0.0); cache_elems];
     let k_cache_ref = FoundryTensor::<F16, Pooled>::new(
         &mut foundry,
-        vec![n_heads, max_seq_len, head_dim],
+        vec![n_kv_heads, max_seq_len, head_dim],
         TensorInit::CopyFrom(&cache_zero),
     )?;
     let v_cache_ref = FoundryTensor::<F16, Pooled>::new(
         &mut foundry,
-        vec![n_heads, max_seq_len, head_dim],
+        vec![n_kv_heads, max_seq_len, head_dim],
         TensorInit::CopyFrom(&cache_zero),
     )?;
 
@@ -152,13 +152,11 @@ fn run_fused_parity(
     );
     foundry.run(&rope_k)?;
 
-    let write_k = KvCacheWriteRepeatKvHeads {
+    let write_k = KvCacheWrite {
         input: TensorArg::from_tensor(&k_rot),
         cache: TensorArg::from_tensor(&k_cache_ref),
-        params: KvCacheWriteRepeatKvHeadsParamsResolved {
+        params: KvCacheWriteParamsResolved {
             n_kv_heads: n_kv_heads as u32,
-            n_heads: n_heads as u32,
-            group_size: group_size as u32,
             head_dim: head_dim as u32,
             input_seq_len: seq_len as u32,
             position_offset: position_offset as u32,
@@ -169,13 +167,11 @@ fn run_fused_parity(
     };
     foundry.run(&write_k)?;
 
-    let write_v = KvCacheWriteRepeatKvHeads {
+    let write_v = KvCacheWrite {
         input: TensorArg::from_tensor(&v_heads),
         cache: TensorArg::from_tensor(&v_cache_ref),
-        params: KvCacheWriteRepeatKvHeadsParamsResolved {
+        params: KvCacheWriteParamsResolved {
             n_kv_heads: n_kv_heads as u32,
-            n_heads: n_heads as u32,
-            group_size: group_size as u32,
             head_dim: head_dim as u32,
             input_seq_len: seq_len as u32,
             position_offset: position_offset as u32,
@@ -190,12 +186,12 @@ fn run_fused_parity(
     let q_rot = FoundryTensor::<F16, Pooled>::new(&mut foundry, vec![total_q], TensorInit::Uninitialized)?;
     let k_cache = FoundryTensor::<F16, Pooled>::new(
         &mut foundry,
-        vec![n_heads, max_seq_len, head_dim],
+        vec![n_kv_heads, max_seq_len, head_dim],
         TensorInit::CopyFrom(&cache_zero),
     )?;
     let v_cache = FoundryTensor::<F16, Pooled>::new(
         &mut foundry,
-        vec![n_heads, max_seq_len, head_dim],
+        vec![n_kv_heads, max_seq_len, head_dim],
         TensorInit::CopyFrom(&cache_zero),
     )?;
 
@@ -258,4 +254,12 @@ fn test_kv_prep_fused_decode() -> Result<(), Box<dyn std::error::Error>> {
 #[serial]
 fn test_kv_prep_fused_prefill() -> Result<(), Box<dyn std::error::Error>> {
     run_fused_parity(4, 0, 16, 14, 2, 64)
+}
+
+#[test]
+#[serial]
+fn test_kv_prep_fused_prefill_llama33_shape() -> Result<(), Box<dyn std::error::Error>> {
+    // Llama-3.3 8B geometry: n_heads=32, n_kv_heads=8, head_dim=128.
+    // Keep max_seq_len modest for fast parity while preserving index math.
+    run_fused_parity(2, 0, 64, 32, 8, 128)
 }

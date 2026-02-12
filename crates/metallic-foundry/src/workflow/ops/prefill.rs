@@ -405,17 +405,18 @@ impl WorkflowOp for PrefillOp {
             session.current_pos = start_pos + prompt_len;
             let end_pos = session.current_pos;
 
-            if mode == "delta" && original_start_pos == 0 {
-                if let Err(err) = model.store_kv_prefix_in_cache(foundry, session, prompt_tokens_full, kv_prefix_key.as_deref()) {
-                    tracing::warn!(
-                        target: "metallic_foundry::workflow::ops::prefill",
-                        conversation_id = conversation_id.as_str(),
-                        mode,
-                        kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
-                        error = %err,
-                        "prefill failed to store KV prefix snapshot"
-                    );
-                }
+            if mode == "delta"
+                && original_start_pos == 0
+                && let Err(err) = model.store_kv_prefix_in_cache(foundry, session, prompt_tokens_full, kv_prefix_key.as_deref())
+            {
+                tracing::warn!(
+                    target: "metallic_foundry::workflow::ops::prefill",
+                    conversation_id = conversation_id.as_str(),
+                    mode,
+                    kv_prefix_key = kv_prefix_key.as_deref().unwrap_or("<none>"),
+                    error = %err,
+                    "prefill failed to store KV prefix snapshot"
+                );
             }
 
             // Reset to decode mode for autoregressive decode (M=1).

@@ -35,6 +35,7 @@ struct TileLoader {
     const device uchar* src_base;
     const device uchar* scales;
     const uint weights_per_block;
+    const bool use_canonical_indexing;
     const uint row_idx_offset; // Starting row/col for scale indexing
     const uint blocks_per_k;
     
@@ -50,6 +51,7 @@ struct TileLoader {
         threadgroup T* dst_,
         const device uchar* scales_,
         const uint weights_per_block_,
+        const uint b_is_canonical_,
         const uint row_idx_offset_,
         const uint blocks_per_k_,
         const uint N_, // Unused for now but kept for compatibility
@@ -60,6 +62,7 @@ struct TileLoader {
         src_base(src_),
         scales(scales_),
         weights_per_block(weights_per_block_),
+        use_canonical_indexing(b_is_canonical_ != 0u),
         row_idx_offset(row_idx_offset_),
         blocks_per_k(blocks_per_k_),
         k_offset(0),
@@ -92,9 +95,16 @@ struct TileLoader {
                     }
                     
                     // Physical row/col in memory
-                    ulong global_row = transpose ? N_idx : K_idx;
-                    ulong global_col = transpose ? K_idx : N_idx;
-                    ulong offset = global_row * (ulong)src_ld + global_col;
+                    ulong offset = 0;
+                    if (Policy::HAS_SCALE && use_canonical_indexing) {
+                        ulong k_block = K_idx / weights_per_block;
+                        ulong k_in_block = K_idx - k_block * weights_per_block;
+                        offset = k_in_block + (ulong)weights_per_block * (N_idx + k_block * (ulong)src_ld);
+                    } else {
+                        ulong global_row = transpose ? N_idx : K_idx;
+                        ulong global_col = transpose ? K_idx : N_idx;
+                        offset = global_row * (ulong)src_ld + global_col;
+                    }
                     
                     // Load weights via policy
                     float w_val[1];
@@ -132,9 +142,16 @@ struct TileLoader {
                         N_idx = row_idx_offset + bj + j;
                     }
                     
-                    ulong global_row = transpose ? N_idx : K_idx;
-                    ulong global_col = transpose ? K_idx : N_idx;
-                    ulong offset = (ulong)global_row * src_ld + global_col;
+                    ulong offset = 0;
+                    if (Policy::HAS_SCALE && use_canonical_indexing) {
+                        ulong k_block = K_idx / weights_per_block;
+                        ulong k_in_block = K_idx - k_block * weights_per_block;
+                        offset = k_in_block + (ulong)weights_per_block * (N_idx + k_block * (ulong)src_ld);
+                    } else {
+                        ulong global_row = transpose ? N_idx : K_idx;
+                        ulong global_col = transpose ? K_idx : N_idx;
+                        offset = (ulong)global_row * src_ld + global_col;
+                    }
                     
                     float w_val[1];
                     Policy::template load_weights<1>(src_base, offset, w_val);

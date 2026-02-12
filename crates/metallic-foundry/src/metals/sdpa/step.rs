@@ -710,6 +710,7 @@ fn execute_sdpa_reference(
         params: qk_params,
         alpha: scale,
         beta: 0.0,
+        b_is_canonical: 0,
     };
     foundry.run(&qk_gemm_kernel.clone().bind_arc(qk_args, qk_dispatch))?;
 
@@ -769,6 +770,7 @@ fn execute_sdpa_reference(
         params: av_params,
         alpha: 1.0,
         beta: 0.0,
+        b_is_canonical: 0,
     };
 
     foundry.run(&av_gemm_kernel.clone().bind_arc(av_args, av_dispatch))?;

@@ -273,7 +273,7 @@ impl Stage for WarpReduceStage {
         // Fall back to `simd_sum/simd_max` if the configured SIMD width is unexpected.
         let simd_width = self.simd_width;
         let is_pow2 = simd_width.is_power_of_two();
-        let supported = is_pow2 && simd_width >= 2 && simd_width <= 64;
+        let supported = is_pow2 && (2..=64).contains(&simd_width);
 
         if supported {
             code.push_str(&format!(

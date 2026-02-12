@@ -234,9 +234,9 @@ impl BPETokenizer {
             }
         }
 
-        let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e.into()))?;
+        let special_token_re = Regex::new(r"<\|[^>]*\|>").map_err(|e| BPETokenizerError::RegexError(e))?;
         let pre_kind = PreTokenizerKind::from_metadata_name(pre_tokenizer_name);
-        let token_piece_re = Regex::new(pre_kind.token_piece_pattern()).map_err(|e| BPETokenizerError::RegexError(e.into()))?;
+        let token_piece_re = Regex::new(pre_kind.token_piece_pattern()).map_err(|e| BPETokenizerError::RegexError(e))?;
 
         let chat_template = chat_template.as_deref().filter(|v| !v.trim().is_empty()).map(ChatTemplate::new);
 

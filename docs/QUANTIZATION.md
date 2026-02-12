@@ -172,6 +172,21 @@ Practical rules:
 
 This prevents format-specific regressions (e.g., `Q6_K` using a different logical block size than `Q8_0`/`Q4_0`).
 
+## Mixed-Quant Fused Paths (Current Status)
+
+Foundry now supports mixed-quant model layers (for example, Q/K/V or FFN gate/up using different quant dtypes)
+with **correctness-first runtime fallback paths**:
+
+- `FusedQkv`: if `w_q/w_k/w_v` policies differ, Foundry falls back to per-projection GEMV using each tensor's own policy.
+- `FusedSwiglu` / `FusedFfnSwiGluRmsNorm`: if gate/up policies differ, Foundry falls back to decomposed RMSNorm + per-policy GEMV + SwiGLU.
+
+This avoids silent math/layout corruption from forcing a single-policy fused kernel over mixed-policy tensors.
+
+### Performance Note
+
+These fallback paths are expected to be slower than uniform-policy fused kernels due to extra dispatches and temporary buffers.
+Foundry emits a warning (once per process) when a mixed-policy fallback path is engaged so performance regressions are visible.
+
 ## Scales Are Opaque Bytes
 
 For block-quant formats, “scales” buffers are treated as **opaque bytes** (`device uchar*`) and interpreted by the policy (e.g., `load_scale(scales, block_idx)` reading fp16 bits). Stages should not assume a typed element layout for scales beyond the policy’s contract.

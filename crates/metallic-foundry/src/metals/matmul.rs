@@ -252,6 +252,7 @@ impl Step for MatMulStep {
                 weights_per_block: self.weights_per_block,
                 alpha: self.alpha,
                 beta: self.beta,
+                b_is_canonical: 0,
                 params: GemmParams::default(),
                 m_dim: self.m.clone(),
                 n_dim: self.n.clone(),

@@ -274,6 +274,12 @@ pub struct FfnSwigluWriteStage {
     activation: Activation,
 }
 
+impl Default for FfnSwigluWriteStage {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FfnSwigluWriteStage {
     pub fn new() -> Self {
         Self {

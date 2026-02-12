@@ -28,10 +28,14 @@ impl KvGeometry {
         let raw_n_kv = arch.n_kv_heads();
         let n_kv_heads = if raw_n_kv == 0 { n_heads } else { raw_n_kv.min(n_heads) }.max(1);
 
-        let group_size = if n_heads % n_kv_heads == 0 { n_heads / n_kv_heads } else { 1 };
+        let group_size = if n_heads.is_multiple_of(n_kv_heads) {
+            n_heads / n_kv_heads
+        } else {
+            1
+        };
 
         let head_dim = arch.d_model() / n_heads;
-        let layout = infer_layout_from_prepare(arch, n_heads, n_kv_heads).unwrap_or_else(|| {
+        let layout = infer_layout_from_prepare(arch, n_heads, n_kv_heads).unwrap_or({
             if n_kv_heads < n_heads {
                 KvCacheLayout::CompactKvHeads
             } else {

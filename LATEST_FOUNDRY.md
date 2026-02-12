@@ -49,6 +49,9 @@ This document tracks the state of the Foundry backend transition, highlighting i
 - **Runtime-Driven Selection:** Kernel policies are now strictly derived from runtime `TensorArg` dtypes, eliminating incorrect fallbacks caused by missing model hints.
 - **Extensible Design:** New quantization schemes (Q4, INT8) can be added by implementing `MetalPolicy` without modifying core kernel generation logic.
 - **Zero-Leakage Enforcement**: Successfully removed all explicit `short_name() == "f16"` or `is_q8` branching from kernel stages and execution steps.
+- **Mixed-Quant Safety Paths (Current):** Fused QKV and fused SwiGLU now detect mixed policy tuples at runtime and switch to correctness-first decomposed execution paths (per-tensor policy GEMV flow) instead of forcing a single-policy fused kernel.
+- **Mixed-Quant Perf Caveat:** These safety paths are slower than uniform-policy fused kernels; Foundry now emits one-time warnings when fallback activates so perf regressions are visible during profiling.
+- **Mixed-Quant Fast-Path Plan:** Next step is tuple-policy fused kernel variants (e.g., `(q,k,v)` / `(gate,up)`) to recover fused performance without sacrificing correctness.
 
 ### 6. Backend Reliability & Correctness
 - **Q8 Inference Fixed:** Resolved garbage output regression by enforcing strict runtime dtype validation for GEMM prefill kernels (was defaulting to F16).
@@ -119,6 +122,16 @@ The system uses an `EvictionPolicy` trait. While currently defaulting to `NoEvic
 - **Correctness/DX:** keep SDPA routing explicit and fail-fast; expand coverage with targeted parity tests for new variants/paths.
 - **Selector work:** auto-select per device + shape (kv_len, m) and expose env overrides for benchmarking.
 - **KV-cache quantization (proposal):** add a policy-driven quantized KV-cache format (e.g. int8 + per-block scales) consumable by FlashAttention tile loaders for bandwidth/memory wins, gated by device/heuristics and protected by parity/regression tests.
+
+### 3) Mixed-Quant Fused Kernel Performance Recovery
+
+- **Current state:** mixed-policy safety fallbacks are implemented for `FusedQkv` and fused SwiGLU paths to preserve correctness when tensor policies differ (e.g. Q/K/V or gate/up using different quant dtypes).
+- **Problem:** fallback paths increase dispatch count and temporary-buffer usage, causing measurable throughput/latency regression versus uniform-policy fused kernels.
+- **Next sprint tasks:**
+  - Introduce tuple-policy kernel varianting for fused ops (e.g. `(q,k,v)` and `(gate,up)` policy tuples).
+  - Extend kernel cache keys/registry to include policy tuples while avoiding variant explosion.
+  - Reuse persistent scratch buffers in fallback paths to reduce alloc overhead until tuple-fused kernels land.
+  - Add focused mixed-quant perf benchmarks and parity tests to gate optimization work.
 
 ---
 

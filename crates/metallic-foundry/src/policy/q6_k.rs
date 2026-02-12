@@ -37,7 +37,7 @@ fn decode_q6_k_block(raw_block: &[u8], q_out: &mut [u8; Q6_K_SOURCE_WPB], scales
         let qh_n = &qh[n * 32..n * 32 + 32];
         for l in 0..32 {
             let base = n * 128;
-            let q1 = ((ql_n[l] & 0x0F) | (((qh_n[l] >> 0) & 0x03) << 4)) as i8 - 32;
+            let q1 = ((ql_n[l] & 0x0F) | ((qh_n[l] & 0x03) << 4)) as i8 - 32;
             let q2 = ((ql_n[l + 32] & 0x0F) | (((qh_n[l] >> 2) & 0x03) << 4)) as i8 - 32;
             let q3 = ((ql_n[l] >> 4) | (((qh_n[l] >> 4) & 0x03) << 4)) as i8 - 32;
             let q4 = ((ql_n[l + 32] >> 4) | (((qh_n[l] >> 6) & 0x03) << 4)) as i8 - 32;
@@ -158,7 +158,7 @@ impl MetalPolicyRuntime for PolicyQ6K {
         }
 
         let total_src_blocks = raw.len() / Q6_K_SOURCE_BLOCK_BYTES;
-        if total_src_blocks % source_n_len != 0 {
+        if !total_src_blocks.is_multiple_of(source_n_len) {
             return Err(anyhow::anyhow!(
                 "Q6_K tensor '{}' source blocks {} not divisible by rows {}",
                 source_tensor_name,

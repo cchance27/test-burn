@@ -184,7 +184,7 @@ pub fn generate_streaming_from_tokens_with_workflow(
     let mut inputs: FxHashMap<String, Value> = FxHashMap::default();
     // Token-driven workflows (like text_generation.json) expect pre-tokenized prompt ids.
     if wf_cfg.workflow.inputs.iter().any(|i| i.name == "prompt_tokens") {
-        inputs.insert("prompt_tokens".to_string(), Value::TokensU32(prompt_tokens.to_vec().into()));
+        inputs.insert("prompt_tokens".to_string(), Value::TokensU32(prompt_tokens.to_vec()));
     } else {
         return Err(MetalError::InvalidOperation(
             "Workflow does not declare 'prompt_tokens' input; use generate_streaming_with_workflow_from_prompt()".into(),

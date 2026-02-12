@@ -109,6 +109,9 @@ pub struct GemmV2Args {
     /// Beta scaling factor
     #[arg(buffer = 8)]
     pub beta: f32,
+    /// Whether B buffer is canonical packed block-quant layout (1D packed stream)
+    #[arg(buffer = 9)]
+    pub b_is_canonical: u32,
     /// GEMM parameters struct
     #[arg(buffer = 10)]
     pub params: GemmParams,
@@ -272,6 +275,7 @@ impl CompiledStep for super::CompiledGemmV2Step {
         let loader_args = loader.bind(fast_bindings, &b_resolved);
 
         let b_arg = loader_args[0].clone();
+        let b_is_canonical = if b_arg.dims.len() == 1 { 1u32 } else { 0u32 };
 
         // Safety: F16 policy only returns 1 arg (weights). Q8 returns 2 (weights, scales).
         // If args < 2, use b_arg as dummy for scales to satisfy strict struct packing
@@ -325,6 +329,7 @@ impl CompiledStep for super::CompiledGemmV2Step {
             weights_per_block,
             alpha: self.alpha,
             beta: self.beta,
+            b_is_canonical,
             params,
             // Meta fields don't matter for execution binding, but we can fill them or use defaults
             m_dim: self.m_dim.clone(),

@@ -542,6 +542,7 @@ fn run_gemm_v2_parity_test(cfg: GemmTestConfig) {
         weights_per_block: 32,
         alpha: 1.0,
         beta: 0.0,
+        b_is_canonical: 0,
         params,
     };
 
@@ -1263,6 +1264,7 @@ fn test_gemm_v2_step_runtime_policy_selection_q8() {
         weights_per_block: 32,
         alpha: 1.0,
         beta: 0.0,
+        b_is_canonical: 0,
         params: GemmParams::default(),
         m_dim: DynamicValue::Literal(m as u32),
         n_dim: DynamicValue::Literal(n as u32),

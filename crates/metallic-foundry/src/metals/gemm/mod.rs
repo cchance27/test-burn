@@ -39,6 +39,8 @@ pub struct GemmV2 {
     pub alpha: f32,
     #[arg(buffer = 8)]
     pub beta: f32,
+    #[arg(buffer = 9)]
+    pub b_is_canonical: u32,
     #[arg(buffer = 10, serde_default)]
     pub params: GemmParams,
 
@@ -75,6 +77,7 @@ impl Default for GemmV2 {
             weights_per_block: 32,
             alpha: 1.0,
             beta: 0.0,
+            b_is_canonical: 0,
             params: Default::default(),
             m_dim: DynamicValue::Literal(1),
             n_dim: DynamicValue::Literal(1),

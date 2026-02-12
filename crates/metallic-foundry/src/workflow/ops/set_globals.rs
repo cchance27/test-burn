@@ -37,7 +37,7 @@ impl WorkflowOp for SetGlobalsOp {
 
         model.with_session_mut(ctx.foundry, |_foundry, session| {
             for (key, v) in &resolved {
-                model.set_global_usize(&mut session.bindings, *key, *v);
+                model.set_global_usize(&mut session.bindings, key, *v);
             }
             if self.apply_derived_globals {
                 model.apply_derived_globals(&mut session.bindings);

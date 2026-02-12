@@ -52,6 +52,7 @@ fn run_parity_check(m: usize, n: usize, k: usize, tile_config: TileConfig) {
         c: TensorArg::from_tensor(&output),
         bias: TensorArg::from_tensor(&output),
         b_scales: TensorArg::from_tensor(&output),
+        b_is_canonical: 0,
         weights_per_block: 32,
         alpha: 1.0,
         beta: 0.0,

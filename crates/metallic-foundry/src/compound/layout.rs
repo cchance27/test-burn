@@ -10,10 +10,11 @@ use crate::tensor::Dtype;
 /// Memory layout for tensors.
 ///
 /// Unifies layout definitions from across the codebase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 pub enum Layout {
     /// Weights stored as [N, K] (output-major).
     /// Index: weights[n * K + k]
+    #[default]
     RowMajor,
 
     /// Weights stored as [K, N] (input-major).
@@ -32,12 +33,6 @@ impl Layout {
             Layout::ColMajor => "colmajor",
             Layout::Canonical { .. } => "canonical",
         }
-    }
-}
-
-impl Default for Layout {
-    fn default() -> Self {
-        Self::RowMajor
     }
 }
 

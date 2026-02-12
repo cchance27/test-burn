@@ -1,7 +1,7 @@
 use objc2::{rc::Retained, runtime::ProtocolObject};
 pub use objc2_metal::{MTLBarrierScope as MetalBarrierScope, MTLResourceOptions as MetalResourceOptions};
 use objc2_metal::{
-    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLFunction, MTLLibrary
+    MTLBlitCommandEncoder, MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder, MTLComputePipelineState, MTLDevice, MTLFunction, MTLLibrary, MTLStorageMode
 };
 
 pub mod dispatch;
@@ -172,6 +172,15 @@ impl MetalBuffer {
 
     pub fn as_ptr_addr(&self) -> usize {
         objc2::rc::Retained::as_ptr(&self.0) as usize
+    }
+
+    pub fn storage_mode(&self) -> MTLStorageMode {
+        use objc2_metal::MTLResource as _;
+        self.0.storageMode()
+    }
+
+    pub fn is_host_accessible(&self) -> bool {
+        matches!(self.storage_mode(), MTLStorageMode::Shared | MTLStorageMode::Managed)
     }
 
     /// Read buffer contents into a Vec<T>.

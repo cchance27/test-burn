@@ -77,7 +77,7 @@ impl ChannelU32Reader {
         let header = self.chan.header_buffer()?;
         // Header layout: [write_idx, read_idx, capacity, flags]
         let raw: Vec<u32> = header.read_to_vec(4);
-        let write_idx = raw.get(0).copied().unwrap_or(0);
+        let write_idx = raw.first().copied().unwrap_or(0);
         let cap = raw.get(2).copied().unwrap_or(self.chan.capacity);
         if cap == 0 {
             return Ok(None);

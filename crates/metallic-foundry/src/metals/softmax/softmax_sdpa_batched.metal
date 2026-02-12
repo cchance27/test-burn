@@ -53,6 +53,11 @@ inline float compute_exp_sum_sdpa_batched(
     uint query_offset,
     uint rows_per_batch
 ) {
+    if (!isfinite(row_max)) {
+        // Fully-masked or invalid row: force zero probability mass.
+        return 0.0f;
+    }
+
     uint row_local = sdpa_row_local(row_idx, rows_per_batch);
     uint mask_pos = row_local + query_offset;
 
@@ -85,6 +90,7 @@ inline void normalize_and_write_sdpa_batched(
 ) {
     uint row_local = sdpa_row_local(row_idx, rows_per_batch);
     uint mask_pos = row_local + query_offset;
+    bool invalid_norm = (!isfinite(row_max)) || (!isfinite(row_sum)) || (row_sum <= 0.0f);
 
     for (uint i = tid; i < seq_k; i += 256) {
         uint input_idx = row_idx * seq_k + i;
@@ -94,9 +100,15 @@ inline void normalize_and_write_sdpa_batched(
 
         if (causal != 0 && i > mask_pos) {
             output[input_idx] = 0.0h;
+        } else if (invalid_norm) {
+            output[input_idx] = 0.0h;
         } else {
             float diff = val - row_max;
-            float prob = metal::fast::exp(diff) / row_sum;
+            float numer = isfinite(diff) ? metal::fast::exp(diff) : 0.0f;
+            float prob = numer / row_sum;
+            if (!isfinite(prob)) {
+                prob = 0.0f;
+            }
             output[input_idx] = half(prob);
         }
     }
