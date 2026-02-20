@@ -778,22 +778,6 @@ mod tests {
         raw
     }
 
-    fn build_rope_tables(max_seq: usize, dim: usize) -> (Vec<f16>, Vec<f16>) {
-        let half_dim = dim / 2;
-        let mut cos = Vec::with_capacity(max_seq * half_dim);
-        let mut sin = Vec::with_capacity(max_seq * half_dim);
-        for pos in 0..max_seq {
-            for i in 0..half_dim {
-                let exponent = (2 * i) as f32 / dim as f32;
-                let inv_freq = 1.0f32 / 10000.0f32.powf(exponent);
-                let angle = pos as f32 * inv_freq;
-                cos.push(f16::from_f32(angle.cos()));
-                sin.push(f16::from_f32(angle.sin()));
-            }
-        }
-        (cos, sin)
-    }
-
     #[test]
     fn q5_k_rowmajor_repack_matches_direct_ggml_matmul_generic() {
         let mut seed = 0xD15C_A11Eu32;
